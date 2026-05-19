@@ -20,9 +20,11 @@ Run by the **developer** skill after a repro doc exists.
    - re-activate the related plugins and run their smoke flows
 6. **Commit** when the user approves. Use the plugin repo's existing commit
    style.
-7. **Update the card** (FluentBoards via `fluentboards` skill, or Zoobbe):
-   - move to "Done & Fixed"
-   - add a comment with the branch name + commit hash + summary
+7. **Update the card** via the core `skills/fluentboards/SKILL.md` skill
+   (or Zoobbe for non-FB projects):
+   - move to "Done & Fixed" — `bash skills/fluentboards/scripts/move-task.sh <id> <stage_id>`
+   - add a comment with the branch name + commit hash + summary —
+     `bash skills/fluentboards/scripts/post-comment.sh <id> '<text>'`
 
 ## Rules
 

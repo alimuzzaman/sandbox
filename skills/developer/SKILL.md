@@ -38,5 +38,5 @@ Plus filesystem (Read/Edit/Write) on the host.
 - Never commit without explicit user approval.
 - Never modify `runtime/wp/` core files. Only `runtime/plugins/<slug>`.
 - If the bug came from a FluentBoards ticket, follow `workflows/ship-fix/WORKFLOW.md`
-  and update the card at the end.
+  and update the card at the end using the core `skills/fluentboards/SKILL.md` skill.
 - Document non-obvious fixes by appending a note to `memory/plugin-behavior/`.

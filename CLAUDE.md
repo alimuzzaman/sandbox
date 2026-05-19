@@ -187,6 +187,14 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 - **Fixing a bug** → reproduce live → branch → fix → verify → diff →
   confirm-then-commit → confirm-then-push. See `workflows/ship-fix/WORKFLOW.md`.
 
+- **Reading or closing a FluentBoards card** → `skills/fluentboards/SKILL.md`.
+  This is the company's task tracker; the skill ships scripts for reading
+  cards, posting comments, moving stages, assigning users, etc. Needs
+  `FLUENTBOARDS_SITE`, `FLUENTBOARDS_USER`, `FLUENTBOARDS_APP_PASSWORD` in
+  env (or `sandbox.local.yml` if you wire it through). Never creates,
+  updates, or archives **boards or stages** — only tasks/comments/labels/
+  subtasks/attachments.
+
 - **Adding a plugin to work on** → `./wp-sandbox add <org/repo>` →
   `./wp-sandbox focus <slug>`. `focus_get` pulls in that plugin's own
   `CLAUDE.md` automatically.

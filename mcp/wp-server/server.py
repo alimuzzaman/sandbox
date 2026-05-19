@@ -271,36 +271,90 @@ def mail_get(message_id: str) -> dict:
 
 # ------------------ focus (which plugin am I working on) -------------
 
+def _parse_skill_metadata(skill_md: Path) -> dict:
+    """Pull `name:` and `description:` out of a SKILL.md's YAML frontmatter.
+
+    Tolerant of missing/malformed frontmatter — returns empty strings then.
+    """
+    name, description = "", ""
+    try:
+        text = skill_md.read_text(errors="replace")
+    except OSError:
+        return {"name": name, "description": description}
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            for line in text[3:end].splitlines():
+                if line.startswith("name:"):
+                    name = line.split(":", 1)[1].strip()
+                elif line.startswith("description:"):
+                    description = line.split(":", 1)[1].strip()
+    return {"name": name, "description": description}
+
+
 @mcp.tool()
 def focus_get(include_claude_md: bool = True,
               max_bytes: int = 16_000) -> dict:
-    """Return the currently-focused plugin slug, active project, and the
-    plugin's CLAUDE.md content (auto-injected so Claude follows its conventions).
+    """Return the currently-focused plugin's slug, source path, CLAUDE.md
+    content, and any skill packs it ships (so Claude can read them on demand).
 
-    Devs set focus with `./sandbox focus <slug>`. Claude should default
-    file edits, debugging, and questions to that plugin's repo.
+    Works for ANY plugin — looks for `CLAUDE.md` and `.claude/skills/*/SKILL.md`
+    inside the focused plugin's source repo. No plugin name is hardcoded.
+
+    Devs set focus with `./wp-sandbox focus <slug>`. Claude should default
+    file edits, debugging, and questions to that plugin's repo, and should
+    read any `available_skills[*]` SKILL.md that's relevant to the task.
     """
     focus = FOCUS_FILE.read_text().strip() if FOCUS_FILE.exists() else None
     active = ACTIVE_FILE.read_text().strip() if ACTIVE_FILE.exists() else None
     out = {"ok": True, "focus": focus, "active_project": active,
-           "source_path": None, "claude_md": None}
+           "source_path": None, "claude_md": None, "available_skills": []}
     if not focus:
         return out
 
-    # Resolve focused plugin's source repo from the runtime symlink.
-    link = SANDBOX_ROOT / "runtime" / "plugins" / focus
-    if link.is_symlink():
-        src = link.resolve()
-        out["source_path"] = str(src)
-        if include_claude_md:
-            for candidate in ("CLAUDE.md", ".claude/CLAUDE.md"):
-                cmd = src / candidate
-                if cmd.exists() and cmd.is_file():
-                    data = cmd.read_bytes()[:max_bytes]
-                    out["claude_md"] = data.decode("utf-8", errors="replace")
-                    out["claude_md_path"] = str(cmd)
-                    out["claude_md_truncated"] = cmd.stat().st_size > max_bytes
-                    break
+    # Resolve focused plugin's source repo. Symlinks now live at depth 1
+    # inside wp-content/plugins/ (was runtime/plugins/ — depth 2 — pre-fix).
+    candidates = [
+        SANDBOX_ROOT / "runtime" / "wp" / "wp-content" / "plugins" / focus,
+        SANDBOX_ROOT / "runtime" / "plugins" / focus,           # legacy
+        SANDBOX_ROOT / "plugins" / focus,                       # default plugins_home
+    ]
+    src = None
+    for link in candidates:
+        if link.is_symlink() or link.is_dir():
+            src = link.resolve()
+            break
+    if not src or not src.exists():
+        out["error"] = (f"focused plugin '{focus}' not found in any of: "
+                        f"{', '.join(str(c) for c in candidates)}")
+        return out
+    out["source_path"] = str(src)
+
+    # 1. Plugin's own CLAUDE.md (auto-injected).
+    if include_claude_md:
+        for candidate in ("CLAUDE.md", ".claude/CLAUDE.md"):
+            cmd = src / candidate
+            if cmd.exists() and cmd.is_file():
+                data = cmd.read_bytes()[:max_bytes]
+                out["claude_md"] = data.decode("utf-8", errors="replace")
+                out["claude_md_path"] = str(cmd)
+                out["claude_md_truncated"] = cmd.stat().st_size > max_bytes
+                break
+
+    # 2. Plugin's skill packs at .claude/skills/<name>/SKILL.md — enumerate
+    #    them but don't inline content (Claude reads on demand via fs_read).
+    skills_dir = src / ".claude" / "skills"
+    if skills_dir.is_dir():
+        for entry in sorted(skills_dir.iterdir()):
+            skill_md = entry / "SKILL.md"
+            if entry.is_dir() and skill_md.is_file():
+                meta = _parse_skill_metadata(skill_md)
+                out["available_skills"].append({
+                    "name": meta["name"] or entry.name,
+                    "description": meta["description"],
+                    "path": str(skill_md),
+                })
+
     return out
 
 

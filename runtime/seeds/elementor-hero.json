@@ -1,0 +1,42 @@
+{
+  "_comment": "Minimal Elementor page payload. Use as `meta._elementor_data` when creating a page via wp_rest. The outer array is the section list.",
+  "_elementor_edit_mode": "builder",
+  "_elementor_template_type": "wp-page",
+  "_elementor_version": "3.x",
+  "_elementor_data": [
+    {
+      "id": "sec01",
+      "elType": "section",
+      "settings": { "structure": "10" },
+      "elements": [
+        {
+          "id": "col01",
+          "elType": "column",
+          "settings": { "_column_size": 100 },
+          "elements": [
+            {
+              "id": "wid01",
+              "elType": "widget",
+              "widgetType": "heading",
+              "settings": {
+                "title": "Hello from Sandbox",
+                "size": "xl",
+                "align": "center"
+              }
+            },
+            {
+              "id": "wid02",
+              "elType": "widget",
+              "widgetType": "eael-fancy-text",
+              "settings": {
+                "eael_fancy_text_prefix": "We build",
+                "eael_fancy_text_strings": "fast\nbeautiful\ntested",
+                "eael_fancy_text_suffix": "WordPress plugins."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

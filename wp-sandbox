@@ -1,0 +1,733 @@
+#!/usr/bin/env python3
+"""Sandbox CLI — the entry point for everyone (designers, devs, QA).
+
+All configuration lives in sandbox.yml. This script reads it and drives docker
++ wp-cli on your behalf.
+
+Run `./wp-sandbox` (no args) for help.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+CONFIG = ROOT / "sandbox.yml"
+CONFIG_LOCAL = ROOT / "sandbox.local.yml"
+COMPOSE = ROOT / "docker-compose.yml"
+ACTIVE = ROOT / ".active-project"
+FOCUS = ROOT / ".focus"
+WP_DIR = ROOT / "runtime" / "wp"
+# Symlinks must live at depth 1 inside wp-content/plugins so WordPress's
+# get_plugins() picks them up. (Was runtime/plugins → bind-mounted at depth 2
+# under _sandbox/, which WP never scans.)
+PLUGINS_DIR = WP_DIR / "wp-content" / "plugins"
+SEEDS_DIR = ROOT / "runtime" / "seeds"
+MCP_DIR = ROOT / "mcp" / "wp-server"
+MCP_VENV = MCP_DIR / ".venv"
+CLI_VENV = ROOT / ".cli-venv"
+
+
+# ----------------------------- utilities -----------------------------
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def info(msg: str) -> None:
+    print(f"• {msg}")
+
+
+def ok(msg: str) -> None:
+    print(f"✓ {msg}")
+
+
+def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
+    if not capture:
+        print(f"  $ {' '.join(cmd)}")
+    res = subprocess.run(cmd, check=False, text=True,
+                         capture_output=capture, cwd=str(ROOT), **kw)
+    if check and res.returncode != 0:
+        sys.exit(res.returncode)
+    return res
+
+
+def ensure_pyyaml() -> None:
+    """Ensure PyYAML is importable.
+
+    PEP 668 ("externally-managed-environment") prevents pip --user installs
+    against system/homebrew Pythons, so we keep the CLI's deps in its own
+    venv at .cli-venv/ and re-exec ourselves through it on first run.
+    """
+    try:
+        import yaml  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    cli_py = CLI_VENV / "bin" / "python"
+    if not cli_py.exists():
+        info("Creating CLI venv at .cli-venv/ (one-time)…")
+        subprocess.check_call([sys.executable, "-m", "venv", str(CLI_VENV)])
+        subprocess.check_call(
+            [str(CLI_VENV / "bin" / "pip"), "install", "--quiet",
+             "--disable-pip-version-check", "pyyaml"]
+        )
+
+    # If we're not already running under the CLI venv, re-exec there.
+    # Compare sys.prefix (not sys.executable, which resolves to the underlying
+    # interpreter binary that the venv symlinks to).
+    if Path(sys.prefix).resolve() != CLI_VENV.resolve():
+        os.execv(str(cli_py), [str(cli_py), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+def expand(value, vars_: dict) -> object:
+    """Recursively expand ${var} references using vars_."""
+    if isinstance(value, str):
+        return re.sub(r"\$\{(\w+)\}", lambda m: str(vars_.get(m.group(1), m.group(0))), value)
+    if isinstance(value, list):
+        return [expand(v, vars_) for v in value]
+    if isinstance(value, dict):
+        return {k: expand(v, vars_) for k, v in value.items()}
+    return value
+
+
+def load_config() -> dict:
+    ensure_pyyaml()
+    import yaml
+    if not CONFIG.exists():
+        die(f"missing {CONFIG} — run from the sandbox/ directory")
+    with CONFIG.open() as f:
+        cfg = yaml.safe_load(f) or {}
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+        cfg = deep_merge(cfg, local)
+    vars_ = cfg.get("defaults", {}) or {}
+    return expand(cfg, vars_)
+
+
+def deep_merge(a: dict, b: dict) -> dict:
+    out = dict(a)
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def compose(*args: str, check: bool = True, capture: bool = False):
+    return run(["docker", "compose", "-f", str(COMPOSE), *args],
+               check=check, capture=capture)
+
+
+def wpcli(args: list[str], check: bool = True, capture: bool = False):
+    return compose("run", "--rm", "wpcli", *args, check=check, capture=capture)
+
+
+def write_env_for_compose(cfg: dict) -> None:
+    """Materialize the few values docker-compose's .env file needs."""
+    rt = cfg.get("runtime", {})
+    defaults = cfg.get("defaults", {}) or {}
+    raw = defaults.get("plugins_home", "") or "./plugins"
+    plugins_home = Path(raw).expanduser()
+    if not plugins_home.is_absolute():
+        plugins_home = (ROOT / plugins_home).resolve()
+    plugins_home.mkdir(parents=True, exist_ok=True)
+    env = ROOT / ".env"
+    env.write_text(
+        f"WP_PORT={rt.get('wordpress_port', 8088)}\n"
+        f"DB_PORT={rt.get('db_port', 3307)}\n"
+        f"MAILPIT_PORT={rt.get('mailpit_port', 8025)}\n"
+        # Bind-mount plugin sources at the same absolute path inside the
+        # container, so absolute symlinks under wp-content/plugins/ resolve.
+        f"SANDBOX_PLUGINS_HOST={plugins_home}\n"
+    )
+
+
+# ----------------------------- commands ------------------------------
+
+def cmd_up(cfg: dict, args) -> None:
+    write_env_for_compose(cfg)
+    compose("up", "-d", "wp", "db", "mailpit")
+    rt = cfg.get("runtime", {})
+    ok(f"WordPress: http://localhost:{rt.get('wordpress_port', 8088)}")
+    ok(f"Mailpit:   http://localhost:{rt.get('mailpit_port', 8025)}")
+
+
+def cmd_down(cfg, args) -> None:
+    compose("down")
+
+
+def cmd_status(cfg, args) -> None:
+    compose("ps")
+    if ACTIVE.exists():
+        ok(f"Active project: {ACTIVE.read_text().strip()}")
+    else:
+        info("No active project (run: ./wp-sandbox use <name>)")
+    if FOCUS.exists():
+        ok(f"Focused plugin: {FOCUS.read_text().strip()}")
+    else:
+        info("No focused plugin (run: ./wp-sandbox focus <slug>)")
+
+
+def cmd_focus(cfg, args) -> None:
+    if args.clear:
+        if FOCUS.exists():
+            FOCUS.unlink()
+        ok("Cleared plugin focus")
+        return
+    if not args.slug:
+        if FOCUS.exists():
+            print(FOCUS.read_text().strip())
+        else:
+            info("No focused plugin set")
+        return
+    FOCUS.write_text(args.slug)
+    ok(f"Focused plugin: {args.slug}")
+    print(f"  Tell your LLM:  \"I'm working on {args.slug}.\"")
+
+
+def cmd_logs(cfg, args) -> None:
+    compose("logs", "-f", "wp", "db")
+
+
+def cmd_shell(cfg, args) -> None:
+    compose("exec", "wp", "bash")
+
+
+def cmd_install(cfg, args) -> None:
+    rt = cfg.get("runtime", {})
+    adm = rt.get("admin", {})
+    port = rt.get("wordpress_port", 8088)
+    wpcli([
+        "core", "install",
+        f"--url=http://localhost:{port}",
+        f"--title={adm.get('site_title', 'Sandbox')}",
+        f"--admin_user={adm.get('user', 'admin')}",
+        f"--admin_password={adm.get('password', 'admin')}",
+        f"--admin_email={adm.get('email', 'admin@example.com')}",
+        "--skip-email",
+    ])
+    wpcli(["rewrite", "structure", "/%postname%/"])
+
+    # Auto-provision an Application Password for the MCP server so wp_rest
+    # works out of the box. Idempotent: deletes any prior 'wp-mcp' password
+    # and re-creates so the value lands in sandbox.local.yml.
+    info("Provisioning Application Password for wp-mcp…")
+    wpcli([
+        "user", "application-password", "delete",
+        adm.get("user", "admin"), "wp-mcp", "--all",
+    ], check=False, capture=True)
+    res = wpcli([
+        "user", "application-password", "create",
+        adm.get("user", "admin"), "wp-mcp", "--porcelain",
+    ], check=False, capture=True)
+    app_pw = (res.stdout or "").strip().splitlines()[-1] if res.returncode == 0 else ""
+    if app_pw:
+        save_local_app_password(app_pw)
+        ok("Application Password saved to sandbox.local.yml")
+    else:
+        info("(Could not auto-create Application Password — set it manually "
+             "in sandbox.local.yml under mcp.wp.application_password)")
+
+    ok(f"Admin URL: http://localhost:{port}/wp-admin "
+       f"(user: {adm.get('user', 'admin')})")
+
+
+def save_local_app_password(app_pw: str) -> None:
+    """Persist the WP Application Password into sandbox.local.yml so the
+    MCP server picks it up on next launch."""
+    ensure_pyyaml()
+    import yaml
+    local = {}
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+    local.setdefault("mcp", {}).setdefault("wp", {})["application_password"] = app_pw
+    with CONFIG_LOCAL.open("w") as f:
+        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+
+
+def cmd_projects(cfg, args) -> None:
+    projs = cfg.get("projects", {}) or {}
+    if not projs:
+        info("No projects defined in sandbox.yml")
+        return
+    print()
+    for name, p in projs.items():
+        desc = p.get("description", "").strip()
+        print(f"  {name:<22} {desc}")
+    print()
+
+
+def cmd_use(cfg, args) -> None:
+    name = args.name
+    projs = cfg.get("projects", {}) or {}
+    if name not in projs:
+        die(f"unknown project '{name}'. Run: ./wp-sandbox projects")
+    proj = projs[name]
+
+    # Step 1: symlink local plugin sources
+    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    for plug in proj.get("plugins", []) or []:
+        slug = plug["slug"]
+        src = Path(plug["source"])
+        link = PLUGINS_DIR / slug
+        if not src.exists():
+            info(f"skip {slug}: source not found at {src}")
+            continue
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(src)
+        ok(f"linked {slug} → {src}")
+
+    # Step 2: install wp.org dependencies
+    for slug in proj.get("install_from_wporg", []) or []:
+        info(f"installing {slug} from wp.org (if missing)…")
+        wpcli(["plugin", "install", slug, "--activate"], check=False)
+
+    # Step 3: activate plugins in order
+    for plug in proj.get("plugins", []) or []:
+        slug = plug["slug"]
+        if not (PLUGINS_DIR / slug).exists():
+            continue
+        wpcli(["plugin", "activate", slug], check=False)
+
+    ACTIVE.write_text(name)
+    print()
+    ok(f"Active project: {name}")
+    print(f"  Tell your LLM:  \"I'm working on the '{name}' project.\"")
+
+
+def parse_repo(spec: str, default_org: str | None) -> tuple[str, str]:
+    """Return (clone_url, slug) for an input like 'org/repo', a full URL,
+    or a bare 'repo' (which uses default_org)."""
+    spec = spec.strip()
+    if spec.startswith("git@") or spec.startswith("http"):
+        url = spec
+        slug = re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1])
+        return url, slug
+    if "/" in spec:
+        org, repo = spec.split("/", 1)
+    else:
+        if not default_org:
+            die(f"no org for '{spec}'. Pass org/repo, or set "
+                "defaults.github_org in sandbox.yml")
+        org, repo = default_org, spec
+    repo = re.sub(r"\.git$", "", repo)
+    return f"https://github.com/{org}/{repo}.git", repo
+
+
+def cmd_add(cfg, args) -> None:
+    """Clone a plugin repo and wire it into the active project locally."""
+    defaults = cfg.get("defaults", {}) or {}
+    raw = defaults.get("plugins_home", "") or "./plugins"
+    plugins_home = Path(raw).expanduser()
+    if not plugins_home.is_absolute():
+        plugins_home = (ROOT / plugins_home).resolve()
+    plugins_home.mkdir(parents=True, exist_ok=True)
+
+    url, slug = parse_repo(args.repo, defaults.get("github_org"))
+    dest = plugins_home / slug
+
+    if dest.exists():
+        info(f"{slug} already at {dest} — reusing")
+    else:
+        info(f"Cloning {url} → {dest}")
+        run(["git", "clone", url, str(dest)])
+        ok(f"Cloned {slug}")
+
+    # Symlink + activate in the live runtime
+    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    link = PLUGINS_DIR / slug
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(dest)
+    ok(f"Linked {slug} → {dest}")
+
+    wpcli(["plugin", "activate", slug], check=False)
+
+    # Persist into sandbox.local.yml so `./wp-sandbox use <active>` re-applies it
+    persist_local_plugin(args.project or _active_project_name(), slug, str(dest))
+
+
+def _active_project_name() -> str | None:
+    return ACTIVE.read_text().strip() if ACTIVE.exists() else None
+
+
+def persist_local_plugin(project: str | None, slug: str, source: str) -> None:
+    if not project:
+        info("(no active project — added to runtime only; "
+             "run `./wp-sandbox use <name>` first to make it sticky)")
+        return
+    ensure_pyyaml()
+    import yaml
+    local = {}
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+    proj = local.setdefault("projects", {}).setdefault(project, {})
+    plugins = proj.setdefault("plugins", [])
+    if not any(p.get("slug") == slug for p in plugins):
+        plugins.append({"slug": slug, "source": source})
+        with CONFIG_LOCAL.open("w") as f:
+            yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+        ok(f"Persisted '{slug}' under projects.{project} in sandbox.local.yml")
+
+
+def cmd_doctor(cfg, args) -> None:
+    """Audit the whole stack and report what's broken."""
+    rt = cfg.get("runtime", {})
+    adm = rt.get("admin", {})
+    port = rt.get("wordpress_port", 8088)
+    problems = 0
+
+    def check(label: str, ok_: bool, hint: str = "") -> None:
+        nonlocal problems
+        mark = "✓" if ok_ else "✗"
+        line = f"  {mark} {label}"
+        if not ok_:
+            problems += 1
+            if hint:
+                line += f"\n      → {hint}"
+        print(line)
+
+    print("\nContainers:")
+    ps = compose("ps", "--format", "json", check=False, capture=True)
+    containers = []
+    for ln in (ps.stdout or "").splitlines():
+        try:
+            containers.append(json.loads(ln))
+        except ValueError:
+            pass
+    services = {c.get("Service"): c.get("State") for c in containers}
+    for svc in ("wp", "db", "mailpit"):
+        check(f"{svc} running", services.get(svc) == "running",
+              hint=f"./wp-sandbox up   (currently: {services.get(svc, 'missing')})")
+
+    print("\nWordPress:")
+    r = wpcli(["core", "is-installed"], check=False, capture=True)
+    check("core installed", r.returncode == 0,
+          hint="./wp-sandbox install")
+
+    print("\nMCP wiring:")
+    mcp_cfg = (cfg.get("mcp", {}) or {}).get("wp", {}) or {}
+    app_pw = mcp_cfg.get("application_password", "")
+    check("application_password set", bool(app_pw),
+          hint="./wp-sandbox install   (auto-provisions and writes to sandbox.local.yml)")
+    if app_pw:
+        try:
+            import base64, urllib.request, urllib.error
+            req = urllib.request.Request(
+                f"http://localhost:{port}/wp-json/wp/v2/users/me")
+            token = base64.b64encode(
+                f"{adm.get('user', 'admin')}:{app_pw}".encode()).decode()
+            req.add_header("Authorization", f"Basic {token}")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    status = r.status
+            except urllib.error.HTTPError as e:
+                status = e.code
+            check(f"REST auth works (status {status})", 200 <= status < 300,
+                  hint="rerun ./wp-sandbox install to refresh the password")
+        except Exception as e:
+            check("REST auth works", False, hint=str(e))
+    check("wp-mcp venv built", (MCP_VENV / "bin" / "python").exists(),
+          hint="./wp-sandbox mcp-install")
+
+    print("\nState:")
+    active = _active_project_name()
+    check(f"active project: {active or '—'}", bool(active),
+          hint="./wp-sandbox use <name>")
+    focus = FOCUS.read_text().strip() if FOCUS.exists() else None
+    check(f"focused plugin: {focus or '—'}", True,
+          hint="(optional — set with ./wp-sandbox focus <slug>)")
+
+    print("\nLinked plugins:")
+    expected = []
+    if active:
+        proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
+        expected = [p.get("slug") for p in (proj.get("plugins") or [])]
+    if not PLUGINS_DIR.exists() and expected:
+        check("wp-content/plugins/ exists", False, hint="./wp-sandbox use <name>")
+    elif PLUGINS_DIR.exists():
+        linked = []
+        for entry in sorted(PLUGINS_DIR.iterdir()):
+            if entry.is_symlink():
+                linked.append(entry.name)
+                tgt = entry.resolve()
+                check(f"{entry.name} → {tgt}", tgt.exists(),
+                      hint=f"source missing — ./wp-sandbox add {entry.name}")
+        for slug in expected:
+            if slug not in linked:
+                check(f"{slug} linked", False,
+                      hint=f"./wp-sandbox add {slug}   (project expects it)")
+        if not linked and not expected:
+            info("  (no source-symlinked plugins — project uses install_from_wporg only)")
+
+    print()
+    if problems:
+        info(f"{problems} issue(s) — see → hints above")
+        sys.exit(1)
+    ok("All checks passed.")
+
+
+def cmd_wp(cfg, args) -> None:
+    if not args.passthrough:
+        die("usage: ./wp-sandbox wp <wp-cli args>")
+    wpcli(args.passthrough)
+
+
+def cmd_seed(cfg, args) -> None:
+    if not args.file:
+        die("usage: ./wp-sandbox seed <file-in-runtime/seeds>")
+    wpcli(["import", f"/seeds/{args.file}", "--authors=create"])
+
+
+def find_modern_python() -> str:
+    """Pick a Python >= 3.10 for the wp-mcp venv (mcp package needs it)."""
+    candidates = [
+        "python3.13", "python3.12", "python3.11", "python3.10",
+        "/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+    ]
+    for c in candidates:
+        if not shutil.which(c) and not Path(c).exists():
+            continue
+        try:
+            v = subprocess.check_output(
+                [c, "-c", "import sys;print(sys.version_info[:2])"], text=True
+            ).strip()
+            major, minor = eval(v)
+            if (major, minor) >= (3, 10):
+                return c
+        except Exception:
+            continue
+    # Last resort: system python3 — pip install will fail loudly if too old.
+    return "python3"
+
+
+def cmd_mcp_install(cfg, args) -> None:
+    MCP_DIR.mkdir(parents=True, exist_ok=True)
+    if MCP_VENV.exists():
+        # Rebuild if existing venv is on too-old Python (caused install failure earlier).
+        py_in_venv = MCP_VENV / "bin" / "python"
+        try:
+            v = subprocess.check_output(
+                [str(py_in_venv), "-c", "import sys;print(sys.version_info[:2])"], text=True
+            ).strip()
+            if eval(v) < (3, 10):
+                info("Existing venv uses Python <3.10; rebuilding…")
+                shutil.rmtree(MCP_VENV)
+        except Exception:
+            shutil.rmtree(MCP_VENV)
+    if not MCP_VENV.exists():
+        py = find_modern_python()
+        info(f"Creating mcp/wp-server/.venv (using {py}) …")
+        run([py, "-m", "venv", str(MCP_VENV)])
+    pip = MCP_VENV / "bin" / "pip"
+    run([str(pip), "install", "--upgrade", "--quiet", "pip"])
+    run([str(pip), "install", "--quiet", "-r", str(MCP_DIR / "requirements.txt")])
+    ok("wp-mcp dependencies installed")
+
+
+def cmd_claude(cfg, args) -> None:
+    """Re-write the project-local .mcp.json. (Usually setup does this for you.)"""
+    if not (MCP_VENV / "bin" / "python").exists():
+        info("wp-mcp venv not built yet. Run: ./wp-sandbox mcp-install")
+    path, created = write_claude_mcp_config(cfg)
+    ok(f"{'Wrote' if created else 'Updated'} {path}")
+    print(f"  Run `claude` from {ROOT} — it auto-loads .mcp.json")
+
+
+PROJECT_MCP_JSON = ROOT / ".mcp.json"   # Claude Code auto-loads this when run from ROOT
+
+
+def _build_mcp_entry(cfg: dict) -> dict:
+    rt = cfg.get("runtime", {})
+    adm = rt.get("admin", {})
+    port = rt.get("wordpress_port", 8088)
+    mailpit_port = rt.get("mailpit_port", 8025)
+    app_pw = (cfg.get("mcp", {}) or {}).get("wp", {}).get("application_password", "")
+    return {
+        "command": str(MCP_VENV / "bin" / "python"),
+        "args": [str(MCP_DIR / "server.py")],
+        "env": {
+            "WP_URL": f"http://localhost:{port}",
+            "WP_ADMIN_USER": adm.get("user", "admin"),
+            "WP_APP_PASSWORD": app_pw,
+            "MAILPIT_URL": f"http://localhost:{mailpit_port}",
+        },
+    }
+
+
+def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
+    """Write the project-local .mcp.json inside the sandbox folder.
+
+    Claude Code (and other MCP clients) auto-load .mcp.json from the working
+    directory, so no global config or paste step is needed — the dev just
+    runs `claude` from inside the sandbox folder.
+    """
+    existing = {}
+    created = not PROJECT_MCP_JSON.exists()
+    if not created:
+        try:
+            existing = json.loads(PROJECT_MCP_JSON.read_text()) or {}
+        except json.JSONDecodeError:
+            backup = PROJECT_MCP_JSON.with_suffix(".json.bak")
+            PROJECT_MCP_JSON.rename(backup)
+            info(f"existing .mcp.json was invalid JSON — backed up to {backup}")
+            existing = {}
+            created = True
+    servers = existing.setdefault("mcpServers", {})
+    servers["wp-sandbox"] = _build_mcp_entry(cfg)
+    PROJECT_MCP_JSON.write_text(json.dumps(existing, indent=2) + "\n")
+    return PROJECT_MCP_JSON, created
+
+
+def cmd_setup(cfg, args) -> None:
+    """One command: boot the stack, install WP, build MCP, wire Claude."""
+    print("\n▸ Booting docker stack (wp + db + mailpit)…")
+    cmd_up(cfg, args)
+
+    # Wait for WP to be reachable before `wp core install` to avoid races.
+    rt = cfg.get("runtime", {})
+    port = rt.get("wordpress_port", 8088)
+    import urllib.request, time
+    for _ in range(30):
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+            break
+        except Exception:
+            time.sleep(1)
+
+    print("\n▸ Installing WordPress + provisioning app password…")
+    cmd_install(cfg, args)
+
+    print("\n▸ Building wp-mcp Python venv…")
+    cmd_mcp_install(cfg, args)
+
+    print("\n▸ Wiring Claude Code…")
+    # Reload cfg so the freshly-written app password is picked up.
+    cfg = load_config()
+    path, created = write_claude_mcp_config(cfg)
+    ok(f"{'Wrote' if created else 'Updated'} {path}")
+
+    print("\n▸ Verifying…")
+    try:
+        cmd_doctor(cfg, args)
+    except SystemExit:
+        pass  # doctor exits 1 on problems; we want to keep going to print next steps
+
+    print()
+    ok("Setup complete.")
+    print()
+    print("  Next:")
+    projs = list((cfg.get("projects", {}) or {}).keys())
+    if projs:
+        print(f"    ./wp-sandbox use <name>     # one of: {', '.join(projs)}")
+        print(f"    ./wp-sandbox add <repo>     # clone + activate your plugin")
+        print(f"    ./wp-sandbox focus <slug>   # tell Claude which plugin you're on")
+    print(f"    cd {ROOT} && claude   # run Claude Code here — .mcp.json auto-loads")
+    print()
+
+
+def cmd_clean(cfg, args) -> None:
+    if not args.yes:
+        ans = input("This deletes the DB volume. Continue? [y/N] ").lower()
+        if ans != "y":
+            return
+    compose("down", "-v")
+    ok("Stopped and wiped DB volume")
+
+
+# ----------------------------- main ----------------------------------
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="sandbox",
+        description="WPDeveloper Sandbox — real WP runtime for designers, devs, QA.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Quick start (one command does everything):
+  ./wp-sandbox setup               boot docker, install WP, build MCP, wire Claude
+
+Then pick a project and a plugin:
+  ./wp-sandbox use embedpress      activate a pre-defined profile from sandbox.yml
+  ./wp-sandbox add wpdeveloper/embedpress
+                                   clone + link + activate any GitHub plugin
+  ./wp-sandbox focus embedpress    tell Claude which plugin you're working on
+  ./wp-sandbox doctor              audit everything is healthy
+""",
+    )
+    sub = p.add_subparsers(dest="cmd")
+
+    sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
+    sub.add_parser("up", help="Boot the docker stack")
+    sub.add_parser("down", help="Stop the stack")
+    sub.add_parser("status", help="Show container + project status")
+    sub.add_parser("logs", help="Tail WP + DB logs")
+    sub.add_parser("shell", help="Bash into the WP container")
+    sub.add_parser("install", help="Install WP + create admin user")
+    sub.add_parser("projects", help="List defined projects")
+
+    u = sub.add_parser("use", help="Switch active project")
+    u.add_argument("name")
+
+    w = sub.add_parser("wp", help="Run any wp-cli command")
+    w.add_argument("passthrough", nargs=argparse.REMAINDER)
+
+    s = sub.add_parser("seed", help="Import a WXR from runtime/seeds/")
+    s.add_argument("file")
+
+    a = sub.add_parser("add",
+        help="Clone a plugin from GitHub, link it in, activate it")
+    a.add_argument("repo",
+        help="org/repo, full URL, or bare repo (uses defaults.github_org)")
+    a.add_argument("--project", help="persist under this project (default: active)")
+
+    sub.add_parser("doctor", help="Audit the stack and report problems")
+
+    f = sub.add_parser("focus",
+        help="Set/show which plugin Claude defaults to working on")
+    f.add_argument("slug", nargs="?")
+    f.add_argument("--clear", action="store_true")
+
+    sub.add_parser("mcp-install", help="Install Python deps for wp-mcp")
+    sub.add_parser("claude", help="Print Claude Code MCP config")
+
+    c = sub.add_parser("clean", help="Stop + wipe DB volume")
+    c.add_argument("--yes", action="store_true")
+
+    args = p.parse_args()
+    if not args.cmd:
+        p.print_help()
+        return
+
+    cfg = load_config()
+    # Materialize .env every run so compose bind-mounts (SANDBOX_PLUGINS_HOST,
+    # ports) are always in sync with sandbox.yml + sandbox.local.yml.
+    write_env_for_compose(cfg)
+    handlers = {
+        "setup": cmd_setup,
+        "up": cmd_up, "down": cmd_down, "status": cmd_status,
+        "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
+        "projects": cmd_projects, "use": cmd_use, "wp": cmd_wp,
+        "seed": cmd_seed, "focus": cmd_focus, "add": cmd_add,
+        "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
+        "claude": cmd_claude, "clean": cmd_clean,
+    }
+    handlers[args.cmd](cfg, args)
+
+
+if __name__ == "__main__":
+    main()

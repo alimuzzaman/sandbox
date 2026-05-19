@@ -1,0 +1,149 @@
+# Sandbox — single source of truth for the WPDeveloper plugin dev environment.
+# Edit this file, then run `./wp-sandbox apply` to take effect.
+#
+# Audience: designers, developers, QA across the whole company.
+# Anything humans configure lives here. Things LLMs consume (skills,
+# workflows) stay as markdown elsewhere.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Defaults — referenced as ${VAR} below.
+# Override per-machine in `sandbox.local.yml` (gitignored).
+# ---------------------------------------------------------------------------
+defaults:
+  # Where plugin repos live. Default keeps everything inside the sandbox folder
+  # (./plugins/). Override in sandbox.local.yml if you already have your repos
+  # cloned elsewhere — e.g.  plugins_home: "$HOME/dev"
+  plugins_home: "./plugins"
+  # Set this so `./wp-sandbox add embedpress` resolves to github.com/<org>/embedpress
+  github_org: ""
+
+# ---------------------------------------------------------------------------
+# Runtime — docker stack
+# ---------------------------------------------------------------------------
+runtime:
+  wordpress_port: 8188
+  db_port: 3318
+  mailpit_port: 8125
+
+  wordpress_image: "wordpress:latest"
+  mariadb_image: "mariadb:latest"
+  wpcli_image: "wordpress:cli"
+
+  admin:
+    user: admin
+    password: admin
+    email: admin@example.com
+    site_title: Sandbox
+
+# ---------------------------------------------------------------------------
+# Projects — choose one with `./wp-sandbox use <name>`.
+#
+# A project bundles:
+#   - which plugins to activate, in which order
+#   - where each plugin's source repo lives on disk (symlinked in)
+#   - any wp.org plugins to auto-install as runtime dependencies
+#
+# Ship one project per plugin (or per workflow). Add more freely.
+# ---------------------------------------------------------------------------
+projects:
+
+  embedpress:
+    description: EmbedPress free + Pro source development.
+    plugins:
+      - slug: embedpress
+        source: "${plugins_home}/embedpress"
+      - slug: embedpress-pro
+        source: "${plugins_home}/embedpress-pro"
+    install_from_wporg:
+      - elementor
+
+  notificationx:
+    description: NotificationX source development.
+    plugins:
+      - slug: notificationx
+        source: "${plugins_home}/notificationx"
+      - slug: notificationx-pro
+        source: "${plugins_home}/notificationx-pro"
+
+  essential-addons:
+    description: Essential Addons for Elementor source development.
+    plugins:
+      - slug: essential-addons-for-elementor-lite
+        source: "${plugins_home}/essential-addons-elementor"
+      - slug: essential-addons-elementor   # Pro
+        source: "${plugins_home}/essential-addons-elementor-pro"
+    install_from_wporg:
+      - elementor
+
+  betterdocs:
+    description: BetterDocs source development.
+    plugins:
+      - slug: betterdocs
+        source: "${plugins_home}/betterdocs"
+      - slug: betterdocs-pro
+        source: "${plugins_home}/betterdocs-pro"
+
+  reviewx:
+    description: ReviewX source development.
+    plugins:
+      - slug: reviewx
+        source: "${plugins_home}/reviewx"
+      - slug: reviewx-pro
+        source: "${plugins_home}/reviewx-pro"
+    install_from_wporg:
+      - woocommerce
+
+  schedulepress:
+    description: SchedulePress / WP Scheduled Posts source development.
+    plugins:
+      - slug: wp-scheduled-posts
+        source: "${plugins_home}/wp-scheduled-posts"
+      - slug: wp-scheduled-posts-pro
+        source: "${plugins_home}/wp-scheduled-posts-pro"
+
+  productx:
+    description: ProductX source development.
+    plugins:
+      - slug: wowstore
+        source: "${plugins_home}/productx"
+      - slug: wowstore-pro
+        source: "${plugins_home}/productx-pro"
+    install_from_wporg:
+      - woocommerce
+
+  disable-comments:
+    description: Disable Comments source development.
+    plugins:
+      - slug: disable-comments
+        source: "${plugins_home}/disable-comments"
+
+  # --- Designer / QA use-case profiles (no source dev) ---
+
+  design-elementor:
+    description: Design pages with Elementor + Essential Addons (Lite).
+    install_from_wporg:
+      - elementor
+      - essential-addons-for-elementor-lite
+
+  design-gutenberg:
+    description: Design pages with Gutenberg + EmbedPress + NotificationX.
+    install_from_wporg:
+      - embedpress
+      - notificationx
+
+# ---------------------------------------------------------------------------
+# MCP servers — which contracts are exposed to LLMs.
+# ---------------------------------------------------------------------------
+mcp:
+  wp:
+    enabled: true
+    # Generate at /wp-admin/profile.php → "Application Passwords" after
+    # `./wp-sandbox install`. Required for wp_rest tool only.
+    application_password: ""
+
+  browser:
+    enabled: false           # Phase 2 — Playwright-driven
+  figma:
+    enabled: false           # Phase 3 — official Figma MCP

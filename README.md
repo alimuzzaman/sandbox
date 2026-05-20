@@ -37,7 +37,7 @@ Saved to the gitignored `sandbox.local.yml` (+ mirrored to `.env.local`).
 Then open Claude Code in this folder:
 
 ```bash
-claude          # or: open the sandbox/ folder in your IDE → /mcp shows wp-sandbox connected
+claude          # or: open the sandbox/ folder in your IDE → /mcp shows sandbox connected
 ```
 
 Claude now has 15 tools wired to your local WordPress.

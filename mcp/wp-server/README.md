@@ -33,7 +33,7 @@ For `wp_rest`, generate an Application Password in WordPress
 ```json
 {
   "mcpServers": {
-    "wp-sandbox": {
+    "sandbox": {
       "command": "/abs/path/to/sandbox/mcp/wp-server/.venv/bin/python",
       "args": ["/abs/path/to/sandbox/mcp/wp-server/server.py"],
       "env": {

@@ -1,13 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "mcp__wp-sandbox__wp_exec",
-      "mcp__wp-sandbox__db_query",
-      "mcp__wp-sandbox__wp_cli"
+      "mcp__sandbox__wp_exec",
+      "mcp__sandbox__db_query",
+      "mcp__sandbox__wp_cli"
     ]
   },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
-    "wp-sandbox"
+    "sandbox"
   ]
 }

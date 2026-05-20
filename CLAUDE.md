@@ -230,7 +230,7 @@ traps, and minimum verification rules by changed area.
 
 ## MCP surface (15 tools)
 
-Claude Code's MCP server (`wp-sandbox`) exposes these against the local stack:
+Claude Code's MCP server (`sandbox`) exposes these against the local stack:
 
 | Tool | Purpose |
 |---|---|

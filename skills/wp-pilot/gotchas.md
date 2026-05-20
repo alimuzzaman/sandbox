@@ -40,24 +40,59 @@ If you pass `{ id: 2271 }` only, the widget renders empty / the section shows no
 
 ## SVG uploads
 
-### Need a mu-plugin permitting the mime type
+### Use the Safe SVG plugin — not a raw `upload_mimes` filter
 
-WordPress core rejects SVGs by default. To enable in the sandbox:
+WordPress core rejects SVGs by default for good reason: SVG is XML and can carry `<script>`, `onload=`, `javascript:` payloads that execute as stored XSS when the file is rendered inline.
 
-```php
-// runtime/wp/wp-content/mu-plugins/allow-svg.php
-add_filter('upload_mimes', function ($m) { $m['svg'] = 'image/svg+xml'; return $m; });
-add_filter('wp_check_filetype_and_ext', function ($d, $f, $name, $m) {
-    if (substr($name, -4) === '.svg') { $d['ext']='svg'; $d['type']='image/svg+xml'; $d['proper_filename']=$name; }
-    return $d;
-}, 10, 4);
+**The sanctioned sandbox path:** install [Safe SVG](https://wordpress.org/plugins/safe-svg/). It permits the SVG mime AND sanitizes uploaded SVG content (strips script tags + event handlers + javascript: hrefs).
+
+```bash
+./wp-sandbox wp plugin install safe-svg --activate
 ```
 
-Also: SVG files saved with a `.png` extension by the Figma asset endpoint will fail mime detection. Rename to `.svg` before uploading.
+**Do NOT** add a raw `upload_mimes` filter without sanitization. That permits the file but leaves XSS open.
+
+### `wp media import` of SVGs needs `--user=admin`
+
+Safe SVG restricts SVG uploads to users with the right capabilities (admin-only by default). wp-cli runs as no-user unless you pass `--user`. So:
+
+```bash
+./wp-sandbox wp media import /var/www/html/path/to/file.svg --porcelain --user=admin
+```
+
+For UI uploads / wp-pilot Playwright sessions (which log in as admin), this is automatic.
+
+### Figma asset endpoint hands you SVGs with `.png` extensions
+
+`mcp__figma__get_design_context` returns asset URLs that resolve to SVG content even when the filename ends in `.png`. WP mime detection rejects them. Run `file <name>.png` to check the real type, then rename to `.svg` before `wp media import`.
 
 ---
 
 ## Custom fonts in Elementor
+
+### Gate font-loading mu-plugins behind an opt-in constant
+
+External font fetches (Google Fonts, Fontshare, Adobe Fonts) on every page load leak fingerprints. If you wire a font into the sandbox via a mu-plugin, gate it behind a constant so it's off by default:
+
+```php
+// mu-plugins/your-fonts.php
+if (!defined('YOUR_FONTS_ENABLE') || !YOUR_FONTS_ENABLE) {
+    return;  // opt-out by default
+}
+add_action('wp_enqueue_scripts', function () { wp_enqueue_style(...); }, 99);
+```
+
+Enable for a specific project:
+```bash
+./wp-sandbox wp config set YOUR_FONTS_ENABLE true --type=constant --raw
+```
+
+Disable:
+```bash
+./wp-sandbox wp config delete YOUR_FONTS_ENABLE
+```
+
+The `shop-co-fonts.php` mu-plugin in this repo follows this pattern.
 
 ### Need both a stylesheet enqueue AND Elementor font filter registration
 

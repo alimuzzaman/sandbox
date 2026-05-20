@@ -58,6 +58,7 @@ projects:
         source: "${plugins_home}/embedpress-pro"
     install_from_wporg:
       - elementor
+      - safe-svg          # sanitize SVG uploads — required for any design work
 
   notificationx:
     description: NotificationX source development.
@@ -76,6 +77,7 @@ projects:
         source: "${plugins_home}/essential-addons-elementor-pro"
     install_from_wporg:
       - elementor
+      - safe-svg          # sanitize SVG uploads — required for any design work
 
   betterdocs:
     description: BetterDocs source development.
@@ -126,12 +128,14 @@ projects:
     install_from_wporg:
       - elementor
       - essential-addons-for-elementor-lite
+      - safe-svg          # sanitize SVG uploads — required for any design work
 
   design-gutenberg:
     description: Design pages with Gutenberg + EmbedPress + NotificationX.
     install_from_wporg:
       - embedpress
       - notificationx
+      - safe-svg          # sanitize SVG uploads — required for any design work
 
 # ---------------------------------------------------------------------------
 # MCP servers — which contracts are exposed to LLMs.

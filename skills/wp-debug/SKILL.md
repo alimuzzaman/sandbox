@@ -9,9 +9,9 @@ Use when you see a fatal, a white screen, a 500, an unexpected REST 4xx, a
 ## Step-debug with Xdebug (real breakpoints)
 
 ```bash
-./wp-sandbox xdebug on        # installs xdebug + writes the ini, restarts wp
-./wp-sandbox xdebug status    # confirms on|off
-./wp-sandbox xdebug off       # removes the ini, restarts wp
+./sb xdebug on        # installs xdebug + writes the ini, restarts wp
+./sb xdebug status    # confirms on|off
+./sb xdebug off       # removes the ini, restarts wp
 ```
 
 Mode is `trigger` — Xdebug only attaches when the request carries
@@ -26,15 +26,15 @@ at the **same absolute path** inside the container, so path mapping is 1:1.
 Browser: install any "Xdebug helper" extension or append `?XDEBUG_TRIGGER=1`
 to the URL.
 
-CLI: `XDEBUG_TRIGGER=1 ./wp-sandbox wp …`
+CLI: `XDEBUG_TRIGGER=1 ./sb wp …`
 
 ---
 
 ## debug.log — the first place to look
 
 ```
-./wp-sandbox wp config get WP_DEBUG_LOG       # verify it's enabled
-./wp-sandbox wp eval 'error_log("ping " . time());'   # write a marker, then look for it
+./sb wp config get WP_DEBUG_LOG       # verify it's enabled
+./sb wp eval 'error_log("ping " . time());'   # write a marker, then look for it
 ```
 
 Then use `tail_log` (MCP) — it scopes to `wp-content/debug.log` and supports
@@ -64,7 +64,7 @@ noise from background cron 10×.
 ## Query Monitor (recommended for any non-trivial debug session)
 
 ```bash
-./wp-sandbox wp plugin install query-monitor --activate
+./sb wp plugin install query-monitor --activate
 ```
 
 Then any admin page or front-end page exposes a panel with: PHP errors,
@@ -76,7 +76,7 @@ log shows what broke.
 
 ## Common dead-ends to skip
 
-- "Restart Docker" — almost never the fix. `./wp-sandbox doctor` first.
+- "Restart Docker" — almost never the fix. `./sb doctor` first.
 - "Clear browser cache" — for a server-side bug, no.
 - "Bump WP version" — only when you've ruled out the plugin.
 - "It works on my machine" — every dev runs the same stack here; if you

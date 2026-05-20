@@ -29,9 +29,9 @@ services:
       - ./runtime/wp:/var/www/html
       - ./runtime/seeds:/seeds
       # Bind-mount plugin sources at the same absolute host path so the
-      # symlinks `./wp-sandbox add` creates under wp-content/plugins/ resolve
+      # symlinks `./sb add` creates under wp-content/plugins/ resolve
       # inside the container. SANDBOX_PLUGINS_HOST is materialized into .env
-      # by `./wp-sandbox` on every run.
+      # by `./sb` on every run.
       - ${SANDBOX_PLUGINS_HOST}:${SANDBOX_PLUGINS_HOST}
 
   db:

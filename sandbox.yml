@@ -1,5 +1,5 @@
 # Sandbox — single source of truth for the WPDeveloper plugin dev environment.
-# Edit this file, then run `./wp-sandbox apply` to take effect.
+# Edit this file, then run `./sb apply` to take effect.
 #
 # Audience: designers, developers, QA across the whole company.
 # Anything humans configure lives here. Things LLMs consume (skills,
@@ -16,7 +16,7 @@ defaults:
   # (./plugins/). Override in sandbox.local.yml if you already have your repos
   # cloned elsewhere — e.g.  plugins_home: "$HOME/dev"
   plugins_home: "./plugins"
-  # Set this so `./wp-sandbox add embedpress` resolves to github.com/<org>/embedpress
+  # Set this so `./sb add embedpress` resolves to github.com/<org>/embedpress
   github_org: ""
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ runtime:
     site_title: Sandbox
 
 # ---------------------------------------------------------------------------
-# Projects — choose one with `./wp-sandbox use <name>`.
+# Projects — choose one with `./sb use <name>`.
 #
 # A project bundles:
 #   - which plugins to activate, in which order
@@ -144,7 +144,7 @@ mcp:
   wp:
     enabled: true
     # Generate at /wp-admin/profile.php → "Application Passwords" after
-    # `./wp-sandbox install`. Required for wp_rest tool only.
+    # `./sb install`. Required for wp_rest tool only.
     application_password: ""
 
   browser:
@@ -153,7 +153,7 @@ mcp:
     enabled: false           # Phase 3 — official Figma MCP
 
 # ---------------------------------------------------------------------------
-# Personal secrets — populated by `./wp-sandbox onboard`.
+# Personal secrets — populated by `./sb onboard`.
 #
 # Never edit this block here; the wizard writes the real values into
 # `sandbox.local.yml` (gitignored) and mirrors them into `.env.local` for

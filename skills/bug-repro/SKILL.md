@@ -12,7 +12,7 @@ against the running stack is.
 ## Standard loop
 
 1. **Snapshot a clean baseline** if you don't have one yet:
-   `./wp-sandbox snapshot pre-repro` — gives you a one-command rollback if
+   `./sb snapshot pre-repro` — gives you a one-command rollback if
    the repro mutates state in surprising ways.
 
 2. **Capture the broken state.** Pick the shortest tool that triggers the
@@ -38,7 +38,7 @@ against the running stack is.
 
 5. **Re-run the exact same trigger.** Same `wp_rest` call, same shortcode,
    same cron hook. Compare to step 3. If you ran any DB writes you weren't
-   sure about, `./wp-sandbox restore pre-repro` first.
+   sure about, `./sb restore pre-repro` first.
 
 6. **Report broken-then-fixed.** Both halves, side-by-side, in the response.
    Without the "before" half the user can't verify the fix actually changed
@@ -55,7 +55,7 @@ explicitly — never claim a fix is verified from source reading alone.
 In that case:
 - Mirror the user's data state via `db_query` / `wp_cli post update` so when
   the user reloads, they hit the same scenario.
-- Snapshot first (`./wp-sandbox snapshot before-editor-test`) so the user
+- Snapshot first (`./sb snapshot before-editor-test`) so the user
   can hand the state back to you cleanly if needed.
 - Report: "verified by code inspection; needs browser verification on your
   end" — never claim "verified" for UI work without an actual browser run.

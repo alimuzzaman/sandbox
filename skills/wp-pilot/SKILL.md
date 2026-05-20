@@ -56,10 +56,10 @@ Output: a written plan, presented to the user **before any code**. The user must
 
 ### 3. INVENTORY — install/activate what's missing
 
-- `./wp-sandbox wp plugin list --format=csv` to confirm what's active
+- `./sb wp plugin list --format=csv` to confirm what's active
 - Activate inactive plugins from the lineup
 - Install missing plugins (zip files dropped into `runtime/wp/` then `wp plugin install /var/www/html/<name>.zip --activate`)
-- **Then run `./wp-sandbox introspect all`** so `runtime/cache/widgets.json` and `runtime/cache/blocks.json` reflect the new active set. **Claude does this automatically — the user is never asked to run it.**
+- **Then run `./sb introspect all`** so `runtime/cache/widgets.json` and `runtime/cache/blocks.json` reflect the new active set. **Claude does this automatically — the user is never asked to run it.**
 
 ### 4. ASSETS — pipeline images, fonts, products
 
@@ -98,17 +98,17 @@ The sandbox ships an introspection command that dumps the **live** widget/block/
 
 ### Claude runs this automatically — users never have to think about it
 
-In the 7-step workflow, **Claude runs `./wp-sandbox introspect all` as part of step 3 (INVENTORY)** — right after confirming plugins are active. Users don't need to know the command exists. The only thing they ever run is `./wp-sandbox setup`. Everything else is Claude's job.
+In the 7-step workflow, **Claude runs `./sb introspect all` as part of step 3 (INVENTORY)** — right after confirming plugins are active. Users don't need to know the command exists. The only thing they ever run is `./sb setup`. Everything else is Claude's job.
 
 Re-run after any plugin install/activate change. Cheap (~5s for all three).
 
 ### Manual usage (rare — only for debugging)
 
 ```bash
-./wp-sandbox introspect all          # refreshes all caches (default)
-./wp-sandbox introspect widgets      # Elementor widgets only
-./wp-sandbox introspect blocks       # Gutenberg blocks only
-./wp-sandbox introspect shortcodes   # registered shortcodes
+./sb introspect all          # refreshes all caches (default)
+./sb introspect widgets      # Elementor widgets only
+./sb introspect blocks       # Gutenberg blocks only
+./sb introspect shortcodes   # registered shortcodes
 ```
 
 ### What each cache contains

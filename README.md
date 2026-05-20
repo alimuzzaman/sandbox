@@ -13,7 +13,7 @@ fix bugs, run migrations, query the DB, check email — without leaving this fol
 ```bash
 git clone <this-repo> sandbox
 cd sandbox
-./wp-sandbox setup
+./sb setup
 ```
 
 `setup` is non-interactive. It checks prerequisites (Docker running, Python
@@ -24,8 +24,8 @@ Connect external integrations on demand — each one is its own command, so
 you only set up what you'll actually use:
 
 ```bash
-./wp-sandbox connect fb     # FluentBoards (URL + email + app password)
-./wp-sandbox connect gh     # GitHub org/user (auto-detects gh CLI auth)
+./sb connect fb     # FluentBoards (URL + email + app password)
+./sb connect gh     # GitHub org/user (auto-detects gh CLI auth)
 ```
 
 Skipping these is fine — the sandbox itself runs without them. `gh` is
@@ -47,30 +47,30 @@ Claude now has 15 tools wired to your local WordPress.
 ## Daily commands
 
 ```bash
-./wp-sandbox use <project>        # activate a profile (embedpress, design-elementor, …)
-./wp-sandbox add <repo>           # clone + link a plugin from GitHub
-./wp-sandbox update               # git pull every plugin in the active project
-./wp-sandbox focus <plugin>       # tell Claude which plugin is the active one
-./wp-sandbox open [admin|site|mail]  # open in browser (default: admin)
-./wp-sandbox snapshot <name>      # save DB + uploads (for fast bug repro / QA)
-./wp-sandbox restore <name>       # restore a saved snapshot
-./wp-sandbox snapshots            # list saved snapshots
-./wp-sandbox xdebug on|off        # toggle step-debug (port 9003, host trigger)
-./wp-sandbox doctor               # audit the stack — runs after setup, run anytime
-./wp-sandbox connect <fb|gh>      # save FluentBoards or GitHub creds
-./wp-sandbox status               # which containers + project + focus are active
-./wp-sandbox down                 # stop containers (state is preserved)
-./wp-sandbox clean                # stop + wipe DB volume (start fresh)
+./sb use <project>        # activate a profile (embedpress, design-elementor, …)
+./sb add <repo>           # clone + link a plugin from GitHub
+./sb update               # git pull every plugin in the active project
+./sb focus <plugin>       # tell Claude which plugin is the active one
+./sb open [admin|site|mail]  # open in browser (default: admin)
+./sb snapshot <name>      # save DB + uploads (for fast bug repro / QA)
+./sb restore <name>       # restore a saved snapshot
+./sb snapshots            # list saved snapshots
+./sb xdebug on|off        # toggle step-debug (port 9003, host trigger)
+./sb doctor               # audit the stack — runs after setup, run anytime
+./sb connect <fb|gh>      # save FluentBoards or GitHub creds
+./sb status               # which containers + project + focus are active
+./sb down                 # stop containers (state is preserved)
+./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
-Run `./wp-sandbox` with no args for the full list.
+Run `./sb` with no args for the full list.
 
 ### Working on a plugin
 
 ```bash
-./wp-sandbox use embedpress                  # the profile bundles embedpress + deps
-./wp-sandbox add wpdeveloper/embedpress-pro  # clone + link Pro repo too
-./wp-sandbox focus embedpress-pro            # Claude defaults to this repo
+./sb use embedpress                  # the profile bundles embedpress + deps
+./sb add wpdeveloper/embedpress-pro  # clone + link Pro repo too
+./sb focus embedpress-pro            # Claude defaults to this repo
 ```
 
 `add` accepts `org/repo`, full HTTPS URL, SSH URL, or bare `repo` (if you set
@@ -110,7 +110,7 @@ Three attach points, all automatic:
    Code auto-loads it for every conversation started here.
 
 2. **Plugin-level CLAUDE.md** — if a plugin repo you `add`ed has its own
-   `CLAUDE.md`, `./wp-sandbox focus <slug>` makes Claude pull it in via
+   `CLAUDE.md`, `./sb focus <slug>` makes Claude pull it in via
    `focus_get`. Your plugin docs travel with the plugin.
 
 3. **Personal skills** — `~/.claude/skills/*.md` are loaded by Claude Code
@@ -145,7 +145,7 @@ All knobs live in [sandbox.yml](sandbox.yml). Edit, then re-run setup:
 
 ```bash
 nano sandbox.yml          # change ports, admin creds, projects, etc.
-./wp-sandbox setup        # idempotent — applies only what changed
+./sb setup        # idempotent — applies only what changed
 ```
 
 Per-machine overrides (not committed) go in `sandbox.local.yml`. Things to
@@ -154,11 +154,11 @@ override there:
 ```yaml
 defaults:
   plugins_home: "$HOME/dev"     # use your existing plugin clones instead of ./plugins
-  github_org: "wpdeveloper"     # so `./wp-sandbox add embedpress` resolves
+  github_org: "wpdeveloper"     # so `./sb add embedpress` resolves
 ```
 
 To add a new project, copy a `projects:` block in `sandbox.yml`, change the
-slug + source, save, run `./wp-sandbox use <new-name>`.
+slug + source, save, run `./sb use <new-name>`.
 
 ---
 
@@ -166,7 +166,8 @@ slug + source, save, run `./wp-sandbox use <new-name>`.
 
 ```
 sandbox/
-├── wp-sandbox              # the CLI (run as ./wp-sandbox)
+├── sb                      # the CLI (Python script — invoke as ./sb)
+├── wp-sandbox              # back-compat symlink → sb
 ├── sandbox.yml             # single source of truth — edit this
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
 ├── .mcp.json               # auto-generated — Claude Code reads this
@@ -185,24 +186,24 @@ sandbox/
 ```
 
 The only state outside this folder: Docker's named volume `db_data` (cleared by
-`./wp-sandbox clean`).
+`./sb clean`).
 
 ---
 
 ## Troubleshooting
 
 ```bash
-./wp-sandbox doctor       # checks containers, WP, REST auth, MCP venv, symlinks, focus
+./sb doctor       # checks containers, WP, REST auth, MCP venv, symlinks, focus
 ```
 
 Every failure prints a `→ hint` next to it. Common ones:
 
-- **REST auth fails** — re-run `./wp-sandbox setup` (regenerates the app password)
+- **REST auth fails** — re-run `./sb setup` (regenerates the app password)
 - **MCP server not connected in Claude Code** — make sure you ran `claude` from
   inside this folder; check `cat .mcp.json` exists and `./mcp/wp-server/.venv/bin/python`
   is the Python path it references
-- **Container won't start** — `./wp-sandbox down && ./wp-sandbox setup`
-- **Want a fresh start** — `./wp-sandbox clean && ./wp-sandbox setup`
+- **Container won't start** — `./sb down && ./sb setup`
+- **Want a fresh start** — `./sb clean && ./sb setup`
 
 For everything else, ask Claude — it has `tail_log`, `wp_exec`, and `db_query`
 and can usually diagnose itself.
@@ -220,4 +221,4 @@ and can usually diagnose itself.
   WordPress page.
 
 Both later phases plug into the same `sandbox.yml`. Flip a toggle, re-run
-`./wp-sandbox setup`.
+`./sb setup`.

@@ -301,7 +301,7 @@ def focus_get(include_claude_md: bool = True,
     Works for ANY plugin — looks for `CLAUDE.md` and `.claude/skills/*/SKILL.md`
     inside the focused plugin's source repo. No plugin name is hardcoded.
 
-    Devs set focus with `./wp-sandbox focus <slug>`. Claude should default
+    Devs set focus with `./sb focus <slug>`. Claude should default
     file edits, debugging, and questions to that plugin's repo, and should
     read any `available_skills[*]` SKILL.md that's relevant to the task.
     """

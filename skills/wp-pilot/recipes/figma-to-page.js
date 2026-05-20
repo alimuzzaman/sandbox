@@ -79,7 +79,7 @@ const POST_ID = process.env.POST_ID ? parseInt(process.env.POST_ID, 10) : null;
     // 3. INVENTORY — verify plugins are active
     console.log('=== INVENTORY ===');
     try {
-        const out = execSync(`cd /Applications/Workspace/GitHub/sandbox && ./wp-sandbox wp plugin list --status=active --format=csv 2>&1 | tail -20`).toString();
+        const out = execSync(`cd /Applications/Workspace/GitHub/sandbox && ./sb wp plugin list --status=active --format=csv 2>&1 | tail -20`).toString();
         for (const slug of PLAN.pluginsRequired) {
             if (!out.includes(slug)) console.warn(`  MISSING: ${slug} — activate before continuing`);
             else console.log(`  ✓ ${slug}`);
@@ -175,7 +175,7 @@ const POST_ID = process.env.POST_ID ? parseInt(process.env.POST_ID, 10) : null;
 
     // Page template via wp-cli (REST meta path doesn't always honor it — gotchas.md)
     try {
-        execSync(`cd /Applications/Workspace/GitHub/sandbox && ./wp-sandbox wp post meta update ${result.pid} _wp_page_template ${PLAN.pageTemplate}`).toString();
+        execSync(`cd /Applications/Workspace/GitHub/sandbox && ./sb wp post meta update ${result.pid} _wp_page_template ${PLAN.pageTemplate}`).toString();
     } catch (e) { console.warn('page template set failed:', e.message); }
 
     // Elementor CSS regen — open the editor headlessly once

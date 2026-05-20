@@ -11,10 +11,10 @@ from their reports, then cut `v1`.
 ## Blockers (must be done before v1)
 
 - [ ] **Clean-room install verified on a fresh machine.**
-      `git clone && ./wp-sandbox setup` on at least one un-customized
+      `git clone && ./sb setup` on at least one un-customized
       macOS box and one un-customized Ubuntu box. Capture any failure as
       a follow-up issue.
-- [ ] **Smoke test exists.** Either a `./wp-sandbox smoke` subcommand
+- [ ] **Smoke test exists.** Either a `./sb smoke` subcommand
       (boots stack → installs WP → activates a known plugin → REST ping →
       tears down) or a GitHub Action that runs setup on every PR.
 - [ ] **`gh` org detection is correct.** Today `connect gh` saves
@@ -42,7 +42,7 @@ from their reports, then cut `v1`.
       end-to-end flows.** Vision promises "ship plugins faster" — that
       needs proof. Document a real shipped fix using `workflows/`.
 - [ ] **`connect` accepts env-var override** (e.g.
-      `FLUENTBOARDS_APP_PASSWORD=… ./wp-sandbox connect fb
+      `FLUENTBOARDS_APP_PASSWORD=… ./sb connect fb
       --non-interactive`) so CI / scripted setups don't need a TTY.
 - [ ] **Per-OS install scripts** (`scripts/install-macos.sh`,
       `scripts/install-ubuntu.sh`) that handle Docker + Python in one
@@ -71,8 +71,8 @@ from their reports, then cut `v1`.
 ## Cut-the-tag flow (once Blockers are green)
 
 ```bash
-./wp-sandbox doctor                       # all green
-./wp-sandbox smoke                        # all green (once added)
+./sb doctor                       # all green
+./sb smoke                        # all green (once added)
 git tag -a v1.0.0 -m "v1.0.0"
 git push origin main --tags               # ask before pushing
 ```

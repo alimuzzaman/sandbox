@@ -4,9 +4,9 @@ Save and restore DB + uploads state. The unlock for fast bug repro, QA
 loops, and any "I'm about to do something that might break things."
 
 ```bash
-./wp-sandbox snapshot <name> [--force]
-./wp-sandbox restore  <name>
-./wp-sandbox snapshots
+./sb snapshot <name> [--force]
+./sb restore  <name>
+./sb snapshots
 ```
 
 Snapshots live under `runtime/snapshots/<name>/` and contain `db.sql` +
@@ -35,7 +35,7 @@ sequence: `step1-fresh`, `step2-content-imported`, `step3-after-license`.
 ## When NOT to snapshot
 
 - Read-only work (browsing, code review, log tailing). No state to lose.
-- Right after `./wp-sandbox clean && setup` — that's already your clean
+- Right after `./sb clean && setup` — that's already your clean
   baseline; snapshotting it is duplicate work.
 - For long-term storage. Snapshots are gitignored and not portable across
   machines (uploads may contain absolute paths from this dev's machine).

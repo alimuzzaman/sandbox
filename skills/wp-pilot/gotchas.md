@@ -13,7 +13,7 @@ Curated knowledge that **cannot be auto-extracted** from widget/block source. Em
 Setting `_elementor_data` postmeta alone isn't enough — the page still renders inside the theme's content container (narrow, with site header/footer). To get a true full-width Elementor canvas you must also set the page template:
 
 ```bash
-./wp-sandbox wp post meta update <id> _wp_page_template elementor_canvas
+./sb wp post meta update <id> _wp_page_template elementor_canvas
 ```
 
 Setting this via REST `meta:` field in `wp.apiFetch` **does not work** unless the meta key is `show_in_rest`-registered. Use wp-cli or a `wp_update_post_meta` PHP call.
@@ -47,7 +47,7 @@ WordPress core rejects SVGs by default for good reason: SVG is XML and can carry
 **The sanctioned sandbox path:** install [Safe SVG](https://wordpress.org/plugins/safe-svg/). It permits the SVG mime AND sanitizes uploaded SVG content (strips script tags + event handlers + javascript: hrefs).
 
 ```bash
-./wp-sandbox wp plugin install safe-svg --activate
+./sb wp plugin install safe-svg --activate
 ```
 
 **Do NOT** add a raw `upload_mimes` filter without sanitization. That permits the file but leaves XSS open.
@@ -57,7 +57,7 @@ WordPress core rejects SVGs by default for good reason: SVG is XML and can carry
 Safe SVG restricts SVG uploads to users with the right capabilities (admin-only by default). wp-cli runs as no-user unless you pass `--user`. So:
 
 ```bash
-./wp-sandbox wp media import /var/www/html/path/to/file.svg --porcelain --user=admin
+./sb wp media import /var/www/html/path/to/file.svg --porcelain --user=admin
 ```
 
 For UI uploads / wp-pilot Playwright sessions (which log in as admin), this is automatic.
@@ -84,12 +84,12 @@ add_action('wp_enqueue_scripts', function () { wp_enqueue_style(...); }, 99);
 
 Enable for a specific project:
 ```bash
-./wp-sandbox wp config set YOUR_FONTS_ENABLE true --type=constant --raw
+./sb wp config set YOUR_FONTS_ENABLE true --type=constant --raw
 ```
 
 Disable:
 ```bash
-./wp-sandbox wp config delete YOUR_FONTS_ENABLE
+./sb wp config delete YOUR_FONTS_ENABLE
 ```
 
 The `shop-co-fonts.php` mu-plugin in this repo follows this pattern.
@@ -130,7 +130,7 @@ To install a plugin from a host zip or import host images: copy the file into `r
 
 ```bash
 cp ~/Downloads/plugin.zip /Applications/Workspace/GitHub/sandbox/runtime/wp/plugin.zip
-./wp-sandbox wp plugin install /var/www/html/plugin.zip --activate
+./sb wp plugin install /var/www/html/plugin.zip --activate
 ```
 
 ---

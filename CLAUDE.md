@@ -96,6 +96,7 @@ If a shortcut violates one of these, take the longer path.
 4. **Reproduce bugs live before fixing.**
    Use `wp_cli`, `wp_exec`, `db_query`, `wp_rest`, `tail_log` against the
    running stack to confirm the broken behavior. Capture broken-then-fixed
+
    evidence. Don't substitute reading code for running it. Full loop:
    `skills/bug-repro/SKILL.md`.
 
@@ -105,7 +106,16 @@ If a shortcut violates one of these, take the longer path.
    30-second snapshot beats a 30-minute rebuild. See
    `skills/snapshot/SKILL.md`.
 
-6. **Build features in slices when they span 3+ layers.**
+6. **Editor-dependent authoring goes through wp-pilot.**
+   Creating pages with Gutenberg blocks / Elementor widgets / Customizer
+   settings — if the surface has JS-only `save()` logic, drive the real
+   admin via headless Playwright so output is byte-perfect and editor-safe.
+   Hand-authored markup from PHP works for core blocks; reach for wp-pilot
+   when a block has stateful save behavior or a deprecation that strips
+   PHP-authored attributes. Skip wp-pilot for bulk operations — wp-cli is
+   50× faster. See `skills/wp-pilot/SKILL.md`.
+
+7. **Build features in slices when they span 3+ layers.**
    For anything touching DB + backend + REST + UI together, write the
    smallest runnable slice, live-verify it via the right MCP tool
    (`wp_cli`, `wp_rest`, `db_query`), then move to the next. One-shot
@@ -113,14 +123,14 @@ If a shortcut violates one of these, take the longer path.
    there. The point isn't extra work; it's not debugging four entangled
    layers when something breaks.
 
-7. **Document what you implement.**
+8. **Document what you implement.**
    Code change + the matching `README.md` / `CLAUDE.md` / `SKILL.md` /
    `WORKFLOW.md` update land in the **same** change, not later. Stale docs
    are worse than no docs. For non-obvious cross-plugin runtime findings
    you discover while debugging, drop a short note in
    `memory/plugin-behavior/` — it's tracked and shared with the team.
 
-8. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
+9. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
    `runtime/wp/wp-content/uploads/` are fair game for edits. Core WP files
    get clobbered on the next `wordpress:latest` pull.
 

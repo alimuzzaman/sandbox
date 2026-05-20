@@ -1038,6 +1038,130 @@ def cmd_xdebug(cfg, args) -> None:
     ok(f"Xdebug {state}.")
 
 
+# --- introspect: dump live block/widget/shortcode registries to JSON cache ---
+#
+# The wp-pilot skill's PLAN-FIRST workflow depends on `runtime/cache/*.json`
+# being current. Claude runs this command automatically before planning a
+# build; designers/devs never have to think about it.
+
+INTROSPECT_PHP = {
+"blocks": r"""<?php
+$reg = WP_Block_Type_Registry::get_instance();
+$out = [];
+foreach ($reg->get_all_registered() as $name => $b) {
+    $out[] = [
+        'name'       => $name,
+        'title'      => $b->title ?? '',
+        'category'   => $b->category ?? '',
+        'attributes' => $b->attributes ?? [],
+        'supports'   => $b->supports ?? [],
+        'dynamic'    => !empty($b->render_callback),
+        'parent'     => $b->parent ?? null,
+        'ancestor'   => $b->ancestor ?? null,
+    ];
+}
+echo wp_json_encode(['count' => count($out), 'blocks' => $out], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+""",
+
+"widgets": r"""<?php
+if (!class_exists('\Elementor\Plugin')) {
+    echo wp_json_encode(['error' => 'Elementor not active']);
+    return;
+}
+$mgr = \Elementor\Plugin::$instance->widgets_manager;
+$out = [];
+foreach ($mgr->get_widget_types() as $name => $w) {
+    // get_controls() / get_title() avoid get_config()'s full bootstrap which
+    // sometimes faults outside an editor request context.
+    $controls = [];
+    try { $raw = $w->get_controls(); } catch (\Throwable $e) { $raw = []; }
+    foreach ((array)$raw as $cname => $c) {
+        if (!is_array($c)) continue;
+        $entry = ['type' => $c['type'] ?? null];
+        if (isset($c['default']))   $entry['default']  = $c['default'];
+        if (isset($c['options']))   $entry['options']  = is_array($c['options']) ? array_keys($c['options']) : $c['options'];
+        if (isset($c['label']))     $entry['label']    = is_string($c['label']) ? wp_strip_all_tags($c['label']) : '';
+        if (isset($c['fields']))    $entry['fields']   = array_keys((array)$c['fields']);
+        if (!empty($c['condition'])) $entry['condition'] = $c['condition'];
+        if (!empty($c['classes']))  $entry['classes']  = $c['classes'];   // surfaces Pro-only flags
+        $controls[$cname] = $entry;
+    }
+    try { $title = $w->get_title(); } catch (\Throwable $e) { $title = ''; }
+    try { $cats  = $w->get_categories(); } catch (\Throwable $e) { $cats = []; }
+    $out[] = [
+        'name'       => $name,
+        'title'      => is_string($title) ? wp_strip_all_tags($title) : '',
+        'categories' => $cats,
+        'controls'   => $controls,
+    ];
+}
+echo wp_json_encode(['count' => count($out), 'widgets' => $out], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+""",
+
+"shortcodes": r"""<?php
+$out = [];
+foreach ($GLOBALS['shortcode_tags'] ?? [] as $tag => $cb) {
+    $callback = '';
+    if (is_string($cb))         $callback = $cb;
+    elseif (is_array($cb))      $callback = (is_object($cb[0]) ? get_class($cb[0]) : (string)$cb[0]) . '::' . $cb[1];
+    elseif ($cb instanceof Closure) $callback = 'Closure';
+    $out[] = ['tag' => $tag, 'callback' => $callback];
+}
+echo wp_json_encode(['count' => count($out), 'shortcodes' => $out], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+""",
+}
+
+
+def cmd_introspect(cfg, args) -> None:
+    """Dump live block/widget/shortcode registries to runtime/cache/*.json.
+
+    Runs PHP via wp-cli's eval-file inside the wpcli container so the WP
+    install is fully bootstrapped (all plugins active, all registries populated).
+    """
+    target = args.target or "all"
+    valid = ["blocks", "widgets", "shortcodes", "all"]
+    if target not in valid:
+        die(f"unknown target '{target}' — choose from: {', '.join(valid)}")
+
+    cache_dir = ROOT / "runtime" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    targets = ["blocks", "widgets", "shortcodes"] if target == "all" else [target]
+
+    for t in targets:
+        info(f"introspecting {t}…")
+        php = INTROSPECT_PHP[t]
+        # Pipe PHP source into wp eval-file - (stdin). We need to bypass our
+        # `run` helper's stdout printing because we want to capture clean JSON.
+        proc = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE), "run", "--rm", "-T",
+             "wpcli", "eval-file", "-"],
+            input=php, text=True, capture_output=True, cwd=str(ROOT),
+        )
+        if proc.returncode != 0:
+            print(proc.stderr, file=sys.stderr)
+            die(f"introspect {t} failed (exit {proc.returncode})")
+
+        # The wpcli container prints docker-compose log lines on stderr; stdout
+        # is the JSON payload. But the wordpress:cli image sometimes emits
+        # WP_DEBUG warnings inline. Strip anything before the opening { or [.
+        raw = proc.stdout
+        start = min((i for i in [raw.find('{'), raw.find('[')] if i >= 0), default=-1)
+        if start < 0:
+            die(f"introspect {t}: no JSON in output\n{raw[:500]}")
+        json_text = raw[start:].strip()
+
+        try:
+            parsed = json.loads(json_text)
+        except json.JSONDecodeError as e:
+            die(f"introspect {t}: bad JSON ({e})\n{json_text[:500]}")
+
+        out_path = cache_dir / f"{t}.json"
+        out_path.write_text(json.dumps(parsed, indent=2))
+        count = parsed.get("count", "?")
+        ok(f"{t}: {count} entries → {out_path.relative_to(ROOT)}")
+
+
 def cmd_clean(cfg, args) -> None:
     if not args.yes:
         ans = input("This deletes the DB volume. Continue? [y/N] ").lower()
@@ -1125,6 +1249,11 @@ Then pick a project and a plugin:
     xd = sub.add_parser("xdebug", help="Toggle Xdebug in the WP container")
     xd.add_argument("state", choices=["on", "off", "status"])
 
+    isp = sub.add_parser("introspect",
+        help="Dump live block/widget/shortcode registries to runtime/cache/*.json")
+    isp.add_argument("target", nargs="?", default="all",
+                     choices=["blocks", "widgets", "shortcodes", "all"])
+
     c = sub.add_parser("clean", help="Stop + wipe DB volume")
     c.add_argument("--yes", action="store_true")
 
@@ -1149,6 +1278,7 @@ Then pick a project and a plugin:
         "snapshot": cmd_snapshot, "restore": cmd_restore,
         "snapshots": cmd_snapshots, "update": cmd_update,
         "open": cmd_open, "xdebug": cmd_xdebug,
+        "introspect": cmd_introspect,
     }
     handlers[args.cmd](cfg, args)
 

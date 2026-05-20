@@ -167,7 +167,6 @@ slug + source, save, run `./sb use <new-name>`.
 ```
 sandbox/
 ├── sb                      # the CLI (Python script — invoke as ./sb)
-├── wp-sandbox              # back-compat symlink → sb
 ├── sandbox.yml             # single source of truth — edit this
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
 ├── .mcp.json               # auto-generated — Claude Code reads this

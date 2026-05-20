@@ -156,7 +156,6 @@ If a shortcut violates one of these, take the longer path.
 ```
 sandbox/
 ├── sb                      # the CLI (Python script — invoke as ./sb)
-├── wp-sandbox              # back-compat symlink → sb
 ├── sandbox.yml             # single source of truth — humans edit this
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
 ├── docker-compose.yml      # managed by the CLI

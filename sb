@@ -606,8 +606,6 @@ def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
             created = True
     servers = existing.setdefault("mcpServers", {})
     servers["sandbox"] = _build_mcp_entry(cfg)
-    # Clean up legacy key from earlier rename so .mcp.json doesn't carry both
-    servers.pop("wp-sandbox", None)
     PROJECT_MCP_JSON.write_text(json.dumps(existing, indent=2) + "\n")
     return PROJECT_MCP_JSON, created
 

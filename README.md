@@ -16,8 +16,23 @@ cd sandbox
 ./wp-sandbox setup
 ```
 
-That's it. `setup` boots Docker, installs WordPress, generates an Application
+`setup` is non-interactive. It checks prerequisites (Docker running, Python
+3.9+), then boots Docker, installs WordPress, generates an Application
 Password, builds the MCP server, and writes `.mcp.json` inside this folder.
+
+Connect external integrations on demand — each one is its own command, so
+you only set up what you'll actually use:
+
+```bash
+./wp-sandbox connect fb     # FluentBoards (URL + email + app password)
+./wp-sandbox connect gh     # GitHub org/user (auto-detects gh CLI auth)
+```
+
+Skipping these is fine — the sandbox itself runs without them. `gh` is
+detected automatically: if you're already signed in with `gh auth login`,
+`connect gh` just reports the existing connection and saves the username.
+
+Saved to the gitignored `sandbox.local.yml` (+ mirrored to `.env.local`).
 
 Then open Claude Code in this folder:
 
@@ -42,6 +57,7 @@ Claude now has 15 tools wired to your local WordPress.
 ./wp-sandbox snapshots            # list saved snapshots
 ./wp-sandbox xdebug on|off        # toggle step-debug (port 9003, host trigger)
 ./wp-sandbox doctor               # audit the stack — runs after setup, run anytime
+./wp-sandbox connect <fb|gh>      # save FluentBoards or GitHub creds
 ./wp-sandbox status               # which containers + project + focus are active
 ./wp-sandbox down                 # stop containers (state is preserved)
 ./wp-sandbox clean                # stop + wipe DB volume (start fresh)

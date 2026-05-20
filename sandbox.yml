@@ -147,3 +147,16 @@ mcp:
     enabled: false           # Phase 2 — Playwright-driven
   figma:
     enabled: false           # Phase 3 — official Figma MCP
+
+# ---------------------------------------------------------------------------
+# Personal secrets — populated by `./wp-sandbox onboard`.
+#
+# Never edit this block here; the wizard writes the real values into
+# `sandbox.local.yml` (gitignored) and mirrors them into `.env.local` for
+# scripts/skills that prefer dotenv.
+#
+# fluentboards:
+#   url: https://office.example.com
+#   email: you@example.com
+#   app_password: xxxx xxxx xxxx xxxx xxxx xxxx
+# ---------------------------------------------------------------------------

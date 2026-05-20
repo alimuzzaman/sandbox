@@ -1,11 +1,26 @@
-#!/usr/bin/env python3
-"""Sandbox CLI — the entry point for everyone (designers, devs, QA).
+#!/bin/sh
+# Sandbox CLI — entry point for everyone (designers, devs, QA).
+# All configuration lives in sandbox.yml. Run `./wp-sandbox` for help.
+#
+# Polyglot bootstrap: the shell catches a missing python3 with a friendly
+# install hint, then re-execs this same file under python3. Python's parser
+# treats the next triple-quoted block as the module docstring and skips it.
+""":"
+if ! command -v python3 >/dev/null 2>&1; then
+    cat <<'EOF' >&2
+error: python3 is required to run ./wp-sandbox but was not found.
 
-All configuration lives in sandbox.yml. This script reads it and drives docker
-+ wp-cli on your behalf.
-
-Run `./wp-sandbox` (no args) for help.
-"""
+Install it, then re-run ./wp-sandbox setup:
+  • macOS:          brew install python
+  • Ubuntu/Debian:  sudo apt install python3 python3-venv
+  • Fedora/RHEL:    sudo dnf install python3 python3-virtualenv
+  • Windows (WSL):  install Ubuntu via WSL, then the Ubuntu line above
+  • Or use pyenv:   https://github.com/pyenv/pyenv
+EOF
+    exit 1
+fi
+exec python3 "$0" "$@"
+":"""
 
 from __future__ import annotations
 
@@ -595,8 +610,243 @@ def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
     return PROJECT_MCP_JSON, created
 
 
+SECRETS_ENV = ROOT / ".env.local"
+
+
+def _local_yaml() -> dict:
+    ensure_pyyaml()
+    import yaml
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _write_local_yaml(local: dict) -> None:
+    ensure_pyyaml()
+    import yaml
+    with CONFIG_LOCAL.open("w") as f:
+        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+
+
+def _write_env_local(values: dict) -> None:
+    """Write/merge KEY=VAL pairs into .env.local. Existing keys are replaced;
+    others preserved. Empty values are skipped."""
+    existing: dict[str, str] = {}
+    if SECRETS_ENV.exists():
+        for ln in SECRETS_ENV.read_text().splitlines():
+            if "=" in ln and not ln.lstrip().startswith("#"):
+                k, v = ln.split("=", 1)
+                existing[k.strip()] = v
+    for k, v in values.items():
+        if v:
+            existing[k] = v
+    lines = ["# Personal secrets for the sandbox — gitignored, never commit.",
+             "# Source from your shell or let skills read directly.", ""]
+    for k, v in existing.items():
+        lines.append(f"{k}={v}")
+    SECRETS_ENV.write_text("\n".join(lines) + "\n")
+    try:
+        SECRETS_ENV.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _docker_preflight() -> int:
+    """Check prerequisites are usable. Returns problem count."""
+    problems = 0
+    print("\nPrerequisites:")
+
+    # Python — script wouldn't have started without it, but warn on too-old
+    # versions and on missing `venv` module (Debian/Ubuntu split it out, which
+    # silently breaks .cli-venv and mcp/wp-server/.venv).
+    py_ver = sys.version_info
+    if (py_ver.major, py_ver.minor) < (3, 9):
+        problems += 1
+        print(f"  ✗ Python {py_ver.major}.{py_ver.minor} is too old (need 3.9+)")
+        print("      → macOS: `brew install python@3.12`")
+        print("      → Ubuntu/Debian: `sudo apt install python3.12 python3.12-venv`")
+        print("      → Or use pyenv: https://github.com/pyenv/pyenv")
+    else:
+        print(f"  ✓ python {py_ver.major}.{py_ver.minor}.{py_ver.micro}")
+
+    r = subprocess.run([sys.executable, "-m", "venv", "--help"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        problems += 1
+        print("  ✗ python3 `venv` module not available")
+        print("      → Ubuntu/Debian: `sudo apt install python3-venv`")
+        print("      → (needed to build .cli-venv and mcp/wp-server/.venv)")
+    else:
+        print("  ✓ python3 -m venv works")
+
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        problems += 1
+        print("  ✗ docker not found in PATH")
+        print("      → install Docker Desktop: https://docs.docker.com/get-docker/")
+        return problems
+    print(f"  ✓ docker found ({docker_bin})")
+
+    r = subprocess.run(["docker", "info"], capture_output=True, text=True)
+    if r.returncode != 0:
+        problems += 1
+        print("  ✗ docker is installed but not running")
+        print("      → macOS:  open -a Docker      (then wait ~10s for it to start)")
+        print("      → Linux:  sudo systemctl start docker")
+        print("      → check:  docker info         (should print without errors)")
+        return problems
+    print("  ✓ docker daemon running")
+
+    r = subprocess.run(["docker", "compose", "version"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        problems += 1
+        print("  ✗ `docker compose` plugin not available")
+        print("      → install Compose v2: https://docs.docker.com/compose/install/")
+    else:
+        print(f"  ✓ {r.stdout.strip()}")
+    return problems
+
+
+def _prompt(label: str, default: str = "", secret: bool = False) -> str:
+    """Prompt the user. Empty input keeps the default (or skips if no default)."""
+    if default:
+        hint = "•••••• (saved)" if secret else default
+        suffix = f" [{hint}] (Enter to keep)"
+    else:
+        suffix = " (Enter to skip)"
+    if secret:
+        import getpass
+        val = getpass.getpass(f"  {label}{suffix}: ").strip()
+    else:
+        val = input(f"  {label}{suffix}: ").strip()
+    return val or default
+
+
+CONNECT_TARGETS = {
+    "fb": "fluentboards", "fluentboards": "fluentboards",
+    "gh": "github", "github": "github",
+}
+
+
+def _refresh_env_local() -> None:
+    """Mirror current sandbox.local.yml secrets into .env.local."""
+    local = _local_yaml()
+    fb = local.get("fluentboards", {}) or {}
+    _write_env_local({
+        "GITHUB_ORG": (local.get("defaults", {}) or {}).get("github_org", ""),
+        "FLUENTBOARDS_URL": fb.get("url", ""),
+        "FLUENTBOARDS_EMAIL": fb.get("email", ""),
+        "FLUENTBOARDS_APP_PASSWORD": fb.get("app_password", ""),
+    })
+
+
+def _connect_fluentboards(cfg) -> None:
+    local = _local_yaml()
+    fb = local.setdefault("fluentboards", {})
+    print("\nFluentBoards")
+    print("  Used by the standup/report skills to read your My Day cards.")
+    print("  Generate an Application Password at:")
+    print("    https://projects.startise.com/wp-admin/profile.php#application-passwords-section")
+    print("  Press Enter at any prompt to skip / keep existing value.")
+    fb["url"] = _prompt("Site URL",
+                        fb.get("url") or "https://projects.startise.com")
+    fb["email"] = _prompt("Login email", fb.get("email", ""))
+    fb["app_password"] = _prompt("Application password",
+                                 fb.get("app_password", ""), secret=True)
+    _write_local_yaml(local)
+    _refresh_env_local()
+    ok(f"Saved to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+
+
+def _gh_cli_user() -> str | None:
+    """Return the GitHub username if `gh` is installed AND authenticated."""
+    if not shutil.which("gh"):
+        return None
+    r = subprocess.run(["gh", "auth", "status"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    # `gh api user` is the cleanest source-of-truth for the logged-in handle.
+    r = subprocess.run(["gh", "api", "user", "-q", ".login"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def _connect_github(cfg) -> None:
+    local = _local_yaml()
+    defaults = local.setdefault("defaults", {})
+    cur = (defaults.get("github_org")
+           or (cfg.get("defaults", {}) or {}).get("github_org") or "")
+
+    print("\nGitHub")
+    gh_user = _gh_cli_user()
+    if gh_user:
+        ok(f"`gh` CLI already authenticated as: {gh_user}")
+        print(f"  Setting defaults.github_org = '{gh_user}' from gh auth.")
+        print(f"  (Override with: ./wp-sandbox connect gh   then type a different org)")
+        defaults["github_org"] = gh_user
+        _write_local_yaml(local)
+        _refresh_env_local()
+        ok(f"Saved to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+        return
+
+    print("  Used by `./wp-sandbox add <repo>` to resolve bare repo names like")
+    print("  `embedpress` → `github.com/<org>/embedpress`.")
+    print("  Tip: install the `gh` CLI and run `gh auth login` — this command")
+    print("       will then auto-detect your org. Otherwise enter it manually:")
+    defaults["github_org"] = _prompt("GitHub org/user", cur)
+    _write_local_yaml(local)
+    _refresh_env_local()
+    ok(f"Saved to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+
+
+def cmd_connect(cfg, args) -> None:
+    """Save credentials for an external integration (FluentBoards, GitHub).
+
+    Usage:
+      ./wp-sandbox connect fb           # or: fluentboards
+      ./wp-sandbox connect gh           # or: github
+      ./wp-sandbox connect              # list available targets
+    """
+    target = getattr(args, "target", None)
+    if not target:
+        print("\nUsage: ./wp-sandbox connect <target>")
+        print("\nAvailable targets:")
+        print("  fb, fluentboards   FluentBoards URL + email + app password")
+        print("  gh, github         GitHub org/user (for ./wp-sandbox add <bare-repo>)")
+        print()
+        return
+
+    canonical = CONNECT_TARGETS.get(target.lower())
+    if not canonical:
+        die(f"unknown target '{target}'. "
+            f"Try: {', '.join(sorted(set(CONNECT_TARGETS)))}")
+
+    if canonical == "fluentboards":
+        _connect_fluentboards(cfg)
+    elif canonical == "github":
+        _connect_github(cfg)
+
+
 def cmd_setup(cfg, args) -> None:
-    """One command: boot the stack, install WP, build MCP, wire Claude."""
+    """One command: boot the stack, install WP, build MCP, wire Claude.
+
+    Runs preflight (Docker + Python) but does NOT prompt for personal secrets.
+    Users who need FluentBoards/GitHub creds run `./wp-sandbox onboard`
+    separately — keeps `setup` non-interactive for everyone else.
+    """
+    problems = _docker_preflight()
+    sys.stdout.flush()
+    if problems:
+        print()
+        print(f"  ✗ {problems} prerequisite(s) above must be fixed before the")
+        print("    sandbox can run. Follow the → hint next to each failure,")
+        print("    then re-run:  ./wp-sandbox setup")
+        print()
+        sys.exit(1)
+
     print("\n▸ Booting docker stack (wp + db + mailpit)…")
     cmd_up(cfg, args)
 
@@ -639,6 +889,10 @@ def cmd_setup(cfg, args) -> None:
         print(f"    ./wp-sandbox add <repo>     # clone + activate your plugin")
         print(f"    ./wp-sandbox focus <slug>   # tell Claude which plugin you're on")
     print(f"    cd {ROOT} && claude   # run Claude Code here — .mcp.json auto-loads")
+    print()
+    print("  Optional — connect external integrations on demand:")
+    print("    ./wp-sandbox connect fb     # FluentBoards (standup/report skills)")
+    print("    ./wp-sandbox connect gh     # GitHub (auto-detects gh CLI auth)")
     print()
 
 
@@ -816,6 +1070,11 @@ Then pick a project and a plugin:
 
     sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
     sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
+
+    cn = sub.add_parser("connect",
+        help="Save credentials for an integration (fb/fluentboards/gh/github)")
+    cn.add_argument("target", nargs="?",
+                    help="fb, fluentboards, gh, or github (omit to list)")
     sub.add_parser("up", help="Boot the docker stack")
     sub.add_parser("down", help="Stop the stack")
     sub.add_parser("status", help="Show container + project status")
@@ -885,6 +1144,7 @@ Then pick a project and a plugin:
         "projects": cmd_projects, "use": cmd_use, "wp": cmd_wp,
         "seed": cmd_seed, "focus": cmd_focus, "add": cmd_add,
         "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
+        "connect": cmd_connect,
         "claude": cmd_claude, "clean": cmd_clean,
         "snapshot": cmd_snapshot, "restore": cmd_restore,
         "snapshots": cmd_snapshots, "update": cmd_update,

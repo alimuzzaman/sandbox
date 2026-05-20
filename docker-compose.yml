@@ -8,6 +8,12 @@ services:
         condition: service_healthy
     ports:
       - "${WP_PORT:-8088}:80"
+    # The official wordpress:latest image ships Apache with `AllowOverride None`
+    # for /var/www/, which silently breaks pretty permalinks (wp-json/ 404s).
+    # Patch the conf on every start, then hand off to the image's entrypoint.
+    command: >
+      bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
+      && docker-entrypoint.sh apache2-foreground"
     environment:
       WORDPRESS_DB_HOST: db:3306
       WORDPRESS_DB_USER: wp

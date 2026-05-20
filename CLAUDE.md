@@ -44,27 +44,37 @@ from this folder. It applies to **every dev**, not just the original author.
    30-second snapshot beats a 30-minute rebuild. See
    `skills/snapshot/SKILL.md`.
 
-6. **Document what you implement.**
+6. **Build features in slices when they span 3+ layers.**
+   For anything touching DB + backend + REST + UI together, write the
+   smallest runnable slice, live-verify it via the right MCP tool
+   (`wp_cli`, `wp_rest`, `db_query`), then move to the next. One-shot
+   small stuff (single function, single filter) — slicing is overkill
+   there. The point isn't extra work; it's not debugging four entangled
+   layers when something breaks.
+
+7. **Document what you implement.**
    Code change + the matching `README.md` / `CLAUDE.md` / `SKILL.md` /
    `WORKFLOW.md` update land in the **same** change, not later. Stale docs
-   are worse than no docs.
+   are worse than no docs. For non-obvious cross-plugin runtime findings
+   you discover while debugging, drop a short note in
+   `memory/plugin-behavior/` — it's tracked and shared with the team.
 
-7. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
+8. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
    `runtime/wp/wp-content/uploads/` are fair game for edits. Core WP files
    get clobbered on the next `wordpress:latest` pull.
 
-8. **Prefer `./wp-sandbox <cmd>` over `docker compose` directly.**
+9. **Prefer `./wp-sandbox <cmd>` over `docker compose` directly.**
    Subcommands wire env vars, idempotency, and state files. Reach for raw
    docker only when the CLI doesn't cover it — and consider adding a
    subcommand if the gap is real.
 
-9. **No emojis in code or commits** unless the user explicitly asks.
+10. **No emojis in code or commits** unless the user explicitly asks.
 
-10. **No half-finished implementations or speculative scaffolding.**
+11. **No half-finished implementations or speculative scaffolding.**
     Three similar lines beats a premature abstraction. Don't add error
     handling for cases that can't happen.
 
-11. **README.md is for humans; this file (CLAUDE.md) is for agents.**
+12. **README.md is for humans; this file (CLAUDE.md) is for agents.**
     When they drift, fix both in the same change.
 
 ---
@@ -140,7 +150,8 @@ traps, and minimum verification rules by changed area.
 | A reusable demo content set | `runtime/seeds/<name>.json` (or `.xml`) |
 | A role-shaped prompt for Claude | `skills/<role>/SKILL.md` |
 | A step-by-step playbook | `workflows/<flow>/WORKFLOW.md` |
-| A long-lived insight from a bug fix | `memory/plugin-behavior/<note>.md` |
+| A cross-plugin / non-obvious runtime finding | `memory/plugin-behavior/<note>.md` (tracked — shared with team) |
+| Per-bug repro state (machine-specific) | `memory/repros/<slug>.md` (gitignored) |
 | Generated state | gitignored — never commit |
 
 ---
@@ -262,7 +273,13 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
    (cookie / GET param / env) won't break — that's deliberate so cron and
    background traffic don't deadlock the debugger.
 
-8. **Snapshots are local-only.** `runtime/snapshots/` is gitignored and
+8. **Pretty permalinks need `AllowOverride All`.** The `wordpress:latest`
+   Apache config defaults to `AllowOverride None` for `/var/www/`, which
+   silently breaks `/wp-json/` (404) even though `?rest_route=…` works.
+   The compose `command:` override on the `wp` service patches this on
+   start; don't remove it.
+
+9. **Snapshots are local-only.** `runtime/snapshots/` is gitignored and
    contains machine-specific absolute paths in uploads metadata. For
    shareable fixtures use WXR in `runtime/seeds/` or a `wp_cli` seed
    script checked into the plugin repo.

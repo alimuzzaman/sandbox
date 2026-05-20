@@ -23,9 +23,10 @@ mcp/wp-server/.venv/
 __pycache__/
 *.pyc
 
-# Memory grown by agents (kept locally, opt-in for sharing)
+# Memory grown by agents.
+# repros/ stays local — they're machine-specific reproduction state.
+# plugin-behavior/ is tracked — cross-plugin findings are worth sharing.
 memory/repros/
-memory/plugin-behavior/
 
 # OS
 .DS_Store

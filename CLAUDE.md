@@ -1,7 +1,7 @@
 # Sandbox — agent guide
 
 You are working inside the **wp-sandbox** repo. This is a real WordPress dev
-environment shared by designers, developers, and QA across WPDeveloper.
+environment shared by designers, developers, and QA across WPDeveloper. Also always keep remember our vision `docs/vision.md`
 
 This file is auto-loaded by Claude Code (and any MCP-aware client) when run
 from this folder. It applies to **every dev**, not just the original author.
@@ -117,6 +117,10 @@ betterdocs, schedulepress, anything else.
 
 Both are picked up automatically by `focus_get`. No sandbox-side wiring needed.
 
+Each plugin repo's `CLAUDE.md` should stay short but operational: source map,
+build commands, test commands, release/package command, known compatibility
+traps, and minimum verification rules by changed area.
+
 ---
 
 ## Where things go
@@ -186,6 +190,10 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 
 - **Fixing a bug** → reproduce live → branch → fix → verify → diff →
   confirm-then-commit → confirm-then-push. See `workflows/ship-fix/WORKFLOW.md`.
+
+- **Fast plugin dev/fix/ship** → `workflows/fast-plugin-ship/WORKFLOW.md`.
+  Use this for every focused plugin unless a more specific plugin workflow
+  overrides it.
 
 - **Reading or closing a FluentBoards card** → `skills/fluentboards/SKILL.md`.
   This is the company's task tracker; the skill ships scripts for reading

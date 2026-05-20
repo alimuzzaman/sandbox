@@ -11,6 +11,7 @@ runtime/wp/*
 !runtime/wp/.gitkeep
 runtime/plugins/*
 !runtime/plugins/.gitkeep
+runtime/snapshots/
 
 # Plugin repos cloned by `./wp-sandbox add` live here by default.
 # Each plugin has its own git history; never check them into the sandbox repo.

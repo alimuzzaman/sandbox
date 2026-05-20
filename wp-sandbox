@@ -25,6 +25,7 @@ COMPOSE = ROOT / "docker-compose.yml"
 ACTIVE = ROOT / ".active-project"
 FOCUS = ROOT / ".focus"
 WP_DIR = ROOT / "runtime" / "wp"
+SNAPSHOTS_DIR = ROOT / "runtime" / "snapshots"
 # Symlinks must live at depth 1 inside wp-content/plugins so WordPress's
 # get_plugins() picks them up. (Was runtime/plugins → bind-mounted at depth 2
 # under _sandbox/, which WP never scans.)
@@ -641,6 +642,148 @@ def cmd_setup(cfg, args) -> None:
     print()
 
 
+def cmd_snapshot(cfg, args) -> None:
+    """Save the current DB + uploads under runtime/snapshots/<name>/.
+
+    DB is exported via `wp db export`; uploads are tar'd to keep symlinks intact.
+    Restore with `./wp-sandbox restore <name>`.
+    """
+    name = args.name
+    if not re.match(r"^[\w.-]+$", name or ""):
+        die("snapshot name must be [A-Za-z0-9._-]+")
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    target = SNAPSHOTS_DIR / name
+    if target.exists() and not args.force:
+        die(f"snapshot '{name}' exists — pass --force to overwrite")
+    target.mkdir(parents=True, exist_ok=True)
+
+    # DB → snapshot.sql inside the container's view of the snapshot dir.
+    # `wp db export` writes from within the wpcli container, so we mount the
+    # snapshots dir as /snapshots for the duration of the call.
+    info(f"Exporting DB → {target}/db.sql")
+    compose("run", "--rm",
+            "-v", f"{SNAPSHOTS_DIR}:/snapshots",
+            "wpcli", "db", "export", f"/snapshots/{name}/db.sql",
+            "--add-drop-table")
+
+    # Uploads — preserve relative symlinks, skip if dir missing
+    uploads = WP_DIR / "wp-content" / "uploads"
+    if uploads.exists():
+        info(f"Archiving uploads → {target}/uploads.tgz")
+        run(["tar", "-C", str(uploads.parent), "-czf",
+             str(target / "uploads.tgz"), "uploads"])
+    active = _active_project_name() or ""
+    (target / "META").write_text(f"project={active}\n")
+    ok(f"Snapshot '{name}' saved.")
+
+
+def cmd_restore(cfg, args) -> None:
+    name = args.name
+    target = SNAPSHOTS_DIR / name
+    if not target.exists():
+        die(f"no snapshot '{name}' under {SNAPSHOTS_DIR}")
+    sql = target / "db.sql"
+    if not sql.exists():
+        die(f"snapshot is missing db.sql: {sql}")
+    info(f"Importing DB ← {sql}")
+    compose("run", "--rm",
+            "-v", f"{SNAPSHOTS_DIR}:/snapshots",
+            "wpcli", "db", "import", f"/snapshots/{name}/db.sql")
+    tgz = target / "uploads.tgz"
+    if tgz.exists():
+        info(f"Restoring uploads ← {tgz}")
+        run(["tar", "-C", str(WP_DIR / "wp-content"), "-xzf", str(tgz)])
+    ok(f"Restored snapshot '{name}'.")
+
+
+def cmd_snapshots(cfg, args) -> None:
+    if not SNAPSHOTS_DIR.exists() or not any(SNAPSHOTS_DIR.iterdir()):
+        info("No snapshots yet. Save one: ./wp-sandbox snapshot <name>")
+        return
+    print()
+    for entry in sorted(SNAPSHOTS_DIR.iterdir()):
+        if not entry.is_dir():
+            continue
+        meta = ""
+        m = entry / "META"
+        if m.exists():
+            meta = m.read_text().strip().replace("\n", " ")
+        size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+        print(f"  {entry.name:<24} {size // 1024:>6} KB   {meta}")
+    print()
+
+
+def cmd_update(cfg, args) -> None:
+    """`git pull` every plugin source referenced by the active project."""
+    active = _active_project_name()
+    if not active:
+        die("no active project — run ./wp-sandbox use <name> first")
+    proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
+    plugins = proj.get("plugins") or []
+    if not plugins:
+        info(f"project '{active}' has no source plugins to update")
+        return
+    for plug in plugins:
+        src = Path(plug["source"])
+        if not (src / ".git").exists():
+            info(f"skip {plug['slug']}: not a git repo at {src}")
+            continue
+        print(f"\n▸ {plug['slug']}  ({src})")
+        run(["git", "-C", str(src), "pull", "--ff-only"], check=False)
+    ok("Done.")
+
+
+def cmd_open(cfg, args) -> None:
+    rt = cfg.get("runtime", {})
+    port = rt.get("wordpress_port", 8088)
+    mailpit = rt.get("mailpit_port", 8025)
+    targets = {
+        "admin": f"http://localhost:{port}/wp-admin",
+        "site": f"http://localhost:{port}",
+        "mail": f"http://localhost:{mailpit}",
+    }
+    url = targets.get(args.what or "admin")
+    if not url:
+        die(f"unknown target '{args.what}'. Try: admin | site | mail")
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    run([opener, url], check=False)
+
+
+def cmd_xdebug(cfg, args) -> None:
+    """Toggle Xdebug by writing a drop-in PHP ini into the WP container.
+
+    Uses `wp_exec` semantics — writes the ini, restarts php via the wp service.
+    """
+    state = args.state
+    if state not in ("on", "off", "status"):
+        die("usage: ./wp-sandbox xdebug on|off|status")
+
+    ini_path = "/usr/local/etc/php/conf.d/zz-sandbox-xdebug.ini"
+    if state == "status":
+        r = compose("exec", "wp", "sh", "-c",
+                    f"test -f {ini_path} && echo on || echo off",
+                    check=False, capture=True)
+        print((r.stdout or "off").strip())
+        return
+
+    if state == "on":
+        # Install xdebug if absent (pecl), then write the ini.
+        info("Installing/enabling Xdebug in the wp container…")
+        compose("exec", "wp", "sh", "-c",
+                "command -v pecl >/dev/null && "
+                "(pecl list | grep -qi xdebug || pecl install xdebug) && "
+                f"printf 'zend_extension=xdebug\\n"
+                f"xdebug.mode=debug\\n"
+                f"xdebug.start_with_request=trigger\\n"
+                f"xdebug.client_host=host.docker.internal\\n"
+                f"xdebug.client_port=9003\\n' > {ini_path}")
+    else:
+        compose("exec", "wp", "sh", "-c", f"rm -f {ini_path}")
+
+    compose("restart", "wp", check=False)
+    ok(f"Xdebug {state}.")
+
+
 def cmd_clean(cfg, args) -> None:
     if not args.yes:
         ans = input("This deletes the DB volume. Continue? [y/N] ").lower()
@@ -672,6 +815,7 @@ Then pick a project and a plugin:
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
+    sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
     sub.add_parser("up", help="Boot the docker stack")
     sub.add_parser("down", help="Stop the stack")
     sub.add_parser("status", help="Show container + project status")
@@ -705,6 +849,23 @@ Then pick a project and a plugin:
     sub.add_parser("mcp-install", help="Install Python deps for wp-mcp")
     sub.add_parser("claude", help="Print Claude Code MCP config")
 
+    sn = sub.add_parser("snapshot", help="Save DB + uploads to runtime/snapshots/")
+    sn.add_argument("name")
+    sn.add_argument("--force", action="store_true", help="overwrite if exists")
+
+    re_ = sub.add_parser("restore", help="Restore a saved snapshot")
+    re_.add_argument("name")
+
+    sub.add_parser("snapshots", help="List saved snapshots")
+    sub.add_parser("update", help="git pull every plugin in the active project")
+
+    op = sub.add_parser("open", help="Open admin / site / mailpit in browser")
+    op.add_argument("what", nargs="?", default="admin",
+                    choices=["admin", "site", "mail"])
+
+    xd = sub.add_parser("xdebug", help="Toggle Xdebug in the WP container")
+    xd.add_argument("state", choices=["on", "off", "status"])
+
     c = sub.add_parser("clean", help="Stop + wipe DB volume")
     c.add_argument("--yes", action="store_true")
 
@@ -718,13 +879,16 @@ Then pick a project and a plugin:
     # ports) are always in sync with sandbox.yml + sandbox.local.yml.
     write_env_for_compose(cfg)
     handlers = {
-        "setup": cmd_setup,
+        "setup": cmd_setup, "apply": cmd_setup,
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
         "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
         "projects": cmd_projects, "use": cmd_use, "wp": cmd_wp,
         "seed": cmd_seed, "focus": cmd_focus, "add": cmd_add,
         "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
         "claude": cmd_claude, "clean": cmd_clean,
+        "snapshot": cmd_snapshot, "restore": cmd_restore,
+        "snapshots": cmd_snapshots, "update": cmd_update,
+        "open": cmd_open, "xdebug": cmd_xdebug,
     }
     handlers[args.cmd](cfg, args)
 

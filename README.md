@@ -32,13 +32,19 @@ Claude now has 15 tools wired to your local WordPress.
 ## Daily commands
 
 ```bash
-./wp-sandbox use <project>      # activate a profile (embedpress, design-elementor, …)
-./wp-sandbox add <repo>         # clone + link a plugin from GitHub
-./wp-sandbox focus <plugin>     # tell Claude which plugin is the active one
-./wp-sandbox doctor             # audit the stack — runs after setup, run anytime
-./wp-sandbox status             # which containers + project + focus are active
-./wp-sandbox down               # stop containers (state is preserved)
-./wp-sandbox clean              # stop + wipe DB volume (start fresh)
+./wp-sandbox use <project>        # activate a profile (embedpress, design-elementor, …)
+./wp-sandbox add <repo>           # clone + link a plugin from GitHub
+./wp-sandbox update               # git pull every plugin in the active project
+./wp-sandbox focus <plugin>       # tell Claude which plugin is the active one
+./wp-sandbox open [admin|site|mail]  # open in browser (default: admin)
+./wp-sandbox snapshot <name>      # save DB + uploads (for fast bug repro / QA)
+./wp-sandbox restore <name>       # restore a saved snapshot
+./wp-sandbox snapshots            # list saved snapshots
+./wp-sandbox xdebug on|off        # toggle step-debug (port 9003, host trigger)
+./wp-sandbox doctor               # audit the stack — runs after setup, run anytime
+./wp-sandbox status               # which containers + project + focus are active
+./wp-sandbox down                 # stop containers (state is preserved)
+./wp-sandbox clean                # stop + wipe DB volume (start fresh)
 ```
 
 Run `./wp-sandbox` with no args for the full list.

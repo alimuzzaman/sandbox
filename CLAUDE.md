@@ -35,29 +35,36 @@ from this folder. It applies to **every dev**, not just the original author.
 4. **Reproduce bugs live before fixing.**
    Use `wp_cli`, `wp_exec`, `db_query`, `wp_rest`, `tail_log` against the
    running stack to confirm the broken behavior. Capture broken-then-fixed
-   evidence. Don't substitute reading code for running it.
+   evidence. Don't substitute reading code for running it. Full loop:
+   `skills/bug-repro/SKILL.md`.
 
-5. **Document what you implement.**
+5. **Snapshot before mutating state you can't easily rebuild.**
+   `./wp-sandbox snapshot <name>` before any destructive `db_query`,
+   migration test, license-activation flow, or repro that writes data. A
+   30-second snapshot beats a 30-minute rebuild. See
+   `skills/snapshot/SKILL.md`.
+
+6. **Document what you implement.**
    Code change + the matching `README.md` / `CLAUDE.md` / `SKILL.md` /
    `WORKFLOW.md` update land in the **same** change, not later. Stale docs
    are worse than no docs.
 
-6. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
+7. **Never modify `runtime/wp/` core files.** Only `plugins/<slug>/` and
    `runtime/wp/wp-content/uploads/` are fair game for edits. Core WP files
    get clobbered on the next `wordpress:latest` pull.
 
-7. **Prefer `./wp-sandbox <cmd>` over `docker compose` directly.**
+8. **Prefer `./wp-sandbox <cmd>` over `docker compose` directly.**
    Subcommands wire env vars, idempotency, and state files. Reach for raw
    docker only when the CLI doesn't cover it — and consider adding a
    subcommand if the gap is real.
 
-8. **No emojis in code or commits** unless the user explicitly asks.
+9. **No emojis in code or commits** unless the user explicitly asks.
 
-9. **No half-finished implementations or speculative scaffolding.**
-   Three similar lines beats a premature abstraction. Don't add error
-   handling for cases that can't happen.
+10. **No half-finished implementations or speculative scaffolding.**
+    Three similar lines beats a premature abstraction. Don't add error
+    handling for cases that can't happen.
 
-10. **README.md is for humans; this file (CLAUDE.md) is for agents.**
+11. **README.md is for humans; this file (CLAUDE.md) is for agents.**
     When they drift, fix both in the same change.
 
 ---
@@ -188,8 +195,16 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
   the builder's data into post content or post meta, set companion meta,
   smoke-check via `tail_log`. Builder-specific keys live in the workflow.
 
-- **Fixing a bug** → reproduce live → branch → fix → verify → diff →
-  confirm-then-commit → confirm-then-push. See `workflows/ship-fix/WORKFLOW.md`.
+- **Fixing a bug** → `skills/bug-repro/SKILL.md` is the canonical loop
+  (snapshot → reproduce live → fix → verify against snapshot). Then
+  branch → diff → confirm-then-commit → confirm-then-push.
+
+- **Diagnosing a WP / plugin error** → `skills/wp-debug/SKILL.md`. Covers
+  `tail_log`, Xdebug (`./wp-sandbox xdebug on`), Query Monitor, and a
+  symptom→cause table for the most common failures.
+
+- **Saving / restoring state** → `skills/snapshot/SKILL.md`. Use before
+  any destructive flow or whenever you'd rather not rebuild a fixture.
 
 - **Fast plugin dev/fix/ship** → `workflows/fast-plugin-ship/WORKFLOW.md`.
   Use this for every focused plugin unless a more specific plugin workflow
@@ -207,7 +222,13 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
   `./wp-sandbox focus <slug>`. `focus_get` pulls in that plugin's own
   `CLAUDE.md` automatically.
 
+- **Starting the day** → `./wp-sandbox update` to git-pull every source
+  plugin in the active project. Pairs with `./wp-sandbox doctor`.
+
 - **Stack feels broken** → `./wp-sandbox doctor` first.
+
+- **Opening WP / Mailpit in the browser** → `./wp-sandbox open admin`
+  (or `site` / `mail`).
 
 ---
 
@@ -235,6 +256,16 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 
 6. **`wp post meta update` with JSON needs shell.** wp-cli doesn't expand
    `$()`; use `docker compose run --rm --entrypoint sh wpcli -c '…'` or pipe.
+
+7. **Xdebug only attaches on trigger.** `./wp-sandbox xdebug on` enables
+   `xdebug.start_with_request=trigger`. Requests without `XDEBUG_TRIGGER`
+   (cookie / GET param / env) won't break — that's deliberate so cron and
+   background traffic don't deadlock the debugger.
+
+8. **Snapshots are local-only.** `runtime/snapshots/` is gitignored and
+   contains machine-specific absolute paths in uploads metadata. For
+   shareable fixtures use WXR in `runtime/seeds/` or a `wp_cli` seed
+   script checked into the plugin repo.
 
 ---
 

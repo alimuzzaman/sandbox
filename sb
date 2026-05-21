@@ -288,6 +288,265 @@ def cmd_projects(cfg, args) -> None:
     print()
 
 
+def _force_symlink(link: Path, src: Path) -> None:
+    """Replace whatever is at `link` with a symlink to `src`.
+
+    `link.unlink()` fails with EPERM on a real (non-symlink) directory, which
+    is exactly the state we hit when a wp.org install of the same slug already
+    sits in the plugins folder. Detect that case and remove the directory tree
+    instead. Symlinks (even dangling ones) get unlinked normally.
+    """
+    if link.is_symlink():
+        link.unlink()
+    elif link.is_dir():
+        # Plain `rmtree` follows nothing here — link is a real dir, not a link.
+        shutil.rmtree(link)
+    elif link.exists():
+        link.unlink()
+    link.symlink_to(src)
+
+
+def _parse_pick_input(raw: str, name_to_idx: dict[str, int],
+                      idx_to_name: dict[int, str]) -> list[str]:
+    """Parse a picker selection string into an ordered list of project names.
+
+    Accepts space- or comma-separated mix of numbers, ranges (1-3), 'all',
+    and slug names. Unknown tokens are silently dropped — the caller shows
+    the final confirm-list so typos are obvious.
+    """
+    raw = (raw or "").strip().lower()
+    if not raw or raw == "none":
+        return []
+    if raw == "all":
+        return [idx_to_name[i] for i in sorted(idx_to_name)]
+    seen: set[str] = set()
+    chosen: list[str] = []
+
+    def take(name: str):
+        if name and name not in seen:
+            seen.add(name)
+            chosen.append(name)
+
+    for token in re.split(r"[\s,]+", raw):
+        if not token:
+            continue
+        if "-" in token and all(p.isdigit() for p in token.split("-")):
+            lo, hi = (int(x) for x in token.split("-"))
+            for i in range(lo, hi + 1):
+                if i in idx_to_name:
+                    take(idx_to_name[i])
+        elif token.isdigit():
+            i = int(token)
+            if i in idx_to_name:
+                take(idx_to_name[i])
+        elif token in name_to_idx:
+            take(token)
+    return chosen
+
+
+def _resolve_plugin_github(plug: dict, project_org: str, default_org: str) -> str | None:
+    """Pick the GitHub <org>/<repo> to clone for a plugin entry.
+
+    Resolution order:
+      1. explicit `github: "<org>/<repo>"` on the plugin
+      2. explicit `github_repo: "<repo>"` on the plugin combined with the
+         project- or defaults-level `github_org`
+      3. fallback: <project_org or default_org>/<slug>
+
+    Returns None when nothing usable can be assembled, so the caller can
+    print a precise error instead of falling through to a 404.
+    """
+    explicit = (plug.get("github") or "").strip()
+    if explicit and "/" in explicit:
+        return explicit
+    repo_name = (plug.get("github_repo") or plug.get("slug") or "").strip()
+    org = (project_org or default_org or "").strip()
+    if not (org and repo_name):
+        return None
+    return f"{org}/{repo_name}"
+
+
+def _install_picked_project(cfg: dict, name: str, report: dict) -> None:
+    """Materialize a project from sandbox.yml.
+
+    Clone source plugins (when not already on disk), symlink them into the
+    runtime, install any wp.org runtime deps, activate everything. Per-plugin
+    failures are collected into `report` so the picker can summarize them at
+    the end — one wrong slug shouldn't abort the whole batch.
+    """
+    projects = cfg.get("projects", {}) or {}
+    proj = projects.get(name)
+    if not proj:
+        report["skipped"].append((name, "not in sandbox.yml"))
+        return
+
+    defaults = cfg.get("defaults", {}) or {}
+    raw = defaults.get("plugins_home", "") or "./plugins"
+    plugins_home = Path(raw).expanduser()
+    if not plugins_home.is_absolute():
+        plugins_home = (ROOT / plugins_home).resolve()
+    plugins_home.mkdir(parents=True, exist_ok=True)
+    default_org = (defaults.get("github_org") or "").strip()
+    project_org = (proj.get("github_org") or "").strip()
+
+    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+
+    for plug in proj.get("plugins", []) or []:
+        slug = plug["slug"]
+        src = Path(plug.get("source") or (plugins_home / slug))
+        src = src.expanduser()
+        if not src.is_absolute():
+            src = (ROOT / src).resolve()
+
+        if not src.exists():
+            target = _resolve_plugin_github(plug, project_org, default_org)
+            if not target:
+                report["failed"].append((slug,
+                    "no github_org set and no explicit `github:` field — "
+                    "run `./sb connect gh` or add `github: <org>/<repo>` "
+                    "to the plugin entry in sandbox.yml"))
+                continue
+            url = f"https://github.com/{target}.git"
+            info(f"cloning {url} → {src}")
+            res = subprocess.run(["git", "clone", url, str(src)],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                stderr = (res.stderr or "").strip().lower()
+                if "repository not found" in stderr or "not found" in stderr:
+                    hint = (
+                        f"github.com/{target} is 404 — most likely wrong org "
+                        f"name or wrong repo name. If the actual repo lives "
+                        f"elsewhere set `github: <org>/<repo>` on the plugin "
+                        f"in sandbox.yml. If it's private, ensure `gh auth` "
+                        f"can read it."
+                    )
+                elif "authentication" in stderr or "denied" in stderr or "403" in stderr:
+                    hint = (
+                        f"clone of {target} was denied — likely private/Pro. "
+                        f"Run `gh auth refresh -s repo,read:org` or skip."
+                    )
+                else:
+                    hint = res.stderr.strip() or "git clone failed"
+                report["failed"].append((slug, hint))
+                continue
+
+        link = PLUGINS_DIR / slug
+        _force_symlink(link, src)
+        ok(f"linked {slug} → {src}")
+        report["linked"].append(slug)
+
+    for slug in proj.get("install_from_wporg", []) or []:
+        info(f"installing {slug} from wp.org (if missing)…")
+        wpcli(["plugin", "install", slug, "--activate"], check=False)
+        report["wporg"].append(slug)
+
+    for plug in proj.get("plugins", []) or []:
+        slug = plug["slug"]
+        if (PLUGINS_DIR / slug).exists():
+            wpcli(["plugin", "activate", slug], check=False)
+
+
+def cmd_pick(cfg, args) -> None:
+    """Interactive multi-select for the project catalog defined in sandbox.yml.
+
+    Replaces the manual `./sb use <x>` + `./sb add <r>` * N loop with one
+    pass: read the catalog, show a numbered checklist split by source-dev
+    vs designer-only, parse the selection, clone + symlink + activate.
+    """
+    projects = cfg.get("projects", {}) or {}
+    if not projects:
+        die("no projects defined in sandbox.yml")
+
+    src_dev = {n: p for n, p in projects.items() if p.get("plugins")}
+    designer = {n: p for n, p in projects.items() if not p.get("plugins")}
+
+    name_to_idx: dict[str, int] = {}
+    idx_to_name: dict[int, str] = {}
+
+    print()
+    print("  Pick projects to set up.")
+    i = 1
+    if src_dev:
+        print()
+        print("  Source dev (clones repos into plugins_home):")
+        for n, p in src_dev.items():
+            desc = (p.get("description") or "").strip()
+            print(f"   {i:>2})  [ ]  {n:<22} {desc}")
+            name_to_idx[n] = i
+            idx_to_name[i] = n
+            i += 1
+    if designer:
+        print()
+        print("  Designer / QA (wp.org plugins only):")
+        for n, p in designer.items():
+            desc = (p.get("description") or "").strip()
+            print(f"   {i:>2})  [ ]  {n:<22} {desc}")
+            name_to_idx[n] = i
+            idx_to_name[i] = n
+            i += 1
+
+    print()
+    print("  Enter numbers (e.g. '1 3 5'), ranges ('1-3'), 'all', 'none',")
+    print("  or slug names ('embedpress notificationx'):")
+    try:
+        raw = input("  > ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    chosen = _parse_pick_input(raw, name_to_idx, idx_to_name)
+    if not chosen:
+        info("nothing selected")
+        return
+
+    print()
+    print(f"  Will set up: {', '.join(chosen)}")
+    try:
+        confirm = input("  Proceed? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if confirm and confirm not in ("y", "yes"):
+        info("cancelled")
+        return
+
+    report = {"linked": [], "failed": [], "wporg": [], "skipped": []}
+    print()
+    for name in chosen:
+        print(f"▸ {name}")
+        _install_picked_project(cfg, name, report)
+        print()
+
+    # Summary — make failures impossible to miss after a long run.
+    print()
+    if report["linked"]:
+        ok(f"Linked: {', '.join(report['linked'])}")
+    if report["wporg"]:
+        info(f"wp.org plugins installed: {', '.join(sorted(set(report['wporg'])))}")
+    if report["failed"]:
+        print()
+        print("  ✗ Could not set up these plugins:")
+        for slug, why in report["failed"]:
+            print(f"      {slug}")
+            for line in (why or "").splitlines() or [""]:
+                print(f"        {line}")
+        print()
+        print("  Hints:")
+        print("    • Wrong default org?       ./sb connect gh")
+        print("    • Explicit repo per plug?  add `github: <org>/<repo>` in sandbox.yml")
+        print("    • Already cloned locally?  add `source: <abs-path>` to point at it")
+
+    # If exactly one was picked AND no prior active, activate it.
+    cur_active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    if len(chosen) == 1 and not cur_active:
+        ACTIVE.write_text(chosen[0])
+        ok(f"Active project: {chosen[0]}")
+    elif cur_active and cur_active in chosen:
+        info(f"Active project unchanged: {cur_active}  (switch with `./sb use <name>`)")
+    else:
+        info(f"Set active with:  ./sb use <one of: {', '.join(chosen)}>")
+
+
 def cmd_use(cfg, args) -> None:
     name = args.name
     projs = cfg.get("projects", {}) or {}
@@ -304,9 +563,7 @@ def cmd_use(cfg, args) -> None:
         if not src.exists():
             info(f"skip {slug}: source not found at {src}")
             continue
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(src)
+        _force_symlink(link, src)
         ok(f"linked {slug} → {src}")
 
     # Step 2: install wp.org dependencies
@@ -368,9 +625,7 @@ def cmd_add(cfg, args) -> None:
     # Symlink + activate in the live runtime
     PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
     link = PLUGINS_DIR / slug
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(dest)
+    _force_symlink(link, dest)
     ok(f"Linked {slug} → {dest}")
 
     wpcli(["plugin", "activate", slug], check=False)
@@ -821,6 +1076,17 @@ def _gh_cli_user() -> str | None:
     return r.stdout.strip() or None
 
 
+def _gh_cli_orgs() -> list[str]:
+    """Return GitHub orgs the gh-authenticated user belongs to (or [] if none/no-gh)."""
+    if not shutil.which("gh"):
+        return []
+    r = subprocess.run(["gh", "api", "user/orgs", "--jq", ".[].login"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return []
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
 def _connect_github(cfg) -> None:
     local = _local_yaml()
     defaults = local.setdefault("defaults", {})
@@ -828,25 +1094,65 @@ def _connect_github(cfg) -> None:
            or (cfg.get("defaults", {}) or {}).get("github_org") or "")
 
     print("\nGitHub")
+    print("  Used by `./sb add <repo>` and `./sb pick` to resolve plugin repos")
+    print("  as github.com/<org>/<slug> when no explicit `github:` field is set.")
+    print()
+
     gh_user = _gh_cli_user()
+    orgs = _gh_cli_orgs() if gh_user else []
+
     if gh_user:
-        ok(f"`gh` CLI already authenticated as: {gh_user}")
-        print(f"  Setting defaults.github_org = '{gh_user}' from gh auth.")
-        print(f"  (Override with: ./sb connect gh   then type a different org)")
-        defaults["github_org"] = gh_user
-        _write_local_yaml(local)
-        _refresh_env_local()
-        ok(f"Saved to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+        ok(f"`gh` CLI authenticated as: {gh_user}")
+
+    # Build a numbered menu when we have anything to suggest. Otherwise
+    # fall back to a free-form prompt. The current value (if any) is
+    # always offered as one of the choices, never silently re-confirmed —
+    # so a wrong saved value (a common state for new WPDev hires whose
+    # gh login is their personal handle) can't shadow the right answer.
+    choices: list[str] = []
+    if "WPDevelopers" in orgs:
+        choices.append("WPDevelopers")
+    for o in orgs:
+        if o not in choices:
+            choices.append(o)
+    if gh_user and gh_user not in choices:
+        choices.append(gh_user)
+    if cur and cur not in choices:
+        choices.append(cur)
+
+    entered = ""
+    if choices:
+        print()
+        print("  Pick a GitHub org/user (default repo resolution falls back here):")
+        for i, c in enumerate(choices, 1):
+            marker = "  (current)" if c == cur else ("  (recommended for WPDev team)"
+                                                    if c == "WPDevelopers" else "")
+            print(f"    {i})  {c}{marker}")
+        print(f"    {len(choices)+1})  other (type a value)")
+        try:
+            raw = input("  Pick: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(choices):
+                entered = choices[idx - 1]
+            elif idx == len(choices) + 1:
+                entered = _prompt("Enter org/user", "").strip()
+        else:
+            entered = raw  # treat as a typed org name
+    else:
+        entered = _prompt("GitHub org/user", cur).strip()
+
+    if not entered:
+        info("(left blank — set later with `./sb connect gh`)")
         return
 
-    print("  Used by `./sb add <repo>` to resolve bare repo names like")
-    print("  `embedpress` → `github.com/<org>/embedpress`.")
-    print("  Tip: install the `gh` CLI and run `gh auth login` — this command")
-    print("       will then auto-detect your org. Otherwise enter it manually:")
-    defaults["github_org"] = _prompt("GitHub org/user", cur)
+    defaults["github_org"] = entered
     _write_local_yaml(local)
     _refresh_env_local()
-    ok(f"Saved to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+    ok(f"Saved github_org='{entered}' to {CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
 
 
 def cmd_connect(cfg, args) -> None:
@@ -929,11 +1235,25 @@ def cmd_setup(cfg, args) -> None:
     print()
     ok("Setup complete.")
     print()
+
+    # Offer the plugin picker as the natural next step. Skip on --no-pick
+    # (CI / re-runs) or if no projects are defined.
+    skip_pick = getattr(args, "no_pick", False)
+    projs = (cfg.get("projects", {}) or {})
+    if projs and not skip_pick and sys.stdin.isatty():
+        try:
+            ans = input("  Pick plugins to install now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+            print()
+        if ans in ("", "y", "yes"):
+            cmd_pick(cfg, args)
+            print()
+
     print("  Next:")
-    projs = list((cfg.get("projects", {}) or {}).keys())
     if projs:
-        print(f"    ./sb use <name>     # one of: {', '.join(projs)}")
-        print(f"    ./sb add <repo>     # clone + activate your plugin")
+        print(f"    ./sb pick           # interactive checklist of plugins")
+        print(f"    ./sb add <repo>     # clone + activate a single plugin")
         print(f"    ./sb focus <slug>   # tell Claude which plugin you're on")
     print(f"    cd {ROOT} && claude   # run Claude Code here — .mcp.json auto-loads")
     print()
@@ -1239,8 +1559,11 @@ Then pick a project and a plugin:
     )
     sub = p.add_subparsers(dest="cmd")
 
-    sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
-    sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
+    sp = sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
+    sp.add_argument("--no-pick", action="store_true",
+                    help="skip the post-setup plugin picker (CI / re-run)")
+    ap = sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
+    ap.add_argument("--no-pick", action="store_true")
 
     cn = sub.add_parser("connect",
         help="Save credentials for an integration (fb/fluentboards/gh/github)")
@@ -1253,6 +1576,7 @@ Then pick a project and a plugin:
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
     sub.add_parser("projects", help="List defined projects")
+    sub.add_parser("pick", help="Interactive checklist to set up WPDeveloper plugins")
 
     u = sub.add_parser("use", help="Switch active project")
     u.add_argument("name")
@@ -1323,7 +1647,7 @@ Then pick a project and a plugin:
         "setup": cmd_setup, "apply": cmd_setup,
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
         "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
-        "projects": cmd_projects, "use": cmd_use, "wp": cmd_wp,
+        "projects": cmd_projects, "pick": cmd_pick, "use": cmd_use, "wp": cmd_wp,
         "seed": cmd_seed, "focus": cmd_focus, "add": cmd_add,
         "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
         "connect": cmd_connect,

@@ -47,8 +47,9 @@ Claude now has 15 tools wired to your local WordPress.
 ## Daily commands
 
 ```bash
+./sb pick                 # interactive checklist of WPDeveloper plugins
 ./sb use <project>        # activate a profile (embedpress, design-elementor, …)
-./sb add <repo>           # clone + link a plugin from GitHub
+./sb add <repo>           # clone + link a single plugin from GitHub
 ./sb update               # git pull every plugin in the active project
 ./sb focus <plugin>       # tell Claude which plugin is the active one
 ./sb open [admin|site|mail]  # open in browser (default: admin)

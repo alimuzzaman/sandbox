@@ -11,6 +11,8 @@ services:
     # The official wordpress:latest image ships Apache with `AllowOverride None`
     # for /var/www/, which silently breaks pretty permalinks (wp-json/ 404s).
     # Patch the conf on every start, then hand off to the image's entrypoint.
+    # (PHP memory / upload bumps live in config/php-sandbox.ini, mounted into
+    # /usr/local/etc/php/conf.d/ — that's also picked up by the wpcli container.)
     command: >
       bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
       && docker-entrypoint.sh apache2-foreground"
@@ -33,6 +35,8 @@ services:
       # inside the container. SANDBOX_PLUGINS_HOST is materialized into .env
       # by `./sb` on every run.
       - ${SANDBOX_PLUGINS_HOST}:${SANDBOX_PLUGINS_HOST}
+      # PHP overrides — read-only, ends in zz so it wins over upstream defaults.
+      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
 
   db:
     image: mariadb:latest
@@ -71,6 +75,10 @@ services:
       - ./runtime/wp:/var/www/html
       - ./runtime/seeds:/seeds
       - ${SANDBOX_PLUGINS_HOST}:${SANDBOX_PLUGINS_HOST}
+      # Same PHP overrides as the wp service — wp-cli runs `wp plugin activate`
+      # against plugins like Essential Addons whose activation hooks load
+      # heavy classes and 128 M is not enough.
+      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
     entrypoint: ["wp", "--allow-root"]
     command: ["--info"]
 

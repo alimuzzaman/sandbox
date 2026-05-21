@@ -49,6 +49,8 @@ SEEDS_DIR = ROOT / "runtime" / "seeds"
 MCP_DIR = ROOT / "mcp" / "wp-server"
 MCP_VENV = MCP_DIR / ".venv"
 CLI_VENV = ROOT / ".cli-venv"
+TOOLS_DIR = ROOT / "tools"
+TOOLS_VENV = ROOT / "runtime" / ".venv-tools"
 
 
 # ----------------------------- utilities -----------------------------
@@ -508,6 +510,51 @@ def cmd_seed(cfg, args) -> None:
     if not args.file:
         die("usage: ./sb seed <file-in-runtime/seeds>")
     wpcli(["import", f"/seeds/{args.file}", "--authors=create"])
+
+
+def ensure_tools_venv() -> Path:
+    """Build the headless-browser venv on first use and return its python path.
+
+    Lives under runtime/.venv-tools/ so it sits next to other auto-managed
+    state and is wiped by `./sb clean`. The Chromium binary that Playwright
+    downloads lands in the playwright cache under the venv.
+    """
+    py = TOOLS_VENV / "bin" / "python"
+    req = TOOLS_DIR / "visit" / "requirements.txt"
+    stamp = TOOLS_VENV / ".installed"
+
+    if py.exists() and stamp.exists() and stamp.read_text().strip() == req.read_text().strip():
+        return py
+
+    if not py.exists():
+        info("Creating tools venv at runtime/.venv-tools/ (one-time)…")
+        TOOLS_VENV.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.check_call([find_modern_python(), "-m", "venv", str(TOOLS_VENV)])
+
+    pip = TOOLS_VENV / "bin" / "pip"
+    info("Installing Playwright (one-time)…")
+    subprocess.check_call([str(pip), "install", "--quiet",
+                           "--disable-pip-version-check", "-r", str(req)])
+    info("Downloading headless Chromium (one-time, ~150 MB)…")
+    # Pin to chromium only — we don't need firefox/webkit and don't want
+    # to wait for 3x the download on first run.
+    subprocess.check_call([str(py), "-m", "playwright", "install", "chromium"])
+    stamp.write_text(req.read_text())
+    ok("Tools venv ready.")
+    return py
+
+
+def cmd_visit(cfg, args) -> None:
+    """Headless-browser inspection of a URL.
+
+    All flags are forwarded to tools/visit/visit.py; this wrapper just
+    ensures the venv + Chromium are present, then exec's the runner so
+    the user sees its JSON output and exit code directly.
+    """
+    py = ensure_tools_venv()
+    script = TOOLS_DIR / "visit" / "visit.py"
+    cmd = [str(py), str(script), *args.passthrough]
+    os.execv(str(py), cmd)
 
 
 def find_modern_python() -> str:
@@ -1216,6 +1263,12 @@ Then pick a project and a plugin:
     s = sub.add_parser("seed", help="Import a WXR from runtime/seeds/")
     s.add_argument("file")
 
+    v = sub.add_parser("visit",
+        help="Load a URL in headless Chromium and report DOM/console/iframes as JSON")
+    v.add_argument("passthrough", nargs=argparse.REMAINDER,
+        help="<url> [--check-iframes] [--screenshot PATH] [--full-page] "
+             "[--width N] [--height N] [--timeout S] [--wait-until COND]")
+
     a = sub.add_parser("add",
         help="Clone a plugin from GitHub, link it in, activate it")
     a.add_argument("repo",
@@ -1279,6 +1332,7 @@ Then pick a project and a plugin:
         "snapshots": cmd_snapshots, "update": cmd_update,
         "open": cmd_open, "xdebug": cmd_xdebug,
         "introspect": cmd_introspect,
+        "visit": cmd_visit,
     }
     handlers[args.cmd](cfg, args)
 

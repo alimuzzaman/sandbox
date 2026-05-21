@@ -31,3 +31,7 @@ memory/repros/
 
 # OS
 .DS_Store
+
+# Tooling venvs — auto-managed by ./sb
+.cli-venv/
+runtime/.venv-tools/

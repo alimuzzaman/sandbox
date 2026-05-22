@@ -51,6 +51,14 @@ evidence — only a live MCP call against the stack is.
   not `docker compose exec wp wp`. `wp_rest`, not `curl localhost:8188`.
   `db_query`, not `mysql -h`. `tail_log`, not `docker logs`. Bash is
   for `git`, `grep`, `find` — not for talking to WordPress.
+
+- **Browser-rendered bug (Gutenberg editor state, Elementor, JS,
+  asset-load order) →** use the `visit` MCP tool. It auto-logs in on
+  `/wp-admin/` URLs using pre-wired admin credentials. You have full
+  admin access against the sandbox WP — never ask the user for the
+  password. Stay on the lightweight tools (`wp_cli` / `wp_rest` /
+  `db_query` / `tail_log`) for everything that isn't actually
+  browser-runtime; `visit` is heavier and slower.
 - **About to mutate DB / run a migration / touch licensing →**
   `./sb snapshot <short-name>` first. A 30-second snapshot beats a
   30-minute rebuild.

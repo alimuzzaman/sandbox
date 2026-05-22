@@ -87,10 +87,15 @@ test." Either you verified it live, or you are BLOCKED.
 
 2. **Map every call site in one read pass.** Grep the focused plugin
    for every function, hook, block name, REST route, CSS class, JS
-   handle, template partial involved. Read all of them **before** you
-   edit anything. If you find yourself opening a file mid-edit because
-   something else broke, you are already losing — stop, back up, read
-   the rest.
+   handle, template partial involved. **If the focused plugin has a
+   `-pro` sibling repo** (`embedpress` ↔ `embedpress-pro`, `betterdocs`
+   ↔ `betterdocs-pro`, etc.), grep BOTH repos at this step — Pro
+   commonly overrides free's rewrite rules, hooks, REST handlers, and
+   filters, and a fix that ignores Pro will pass one verification round
+   and fail the next when Pro's override re-asserts the broken behavior.
+   Read all hits **before** you edit anything. If you find yourself
+   opening a file mid-edit because something else broke, you are
+   already losing — stop, back up, read the rest.
 
 3. **Form the complete edit plan.** Every file, every line. If the
    change touches a Gutenberg block `save()`, plan the `deprecated[]`
@@ -113,21 +118,35 @@ test." Either you verified it live, or you are BLOCKED.
 
 ---
 
-## What "verified" means by surface
+## Tool selection — pick the lightest tool that captures the bug live
 
-| Changed surface | Minimum verification before claiming FIXED |
+Headless Chromium (`visit`) is the heaviest tool — seconds to load, noisy
+output. Don't reach for it unless the bug *requires* a real browser. For
+everything else, the lightweight MCP tools give faster, cleaner evidence.
+
+| Bug surface | Right repro / verify tool |
 |---|---|
-| PHP function (no UI) | `wp_cli eval` or `wp_rest` call exercising it; `tail_log` clean |
+| PHP function / class behavior | `wp_cli eval` or `wp_rest` exercising it; `tail_log` clean |
 | REST endpoint | `wp_rest` request; assert status + body shape |
 | DB schema / migration | Snapshot → run migration → `db_query DESCRIBE`; test fresh AND upgraded data |
-| Admin page (React/PHP) | Headless `visit` to `/wp-admin/<page>`; screenshot; check console |
-| Gutenberg block / Elementor widget | Render a post using it via headless; check both editor save + frontend |
-| Frontend asset (JS/CSS) | Load the page that enqueues it; check Network 200 + console |
+| SQL behavior / data query | `db_query` |
+| PHP fatal in log | trigger via `wp_cli` / `wp_rest`, then `tail_log` |
 | Cron / scheduled task | `wp_cli cron event run <hook>`; assert side effect |
+| Email | trigger the send via `wp_cli` / `wp_rest`, inspect via `mail_list` / `mail_get` |
+| **Rendered page / Gutenberg / Elementor / JS / asset loading** | `visit` (headless Chromium) — the only tool that captures browser-runtime evidence |
+| Admin page (React-rendered) | `visit` on the `/wp-admin/<page>` URL (auto-login is on) |
 
-If you cannot run the right verification (e.g. Elementor widget but
-Elementor isn't installed), say so and return BLOCKED. Do NOT downgrade
-to "ran PHP lint, looks fine."
+`visit` has **auto-login** for `/wp-admin/` URLs — credentials come from
+`WP_ADMIN_USER` / `WP_ADMIN_PASSWORD` in the MCP env. You have full admin
+access against the sandbox WP. Don't ask the user for credentials.
+
+If you cannot run the right verification (e.g. the bug needs a real
+browser but `visit`'s tools venv isn't built, OR the bug needs a paid
+third-party plugin you don't have), return `STATUS: BLOCKED` with the
+precise missing piece in `NEXT:`. Do NOT downgrade to "ran PHP lint,
+looks fine" or "wp_exec eval'd the format string, same error class."
+Synthetic in-isolation reproductions of a failure *class* are not
+evidence the *actual* bug fired against the *actual* code path.
 
 ---
 

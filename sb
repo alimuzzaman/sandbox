@@ -1011,8 +1011,15 @@ def _build_mcp_entry(cfg: dict) -> dict:
         "env": {
             "WP_URL": f"http://localhost:{port}",
             "WP_ADMIN_USER": adm.get("user", "admin"),
+            # Browser-login password — `visit` uses this to authenticate
+            # against wp-login.php so the agent can load wp-admin URLs
+            # autonomously. Separate from WP_APP_PASSWORD (REST-only).
+            "WP_ADMIN_PASSWORD": adm.get("password", "admin"),
             "WP_APP_PASSWORD": app_pw,
             "MAILPIT_URL": f"http://localhost:{mailpit_port}",
+            # Path to the sandbox root so the MCP server can invoke
+            # tools/visit/visit.py via the tools venv.
+            "SANDBOX_ROOT": str(ROOT),
         },
     }
 

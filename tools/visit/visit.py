@@ -28,10 +28,41 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
+
+
+def _wp_login_url(target_url: str) -> str:
+    """Derive the wp-login.php URL from the target URL's host."""
+    parts = urlsplit(target_url)
+    return urlunsplit((parts.scheme, parts.netloc, "/wp-login.php", "", ""))
+
+
+def _do_login(page, target_url: str, user: str, password: str) -> str | None:
+    """Submit wp-login.php with `user` / `password`. Returns None on success,
+    error string on failure. Reuses the page's context so subsequent navigations
+    carry the session cookie."""
+    login_url = _wp_login_url(target_url)
+    try:
+        page.goto(login_url, wait_until="domcontentloaded", timeout=15000)
+        page.fill("#user_login", user)
+        page.fill("#user_pass", password)
+        # Form submit + wait for redirect off wp-login.php.
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+            page.click("#wp-submit")
+    except PWTimeout:
+        return "login: timeout waiting for redirect after submit"
+    except PWError as e:
+        return f"login: {e}"
+    # WordPress redirects to wp-admin on success; the .login class stays on
+    # wp-login.php for a failed attempt. Either signal is reliable.
+    if "wp-login.php" in page.url:
+        return "login: still on wp-login.php (wrong credentials?)"
+    return None
 
 
 def run(args: argparse.Namespace) -> int:
@@ -82,7 +113,30 @@ def run(args: argparse.Namespace) -> int:
         page.on("console", on_console)
         page.on("pageerror", on_pageerror)
 
+        # Auto-login when --login is set OR when the target URL is wp-admin
+        # and we have credentials available. The session cookie set by
+        # wp-login.php sticks to the page context for the actual navigation.
+        needs_login = args.login or (
+            args.auto_login and "/wp-admin/" in args.url
+        )
+        if needs_login:
+            user = args.login_user or os.environ.get("WP_ADMIN_USER", "admin")
+            pw = args.login_password or os.environ.get("WP_ADMIN_PASSWORD", "")
+            if not pw:
+                report["errors"].append(
+                    "login requested but WP_ADMIN_PASSWORD is empty "
+                    "and --login-password not provided"
+                )
+                failed = True
+            else:
+                err = _do_login(page, args.url, user, pw)
+                if err:
+                    report["errors"].append(err)
+                    failed = True
+
         try:
+            if failed:
+                raise PWError("skipping navigation — pre-navigation step failed")
             resp = page.goto(args.url, wait_until=args.wait_until, timeout=args.timeout * 1000)
             if resp is not None and main_status["value"] is None:
                 main_status["value"] = resp.status
@@ -209,6 +263,14 @@ def main() -> int:
                    choices=["load", "domcontentloaded", "networkidle", "commit"],
                    default="domcontentloaded",
                    help="navigation wait condition (default: domcontentloaded)")
+    p.add_argument("--login", action="store_true",
+        help="Force a wp-login.php form submission before navigation.")
+    p.add_argument("--auto-login", action="store_true",
+        help="Auto-submit wp-login.php when the target URL is /wp-admin/.")
+    p.add_argument("--login-user", default="",
+        help="Override WP_ADMIN_USER for the login step.")
+    p.add_argument("--login-password", default="",
+        help="Override WP_ADMIN_PASSWORD for the login step.")
     p.add_argument("--user-agent", default="",
                    help="override the browser User-Agent")
     return run(p.parse_args())

@@ -59,13 +59,14 @@ without your word). Deeper context is loaded on demand via
 You can also invoke any skill as a slash command:
 
 ```
-/mcp__sandbox__focus <plugin>   # explicit activation handshake
-/mcp__sandbox__activate         # load full sandbox operating guide
-/mcp__sandbox__fix <task>       # engage the one-pass bug-fix loop
-/mcp__sandbox__bug_repro        # reproduce a bug live
-/mcp__sandbox__wp_pilot         # headless wp-admin authoring
-/mcp__sandbox__snapshot         # snapshot/restore guidance
-/mcp__sandbox__wp_debug         # debugging the WP stack
+/mcp__sandbox__focus <plugin>          # explicit activation handshake
+/mcp__sandbox__activate                # load full sandbox operating guide
+/mcp__sandbox__fix <task>              # engage the one-pass bug-fix loop
+/mcp__sandbox__build_feature <task>    # three-phase feature workflow (establish → plan → build)
+/mcp__sandbox__bug_repro               # reproduce a bug live
+/mcp__sandbox__wp_pilot                # headless wp-admin authoring
+/mcp__sandbox__snapshot                # snapshot/restore guidance
+/mcp__sandbox__wp_debug                # debugging the WP stack
 ```
 
 Claude now has 17 tools wired to your local WordPress (`wp_cli`,

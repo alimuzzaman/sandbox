@@ -67,11 +67,18 @@ evidence — only a live MCP call against the stack is.
   through `skills/wp-pilot/SKILL.md`. Hand-authored PHP markup only
   works for core blocks without JS save logic. Skip wp-pilot for bulk
   operations — wp-cli is 50× faster.
-- **New feature touching 3+ layers (DB + backend + REST + UI) →**
-  slice it. Build the smallest runnable slice, live-verify it via the
-  right MCP tool, then move to the next. Slicing prevents debugging
-  four entangled layers when something breaks. (This is the *only*
-  place slicing applies — bug fixes use the one-pass loop above.)
+- **"Add" / "build" / "implement" / "create a new" X →** load
+  `workflows/build-feature/WORKFLOW.md` (or call
+  `load_workflow('build-feature')`) and run the three-phase loop:
+  Phase 1 ESTABLISH (spec + impact + edge cases) → Phase 2 PLAN (file
+  plan + reuse audit + slicing + rollout) → Phase 3 BUILD (slice by
+  slice with live verification). **User gates between each phase** —
+  do not start Phase 2 until they sign off on Phase 1, do not start
+  Phase 3 until they sign off on Phase 2. This is the canonical
+  contract for net-new feature work; bug fixes still use
+  `skills/fix/SKILL.md`. Slicing — required for size-L features
+  (DB + backend + REST + UI) — happens inside Phase 3 here, not as a
+  freelance pattern.
 - **About to commit, push, force-push, tag, open/merge a PR →** stop.
   Stage the diff, name what changed, wait for the user to say the word.
   Approval for one of these is never approval for the next.

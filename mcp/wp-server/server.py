@@ -43,24 +43,25 @@ MAILPIT_URL = os.environ.get("MAILPIT_URL", "http://localhost:8025")
 # CLAUDE.md and is loadable on demand via load_context().
 SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a live WordPress dev stack with MCP tools (wp_cli, wp_rest, db_query, tail_log, visit, fs_read, ...) wired to WP_URL.
 
-ACTIVATION: when the user says `focus <plugin>`, `work on <plugin>`, or names a WPDeveloper plugin in a working/debugging context, run this handshake in order — `focus_set(<plugin>)` → `load_context()` → `focus_get()`. That puts you in sandbox mode (full operating prompt + plugin conventions + skill list). Don't re-run on subsequent turns. Also engage on WP errors, stack traces, debugging wp-admin, or "work with sandbox." Stay quiet on non-WP work.
+ACTIVATION: user says `focus <plugin>` / `work on <plugin>` / names a WPDeveloper plugin in a working context → handshake `focus_set` → `load_context` → `focus_get`. Don't re-run. Also engage on WP errors, stack traces, wp-admin debugging, or "work with sandbox." Stay quiet on non-WP work.
 
-ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app password), visit (auto-login on wp-admin URLs). Creds pre-wired; never ask the user.
+ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
 
 REFLEXES when engaged:
-- Bug / error / stack trace / "doesn't work" → your literal FIRST tool call REPRODUCES it on the live stack. Not Read. Not Grep. Not find. Pick the lightest tool that captures the bug: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered (Gutenberg/Elementor/JS/asset-load) → visit. Can't reproduce → return BLOCKED.
+- Bug / error / stack trace / "doesn't work" → first tool call REPRODUCES on the live stack. Not Read/Grep/find. Pick the lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered → visit. Can't reproduce → BLOCKED.
+- "Add" / "build" / "implement" / "create new" X → load_workflow('build-feature'); run Phase 1 (spec + impact + edge cases) and WAIT for user sign-off before Phase 2 (plan) and Phase 3 (build). Don't skip gates.
 - Any WP action → MCP tool, never raw bash / docker / curl / mysql.
 - About to mutate DB / migrate / touch licensing → snapshot first.
-- Editor-authored content (Gutenberg stateful save(), Elementor) → load_skill('wp-pilot'), drive real wp-admin, not hand PHP.
+- Editor authoring (Gutenberg stateful save, Elementor) → load_skill('wp-pilot'), drive real wp-admin.
 - About to commit / push / tag / open PR → STOP, wait for user.
 
-DEEPER CONTEXT: load_context (full guide), load_skill(name) for fix / bug-repro / snapshot / wp-debug / wp-pilot / fluentboards.
+DEEPER CONTEXT: load_context (full guide), load_skill(name) for fix/bug-repro/snapshot/wp-debug/wp-pilot/fluentboards, load_workflow('build-feature') for new features.
 
 ANTI-PATTERNS — catch yourself:
-- Declaring FIXED from code reading. Only a live MCP call is evidence.
-- Slicing — use load_skill('fix'): read all call sites once, batch edits, verify once.
+- FIXED from code reading. Only live MCP calls count as evidence.
+- Bug-fix slicing (edit, test, edit, test) — use load_skill('fix'): read all, batch edits, verify once.
 - Bash where an MCP tool exists.
-- 3 clarifying questions before starting — pick likeliest interpretation, work, flag assumption.
+- 3 clarifying questions — pick likeliest interpretation, work, flag the assumption.
 
 Output: terse, evidence-first, no "I'll now do X" preamble, code refs as markdown links.
 """
@@ -530,6 +531,7 @@ def visit(url: str, login: bool = False, check_iframes: bool = False,
 
 SANDBOX_CLAUDE_MD = SANDBOX_ROOT / "CLAUDE.md"
 SANDBOX_SKILLS_DIR = SANDBOX_ROOT / "skills"
+SANDBOX_WORKFLOWS_DIR = SANDBOX_ROOT / "workflows"
 
 
 def _list_sandbox_skills() -> list[dict]:
@@ -565,6 +567,49 @@ def load_context() -> dict:
         "claude_md": SANDBOX_CLAUDE_MD.read_text(errors="replace"),
         "claude_md_path": str(SANDBOX_CLAUDE_MD),
         "available_skills": _list_sandbox_skills(),
+    }
+
+
+def _list_sandbox_workflows() -> list[dict]:
+    out = []
+    if not SANDBOX_WORKFLOWS_DIR.is_dir():
+        return out
+    for entry in sorted(SANDBOX_WORKFLOWS_DIR.iterdir()):
+        wf_md = entry / "WORKFLOW.md"
+        if entry.is_dir() and wf_md.is_file():
+            meta = _parse_skill_metadata(wf_md)
+            out.append({
+                "name": meta["name"] or entry.name,
+                "description": meta["description"],
+                "path": str(wf_md.relative_to(SANDBOX_ROOT)),
+            })
+    return out
+
+
+@mcp.tool()
+def load_workflow(name: str) -> dict:
+    """Return the full text of a top-level sandbox workflow (WORKFLOW.md).
+
+    Workflows are multi-phase playbooks (vs. skills, which are reflexes).
+    Use this when the situation calls for a deliberate multi-stage process
+    with user gates between phases — e.g. `load_workflow('build-feature')`
+    before starting a net-new feature, so you run the
+    establish → plan → build loop with explicit confirmation at each gate.
+
+    Workflow names match the directories under sandbox/workflows/.
+    """
+    wf_md = SANDBOX_WORKFLOWS_DIR / name / "WORKFLOW.md"
+    if not wf_md.is_file():
+        return {
+            "ok": False,
+            "error": f"no workflow '{name}' (looked at {wf_md})",
+            "available_workflows": [w["name"] for w in _list_sandbox_workflows()],
+        }
+    return {
+        "ok": True,
+        "name": name,
+        "path": str(wf_md.relative_to(SANDBOX_ROOT)),
+        "content": wf_md.read_text(errors="replace"),
     }
 
 
@@ -645,6 +690,30 @@ def focus(plugin: str) -> str:
 def fix(task: str = "") -> str:
     """Engage the one-pass bug-fix loop (skills/fix/SKILL.md)."""
     return _skill_prompt_body("fix", task)
+
+
+@mcp.prompt()
+def build_feature(task: str = "") -> str:
+    """Engage the three-phase feature-building workflow (workflows/build-feature/WORKFLOW.md).
+
+    Generic across plugins. Phase 1 (ESTABLISH) captures spec + impact +
+    edge cases; Phase 2 (PLAN) audits reuse + slices for de-risk; Phase 3
+    (BUILD) executes slice-by-slice with live verification. User gates
+    between each phase.
+    """
+    wf_md = SANDBOX_WORKFLOWS_DIR / "build-feature" / "WORKFLOW.md"
+    if not wf_md.is_file():
+        return f"Workflow 'build-feature' not found at {wf_md}."
+    body = wf_md.read_text(errors="replace")
+    header = (
+        "The user has invoked the `build-feature` workflow. Follow its "
+        "three-phase contract for the rest of this conversation. Do NOT "
+        "skip ahead to Phase 3 — Phase 1 and Phase 2 each end with a "
+        "structured block that you wait on user sign-off for.\n\n"
+    )
+    if task:
+        header += f"FEATURE REQUEST FROM USER:\n{task}\n\n"
+    return header + "--- WORKFLOW CONTRACT ---\n\n" + body
 
 
 @mcp.prompt()

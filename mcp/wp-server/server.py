@@ -37,7 +37,33 @@ WP_USER = os.environ.get("WP_ADMIN_USER", "admin")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
 MAILPIT_URL = os.environ.get("MAILPIT_URL", "http://localhost:8025")
 
-mcp = FastMCP("wp-mcp")
+# Server-level instructions — Claude Code (and other MCP clients) surface
+# this in the model's system context automatically on connect. Capped at
+# 2KB by Claude Code; keep it punchy. Full operating prompt lives in
+# CLAUDE.md and is loadable on demand via load_context().
+SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a live WordPress dev stack with MCP tools (wp_cli, wp_rest, db_query, tail_log, visit, fs_read, ...) wired to WP_URL.
+
+ACTIVATION: when the user says `focus <plugin>`, `work on <plugin>`, or names a WPDeveloper plugin in a working/debugging context, run this handshake in order — `focus_set(<plugin>)` → `load_context()` → `focus_get()`. That puts you in sandbox mode (full operating prompt + plugin conventions + skill list). Don't re-run on subsequent turns. Also engage on WP errors, stack traces, debugging wp-admin, or "work with sandbox." Stay quiet on non-WP work.
+
+REFLEXES when engaged:
+- Bug / error / stack trace / "doesn't work" → your literal FIRST tool call REPRODUCES it via wp_cli, wp_rest, visit, or tail_log. Not Read. Not Grep. Not find. Can't reproduce → return BLOCKED. Never guess a fix from code reading.
+- Any WP action → MCP tool, never raw bash / docker / curl / mysql.
+- About to mutate DB / migrate / touch licensing → snapshot first.
+- Editor-authored content (Gutenberg stateful save(), Elementor) → load_skill('wp-pilot'), drive real wp-admin, not hand PHP.
+- About to commit / push / tag / open PR → STOP, wait for user.
+
+DEEPER CONTEXT (call as needed): load_context (full sandbox guide), load_skill(name) for fix / bug-repro / snapshot / wp-debug / wp-pilot / fluentboards.
+
+ANTI-PATTERNS — catch yourself:
+- Declaring FIXED from code reading. Only a live MCP call is evidence.
+- Slicing (edit, test, edit, test) — use load_skill('fix'): read all call sites once, batch edits, verify once.
+- Bash where an MCP tool exists.
+- 3 clarifying questions before starting — pick the most probable interpretation, work, flag assumption.
+
+Output: terse, evidence-first, no "I'll now do X" preamble, code refs as markdown links.
+"""
+
+mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)
 
 
 # ----------------------------- helpers -------------------------------
@@ -388,6 +414,151 @@ def import_content(seed_file: str, authors: str = "create") -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
     return _wpcli(["import", f"/seeds/{seed_file}",
                    f"--authors={authors}"], timeout=180)
+
+
+# ----------------------------- sandbox context loaders -----------------
+
+SANDBOX_CLAUDE_MD = SANDBOX_ROOT / "CLAUDE.md"
+SANDBOX_SKILLS_DIR = SANDBOX_ROOT / "skills"
+
+
+def _list_sandbox_skills() -> list[dict]:
+    out = []
+    if not SANDBOX_SKILLS_DIR.is_dir():
+        return out
+    for entry in sorted(SANDBOX_SKILLS_DIR.iterdir()):
+        skill_md = entry / "SKILL.md"
+        if entry.is_dir() and skill_md.is_file():
+            meta = _parse_skill_metadata(skill_md)
+            out.append({
+                "name": meta["name"] or entry.name,
+                "description": meta["description"],
+                "path": str(skill_md.relative_to(SANDBOX_ROOT)),
+            })
+    return out
+
+
+@mcp.tool()
+def load_context() -> dict:
+    """Return the full Sandbox CLAUDE.md (operating guide).
+
+    Call this when the user wants to "work with sandbox" or when you've
+    decided you're engaged in WP work and need the full operating prompt
+    beyond the 2KB instructions baseline. Also returns the list of
+    available top-level sandbox skills so you know which load_skill()
+    calls are available.
+    """
+    if not SANDBOX_CLAUDE_MD.exists():
+        return {"ok": False, "error": f"missing {SANDBOX_CLAUDE_MD}"}
+    return {
+        "ok": True,
+        "claude_md": SANDBOX_CLAUDE_MD.read_text(errors="replace"),
+        "claude_md_path": str(SANDBOX_CLAUDE_MD),
+        "available_skills": _list_sandbox_skills(),
+    }
+
+
+@mcp.tool()
+def load_skill(name: str) -> dict:
+    """Return the full text of a top-level sandbox skill (SKILL.md).
+
+    Use this when a reflex tells you to engage a specific skill — e.g.
+    `load_skill('fix')` before starting a bug-fix loop, `load_skill('wp-pilot')`
+    before editor-driven authoring. Skill names match the directories
+    under sandbox/skills/ (fix, bug-repro, snapshot, wp-debug, wp-pilot,
+    fluentboards).
+    """
+    skill_md = SANDBOX_SKILLS_DIR / name / "SKILL.md"
+    if not skill_md.is_file():
+        return {
+            "ok": False,
+            "error": f"no skill '{name}' (looked at {skill_md})",
+            "available_skills": [s["name"] for s in _list_sandbox_skills()],
+        }
+    return {
+        "ok": True,
+        "name": name,
+        "path": str(skill_md.relative_to(SANDBOX_ROOT)),
+        "content": skill_md.read_text(errors="replace"),
+    }
+
+
+# ----------------------------- user-invoked prompts --------------------
+# Surface as /mcp__sandbox__<name> slash commands in Claude Code.
+# These are USER-invoked (the model cannot trigger them programmatically —
+# for that we expose load_skill / load_context as tools above).
+
+def _skill_prompt_body(name: str, task: str = "") -> str:
+    skill_md = SANDBOX_SKILLS_DIR / name / "SKILL.md"
+    if not skill_md.is_file():
+        return f"Skill '{name}' not found at {skill_md}."
+    body = skill_md.read_text(errors="replace")
+    header = (
+        f"The user has invoked the `{name}` sandbox skill. Follow its "
+        f"contract for the rest of this conversation.\n\n"
+    )
+    if task:
+        header += f"TASK FROM USER:\n{task}\n\n"
+    return header + "--- SKILL CONTRACT ---\n\n" + body
+
+
+@mcp.prompt()
+def activate(task: str = "") -> str:
+    """Load the full sandbox operating guide (CLAUDE.md) into this session."""
+    cm = SANDBOX_CLAUDE_MD.read_text(errors="replace") if SANDBOX_CLAUDE_MD.exists() else "(missing CLAUDE.md)"
+    header = "The user has activated sandbox mode. Follow this operating guide for the rest of the conversation.\n\n"
+    if task:
+        header += f"TASK FROM USER:\n{task}\n\n"
+    return header + "--- SANDBOX CLAUDE.md ---\n\n" + cm
+
+
+@mcp.prompt()
+def focus(plugin: str) -> str:
+    """Activate sandbox mode focused on a specific plugin.
+
+    Runs the activation handshake: sets the focused plugin, loads the
+    full sandbox operating guide, and instructs you to call focus_get
+    next for the plugin's own conventions + skills.
+    """
+    return (
+        f"The user is focusing on plugin '{plugin}' and entering sandbox mode. "
+        f"Run this handshake now:\n\n"
+        f"1. Call focus_set(plugin_slug='{plugin}') to persist the choice.\n"
+        f"2. Call load_context() to pull the full sandbox CLAUDE.md.\n"
+        f"3. Call focus_get() to fetch the plugin's own CLAUDE.md + available skills.\n\n"
+        f"Then acknowledge with one line (which plugin is loaded, which skills are available) "
+        f"and await the user's task. Follow the sandbox operating prompt for the rest of the conversation."
+    )
+
+
+@mcp.prompt()
+def fix(task: str = "") -> str:
+    """Engage the one-pass bug-fix loop (skills/fix/SKILL.md)."""
+    return _skill_prompt_body("fix", task)
+
+
+@mcp.prompt()
+def bug_repro(task: str = "") -> str:
+    """Reproduce a bug live on the running stack (skills/bug-repro/SKILL.md)."""
+    return _skill_prompt_body("bug-repro", task)
+
+
+@mcp.prompt()
+def snapshot(task: str = "") -> str:
+    """Snapshot / restore guidance (skills/snapshot/SKILL.md)."""
+    return _skill_prompt_body("snapshot", task)
+
+
+@mcp.prompt()
+def wp_debug(task: str = "") -> str:
+    """Debugging the WP stack (skills/wp-debug/SKILL.md)."""
+    return _skill_prompt_body("wp-debug", task)
+
+
+@mcp.prompt()
+def wp_pilot(task: str = "") -> str:
+    """Headless wp-admin authoring (skills/wp-pilot/SKILL.md)."""
+    return _skill_prompt_body("wp-pilot", task)
 
 
 if __name__ == "__main__":

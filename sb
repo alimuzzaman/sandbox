@@ -956,12 +956,44 @@ def cmd_mcp_install(cfg, args) -> None:
 
 
 def cmd_claude(cfg, args) -> None:
-    """Re-write the project-local .mcp.json. (Usually setup does this for you.)"""
-    if not (MCP_VENV / "bin" / "python").exists():
-        info("wp-mcp venv not built yet. Run: ./sb mcp-install")
-    path, created = write_claude_mcp_config(cfg)
-    ok(f"{'Wrote' if created else 'Updated'} {path}")
-    print(f"  Run `claude` from {ROOT} — it auto-loads .mcp.json")
+    """Launch `claude` with the sandbox + focused plugin context guaranteed loaded.
+
+    Without this wrapper, devs who run `claude` from anywhere except the
+    sandbox root miss the sandbox CLAUDE.md and the focused plugin's
+    CLAUDE.md / skills. Forcing --add-dir for both makes the context
+    load deterministic regardless of cwd.
+
+    `./sb claude --write-config` retains the old behavior (rewrite
+    .mcp.json) for setup flows.
+    """
+    if args.write_config:
+        if not (MCP_VENV / "bin" / "python").exists():
+            info("wp-mcp venv not built yet. Run: ./sb mcp-install")
+        path, created = write_claude_mcp_config(cfg)
+        ok(f"{'Wrote' if created else 'Updated'} {path}")
+        return
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        die("claude CLI not found in PATH — install Claude Code first.")
+
+    add_dirs = [str(ROOT)]
+    if FOCUS.exists():
+        slug = FOCUS.read_text().strip()
+        link = PLUGINS_DIR / slug
+        if link.exists():
+            plugin_src = str(link.resolve())
+            if plugin_src not in add_dirs:
+                add_dirs.append(plugin_src)
+            info(f"focus: {slug}  ({plugin_src})")
+        else:
+            info(f"focus: {slug}  (not linked — run `./sb use <project>`)")
+    else:
+        info("focus: (none — set with `./sb focus <slug>`)")
+
+    cmd = [claude_bin, "--add-dir", *add_dirs, *args.passthrough]
+    info(f"launching: claude --add-dir {' '.join(add_dirs)}")
+    os.execv(claude_bin, cmd)
 
 
 PROJECT_MCP_JSON = ROOT / ".mcp.json"   # Claude Code auto-loads this when run from ROOT
@@ -985,12 +1017,54 @@ def _build_mcp_entry(cfg: dict) -> dict:
     }
 
 
+def register_claude_user_scope(cfg: dict) -> None:
+    """Register the sandbox MCP server at user scope so it's available in
+    every `claude` session on the machine, regardless of cwd.
+
+    Idempotent: removes any prior `sandbox` or `wp-sandbox` registration
+    (the latter was the pre-rename name) before re-adding under the
+    canonical `sandbox` name. Without this, the server only loads when
+    the user is in a directory whose .mcp.json includes it — i.e.
+    inside the sandbox repo — which silently breaks the
+    "work from anywhere" promise.
+    """
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        info("claude CLI not in PATH — skipping user-scope MCP registration.")
+        return
+
+    entry = _build_mcp_entry(cfg)
+    # Wipe any previous registrations under either name so re-running
+    # setup updates env vars (e.g. after a password rotation).
+    for name in ("sandbox", "wp-sandbox"):
+        subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", name],
+                       capture_output=True, text=True)
+
+    env_args = []
+    for k, v in (entry.get("env") or {}).items():
+        env_args += ["-e", f"{k}={v}"]
+    # NB: server name MUST precede -e flags — commander.js treats -e as
+    # variadic and otherwise consumes the name as an env-var value.
+    cmd = [
+        claude_bin, "mcp", "add", "--scope", "user",
+        "sandbox", *env_args, "--",
+        entry["command"], *entry.get("args", []),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        ok("Registered `sandbox` MCP at user scope — every claude session "
+           "on this machine can now use it.")
+    else:
+        info(f"user-scope MCP registration failed: {res.stderr.strip()}")
+        info("Project-local .mcp.json still works when cwd is the sandbox.")
+
+
 def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
     """Write the project-local .mcp.json inside the sandbox folder.
 
     Claude Code (and other MCP clients) auto-load .mcp.json from the working
-    directory, so no global config or paste step is needed — the dev just
-    runs `claude` from inside the sandbox folder.
+    directory. The user-scope registration (see register_claude_user_scope)
+    is what makes the server available outside the sandbox folder.
     """
     existing = {}
     created = not PROJECT_MCP_JSON.exists()
@@ -1322,6 +1396,7 @@ def cmd_setup(cfg, args) -> None:
     cfg = load_config()
     path, created = write_claude_mcp_config(cfg)
     ok(f"{'Wrote' if created else 'Updated'} {path}")
+    register_claude_user_scope(cfg)
 
     print("\n▸ Verifying…")
     try:
@@ -1704,7 +1779,12 @@ Then pick a project and a plugin:
     f.add_argument("--clear", action="store_true")
 
     sub.add_parser("mcp-install", help="Install Python deps for wp-mcp")
-    sub.add_parser("claude", help="Print Claude Code MCP config")
+    cl = sub.add_parser("claude",
+        help="Launch `claude` with sandbox + focused plugin context guaranteed loaded")
+    cl.add_argument("--write-config", action="store_true",
+        help="Instead of launching, (re)write the project-local .mcp.json.")
+    cl.add_argument("passthrough", nargs=argparse.REMAINDER,
+        help="Extra args forwarded to the underlying `claude` invocation.")
 
     sn = sub.add_parser("snapshot", help="Save DB + uploads to runtime/snapshots/")
     sn.add_argument("name")

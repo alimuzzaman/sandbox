@@ -34,13 +34,44 @@ detected automatically: if you're already signed in with `gh auth login`,
 
 Saved to the gitignored `sandbox.local.yml` (+ mirrored to `.env.local`).
 
-Then open Claude Code in this folder:
+That's it. `./sb setup` registered the `sandbox` MCP server at user
+scope (`~/.claude.json`), so **every** `claude` session on the machine
+now has it — regardless of which directory you launch from:
 
 ```bash
-claude          # or: open the sandbox/ folder in your IDE → /mcp shows sandbox connected
+claude          # in any project, in any dir
 ```
 
-Claude now has 15 tools wired to your local WordPress.
+**Activation phrase: `focus <plugin>`.** Just say it in chat —
+"focus betterdocs", "focus embedpress", "work on xspeed" — and the
+agent runs the handshake automatically: persists the focus, loads
+the full sandbox `CLAUDE.md`, fetches the plugin's own conventions
+and available skills. After that the session is in sandbox mode for
+that plugin until you close it.
+
+The 2KB operating summary ships on every session via the MCP
+`instructions` field, so the agent already knows the activation
+trigger and the core reflexes (live repro before any fix, MCP tools
+over raw bash, snapshot before destructive DB ops, never commit/push
+without your word). Deeper context is loaded on demand via
+`load_context` and `load_skill(name)`.
+
+You can also invoke any skill as a slash command:
+
+```
+/mcp__sandbox__focus <plugin>   # explicit activation handshake
+/mcp__sandbox__activate         # load full sandbox operating guide
+/mcp__sandbox__fix <task>       # engage the one-pass bug-fix loop
+/mcp__sandbox__bug_repro        # reproduce a bug live
+/mcp__sandbox__wp_pilot         # headless wp-admin authoring
+/mcp__sandbox__snapshot         # snapshot/restore guidance
+/mcp__sandbox__wp_debug         # debugging the WP stack
+```
+
+Claude now has 17 tools wired to your local WordPress (`wp_cli`,
+`wp_rest`, `db_query`, `tail_log`, `visit`, `fs_read/write/list`,
+`mail_list/get`, `focus_get/set`, `load_context`, `load_skill`, and
+more).
 
 ---
 
@@ -200,9 +231,16 @@ The only state outside this folder: Docker's named volume `db_data` (cleared by
 Every failure prints a `→ hint` next to it. Common ones:
 
 - **REST auth fails** — re-run `./sb setup` (regenerates the app password)
-- **MCP server not connected in Claude Code** — make sure you ran `claude` from
-  inside this folder; check `cat .mcp.json` exists and `./mcp/wp-server/.venv/bin/python`
-  is the Python path it references
+- **MCP server not connected in Claude Code** — run `claude mcp list` and
+  confirm `sandbox` is `✓ Connected`. If missing, re-run `./sb setup`
+  (it re-registers the user-scope server). For project-local fallback,
+  `cat .mcp.json` and verify `./mcp/wp-server/.venv/bin/python` is the
+  Python path it references
+- **Sandbox prompt / reflexes not engaging** — the 2KB summary ships via
+  the MCP `instructions` field on every session. If the model isn't
+  picking up sandbox behavior, verify the server is connected (see
+  above) and try invoking `/mcp__sandbox__activate` to explicitly load
+  the full CLAUDE.md
 - **Container won't start** — `./sb down && ./sb setup`
 - **Want a fresh start** — `./sb clean && ./sb setup`
 

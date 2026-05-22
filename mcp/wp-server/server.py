@@ -49,7 +49,7 @@ ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_r
 
 REFLEXES when engaged:
 - Bug / error / stack trace / "doesn't work" → first tool call REPRODUCES on the live stack. Not Read/Grep/find. Pick the lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered → visit. Can't reproduce → BLOCKED.
-- "Add" / "build" / "implement" / "create new" X → load_workflow('build-feature'); run Phase 1 (spec + impact + edge cases) and WAIT for user sign-off before Phase 2 (plan) and Phase 3 (build). Don't skip gates.
+- "Add" / "build" / "implement" / "create new" X → load_workflow('build-feature'); emit each phase as prose with bold headers (NOT fenced code blocks). Gates scale by Size: S = no gates after Phase 1 (auto-proceed), M = 1 gate after Phase 1, L = 2 gates (after Phase 1 + Phase 2).
 - Any WP action → MCP tool, never raw bash / docker / curl / mysql.
 - About to mutate DB / migrate / touch licensing → snapshot first.
 - Editor authoring (Gutenberg stateful save, Elementor) → load_skill('wp-pilot'), drive real wp-admin.

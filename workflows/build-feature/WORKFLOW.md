@@ -54,51 +54,68 @@ Goal: capture the smallest spec that lets you measure "done" later.
 You produce this **before reading any plugin code beyond a single
 focus_get call to load conventions**. Code reading is Phase 2.
 
-Emit this block, verbatim shape, then stop:
+Emit the spec as **natural readable prose with bold section headers**,
+NOT as a fenced code block. Code-fenced output renders as monospace and
+looks like a code dump in chat UIs — this is the only thing the user
+will actually read, so it has to be readable. Use this shape:
 
-```
-PHASE 1 — ESTABLISH
+> **PHASE 1 — ESTABLISH**
+>
+> **Feature:** <verb-led plain English, what a teammate would naturally
+> say — "Show view counts on PDF embeds," not "Visitor-facing view
+> counter system." NOT a PM ticket title.>
+>
+> **Size:** S | M | L
+>   *S = one file or one surface; M = 3-5 files, one layer; L = 3+ layers (DB + backend + REST + UI, etc.)*
+>
+> **What it does** — one or two sentences in plain English, verb-led.
+> "Adds a small label next to PDF embeds showing the view count from the
+> existing analytics table."
+>
+> **Why we want it** — either a capability add ("users want a popularity
+> signal on their embeds") or a problem being solved ("X is hurting
+> today because Y") — BOTH are valid framings. Don't force a "problem"
+> story for a pure capability add.
+>
+> **Audience** — who benefits (end visitor, plugin admin, plugin author,
+> integrator).
+>
+> **Trigger** — what made the user ask (one-line: user request, support
+> ticket, FluentBoards card #, conversation).
+>
+> **Success criteria** *(testable, live-verifiable)*
+> - 2-4 concrete statements. "Visiting URL X with embed Y shows a label
+>   matching the DB count." Each must be verifiable by an MCP call later.
+>
+> **Out of scope** *(NOT building in this pass)*
+> - Explicit list. Future passes can pick these up.
+>
+> **Impact / what could break**
+> - One row per surface that changes. Include BC traps (Gutenberg
+>   save(), schema, hook signatures), performance (new queries, N+1),
+>   security (new input boundaries, auth paths). For each, one-line
+>   risk + mitigation, or "no risk because X."
+>
+> **Edge cases — committed to handling**
+> - Only the rows that genuinely apply. Don't pad.
+> - Empty state, RTL/i18n, multisite, license (free vs Pro), cache
+>   invalidation, concurrency — pick whichever apply, mark "n/a" or
+>   "out of scope for v1" otherwise.
 
-FEATURE: <one-line title>
-SIZE: <S | M | L>     # S = single file or surface, M = 3+ files one layer, L = 3+ layers (DB + REST + UI etc.)
+After emitting the spec, decide what happens next based on **Size**:
 
-INTENT
-- Problem: <what's hurting today, in one sentence>
-- Audience: <who's it for — end user, plugin author, admin, integrator>
-- Trigger: <what made you ask — support ticket, FluentBoards card, conversation>
+- **Size S** → no gate. Announce ("Size S → no gate. Proceeding through
+  Phase 2 and Phase 3 autonomously.") and start Phase 2 immediately.
+  Single final report at the end. The user can always interrupt.
+- **Size M** → one gate, right here. End with "Waiting on your go before
+  Phase 2." When confirmed, run Phase 2 + Phase 3 autonomously.
+- **Size L** → one gate here, one more after Phase 2. End with "Waiting
+  on your go before Phase 2." When confirmed, run Phase 2 and pause
+  for a second sign-off before Phase 3.
 
-SUCCESS CRITERIA (testable, live-verifiable)
-- <statement 1 — "X URL returns Y", "block Z saves attribute W", etc.>
-- <statement 2>
-- <statement 3>  # 2-4 max; if you can't name them concretely, the feature isn't ready to build
-
-OUT OF SCOPE (we are NOT building these in this pass)
-- <thing 1>
-- <thing 2>
-
-IMPACT / WHAT COULD BREAK
-- <existing surface 1>: <one-line risk + mitigation, or "no risk because X">
-- <existing surface 2>: ...
-- BC traps: <Gutenberg save() change? schema migration? hook signature? — name them, or "none">
-- Performance: <new N+1? new heavy query? — name them, or "negligible">
-- Security: <new input boundary? new auth path? — name them, or "none new">
-
-EDGE CASES — committed to handling in this build
-- Empty state: <how we handle | out of scope for v1>
-- RTL / i18n: <strings translatable, layout mirrored | out of scope>
-- Multisite: <per-site or network-wide | out of scope>
-- License (free vs Pro): <gated where, fallback for free | out of scope>
-- Cache / object cache: <invalidation hooks | not applicable>
-- Concurrency: <race condition handling | not applicable>
-- # Only include rows that genuinely apply. Don't pad.
-
-# WAIT FOR USER SIGN-OFF before Phase 2.
-```
-
-**Gate 1.** The user reads, says "yes do this," or kicks back with
-corrections. No `Grep`, no `Read` past the plugin's CLAUDE.md, no
-`Edit` until they confirm. If they redirect ("don't gate behind a
-setting, make it always on"), update the block and re-confirm.
+The user can override mid-stream at any time ("stop," "change X,"
+"actually this is bigger than M, treat it as L"). Gates are formal
+pause points, not the only feedback channel.
 
 ---
 
@@ -111,65 +128,60 @@ handlers; ignoring Pro at this step costs an entire iteration later)
 for every function, hook, block name, REST route, asset handle,
 template partial, setting key relevant to the feature.
 
-Then emit:
+Emit the plan as **prose with bold section headers**, same as Phase 1
+— not a fenced code block. Use this shape:
 
-```
-PHASE 2 — PLAN
+> **PHASE 2 — PLAN**
+>
+> **Reuse audit** *(what already exists; we ride on it)*
+> - Helpers, hooks, blocks, settings, REST routes we'll extend or read
+>   from. Include `file:line` references.
+> - Plugin scaffolding skills that apply (e.g.
+>   `.claude/skills/add-block/SKILL.md`). Phase 3 will follow them.
+> - If this list is empty, you may be reinventing — pause and re-grep.
+>
+> **File-level edit plan**
+> - Every file, every change. No "and possibly other files." Be
+>   specific: "`<path>`: new function `foo()`," "new block attribute
+>   `showViewCount`," etc.
+>
+> **Slicing strategy** *(required for Size L; recommended for M when
+> 3+ layers are touched; skip for S)*
+> - Slice 1 (thin vertical): smallest end-to-end thing that proves the
+>   integration works → verify with `<MCP call>`.
+> - Slice 2: next vertical increment → verify with `<MCP call>`.
+> - "Thin vertical" = touches every layer (DB → backend → API → UI) for
+>   the simplest case. Integration bugs surface day 1, not day 14.
+>
+> **BC strategy** *(match every BC trap from Phase 1)*
+> - Gutenberg `save()` changes: conditional emission pattern, or
+>   `deprecated[]` entry at `<path>`, or "no save() change."
+> - Schema migration: migration class location + fresh AND upgrade-path
+>   test plan, or "no schema change."
+> - Hook signature changes: "none" or "new hook, documented at `<path>`."
+>
+> **Rollout**
+> - Settings toggle (default off + key name + location), or "always-on
+>   for v1."
+> - Version gate (activate behind plugin >= X.Y.Z; flush rewrite rules
+>   on upgrade if rules changed).
+> - Free vs Pro gating (free renders skeleton + upsell / Pro implements
+>   full behavior / n/a).
+> - Draft changelog entry: one-line user-facing string for release notes.
+>
+> **Verification plan** *(one row per Phase 1 success criterion + one
+> per edge case)*
+> - Criterion → MCP call that proves it live.
+> - Edge case → MCP call or "deferred (see out-of-scope)."
 
-REUSE AUDIT (what already exists; we ride on it)
-- <helper or hook or block we'll extend>: <file:line>
-- <existing setting / option we'll read>: <key>
-- <existing REST route we'll piggyback on, or "n/a, new route">
-- <existing block scaffolding skill that applies>: e.g. .claude/skills/add-block/SKILL.md
-- # If reuse audit is empty, you may be reinventing — pause and reconsider.
+After emitting the plan, decide what happens next based on **Size**
+(from Phase 1):
 
-ROUTING INTO PLUGIN SCAFFOLDING (when applicable)
-- This feature touches a <block | shortcode | REST endpoint | setting | Elementor widget>.
-- Plugin ships <skill-name> for this scaffold at <path>. Phase 3 will follow it.
-- # If the plugin has no scaffolding skill for this surface, note "manual" here.
-
-FILE-LEVEL EDIT PLAN
-- <path/file1>: <what changes — new function | new attribute | new hook>
-- <path/file2>: <what changes>
-- <path/file3>: ...
-- # Every file, every change. No "and possibly other files." Be specific.
-
-SLICING STRATEGY (REQUIRED for SIZE: L; optional for M; skip for S)
-- Slice 1 (thin vertical): <smallest end-to-end thing that proves the integration works>
-  Verify: <which MCP call confirms slice 1 works>
-- Slice 2: <next vertical increment>
-  Verify: <MCP call>
-- Slice 3 (if needed): <final increment>
-  Verify: <MCP call>
-- # "Thin vertical" means slice 1 touches every layer (DB → backend → API → UI)
-  # for the simplest possible case. Bugs surface at integration boundaries; the
-  # vertical slice flushes them on day 1.
-
-BC STRATEGY
-- Gutenberg block save() changes: <conditional emission pattern, deprecated[] entry needed at path X, or "no save() change">
-- Schema migration: <migration class location, fresh AND upgrade-path test plan, or "no schema change">
-- Hook signature changes: <none expected | new hook, will document>
-- # Match each item in IMPACT > BC traps from Phase 1 with a strategy here.
-
-ROLLOUT
-- Default-off settings toggle: <key name, where it lives, default false> — OR — "n/a, this is internal/always-on"
-- Version gate: <activate behind plugin version >= X.Y.Z, flush rewrite rules on upgrade if needed>
-- Free vs Pro gating: <free renders skeleton with upsell | Pro implements full behavior | n/a>
-- Changelog entry (draft): <one-line user-facing string for the release notes>
-
-VERIFICATION PLAN (one row per SUCCESS CRITERIA from Phase 1, plus one per EDGE CASE)
-- Criterion: <statement 1> → <MCP call that proves it live>
-- Criterion: <statement 2> → <MCP call>
-- Edge case: <empty state> → <MCP call or "punted, see out-of-scope">
-- Edge case: <RTL/i18n> → <MCP call or "punted">
-- # Every Phase 1 row gets a verification row here.
-
-# WAIT FOR USER SIGN-OFF before Phase 3.
-```
-
-**Gate 2.** The user confirms the plan or redirects ("don't extend
-class X, it's deprecated — use Y", "skip the wp-pilot path, use
-wp_cli instead"). No `Edit` until signed off.
+- **Size S** → there is no Phase 2 pause. You came here autonomously
+  after announcing the auto-proceed; now run Phase 3 immediately.
+- **Size M** → there is no Phase 2 gate. Run Phase 3 immediately.
+- **Size L** → second and final gate. End with "Waiting on your go
+  before Phase 3." When confirmed, run Phase 3.
 
 ---
 
@@ -194,46 +206,46 @@ After the last slice, run the FULL VERIFICATION PLAN from Phase 2 —
 every success criterion + every edge case row. Each must produce
 EVIDENCE from a live MCP call.
 
-Emit the final block:
+Emit the final report as **prose with bold section headers**, NOT a
+fenced code block. Use this shape:
 
-```
-STATUS: SHIPPED
-
-SUMMARY: <one-line — what now works that didn't before>
-
-FILES:
-  <path>: <one-line per file>
-
-EVIDENCE (one per Phase 1 success criterion + one per edge case)
-- <criterion 1>: <MCP command + observed output, trimmed>
-- <criterion 2>: <MCP command + observed output>
-- <edge case 1>: <MCP command + observed output, or "deferred — see DEFERRED">
-
-DEFERRED (from Phase 1 OUT OF SCOPE, restated so the user sees what they're NOT getting)
-- <thing 1>
-- <thing 2>
-
-ROLLOUT NOTES
-- Toggle: <key name and default> — OR — "always-on for v1"
-- Version gate: <triggers on upgrade to X.Y.Z>
-- Flush required on existing installs: <yes/no — if rewrite rules changed, flag this>
-
-NEXT (what the human / outer agent needs to do)
-- Branch + commit (suggested branch name: feat/<short-slug>)
-- Update changelog with the draft entry from Phase 2
-- Open PR / move FluentBoards card / etc. — your call
-```
+> **STATUS: SHIPPED**
+>
+> **Summary** — one line on what now works that didn't before.
+>
+> **Files**
+> - `<path>` — one-line description per file.
+>
+> **Evidence** *(one row per Phase 1 success criterion + one per edge
+> case)*
+> - Criterion: MCP command + observed output, trimmed.
+> - Edge case: MCP command + observed output, or "deferred — see below."
+>
+> **Deferred** *(from Phase 1 Out of scope, restated so the user sees
+> what they're not getting)*
+> - Items punted to a future pass.
+>
+> **Rollout notes**
+> - Toggle: key name + default, or "always-on for v1."
+> - Version gate: triggers on upgrade to X.Y.Z (if applicable).
+> - Flush required on existing installs: yes/no (flag if rewrite rules
+>   changed).
+>
+> **Next** *(what the human needs to do)*
+> - Branch + commit (suggested branch name: `feat/<short-slug>`).
+> - Update changelog with the draft entry from Phase 2.
+> - Open PR / move FluentBoards card / etc. — user's call.
 
 If you cannot complete a slice and verification fails for reasons
-outside the spec, return:
+outside the spec, emit instead:
 
-```
-STATUS: BLOCKED
-
-REASON: <one sentence>
-PROGRESS: <slices completed, slices remaining>
-NEXT: <what the user needs to decide or supply>
-```
+> **STATUS: BLOCKED**
+>
+> **Reason** — one sentence on what stopped you.
+>
+> **Progress** — slices completed, slices remaining.
+>
+> **Next** — what the user needs to decide or supply.
 
 ---
 
@@ -248,10 +260,12 @@ team learns from it. Skip if the build was unremarkable.
 
 ## Anti-patterns that invalidate the workflow
 
-- **Starting Phase 3 without user confirm on Phase 1 + Phase 2.** The
-  gates exist because a wrong assumption at Phase 1 wastes the
-  entire Phase 3 effort. If you find yourself editing before two
-  separate user confirmations have landed, stop and back up.
+- **Skipping the size-appropriate gate.** Gates are scaled to feature
+  size — Size S has none, Size M has one (after Phase 1), Size L has
+  two (after Phase 1 + Phase 2). The right number of confirmations for
+  the right size matters: skipping a Size L plan gate is risky, and
+  forcing a Size S to pause is friction. Honor the rule for the size
+  you declared in Phase 1.
 - **Phase 1 success criteria you can't verify with an MCP call.** "It
   feels right" is not a criterion. "When you click X, response body
   contains Y" is.

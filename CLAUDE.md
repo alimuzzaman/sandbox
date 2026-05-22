@@ -68,17 +68,23 @@ evidence — only a live MCP call against the stack is.
   works for core blocks without JS save logic. Skip wp-pilot for bulk
   operations — wp-cli is 50× faster.
 - **"Add" / "build" / "implement" / "create a new" X →** load
-  `workflows/build-feature/WORKFLOW.md` (or call
-  `load_workflow('build-feature')`) and run the three-phase loop:
+  `workflows/build-feature/WORKFLOW.md` and run the three-phase loop:
   Phase 1 ESTABLISH (spec + impact + edge cases) → Phase 2 PLAN (file
   plan + reuse audit + slicing + rollout) → Phase 3 BUILD (slice by
-  slice with live verification). **User gates between each phase** —
-  do not start Phase 2 until they sign off on Phase 1, do not start
-  Phase 3 until they sign off on Phase 2. This is the canonical
-  contract for net-new feature work; bug fixes still use
-  `skills/fix/SKILL.md`. Slicing — required for size-L features
-  (DB + backend + REST + UI) — happens inside Phase 3 here, not as a
-  freelance pattern.
+  slice with live verification). Emit each phase as **prose with bold
+  headers**, NOT a fenced code block. Gates scale with the Size
+  classification you declare in Phase 1:
+  - **Size S** (one file / one surface): no gates after Phase 1.
+    Announce auto-proceed and run Phase 2 + Phase 3 end-to-end. Final
+    report at the end.
+  - **Size M** (3-5 files, one layer): one gate after Phase 1. When
+    confirmed, Phase 2 + Phase 3 auto-run.
+  - **Size L** (3+ layers — DB + REST + UI): two gates, after Phase 1
+    and after Phase 2.
+  User can interrupt mid-stream at any time ("stop," "change X"). Bug
+  fixes still use `skills/fix/SKILL.md`, not this workflow. Slicing
+  inside Phase 3 is required for L, recommended for M when 3+ layers
+  are touched, skipped for S.
 - **About to commit, push, force-push, tag, open/merge a PR →** stop.
   Stage the diff, name what changed, wait for the user to say the word.
   Approval for one of these is never approval for the next.

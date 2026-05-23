@@ -120,15 +120,19 @@ The sandbox removes the blindfold and hands it the keys.
 
 ### What that means on three tasks you actually do
 
-**Fix a bug.** Plain Claude reads `category-counter.php`, sees the
-`sprintf`, says "looks like a placeholder mismatch, here's a fix." Done.
-Sandbox-Claude writes a `pt_BR.mo` with the mismatched placeholder via
-`fs_write`, loads the page via `visit`, captures the actual
-`ArgumentCountError` in `tail_log` as `EVIDENCE.before`, batch-edits the
-template AND its sibling AND the Pro mirror (caught by the cross-surface
-grep), re-loads, captures clean output as `EVIDENCE.after`, reports
-`STATUS: FIXED` with both evidence rows. Same diagnosis, but the diff
-ships with proof instead of with confidence.
+**Fix a bug.** Take a real one: *"PDF gallery throws
+`ArgumentCountError` in `category-counter.php:25` when the site is in
+pt_BR"* (a FluentBoards card from a customer). Same task, two agents:
+
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Read the report** | Copy-paste the card content into chat. | Paste the FluentBoards short-link — agent fetches the card body via the FluentBoards REST API in one tool call. |
+| **2. Reproduce** | "Let me look at the file" → reads `category-counter.php`, spots the `sprintf` + `_n()`, says "looks like a placeholder mismatch." | Literal first tool call provisions the missing piece: `fs_write` a `pt_BR.mo` with the mismatched placeholder into `wp-content/languages/plugins/`, then `visit` the page → captures the actual `ArgumentCountError` in `tail_log` as `EVIDENCE.before`. |
+| **3. Find every site** | Reads the one file the report names. Misses the sibling `sub-category-counter.php` and the Pro mirror. | Grep step in `skills/fix/SKILL.md` covers every call site in one pass, AND grep the `-pro` sibling repo — catches the same pattern in three files instead of one. |
+| **4. Fix** | Edit file 1, refresh, see what breaks next, edit file 2, repeat (15-25 min). | Batch-edit all three files in one pass. No fix-test-fix loop. |
+| **5. Verify** | "Looks right." Maybe `php -l`. | Re-`visit` the page with the broken `pt_BR.mo` still loaded → confirm clean output → `EVIDENCE.after`. Real before/after pair against the actual failure path, not a synthetic eval. |
+| **6. Report** | Prose summary. | `STATUS: FIXED` block: files changed, paired evidence rows, what was deferred, suggested branch name. |
+| **7. Ship** | Commit + push + FB card update in one breath. | Stops at the working tree. Commit, push, card move — each waits for explicit "go." |
 
 **Build a feature.** Take a real one: *"Add visitor-facing view counts
 to PDF and document embeds."* Three render surfaces (Gutenberg block,
@@ -158,13 +162,18 @@ showed DB counts going 5→6 with the new row tagged
 elapsed: one session. No accidental commits, no scope creep past what
 the user re-specified.
 
-**Design a page.** Plain Claude can describe a page; it cannot create
-one. Sandbox-Claude calls `wp_rest` to create the post, writes the
-block JSON via `fs_write`, loads the page via `visit` and returns a
-PNG + DOM + console + network report. For Gutenberg blocks with
-stateful `save()`, it loads `wp-pilot` and drives real wp-admin
-headlessly so the editor output is byte-perfect — the only way to
-avoid the "Block contains unexpected content" recovery prompt.
+**Design a page.** Take a real one: *"Build a help-center landing page
+with hero + 3-column doc-category grid + Pricing FAQ accordion, then
+ship it."* Same task, two agents:
+
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Create the post** | Describes the page in chat; you create it manually in wp-admin. | `wp_rest` POST `/wp/v2/pages` creates the page in one call. Returns the post ID. |
+| **2. Build the layout** | Generates a block-markup string and hopes you paste it in correctly. | Writes the block JSON via `fs_write` (or for stateful blocks/Elementor widgets, `load_skill('wp-pilot')` drives real wp-admin headlessly with auto-login so the output is byte-perfect — the only way to avoid the "Block contains unexpected content" recovery prompt). |
+| **3. Use plugin blocks** | Knows the block name from training data, guesses at the attribute shape. Often wrong. | Focused plugin's `CLAUDE.md` is loaded — the BetterDocs `doc-category-grid` block's attribute names + defaults + BC rules are in context before the JSON is written. |
+| **4. Verify rendering** | "Open the page in your browser and see." | `visit` returns a PNG screenshot + DOM + console errors + network failures in one call. If a CSS class is missing or an image 404s, the agent sees it without you switching tabs. |
+| **5. Iterate** | "Try this CSS." (you paste it, refresh, screenshot, paste back, repeat.) | Agent edits the stylesheet via `fs_write` → re-`visit` with `--screenshot` → diffs against the previous PNG. Real iteration loop without you in the middle of every cycle. |
+| **6. Ship** | Manual: copy markup into the staging site, eyeball it. | Stops at the working tree. The page exists locally; export via WXR (`runtime/seeds/`) or commit the block JSON to the plugin repo — your call, on your "go." |
 
 ### The two underlying patterns
 

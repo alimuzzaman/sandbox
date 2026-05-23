@@ -130,17 +130,33 @@ grep), re-loads, captures clean output as `EVIDENCE.after`, reports
 `STATUS: FIXED` with both evidence rows. Same diagnosis, but the diff
 ships with proof instead of with confidence.
 
-**Build a feature.** Plain Claude generates a reasonable proposal,
-writes code that looks right, doesn't know that EmbedPress's block
-`save()` changes need a `deprecated[]` entry or old posts get the
-recovery prompt. Sandbox-Claude loads `build-feature`, emits a Phase 1
-spec the user signs off on, audits *your* existing analytics helpers in
-Phase 2 (rides on `embedpress_analytics_views` instead of inventing a
-new table), slices vertically through DB + REST + JS + CSS in Phase 3
-with a live `visit` screenshot at the end of each slice. When you
-redirect mid-build ("decouple this from analytics"), it acknowledges
-and the SHIPPED block names the drift. Same three-surface result
-(block + shortcode + Elementor), but every layer is live-verified.
+**Build a feature.** Take a real one: *"Add visitor-facing view counts
+to PDF and document embeds."* Three render surfaces (Gutenberg block,
+shortcode, Elementor widget), needs to read existing analytics, has
+free-vs-Pro implications, and has to not break old posts. Same task,
+two agents:
+
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Specify** | "Build a view counter on PDF embeds." Agent infers what it can, starts coding. You discover misunderstandings during review. | `load_workflow('build-feature')` → emits a Phase 1 ESTABLISH block (verb-led title, size class, success criteria that are *live-verifiable*, out-of-scope list, impact analysis, edge cases). You sign off OR redirect before any code is written. |
+| **2. Plan** | Skipped. Or done in chat as prose nobody references later. | Phase 2 PLAN: **reuse audit** finds existing `embedpress_analytics_views` table (does NOT invent a new one), finds `data-embed-type` already emitted at `EmbedPressBlockRenderer.php:573`. **Cross-surface grep** catches that shortcode emits `data-embed-type="document_pdf"` (block emits `"PDF"`) and Elementor puts the attr on the iframe — discovered in Phase 2, not in Phase 3 after a broken render. |
+| **3. Know your code** | Generic WP knowledge. Doesn't know `static/` is hand-written while `assets/` is build output, doesn't know which textdomain to use, doesn't know save() changes need `deprecated[]` entries. | Focused plugin's `CLAUDE.md` auto-loaded by `focus_get`. The block's "conditional emission" BC pattern is in context. The static→assets mirror rule is in context. The FluentBoards board ID is in context. |
+| **4. Slice the build** | Horizontally: "first the DB, then the API, then the UI." Integration bugs surface at the end. | Phase 2 declares vertical slices. **Slice 1** = thinnest possible end-to-end: PDF block only, DB read → PHP render → frontend badge → live `visit` screenshot. **Slice 2** = extend to Document. Integration bugs surface on day 1. |
+| **5. Apply non-negotiables** | You have to remember to ask: nonce? capability? prefix? Escape on output? | Workflow enforces them per-Edit: auth on every handler, sanitize-in / escape-out, prefix everything with the plugin slug, WP APIs over raw PHP. Listed in the workflow contract, applied automatically. |
+| **6. Verify** | "Compiled OK, looks right." Or `php -l`. Or "tested on my machine." | Each slice: `visit` the live test post → DB row count before, badge increment, DB row count after, screenshot. Real before/after evidence, not "looks right." |
+| **7. Handle mid-build redirects** | You say "wait, this should also work when analytics is off" — agent silently expands scope, you discover it later. | Same redirect → agent acknowledges, adds a separate `embedpress_show_visitor_view_count` toggle, self-record endpoint with session-dedup, re-verifies. Final SHIPPED block has a "Spec drift" section saying *what Phase 1 said / what shipped instead / why*. |
+| **8. Report** | Prose summary you have to read to figure out what shipped. | STATUS: SHIPPED block: every Phase 1 success criterion gets a paired evidence row from a live MCP call. Rollout notes (toggle name, flush requirement, free/Pro gating). Draft changelog entry. Suggested branch name. |
+| **9. Ship** | Commit + push in one go because the agent assumed you wanted that. | Stops at the working tree. Commit, push, FluentBoards card move — each requires explicit "go." Approval for one doesn't carry to the next. |
+
+**What this looked like on the actual sandbox run for this exact
+feature:** 7 files modified across `EmbedPress/` + `static/js/` +
+`static/css/`, mirrored to `assets/`. Three render surfaces verified
+live with `visit` screenshots. Mid-stream redirect to decouple from
+analytics handled in a single Phase 3 follow-up. Final SHIPPED block
+showed DB counts going 5→6 with the new row tagged
+`source: "visitor_view_count"` proving the new self-record path. Total
+elapsed: one session. No accidental commits, no scope creep past what
+the user re-specified.
 
 **Design a page.** Plain Claude can describe a page; it cannot create
 one. Sandbox-Claude calls `wp_rest` to create the post, writes the

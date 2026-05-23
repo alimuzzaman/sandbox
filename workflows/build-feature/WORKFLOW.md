@@ -128,6 +128,17 @@ handlers; ignoring Pro at this step costs an entire iteration later)
 for every function, hook, block name, REST route, asset handle,
 template partial, setting key relevant to the feature.
 
+**Cross-surface features** (anything that touches block + shortcode +
+Elementor widget, or any other combination of two-or-more render
+paths) need an extra pass: grep EVERY emit point of the shared
+attribute or class name across all surfaces, not just the one you
+started with. Different surfaces often emit subtly different values —
+the block might use `data-embed-type="PDF"`, the shortcode
+`data-embed-type="document_pdf"`, and the Elementor widget puts the
+attribute on the iframe instead of the wrapper. Discovering this in
+Phase 2 saves a full Phase 3 iteration where the feature works on
+one surface and silently breaks on another.
+
 Emit the plan as **prose with bold section headers**, same as Phase 1
 — not a fenced code block. Use this shape:
 
@@ -224,6 +235,14 @@ fenced code block. Use this shape:
 > **Deferred** *(from Phase 1 Out of scope, restated so the user sees
 > what they're not getting)*
 > - Items punted to a future pass.
+>
+> **Spec drift** *(include ONLY if the user redirected mid-build, or
+> Phase 2/3 discovered something that changed what shipped vs. what
+> Phase 1 committed to. Omit entirely if the build matched the spec
+> as confirmed.)*
+> - What Phase 1 said: ...
+> - What shipped instead: ...
+> - Why: user redirect / Phase 2 discovery / code reality forced it.
 >
 > **Rollout notes**
 > - Toggle: key name + default, or "always-on for v1."

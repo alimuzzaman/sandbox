@@ -82,8 +82,9 @@ Chromium with auto-login on `/wp-admin/`), `fs_read/write/list`,
 Claude in your IDE is already smart. It can read your code, propose
 diffs, talk through architecture. What it **cannot** do alone is run
 your WordPress, see what your block actually renders, query your DB,
-check `debug.log`, or know that EmbedPress's `static/` is hand-written
-while `assets/` is build output. It's a brilliant pair-programmer
+check `debug.log`, or know your plugin's specific conventions
+(build pipeline, textdomain rules, BC traps, where the source folder
+lives vs. the build output). It's a brilliant pair-programmer
 working blindfolded against an unfamiliar codebase.
 
 The sandbox removes the blindfold and hands it the keys.
@@ -105,9 +106,9 @@ The sandbox removes the blindfold and hands it the keys.
   `http_fetch`, `fs_read/write`, `mail_list/get`, etc. The agent acts
   on your stack instead of guessing at it.
 - **Your plugin's institutional knowledge** auto-loaded. The focused
-  plugin's `CLAUDE.md` (text domain rules, save() BC traps, build
-  conventions, FluentBoards board ID, sister-repo location) reaches
-  the model on every session via `focus_get`.
+  plugin's `CLAUDE.md` (textdomain rules, save() BC traps, build
+  conventions, task-tracker board, sister-repo location) reaches the
+  model on every session via `focus_get`.
 - **A 2KB operating prompt** in every Claude session via the MCP
   `instructions` field — reflexes ("first tool call reproduces, not
   Read"), anti-patterns ("declaring fixed from code reading"),
@@ -120,60 +121,47 @@ The sandbox removes the blindfold and hands it the keys.
 
 ### What that means on three tasks you actually do
 
-**Fix a bug.** Take a real one: *"PDF gallery throws
-`ArgumentCountError` in `category-counter.php:25` when the site is in
-pt_BR"* (a FluentBoards card from a customer). Same task, two agents:
+Same task, two agents — what changes, step by step.
+
+**Fix a bug in your plugin.** A customer reports something breaks
+under a specific condition.
 
 | Step | Plain Claude | Claude + sandbox |
 |------|--------------|------------------|
-| **1. Read the report** | Copy-paste the card content into chat. | Paste the FluentBoards short-link — agent fetches the card body via the FluentBoards REST API in one tool call. |
-| **2. Reproduce** | "Let me look at the file" → reads `category-counter.php`, spots the `sprintf` + `_n()`, says "looks like a placeholder mismatch." | Literal first tool call provisions the missing piece: `fs_write` a `pt_BR.mo` with the mismatched placeholder into `wp-content/languages/plugins/`, then `visit` the page → captures the actual `ArgumentCountError` in `tail_log` as `EVIDENCE.before`. |
-| **3. Find every site** | Reads the one file the report names. Misses the sibling `sub-category-counter.php` and the Pro mirror. | Grep step in `skills/fix/SKILL.md` covers every call site in one pass, AND grep the `-pro` sibling repo — catches the same pattern in three files instead of one. |
-| **4. Fix** | Edit file 1, refresh, see what breaks next, edit file 2, repeat (15-25 min). | Batch-edit all three files in one pass. No fix-test-fix loop. |
-| **5. Verify** | "Looks right." Maybe `php -l`. | Re-`visit` the page with the broken `pt_BR.mo` still loaded → confirm clean output → `EVIDENCE.after`. Real before/after pair against the actual failure path, not a synthetic eval. |
-| **6. Report** | Prose summary. | `STATUS: FIXED` block: files changed, paired evidence rows, what was deferred, suggested branch name. |
-| **7. Ship** | Commit + push + FB card update in one breath. | Stops at the working tree. Commit, push, card move — each waits for explicit "go." |
+| **1. Understand the report** | Asks you what version, what other plugins are active, what theme. Reads the report's file paths. | Your plugin's `CLAUDE.md` is already in context (textdomain rules, BC traps, source layout). Can fetch the task-tracker card body via REST in one tool call. |
+| **2. Reproduce** | "Let me look at the file" → reads the code, spots the suspect line, says "looks like X is the cause." Can't actually verify. | First tool call provisions whatever the bug needs to fire (a translation file, a missing row, a setting flip) and triggers it on the live WP. Captures the real error in the log as `EVIDENCE.before`. |
+| **3. Find every affected site** | Reads the file the report names. Misses the sibling implementation and the Pro-side mirror. | Greps every call site across the focused plugin AND its `-pro` sibling in one pass. Same pattern caught wherever it lives. |
+| **4. Fix** | Edits file 1, asks you to test, edits file 2, asks again. 15-25 min per round, 3-5 rounds. | Batch-edits every affected file in one pass. No fix-test-fix loop. |
+| **5. Verify** | "Looks right." Or `php -l`. Or "tested on my machine." | Re-triggers the exact same failing call from step 2 — confirms output flipped → `EVIDENCE.after`. Real before/after pair against the actual failure path. |
+| **6. Report** | Prose summary you have to parse to figure out what shipped. | `STATUS: FIXED` block: files changed, paired evidence rows, what was deferred, suggested branch name. |
+| **7. Ship** | Commit + push + task-tracker update in one breath, because the agent assumed you wanted that. | Stops at the working tree. Commit, push, card update — each waits for explicit "go." |
 
-**Build a feature.** Take a real one: *"Add visitor-facing view counts
-to PDF and document embeds."* Three render surfaces (Gutenberg block,
-shortcode, Elementor widget), needs to read existing analytics, has
-free-vs-Pro implications, and has to not break old posts. Same task,
-two agents:
+**Build a new feature in your plugin.** A founder request or a
+task-tracker card asking for net-new functionality.
 
 | Step | Plain Claude | Claude + sandbox |
 |------|--------------|------------------|
-| **1. Specify** | "Build a view counter on PDF embeds." Agent infers what it can, starts coding. You discover misunderstandings during review. | `load_workflow('build-feature')` → emits a Phase 1 ESTABLISH block (verb-led title, size class, success criteria that are *live-verifiable*, out-of-scope list, impact analysis, edge cases). You sign off OR redirect before any code is written. |
-| **2. Plan** | Skipped. Or done in chat as prose nobody references later. | Phase 2 PLAN: **reuse audit** finds existing `embedpress_analytics_views` table (does NOT invent a new one), finds `data-embed-type` already emitted at `EmbedPressBlockRenderer.php:573`. **Cross-surface grep** catches that shortcode emits `data-embed-type="document_pdf"` (block emits `"PDF"`) and Elementor puts the attr on the iframe — discovered in Phase 2, not in Phase 3 after a broken render. |
-| **3. Know your code** | Generic WP knowledge. Doesn't know `static/` is hand-written while `assets/` is build output, doesn't know which textdomain to use, doesn't know save() changes need `deprecated[]` entries. | Focused plugin's `CLAUDE.md` auto-loaded by `focus_get`. The block's "conditional emission" BC pattern is in context. The static→assets mirror rule is in context. The FluentBoards board ID is in context. |
-| **4. Slice the build** | Horizontally: "first the DB, then the API, then the UI." Integration bugs surface at the end. | Phase 2 declares vertical slices. **Slice 1** = thinnest possible end-to-end: PDF block only, DB read → PHP render → frontend badge → live `visit` screenshot. **Slice 2** = extend to Document. Integration bugs surface on day 1. |
-| **5. Apply non-negotiables** | You have to remember to ask: nonce? capability? prefix? Escape on output? | Workflow enforces them per-Edit: auth on every handler, sanitize-in / escape-out, prefix everything with the plugin slug, WP APIs over raw PHP. Listed in the workflow contract, applied automatically. |
-| **6. Verify** | "Compiled OK, looks right." Or `php -l`. Or "tested on my machine." | Each slice: `visit` the live test post → DB row count before, badge increment, DB row count after, screenshot. Real before/after evidence, not "looks right." |
-| **7. Handle mid-build redirects** | You say "wait, this should also work when analytics is off" — agent silently expands scope, you discover it later. | Same redirect → agent acknowledges, adds a separate `embedpress_show_visitor_view_count` toggle, self-record endpoint with session-dedup, re-verifies. Final SHIPPED block has a "Spec drift" section saying *what Phase 1 said / what shipped instead / why*. |
-| **8. Report** | Prose summary you have to read to figure out what shipped. | STATUS: SHIPPED block: every Phase 1 success criterion gets a paired evidence row from a live MCP call. Rollout notes (toggle name, flush requirement, free/Pro gating). Draft changelog entry. Suggested branch name. |
-| **9. Ship** | Commit + push in one go because the agent assumed you wanted that. | Stops at the working tree. Commit, push, FluentBoards card move — each requires explicit "go." Approval for one doesn't carry to the next. |
+| **1. Specify** | Agent infers what it can from the request and starts coding. Misunderstandings surface during review. | `load_workflow('build-feature')` → Phase 1 ESTABLISH block: verb-led title, size class, live-verifiable success criteria, out-of-scope list, impact analysis, edge cases. You sign off or redirect *before* any code is written. |
+| **2. Plan** | Skipped. Or done in chat as prose nobody references later. | Phase 2 PLAN: **reuse audit** names every existing helper / table / REST route / hook the feature will ride on instead of reinventing. **Cross-surface grep** catches discrepancies between render paths in advance. |
+| **3. Know your code** | Generic WP knowledge. Doesn't know your plugin's build pipeline, textdomain rules, or BC patterns. | Focused plugin's `CLAUDE.md` auto-loaded by `focus_get`. Source layout, build commands, BC patterns, task-tracker board — all in context before any code is read. |
+| **4. Slice the build** | Horizontally: "first the DB, then the API, then the UI." Integration bugs surface at the end. | Vertical slices: thinnest possible end-to-end through every layer first, then thicken. Integration bugs surface on day 1. |
+| **5. Apply non-negotiables** | You have to remember to ask: nonce? capability? plugin-slug prefix? Escape on output? | Workflow enforces them per-Edit: auth on every handler, sanitize-in / escape-out, prefix everything with the plugin slug, WP APIs over raw PHP. Listed in the contract, applied automatically. |
+| **6. Verify** | "Compiled OK, looks right." Or `php -l`. Or "tested on my machine." | Each slice: trigger via the right MCP tool → capture output → compare against that slice's success criterion. Real evidence per slice, not "looks right" once at the end. |
+| **7. Handle mid-build redirects** | You say "wait, also handle X" — agent silently expands scope. You discover later. | Same redirect → agent acknowledges, builds the addition, re-verifies. Final SHIPPED block carries a **Spec drift** section: *what Phase 1 said / what shipped instead / why*. |
+| **8. Report** | Prose summary you have to read to figure out what shipped. | `STATUS: SHIPPED` block: every Phase 1 success criterion gets a paired evidence row from a live MCP call. Rollout notes (toggle + default, flush requirement, free/Pro gating). Draft changelog entry. Suggested branch name. |
+| **9. Ship** | Commit + push in one go because the agent assumed you wanted that. | Stops at the working tree. Commit, push, task-tracker move — each requires explicit "go." |
 
-**What this looked like on the actual sandbox run for this exact
-feature:** 7 files modified across `EmbedPress/` + `static/js/` +
-`static/css/`, mirrored to `assets/`. Three render surfaces verified
-live with `visit` screenshots. Mid-stream redirect to decouple from
-analytics handled in a single Phase 3 follow-up. Final SHIPPED block
-showed DB counts going 5→6 with the new row tagged
-`source: "visitor_view_count"` proving the new self-record path. Total
-elapsed: one session. No accidental commits, no scope creep past what
-the user re-specified.
-
-**Design a page.** Take a real one: *"Build a help-center landing page
-with hero + 3-column doc-category grid + Pricing FAQ accordion, then
-ship it."* Same task, two agents:
+**Design a page in WordPress.** A landing page, a help-center index,
+a marketing page — anything you'd normally build by hand in wp-admin.
 
 | Step | Plain Claude | Claude + sandbox |
 |------|--------------|------------------|
-| **1. Create the post** | Describes the page in chat; you create it manually in wp-admin. | `wp_rest` POST `/wp/v2/pages` creates the page in one call. Returns the post ID. |
-| **2. Build the layout** | Generates a block-markup string and hopes you paste it in correctly. | Writes the block JSON via `fs_write` (or for stateful blocks/Elementor widgets, `load_skill('wp-pilot')` drives real wp-admin headlessly with auto-login so the output is byte-perfect — the only way to avoid the "Block contains unexpected content" recovery prompt). |
-| **3. Use plugin blocks** | Knows the block name from training data, guesses at the attribute shape. Often wrong. | Focused plugin's `CLAUDE.md` is loaded — the BetterDocs `doc-category-grid` block's attribute names + defaults + BC rules are in context before the JSON is written. |
+| **1. Create the page** | Describes it in chat; you create it manually in wp-admin. | `wp_rest` POST creates the page in one call and returns the post ID. |
+| **2. Build the layout** | Generates a block-markup string and hopes you paste it in correctly. | Writes block JSON directly via `fs_write`. For stateful blocks / Elementor widgets, `load_skill('wp-pilot')` drives real wp-admin headlessly with auto-login so the editor output is byte-perfect. |
+| **3. Use your plugin's blocks** | Knows the block name from training data, guesses at attribute shape. Often wrong. | Focused plugin's `CLAUDE.md` is loaded — block attribute names + defaults + BC rules are in context before the JSON is written. |
 | **4. Verify rendering** | "Open the page in your browser and see." | `visit` returns a PNG screenshot + DOM + console errors + network failures in one call. If a CSS class is missing or an image 404s, the agent sees it without you switching tabs. |
-| **5. Iterate** | "Try this CSS." (you paste it, refresh, screenshot, paste back, repeat.) | Agent edits the stylesheet via `fs_write` → re-`visit` with `--screenshot` → diffs against the previous PNG. Real iteration loop without you in the middle of every cycle. |
-| **6. Ship** | Manual: copy markup into the staging site, eyeball it. | Stops at the working tree. The page exists locally; export via WXR (`runtime/seeds/`) or commit the block JSON to the plugin repo — your call, on your "go." |
+| **5. Iterate** | "Try this CSS." You paste, refresh, screenshot, paste back, repeat. | Agent edits the stylesheet → re-`visit` with `--screenshot` → diffs against the previous PNG. You're not in the middle of every cycle. |
+| **6. Ship** | Manual: copy markup into staging, eyeball it. | Stops at the working tree. Export via WXR or commit the block JSON — your call, on your "go." |
 
 ### The two underlying patterns
 

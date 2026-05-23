@@ -77,50 +77,95 @@ Chromium with auto-login on `/wp-admin/`), `fs_read/write/list`,
 
 ---
 
-## Before vs. After — what changes when Claude has the sandbox
+## Plain Claude vs. Claude + sandbox
 
-The sandbox isn't just a dev environment; it's a contract that makes
-Claude operate like a senior engineer instead of a search bot. Concrete
-comparison of the three workflows you'll hit daily:
+Claude in your IDE is already smart. It can read your code, propose
+diffs, talk through architecture. What it **cannot** do alone is run
+your WordPress, see what your block actually renders, query your DB,
+check `debug.log`, or know that EmbedPress's `static/` is hand-written
+while `assets/` is build output. It's a brilliant pair-programmer
+working blindfolded against an unfamiliar codebase.
 
-### Fixing a bug from a FluentBoards card
+The sandbox removes the blindfold and hands it the keys.
 
-| | **Before** (Claude without the sandbox) | **After** (Claude + sandbox) |
-|---|---|---|
-| **Read the card** | Manually copy-paste card into chat | `focus <plugin>` then paste card URL — agent fetches via FluentBoards API |
-| **Reproduce** | "Let me look at the file" → reads code, guesses | Literal first tool call is `wp_cli` / `wp_rest` / `visit` / `tail_log` on the live stack. Captures the actual error as `EVIDENCE.before` |
-| **Can't reproduce?** | Pivot to code reading, ship a guess | Provision the missing piece (`fs_write` a `.mo`, `db_query` a missing row, `wp_cli plugin install`), retry. If genuinely impossible: `STATUS: BLOCKED` with the exact missing input |
-| **Fix the code** | Edit one file, refresh browser, see what breaks next, edit another, repeat (15-25 min) | Read all call sites in one pass, batch-edit, BC traps handled (deprecated[], conditional emission) |
-| **Verify** | "Looks right on my machine" | Re-run the exact MCP call from repro → confirm output flipped. Paired `EVIDENCE.before` + `EVIDENCE.after` |
-| **Report** | Prose summary, hope it's right | `STATUS: FIXED` block: files, evidence, what was deferred, what the human does next |
-| **Ship** | Commit + push in the same breath | Stops at the working tree. Commit, push, FB card update — each waits for explicit "go" |
+### What plain Claude has
 
-### Building a new feature
+- Your source code on disk (Read / Write / Edit).
+- The internet (web search, fetch).
+- Its training knowledge of WordPress / PHP / JS.
+- Nothing about *your* WordPress, *your* plugin's conventions, or
+  whether the edit it just made actually works.
 
-| | **Before** | **After** |
-|---|---|---|
-| **Specify** | "Just build it" — agent and human have different mental models | Phase 1 ESTABLISH block: verb-led title, success criteria (live-verifiable), out-of-scope, impact, edge cases. User signs off (Size M) or auto-proceeds (Size S) |
-| **Plan** | Skipped. Agent starts editing the first file it finds | Phase 2 PLAN: reuse audit (rides on existing helpers), file-level plan, vertical slicing, BC strategy, rollout (toggle + version gate + free/Pro split + draft changelog) |
-| **Build** | Horizontal slicing — "first the DB, then the API, then the UI." Integration bugs surface day 14 | Vertical slicing — first slice cuts through every layer for the simplest case. Integration bugs surface day 1 |
-| **Cross-surface** | Block surface works, shortcode quietly broken | Phase 2 grep covers every render path. Block + shortcode + Elementor checked in the reuse audit |
-| **Scope creep** | Founder says "also add X" mid-build, agent silently expands | Mid-stream redirects acknowledged; final SHIPPED block has a "Spec drift" section reconciling what changed vs. Phase 1 |
-| **Ship** | Done = "I think it works" | `STATUS: SHIPPED` block with one row of evidence per success criterion + one per edge case, all from live MCP calls |
+### What Claude + sandbox has, on top of that
 
-### Designing a page in WordPress
+- **A live WordPress at `http://localhost:8188`** with your plugins
+  symlinked in. Edits land in seconds, no rebuild.
+- **20 MCP tools** to drive it: `wp_cli`, `wp_rest`, `db_query`,
+  `tail_log`, `visit` (headless Chromium, auto-login on wp-admin),
+  `http_fetch`, `fs_read/write`, `mail_list/get`, etc. The agent acts
+  on your stack instead of guessing at it.
+- **Your plugin's institutional knowledge** auto-loaded. The focused
+  plugin's `CLAUDE.md` (text domain rules, save() BC traps, build
+  conventions, FluentBoards board ID, sister-repo location) reaches
+  the model on every session via `focus_get`.
+- **A 2KB operating prompt** in every Claude session via the MCP
+  `instructions` field — reflexes ("first tool call reproduces, not
+  Read"), anti-patterns ("declaring fixed from code reading"),
+  workflow triggers ("focus &lt;plugin&gt;" → handshake).
+- **Skills + workflows** for the patterns that repeat: `fix` for
+  bugs (one-pass loop with paired before/after evidence),
+  `build-feature` for new features (three-phase: establish → plan →
+  build with size-scaled gates), `wp-pilot` for editor-stateful
+  authoring, `fluentboards` for task management.
 
-| | **Before** | **After** |
-|---|---|---|
-| **Where you work** | Local WP + a separate Figma window + a separate code editor + a terminal | One folder. Claude has `wp_rest` to create pages, `visit` to render them headless, `fs_read/write` to drop block JSON / Elementor data, `mail_list` to verify form sends |
-| **Verify rendering** | "Switch to the browser and look" | `visit` with `--screenshot` returns a PNG + DOM + console + network. Real before/after when you change CSS |
-| **Editor-stateful authoring** (Gutenberg blocks with stateful `save()`, Elementor widgets) | Hand-write HTML, hope it doesn't trigger Gutenberg recovery prompt | `load_skill('wp-pilot')` — drive real wp-admin via headless Playwright with auto-login. Byte-perfect editor output |
+### What that means on three tasks you actually do
 
-### The two patterns underneath all three
+**Fix a bug.** Plain Claude reads `category-counter.php`, sees the
+`sprintf`, says "looks like a placeholder mismatch, here's a fix." Done.
+Sandbox-Claude writes a `pt_BR.mo` with the mismatched placeholder via
+`fs_write`, loads the page via `visit`, captures the actual
+`ArgumentCountError` in `tail_log` as `EVIDENCE.before`, batch-edits the
+template AND its sibling AND the Pro mirror (caught by the cross-surface
+grep), re-loads, captures clean output as `EVIDENCE.after`, reports
+`STATUS: FIXED` with both evidence rows. Same diagnosis, but the diff
+ships with proof instead of with confidence.
 
-1. **Live evidence is the only evidence.** Code reading is for *understanding* — never for *deciding* something is done. Every "fixed" / "shipped" / "verified" claim is backed by an MCP call against the running stack.
+**Build a feature.** Plain Claude generates a reasonable proposal,
+writes code that looks right, doesn't know that EmbedPress's block
+`save()` changes need a `deprecated[]` entry or old posts get the
+recovery prompt. Sandbox-Claude loads `build-feature`, emits a Phase 1
+spec the user signs off on, audits *your* existing analytics helpers in
+Phase 2 (rides on `embedpress_analytics_views` instead of inventing a
+new table), slices vertically through DB + REST + JS + CSS in Phase 3
+with a live `visit` screenshot at the end of each slice. When you
+redirect mid-build ("decouple this from analytics"), it acknowledges
+and the SHIPPED block names the drift. Same three-surface result
+(block + shortcode + Elementor), but every layer is live-verified.
 
-2. **The work stops at the working tree.** Commits, pushes, FB card updates, PR creations — all wait for explicit user confirmation. Approval for one doesn't carry to the next.
+**Design a page.** Plain Claude can describe a page; it cannot create
+one. Sandbox-Claude calls `wp_rest` to create the post, writes the
+block JSON via `fs_write`, loads the page via `visit` and returns a
+PNG + DOM + console + network report. For Gutenberg blocks with
+stateful `save()`, it loads `wp-pilot` and drives real wp-admin
+headlessly so the editor output is byte-perfect — the only way to
+avoid the "Block contains unexpected content" recovery prompt.
 
-The throughput delta is real: bug fixes that used to be 20-25 minutes per round (× 3-5 rounds) drop to 5-10 minutes total. Feature work that used to scope-creep for a week ships in a day with the same surface area covered.
+### The two underlying patterns
+
+1. **Live evidence is the only evidence.** Plain Claude can't reach
+   your stack, so it ships claims. Sandbox-Claude can reach your stack,
+   so it ships evidence. Every "fixed" / "shipped" / "verified" is
+   backed by an MCP call against the running WordPress.
+
+2. **The work stops at the working tree.** Commits, pushes, FB card
+   updates, PR creations — all wait for explicit user confirmation.
+   The sandbox makes Claude powerful; the gates make sure that power
+   doesn't outrun your intent.
+
+Net effect: Claude's intelligence stays the same; its **leverage on
+your codebase** changes by an order of magnitude. The same model that
+guessed wrong yesterday can ship a verified three-surface feature today
+because it has the stack, the conventions, and the tools.
 
 ---
 

@@ -198,6 +198,26 @@ def cmd_status(cfg, args) -> None:
         info("No focused plugin (run: ./sb focus <slug>)")
 
 
+def _project_for_plugin(cfg: dict, slug: str) -> str | None:
+    """Return the best-fit project name that contains `slug`, or None.
+
+    Prefer a project whose name matches the plugin slug (the common
+    convention: `embedpress` project contains `embedpress`). Otherwise
+    return the first project that lists the plugin.
+    """
+    projs = cfg.get("projects", {}) or {}
+    candidates = []
+    for name, p in projs.items():
+        plugin_slugs = [(pl or {}).get("slug") for pl in (p.get("plugins") or [])]
+        if slug in plugin_slugs:
+            candidates.append(name)
+    if not candidates:
+        return None
+    if slug in candidates:
+        return slug
+    return candidates[0]
+
+
 def cmd_focus(cfg, args) -> None:
     if args.clear:
         if FOCUS.exists():
@@ -212,7 +232,40 @@ def cmd_focus(cfg, args) -> None:
         return
     FOCUS.write_text(args.slug)
     ok(f"Focused plugin: {args.slug}")
-    print(f"  Tell your LLM:  \"I'm working on {args.slug}.\"")
+
+    # Auto-link: if the focused plugin isn't already in the active
+    # project's plugin list, switch the active project to one that
+    # contains it. Keeps focus + active_project consistent so users
+    # don't have to think about both concepts.
+    active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    projs = cfg.get("projects", {}) or {}
+    active_slugs = []
+    if active and active in projs:
+        active_slugs = [(pl or {}).get("slug")
+                        for pl in (projs[active].get("plugins") or [])]
+    if args.slug in active_slugs:
+        # Already aligned — nothing to do.
+        print(f"  Active project: {active} (contains {args.slug})")
+        return
+
+    target = _project_for_plugin(cfg, args.slug)
+    if not target:
+        info(f"plugin '{args.slug}' isn't in any defined project — add "
+             f"it to sandbox.yml or sandbox.local.yml to enable "
+             f"auto-provisioning. Focus set; active project unchanged.")
+        return
+
+    if active == target:
+        # Active project IS the right one but doesn't list this plugin
+        # — config drift; bail rather than re-provision.
+        info(f"active project '{active}' is the best match for "
+             f"'{args.slug}' but doesn't list it. Check sandbox.yml.")
+        return
+
+    info(f"switching active project: {active or '(none)'} → {target} "
+         f"(contains '{args.slug}')")
+    import types
+    cmd_use(cfg, types.SimpleNamespace(name=target))
 
 
 def cmd_logs(cfg, args) -> None:

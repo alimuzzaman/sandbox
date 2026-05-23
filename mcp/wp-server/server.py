@@ -384,6 +384,35 @@ def focus_get(include_claude_md: bool = True,
     if not focus:
         return out
 
+    # Defensive check: warn when focus and active_project disagree (focused
+    # on a plugin that isn't in the active project's plugin list). Common
+    # cause: user ran `./sb use <project-A>` then `./sb focus <plugin-not-in-A>`
+    # before the auto-link landed. Tells the agent the state is drifty.
+    if active:
+        try:
+            import yaml as _yaml
+            cfg_path = SANDBOX_ROOT / "sandbox.yml"
+            local_path = SANDBOX_ROOT / "sandbox.local.yml"
+            cfg_data = {}
+            for p in (cfg_path, local_path):
+                if p.exists():
+                    loaded = _yaml.safe_load(p.read_text()) or {}
+                    # Shallow merge — local overrides
+                    projs = (loaded.get("projects") or {})
+                    cfg_data.setdefault("projects", {}).update(projs)
+            proj = (cfg_data.get("projects") or {}).get(active) or {}
+            active_slugs = [(pl or {}).get("slug")
+                            for pl in (proj.get("plugins") or [])]
+            if active_slugs and focus not in active_slugs:
+                out["mismatch_warning"] = (
+                    f"focus '{focus}' isn't in active_project '{active}'"
+                    f" (which contains {active_slugs}). Run `./sb focus"
+                    f" {focus}` to auto-switch the active project."
+                )
+        except Exception:
+            # Don't break focus_get over a config-read error.
+            pass
+
     # Resolve focused plugin's source repo. Symlinks now live at depth 1
     # inside wp-content/plugins/ (was runtime/plugins/ — depth 2 — pre-fix).
     candidates = [
@@ -432,13 +461,41 @@ def focus_get(include_claude_md: bool = True,
 
 @mcp.tool()
 def focus_set(plugin_slug: str) -> dict:
-    """Set the focused plugin slug. Pass empty string to clear."""
-    if plugin_slug:
-        FOCUS_FILE.write_text(plugin_slug.strip())
-        return {"ok": True, "focus": plugin_slug.strip()}
-    if FOCUS_FILE.exists():
-        FOCUS_FILE.unlink()
-    return {"ok": True, "focus": None}
+    """Set the focused plugin slug. Pass empty string to clear.
+
+    When setting a focus, this shells out to `./sb focus <slug>` so the
+    CLI's auto-link logic runs: if the focused plugin isn't already in
+    the active project's plugin list, the active project is switched
+    to one that contains it. Keeps focus + active_project consistent.
+    """
+    if not plugin_slug:
+        if FOCUS_FILE.exists():
+            FOCUS_FILE.unlink()
+        return {"ok": True, "focus": None}
+
+    slug = plugin_slug.strip()
+    sb = SANDBOX_ROOT / "sb"
+    if not sb.exists():
+        # Fallback: just write the file without the auto-link niceties.
+        FOCUS_FILE.write_text(slug)
+        return {"ok": True, "focus": slug, "warning": "./sb not found — focus set without auto-link"}
+
+    res = subprocess.run(
+        [str(sb), "focus", slug],
+        capture_output=True, text=True, cwd=str(SANDBOX_ROOT), timeout=120,
+    )
+    out = {
+        "ok": res.returncode == 0,
+        "focus": FOCUS_FILE.read_text().strip() if FOCUS_FILE.exists() else None,
+        "active_project": (
+            (SANDBOX_ROOT / ".active-project").read_text().strip()
+            if (SANDBOX_ROOT / ".active-project").exists() else None
+        ),
+        "stdout": res.stdout,
+    }
+    if res.stderr.strip():
+        out["stderr"] = res.stderr
+    return out
 
 
 # ------------------ legacy convenience -------------------------------

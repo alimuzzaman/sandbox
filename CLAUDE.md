@@ -39,14 +39,24 @@ evidence — only a live MCP call against the stack is.
 - **First contact in a session →** call `focus_get`, skim `git log -10`,
   read the focused plugin's `CLAUDE.md` + any `.claude/skills/<area>/SKILL.md`
   that matches the work area. Once. Don't re-read it later.
+
+- **Loading sandbox workflows / skills → use the MCP tools, not `Read` or
+  `cat`.** Workflows live at `workflows/<name>/WORKFLOW.md` and skills at
+  `skills/<name>/SKILL.md`, but you don't open those files directly — you
+  call `load_workflow('<name>')` or `load_skill('<name>')` which returns
+  the parsed content + frontmatter as a tool result. The path-style
+  references elsewhere in this doc are for the AUTHOR's benefit (so you
+  know what file to edit if a sharpening is needed); the AGENT's loading
+  path is always the MCP tool.
 - **Bug, error, stack trace, or "X doesn't work" →** your literal
   first tool call must attempt to reproduce it on the live stack
   (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`).
   Not Read. Not Grep. Not `find`. Not "let me look at the file." If
   you cannot reproduce, you return `STATUS: BLOCKED` — you do not
-  pivot to code reading and guess a fix. Once reproduced, load
-  `skills/fix/SKILL.md` and run the one-pass loop. The slicing rule
-  does NOT apply here.
+  pivot to code reading and guess a fix. Once reproduced, call
+  `load_skill('fix')` (the MCP tool — not `Read` or `cat` on the
+  SKILL.md file) and run the one-pass loop. The slicing rule does
+  NOT apply here.
 - **Anything WP-touching →** reach for the MCP tool first. `wp_cli`,
   not `docker compose exec wp wp`. `wp_rest`, not `curl localhost:8188`.
   `db_query`, not `mysql -h`. `tail_log`, not `docker logs`. Bash is
@@ -67,8 +77,9 @@ evidence — only a live MCP call against the stack is.
   through `skills/wp-pilot/SKILL.md`. Hand-authored PHP markup only
   works for core blocks without JS save logic. Skip wp-pilot for bulk
   operations — wp-cli is 50× faster.
-- **"Add" / "build" / "implement" / "create a new" X →** load
-  `workflows/build-feature/WORKFLOW.md` and run the three-phase loop:
+- **"Add" / "build" / "implement" / "create a new" X →** call the MCP
+  tool `load_workflow('build-feature')` (NOT `Read` or `cat` on the
+  WORKFLOW.md file) and run the three-phase loop:
   Phase 1 ESTABLISH (spec + impact + edge cases) → Phase 2 PLAN (file
   plan + reuse audit + slicing + rollout) → Phase 3 BUILD (slice by
   slice with live verification). Emit each phase as **prose with bold
@@ -110,6 +121,11 @@ you notice yourself doing one of them, stop and reset.
   produces the expected output, captured in evidence.
 - **Reaching for bash when an MCP tool exists.** Every time you type
   `docker compose exec` for a WP task, an MCP tool was already there.
+  Same applies to skill/workflow loading: `cat workflows/X/WORKFLOW.md`
+  and `Read skills/X/SKILL.md` are anti-patterns — call
+  `load_workflow('X')` or `load_skill('X')` instead. The MCP tools
+  parse frontmatter, surface the right metadata, and are how the
+  sandbox knows the agent actually engaged the contract.
 - **Asking three clarifying questions before starting.** Pick the most
   probable interpretation, do the work, flag the assumption in your
   summary. Ask only when the choice is genuinely load-bearing and a

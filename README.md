@@ -77,50 +77,108 @@ Chromium with auto-login on `/wp-admin/`), `fs_read/write/list`,
 
 ---
 
-## Before vs. After — what changes when Claude has the sandbox
+## Plain Claude vs. Claude + sandbox
 
-The sandbox isn't just a dev environment; it's a contract that makes
-Claude operate like a senior engineer instead of a search bot. Concrete
-comparison of the three workflows you'll hit daily:
+Claude in your IDE is already smart. It can read your code, propose
+diffs, talk through architecture. What it **cannot** do alone is run
+your WordPress, see what your block actually renders, query your DB,
+check `debug.log`, or know your plugin's specific conventions
+(build pipeline, textdomain rules, BC traps, where the source folder
+lives vs. the build output). It's a brilliant pair-programmer
+working blindfolded against an unfamiliar codebase.
 
-### Fixing a bug from a FluentBoards card
+The sandbox removes the blindfold and hands it the keys.
 
-| | **Before** (Claude without the sandbox) | **After** (Claude + sandbox) |
-|---|---|---|
-| **Read the card** | Manually copy-paste card into chat | `focus <plugin>` then paste card URL — agent fetches via FluentBoards API |
-| **Reproduce** | "Let me look at the file" → reads code, guesses | Literal first tool call is `wp_cli` / `wp_rest` / `visit` / `tail_log` on the live stack. Captures the actual error as `EVIDENCE.before` |
-| **Can't reproduce?** | Pivot to code reading, ship a guess | Provision the missing piece (`fs_write` a `.mo`, `db_query` a missing row, `wp_cli plugin install`), retry. If genuinely impossible: `STATUS: BLOCKED` with the exact missing input |
-| **Fix the code** | Edit one file, refresh browser, see what breaks next, edit another, repeat (15-25 min) | Read all call sites in one pass, batch-edit, BC traps handled (deprecated[], conditional emission) |
-| **Verify** | "Looks right on my machine" | Re-run the exact MCP call from repro → confirm output flipped. Paired `EVIDENCE.before` + `EVIDENCE.after` |
-| **Report** | Prose summary, hope it's right | `STATUS: FIXED` block: files, evidence, what was deferred, what the human does next |
-| **Ship** | Commit + push in the same breath | Stops at the working tree. Commit, push, FB card update — each waits for explicit "go" |
+### What plain Claude has
 
-### Building a new feature
+- Your source code on disk (Read / Write / Edit).
+- The internet (web search, fetch).
+- Its training knowledge of WordPress / PHP / JS.
+- Nothing about *your* WordPress, *your* plugin's conventions, or
+  whether the edit it just made actually works.
 
-| | **Before** | **After** |
-|---|---|---|
-| **Specify** | "Just build it" — agent and human have different mental models | Phase 1 ESTABLISH block: verb-led title, success criteria (live-verifiable), out-of-scope, impact, edge cases. User signs off (Size M) or auto-proceeds (Size S) |
-| **Plan** | Skipped. Agent starts editing the first file it finds | Phase 2 PLAN: reuse audit (rides on existing helpers), file-level plan, vertical slicing, BC strategy, rollout (toggle + version gate + free/Pro split + draft changelog) |
-| **Build** | Horizontal slicing — "first the DB, then the API, then the UI." Integration bugs surface day 14 | Vertical slicing — first slice cuts through every layer for the simplest case. Integration bugs surface day 1 |
-| **Cross-surface** | Block surface works, shortcode quietly broken | Phase 2 grep covers every render path. Block + shortcode + Elementor checked in the reuse audit |
-| **Scope creep** | Founder says "also add X" mid-build, agent silently expands | Mid-stream redirects acknowledged; final SHIPPED block has a "Spec drift" section reconciling what changed vs. Phase 1 |
-| **Ship** | Done = "I think it works" | `STATUS: SHIPPED` block with one row of evidence per success criterion + one per edge case, all from live MCP calls |
+### What Claude + sandbox has, on top of that
 
-### Designing a page in WordPress
+- **A live WordPress at `http://localhost:8188`** with your plugins
+  symlinked in. Edits land in seconds, no rebuild.
+- **20 MCP tools** to drive it: `wp_cli`, `wp_rest`, `db_query`,
+  `tail_log`, `visit` (headless Chromium, auto-login on wp-admin),
+  `http_fetch`, `fs_read/write`, `mail_list/get`, etc. The agent acts
+  on your stack instead of guessing at it.
+- **Your plugin's institutional knowledge** auto-loaded. The focused
+  plugin's `CLAUDE.md` (textdomain rules, save() BC traps, build
+  conventions, task-tracker board, sister-repo location) reaches the
+  model on every session via `focus_get`.
+- **A 2KB operating prompt** in every Claude session via the MCP
+  `instructions` field — reflexes ("first tool call reproduces, not
+  Read"), anti-patterns ("declaring fixed from code reading"),
+  workflow triggers ("focus &lt;plugin&gt;" → handshake).
+- **Skills + workflows** for the patterns that repeat: `fix` for
+  bugs (one-pass loop with paired before/after evidence),
+  `build-feature` for new features (three-phase: establish → plan →
+  build with size-scaled gates), `wp-pilot` for editor-stateful
+  authoring, `fluentboards` for task management.
 
-| | **Before** | **After** |
-|---|---|---|
-| **Where you work** | Local WP + a separate Figma window + a separate code editor + a terminal | One folder. Claude has `wp_rest` to create pages, `visit` to render them headless, `fs_read/write` to drop block JSON / Elementor data, `mail_list` to verify form sends |
-| **Verify rendering** | "Switch to the browser and look" | `visit` with `--screenshot` returns a PNG + DOM + console + network. Real before/after when you change CSS |
-| **Editor-stateful authoring** (Gutenberg blocks with stateful `save()`, Elementor widgets) | Hand-write HTML, hope it doesn't trigger Gutenberg recovery prompt | `load_skill('wp-pilot')` — drive real wp-admin via headless Playwright with auto-login. Byte-perfect editor output |
+### What that means on three tasks you actually do
 
-### The two patterns underneath all three
+Same task, two agents — what changes, step by step.
 
-1. **Live evidence is the only evidence.** Code reading is for *understanding* — never for *deciding* something is done. Every "fixed" / "shipped" / "verified" claim is backed by an MCP call against the running stack.
+**Fix a bug in your plugin.** A customer reports something breaks
+under a specific condition.
 
-2. **The work stops at the working tree.** Commits, pushes, FB card updates, PR creations — all wait for explicit user confirmation. Approval for one doesn't carry to the next.
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Understand the report** | Asks you what version, what other plugins are active, what theme. Reads the report's file paths. | Your plugin's `CLAUDE.md` is already in context (textdomain rules, BC traps, source layout). Can fetch the task-tracker card body via REST in one tool call. |
+| **2. Reproduce** | "Let me look at the file" → reads the code, spots the suspect line, says "looks like X is the cause." Can't actually verify. | First tool call provisions whatever the bug needs to fire (a translation file, a missing row, a setting flip) and triggers it on the live WP. Captures the real error in the log as `EVIDENCE.before`. |
+| **3. Find every affected site** | Reads the file the report names. Misses the sibling implementation and the Pro-side mirror. | Greps every call site across the focused plugin AND its `-pro` sibling in one pass. Same pattern caught wherever it lives. |
+| **4. Fix** | Edits file 1, asks you to test, edits file 2, asks again. 15-25 min per round, 3-5 rounds. | Batch-edits every affected file in one pass. No fix-test-fix loop. |
+| **5. Verify** | "Looks right." Or `php -l`. Or "tested on my machine." | Re-triggers the exact same failing call from step 2 — confirms output flipped → `EVIDENCE.after`. Real before/after pair against the actual failure path. |
+| **6. Report** | Prose summary you have to parse to figure out what shipped. | `STATUS: FIXED` block: files changed, paired evidence rows, what was deferred, suggested branch name. |
+| **7. Ship** | Commit + push + task-tracker update in one breath, because the agent assumed you wanted that. | Stops at the working tree. Commit, push, card update — each waits for explicit "go." |
 
-The throughput delta is real: bug fixes that used to be 20-25 minutes per round (× 3-5 rounds) drop to 5-10 minutes total. Feature work that used to scope-creep for a week ships in a day with the same surface area covered.
+**Build a new feature in your plugin.** A founder request or a
+task-tracker card asking for net-new functionality.
+
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Specify** | Agent infers what it can from the request and starts coding. Misunderstandings surface during review. | `load_workflow('build-feature')` → Phase 1 ESTABLISH block: verb-led title, size class, live-verifiable success criteria, out-of-scope list, impact analysis, edge cases. You sign off or redirect *before* any code is written. |
+| **2. Plan** | Skipped. Or done in chat as prose nobody references later. | Phase 2 PLAN: **reuse audit** names every existing helper / table / REST route / hook the feature will ride on instead of reinventing. **Cross-surface grep** catches discrepancies between render paths in advance. |
+| **3. Know your code** | Generic WP knowledge. Doesn't know your plugin's build pipeline, textdomain rules, or BC patterns. | Focused plugin's `CLAUDE.md` auto-loaded by `focus_get`. Source layout, build commands, BC patterns, task-tracker board — all in context before any code is read. |
+| **4. Slice the build** | Horizontally: "first the DB, then the API, then the UI." Integration bugs surface at the end. | Vertical slices: thinnest possible end-to-end through every layer first, then thicken. Integration bugs surface on day 1. |
+| **5. Apply non-negotiables** | You have to remember to ask: nonce? capability? plugin-slug prefix? Escape on output? | Workflow enforces them per-Edit: auth on every handler, sanitize-in / escape-out, prefix everything with the plugin slug, WP APIs over raw PHP. Listed in the contract, applied automatically. |
+| **6. Verify** | "Compiled OK, looks right." Or `php -l`. Or "tested on my machine." | Each slice: trigger via the right MCP tool → capture output → compare against that slice's success criterion. Real evidence per slice, not "looks right" once at the end. |
+| **7. Handle mid-build redirects** | You say "wait, also handle X" — agent silently expands scope. You discover later. | Same redirect → agent acknowledges, builds the addition, re-verifies. Final SHIPPED block carries a **Spec drift** section: *what Phase 1 said / what shipped instead / why*. |
+| **8. Report** | Prose summary you have to read to figure out what shipped. | `STATUS: SHIPPED` block: every Phase 1 success criterion gets a paired evidence row from a live MCP call. Rollout notes (toggle + default, flush requirement, free/Pro gating). Draft changelog entry. Suggested branch name. |
+| **9. Ship** | Commit + push in one go because the agent assumed you wanted that. | Stops at the working tree. Commit, push, task-tracker move — each requires explicit "go." |
+
+**Design a page in WordPress.** A landing page, a help-center index,
+a marketing page — anything you'd normally build by hand in wp-admin.
+
+| Step | Plain Claude | Claude + sandbox |
+|------|--------------|------------------|
+| **1. Create the page** | Describes it in chat; you create it manually in wp-admin. | `wp_rest` POST creates the page in one call and returns the post ID. |
+| **2. Build the layout** | Generates a block-markup string and hopes you paste it in correctly. | Writes block JSON directly via `fs_write`. For stateful blocks / Elementor widgets, `load_skill('wp-pilot')` drives real wp-admin headlessly with auto-login so the editor output is byte-perfect. |
+| **3. Use your plugin's blocks** | Knows the block name from training data, guesses at attribute shape. Often wrong. | Focused plugin's `CLAUDE.md` is loaded — block attribute names + defaults + BC rules are in context before the JSON is written. |
+| **4. Verify rendering** | "Open the page in your browser and see." | `visit` returns a PNG screenshot + DOM + console errors + network failures in one call. If a CSS class is missing or an image 404s, the agent sees it without you switching tabs. |
+| **5. Iterate** | "Try this CSS." You paste, refresh, screenshot, paste back, repeat. | Agent edits the stylesheet → re-`visit` with `--screenshot` → diffs against the previous PNG. You're not in the middle of every cycle. |
+| **6. Ship** | Manual: copy markup into staging, eyeball it. | Stops at the working tree. Export via WXR or commit the block JSON — your call, on your "go." |
+
+### The two underlying patterns
+
+1. **Live evidence is the only evidence.** Plain Claude can't reach
+   your stack, so it ships claims. Sandbox-Claude can reach your stack,
+   so it ships evidence. Every "fixed" / "shipped" / "verified" is
+   backed by an MCP call against the running WordPress.
+
+2. **The work stops at the working tree.** Commits, pushes, FB card
+   updates, PR creations — all wait for explicit user confirmation.
+   The sandbox makes Claude powerful; the gates make sure that power
+   doesn't outrun your intent.
+
+Net effect: Claude's intelligence stays the same; its **leverage on
+your codebase** changes by an order of magnitude. The same model that
+guessed wrong yesterday can ship a verified three-surface feature today
+because it has the stack, the conventions, and the tools.
 
 ---
 

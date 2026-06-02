@@ -3,7 +3,10 @@
     "allow": [
       "mcp__sandbox__wp_exec",
       "mcp__sandbox__db_query",
-      "mcp__sandbox__wp_cli"
+      "mcp__sandbox__wp_cli",
+      "mcp__sandbox__focus_set",
+      "mcp__sandbox__load_context",
+      "mcp__sandbox__focus_get"
     ]
   },
   "enableAllProjectMcpServers": true,

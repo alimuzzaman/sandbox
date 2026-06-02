@@ -203,7 +203,12 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
 
     if not instances:
         return {DEFAULT_INSTANCE: merged({})}
-    return {name: merged(inst or {}) for name, inst in instances.items()}
+    out = {name: merged(inst or {}) for name, inst in instances.items()}
+    # `main` is always implicitly available even when instances: lists
+    # only additional instances — otherwise existing scripts that don't
+    # pass --instance would suddenly fail when a `qa` block is added.
+    out.setdefault(DEFAULT_INSTANCE, merged({}))
+    return out
 
 
 def compose_file(instance: str) -> Path:
@@ -2281,12 +2286,21 @@ Then pick a project and a plugin:
     sub.add_parser("instances",
         help="List defined sandbox instances + their status + ports")
 
-    # Global --instance flag. Default is None so we can distinguish
-    # "user explicitly chose main" from "user didn't say"; resolved
-    # below to honor $SANDBOX_INSTANCE if set.
+    # Global --instance flag accepted both BEFORE and AFTER the subcommand.
+    # argparse can't natively share a global flag with all subparsers, so
+    # we register it on the top-level parser AND inject the same flag onto
+    # every subparser. Default is None so we can distinguish "user
+    # explicitly chose main" from "user didn't say"; resolved below to
+    # honor $SANDBOX_INSTANCE if set.
     p.add_argument("--instance", default=None,
         help="Which sandbox instance to target (default: main, "
              "or $SANDBOX_INSTANCE if set)")
+    for sp_name, sp_parser in (sub.choices or {}).items():
+        # Don't double-add when a subparser already has --instance
+        # (none currently do; future-proof).
+        if not any(a.option_strings == ["--instance"]
+                   for a in sp_parser._actions):
+            sp_parser.add_argument("--instance", default=None)
 
     args = p.parse_args()
     if not args.cmd:

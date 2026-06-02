@@ -307,14 +307,91 @@ Claude Code's MCP server (`sandbox`) exposes these against the local stack:
 | `wp_rest` | Call the WordPress REST API |
 | `db_query` | SQL — writes require `mutate: true` |
 | `tail_log` | Tail `wp-content/debug.log` |
-| `fs_read` / `fs_write` / `fs_list` | Files under `runtime/wp/` (scoped) |
+| `fs_read` / `fs_write` / `fs_list` | Files under `runtime/wp-<instance>/` (scoped) |
 | `mail_list` / `mail_get` | Mailpit (test SMTP inbox) |
 | `focus_get` / `focus_set` | Which plugin Claude is currently working on |
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | WXR import from `runtime/seeds/` |
 
+Every tool accepts an optional `instance: str = "main"` argument that
+routes the call to a specific sandbox instance (see "Multi-instance"
+below). Omitting it targets `main` — the only instance that exists
+unless `instances:` is defined in `sandbox.yml`.
+
 Plus Claude's native `Read`/`Write`/`Edit` reach the plugin source — because
 sources are bind-mounted into the container, edits are live with no rebuild.
+
+---
+
+## Multi-instance — running parallel isolated WordPress installs
+
+A single `sandbox.yml` can declare more than one WordPress instance.
+Each instance gets its own docker-compose project, DB volume, WP
+install dir (`runtime/wp-<instance>/`), ports, and state files
+(`.active-project.<instance>`, `.focus.<instance>`). The same `sb`
+CLI and the same MCP server manage all of them — instances are
+selected with `--instance <name>` (CLI) or `instance="..."` (MCP).
+
+**When to use a second instance:**
+- Test a release zip in isolation, free of dev-symlink artifacts (the
+  exact bug this feature was built to catch).
+- Run a clean WP with a different plugin set in parallel without
+  swapping out `runtime/wp/` or wiping the DB.
+- A/B compare two versions of the same plugin.
+
+**Define one in sandbox.yml:**
+
+```yaml
+runtime:
+  wordpress_port: 8188        # main instance ports
+  db_port: 3318
+  mailpit_port: 8125
+  admin: { user: admin, password: admin, ... }
+
+instances:                     # optional — main is implicit
+  qa:
+    wordpress_port: 8288       # all per-instance fields are optional;
+    db_port: 3328              # unset values inherit from runtime: above
+    mailpit_port: 8225
+    project: xspeed-clean      # which projects entry to wire on `./sb use`
+    admin:
+      site_title: Sandbox QA   # admin overrides shallow-merge over runtime.admin
+```
+
+No `instances:` block → behaves identically to the pre-multi-instance
+era (a single `main` instance is synthesized from `runtime:`).
+
+**Apply + boot a new instance:**
+
+```
+./sb apply                                 # regenerate runtime/compose/<inst>.yml for all instances
+./sb up --instance qa                      # boot qa stack on its own ports
+./sb install --instance qa                 # wp core install + app password
+./sb use xspeed-clean --instance qa        # symlink + activate plugins
+./sb visit http://localhost:8288/wp-admin/ # verify
+./sb instances                             # list all defined + status
+```
+
+**From the MCP server side:**
+
+```
+wp_cli(command="plugin list", instance="qa")
+wp_rest(method="GET", path="/wp/v2/posts", instance="qa")
+focus_get(instance="qa")
+tail_log(instance="qa")
+```
+
+The MCP server reads `sandbox.yml` on each call (cached on mtime),
+resolves per-instance ports + admin + app_password, and routes
+`docker compose -p sandbox-<inst> -f runtime/compose/<inst>.yml`. No
+restart needed when you add a new instance — just `./sb apply` and the
+next MCP tool call picks it up.
+
+**Don't mix bind-mounted plugin sources between instances accidentally.**
+Both instances share the same `defaults.plugins_home`, so activating
+`xspeed` in both instances symlinks them to the same git working tree.
+That's fine for "dev source in two instances" but means file edits
+affect both immediately.
 
 ---
 
@@ -360,6 +437,14 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 - **Fast plugin dev/fix/ship** → `workflows/fast-plugin-ship/WORKFLOW.md`.
   Use this for every focused plugin unless a more specific plugin workflow
   overrides it.
+
+- **Testing a release zip in isolation** → spin up a second instance
+  (see "Multi-instance" above). Drop an `instances: { qa: { ... } }` block
+  into `sandbox.yml`, `./sb apply`, `./sb up --instance qa`, install the
+  zip via `wp_cli(command="plugin install /path/to/foo.zip --activate",
+  instance="qa")`. Reproduces bugs that only appear in a non-symlink
+  install (broken `plugin_dir_url()`, etc.) without disturbing your dev
+  symlink in `main`.
 
 - **Reading or closing a FluentBoards card** → `skills/fluentboards/SKILL.md`.
   This is the company's task tracker; the skill ships scripts for reading

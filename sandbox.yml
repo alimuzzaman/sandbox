@@ -24,6 +24,10 @@ defaults:
 
 # ---------------------------------------------------------------------------
 # Runtime — docker stack
+#
+# These values become the defaults for the implicit `main` instance.
+# Each instance defined under `instances:` below inherits unset fields
+# from this block.
 # ---------------------------------------------------------------------------
 runtime:
   wordpress_port: 8188
@@ -39,6 +43,23 @@ runtime:
     password: admin
     email: admin@example.com
     site_title: Sandbox
+
+# ---------------------------------------------------------------------------
+# Instances — optional. Lets you run multiple isolated WordPress stacks
+# from one sandbox checkout (different ports + DB volumes + WP install
+# dirs). Target one with `./sb --instance <name> <cmd>` or via the
+# `instance` arg on every MCP tool. Without this block, a single `main`
+# instance is synthesized automatically from the `runtime:` block above.
+#
+# instances:
+#   qa:
+#     wordpress_port: 8288
+#     db_port: 3328
+#     mailpit_port: 8225
+#     project: xspeed              # which projects entry to wire on `./sb use`
+#     admin:
+#       site_title: Sandbox QA
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Projects — choose one with `./sb use <name>`.

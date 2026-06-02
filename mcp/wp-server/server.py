@@ -26,12 +26,116 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 SANDBOX_ROOT = Path(__file__).resolve().parents[2]
-COMPOSE_FILE = SANDBOX_ROOT / "docker-compose.yml"
-WP_ROOT = SANDBOX_ROOT / "runtime" / "wp"
-LOG_PATH = WP_ROOT / "wp-content" / "debug.log"
-FOCUS_FILE = SANDBOX_ROOT / ".focus"
-ACTIVE_FILE = SANDBOX_ROOT / ".active-project"
+COMPOSE_DIR = SANDBOX_ROOT / "runtime" / "compose"
+DEFAULT_INSTANCE = "main"
 
+# Per-instance helpers — mirror the CLI's resolution.
+
+def _wp_root(instance: str) -> Path:
+    return SANDBOX_ROOT / "runtime" / f"wp-{instance}"
+
+
+def _log_path(instance: str) -> Path:
+    return _wp_root(instance) / "wp-content" / "debug.log"
+
+
+def _focus_file(instance: str) -> Path:
+    return SANDBOX_ROOT / f".focus.{instance}"
+
+
+def _active_file(instance: str) -> Path:
+    return SANDBOX_ROOT / f".active-project.{instance}"
+
+
+def _compose_file(instance: str) -> Path:
+    return COMPOSE_DIR / f"{instance}.yml"
+
+
+def _project_name(instance: str) -> str:
+    return f"sandbox-{instance}"
+
+
+# Cached config — invalidated when sandbox.yml mtime changes so we
+# don't re-parse on every tool call but still pick up edits.
+_cfg_cache: dict = {"mtime": 0.0, "data": None}
+
+
+def _load_sandbox_yml() -> dict:
+    """Read sandbox.yml (+ sandbox.local.yml override) for instance lookups.
+
+    Cached on mtime so per-tool-call cost stays near-zero. Tools that
+    need per-instance config (ports, admin) call _resolve_instance(name).
+    """
+    cfg_path = SANDBOX_ROOT / "sandbox.yml"
+    local_path = SANDBOX_ROOT / "sandbox.local.yml"
+    if not cfg_path.exists():
+        return {}
+    mtime = max(
+        cfg_path.stat().st_mtime,
+        local_path.stat().st_mtime if local_path.exists() else 0,
+    )
+    if _cfg_cache["data"] is not None and mtime == _cfg_cache["mtime"]:
+        return _cfg_cache["data"]
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return {}
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    if local_path.exists():
+        local = yaml.safe_load(local_path.read_text()) or {}
+        # Shallow merge — local overrides at the top level.
+        for k, v in local.items():
+            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                cfg[k] = {**cfg[k], **v}
+            else:
+                cfg[k] = v
+    _cfg_cache["data"] = cfg
+    _cfg_cache["mtime"] = mtime
+    return cfg
+
+
+def _resolve_instance(instance: str) -> dict:
+    """Return per-instance ports/admin/app_password.
+
+    Falls back to env vars (set by the CLI when registering the MCP
+    server) for the default instance — keeps the pre-multi-instance
+    `main`-only flow working even before sandbox.yml is read.
+    """
+    cfg = _load_sandbox_yml()
+    runtime = cfg.get("runtime", {}) or {}
+    inst = (cfg.get("instances") or {}).get(instance, {}) or {}
+
+    rt_admin = runtime.get("admin") or {}
+    inst_admin = inst.get("admin") or {}
+    out = {
+        "wordpress_port": inst.get("wordpress_port",
+                                   runtime.get("wordpress_port", 8088)),
+        "mailpit_port": inst.get("mailpit_port",
+                                 runtime.get("mailpit_port", 8025)),
+        "admin": {**rt_admin, **inst_admin},
+    }
+
+    # App password: per-instance under instances.<name>.app_password,
+    # OR (for main only) the legacy mcp.wp.application_password key.
+    if instance == DEFAULT_INSTANCE:
+        app_pw = ((cfg.get("mcp") or {}).get("wp") or {}).get(
+            "application_password", ""
+        )
+        # Env wins over file when both set — that's how the CLI primes the
+        # server on startup before sandbox.local.yml is even written.
+        out["app_password"] = os.environ.get("WP_APP_PASSWORD") or app_pw
+        out["wordpress_port"] = int(
+            os.environ.get("WP_URL", "").rsplit(":", 1)[-1].split("/")[0]
+            or out["wordpress_port"]
+        ) if os.environ.get("WP_URL") else out["wordpress_port"]
+    else:
+        out["app_password"] = inst.get("app_password", "")
+    return out
+
+
+# Default-instance values for tools that pre-date the multi-instance era
+# (and for the docstring defaults). The CLI sets these env vars when it
+# registers the MCP server; we honor them as the main instance.
 WP_URL = os.environ.get("WP_URL", "http://localhost:8088")
 WP_USER = os.environ.get("WP_ADMIN_USER", "admin")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
@@ -71,8 +175,19 @@ mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)
 
 # ----------------------------- helpers -------------------------------
 
-def _compose(*args: str, capture: bool = True, timeout: int = 60) -> dict:
-    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
+def _compose(*args: str, instance: str = DEFAULT_INSTANCE,
+             capture: bool = True, timeout: int = 60) -> dict:
+    cf = _compose_file(instance)
+    if not cf.exists():
+        return {
+            "ok": False,
+            "error": f"no compose file for instance '{instance}' "
+                     f"(expected {cf}). Run `./sb apply` from the sandbox "
+                     f"dir to regenerate.",
+        }
+    cmd = ["docker", "compose",
+           "-p", _project_name(instance),
+           "-f", str(cf), *args]
     try:
         res = subprocess.run(
             cmd, capture_output=capture, text=True,
@@ -88,15 +203,18 @@ def _compose(*args: str, capture: bool = True, timeout: int = 60) -> dict:
     }
 
 
-def _wpcli(args: list[str], timeout: int = 60) -> dict:
-    return _compose("run", "--rm", "wpcli", *args, timeout=timeout)
+def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
+           timeout: int = 60) -> dict:
+    return _compose("run", "--rm", "wpcli", *args,
+                    instance=instance, timeout=timeout)
 
 
-def _wpcli_shell(shell_cmd: str, timeout: int = 60) -> dict:
+def _wpcli_shell(shell_cmd: str, instance: str = DEFAULT_INSTANCE,
+                 timeout: int = 60) -> dict:
     """Run a wp-cli command through sh -c so $(...) / pipes work."""
     return _compose(
         "run", "--rm", "--entrypoint", "sh", "wpcli", "-c", shell_cmd,
-        timeout=timeout,
+        instance=instance, timeout=timeout,
     )
 
 
@@ -120,18 +238,21 @@ def _safe_json(text: str):
 # ----------------------------- tools ---------------------------------
 
 @mcp.tool()
-def wp_cli(command: str, timeout: int = 60) -> dict:
+def wp_cli(command: str, timeout: int = 60,
+           instance: str = DEFAULT_INSTANCE) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
     `$(cat ...)`, pipes, or redirects, use wp_exec instead.
+
+    instance: which sandbox instance to target (default: main).
     """
-    return _wpcli(shlex.split(command), timeout=timeout)
+    return _wpcli(shlex.split(command), instance=instance, timeout=timeout)
 
 
 @mcp.tool()
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120) -> dict:
+            timeout: int = 120, instance: str = DEFAULT_INSTANCE) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -139,32 +260,40 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     it goes through `sh -c`.
 
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
+    instance: which sandbox instance to target (default: main).
     """
     args = ["exec"]
     if workdir:
         args += ["-w", workdir]
     args += ["-T", container, "sh", "-c", command]
-    return _compose(*args, timeout=timeout)
+    return _compose(*args, instance=instance, timeout=timeout)
 
 
 @mcp.tool()
 def wp_rest(method: str, path: str, body: dict | None = None,
-            query: dict | None = None) -> dict:
+            query: dict | None = None,
+            instance: str = DEFAULT_INSTANCE) -> dict:
     """Call the WordPress REST API.
 
     path: e.g. '/wp/v2/posts' (leading slash optional)
-    Auth via Application Password — set WP_APP_PASSWORD env var.
+    Auth via Application Password — auto-provisioned by `./sb install`.
+    instance: which sandbox instance to hit (default: main).
     """
-    if not WP_APP_PASSWORD:
+    inst_cfg = _resolve_instance(instance)
+    app_pw = inst_cfg["app_password"]
+    if not app_pw:
         return {
             "ok": False,
-            "error": "WP_APP_PASSWORD not set. Run `./sandbox install` "
-                     "(auto-provisions one) or generate at "
-                     f"{WP_URL}/wp-admin/profile.php and export it.",
+            "error": f"no application_password for instance '{instance}'. "
+                     f"Run `./sb install --instance {instance}` "
+                     f"(auto-provisions one).",
         }
-    url = f"{WP_URL.rstrip('/')}/wp-json{'/' if not path.startswith('/') else ''}{path}"
+    port = inst_cfg["wordpress_port"]
+    user = inst_cfg["admin"].get("user", "admin")
+    base = f"http://localhost:{port}"
+    url = f"{base}/wp-json{'/' if not path.startswith('/') else ''}{path}"
     try:
-        with httpx.Client(auth=(WP_USER, WP_APP_PASSWORD), timeout=30.0) as c:
+        with httpx.Client(auth=(user, app_pw), timeout=30.0) as c:
             r = c.request(method.upper(), url, params=query, json=body)
         return {"ok": r.is_success, "status": r.status_code,
                 "body": _safe_json(r.text)}
@@ -216,12 +345,15 @@ def http_fetch(url: str, method: str = "GET", follow_redirects: bool = True,
 
 
 @mcp.tool()
-def db_query(sql: str, mutate: bool = False) -> dict:
+def db_query(sql: str, mutate: bool = False,
+             instance: str = DEFAULT_INSTANCE) -> dict:
     """Run a SQL query against the WP database.
 
     Reads (SELECT/SHOW/DESCRIBE/EXPLAIN) run freely.
     Writes (INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE/REPLACE) require
     mutate=true — an explicit acknowledgement that this changes data.
+
+    instance: which sandbox instance to target (default: main).
     """
     head = sql.strip().split(None, 1)[0].upper() if sql.strip() else ""
     reads = {"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}
@@ -234,31 +366,36 @@ def db_query(sql: str, mutate: bool = False) -> dict:
         }
     if head not in reads and head not in writes:
         return {"ok": False, "error": f"unrecognized statement type: {head!r}"}
-    return _wpcli(["db", "query", sql])
+    return _wpcli(["db", "query", sql], instance=instance)
 
 
 @mcp.tool()
-def tail_log(lines: int = 100) -> dict:
-    """Tail wp-content/debug.log."""
-    if not LOG_PATH.exists():
-        return {"ok": True, "lines": [], "note": "debug.log not yet created"}
+def tail_log(lines: int = 100, instance: str = DEFAULT_INSTANCE) -> dict:
+    """Tail wp-content/debug.log for one instance (default: main)."""
+    log_path = _log_path(instance)
+    if not log_path.exists():
+        return {"ok": True, "lines": [], "note": "debug.log not yet created",
+                "path": str(log_path)}
     try:
-        data = LOG_PATH.read_bytes()
+        data = log_path.read_bytes()
         text = data.decode("utf-8", errors="replace")
         return {"ok": True, "lines": text.splitlines()[-lines:],
-                "path": str(LOG_PATH)}
+                "path": str(log_path)}
     except OSError as e:
         return {"ok": False, "error": str(e)}
 
 
 @mcp.tool()
-def fs_read(path: str, max_bytes: int = 200_000) -> dict:
-    """Read a file under runtime/wp/ (the WordPress install).
+def fs_read(path: str, max_bytes: int = 200_000,
+            instance: str = DEFAULT_INSTANCE) -> dict:
+    """Read a file under runtime/wp-<instance>/ (the WordPress install).
 
-    path is relative to runtime/wp/ — e.g. 'wp-content/themes/my-theme/style.css'.
+    path is relative to runtime/wp-<instance>/ — e.g. 'wp-content/themes/my-theme/style.css'.
     Refuses paths that escape the WP root.
+    instance: which sandbox instance (default: main).
     """
-    target = _safe_resolve(path, WP_ROOT)
+    wp_root = _wp_root(instance)
+    target = _safe_resolve(path, wp_root)
     if target is None:
         return {"ok": False, "error": f"path escapes WP root: {path!r}"}
     if not target.exists():
@@ -267,36 +404,41 @@ def fs_read(path: str, max_bytes: int = 200_000) -> dict:
         return {"ok": False, "error": f"not a file: {path}"}
     data = target.read_bytes()[:max_bytes]
     try:
-        return {"ok": True, "path": str(target.relative_to(WP_ROOT)),
+        return {"ok": True, "path": str(target.relative_to(wp_root)),
                 "size": target.stat().st_size,
                 "truncated": target.stat().st_size > max_bytes,
                 "content": data.decode("utf-8")}
     except UnicodeDecodeError:
-        return {"ok": True, "path": str(target.relative_to(WP_ROOT)),
+        return {"ok": True, "path": str(target.relative_to(wp_root)),
                 "size": target.stat().st_size, "binary": True,
                 "note": "binary file; use wp_exec to inspect"}
 
 
 @mcp.tool()
-def fs_write(path: str, content: str, create_dirs: bool = True) -> dict:
-    """Write a file under runtime/wp/. Creates parent dirs by default.
+def fs_write(path: str, content: str, create_dirs: bool = True,
+             instance: str = DEFAULT_INSTANCE) -> dict:
+    """Write a file under runtime/wp-<instance>/. Creates parent dirs by default.
 
     Refuses paths that escape WP root. Returns bytes written.
+    instance: which sandbox instance (default: main).
     """
-    target = _safe_resolve(path, WP_ROOT)
+    wp_root = _wp_root(instance)
+    target = _safe_resolve(path, wp_root)
     if target is None:
         return {"ok": False, "error": f"path escapes WP root: {path!r}"}
     if create_dirs:
         target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
-    return {"ok": True, "path": str(target.relative_to(WP_ROOT)),
+    return {"ok": True, "path": str(target.relative_to(wp_root)),
             "bytes": len(content.encode("utf-8"))}
 
 
 @mcp.tool()
-def fs_list(path: str = "", depth: int = 1) -> dict:
-    """List files under runtime/wp/<path>. depth=1 is shallow."""
-    target = _safe_resolve(path or ".", WP_ROOT)
+def fs_list(path: str = "", depth: int = 1,
+            instance: str = DEFAULT_INSTANCE) -> dict:
+    """List files under runtime/wp-<instance>/<path>. depth=1 is shallow."""
+    wp_root = _wp_root(instance)
+    target = _safe_resolve(path or ".", wp_root)
     if target is None or not target.exists():
         return {"ok": False, "error": f"not found or escapes root: {path!r}"}
     out = []
@@ -305,23 +447,31 @@ def fs_list(path: str = "", depth: int = 1) -> dict:
         if len(p.parts) - base_depth > depth:
             continue
         out.append({
-            "path": str(p.relative_to(WP_ROOT)),
+            "path": str(p.relative_to(wp_root)),
             "type": "dir" if p.is_dir() else "file",
             "size": p.stat().st_size if p.is_file() else None,
         })
         if len(out) >= 500:
             out.append({"note": "truncated at 500 entries"})
             break
-    return {"ok": True, "root": str(target.relative_to(WP_ROOT)), "entries": out}
+    return {"ok": True, "root": str(target.relative_to(wp_root)), "entries": out}
 
 
 # ------------------ Mailpit (test SMTP inbox) ------------------------
 
+def _mailpit_url(instance: str) -> str:
+    if instance == DEFAULT_INSTANCE and os.environ.get("MAILPIT_URL"):
+        return os.environ["MAILPIT_URL"]
+    port = _resolve_instance(instance)["mailpit_port"]
+    return f"http://localhost:{port}"
+
+
 @mcp.tool()
-def mail_list(limit: int = 20) -> dict:
+def mail_list(limit: int = 20, instance: str = DEFAULT_INSTANCE) -> dict:
     """List the most recent messages caught by Mailpit (test SMTP)."""
+    base = _mailpit_url(instance).rstrip("/")
     try:
-        r = httpx.get(f"{MAILPIT_URL.rstrip('/')}/api/v1/messages",
+        r = httpx.get(f"{base}/api/v1/messages",
                       params={"limit": limit}, timeout=10.0)
         return {"ok": r.is_success, "status": r.status_code,
                 "body": _safe_json(r.text)}
@@ -330,11 +480,11 @@ def mail_list(limit: int = 20) -> dict:
 
 
 @mcp.tool()
-def mail_get(message_id: str) -> dict:
+def mail_get(message_id: str, instance: str = DEFAULT_INSTANCE) -> dict:
     """Get a single message from Mailpit (headers, text, html)."""
+    base = _mailpit_url(instance).rstrip("/")
     try:
-        r = httpx.get(f"{MAILPIT_URL.rstrip('/')}/api/v1/message/{message_id}",
-                      timeout=10.0)
+        r = httpx.get(f"{base}/api/v1/message/{message_id}", timeout=10.0)
         return {"ok": r.is_success, "status": r.status_code,
                 "body": _safe_json(r.text)}
     except httpx.HTTPError as e:
@@ -366,7 +516,8 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
 
 @mcp.tool()
 def focus_get(include_claude_md: bool = True,
-              max_bytes: int = 16_000) -> dict:
+              max_bytes: int = 16_000,
+              instance: str = DEFAULT_INSTANCE) -> dict:
     """Return the currently-focused plugin's slug, source path, CLAUDE.md
     content, and any skill packs it ships (so Claude can read them on demand).
 
@@ -376,10 +527,16 @@ def focus_get(include_claude_md: bool = True,
     Devs set focus with `./sb focus <slug>`. Claude should default
     file edits, debugging, and questions to that plugin's repo, and should
     read any `available_skills[*]` SKILL.md that's relevant to the task.
+
+    instance: which sandbox instance (default: main). Focus + active project
+    are per-instance.
     """
-    focus = FOCUS_FILE.read_text().strip() if FOCUS_FILE.exists() else None
-    active = ACTIVE_FILE.read_text().strip() if ACTIVE_FILE.exists() else None
-    out = {"ok": True, "focus": focus, "active_project": active,
+    ff = _focus_file(instance)
+    af = _active_file(instance)
+    focus = ff.read_text().strip() if ff.exists() else None
+    active = af.read_text().strip() if af.exists() else None
+    out = {"ok": True, "instance": instance, "focus": focus,
+           "active_project": active,
            "source_path": None, "claude_md": None, "available_skills": []}
     if not focus:
         return out
@@ -416,6 +573,7 @@ def focus_get(include_claude_md: bool = True,
     # Resolve focused plugin's source repo. Symlinks now live at depth 1
     # inside wp-content/plugins/ (was runtime/plugins/ — depth 2 — pre-fix).
     candidates = [
+        _wp_root(instance) / "wp-content" / "plugins" / focus,
         SANDBOX_ROOT / "runtime" / "wp" / "wp-content" / "plugins" / focus,
         SANDBOX_ROOT / "runtime" / "plugins" / focus,           # legacy
         SANDBOX_ROOT / "plugins" / focus,                       # default plugins_home
@@ -460,37 +618,41 @@ def focus_get(include_claude_md: bool = True,
 
 
 @mcp.tool()
-def focus_set(plugin_slug: str) -> dict:
+def focus_set(plugin_slug: str,
+              instance: str = DEFAULT_INSTANCE) -> dict:
     """Set the focused plugin slug. Pass empty string to clear.
 
     When setting a focus, this shells out to `./sb focus <slug>` so the
     CLI's auto-link logic runs: if the focused plugin isn't already in
     the active project's plugin list, the active project is switched
     to one that contains it. Keeps focus + active_project consistent.
+
+    instance: which sandbox instance's focus to set (default: main).
     """
+    ff = _focus_file(instance)
+    af = _active_file(instance)
     if not plugin_slug:
-        if FOCUS_FILE.exists():
-            FOCUS_FILE.unlink()
-        return {"ok": True, "focus": None}
+        if ff.exists():
+            ff.unlink()
+        return {"ok": True, "instance": instance, "focus": None}
 
     slug = plugin_slug.strip()
     sb = SANDBOX_ROOT / "sb"
     if not sb.exists():
         # Fallback: just write the file without the auto-link niceties.
-        FOCUS_FILE.write_text(slug)
-        return {"ok": True, "focus": slug, "warning": "./sb not found — focus set without auto-link"}
+        ff.write_text(slug)
+        return {"ok": True, "instance": instance, "focus": slug,
+                "warning": "./sb not found — focus set without auto-link"}
 
     res = subprocess.run(
-        [str(sb), "focus", slug],
+        [str(sb), "--instance", instance, "focus", slug],
         capture_output=True, text=True, cwd=str(SANDBOX_ROOT), timeout=120,
     )
     out = {
         "ok": res.returncode == 0,
-        "focus": FOCUS_FILE.read_text().strip() if FOCUS_FILE.exists() else None,
-        "active_project": (
-            (SANDBOX_ROOT / ".active-project").read_text().strip()
-            if (SANDBOX_ROOT / ".active-project").exists() else None
-        ),
+        "instance": instance,
+        "focus": ff.read_text().strip() if ff.exists() else None,
+        "active_project": af.read_text().strip() if af.exists() else None,
         "stdout": res.stdout,
     }
     if res.stderr.strip():
@@ -501,22 +663,23 @@ def focus_set(plugin_slug: str) -> dict:
 # ------------------ legacy convenience -------------------------------
 
 @mcp.tool()
-def activate_plugin(slug: str) -> dict:
+def activate_plugin(slug: str, instance: str = DEFAULT_INSTANCE) -> dict:
     """wp plugin activate <slug>. Slug must match the plugin folder name."""
-    return _wpcli(["plugin", "activate", slug])
+    return _wpcli(["plugin", "activate", slug], instance=instance)
 
 
 @mcp.tool()
-def deactivate_plugin(slug: str) -> dict:
+def deactivate_plugin(slug: str, instance: str = DEFAULT_INSTANCE) -> dict:
     """wp plugin deactivate <slug>."""
-    return _wpcli(["plugin", "deactivate", slug])
+    return _wpcli(["plugin", "deactivate", slug], instance=instance)
 
 
 @mcp.tool()
-def import_content(seed_file: str, authors: str = "create") -> dict:
+def import_content(seed_file: str, authors: str = "create",
+                   instance: str = DEFAULT_INSTANCE) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
     return _wpcli(["import", f"/seeds/{seed_file}",
-                   f"--authors={authors}"], timeout=180)
+                   f"--authors={authors}"], instance=instance, timeout=180)
 
 
 # ----------------------------- headless browser ------------------------
@@ -529,7 +692,8 @@ TOOLS_VENV_PY = SANDBOX_ROOT / "runtime" / ".venv-tools" / "bin" / "python"
 def visit(url: str, login: bool = False, check_iframes: bool = False,
           screenshot: str | None = None, full_page: bool = False,
           timeout: int = 20, width: int = 1280, height: int = 800,
-          wait_until: str = "domcontentloaded") -> dict:
+          wait_until: str = "domcontentloaded",
+          instance: str = DEFAULT_INSTANCE) -> dict:
     """Load `url` in headless Chromium and return a structured report
     (status, title, console errors, network failures, iframe inventory).
 

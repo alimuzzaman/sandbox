@@ -2154,6 +2154,183 @@ def cmd_clean(cfg, args) -> None:
     ok(f"Stopped and wiped DB volume for instance '{inst}'")
 
 
+def _next_free_port(start: int, used: set[int]) -> int:
+    """Find the next port >= start that is not in `used` and not bound by
+    another local listener. Avoids handing out a port the OS will reject."""
+    import socket
+    p = start
+    while True:
+        if p not in used:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", p))
+                    return p
+                except OSError:
+                    pass
+        p += 1
+
+
+def _pick_instance_ports(cfg: dict) -> dict[str, int]:
+    """Pick wordpress_port, db_port, mailpit_port for a new instance.
+
+    Walks every defined instance's resolved config to collect ports
+    already claimed, then bumps each base by 1 until we find a free trio.
+    Bases are picked off `main`'s defaults so new instances stay in the
+    same numeric neighborhood (8188 → 8189 → 8190 …).
+    """
+    instances = resolve_instances(cfg)
+    main = instances.get(DEFAULT_INSTANCE, {})
+    used: set[int] = set()
+    for inst in instances.values():
+        used.update({inst["wordpress_port"], inst["db_port"], inst["mailpit_port"]})
+    return {
+        "wordpress_port": _next_free_port(main.get("wordpress_port", 8188) + 1, used),
+        "db_port": _next_free_port(main.get("db_port", 3318) + 1, used),
+        "mailpit_port": _next_free_port(main.get("mailpit_port", 8125) + 1, used),
+    }
+
+
+def cmd_instance(cfg, args) -> None:
+    """Create / delete a sandbox instance end-to-end.
+
+    `./sb instance create <name>` picks free ports, writes the block to
+    sandbox.local.yml, boots the stack, installs WordPress, and prints
+    the admin URL. Idempotent: re-running on an existing instance just
+    re-applies (compose regen + ensures it's up).
+
+    `./sb instance delete <name>` stops the stack, removes the volume,
+    deletes runtime/wp-<name>/, removes the block from sandbox.local.yml,
+    and removes the per-instance state files. Refuses to delete `main`
+    (use ./sb clean for that).
+    """
+    action = args.action
+    name = args.name
+
+    if action not in ("create", "delete"):
+        die("usage: ./sb instance create|delete <name>")
+    if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name or ""):
+        die("instance name must be lowercase, start with [a-z0-9], "
+            "and contain only [a-z0-9_-] (max 31 chars)")
+
+    if action == "create":
+        existing = resolve_instances(cfg)
+        if name in existing and name != DEFAULT_INSTANCE:
+            info(f"instance '{name}' already defined — re-applying "
+                 f"(regenerating compose, ensuring stack is up)")
+            args.resolved_instance = name
+            cmd_up(cfg, args)
+            return
+
+        ports = _pick_instance_ports(cfg)
+        info(f"picked ports: WP={ports['wordpress_port']} "
+             f"DB={ports['db_port']} mailpit={ports['mailpit_port']}")
+
+        # Append the instance block to sandbox.local.yml (gitignored,
+        # per-machine). Only the ports + admin.site_title are written;
+        # everything else inherits from runtime: defaults.
+        local = _local_yaml()
+        local.setdefault("instances", {})[name] = {
+            "wordpress_port": ports["wordpress_port"],
+            "db_port": ports["db_port"],
+            "mailpit_port": ports["mailpit_port"],
+            "admin": {"site_title": f"Sandbox {name}"},
+        }
+        _write_local_yaml(local)
+        ok(f"Wrote instances.{name} to {CONFIG_LOCAL.name}")
+
+        # Reload cfg now that the new block is on disk, then regenerate
+        # compose files (the legacy main() flow already ran with the
+        # *previous* cfg before we knew this instance existed).
+        cfg = load_config()
+        write_compose_files(cfg)
+
+        # Boot + install in one shot. Cmd_up + cmd_install both read
+        # args.resolved_instance, so set it.
+        args.resolved_instance = name
+        print(f"\n▸ Booting docker stack for '{name}'…")
+        cmd_up(cfg, args)
+
+        # Wait for WP to be reachable before wp core install.
+        import urllib.request, time
+        port = ports["wordpress_port"]
+        for _ in range(30):
+            try:
+                urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+                break
+            except Exception:
+                time.sleep(1)
+
+        print(f"\n▸ Installing WordPress on '{name}'…")
+        cmd_install(cfg, args)
+
+        print()
+        ok(f"Instance '{name}' ready at http://localhost:{port}/wp-admin/")
+        print(f"  Admin: admin / admin")
+        print()
+        print(f"  Next:")
+        print(f"    ./sb use <project> --instance {name}     # link + activate plugins")
+        print(f"    ./sb wp --instance {name} plugin list")
+        print(f"    ./sb instances                           # see all")
+        return
+
+    # delete
+    if name == DEFAULT_INSTANCE:
+        die(f"refusing to delete the '{DEFAULT_INSTANCE}' instance — "
+            f"it's the implicit default. Use `./sb clean` to wipe its "
+            f"data, or remove the runtime: block from sandbox.yml.")
+
+    instances = resolve_instances(cfg)
+    if name not in instances:
+        die(f"unknown instance '{name}'. Defined: "
+            f"{', '.join(instances.keys())}")
+
+    if not args.yes:
+        print(f"\n  This will:")
+        print(f"    • stop + remove all containers for instance '{name}'")
+        print(f"    • delete the DB volume")
+        print(f"    • delete runtime/wp-{name}/ and runtime/snapshots/{name}/")
+        print(f"    • remove instances.{name} from sandbox.local.yml")
+        print(f"    • delete .focus.{name} / .active-project.{name}")
+        print()
+        ans = input(f"  Type the instance name '{name}' to confirm: ").strip()
+        if ans != name:
+            info("cancelled")
+            return
+
+    # 1. Stop + remove containers + volume
+    args.resolved_instance = name
+    info(f"stopping + removing containers + volume for '{name}'")
+    compose("down", "-v", instance=name, check=False)
+
+    # 2. Remove WP install dir + snapshots
+    for path in (wp_dir(name), snapshots_dir(name)):
+        if path.exists():
+            info(f"removing {path}")
+            shutil.rmtree(path, ignore_errors=True)
+
+    # 3. Remove state files
+    for path in (focus_file(name), active_project_file(name)):
+        if path.exists():
+            info(f"removing {path}")
+            path.unlink()
+
+    # 4. Remove compose file
+    cf = compose_file(name)
+    if cf.exists():
+        cf.unlink()
+
+    # 5. Remove block from sandbox.local.yml (only — never touch sandbox.yml)
+    local = _local_yaml()
+    if name in (local.get("instances") or {}):
+        del local["instances"][name]
+        if not local["instances"]:
+            del local["instances"]
+        _write_local_yaml(local)
+        info(f"removed instances.{name} from {CONFIG_LOCAL.name}")
+
+    ok(f"Instance '{name}' deleted.")
+
+
 def cmd_instances(cfg, args) -> None:
     """List defined instances + their status and ports."""
     instances = resolve_instances(cfg)
@@ -2286,6 +2463,13 @@ Then pick a project and a plugin:
     sub.add_parser("instances",
         help="List defined sandbox instances + their status + ports")
 
+    ins = sub.add_parser("instance",
+        help="Create or delete a sandbox instance (auto-picks ports)")
+    ins.add_argument("action", choices=["create", "delete"])
+    ins.add_argument("name")
+    ins.add_argument("--yes", action="store_true",
+        help="skip the confirmation prompt on delete")
+
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
     # we register it on the top-level parser AND inject the same flag onto
@@ -2343,6 +2527,7 @@ Then pick a project and a plugin:
         "introspect": cmd_introspect,
         "visit": cmd_visit,
         "instances": cmd_instances,
+        "instance": cmd_instance,
     }
     handlers[args.cmd](cfg, args)
 

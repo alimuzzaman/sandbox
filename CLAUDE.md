@@ -361,14 +361,22 @@ instances:                     # optional — main is implicit
 No `instances:` block → behaves identically to the pre-multi-instance
 era (a single `main` instance is synthesized from `runtime:`).
 
-**Apply + boot a new instance:**
+**Create a new instance (recommended — one command):**
 
 ```
+./sb instance create qa                    # picks free ports, writes yaml, boots, installs
+./sb visit http://localhost:8189/wp-admin/ # verify (port is auto-assigned + printed)
+./sb instance delete qa                    # round-trip cleanup (containers + volume + files + yaml block)
+```
+
+**Or do it by hand** (when you want specific ports or custom admin):
+
+```
+# 1. add to sandbox.yml under instances:
 ./sb apply                                 # regenerate runtime/compose/<inst>.yml for all instances
 ./sb up --instance qa                      # boot qa stack on its own ports
 ./sb install --instance qa                 # wp core install + app password
 ./sb use xspeed-clean --instance qa        # symlink + activate plugins
-./sb visit http://localhost:8288/wp-admin/ # verify
 ./sb instances                             # list all defined + status
 ```
 

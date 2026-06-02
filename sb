@@ -37,14 +37,27 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "sandbox.yml"
 CONFIG_LOCAL = ROOT / "sandbox.local.yml"
 COMPOSE = ROOT / "docker-compose.yml"
+COMPOSE_DIR = ROOT / "runtime" / "compose"
+
+# Multi-instance constants. The "main" instance preserves the
+# pre-multi-instance behavior; additional instances live in
+# sandbox.yml under `instances:` and get their own compose project,
+# DB volume, WP dir, ports, and state files.
+DEFAULT_INSTANCE = "main"
+
+# Legacy state files (pre-multi-instance) — these are the *main* instance's
+# state on disk after the one-time migration in `cmd_apply`. New code reads
+# them via `active_project_file()` / `focus_file()`; these aliases stay so
+# any older code paths still find them.
 ACTIVE = ROOT / ".active-project"
 FOCUS = ROOT / ".focus"
+
+# Pre-multi-instance WP dir. After `cmd_apply`, `runtime/wp/` is migrated to
+# `runtime/wp-main/` and a compat symlink at the old path keeps these aliases
+# valid for one release. New code uses `wp_dir(instance)`.
 WP_DIR = ROOT / "runtime" / "wp"
-SNAPSHOTS_DIR = ROOT / "runtime" / "snapshots"
-# Symlinks must live at depth 1 inside wp-content/plugins so WordPress's
-# get_plugins() picks them up. (Was runtime/plugins → bind-mounted at depth 2
-# under _sandbox/, which WP never scans.)
 PLUGINS_DIR = WP_DIR / "wp-content" / "plugins"
+SNAPSHOTS_DIR = ROOT / "runtime" / "snapshots"
 SEEDS_DIR = ROOT / "runtime" / "seeds"
 MCP_DIR = ROOT / "mcp" / "wp-server"
 MCP_VENV = MCP_DIR / ".venv"
@@ -143,31 +156,332 @@ def deep_merge(a: dict, b: dict) -> dict:
     return out
 
 
-def compose(*args: str, check: bool = True, capture: bool = False):
-    return run(["docker", "compose", "-f", str(COMPOSE), *args],
-               check=check, capture=capture)
+# --------------------- multi-instance plumbing -----------------------
+#
+# Resolution model: `instances:` is an optional top-level block in
+# sandbox.yml. Each instance inherits unset fields (ports, admin,
+# images) from the top-level `runtime:` block. If `instances:` is
+# absent entirely, we synthesize {"main": {}} so existing single-
+# instance configs keep working with zero edits.
+
+def resolve_instances(cfg: dict) -> dict[str, dict]:
+    """Return {instance_name: resolved_instance_config}.
+
+    Each resolved dict has: wordpress_port, db_port, mailpit_port,
+    admin (dict), wordpress_image, mariadb_image, wpcli_image,
+    project (str|None). Values come from per-instance overrides
+    first, then the top-level runtime: block, then hardcoded defaults.
+    """
+    runtime = cfg.get("runtime", {}) or {}
+    instances = cfg.get("instances")
+
+    def merged(inst: dict) -> dict:
+        # Per-instance values override runtime defaults; admin dict is
+        # shallow-merged so a per-instance override (e.g. site_title)
+        # doesn't require restating user/password/email.
+        rt_admin = (runtime.get("admin") or {})
+        inst_admin = (inst.get("admin") or {})
+        return {
+            "wordpress_port": inst.get("wordpress_port",
+                                       runtime.get("wordpress_port", 8088)),
+            "db_port": inst.get("db_port",
+                                runtime.get("db_port", 3307)),
+            "mailpit_port": inst.get("mailpit_port",
+                                     runtime.get("mailpit_port", 8025)),
+            "wordpress_image": inst.get("wordpress_image",
+                                        runtime.get("wordpress_image",
+                                                    "wordpress:latest")),
+            "mariadb_image": inst.get("mariadb_image",
+                                      runtime.get("mariadb_image",
+                                                  "mariadb:latest")),
+            "wpcli_image": inst.get("wpcli_image",
+                                    runtime.get("wpcli_image",
+                                                "wordpress:cli")),
+            "admin": {**rt_admin, **inst_admin},
+            "project": inst.get("project"),
+        }
+
+    if not instances:
+        return {DEFAULT_INSTANCE: merged({})}
+    return {name: merged(inst or {}) for name, inst in instances.items()}
 
 
-def wpcli(args: list[str], check: bool = True, capture: bool = False):
-    return compose("run", "--rm", "wpcli", *args, check=check, capture=capture)
+def compose_file(instance: str) -> Path:
+    """Per-instance generated compose file path."""
+    return COMPOSE_DIR / f"{instance}.yml"
+
+
+def wp_dir(instance: str) -> Path:
+    """Per-instance WordPress install dir."""
+    return ROOT / "runtime" / f"wp-{instance}"
+
+
+def plugins_dir(instance: str) -> Path:
+    return wp_dir(instance) / "wp-content" / "plugins"
+
+
+def active_project_file(instance: str) -> Path:
+    return ROOT / f".active-project.{instance}"
+
+
+def focus_file(instance: str) -> Path:
+    return ROOT / f".focus.{instance}"
+
+
+def snapshots_dir(instance: str) -> Path:
+    return ROOT / "runtime" / "snapshots" / instance
+
+
+def project_name(instance: str) -> str:
+    """docker-compose project name — must be unique per instance."""
+    return f"sandbox-{instance}"
+
+
+def _plugins_home(cfg: dict) -> Path:
+    """Resolve `defaults.plugins_home` to an absolute path, creating it."""
+    defaults = cfg.get("defaults", {}) or {}
+    raw = defaults.get("plugins_home", "") or "./plugins"
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (ROOT / p).resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def render_compose(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
+    """Build the docker-compose YAML for one instance.
+
+    Mirrors the original docker-compose.yml structure but parameterizes
+    project name, ports, volume name, and WP bind-mount target. Kept as
+    a Python f-string (no Jinja2 dependency) — the template is small
+    and stable enough to inline.
+    """
+    return f"""# Generated by ./sb — do not edit by hand. Edit sandbox.yml + re-run ./sb apply.
+name: {project_name(instance)}
+
+services:
+  wp:
+    image: {inst_cfg["wordpress_image"]}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "{inst_cfg["wordpress_port"]}:80"
+    # The official wordpress:latest image ships Apache with
+    # `AllowOverride None` for /var/www/, which silently breaks pretty
+    # permalinks (wp-json/ 404s). Patch the conf on every start, then
+    # hand off to the image's entrypoint.
+    command: >
+      bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
+      && docker-entrypoint.sh apache2-foreground"
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wp
+      WORDPRESS_DB_PASSWORD: wp
+      WORDPRESS_DB_NAME: wp
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+        define('SCRIPT_DEBUG', true);
+        define('WP_ENVIRONMENT_TYPE', 'local');
+    volumes:
+      - ./runtime/wp-{instance}:/var/www/html
+      - ./runtime/seeds:/seeds
+      # Bind-mount plugin sources at the same absolute host path so the
+      # symlinks `./sb add` creates under wp-content/plugins/ resolve
+      # inside the container.
+      - {plugins_host}:{plugins_host}
+      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+
+  db:
+    image: {inst_cfg["mariadb_image"]}
+    environment:
+      MARIADB_DATABASE: wp
+      MARIADB_USER: wp
+      MARIADB_PASSWORD: wp
+      MARIADB_ROOT_PASSWORD: root
+    ports:
+      - "{inst_cfg["db_port"]}:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin --user=root --password=$$MARIADB_ROOT_PASSWORD ping --silent"]
+      interval: 5s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "{inst_cfg["mailpit_port"]}:8025"
+      - "1025"
+
+  wpcli:
+    image: {inst_cfg["wpcli_image"]}
+    depends_on:
+      - wp
+    user: "33:33"
+    working_dir: /var/www/html
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wp
+      WORDPRESS_DB_PASSWORD: wp
+      WORDPRESS_DB_NAME: wp
+    volumes:
+      - ./runtime/wp-{instance}:/var/www/html
+      - ./runtime/seeds:/seeds
+      - {plugins_host}:{plugins_host}
+      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+    entrypoint: ["wp", "--allow-root"]
+    command: ["--info"]
+
+volumes:
+  db_data:
+"""
+
+
+def write_compose_files(cfg: dict) -> None:
+    """Regenerate one compose file per instance under runtime/compose/.
+
+    Idempotent: safe to call on every `sb` invocation. Old compose files
+    for instances no longer in sandbox.yml are removed so stale stacks
+    don't linger.
+    """
+    COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
+    plugins_host = _plugins_home(cfg)
+    instances = resolve_instances(cfg)
+
+    # Write current instances
+    current_files = set()
+    for name, inst_cfg in instances.items():
+        path = compose_file(name)
+        path.write_text(render_compose(name, inst_cfg, plugins_host))
+        current_files.add(path.name)
+
+    # Remove orphaned compose files (instance was deleted from sandbox.yml).
+    # Only remove .yml under our managed dir — don't touch user files.
+    for existing in COMPOSE_DIR.glob("*.yml"):
+        if existing.name not in current_files:
+            existing.unlink()
+
+
+def _legacy_stack_running() -> bool:
+    """True if a docker-compose stack is up under the old (pre-multi-instance)
+    project name `sandbox`, indicating an in-flight install we shouldn't
+    blindly migrate underneath of."""
+    try:
+        res = subprocess.run(
+            ["docker", "compose", "-p", "sandbox", "ps", "-q"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return bool((res.stdout or "").strip())
+
+
+def migrate_legacy_layout() -> None:
+    """One-time migration of pre-multi-instance state into the `main` slot.
+
+    Moves runtime/wp/ → runtime/wp-main/, runtime/snapshots/* into
+    runtime/snapshots/main/, and .active-project / .focus into their
+    per-instance equivalents. Leaves compat symlinks at the old paths so
+    callers that still hardcode `runtime/wp/` etc. keep working for one
+    release.
+
+    Idempotent: no-op when the new layout is already in place. Refuses
+    to migrate while a docker stack is running under the old project
+    name `sandbox` — moving runtime/wp/ to runtime/wp-main/ would yank
+    the bind-mount target out from under live containers.
+    """
+    # State files: .active-project → .active-project.main, etc.
+    # Always safe to migrate (small files, no container reads them).
+    legacy_state = [
+        (ROOT / ".active-project", active_project_file(DEFAULT_INSTANCE)),
+        (ROOT / ".focus",          focus_file(DEFAULT_INSTANCE)),
+    ]
+    for old, new in legacy_state:
+        if old.exists() and not old.is_symlink() and not new.exists():
+            old.rename(new)
+        if new.exists() and not old.exists():
+            old.symlink_to(new.name)
+
+    # WP dir + snapshots — only migrate when no legacy stack is running.
+    old_wp = ROOT / "runtime" / "wp"
+    new_wp = wp_dir(DEFAULT_INSTANCE)
+    needs_wp_migration = (old_wp.exists() and not old_wp.is_symlink()
+                          and not new_wp.exists())
+
+    if needs_wp_migration and _legacy_stack_running():
+        info(
+            "skipping runtime/wp/ → runtime/wp-main/ migration: a docker "
+            "stack is running under the old project name `sandbox`. Stop "
+            "it first: `docker compose -p sandbox down` (NOT `./sb down`, "
+            "which targets sandbox-main)."
+        )
+        return
+
+    if needs_wp_migration:
+        info(f"migrating runtime/wp/ → runtime/wp-{DEFAULT_INSTANCE}/ (one-time)")
+        old_wp.rename(new_wp)
+    if new_wp.exists() and not old_wp.exists():
+        # Compat symlink so old hardcoded refs (`./runtime/wp/...`) keep working.
+        old_wp.symlink_to(new_wp.name)
+
+    # runtime/snapshots/<name>/ → runtime/snapshots/main/<name>/
+    snap_root = ROOT / "runtime" / "snapshots"
+    main_snap = snapshots_dir(DEFAULT_INSTANCE)
+    if snap_root.exists():
+        for entry in list(snap_root.iterdir()):
+            # Skip the per-instance dirs themselves.
+            if entry.name == DEFAULT_INSTANCE or entry.is_symlink():
+                continue
+            if entry.is_dir():
+                main_snap.mkdir(parents=True, exist_ok=True)
+                target = main_snap / entry.name
+                if not target.exists():
+                    entry.rename(target)
+
+
+def compose(*args: str, instance: str = DEFAULT_INSTANCE,
+            check: bool = True, capture: bool = False):
+    """Run `docker compose` against one instance's stack.
+
+    Uses the per-instance project name (-p sandbox-<instance>) and
+    generated compose file. Caller must have run write_compose_files()
+    at least once (the CLI entrypoint does this on every invocation).
+    """
+    return run(
+        ["docker", "compose",
+         "-p", project_name(instance),
+         "-f", str(compose_file(instance)),
+         *args],
+        check=check, capture=capture,
+    )
+
+
+def wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
+          check: bool = True, capture: bool = False):
+    return compose("run", "--rm", "wpcli", *args,
+                   instance=instance, check=check, capture=capture)
 
 
 def write_env_for_compose(cfg: dict) -> None:
-    """Materialize the few values docker-compose's .env file needs."""
+    """Legacy: materialize values for the checked-in docker-compose.yml.
+
+    Pre-multi-instance, this wrote a `.env` file consumed by
+    `docker-compose.yml` (the checked-in file). The new flow ignores
+    that file entirely — each instance has its own generated compose
+    file with values baked in. We keep this function so anyone calling
+    it from out-of-tree code (or older skills) still gets a valid
+    `.env`, but the multi-instance code path doesn't depend on it.
+    """
     rt = cfg.get("runtime", {})
-    defaults = cfg.get("defaults", {}) or {}
-    raw = defaults.get("plugins_home", "") or "./plugins"
-    plugins_home = Path(raw).expanduser()
-    if not plugins_home.is_absolute():
-        plugins_home = (ROOT / plugins_home).resolve()
-    plugins_home.mkdir(parents=True, exist_ok=True)
+    plugins_home = _plugins_home(cfg)
     env = ROOT / ".env"
     env.write_text(
         f"WP_PORT={rt.get('wordpress_port', 8088)}\n"
         f"DB_PORT={rt.get('db_port', 3307)}\n"
         f"MAILPIT_PORT={rt.get('mailpit_port', 8025)}\n"
-        # Bind-mount plugin sources at the same absolute path inside the
-        # container, so absolute symlinks under wp-content/plugins/ resolve.
         f"SANDBOX_PLUGINS_HOST={plugins_home}\n"
     )
 
@@ -175,25 +489,28 @@ def write_env_for_compose(cfg: dict) -> None:
 # ----------------------------- commands ------------------------------
 
 def cmd_up(cfg: dict, args) -> None:
-    write_env_for_compose(cfg)
-    compose("up", "-d", "wp", "db", "mailpit")
-    rt = cfg.get("runtime", {})
-    ok(f"WordPress: http://localhost:{rt.get('wordpress_port', 8088)}")
-    ok(f"Mailpit:   http://localhost:{rt.get('mailpit_port', 8025)}")
+    inst = args.resolved_instance
+    inst_cfg = resolve_instances(cfg)[inst]
+    compose("up", "-d", "wp", "db", "mailpit", instance=inst)
+    ok(f"WordPress: http://localhost:{inst_cfg['wordpress_port']}")
+    ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
 
 
 def cmd_down(cfg, args) -> None:
-    compose("down")
+    compose("down", instance=args.resolved_instance)
 
 
 def cmd_status(cfg, args) -> None:
-    compose("ps")
-    if ACTIVE.exists():
-        ok(f"Active project: {ACTIVE.read_text().strip()}")
+    inst = args.resolved_instance
+    compose("ps", instance=inst)
+    apf = active_project_file(inst)
+    ff = focus_file(inst)
+    if apf.exists():
+        ok(f"Active project: {apf.read_text().strip()}")
     else:
         info("No active project (run: ./sb use <name>)")
-    if FOCUS.exists():
-        ok(f"Focused plugin: {FOCUS.read_text().strip()}")
+    if ff.exists():
+        ok(f"Focused plugin: {ff.read_text().strip()}")
     else:
         info("No focused plugin (run: ./sb focus <slug>)")
 
@@ -219,25 +536,28 @@ def _project_for_plugin(cfg: dict, slug: str) -> str | None:
 
 
 def cmd_focus(cfg, args) -> None:
+    inst = args.resolved_instance
+    ff = focus_file(inst)
+    apf = active_project_file(inst)
     if args.clear:
-        if FOCUS.exists():
-            FOCUS.unlink()
+        if ff.exists():
+            ff.unlink()
         ok("Cleared plugin focus")
         return
     if not args.slug:
-        if FOCUS.exists():
-            print(FOCUS.read_text().strip())
+        if ff.exists():
+            print(ff.read_text().strip())
         else:
             info("No focused plugin set")
         return
-    FOCUS.write_text(args.slug)
+    ff.write_text(args.slug)
     ok(f"Focused plugin: {args.slug}")
 
     # Auto-link: if the focused plugin isn't already in the active
     # project's plugin list, switch the active project to one that
     # contains it. Keeps focus + active_project consistent so users
     # don't have to think about both concepts.
-    active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    active = apf.read_text().strip() if apf.exists() else None
     projs = cfg.get("projects", {}) or {}
     active_slugs = []
     if active and active in projs:
@@ -265,21 +585,22 @@ def cmd_focus(cfg, args) -> None:
     info(f"switching active project: {active or '(none)'} → {target} "
          f"(contains '{args.slug}')")
     import types
-    cmd_use(cfg, types.SimpleNamespace(name=target))
+    cmd_use(cfg, types.SimpleNamespace(name=target, resolved_instance=inst))
 
 
 def cmd_logs(cfg, args) -> None:
-    compose("logs", "-f", "wp", "db")
+    compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
 
 
 def cmd_shell(cfg, args) -> None:
-    compose("exec", "wp", "bash")
+    compose("exec", "wp", "bash", instance=args.resolved_instance)
 
 
 def cmd_install(cfg, args) -> None:
-    rt = cfg.get("runtime", {})
-    adm = rt.get("admin", {})
-    port = rt.get("wordpress_port", 8088)
+    inst = args.resolved_instance
+    inst_cfg = resolve_instances(cfg)[inst]
+    adm = inst_cfg["admin"]
+    port = inst_cfg["wordpress_port"]
     wpcli([
         "core", "install",
         f"--url=http://localhost:{port}",
@@ -288,8 +609,8 @@ def cmd_install(cfg, args) -> None:
         f"--admin_password={adm.get('password', 'admin')}",
         f"--admin_email={adm.get('email', 'admin@example.com')}",
         "--skip-email",
-    ])
-    wpcli(["rewrite", "structure", "/%postname%/"])
+    ], instance=inst)
+    wpcli(["rewrite", "structure", "/%postname%/"], instance=inst)
 
     # Auto-provision an Application Password for the MCP server so wp_rest
     # works out of the box. Idempotent: deletes any prior 'wp-mcp' password
@@ -298,14 +619,14 @@ def cmd_install(cfg, args) -> None:
     wpcli([
         "user", "application-password", "delete",
         adm.get("user", "admin"), "wp-mcp", "--all",
-    ], check=False, capture=True)
+    ], instance=inst, check=False, capture=True)
     res = wpcli([
         "user", "application-password", "create",
         adm.get("user", "admin"), "wp-mcp", "--porcelain",
-    ], check=False, capture=True)
+    ], instance=inst, check=False, capture=True)
     app_pw = (res.stdout or "").strip().splitlines()[-1] if res.returncode == 0 else ""
     if app_pw:
-        save_local_app_password(app_pw)
+        save_local_app_password(app_pw, instance=inst)
         ok("Application Password saved to sandbox.local.yml")
     else:
         info("(Could not auto-create Application Password — set it manually "
@@ -315,16 +636,25 @@ def cmd_install(cfg, args) -> None:
        f"(user: {adm.get('user', 'admin')})")
 
 
-def save_local_app_password(app_pw: str) -> None:
+def save_local_app_password(app_pw: str, instance: str = DEFAULT_INSTANCE) -> None:
     """Persist the WP Application Password into sandbox.local.yml so the
-    MCP server picks it up on next launch."""
+    MCP server picks it up on next launch.
+
+    For the default `main` instance, writes to the legacy
+    `mcp.wp.application_password` key for backwards compatibility.
+    For other instances, writes to `instances.<name>.app_password` so
+    each instance has its own secret without colliding.
+    """
     ensure_pyyaml()
     import yaml
     local = {}
     if CONFIG_LOCAL.exists():
         with CONFIG_LOCAL.open() as f:
             local = yaml.safe_load(f) or {}
-    local.setdefault("mcp", {}).setdefault("wp", {})["application_password"] = app_pw
+    if instance == DEFAULT_INSTANCE:
+        local.setdefault("mcp", {}).setdefault("wp", {})["application_password"] = app_pw
+    else:
+        local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
     with CONFIG_LOCAL.open("w") as f:
         yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
 
@@ -513,7 +843,8 @@ def _resolve_plugin_github(plug: dict, project_org: str, default_org: str) -> st
     return f"{org}/{repo_name}"
 
 
-def _install_picked_project(cfg: dict, name: str, report: dict) -> None:
+def _install_picked_project(cfg: dict, name: str, report: dict,
+                            instance: str = DEFAULT_INSTANCE) -> None:
     """Materialize a project from sandbox.yml.
 
     Clone source plugins (when not already on disk), symlink them into the
@@ -528,15 +859,12 @@ def _install_picked_project(cfg: dict, name: str, report: dict) -> None:
         return
 
     defaults = cfg.get("defaults", {}) or {}
-    raw = defaults.get("plugins_home", "") or "./plugins"
-    plugins_home = Path(raw).expanduser()
-    if not plugins_home.is_absolute():
-        plugins_home = (ROOT / plugins_home).resolve()
-    plugins_home.mkdir(parents=True, exist_ok=True)
+    plugins_home = _plugins_home(cfg)
     default_org = (defaults.get("github_org") or "").strip()
     project_org = (proj.get("github_org") or "").strip()
 
-    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    plug_dir = plugins_dir(instance)
+    plug_dir.mkdir(parents=True, exist_ok=True)
 
     for plug in proj.get("plugins", []) or []:
         slug = plug["slug"]
@@ -577,7 +905,7 @@ def _install_picked_project(cfg: dict, name: str, report: dict) -> None:
                 report["failed"].append((slug, hint))
                 continue
 
-        link = PLUGINS_DIR / slug
+        link = plug_dir / slug
         _force_symlink(link, src)
         ok(f"linked {slug} → {src}")
         report["linked"].append(slug)
@@ -585,13 +913,14 @@ def _install_picked_project(cfg: dict, name: str, report: dict) -> None:
 
     for slug in proj.get("install_from_wporg", []) or []:
         info(f"installing {slug} from wp.org (if missing)…")
-        wpcli(["plugin", "install", slug, "--activate"], check=False)
+        wpcli(["plugin", "install", slug, "--activate"],
+              instance=instance, check=False)
         report["wporg"].append(slug)
 
     for plug in proj.get("plugins", []) or []:
         slug = plug["slug"]
-        if (PLUGINS_DIR / slug).exists():
-            wpcli(["plugin", "activate", slug], check=False)
+        if (plug_dir / slug).exists():
+            wpcli(["plugin", "activate", slug], instance=instance, check=False)
 
 
 def cmd_pick(cfg, args) -> None:
@@ -658,11 +987,12 @@ def cmd_pick(cfg, args) -> None:
         info("cancelled")
         return
 
+    inst = args.resolved_instance
     report = {"linked": [], "failed": [], "wporg": [], "skipped": []}
     print()
     for name in chosen:
         print(f"▸ {name}")
-        _install_picked_project(cfg, name, report)
+        _install_picked_project(cfg, name, report, instance=inst)
         print()
 
     # Summary — make failures impossible to miss after a long run.
@@ -685,9 +1015,10 @@ def cmd_pick(cfg, args) -> None:
         print("    • Already cloned locally?  add `source: <abs-path>` to point at it")
 
     # If exactly one was picked AND no prior active, activate it.
-    cur_active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    apf = active_project_file(inst)
+    cur_active = apf.read_text().strip() if apf.exists() else None
     if len(chosen) == 1 and not cur_active:
-        ACTIVE.write_text(chosen[0])
+        apf.write_text(chosen[0])
         ok(f"Active project: {chosen[0]}")
     elif cur_active and cur_active in chosen:
         info(f"Active project unchanged: {cur_active}  (switch with `./sb use <name>`)")
@@ -697,17 +1028,19 @@ def cmd_pick(cfg, args) -> None:
 
 def cmd_use(cfg, args) -> None:
     name = args.name
+    inst = args.resolved_instance
     projs = cfg.get("projects", {}) or {}
     if name not in projs:
         die(f"unknown project '{name}'. Run: ./sb projects")
     proj = projs[name]
 
+    plug_dir = plugins_dir(inst)
     # Step 1: symlink local plugin sources
-    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
+    plug_dir.mkdir(parents=True, exist_ok=True)
     for plug in proj.get("plugins", []) or []:
         slug = plug["slug"]
         src = Path(plug["source"])
-        link = PLUGINS_DIR / slug
+        link = plug_dir / slug
         if not src.exists():
             info(f"skip {slug}: source not found at {src}")
             continue
@@ -718,16 +1051,17 @@ def cmd_use(cfg, args) -> None:
     # Step 2: install wp.org dependencies
     for slug in proj.get("install_from_wporg", []) or []:
         info(f"installing {slug} from wp.org (if missing)…")
-        wpcli(["plugin", "install", slug, "--activate"], check=False)
+        wpcli(["plugin", "install", slug, "--activate"],
+              instance=inst, check=False)
 
     # Step 3: activate plugins in order
     for plug in proj.get("plugins", []) or []:
         slug = plug["slug"]
-        if not (PLUGINS_DIR / slug).exists():
+        if not (plug_dir / slug).exists():
             continue
-        wpcli(["plugin", "activate", slug], check=False)
+        wpcli(["plugin", "activate", slug], instance=inst, check=False)
 
-    ACTIVE.write_text(name)
+    active_project_file(inst).write_text(name)
     print()
     ok(f"Active project: {name}")
     print(f"  Tell your LLM:  \"I'm working on the '{name}' project.\"")
@@ -754,12 +1088,9 @@ def parse_repo(spec: str, default_org: str | None) -> tuple[str, str]:
 
 def cmd_add(cfg, args) -> None:
     """Clone a plugin repo and wire it into the active project locally."""
+    inst = args.resolved_instance
     defaults = cfg.get("defaults", {}) or {}
-    raw = defaults.get("plugins_home", "") or "./plugins"
-    plugins_home = Path(raw).expanduser()
-    if not plugins_home.is_absolute():
-        plugins_home = (ROOT / plugins_home).resolve()
-    plugins_home.mkdir(parents=True, exist_ok=True)
+    plugins_home = _plugins_home(cfg)
 
     url, slug = parse_repo(args.repo, defaults.get("github_org"))
     dest = plugins_home / slug
@@ -772,20 +1103,23 @@ def cmd_add(cfg, args) -> None:
         ok(f"Cloned {slug}")
 
     # Symlink + activate in the live runtime
-    PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
-    link = PLUGINS_DIR / slug
+    plug_dir = plugins_dir(inst)
+    plug_dir.mkdir(parents=True, exist_ok=True)
+    link = plug_dir / slug
     _force_symlink(link, dest)
     ok(f"Linked {slug} → {dest}")
     _drop_sandbox_claude_md(dest, slug, cfg)
 
-    wpcli(["plugin", "activate", slug], check=False)
+    wpcli(["plugin", "activate", slug], instance=inst, check=False)
 
     # Persist into sandbox.local.yml so `./sb use <active>` re-applies it
-    persist_local_plugin(args.project or _active_project_name(), slug, str(dest))
+    persist_local_plugin(args.project or _active_project_name(inst),
+                         slug, str(dest))
 
 
-def _active_project_name() -> str | None:
-    return ACTIVE.read_text().strip() if ACTIVE.exists() else None
+def _active_project_name(instance: str = DEFAULT_INSTANCE) -> str | None:
+    apf = active_project_file(instance)
+    return apf.read_text().strip() if apf.exists() else None
 
 
 def persist_local_plugin(project: str | None, slug: str, source: str) -> None:
@@ -810,10 +1144,13 @@ def persist_local_plugin(project: str | None, slug: str, source: str) -> None:
 
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
-    rt = cfg.get("runtime", {})
-    adm = rt.get("admin", {})
-    port = rt.get("wordpress_port", 8088)
+    inst = args.resolved_instance
+    inst_cfg = resolve_instances(cfg)[inst]
+    adm = inst_cfg["admin"]
+    port = inst_cfg["wordpress_port"]
     problems = 0
+
+    print(f"\nInstance: {inst}  (http://localhost:{port})")
 
     def check(label: str, ok_: bool, hint: str = "") -> None:
         nonlocal problems
@@ -826,7 +1163,8 @@ def cmd_doctor(cfg, args) -> None:
         print(line)
 
     print("\nContainers:")
-    ps = compose("ps", "--format", "json", check=False, capture=True)
+    ps = compose("ps", "--format", "json", instance=inst,
+                 check=False, capture=True)
     containers = []
     for ln in (ps.stdout or "").splitlines():
         try:
@@ -836,18 +1174,23 @@ def cmd_doctor(cfg, args) -> None:
     services = {c.get("Service"): c.get("State") for c in containers}
     for svc in ("wp", "db", "mailpit"):
         check(f"{svc} running", services.get(svc) == "running",
-              hint=f"./sb up   (currently: {services.get(svc, 'missing')})")
+              hint=f"./sb up --instance {inst}   (currently: {services.get(svc, 'missing')})")
 
     print("\nWordPress:")
-    r = wpcli(["core", "is-installed"], check=False, capture=True)
+    r = wpcli(["core", "is-installed"], instance=inst,
+              check=False, capture=True)
     check("core installed", r.returncode == 0,
-          hint="./sb install")
+          hint=f"./sb install --instance {inst}")
 
     print("\nMCP wiring:")
-    mcp_cfg = (cfg.get("mcp", {}) or {}).get("wp", {}) or {}
-    app_pw = mcp_cfg.get("application_password", "")
+    if inst == DEFAULT_INSTANCE:
+        mcp_cfg = (cfg.get("mcp", {}) or {}).get("wp", {}) or {}
+        app_pw = mcp_cfg.get("application_password", "")
+    else:
+        app_pw = ((cfg.get("instances", {}) or {}).get(inst, {}) or {}
+                  ).get("app_password", "")
     check("application_password set", bool(app_pw),
-          hint="./sb install   (auto-provisions and writes to sandbox.local.yml)")
+          hint=f"./sb install --instance {inst}   (auto-provisions)")
     if app_pw:
         try:
             import base64, urllib.request, urllib.error
@@ -862,30 +1205,33 @@ def cmd_doctor(cfg, args) -> None:
             except urllib.error.HTTPError as e:
                 status = e.code
             check(f"REST auth works (status {status})", 200 <= status < 300,
-                  hint="rerun ./sb install to refresh the password")
+                  hint=f"rerun ./sb install --instance {inst} to refresh the password")
         except Exception as e:
             check("REST auth works", False, hint=str(e))
     check("wp-mcp venv built", (MCP_VENV / "bin" / "python").exists(),
           hint="./sb mcp-install")
 
     print("\nState:")
-    active = _active_project_name()
+    active = _active_project_name(inst)
     check(f"active project: {active or '—'}", bool(active),
-          hint="./sb use <name>")
-    focus = FOCUS.read_text().strip() if FOCUS.exists() else None
+          hint=f"./sb use <name> --instance {inst}")
+    ff = focus_file(inst)
+    focus = ff.read_text().strip() if ff.exists() else None
     check(f"focused plugin: {focus or '—'}", True,
           hint="(optional — set with ./sb focus <slug>)")
 
     print("\nLinked plugins:")
+    plug_dir = plugins_dir(inst)
     expected = []
     if active:
         proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
         expected = [p.get("slug") for p in (proj.get("plugins") or [])]
-    if not PLUGINS_DIR.exists() and expected:
-        check("wp-content/plugins/ exists", False, hint="./sb use <name>")
-    elif PLUGINS_DIR.exists():
+    if not plug_dir.exists() and expected:
+        check("wp-content/plugins/ exists", False,
+              hint=f"./sb use <name> --instance {inst}")
+    elif plug_dir.exists():
         linked = []
-        for entry in sorted(PLUGINS_DIR.iterdir()):
+        for entry in sorted(plug_dir.iterdir()):
             if entry.is_symlink():
                 linked.append(entry.name)
                 tgt = entry.resolve()
@@ -908,13 +1254,14 @@ def cmd_doctor(cfg, args) -> None:
 def cmd_wp(cfg, args) -> None:
     if not args.passthrough:
         die("usage: ./sb wp <wp-cli args>")
-    wpcli(args.passthrough)
+    wpcli(args.passthrough, instance=args.resolved_instance)
 
 
 def cmd_seed(cfg, args) -> None:
     if not args.file:
         die("usage: ./sb seed <file-in-runtime/seeds>")
-    wpcli(["import", f"/seeds/{args.file}", "--authors=create"])
+    wpcli(["import", f"/seeds/{args.file}", "--authors=create"],
+          instance=args.resolved_instance)
 
 
 def ensure_tools_venv() -> Path:
@@ -1030,10 +1377,13 @@ def cmd_claude(cfg, args) -> None:
     if not claude_bin:
         die("claude CLI not found in PATH — install Claude Code first.")
 
+    inst = args.resolved_instance
+    ff = focus_file(inst)
+    plug_dir = plugins_dir(inst)
     add_dirs = [str(ROOT)]
-    if FOCUS.exists():
-        slug = FOCUS.read_text().strip()
-        link = PLUGINS_DIR / slug
+    if ff.exists():
+        slug = ff.read_text().strip()
+        link = plug_dir / slug
         if link.exists():
             plugin_src = str(link.resolve())
             if plugin_src not in add_dirs:
@@ -1420,6 +1770,10 @@ def cmd_setup(cfg, args) -> None:
     Runs preflight (Docker + Python) but does NOT prompt for personal secrets.
     Users who need FluentBoards/GitHub creds run `./sb onboard`
     separately — keeps `setup` non-interactive for everyone else.
+
+    Multi-instance: iterates every instance defined in sandbox.yml,
+    booting + installing each one. Without an `instances:` block, this
+    behaves identically to the pre-multi-instance flow against `main`.
     """
     problems = _docker_preflight()
     sys.stdout.flush()
@@ -1431,22 +1785,27 @@ def cmd_setup(cfg, args) -> None:
         print()
         sys.exit(1)
 
-    print("\n▸ Booting docker stack (wp + db + mailpit)…")
-    cmd_up(cfg, args)
-
-    # Wait for WP to be reachable before `wp core install` to avoid races.
-    rt = cfg.get("runtime", {})
-    port = rt.get("wordpress_port", 8088)
+    instances = resolve_instances(cfg)
+    import types
     import urllib.request, time
-    for _ in range(30):
-        try:
-            urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
-            break
-        except Exception:
-            time.sleep(1)
+    for inst_name, inst_cfg in instances.items():
+        print(f"\n▸ Instance '{inst_name}': booting docker stack (wp + db + mailpit)…")
+        sub_args = types.SimpleNamespace(**vars(args), resolved_instance=inst_name) \
+            if not hasattr(args, 'resolved_instance') \
+            else types.SimpleNamespace(**{**vars(args), "resolved_instance": inst_name})
+        cmd_up(cfg, sub_args)
 
-    print("\n▸ Installing WordPress + provisioning app password…")
-    cmd_install(cfg, args)
+        # Wait for WP to be reachable before `wp core install` to avoid races.
+        port = inst_cfg["wordpress_port"]
+        for _ in range(30):
+            try:
+                urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+                break
+            except Exception:
+                time.sleep(1)
+
+        print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
+        cmd_install(cfg, sub_args)
 
     print("\n▸ Building wp-mcp Python venv…")
     cmd_mcp_install(cfg, args)
@@ -1496,16 +1855,18 @@ def cmd_setup(cfg, args) -> None:
 
 
 def cmd_snapshot(cfg, args) -> None:
-    """Save the current DB + uploads under runtime/snapshots/<name>/.
+    """Save the current DB + uploads under runtime/snapshots/<instance>/<name>/.
 
     DB is exported via `wp db export`; uploads are tar'd to keep symlinks intact.
     Restore with `./sb restore <name>`.
     """
+    inst = args.resolved_instance
     name = args.name
     if not re.match(r"^[\w.-]+$", name or ""):
         die("snapshot name must be [A-Za-z0-9._-]+")
-    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    target = SNAPSHOTS_DIR / name
+    snap_root = snapshots_dir(inst)
+    snap_root.mkdir(parents=True, exist_ok=True)
+    target = snap_root / name
     if target.exists() and not args.force:
         die(f"snapshot '{name}' exists — pass --force to overwrite")
     target.mkdir(parents=True, exist_ok=True)
@@ -1515,46 +1876,53 @@ def cmd_snapshot(cfg, args) -> None:
     # snapshots dir as /snapshots for the duration of the call.
     info(f"Exporting DB → {target}/db.sql")
     compose("run", "--rm",
-            "-v", f"{SNAPSHOTS_DIR}:/snapshots",
+            "-v", f"{snap_root}:/snapshots",
             "wpcli", "db", "export", f"/snapshots/{name}/db.sql",
-            "--add-drop-table")
+            "--add-drop-table",
+            instance=inst)
 
     # Uploads — preserve relative symlinks, skip if dir missing
-    uploads = WP_DIR / "wp-content" / "uploads"
+    uploads = wp_dir(inst) / "wp-content" / "uploads"
     if uploads.exists():
         info(f"Archiving uploads → {target}/uploads.tgz")
         run(["tar", "-C", str(uploads.parent), "-czf",
              str(target / "uploads.tgz"), "uploads"])
-    active = _active_project_name() or ""
-    (target / "META").write_text(f"project={active}\n")
+    active = _active_project_name(inst) or ""
+    (target / "META").write_text(f"project={active}\ninstance={inst}\n")
     ok(f"Snapshot '{name}' saved.")
 
 
 def cmd_restore(cfg, args) -> None:
+    inst = args.resolved_instance
     name = args.name
-    target = SNAPSHOTS_DIR / name
+    snap_root = snapshots_dir(inst)
+    target = snap_root / name
     if not target.exists():
-        die(f"no snapshot '{name}' under {SNAPSHOTS_DIR}")
+        die(f"no snapshot '{name}' under {snap_root}")
     sql = target / "db.sql"
     if not sql.exists():
         die(f"snapshot is missing db.sql: {sql}")
     info(f"Importing DB ← {sql}")
     compose("run", "--rm",
-            "-v", f"{SNAPSHOTS_DIR}:/snapshots",
-            "wpcli", "db", "import", f"/snapshots/{name}/db.sql")
+            "-v", f"{snap_root}:/snapshots",
+            "wpcli", "db", "import", f"/snapshots/{name}/db.sql",
+            instance=inst)
     tgz = target / "uploads.tgz"
     if tgz.exists():
         info(f"Restoring uploads ← {tgz}")
-        run(["tar", "-C", str(WP_DIR / "wp-content"), "-xzf", str(tgz)])
+        run(["tar", "-C", str(wp_dir(inst) / "wp-content"), "-xzf", str(tgz)])
     ok(f"Restored snapshot '{name}'.")
 
 
 def cmd_snapshots(cfg, args) -> None:
-    if not SNAPSHOTS_DIR.exists() or not any(SNAPSHOTS_DIR.iterdir()):
-        info("No snapshots yet. Save one: ./sb snapshot <name>")
+    inst = args.resolved_instance
+    snap_root = snapshots_dir(inst)
+    if not snap_root.exists() or not any(snap_root.iterdir()):
+        info(f"No snapshots yet for instance '{inst}'. "
+             f"Save one: ./sb snapshot <name> --instance {inst}")
         return
     print()
-    for entry in sorted(SNAPSHOTS_DIR.iterdir()):
+    for entry in sorted(snap_root.iterdir()):
         if not entry.is_dir():
             continue
         meta = ""
@@ -1568,9 +1936,11 @@ def cmd_snapshots(cfg, args) -> None:
 
 def cmd_update(cfg, args) -> None:
     """`git pull` every plugin source referenced by the active project."""
-    active = _active_project_name()
+    inst = args.resolved_instance
+    active = _active_project_name(inst)
     if not active:
-        die("no active project — run ./sb use <name> first")
+        die(f"no active project for instance '{inst}' — "
+            f"run ./sb use <name> --instance {inst} first")
     proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
     plugins = proj.get("plugins") or []
     if not plugins:
@@ -1587,9 +1957,9 @@ def cmd_update(cfg, args) -> None:
 
 
 def cmd_open(cfg, args) -> None:
-    rt = cfg.get("runtime", {})
-    port = rt.get("wordpress_port", 8088)
-    mailpit = rt.get("mailpit_port", 8025)
+    inst_cfg = resolve_instances(cfg)[args.resolved_instance]
+    port = inst_cfg["wordpress_port"]
+    mailpit = inst_cfg["mailpit_port"]
     targets = {
         "admin": f"http://localhost:{port}/wp-admin",
         "site": f"http://localhost:{port}",
@@ -1607,6 +1977,7 @@ def cmd_xdebug(cfg, args) -> None:
 
     Uses `wp_exec` semantics — writes the ini, restarts php via the wp service.
     """
+    inst = args.resolved_instance
     state = args.state
     if state not in ("on", "off", "status"):
         die("usage: ./sb xdebug on|off|status")
@@ -1615,7 +1986,7 @@ def cmd_xdebug(cfg, args) -> None:
     if state == "status":
         r = compose("exec", "wp", "sh", "-c",
                     f"test -f {ini_path} && echo on || echo off",
-                    check=False, capture=True)
+                    instance=inst, check=False, capture=True)
         print((r.stdout or "off").strip())
         return
 
@@ -1629,11 +2000,13 @@ def cmd_xdebug(cfg, args) -> None:
                 f"xdebug.mode=debug\\n"
                 f"xdebug.start_with_request=trigger\\n"
                 f"xdebug.client_host=host.docker.internal\\n"
-                f"xdebug.client_port=9003\\n' > {ini_path}")
+                f"xdebug.client_port=9003\\n' > {ini_path}",
+                instance=inst)
     else:
-        compose("exec", "wp", "sh", "-c", f"rm -f {ini_path}")
+        compose("exec", "wp", "sh", "-c", f"rm -f {ini_path}",
+                instance=inst)
 
-    compose("restart", "wp", check=False)
+    compose("restart", "wp", instance=inst, check=False)
     ok(f"Xdebug {state}.")
 
 
@@ -1727,13 +2100,17 @@ def cmd_introspect(cfg, args) -> None:
 
     targets = ["blocks", "widgets", "shortcodes"] if target == "all" else [target]
 
+    inst = args.resolved_instance
     for t in targets:
         info(f"introspecting {t}…")
         php = INTROSPECT_PHP[t]
         # Pipe PHP source into wp eval-file - (stdin). We need to bypass our
         # `run` helper's stdout printing because we want to capture clean JSON.
         proc = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE), "run", "--rm", "-T",
+            ["docker", "compose",
+             "-p", project_name(inst),
+             "-f", str(compose_file(inst)),
+             "run", "--rm", "-T",
              "wpcli", "eval-file", "-"],
             input=php, text=True, capture_output=True, cwd=str(ROOT),
         )
@@ -1762,12 +2139,42 @@ def cmd_introspect(cfg, args) -> None:
 
 
 def cmd_clean(cfg, args) -> None:
+    inst = args.resolved_instance
     if not args.yes:
-        ans = input("This deletes the DB volume. Continue? [y/N] ").lower()
+        ans = input(f"This deletes the DB volume for instance '{inst}'. "
+                    f"Continue? [y/N] ").lower()
         if ans != "y":
             return
-    compose("down", "-v")
-    ok("Stopped and wiped DB volume")
+    compose("down", "-v", instance=inst)
+    ok(f"Stopped and wiped DB volume for instance '{inst}'")
+
+
+def cmd_instances(cfg, args) -> None:
+    """List defined instances + their status and ports."""
+    instances = resolve_instances(cfg)
+    print()
+    print(f"  {'STATUS':<10} {'NAME':<10} {'URL':<26} {'PROJECT':<18} FOCUS")
+    for name, inst_cfg in instances.items():
+        # Check running by asking docker compose for the wp container's state.
+        ps = compose("ps", "--format", "json", instance=name,
+                     check=False, capture=True)
+        running = False
+        for ln in (ps.stdout or "").splitlines():
+            try:
+                row = json.loads(ln)
+            except ValueError:
+                continue
+            if row.get("Service") == "wp" and row.get("State") == "running":
+                running = True
+                break
+        status = "● running" if running else "○ stopped"
+        apf = active_project_file(name)
+        ff = focus_file(name)
+        active = apf.read_text().strip() if apf.exists() else "—"
+        focus = ff.read_text().strip() if ff.exists() else "—"
+        url = f"http://localhost:{inst_cfg['wordpress_port']}"
+        print(f"  {status:<10} {name:<10} {url:<26} {active:<18} {focus}")
+    print()
 
 
 # ----------------------------- main ----------------------------------
@@ -1871,15 +2278,42 @@ Then pick a project and a plugin:
     c = sub.add_parser("clean", help="Stop + wipe DB volume")
     c.add_argument("--yes", action="store_true")
 
+    sub.add_parser("instances",
+        help="List defined sandbox instances + their status + ports")
+
+    # Global --instance flag. Default is None so we can distinguish
+    # "user explicitly chose main" from "user didn't say"; resolved
+    # below to honor $SANDBOX_INSTANCE if set.
+    p.add_argument("--instance", default=None,
+        help="Which sandbox instance to target (default: main, "
+             "or $SANDBOX_INSTANCE if set)")
+
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
         return
 
     cfg = load_config()
-    # Materialize .env every run so compose bind-mounts (SANDBOX_PLUGINS_HOST,
-    # ports) are always in sync with sandbox.yml + sandbox.local.yml.
+
+    # Resolve which instance this invocation targets.
+    instances = resolve_instances(cfg)
+    chosen = args.instance or os.environ.get("SANDBOX_INSTANCE") or DEFAULT_INSTANCE
+    if chosen not in instances:
+        die(f"unknown instance '{chosen}'. Defined: "
+            f"{', '.join(instances.keys())}.\n"
+            f"Add it under `instances:` in sandbox.yml, or pick one above.")
+    args.resolved_instance = chosen
+
+    # One-time migration of pre-multi-instance layout into the 'main' slot,
+    # then (re)generate per-instance compose files so they're always in sync
+    # with sandbox.yml. Both are cheap + idempotent.
+    migrate_legacy_layout()
+    write_compose_files(cfg)
+    # Keep the legacy `.env` populated so anyone still invoking the
+    # checked-in docker-compose.yml directly (out-of-tree scripts, older
+    # skills) doesn't break. New flow ignores this file.
     write_env_for_compose(cfg)
+
     handlers = {
         "setup": cmd_setup, "apply": cmd_setup,
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
@@ -1894,6 +2328,7 @@ Then pick a project and a plugin:
         "open": cmd_open, "xdebug": cmd_xdebug,
         "introspect": cmd_introspect,
         "visit": cmd_visit,
+        "instances": cmd_instances,
     }
     handlers[args.cmd](cfg, args)
 

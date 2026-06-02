@@ -2,17 +2,21 @@
 .env
 .env.local
 .active-project
+.active-project.*
 .focus
+.focus.*
 .mcp.json
 .mcp.json.bak
 sandbox.local.yml
 
-# Runtime — WP core + plugin symlinks + uploaded data
+# Runtime — WP core + plugin symlinks + uploaded data + generated compose files
 runtime/wp/*
+runtime/wp-*/
 !runtime/wp/.gitkeep
 runtime/plugins/*
 !runtime/plugins/.gitkeep
 runtime/snapshots/
+runtime/compose/
 
 # Plugin repos cloned by `./sb add` live here by default.
 # Each plugin has its own git history; never check them into the sandbox repo.

@@ -20,6 +20,19 @@ cd sandbox
 present (offering to install it if not), then runs `./sb setup`. Prefer to skip
 the wrapper? Just run `./sb setup` directly — it does the same thing.
 
+**One-line install (production).** End users don't need the repo or git — once
+the release is published to a public host, they paste a single line:
+
+```bash
+curl -fsSL https://<your-host>/install.sh | sh
+```
+
+That downloads a packaged release (no GitHub access needed — the dev repo stays
+private), unpacks it to `~/sandbox`, and runs setup. To publish a release:
+`./scripts/make-release.sh` builds `dist/sandbox-latest.tar.gz`; upload it plus
+`scripts/web-install.sh` (as `install.sh`) to your host, and point the script's
+`BASE_URL` at it. See the headers of those two scripts for details.
+
 `setup` checks prerequisites (Docker running, Python 3.9+), then boots Docker,
 installs WordPress, generates an Application Password, builds the MCP server, and
 writes `.mcp.json` inside this folder.

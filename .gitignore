@@ -48,3 +48,7 @@ runtime/.venv-tools/
 # IS committed (vendored); only the dev deps + dist are ignored.
 src/web/node_modules/
 src/web/dist/
+
+# Release tarballs from scripts/make-release.sh (built artifacts — upload to the
+# public host, don't commit).
+dist/

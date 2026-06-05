@@ -52,3 +52,4 @@ src/web/dist/
 # Release tarballs from scripts/make-release.sh (built artifacts — upload to the
 # public host, don't commit).
 dist/
+deploy/install-site/public/

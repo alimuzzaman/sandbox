@@ -3046,16 +3046,94 @@ _WEB_PAGE = """<!doctype html>
   </div>
 </main>
 
+<!-- Modal (Flywheel-style): overlay + centered dialog. Hidden by default. -->
+<div id="modal" class="hidden fixed inset-0 z-50 flex items-center justify-center
+     bg-black/40 backdrop-blur-sm p-4">
+  <div class="bg-app dark:bg-card-dark border border-brd dark:border-brd-dark rounded-lg
+       shadow-xl w-full max-w-sm p-5 flex flex-col gap-3.5">
+    <h2 id="mTitle" class="text-[15px] font-semibold text-neutral-900 dark:text-neutral-50"></h2>
+    <p id="mDesc" class="text-[13px] text-neutral-500 dark:text-neutral-400 leading-snug"></p>
+    <input id="mInput" class="px-3 py-1.5 rounded border border-brdin dark:border-neutral-700
+       bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
+    <div class="flex justify-end gap-2 pt-1">
+      <button id="mCancel" class="px-3 py-1.5 rounded border border-brd dark:border-neutral-700
+         text-[13px] text-neutral-600 dark:text-neutral-300
+         hover:bg-neutral-50 dark:hover:bg-neutral-800">Cancel</button>
+      <button id="mOk" class="px-3 py-1.5 rounded text-[13px] text-white
+         bg-accent border border-accent hover:bg-blue-700">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast stack (bottom-right). No alert()/console — DESIGN.md §14 toast feel. -->
+<div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end"></div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const showLog = (t) => { $('logwrap').classList.remove('hidden'); $('log').textContent = t; };
+
+// Toast — transient notification, no alert()/console. type: ok | err | info.
+function toast(msg, type='info'){
+  const colors = {
+    ok:  'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-200 dark:border-emerald-800',
+    err: 'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/70 dark:text-red-200 dark:border-red-900',
+    info:'bg-app text-neutral-700 border-brd dark:bg-card-dark dark:text-neutral-200 dark:border-brd-dark',
+  };
+  const el = document.createElement('div');
+  el.className = 'pointer-events-auto text-[13px] px-3.5 py-2 rounded-lg border shadow-md '
+    + 'max-w-xs transition-all duration-200 ' + (colors[type]||colors.info);
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity='0'; el.style.transform='translateY(4px)';
+    setTimeout(()=>el.remove(), 220); }, 2600);
+}
+
+// Modal — promise-based. opts: {title, desc, value, placeholder, okText, danger}.
+// Resolves with the input string on confirm, or null on cancel.
+let _modalResolve = null;
+function modal(opts={}){
+  return new Promise((resolve) => {
+    _modalResolve = resolve;
+    $('mTitle').textContent = opts.title || '';
+    $('mDesc').textContent  = opts.desc || '';
+    const inp = $('mInput');
+    inp.value = opts.value || '';
+    inp.placeholder = opts.placeholder || '';
+    inp.classList.toggle('hidden', opts.input === false);
+    const ok = $('mOk');
+    ok.textContent = opts.okText || 'Confirm';
+    ok.className = 'px-3 py-1.5 rounded text-[13px] text-white border '
+      + (opts.danger ? 'bg-red-600 border-red-600 hover:bg-red-700'
+                     : 'bg-accent border-accent hover:bg-blue-700');
+    $('modal').classList.remove('hidden');
+    setTimeout(()=>{ opts.input === false ? ok.focus() : inp.focus(); }, 30);
+  });
+}
+function closeModal(val){
+  $('modal').classList.add('hidden');
+  if (_modalResolve){ const r=_modalResolve; _modalResolve=null; r(val); }
+}
+$('mCancel').onclick = () => closeModal(null);
+$('mOk').onclick     = () => closeModal($('mInput').classList.contains('hidden') ? true : $('mInput').value.trim());
+$('mInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') $('mOk').click();
+  if(e.key==='Escape') closeModal(null); });
+$('modal').addEventListener('click', (e)=>{ if(e.target===$('modal')) closeModal(null); });
+
 async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
 async function act(instance, action, extra={}) {
   const body = Object.assign({instance, action}, extra);
-  const r = await api('/api/action', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify(body)});
-  if (r.job_id) { pollJob(r.job_id); }
-  else { if(r.output) showLog(r.output.trim()); refresh(); }
+  let r;
+  try {
+    r = await api('/api/action', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify(body)});
+  } catch(e){ toast('request failed: '+e, 'err'); return; }
+  if (r.job_id) { toast(action+' '+(body.name||instance)+' started…', 'info'); pollJob(r.job_id); }
+  else {
+    if (r.ok) toast((action.charAt(0).toUpperCase()+action.slice(1))+' '+instance+' ✓', 'ok');
+    else toast((r.output||'action failed').split('\\n')[0], 'err');
+    if (r.output) showLog(r.output.trim());
+    refresh();
+  }
   return r;
 }
 let paused = false;
@@ -3064,7 +3142,11 @@ async function pollJob(id){
   const t = setInterval(async () => {
     const j = await api('/api/job/'+id);
     showLog((j.status||'') + "\\n\\n" + (j.output||''));
-    if (j.done){ clearInterval(t); paused=false; refresh(); }
+    if (j.done){
+      clearInterval(t); paused=false;
+      toast(j.status || 'done', j.ok ? 'ok' : 'err');
+      refresh();
+    }
   }, 1500);
 }
 
@@ -3130,13 +3212,23 @@ function newCard(){
     <div><button class="${btn} bg-accent text-white border-accent hover:bg-blue-700"
       onclick="doCreate()">Create</button></div></div>`;
 }
-function doFocus(name){ const s = prompt('Focus which plugin on '+name+'?'); if(s) act(name,'focus',{slug:s}); }
-function doDelete(name){ if(prompt('Type '+name+' to delete:')===name) act(name,'delete',{confirm:name}); }
+async function doFocus(name){
+  const slug = await modal({title:'Set focus', desc:'Which plugin should '+name+' focus on?',
+    placeholder:'plugin slug (e.g. xspeed)', okText:'Set focus'});
+  if (slug) act(name,'focus',{slug});
+}
+async function doDelete(name){
+  const typed = await modal({title:'Delete '+name, danger:true, okText:'Delete',
+    desc:'This stops + removes the stack, DB volume, and files. Type the instance name to confirm.',
+    placeholder:name});
+  if (typed === name) act(name,'delete',{confirm:name});
+  else if (typed !== null) toast('name did not match — not deleted', 'err');
+}
 function doCreate(){
   const name=$('newname').value.trim(); const server=$('newserver').value;
-  if(!name) return; showLog('creating '+name+' ('+server+')…');
-  api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({action:'create',name,server})}).then(r=>{ if(r.job_id) pollJob(r.job_id); });
+  if(!name){ toast('enter an instance name', 'err'); return; }
+  act(name,'create',{name,server});
+  $('newname').value='';
 }
 async function refresh(){
   if(paused) return;

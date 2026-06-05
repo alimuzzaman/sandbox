@@ -261,6 +261,9 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             # render_compose); db/mailpit are server-agnostic.
             "server": _valid_server(inst.get("server",
                                              runtime.get("server", "apache"))),
+            # Optional custom local domain (e.g. xspeed.sb) mapped to
+            # 127.0.0.1 via /etc/hosts. None → plain localhost:<port>.
+            "domain": inst.get("domain"),
         }
 
     if not instances:
@@ -312,6 +315,57 @@ def mcp_server_name(instance: str) -> str:
     instances get `sandbox-<name>`, exposing tools as `mcp__sandbox-<name>__*`.
     """
     return "sandbox" if instance == DEFAULT_INSTANCE else f"sandbox-{instance}"
+
+
+# --------------------------- custom domains --------------------------
+#
+# An instance can have a custom local domain (e.g. xspeed.sb) mapped to
+# 127.0.0.1 in /etc/hosts. The site still listens on its port, so the URL is
+# http://<domain>:<port>. /etc/hosts edits go through tools/hosts-helper.sh —
+# the only thing that touches /etc/hosts — run via sudo. `./sb domains setup`
+# installs a scoped passwordless sudoers rule once so subsequent edits (incl.
+# from the web UI) need no password.
+
+HOSTS_HELPER = TOOLS_DIR / "hosts-helper.sh"
+SUDOERS_FILE = Path("/etc/sudoers.d/sandbox-hosts")
+DOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def _valid_domain(domain: str) -> str:
+    d = (domain or "").strip().lower()
+    if not DOMAIN_RE.match(d) or len(d) > 253:
+        die(f"invalid domain '{domain}'. Use a hostname like myapp.sb")
+    if d.endswith(".dev"):
+        info("note: browsers force HTTPS on all .dev domains — http won't work. "
+             "Prefer .sb / .test / .local.")
+    return d
+
+
+def _hosts_passwordless() -> bool:
+    """True if the passwordless sudoers rule for the hosts-helper is installed."""
+    return SUDOERS_FILE.exists()
+
+
+def _hosts_edit(action: str, domain: str) -> tuple[bool, str]:
+    """Add/remove a domain mapping via the helper. Uses `sudo -n` (no prompt)
+    when the passwordless rule is installed; otherwise a normal sudo (prompts in
+    a terminal, fails cleanly from the web). Returns (ok, message)."""
+    cmd = ["sudo"]
+    if _hosts_passwordless():
+        cmd.append("-n")
+    cmd += [str(HOSTS_HELPER), action, domain]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        return True, (res.stdout or "").strip()
+    return False, (res.stderr or res.stdout or "sudo failed").strip()
+
+
+def site_url(inst_cfg: dict) -> str:
+    """The browser URL for an instance — its custom domain if set, else
+    localhost. The port is always included (the site listens on its port)."""
+    host = inst_cfg.get("domain") or "localhost"
+    return f"http://{host}:{inst_cfg['wordpress_port']}"
 
 
 def _plugins_home(cfg: dict) -> Path:
@@ -689,7 +743,7 @@ def cmd_up(cfg: dict, args) -> None:
     inst_cfg = resolve_instances(cfg)[inst]
     compose("up", "-d", *_web_services(inst_cfg.get("server", "apache")),
             instance=inst)
-    ok(f"WordPress: http://localhost:{inst_cfg['wordpress_port']}")
+    ok(f"WordPress: {site_url(inst_cfg)}")
     ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
 
 
@@ -825,7 +879,7 @@ def cmd_install(cfg, args) -> None:
 
     wpcli([
         "core", "install",
-        f"--url=http://localhost:{port}",
+        f"--url={site_url(inst_cfg)}",
         f"--title={adm.get('site_title', 'Sandbox')}",
         f"--admin_user={adm.get('user', 'admin')}",
         f"--admin_password={adm.get('password', 'admin')}",
@@ -2512,6 +2566,9 @@ def cmd_instance(cfg, args) -> None:
             "and contain only [a-z0-9_-] (max 31 chars)")
 
     server = _valid_server(getattr(args, "server", None) or "apache")
+    domain = getattr(args, "domain", None)
+    if domain:
+        domain = _valid_domain(domain)
 
     if action == "create":
         existing = resolve_instances(cfg)
@@ -2527,17 +2584,31 @@ def cmd_instance(cfg, args) -> None:
              f"DB={ports['db_port']} mailpit={ports['mailpit_port']}")
         info(f"web server: {server}")
 
-        # Append the instance block to sandbox.local.yml (gitignored,
-        # per-machine). Ports + server + admin.site_title are written;
-        # everything else inherits from runtime: defaults.
-        local = _local_yaml()
-        local.setdefault("instances", {})[name] = {
+        # Custom domain → map it to 127.0.0.1 in /etc/hosts (before install so
+        # WP's siteurl is set to the domain). If the hosts edit fails (e.g. no
+        # passwordless rule yet), fall back to localhost so create still works.
+        if domain:
+            okh, msg = _hosts_edit("add", domain)
+            if okh:
+                ok(f"mapped {domain} → 127.0.0.1 (/etc/hosts)")
+            else:
+                info(f"could not edit /etc/hosts ({msg}).")
+                info(f"run `./sb domains setup` once for password-free domains, "
+                     f"or add manually: 127.0.0.1  {domain}")
+                info(f"continuing with localhost for now.")
+                domain = None
+
+        block = {
             "wordpress_port": ports["wordpress_port"],
             "db_port": ports["db_port"],
             "mailpit_port": ports["mailpit_port"],
             "server": server,
             "admin": {"site_title": f"Sandbox {name}"},
         }
+        if domain:
+            block["domain"] = domain
+        local = _local_yaml()
+        local.setdefault("instances", {})[name] = block
         _write_local_yaml(local)
         ok(f"Wrote instances.{name} to {CONFIG_LOCAL.name}")
 
@@ -2574,8 +2645,11 @@ def cmd_instance(cfg, args) -> None:
         register_claude_user_scope(cfg)
 
         srv = mcp_server_name(name)
+        base = f"http://{domain}:{port}" if domain else f"http://localhost:{port}"
         print()
-        ok(f"Instance '{name}' ready at http://localhost:{port}/wp-admin/")
+        ok(f"Instance '{name}' ready at {base}/wp-admin/")
+        if domain:
+            print(f"  Domain: {domain} (mapped to 127.0.0.1)")
         print(f"  Server: {server}")
         print(f"  Admin: admin / admin")
         print(f"  MCP server: {srv}  (Claude tools: mcp__{srv}__*)")
@@ -2650,6 +2724,13 @@ def cmd_instance(cfg, args) -> None:
                        capture_output=True, text=True)
         info(f"deregistered MCP server {srv}")
 
+    # 7. Remove its custom-domain /etc/hosts mapping, if any.
+    dom = instances.get(name, {}).get("domain")
+    if dom:
+        okh, msg = _hosts_edit("remove", dom)
+        info(f"removed domain {dom} from /etc/hosts" if okh
+             else f"could not remove {dom} from /etc/hosts ({msg})")
+
     ok(f"Instance '{name}' deleted.")
 
 
@@ -2681,13 +2762,78 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
             "running": _instance_running(name),
             "wordpress_port": inst_cfg["wordpress_port"],
             "mailpit_port": inst_cfg["mailpit_port"],
-            "url": f"http://localhost:{inst_cfg['wordpress_port']}",
+            "url": site_url(inst_cfg),
+            "domain": inst_cfg.get("domain"),
             "server": inst_cfg.get("server", "apache"),
             "mcp_server": mcp_server_name(name),
             "project": apf.read_text().strip() if apf.exists() else "—",
             "focus": ff.read_text().strip() if ff.exists() else "—",
         })
     return rows
+
+
+def cmd_domains(cfg, args) -> None:
+    """Manage custom local domains.
+
+    `./sb domains setup`  — one-time: install a scoped passwordless sudoers
+                            rule so hosts edits (incl. from the web UI) need no
+                            password afterward.
+    `./sb domains list`   — show instance → domain mappings.
+    """
+    action = getattr(args, "action", None) or "list"
+
+    if action == "setup":
+        if _hosts_passwordless():
+            ok(f"Already set up — {SUDOERS_FILE} exists. Domain edits are "
+               f"passwordless.")
+            return
+        # The rule: allow THIS user to run ONLY the hosts-helper as root with no
+        # password. Scoped to the exact script path → safe.
+        import getpass
+        user = getpass.getuser()
+        rule = (f"# Installed by `./sb domains setup` — lets the sandbox edit "
+                f"/etc/hosts for custom domains without a password.\n"
+                f"{user} ALL=(root) NOPASSWD: {HOSTS_HELPER}\n")
+        info("Installing a one-time passwordless rule for the hosts helper.")
+        info("You'll be asked for your password ONCE now; never again for domains.")
+        # Write via sudo tee + validate with visudo -c before installing.
+        tmp = ROOT / "runtime" / "sandbox-hosts.sudoers"
+        tmp.write_text(rule)
+        # validate
+        chk = subprocess.run(["sudo", "visudo", "-cf", str(tmp)],
+                             capture_output=True, text=True)
+        if chk.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            die(f"sudoers rule failed validation: {chk.stderr.strip()}")
+        inst = subprocess.run(
+            ["sudo", "install", "-m", "0440", "-o", "root", "-g",
+             "wheel" if sys.platform == "darwin" else "root",
+             str(tmp), str(SUDOERS_FILE)],
+            capture_output=True, text=True)
+        tmp.unlink(missing_ok=True)
+        if inst.returncode != 0:
+            die(f"failed to install sudoers rule: {inst.stderr.strip()}")
+        ok(f"Done. Custom domains now apply with no password "
+           f"(rule: {SUDOERS_FILE}).")
+        return
+
+    if action == "list":
+        print()
+        any_dom = False
+        for name, ic in resolve_instances(cfg).items():
+            if ic.get("domain"):
+                any_dom = True
+                print(f"  {name:<14} {ic['domain']}:{ic['wordpress_port']}")
+        if not any_dom:
+            info("No custom domains. Create one: "
+                 "./sb instance create <name> --domain <name>.sb")
+        print()
+        status = "✓ passwordless (set up)" if _hosts_passwordless() \
+            else "✗ not set up — run ./sb domains setup for no-password edits"
+        print(f"  hosts edits: {status}\n")
+        return
+
+    die("usage: ./sb domains setup|list")
 
 
 def cmd_instances(cfg, args) -> None:
@@ -3201,14 +3347,15 @@ def _web_do_action(payload: dict) -> dict:
             if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name):
                 return {"ok": False, "output": "invalid instance name"}
         server = _valid_server(payload.get("server") or "apache")
+        domain = (payload.get("domain") or "").strip().lower() or None
         verb = "Creating" if action == "create" else "Deleting"
         label = f"{verb} {name}"
 
         def do_inst():
             with _web_lock:
                 cmd_instance(load_config(), _types.SimpleNamespace(
-                    action=action, name=name, server=server, yes=True,
-                    resolved_instance=name))
+                    action=action, name=name, server=server, domain=domain,
+                    yes=True, resolved_instance=name))
         return {"ok": True, "job_id": _start_job(label, do_inst)}
 
     return {"ok": False, "output": f"unknown action '{action}'"}
@@ -3595,6 +3742,8 @@ function detail(r){
   <div class="px-6 pb-2">
     ${sectionHead('Overview')}
     ${row('Web server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
+    ${r.domain ? row('Domain', `<span class="text-neutral-700 dark:text-neutral-200">${esc(r.domain)}</span>
+        <span class="text-[11px] text-neutral-400">→ 127.0.0.1</span>`) : ''}
     ${row('Site address', r.running
         ? `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`
         : `<span class="text-neutral-400">${r.url} <span class="text-[11px]">(stopped)</span></span>`)}
@@ -3765,20 +3914,22 @@ async function doDelete(name){
 }
 async function doCreate(){
   const v = await modal({title:'New instance', okText:'Create',
-    desc:'Pick a name and web server. Booting may take a minute.',
+    desc:'Pick a name, web server, and optional custom domain. Booting may take a minute.',
     fields:[{key:'name', placeholder:'name (a-z, 0-9, -)'},
-            {key:'server', type:'select', options:DATA.servers}]});
+            {key:'server', type:'select', options:DATA.servers},
+            {key:'domain', placeholder:'custom domain (optional, e.g. myapp.sb)'}]});
   if(!v || !v.name) return;
   const name = v.name.trim();
+  const domain = (v.domain||'').trim().toLowerCase();
   // Optimistic: show the new site in the sidebar immediately (pending state)
   // and select it, so the user watches it come up — not a jarring jump.
   if(!DATA.instances.find(i=>i.name===name)){
     DATA.instances.push({name, running:false, pending:true, server:v.server,
-      url:'', mcp_server:'sandbox-'+name, project:'—', focus:'—',
+      url:'', mcp_server:'sandbox-'+name, project:'—', focus:'—', domain,
       wordpress_port:'', mailpit_port:''});
   }
   selected = name; busy[name]='create'; render();
-  act(name,'create',{name, server:v.server});
+  act(name,'create',{name, server:v.server, domain});
 }
 // Ops/terminal actions: always stream into the console panel.
 async function op(name, action, extra={}){
@@ -4115,8 +4266,14 @@ Then pick a project and a plugin:
     ins.add_argument("name")
     ins.add_argument("--server", choices=list(SERVERS), default="apache",
         help="web server stack for `create` (default: apache)")
+    ins.add_argument("--domain", default=None,
+        help="custom local domain for `create` (e.g. myapp.sb) → /etc/hosts")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
+
+    dm = sub.add_parser("domains",
+        help="Manage custom local domains (setup | list)")
+    dm.add_argument("action", nargs="?", choices=["setup", "list"], default="list")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
@@ -4176,6 +4333,7 @@ Then pick a project and a plugin:
         "visit": cmd_visit,
         "instances": cmd_instances,
         "instance": cmd_instance,
+        "domains": cmd_domains,
         "dashboard": cmd_dashboard, "ui": cmd_dashboard,
         "web": cmd_web,
     }

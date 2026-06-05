@@ -3409,9 +3409,42 @@ const row = (label,val) => `<div class="flex items-center py-3 border-b border-b
   <div class="w-40 shrink-0 text-[13px] text-neutral-500 dark:text-neutral-400">${label}</div>
   <div class="text-[13.5px] text-neutral-800 dark:text-neutral-200">${val}</div></div>`;
 
+function welcome(){
+  const n = DATA.instances.length;
+  return `<div class="max-w-2xl mx-auto px-7 py-12">
+    <h1 class="text-[22px] font-semibold text-neutral-900 dark:text-neutral-50">Welcome to the Sandbox</h1>
+    <p class="mt-2 text-[14px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
+      A sandbox is a <b>safe, throwaway WordPress site</b> for testing plugins and changes
+      without touching anything real. Each item on the left is one fully isolated site —
+      its own database, files, and address — so you can break things freely and reset anytime.</p>
+
+    <div class="mt-7 grid grid-cols-3 gap-3">
+      ${infoCard('What', 'Disposable WordPress sites you fully control — start, stop, snapshot, or delete on a whim.')}
+      ${infoCard('Why', 'Test a plugin, reproduce a bug, or compare web servers (Apache / nginx / LiteSpeed) without risk to a live site.')}
+      ${infoCard('How', 'Pick a site on the left to open it, then Start it and click Admin. Use the + to make a new one.')}
+    </div>
+
+    <div class="mt-7 rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-4">
+      <div class="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">Using it with Claude</div>
+      <p class="mt-1 text-[13px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
+        Each site has its own Claude connection. Open a site to copy its connection snippet,
+        or just tell Claude <code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">focus &lt;plugin&gt;</code>
+        and it will work on that site for you.</p>
+      <button onclick="showHelp()" class="mt-2 text-[13px] text-accent dark:text-blue-400 hover:underline">Learn more →</button>
+    </div>
+
+    ${n ? `<p class="mt-7 text-[13px] text-neutral-400">${n} site${n===1?'':'s'} available — pick one on the left to begin.</p>`
+        : `<button onclick="doCreate()" class="mt-7 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-medium hover:bg-blue-700">Create your first site</button>`}
+  </div>`;
+}
+function infoCard(title, body){
+  return `<div class="rounded-lg border border-brd dark:border-brd-dark p-3.5">
+    <div class="text-[12px] font-semibold uppercase tracking-wide text-accent dark:text-blue-400">${title}</div>
+    <div class="mt-1 text-[13px] text-neutral-600 dark:text-neutral-300 leading-snug">${body}</div></div>`;
+}
+
 function detail(r){
-  if(!r) return `<div class="h-full flex items-center justify-center text-neutral-400 text-[14px]">
-    Select an instance</div>`;
+  if(!r) return welcome();
   const b = busy[r.name];
   const link = "text-accent dark:text-blue-400 hover:underline";
   const p=r.wordpress_port, m=r.mailpit_port;
@@ -3454,12 +3487,12 @@ function detail(r){
       rounded-full border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px]
       hover:bg-red-50 dark:hover:bg-red-950/40">Delete</button>`}
   </div>
-  <div class="px-7 pb-8">
-    ${row('Web Server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
-    ${row('WordPress URL', `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`)}
-    ${row('Mailpit', `<a href="http://localhost:${m}" target="_blank" class="${link}">http://localhost:${m}</a>`)}
-    ${row('MCP server', `<code class="text-[12.5px]">${esc(r.mcp_server)}</code>`)}
-    ${row('Active project', esc(r.project))}
+  <div class="px-7 pb-2">
+    ${sectionHead('Overview')}
+    ${row('Web server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
+    ${row('Site address', `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`)}
+    ${row('Test inbox', `<a href="http://localhost:${m}" target="_blank" class="${link}">Mailpit · :${m}</a>`)}
+    ${row('Active project', r.project==='—'?'<span class="text-neutral-400">none</span>':esc(r.project))}
     ${row('Focus plugin', `<div class="flex items-center gap-2">
         <select id="focusSel" onchange="doFocus('${r.name}', this.value)" ${b?'disabled':''}
           class="px-2.5 py-1 rounded border border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900
@@ -3469,7 +3502,7 @@ function detail(r){
 
   <!-- Tools (terminal commands) -->
   <div class="px-7 pb-6">
-    <div class="text-[11px] font-medium uppercase tracking-wide text-neutral-400 mb-2">Tools</div>
+    ${sectionHead('Tools', 'Run maintenance commands — output streams below')}
     <div class="flex flex-wrap gap-1.5">
       ${opBtn(r.name,'logs','Logs')}
       ${opBtn(r.name,'status','Status')}
@@ -3492,15 +3525,20 @@ function detail(r){
 
   <!-- Using Claude with THIS instance -->
   <div class="px-7 pb-8">
-    <div class="text-[11px] font-medium uppercase tracking-wide text-neutral-400 mb-2">Use with Claude</div>
+    ${sectionHead('Use with Claude', 'Connect a Claude session to this exact site')}
     <div class="rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-3.5 text-[12.5px] space-y-2">
-      <div class="text-neutral-600 dark:text-neutral-300">This instance has its own MCP server. In a Claude session, use its tool namespace:</div>
-      ${snippet('mcp__'+r.mcp_server+'__*')}
-      <div class="text-neutral-600 dark:text-neutral-300">Or just tell Claude in chat (it runs the focus handshake on this instance):</div>
+      <div class="text-neutral-600 dark:text-neutral-300">Tell Claude in chat (simplest):</div>
       ${snippet('focus '+(r.focus && r.focus!=='—' ? r.focus : '<plugin>'))}
-      <div class="text-neutral-500 dark:text-neutral-400">Admin / REST / wp-cli all target <code>${r.url}</code> for this instance.</div>
+      <div class="text-neutral-600 dark:text-neutral-300">Or call this site's tools directly in a session:</div>
+      ${snippet('mcp__'+r.mcp_server+'__*')}
+      <div class="text-neutral-500 dark:text-neutral-400">Everything (admin, REST, wp-cli) targets <code>${r.url}</code>.</div>
     </div>
   </div>`;
+}
+function sectionHead(title, hint){
+  return `<div class="mb-2.5 mt-1">
+    <div class="text-[12px] font-semibold text-neutral-800 dark:text-neutral-100">${title}</div>
+    ${hint?`<div class="text-[12px] text-neutral-400">${hint}</div>`:''}</div>`;
 }
 const toolBtn = "px-2.5 py-1.5 rounded border border-brd dark:border-neutral-700 text-[12.5px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
 function opBtn(name, action, label, extra){
@@ -3598,21 +3636,48 @@ function showHelp(){
 }
 
 // ---- render ----
-function render(){
+// The sidebar + footer refresh every tick (cheap, no inputs). The detail
+// panel is re-rendered ONLY when its data actually changes AND the user isn't
+// mid-interaction (typing in an input / a select or modal is open) — otherwise
+// a 2s tick would wipe what you're typing. This is the fix for "the input
+// keeps resetting".
+let _detailSig = '';
+function detailSignature(r){
+  if(!r) return 'none';
+  // Only fields the panel renders from — busy state + status + focus + plugins.
+  return JSON.stringify([r.name, r.running, r.server, r.focus, r.project,
+                         busy[r.name]||'', DATA.plugins.length]);
+}
+function userIsInteracting(){
+  const a = document.activeElement;
+  if(a && (a.tagName==='INPUT' || a.tagName==='SELECT' || a.tagName==='TEXTAREA')) return true;
+  if(!$('modal').classList.contains('hidden')) return true;
+  return false;
+}
+function renderSidebar(){
   const items = DATA.instances;
   $('list').innerHTML = items.map(listItem).join('');
-  const cur = items.find(i=>i.name===selected) || null;
-  $('detail').innerHTML = detail(cur);
   const running = items.filter(i=>i.running).length;
   $('runcount').textContent = running+'/'+items.length;
-  $('footstat').textContent = running+' of '+items.length+' running';
+  $('footstat').textContent = items.length
+    ? running+' of '+items.length+' running' : 'no instances yet';
 }
+function renderDetail(force){
+  const cur = DATA.instances.find(i=>i.name===selected) || null;
+  const sig = detailSignature(cur);
+  if(!force && sig===_detailSig) return;          // unchanged → leave DOM alone
+  if(!force && userIsInteracting()) return;        // don't clobber active input
+  _detailSig = sig;
+  $('detail').innerHTML = detail(cur);
+}
+function render(){ renderSidebar(); renderDetail(true); }   // explicit full render (on select/action)
 async function refresh(){
   if(paused) return;
-  const d = await api('/api/instances');
+  let d; try { d = await api('/api/instances'); } catch(e){ return; }
   DATA = d;
   if(!selected && d.instances.length) selected = d.instances[0].name;
-  render();
+  renderSidebar();
+  renderDetail(false);                             // soft: only if changed + idle
 }
 refresh(); setInterval(refresh, 2000);
 </script></body></html>"""

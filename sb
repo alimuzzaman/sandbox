@@ -4248,10 +4248,12 @@ async function doCreate(){
   const dready = DATA.domains_ready;
   const desc = dready
     ? 'Pick a name, web server, and optional custom domain. Booting may take a minute.'
-    : 'Pick a name and web server. (Custom domains need a one-time setup — run `./sb domains setup` in your terminal — until then sites use localhost.)';
+    : 'Pick a name, web server, and optional custom domain. Tip: run `./sb domains setup` once for clean no-port URLs — until then a domain still works as <domain>:<port>.';
+  // Always offer the domain field so it's discoverable; setup only changes
+  // whether the URL is clean (proxy) or domain:port.
   const fields = [{key:'name', placeholder:'name (a-z, 0-9, -)'},
-                  {key:'server', type:'select', options:DATA.servers}];
-  if(dready) fields.push({key:'domain', placeholder:'custom domain (optional, e.g. myapp.sb)'});
+                  {key:'server', type:'select', options:DATA.servers},
+                  {key:'domain', placeholder:'custom domain — optional, e.g. myapp.sb'}];
   const v = await modal({title:'New instance', okText:'Create', desc, fields});
   if(!v || !v.name) return;
   const name = v.name.trim();

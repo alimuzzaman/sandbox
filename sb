@@ -3210,25 +3210,62 @@ _WEB_PAGE = """<!doctype html>
      scripts/build-web-css.sh after changing classes in this page. -->
 <style>__SANDBOX_WEB_CSS__</style>
 <style>
-  * { transition: background-color .15s ease, border-color .15s ease, color .12s ease; }
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: #9993; border-radius: 9999px; }
+  /* ---- desktop-app feel (overrides on top of Tailwind) ---- */
+  html, body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  * { transition: background-color .14s ease, border-color .14s ease, color .12s ease,
+        box-shadow .14s ease, transform .08s ease; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: #8884; border-radius: 9999px; border: 2px solid transparent;
+    background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #8888; background-clip: padding-box; }
   .spin { animation: sp 0.7s linear infinite; }
   @keyframes sp { to { transform: rotate(360deg); } }
-  button[disabled] { opacity: .45; cursor: default; }
-</style></head>
-<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark antialiased h-screen overflow-hidden">
 
-<div class="flex h-full">
+  /* Flatten the pill buttons into crisp desktop controls + give them depth.
+     Targets the action buttons rendered with rounded-full / rounded in the JS. */
+  button[disabled] { opacity: .4; cursor: default; }
+  main button:not([disabled]):active, footer button:not([disabled]):active { transform: translateY(0.5px); }
+  /* pill action buttons → desktop radius + subtle shadow */
+  .rounded-full { border-radius: 7px !important; }
+  main .rounded-full, footer .rounded-full, aside .rounded-full {
+    box-shadow: 0 1px 0 rgba(0,0,0,.03); }
+  /* primary (accent) buttons get a soft raised shadow */
+  .bg-accent { box-shadow: 0 1px 2px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.12); }
+
+  /* sidebar rows: tighter, app-like selection */
+  #list button { border-radius: 7px; }
+
+  /* console drawer: terminal vibe */
+  #conBody { background:
+    linear-gradient(180deg, rgba(255,255,255,.015), transparent 120px); }
+
+  /* fade-in for panel content swaps */
+  #detail > * { animation: fadein .18s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+</style></head>
+<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark antialiased h-screen overflow-hidden flex flex-col">
+
+<!-- Desktop title bar (window chrome) -->
+<div class="h-9 shrink-0 flex items-center px-3.5 gap-2 border-b border-brd dark:border-brd-dark
+     bg-neutral-100/80 dark:bg-neutral-900/80 backdrop-blur select-none">
+  <span class="w-3 h-3 rounded-full" style="background:#ff5f57"></span>
+  <span class="w-3 h-3 rounded-full" style="background:#febc2e"></span>
+  <span class="w-3 h-3 rounded-full" style="background:#28c840"></span>
+  <div class="flex-1 text-center text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
+    Sandbox — WordPress dev environments</div>
+  <span class="w-12"></span>
+</div>
+
+<div class="flex flex-1 min-h-0">
   <!-- Sidebar: instance list (Local-style) -->
-  <aside class="w-64 shrink-0 border-r border-brd dark:border-brd-dark
-                bg-neutral-50 dark:bg-neutral-950 flex flex-col">
+  <aside class="w-60 shrink-0 border-r border-brd dark:border-brd-dark
+                bg-neutral-100/60 dark:bg-neutral-950 flex flex-col">
     <button onclick="goHome()" title="What is this?"
-      class="h-14 px-4 flex items-center gap-2 border-b border-brd dark:border-brd-dark
-             w-full hover:bg-neutral-100 dark:hover:bg-neutral-900 text-left">
-      <div class="w-6 h-6 rounded bg-accent flex items-center justify-center
-                  text-white text-[13px] font-bold">S</div>
-      <span class="font-semibold text-[14px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
+      class="h-12 px-3.5 flex items-center gap-2 border-b border-brd dark:border-brd-dark
+             w-full hover:bg-neutral-200/50 dark:hover:bg-neutral-900 text-left">
+      <div class="w-5 h-5 rounded-md bg-accent flex items-center justify-center
+                  text-white text-[12px] font-bold">S</div>
+      <span class="font-semibold text-[13px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
       <span id="runcount" class="ml-auto text-[11px] text-neutral-400"></span>
     </button>
     <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
@@ -3249,18 +3286,6 @@ _WEB_PAGE = """<!doctype html>
   <!-- Detail panel -->
   <div class="flex-1 flex flex-col min-w-0">
     <main id="detail" class="flex-1 overflow-auto"></main>
-
-    <!-- Live console panel (streams command output) -->
-    <div id="console" class="hidden shrink-0 border-t border-brd dark:border-brd-dark
-         bg-neutral-950 h-56 flex flex-col">
-      <div class="h-8 px-4 flex items-center gap-2 border-b border-neutral-800 text-[12px]">
-        <span id="conDot" class="w-2 h-2 rounded-full bg-neutral-500"></span>
-        <span id="conTitle" class="text-neutral-300 font-mono truncate">console</span>
-        <button id="conClose" class="ml-auto text-neutral-500 hover:text-neutral-300">close</button>
-      </div>
-      <pre id="conBody" class="flex-1 overflow-auto px-4 py-2 text-[11.5px] leading-relaxed
-        font-mono text-neutral-300 whitespace-pre-wrap"></pre>
-    </div>
     <!-- Footer bar -->
     <footer class="h-12 shrink-0 border-t border-brd dark:border-brd-dark
        bg-app dark:bg-card-dark px-5 flex items-center gap-3 text-[12.5px]">
@@ -3274,6 +3299,20 @@ _WEB_PAGE = """<!doctype html>
           Stop all</button>
       </div>
     </footer>
+  </div>
+
+  <!-- Console: right-side drawer, slides in. Width animates 0 → 26rem. -->
+  <div id="console" class="shrink-0 w-0 overflow-hidden border-l border-neutral-800
+       bg-neutral-950 flex flex-col transition-[width] duration-300 ease-out">
+    <div class="w-[26rem] flex flex-col h-full">
+      <div class="h-14 px-4 flex items-center gap-2 border-b border-neutral-800 shrink-0">
+        <span id="conDot" class="w-2 h-2 rounded-full bg-neutral-500"></span>
+        <span id="conTitle" class="text-neutral-200 text-[13px] font-medium truncate flex-1">Activity</span>
+        <button id="conClose" class="text-neutral-500 hover:text-neutral-200 text-[18px] leading-none">×</button>
+      </div>
+      <pre id="conBody" class="flex-1 overflow-auto px-4 py-3 text-[11.5px] leading-relaxed
+        font-mono text-neutral-300 whitespace-pre-wrap"></pre>
+    </div>
   </div>
 </div>
 
@@ -3391,12 +3430,17 @@ async function pollJob(id, instance, label){
   },800);
 }
 
-// ---- live console panel ----
+// ---- live console (right drawer, animated) ----
 function consoleOpen(title){
-  $('console').classList.remove('hidden');
+  $('console').classList.remove('w-0');
+  $('console').classList.add('w-[26rem]');
   $('conTitle').textContent = title;
   $('conBody').textContent = '';
   $('conDot').className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+}
+function consoleClose(){
+  $('console').classList.add('w-0');
+  $('console').classList.remove('w-[26rem]');
 }
 function consoleWrite(t){ const b=$('conBody'); b.textContent += t;
   b.scrollTop = b.scrollHeight; }
@@ -3425,7 +3469,7 @@ const row = (label,val) => `<div class="flex items-center py-3 border-b border-b
 
 function welcome(){
   const n = DATA.instances.length;
-  return `<div class="max-w-2xl mx-auto px-7 py-12">
+  return `<div class="max-w-2xl mx-auto px-6 py-12">
     <h1 class="text-[22px] font-semibold text-neutral-900 dark:text-neutral-50">Welcome to the Sandbox</h1>
     <p class="mt-2 text-[14px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
       A sandbox is a <b>safe, throwaway WordPress site</b> for testing plugins and changes
@@ -3459,6 +3503,17 @@ function infoCard(title, body){
 
 function detail(r){
   if(!r) return welcome();
+  if(r.pending) return `<div class="px-6 pt-8">
+    <div class="flex items-center gap-3">
+      <h1 class="text-[24px] font-semibold text-neutral-900 dark:text-neutral-50">${esc(r.name)}</h1>
+      <span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full
+        bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900/60">
+        ${spinner()} creating</span>
+    </div>
+    <p class="mt-3 text-[13px] text-neutral-500 dark:text-neutral-400 leading-relaxed max-w-md">
+      Setting up the <b>${esc(r.server)}</b> stack — pulling images, installing WordPress,
+      and wiring it up. Live progress is in the Activity panel on the right; this can take a
+      minute on first run.</p></div>`;
   const b = busy[r.name];
   const link = "text-accent dark:text-blue-400 hover:underline";
   const p=r.wordpress_port, m=r.mailpit_port;
@@ -3473,13 +3528,13 @@ function detail(r){
   const focusOpts = ['<option value="">— none —</option>']
     .concat(DATA.plugins.map(s=>`<option value="${esc(s)}" ${s===r.focus?'selected':''}>${esc(s)}</option>`)).join('');
   return `
-  <div class="px-7 pt-6 pb-4 border-b border-brd dark:border-brd-dark flex items-start gap-4">
+  <div class="px-6 pt-5 pb-3.5 border-b border-brd dark:border-brd-dark flex items-start gap-4">
     <div class="min-w-0">
-      <div class="flex items-center gap-3">
-        <h1 class="text-[24px] font-semibold text-neutral-900 dark:text-neutral-50 truncate">${esc(r.name)}</h1>
+      <div class="flex items-center gap-2.5">
+        <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50 truncate">${esc(r.name)}</h1>
         ${statusPill(r.running)}
       </div>
-      <div class="mt-1 text-[12.5px] text-neutral-400 flex items-center gap-1">
+      <div class="mt-0.5 text-[12px] text-neutral-400 flex items-center gap-1">
         ${r.url} · <code>${esc(r.mcp_server)}</code></div>
     </div>
     <div class="ml-auto flex items-center gap-2">
@@ -3487,7 +3542,7 @@ function detail(r){
       ${pillLink(r.url, 'View site', r.running)}
     </div>
   </div>
-  <div class="px-7 py-5 flex items-center gap-2">
+  <div class="px-6 py-3.5 flex items-center gap-2">
     ${primaryBtn}
     <button onclick="act('${r.name}','restart')" ${(!r.running||b)?'disabled':''} class="px-4 py-1.5 rounded-full border
       border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
@@ -3497,7 +3552,7 @@ function detail(r){
       rounded-full border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px]
       hover:bg-red-50 dark:hover:bg-red-950/40">Delete</button>`}
   </div>
-  <div class="px-7 pb-2">
+  <div class="px-6 pb-2">
     ${sectionHead('Overview')}
     ${row('Web server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
     ${row('Site address', r.running
@@ -3514,7 +3569,7 @@ function detail(r){
   </div>
 
   <!-- Tools (terminal commands) -->
-  <div class="px-7 pb-6">
+  <div class="px-6 pb-6">
     ${sectionHead('Tools', 'Run maintenance commands — output streams below')}
     <div class="flex flex-wrap gap-1.5">
       ${opBtn(r.name,'logs','Logs')}
@@ -3537,7 +3592,7 @@ function detail(r){
   </div>
 
   <!-- Plugins: search → install (wp.org) or symlink a known source -->
-  <div class="px-7 pb-6">
+  <div class="px-6 pb-6">
     ${sectionHead('Plugins', 'Search to install from WordPress.org, or symlink a local source')}
     <div class="flex gap-2">
       <input id="plugQ" placeholder="Search plugins by name or slug…" oninput="plugFilter()"
@@ -3550,7 +3605,7 @@ function detail(r){
   </div>
 
   <!-- Using Claude with THIS instance -->
-  <div class="px-7 pb-8">
+  <div class="px-6 pb-8">
     ${sectionHead('Use with Claude', 'Connect a Claude session to this exact site')}
     <div class="rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-3.5 text-[12.5px] space-y-2">
       <div class="text-neutral-600 dark:text-neutral-300">Tell Claude in chat (simplest):</div>
@@ -3673,7 +3728,17 @@ async function doCreate(){
     desc:'Pick a name and web server. Booting may take a minute.',
     fields:[{key:'name', placeholder:'name (a-z, 0-9, -)'},
             {key:'server', type:'select', options:DATA.servers}]});
-  if(v && v.name) act(v.name,'create',{name:v.name, server:v.server});
+  if(!v || !v.name) return;
+  const name = v.name.trim();
+  // Optimistic: show the new site in the sidebar immediately (pending state)
+  // and select it, so the user watches it come up — not a jarring jump.
+  if(!DATA.instances.find(i=>i.name===name)){
+    DATA.instances.push({name, running:false, pending:true, server:v.server,
+      url:'', mcp_server:'sandbox-'+name, project:'—', focus:'—',
+      wordpress_port:'', mailpit_port:''});
+  }
+  selected = name; busy[name]='create'; render();
+  act(name,'create',{name, server:v.server});
 }
 // Ops/terminal actions: always stream into the console panel.
 async function op(name, action, extra={}){
@@ -3743,7 +3808,7 @@ $('newBtn').onclick = doCreate;
 $('startAll').onclick = ()=>act('*','start-all');
 $('stopAll').onclick = ()=>act('*','stop-all');
 $('helpBtn').onclick = showHelp;
-$('conClose').onclick = ()=>$('console').classList.add('hidden');
+$('conClose').onclick = consoleClose;
 function showHelp(){
   modal({title:'Using Claude with the sandbox', input:false, okText:'Got it',
     desc:'Each instance runs its own MCP server. In a Claude session, call that '+

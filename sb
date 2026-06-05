@@ -348,16 +348,21 @@ def _hosts_passwordless() -> bool:
 
 
 def _hosts_edit(action: str, domain: str) -> tuple[bool, str]:
-    """Add/remove a domain mapping via the helper. Uses `sudo -n` (no prompt)
-    when the passwordless rule is installed; otherwise a normal sudo (prompts in
-    a terminal, fails cleanly from the web). Returns (ok, message)."""
-    cmd = ["sudo"]
-    if _hosts_passwordless():
-        cmd.append("-n")
-    cmd += [str(HOSTS_HELPER), action, domain]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    """Add/remove a domain mapping via the helper. ALWAYS uses `sudo -n`
+    (non-interactive) so it can NEVER hang on a password prompt — critical for
+    the web server, where a blocking sudo would freeze the job forever. With
+    the passwordless rule installed it succeeds silently; without it, it fails
+    immediately and the caller falls back + tells the user to run
+    `./sb domains setup`. Returns (ok, message)."""
+    res = subprocess.run(
+        ["sudo", "-n", str(HOSTS_HELPER), action, domain],
+        capture_output=True, text=True)
     if res.returncode == 0:
         return True, (res.stdout or "").strip()
+    if not _hosts_passwordless():
+        return False, ("custom domains need a one-time setup: run "
+                       "`./sb domains setup` (or `sudo ./tools/hosts-helper.sh "
+                       f"{action} {domain}`)")
     return False, (res.stderr or res.stdout or "sudo failed").strip()
 
 

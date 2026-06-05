@@ -54,6 +54,10 @@ Each instance can also run a different **web server** —
 `apache`). Useful for testing caching/permalink behavior across Apache, nginx,
 and OpenLiteSpeed. `./sb instances` shows each instance's server.
 
+For a live view, **`./sb dashboard`** opens an interactive full-screen TUI of
+all instances with keys to start/stop/restart, open in browser, set focus, and
+create/delete — auto-refreshing status every couple of seconds.
+
 **Activation phrase: `focus <plugin>`.** Just say it in chat —
 "focus betterdocs", "focus embedpress", "work on xspeed" — and the
 agent runs the handshake automatically: persists the focus, loads

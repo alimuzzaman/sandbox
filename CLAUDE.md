@@ -414,6 +414,21 @@ exercise xSpeed's conflict detection against it. nginx config lives in
 `config/nginx-sandbox.conf`; litespeed needs no custom OLS config (the image's
 vhost template autoloads the WP `.htaccess` that install writes).
 
+### Interactive dashboard — `./sb dashboard`
+
+A full-screen curses TUI (stdlib, no extra deps) to view + drive every instance
+from one place. Auto-refreshes status every ~2s.
+
+```
+./sb dashboard          # or ./sb ui
+```
+
+Keys: `↑↓`/`jk` move · `s` start · `x` stop · `R` restart · `o` open
+(admin/site/mail) · `f` set focus · `n` new instance (name + server picker) ·
+`d` delete (type-name confirm; `main` is protected) · `r` refresh · `q` quit.
+Every action runs the same `cmd_*` the CLI uses, so behavior matches exactly.
+Piping the command to a non-tty falls back to the static `./sb instances` table.
+
 **Or do it by hand** (when you want specific ports or custom admin):
 
 ```

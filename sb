@@ -534,6 +534,7 @@ services:
     restart: unless-stopped
     ports:
       - "{PROXY_BIND_IP}:443:443"
+      - "{PROXY_BIND_IP}:80:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -548,10 +549,19 @@ volumes:
 
 
 def _caddy_block(domain: str, port: int) -> str:
-    """One Caddy site block: terminate TLS with this domain's explicit cert,
-    proxy to the instance's published port, and tell WP it's behind https."""
+    """Two Caddy site blocks for a domain:
+      • http://<domain>  → 308 redirect to https. Needed because Apache inside
+        the container emits server-level redirects (e.g. /wp-admin → /wp-admin/)
+        using the raw request scheme (http), which would otherwise dead-end on
+        :80. Bouncing them back to https keeps every URL on TLS.
+      • https://<domain> → terminate TLS with this domain's cert + reverse-proxy
+        to the instance, telling WP it's behind https (X-Forwarded-Proto)."""
     cert, key = _cert_paths(domain)
-    return f"""{domain} {{
+    return f"""http://{domain} {{
+    redir https://{{host}}{{uri}} 308
+}}
+
+{domain} {{
     tls /certs/{cert.name} /certs/{key.name}
     reverse_proxy host.docker.internal:{port} {{
         header_up X-Forwarded-Proto https
@@ -586,21 +596,39 @@ def regen_caddyfile(cfg: dict) -> None:
     PROXY_CADDYFILE.write_text("\n".join(blocks))
 
 
+def _dns_flush() -> None:
+    """Self-heal DNS so the user NEVER runs a terminal command: reload the live
+    dnsmasq (drops stale cached *.sb records that would shadow the wildcard) and
+    flush macOS's resolver cache. Passwordless via the proxy-helper sudoers rule;
+    silent no-op if that rule isn't installed. Called after every domain change."""
+    if _proxy_sudoers_installed():
+        subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-flush"],
+                       capture_output=True, text=True)
+
+
 def reload_proxy() -> bool:
-    """Apply the current Caddyfile. If the proxy is running, hot-reload it;
-    otherwise bring it up. Non-interactive, never hangs. Returns success."""
-    if not PROXY_COMPOSE.exists():
-        PROXY_COMPOSE.write_text(render_proxy_compose())
-    if _proxy_container_running():
+    """Apply the current proxy config. Always rewrite the compose from the
+    template; if it changed (e.g. ports) recreate the container, else just
+    hot-reload Caddy with the regenerated Caddyfile. Then self-heal DNS (clear
+    stale *.sb cache) so a new/changed domain resolves immediately — no manual
+    flush. Non-interactive, never hangs. Returns success of the proxy step."""
+    desired = render_proxy_compose()
+    changed = (not PROXY_COMPOSE.exists()) or PROXY_COMPOSE.read_text() != desired
+    if changed:
+        PROXY_COMPOSE.write_text(desired)
+    if _proxy_container_running() and not changed:
         res = subprocess.run(
             ["docker", "exec", PROXY_PROJECT, "caddy", "reload",
              "--config", "/etc/caddy/Caddyfile"],
             capture_output=True, text=True)
-        return res.returncode == 0
-    res = subprocess.run(
-        ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
-         "--project-directory", str(ROOT), "up", "-d"],
-        capture_output=True, text=True)
+    else:
+        # First boot, or the compose changed (ports/image) → (re)create so the
+        # new spec takes effect; `up -d` recreates only what differs.
+        res = subprocess.run(
+            ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
+             "--project-directory", str(ROOT), "up", "-d"],
+            capture_output=True, text=True)
+    _dns_flush()
     return res.returncode == 0
 
 
@@ -4194,6 +4222,23 @@ def _web_css() -> str:
     return _WEB_CSS_CACHE[0]
 
 
+_WEB_JS_CACHE = [None]
+
+
+def _web_js() -> str:
+    """Vendored, pre-built dashboard bundle (config/sandbox-web.js) — compiled
+    from the TypeScript source in src/web by Vite. Inlined into the page so the
+    UI is fully self-contained (no node/CDN at runtime). Rebuild after editing
+    src/web: scripts/build-web-js.sh."""
+    if _WEB_JS_CACHE[0] is None:
+        js_path = ROOT / "config" / "sandbox-web.js"
+        try:
+            _WEB_JS_CACHE[0] = js_path.read_text()
+        except OSError:
+            _WEB_JS_CACHE[0] = "console.error('sandbox-web.js missing — run scripts/build-web-js.sh');"
+    return _WEB_JS_CACHE[0]
+
+
 _WEB_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4342,778 +4387,7 @@ _WEB_PAGE = """<!doctype html>
 
 <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end"></div>
 
-<script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-
-// ---- toast ----
-function toast(msg, type='info'){
-  const c = {
-    ok:'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-200 dark:border-emerald-800',
-    err:'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/70 dark:text-red-200 dark:border-red-900',
-    info:'bg-app text-neutral-700 border-brd dark:bg-card-dark dark:text-neutral-200 dark:border-brd-dark'};
-  const el = document.createElement('div');
-  el.className = 'pointer-events-auto text-[13px] px-3.5 py-2 rounded-lg border shadow-md max-w-xs '+(c[type]||c.info);
-  el.textContent = msg; $('toasts').appendChild(el);
-  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),220); }, 2600);
-}
-
-// ---- modal (supports text input or select fields) ----
-let _mResolve = null;
-function modal(opts={}){
-  return new Promise(res=>{
-    _mResolve = res;
-    $('mTitle').textContent = opts.title||'';
-    $('mDesc').textContent = opts.desc||'';
-    $('mFields').innerHTML = (opts.fields||[]).map(f=>{
-      if(f.type==='label'){
-        return `<div class="text-[11px] font-medium uppercase tracking-wide
-          text-neutral-400 pt-1.5">${esc(f.label||'')}</div>`;
-      }
-      if(f.type==='select'){
-        const id = 'mcsel'+(++_cselSeq);
-        const optobjs = f.options.map(o=>({v:o, label:o}));
-        const val = f.value || (f.options[0]||'');
-        // Hidden input carries the value for modalValues(); the csel's pick
-        // callback writes the chosen value into it. fullWidth=true → w-full.
-        return `<input type="hidden" data-k="${f.key}" id="${id}_val" value="${esc(val)}">`
-          + csel(id, optobjs, val,
-                 `(v)=>{document.getElementById('${id}_val').value=v;}`, false, true);
-      }
-      if(f.type==='checkbox'){
-        return `<label class="flex items-center gap-2 text-[13px] text-neutral-700
-          dark:text-neutral-300 cursor-pointer select-none">
-          <input type="checkbox" data-k="${f.key}" data-type="checkbox"
-            ${f.value?'checked':''} class="accent-accent w-3.5 h-3.5">
-          ${esc(f.label||f.key)}</label>`;
-      }
-      if(f.type==='checklist'){
-        const items = (f.options||[]).map(o=>`
-          <label class="flex items-start gap-2 px-2 py-1.5 rounded text-[13px] cursor-pointer
-            hover:bg-neutral-100 dark:hover:bg-neutral-800">
-            <input type="checkbox" data-checklist="${f.key}" value="${esc(o.value)}"
-              class="accent-accent w-3.5 h-3.5 mt-0.5">
-            <span class="flex-1 min-w-0">
-              <span class="text-neutral-800 dark:text-neutral-200">${esc(o.label)}</span>
-              ${o.desc?`<span class="block text-[11.5px] text-neutral-400 truncate">${esc(o.desc)}</span>`:''}
-            </span></label>`).join('');
-        return `<div data-checklist-group="${f.key}"
-          class="flex flex-col gap-0.5 max-h-44 overflow-y-auto rounded border
-          border-brdin dark:border-neutral-700 p-1">${items
-          || `<div class="text-[12px] text-neutral-400 px-2 py-1">none available</div>`}</div>`;
-      }
-      const oninput = f.oninput ? ` oninput="${esc(f.oninput)}"` : '';
-      return `<input data-k="${f.key}" data-field="${esc(f.key)}"${oninput}
-        placeholder="${esc(f.placeholder||'')}" value="${esc(f.value||'')}"
-        class="w-full px-3 py-1.5 rounded border border-brdin dark:border-neutral-700 bg-app
-        dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">`;
-    }).join('');
-    const ok=$('mOk'); ok.textContent=opts.okText||'Confirm';
-    ok.className='px-3 py-1.5 rounded text-[13px] text-white border '+
-      (opts.danger?'bg-red-600 border-red-600 hover:bg-red-700':'bg-accent border-accent hover:bg-blue-700');
-    $('modal').classList.remove('hidden');
-    setTimeout(()=>{ const f=$('mFields').querySelector('input,select'); (f||ok).focus(); },30);
-  });
-}
-function closeModal(val){ $('modal').classList.add('hidden');
-  if(_mResolve){ const r=_mResolve; _mResolve=null; r(val); } }
-function modalValues(){
-  const o={};
-  $('mFields').querySelectorAll('[data-k]').forEach(e=>{
-    if(e.dataset.type==='checkbox') o[e.dataset.k]=e.checked;
-    else o[e.dataset.k]=(e.value||'').trim();
-  });
-  // Checklists → array of checked values.
-  $('mFields').querySelectorAll('[data-checklist-group]').forEach(g=>{
-    const key=g.dataset.checklistGroup;
-    o[key]=[...g.querySelectorAll('input[type=checkbox]:checked')].map(c=>c.value);
-  });
-  return o;
-}
-$('mCancel').onclick=()=>closeModal(null);
-$('mOk').onclick=()=>closeModal(modalValues());
-$('modal').addEventListener('keydown',e=>{ if(e.key==='Enter')$('mOk').click(); if(e.key==='Escape')closeModal(null); });
-$('modal').addEventListener('click',e=>{ if(e.target===$('modal'))closeModal(null); });
-
-// ---- state ----
-let DATA = { instances: [], plugins: [], projects: [], seeds: [],
-             servers: ['apache','nginx','litespeed'] };
-let selected = null;            // selected instance name
-let busy = {};                  // name -> action string while in-flight (optimistic)
-
-async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
-
-async function act(instance, action, extra={}){
-  busy[instance] = action;      // optimistic: mark busy immediately
-  render();
-  let r;
-  try {
-    r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify(Object.assign({instance,action},extra))});
-  } catch(e){ delete busy[instance]; toast('request failed: '+e,'err'); render(); return; }
-  if(r.job_id){ const lbl = ACTION_LABELS[action] ? ACTION_LABELS[action](instance) : (cap(action)+' '+instance);
-    toast(action.replace('-',' ')+' started…','info'); pollJob(r.job_id, instance, lbl); }
-  else {
-    delete busy[instance];
-    if(r.ok) toast(cap(action)+' '+instance+' ✓','ok');
-    else toast((r.output||'failed').split('\\n')[0],'err');
-    await refresh();
-  }
-  return r;
-}
-const cap = s => s.charAt(0).toUpperCase()+s.slice(1);
-const ACTION_LABELS = {
-  'create': n=>'Creating '+n, 'delete': n=>'Deleting '+n,
-  'start-all': ()=>'Starting all sites', 'stop-all': ()=>'Stopping all sites',
-};
-
-let paused=false;
-async function pollJob(id, instance, label){
-  paused=true;
-  consoleOpen(label||'Working…');
-  let offset=0, titled=!!label;
-  const t=setInterval(async()=>{
-    const j=await api('/api/job/'+id+'?offset='+offset);
-    if(!titled && j.status){ $('conTitle').textContent=j.status.replace(/ [✓✗]$/,''); titled=true; }
-    if(j.chunk){ consoleWrite(j.chunk); offset=j.offset; }
-    else if(typeof j.offset==='number'){ offset=j.offset; }
-    if(j.done){ clearInterval(t); paused=false; if(instance) delete busy[instance];
-      consoleStatus(j.status||'done', j.ok);
-      toast(j.status||'done', j.ok?'ok':'err'); await refresh(); }
-  },800);
-}
-
-// ---- live console (right drawer, animated) ----
-function consoleOpen(title){
-  $('console').classList.remove('w-0');
-  $('console').classList.add('w-[26rem]');
-  $('conTitle').textContent = title;
-  $('conBody').textContent = '';
-  $('conInputRow').classList.add('hidden');   // activity mode, not terminal
-  $('conDot').className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
-}
-function consoleClose(){
-  $('console').classList.add('w-0');
-  $('console').classList.remove('w-[26rem]');
-  $('conInputRow').classList.add('hidden');
-}
-function consoleWrite(t){ const b=$('conBody'); b.textContent += t;
-  b.scrollTop = b.scrollHeight; }
-function consoleStatus(s, ok){
-  $('conTitle').textContent = s;
-  $('conDot').className = 'w-2 h-2 rounded-full '+(ok?'bg-emerald-500':'bg-red-500');
-}
-
-// ---- interactive terminal (runs inside the selected instance container) ----
-let termInstance = null, termHist = [], termHistIdx = -1, termBusy = false;
-function openTerminal(name){
-  termInstance = name;
-  $('console').classList.remove('w-0'); $('console').classList.add('w-[26rem]');
-  $('conTitle').textContent = 'Terminal — '+name;
-  $('conDot').className = 'w-2 h-2 rounded-full bg-emerald-500';
-  // Keep existing buffer; print a banner if empty.
-  if(!$('conBody').textContent.trim())
-    consoleWrite('Terminal for '+name+' — runs inside the container.\\n'+
-      'Try: wp plugin list · wp option get siteurl · ls wp-content/plugins\\n\\n');
-  $('conInputRow').classList.remove('hidden');
-  setTimeout(()=>$('conInput').focus(), 60);
-}
-async function runTerm(){
-  if(termBusy) return;
-  const cmd = $('conInput').value.trim();
-  if(!cmd || !termInstance) return;
-  termHist.push(cmd); termHistIdx = termHist.length;
-  $('conInput').value = '';
-  consoleWrite('› '+cmd+'\\n');
-  termBusy = true; $('conDot').className='w-2 h-2 rounded-full bg-amber-400 animate-pulse';
-  let r;
-  try { r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({instance:termInstance, action:'term', cmd})}); }
-  catch(e){ consoleWrite('error: '+e+'\\n'); termBusy=false; return; }
-  if(!r.job_id){ consoleWrite((r.output||'failed')+'\\n'); termBusy=false; return; }
-  // stream the job into the console without resetting it
-  let offset=0;
-  const t=setInterval(async()=>{
-    const j=await api('/api/job/'+r.job_id+'?offset='+offset);
-    if(j.chunk){ consoleWrite(j.chunk); offset=j.offset; }
-    else if(typeof j.offset==='number') offset=j.offset;
-    if(j.done){ clearInterval(t); termBusy=false; consoleWrite('\\n');
-      $('conDot').className='w-2 h-2 rounded-full bg-emerald-500'; $('conInput').focus(); }
-  }, 500);
-}
-function termKey(e){
-  if(e.key==='Enter'){ runTerm(); }
-  else if(e.key==='ArrowUp'){ if(termHistIdx>0){ termHistIdx--; $('conInput').value=termHist[termHistIdx]||''; } e.preventDefault(); }
-  else if(e.key==='ArrowDown'){ if(termHistIdx<termHist.length-1){ termHistIdx++; $('conInput').value=termHist[termHistIdx]||''; } else { termHistIdx=termHist.length; $('conInput').value=''; } e.preventDefault(); }
-}
-
-// ---- sidebar list ----
-function listItem(r){
-  const sel = r.name===selected;
-  const dot = r.running ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600';
-  const b = busy[r.name];
-  return `<button onclick="select_('${r.name}')" class="w-full text-left px-3 py-2 rounded
-     flex items-center gap-2.5 text-[13.5px] ${sel?'bg-white dark:bg-neutral-800 shadow-sm':'hover:bg-neutral-100 dark:hover:bg-neutral-800/60'}">
-     <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
-     <span class="truncate ${sel?'font-medium text-neutral-900 dark:text-neutral-50':'text-neutral-700 dark:text-neutral-300'}">${esc(r.name)}</span>
-     ${b?`<svg class="spin ml-auto w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none">
-        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-dasharray="42" stroke-linecap="round"/></svg>`:''}</button>`;
-}
-
-// ---- detail panel ----
-const row = (label,val) => `<div class="flex items-center py-3 border-b border-brd dark:border-brd-dark/70">
-  <div class="w-40 shrink-0 text-[13px] text-neutral-500 dark:text-neutral-400">${label}</div>
-  <div class="text-[13.5px] text-neutral-800 dark:text-neutral-200">${val}</div></div>`;
-
-function welcome(){
-  const n = DATA.instances.length;
-  return `<div class="max-w-2xl mx-auto px-6 py-12">
-    <h1 class="text-[22px] font-semibold text-neutral-900 dark:text-neutral-50">Give Claude a real WordPress</h1>
-    <p class="mt-2 text-[14px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
-      The sandbox hands Claude a <b>live, disposable WordPress environment</b> to work in — so it
-      stops guessing and starts proving. Through the connected tools Claude can run WP-CLI, hit the
-      REST API and database, open pages in a real browser, read and edit your plugin's actual code,
-      and watch the logs. Each item on the left is one isolated environment Claude can fully control.</p>
-
-    <div class="mt-7 grid grid-cols-3 gap-3">
-      ${infoCard('Build', 'Claude implements features against a running install and verifies them live — not from memory.')}
-      ${infoCard('Reproduce', 'Hand Claude the environment and it reproduces the bug on a real stack — confirmed, not assumed.')}
-      ${infoCard('Fix &amp; prove', 'Reproduce → fix the real code → re-verify in the same environment. Fast, and proven.')}
-    </div>
-
-    <div class="mt-7 rounded-lg border border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 p-4">
-      <div class="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">How Claude works here</div>
-      <p class="mt-1 text-[13px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
-        Just tell Claude <code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">focus &lt;plugin&gt;</code>
-        in chat — it picks the right environment, loads your plugin's code + context, and can build,
-        debug, and fix it end-to-end. Every environment also exposes its own tools
-        (<code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">mcp__sandbox-&lt;name&gt;__*</code>)
-        so multiple Claude sessions can work in parallel without colliding.</p>
-      <button onclick="showHelp()" class="mt-2 text-[13px] text-accent dark:text-blue-400 hover:underline">How it works →</button>
-    </div>
-
-    <p class="mt-5 text-[12.5px] text-neutral-400">
-      It's a real WordPress under the hood — break it, migrate it, throw it away. Snapshot or delete
-      anytime; nothing here is precious.</p>
-
-    ${n ? `<p class="mt-6 text-[13px] text-neutral-400">${n} environment${n===1?'':'s'} ready — pick one on the left, or hand one to Claude.</p>`
-        : `<button onclick="doCreate()" class="mt-6 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-medium hover:bg-blue-700">Create your first environment</button>`}
-  </div>`;
-}
-function infoCard(title, body){
-  return `<div class="rounded-lg border border-brd dark:border-brd-dark p-3.5">
-    <div class="text-[12px] font-semibold uppercase tracking-wide text-accent dark:text-blue-400">${title}</div>
-    <div class="mt-1 text-[13px] text-neutral-600 dark:text-neutral-300 leading-snug">${body}</div></div>`;
-}
-
-function detail(r){
-  if(!r) return welcome();
-  if(r.pending) return `<div class="px-6 pt-8">
-    <div class="flex items-center gap-3">
-      <h1 class="text-[24px] font-semibold text-neutral-900 dark:text-neutral-50">${esc(r.name)}</h1>
-      <span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full
-        bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900/60">
-        ${spinner()} creating</span>
-    </div>
-    <p class="mt-3 text-[13px] text-neutral-500 dark:text-neutral-400 leading-relaxed max-w-md">
-      Setting up the <b>${esc(r.server)}</b> stack — pulling images, installing WordPress,
-      and wiring it up. Live progress is in the Activity panel on the right; this can take a
-      minute on first run.</p></div>`;
-  const b = busy[r.name];
-  const link = "text-accent dark:text-blue-400 hover:underline";
-  const p=r.wordpress_port, m=r.mailpit_port;
-  const primaryBtn = r.running
-    ? `<button onclick="act('${r.name}','stop')" ${b?'disabled':''} class="px-4 py-1.5 rounded-full border
-        border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px] font-medium
-        hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2">
-        ${b==='stop'?spinner():'<span class=\\'w-2 h-2 rounded-sm bg-red-500\\'></span>'}Stop site</button>`
-    : `<button onclick="act('${r.name}','start')" ${b?'disabled':''} class="px-4 py-1.5 rounded-full
-        bg-accent text-white text-[13px] font-medium hover:bg-blue-700
-        flex items-center gap-2">${b==='start'?spinner('white'):'▶'} Start site</button>`;
-  const focusOpts = ['<option value="">— none —</option>']
-    .concat(DATA.plugins.map(s=>`<option value="${esc(s)}" ${s===r.focus?'selected':''}>${esc(s)}</option>`)).join('');
-  return `
-  <div class="px-6 pt-5 pb-3.5 border-b border-brd dark:border-brd-dark flex items-start gap-4">
-    <div class="min-w-0">
-      <div class="flex items-center gap-2.5">
-        <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50 truncate">${esc(r.name)}</h1>
-        ${statusPill(r.running)}
-      </div>
-      <div class="mt-0.5 text-[12px] text-neutral-400 flex items-center gap-1">
-        ${r.url} · <code>${esc(r.mcp_server)}</code></div>
-    </div>
-    <div class="ml-auto flex items-center gap-2">
-      ${pillLink(r.url+'/wp-admin', 'Admin', r.running)}
-      ${pillLink(r.url, 'View site', r.running)}
-    </div>
-  </div>
-  <div class="px-6 py-3.5 flex items-center gap-2">
-    ${primaryBtn}
-    <button onclick="act('${r.name}','restart')" ${(!r.running||b)?'disabled':''} class="px-4 py-1.5 rounded-full border
-      border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
-      hover:bg-neutral-50 dark:hover:bg-neutral-800 flex items-center gap-2">
-      ${b==='restart'?spinner():''}Restart</button>
-    ${r.name==='main'?'':`<button onclick="doDelete('${r.name}')" ${b?'disabled':''} class="ml-auto px-4 py-1.5
-      rounded-full border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px]
-      hover:bg-red-50 dark:hover:bg-red-950/40">Delete</button>`}
-  </div>
-  <div class="px-6 pb-2">
-    ${sectionHead('Overview')}
-    ${row('Web server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
-    ${r.domain ? row('Domain', `<span class="text-neutral-700 dark:text-neutral-200">${esc(r.domain)}</span>
-        <span class="text-[11px] text-neutral-400">→ 127.0.0.1</span>`) : ''}
-    ${row('Site address', r.running
-        ? `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`
-        : `<span class="text-neutral-400">${r.url} <span class="text-[11px]">(stopped)</span></span>`)}
-    ${row('Test inbox', r.running
-        ? `<a href="http://localhost:${m}" target="_blank" class="${link}">Mailpit · :${m}</a>`
-        : `<span class="text-neutral-400">Mailpit · :${m} <span class="text-[11px]">(start the site first)</span></span>`)}
-    ${row('Active project', r.project==='—'?'<span class="text-neutral-400">none</span>':esc(r.project))}
-    ${row('Focus plugin', `<div class="flex items-center gap-2">
-        ${csel('focusSel', [{v:'',label:'— none —'}].concat(DATA.plugins.map(s=>({v:s,label:s}))),
-               r.focus && r.focus!=='—' ? r.focus : '', `(v)=>doFocus('${r.name}', v)`, b)}
-        ${b==='focus'||b==='unfocus'?spinner():''}</div>`)}
-  </div>
-
-  <!-- Tools (terminal commands) -->
-  <div class="px-6 pb-6">
-    ${sectionHead('Tools', 'Run maintenance commands — output streams below')}
-    <div class="flex flex-wrap gap-1.5">
-      ${opBtn(r.name,'logs','Logs')}
-      ${opBtn(r.name,'status','Status')}
-      ${opBtn(r.name,'doctor','Doctor')}
-      ${opBtn(r.name,'update','Update plugins')}
-      <button class="${toolBtn}" onclick="doSnapshot('${r.name}')">Snapshot</button>
-      <button class="${toolBtn}" onclick="doRestore('${r.name}')">Restore…</button>
-      <button class="${toolBtn}" onclick="doSeed('${r.name}')">Seed…</button>
-      ${opBtn(r.name,'xdebug','Xdebug',{state:'status'})}
-    </div>
-    <div class="flex gap-2 mt-2.5">
-      <span class="px-2 py-1.5 text-[12.5px] font-mono text-neutral-400">wp</span>
-      <input id="wpArgs" placeholder="plugin list --status=active"
-        onkeydown="if(event.key==='Enter')doWp('${r.name}')"
-        class="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-brdin dark:border-neutral-700
-        bg-app dark:bg-neutral-900 text-[12.5px] font-mono focus:border-accent outline-none">
-      <button class="${toolBtn}" onclick="doWp('${r.name}')">Run</button>
-    </div>
-  </div>
-
-  <!-- Plugins: search → install (wp.org) or symlink a known source -->
-  <div class="px-6 pb-6">
-    ${sectionHead('Plugins', 'Search to install from WordPress.org, or symlink a local source')}
-    <div class="flex gap-2">
-      <input id="plugQ" placeholder="Search plugins by name or slug…" oninput="plugFilter()"
-        onkeydown="if(event.key==='Enter')doInstall('${r.name}')"
-        class="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-brdin dark:border-neutral-700
-        bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
-      <button class="${toolBtn}" onclick="doInstall('${r.name}')">Install from .org</button>
-    </div>
-    <div id="plugResults" class="mt-2 flex flex-col gap-1"></div>
-  </div>
-
-  <!-- Using Claude with THIS instance -->
-  <div class="px-6 pb-8">
-    ${sectionHead('Use with Claude', 'Connect a Claude session to this exact site')}
-    <div class="rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-3.5 text-[12.5px] space-y-2">
-      <div class="text-neutral-600 dark:text-neutral-300">Tell Claude in chat (simplest):</div>
-      ${snippet('focus '+(r.focus && r.focus!=='—' ? r.focus : '<plugin>'))}
-      <div class="text-neutral-600 dark:text-neutral-300">Or call this site's tools directly in a session:</div>
-      ${snippet('mcp__'+r.mcp_server+'__*')}
-      <div class="text-neutral-500 dark:text-neutral-400">Everything (admin, REST, wp-cli) targets <code>${r.url}</code>.</div>
-      ${instUsageLine(r.name)}
-    </div>
-  </div>`;
-}
-// Per-instance Claude usage summary (best-effort). Uses cached usageData if
-// present; otherwise offers to load it. Cost is estimated.
-function instUsageLine(name){
-  if(!usageData || !usageData.available)
-    return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1">
-      <button onclick="loadUsageThenRender()" class="text-accent dark:text-blue-400 hover:underline">Show Claude token usage →</button></div>`;
-  const v = usageData.per_instance[name];
-  if(!v) return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1 text-neutral-400">No Claude usage attributed to this instance yet.</div>`;
-  return `<div class="pt-2 border-t border-brd dark:border-brd-dark/60 mt-1 flex items-center gap-3">
-    <span class="text-neutral-600 dark:text-neutral-300">Claude usage (est.):</span>
-    <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmtN(tkSum(v))} tokens</span>
-    <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmt$(v.cost)}</span>
-    <button onclick="showUsage()" class="ml-auto text-accent dark:text-blue-400 hover:underline">details →</button></div>`;
-}
-async function loadUsageThenRender(){
-  try { usageData = await api('/api/usage'); } catch(e){ usageData={available:false}; }
-  render();
-}
-function sectionHead(title, hint){
-  return `<div class="mb-2.5 mt-1">
-    <div class="text-[12px] font-semibold text-neutral-800 dark:text-neutral-100">${title}</div>
-    ${hint?`<div class="text-[12px] text-neutral-400">${hint}</div>`:''}</div>`;
-}
-// ---- custom select ----
-// Styled dropdown replacing native <select>. opts: [{v,label}]. `onPick` is a
-// JS expression string taking (value). Searchable when >8 options.
-let _cselSeq = 0;
-const _cselCb = {};   // id -> picker fn
-function csel(id, opts, value, onPickExpr, disabled, fullWidth){
-  const cur = opts.find(o=>o.v===value);
-  const label = cur ? cur.label : (opts[0]?opts[0].label:'');
-  _cselCb[id] = eval(onPickExpr);
-  const dis = disabled ? 'opacity-50 pointer-events-none' : '';
-  const wrapW = fullWidth ? 'block w-full' : 'inline-block';
-  const ctrlW = fullWidth ? 'w-full' : 'w-48';
-  return `<div class="relative ${wrapW}" data-csel="${id}">
-    <button type="button" onclick="cselToggle('${id}')"
-      class="${ctrlW} flex items-center gap-2 px-2.5 py-1.5 rounded border border-brdin
-      dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px] text-left ${dis}">
-      <span class="truncate flex-1" data-csel-label>${esc(label)}</span>
-      <svg class="w-3.5 h-3.5 text-neutral-400 shrink-0" viewBox="0 0 24 24" fill="none">
-        <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-    </button>
-    <div data-csel-pop class="hidden absolute z-[60] mt-1 ${ctrlW} max-h-64 overflow-auto rounded-lg
-      border border-brd dark:border-neutral-700 bg-app dark:bg-card-dark shadow-xl py-1">
-      ${opts.length>8?`<input data-csel-search oninput="cselFilter('${id}')" placeholder="Search…"
-        class="w-[calc(100%-12px)] mx-1.5 mb-1 px-2 py-1 rounded border border-brdin dark:border-neutral-700
-        bg-app dark:bg-neutral-900 text-[12.5px] outline-none focus:border-accent">`:''}
-      <div data-csel-list>
-        ${opts.map(o=>`<button type="button" data-v="${esc(o.v)}" data-search="${esc(o.label.toLowerCase())}"
-          onclick="cselPick('${id}','${esc(o.v)}')"
-          class="w-full text-left px-3 py-1.5 text-[13px] hover:bg-neutral-100 dark:hover:bg-neutral-800
-          ${o.v===value?'text-accent dark:text-blue-400 font-medium':'text-neutral-700 dark:text-neutral-300'}">
-          ${esc(o.label)}</button>`).join('')}
-      </div>
-    </div></div>`;
-}
-function cselToggle(id){
-  document.querySelectorAll('[data-csel-pop]').forEach(p=>{
-    if(p.closest('[data-csel]').dataset.csel!==id) p.classList.add('hidden'); });
-  const pop = document.querySelector(`[data-csel="${id}"] [data-csel-pop]`);
-  if(!pop) return;
-  pop.classList.toggle('hidden');
-  if(!pop.classList.contains('hidden')){
-    const s = pop.querySelector('[data-csel-search]'); if(s){ s.value=''; cselFilter(id); s.focus(); }
-  }
-}
-function cselPick(id, v){
-  document.querySelector(`[data-csel="${id}"] [data-csel-pop]`).classList.add('hidden');
-  const lbl = document.querySelector(`[data-csel="${id}"] [data-csel-label]`);
-  const btn = document.querySelector(`[data-csel="${id}"] [data-v="${CSS.escape(v)}"]`);
-  if(lbl && btn) lbl.textContent = btn.textContent.trim();
-  if(_cselCb[id]) _cselCb[id](v);
-}
-function cselFilter(id){
-  const q = (document.querySelector(`[data-csel="${id}"] [data-csel-search]`)?.value||'').toLowerCase();
-  document.querySelectorAll(`[data-csel="${id}"] [data-csel-list] button`).forEach(b=>{
-    b.style.display = b.dataset.search.includes(q) ? '' : 'none';
-  });
-}
-document.addEventListener('click', e=>{
-  if(!e.target.closest('[data-csel]'))
-    document.querySelectorAll('[data-csel-pop]').forEach(p=>p.classList.add('hidden'));
-});
-
-// Pill link that's a real link when the site runs, greyed + inert when stopped.
-function pillLink(href, label, enabled){
-  const base = "px-4 py-1.5 rounded-full border text-[13px]";
-  if(enabled)
-    return `<a href="${href}" target="_blank" class="${base} border-brd dark:border-neutral-700
-      text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">${label}</a>`;
-  return `<span title="Start the site first" class="${base} border-brd/60 dark:border-neutral-800
-    text-neutral-300 dark:text-neutral-600 cursor-default">${label}</span>`;
-}
-const toolBtn = "px-2.5 py-1.5 rounded border border-brd dark:border-neutral-700 text-[12.5px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
-function opBtn(name, action, label, extra){
-  return `<button class="${toolBtn}" onclick='op("${name}","${action}",${JSON.stringify(extra||{})})'>${label}</button>`;
-}
-function snippet(text){
-  return `<div class="flex items-center gap-2 bg-app dark:bg-neutral-950 border border-brd dark:border-neutral-800 rounded px-2.5 py-1.5">
-    <code class="flex-1 text-[12px] text-neutral-700 dark:text-neutral-200 truncate">${esc(text)}</code>
-    <button onclick='copyText(${JSON.stringify(text)}, this)' class="text-[11px] text-accent dark:text-blue-400 hover:underline shrink-0">copy</button></div>`;
-}
-function spinner(color){ return `<svg class="spin w-3.5 h-3.5 ${color==='white'?'text-white':'text-neutral-400'}"
-  viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"
-  stroke-dasharray="42" stroke-linecap="round"/></svg>`; }
-function statusPill(running){
-  const base="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border";
-  return running
-   ? `<span class="${base} bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>running</span>`
-   : `<span class="${base} bg-neutral-100 text-neutral-500 border-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700"><span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>stopped</span>`;
-}
-
-function select_(name){ selected=name; viewMode='instance'; render(); }
-function goHome(){ selected=null; viewMode='instance'; _autoSelected=true; render(); }
-
-// ---- Claude usage view ----
-let usageData = null;
-async function showUsage(){
-  viewMode='usage'; selected=null;
-  $('detail').innerHTML = `<div class="px-6 py-12 text-center text-neutral-400 text-[13px]">Loading Claude usage…</div>`;
-  try { usageData = await api('/api/usage'); } catch(e){ usageData = {available:false}; }
-  $('detail').innerHTML = usageView();
-}
-const fmtN = n => (n||0).toLocaleString();
-const fmt$ = n => '$'+(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-const tkSum = u => (u.in||0)+(u.out||0)+(u.cw||0)+(u.cr||0);
-function usageView(){
-  const u = usageData;
-  if(!u || !u.available) return `<div class="px-6 py-12 text-center text-neutral-400 text-[14px]">
-    No Claude session data found.</div>`;
-  const t = u.total;
-  const statCard = (label, val, sub) => `<div class="rounded-lg border border-brd dark:border-brd-dark p-4">
-    <div class="text-[12px] text-neutral-400">${label}</div>
-    <div class="mt-1 text-[20px] font-semibold text-neutral-900 dark:text-neutral-50">${val}</div>
-    ${sub?`<div class="text-[12px] text-neutral-400 mt-0.5">${sub}</div>`:''}</div>`;
-  const modelRows = Object.entries(u.by_model).map(([m,v])=>`
-    <div class="flex items-center py-2 border-b border-brd dark:border-brd-dark/70 text-[13px]">
-      <span class="w-24 capitalize text-neutral-700 dark:text-neutral-300">${m}</span>
-      <span class="flex-1 text-neutral-500">${fmtN(tkSum(v))} tokens</span>
-      <span class="text-neutral-700 dark:text-neutral-200">${fmt$(v.cost)}</span></div>`).join('');
-  const instRows = Object.entries(u.per_instance).sort((a,b)=>b[1].cost-a[1].cost).map(([i,v])=>`
-    <div class="flex items-center py-2 border-b border-brd dark:border-brd-dark/70 text-[13px]">
-      <span class="w-32 truncate ${i==='unattributed'?'text-neutral-400 italic':'text-neutral-700 dark:text-neutral-300'}">${esc(i)}</span>
-      <span class="flex-1 text-neutral-500">${fmtN(tkSum(v))} tokens</span>
-      <span class="text-neutral-700 dark:text-neutral-200">${fmt$(v.cost)}</span></div>`).join('');
-  const sess = u.sessions.map(s=>`
-    <div class="flex items-center gap-3 py-1.5 text-[12.5px] border-b border-brd dark:border-brd-dark/60">
-      <code class="text-neutral-400">${s.id}</code>
-      <span class="w-16 capitalize text-neutral-500">${s.model}</span>
-      <span class="flex-1 text-neutral-400 truncate">${(s.instances||[]).join(', ')||'—'}</span>
-      <span class="text-neutral-500">${fmtN(s.tokens)}</span>
-      <span class="w-16 text-right text-neutral-700 dark:text-neutral-200">${fmt$(s.cost)}</span></div>`).join('');
-  return `<div class="px-6 py-6 max-w-3xl">
-    <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50">Claude usage</h1>
-    <p class="mt-1 text-[12.5px] text-neutral-400">Across all sandbox Claude sessions. Cost is <b>estimated</b> from public per-token prices.</p>
-    <div class="mt-5 grid grid-cols-3 gap-3">
-      ${statCard('Total tokens', fmtN(u.tokens))}
-      ${statCard('Estimated cost', fmt$(u.cost))}
-      ${statCard('Sessions', fmtN(u.sessions.length)+(u.sessions.length>=25?'+':''))}
-    </div>
-    <div class="mt-5 grid grid-cols-2 gap-3 text-[12px] text-neutral-400">
-      <div class="rounded-lg border border-brd dark:border-brd-dark p-3">in ${fmtN(t.in)} · out ${fmtN(t.out)}</div>
-      <div class="rounded-lg border border-brd dark:border-brd-dark p-3">cache write ${fmtN(t.cw)} · cache read ${fmtN(t.cr)}</div>
-    </div>
-    <div class="mt-6">${sectionHead('By model')}${modelRows||'<div class="text-[13px] text-neutral-400">—</div>'}</div>
-    <div class="mt-6">${sectionHead('By instance','Best-effort — attributed by which mcp__sandbox-… tools each session used')}${instRows||'<div class="text-[13px] text-neutral-400">—</div>'}</div>
-    <div class="mt-6">${sectionHead('Recent sessions')}
-      <div class="flex items-center gap-3 py-1 text-[11px] uppercase tracking-wide text-neutral-400 border-b border-brd dark:border-brd-dark">
-        <span>id</span><span class="w-16">model</span><span class="flex-1">instances</span><span>tokens</span><span class="w-16 text-right">cost</span></div>
-      ${sess}</div>
-    <button onclick="showUsage()" class="mt-5 text-[13px] text-accent dark:text-blue-400 hover:underline">↻ Refresh</button>
-  </div>`;
-}
-
-// ---- actions ----
-async function doFocus(name, slug){
-  if(slug==='') act(name,'unfocus'); else if(slug) act(name,'focus',{slug});
-}
-async function doDelete(name){
-  const v = await modal({title:'Delete '+name, danger:true, okText:'Delete',
-    desc:'Stops + removes the stack, DB volume, and files. Type the name to confirm.',
-    fields:[{key:'confirm', placeholder:name}]});
-  if(v && v.confirm===name) act(name,'delete',{confirm:name});
-  else if(v) toast('name did not match — not deleted','err');
-}
-// Live-mirror the name into the domain field as <name>.sb, until the user
-// edits the domain themselves (then leave their value alone). Sanitizes the
-// name to a valid hostname label the same way the backend does.
-let _domainTouched = false;
-function syncDomainFromName(nameEl){
-  if(_domainTouched) return;
-  const dom = document.querySelector('#mFields [data-field="domain"]');
-  if(!dom) return;
-  const slug = (nameEl.value||'').trim().toLowerCase()
-    .replace(/[^a-z0-9-]/g,'-').replace(/^-+|-+$/g,'');
-  dom.value = slug ? slug+'.sb' : '';
-}
-function domainEdited(){ _domainTouched = true; }
-async function doCreate(){
-  _domainTouched = false;
-  const dready = DATA.domains_ready;
-  const desc = dready
-    ? 'Name it, pick a web server, then optionally add plugins and demo content. The domain fills in from the name.'
-    : 'Name it, pick a web server, then optionally add plugins and demo content. Tip: run `./sb domains setup` once for trusted no-port HTTPS.';
-  // Projects + curated plugins become one checklist; project names first.
-  const projOpts = (DATA.projects||[]).map(p=>({
-    value:p.name, label:p.name, desc:p.description||((p.plugins||[]).join(', '))}));
-  const seedOpts = ['none', ...(DATA.seeds||[])];
-  const fields = [
-    {type:'label', label:'Basics'},
-    {key:'name', placeholder:'name (a-z, 0-9, -)', oninput:'syncDomainFromName(this)'},
-    {key:'server', type:'select', options:DATA.servers},
-    {key:'domain', placeholder:'domain — defaults to <name>.sb', oninput:'domainEdited()'},
-    {type:'label', label:'Plugins (optional)'},
-    {key:'plugins', type:'checklist', options:projOpts},
-    {type:'label', label:'Content & options (optional)'},
-    {key:'seed', type:'select', options:seedOpts},
-    {key:'site_title', placeholder:'site title — defaults to “Sandbox <name>”'},
-    {key:'theme', placeholder:'theme slug (optional, e.g. astra)'},
-    {key:'wp_debug', type:'checkbox', label:'Enable WP_DEBUG'},
-  ];
-  const v = await modal({title:'New instance', okText:'Create', desc, fields});
-  if(!v || !v.name) return;
-  const name = v.name.trim();
-  const domain = (v.domain||'').trim().toLowerCase();
-  const seed = (v.seed && v.seed!=='none') ? v.seed : '';
-  const plugins = v.plugins||[];
-  // Optimistic: show the new site in the sidebar immediately (pending state)
-  // and select it, so the user watches it come up — not a jarring jump.
-  if(!DATA.instances.find(i=>i.name===name)){
-    DATA.instances.push({name, running:false, pending:true, server:v.server,
-      url:'', mcp_server:'sandbox-'+name, project:'—', focus:'—', domain,
-      wordpress_port:'', mailpit_port:''});
-  }
-  selected = name; busy[name]='create'; render();
-  act(name,'create',{name, server:v.server, domain, plugins, seed,
-    site_title:(v.site_title||'').trim(), theme:(v.theme||'').trim(),
-    wp_debug:!!v.wp_debug});
-}
-// Ops/terminal actions: always stream into the console panel.
-async function op(name, action, extra={}){
-  let r;
-  try {
-    r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify(Object.assign({instance:name,action},extra))});
-  } catch(e){ toast('request failed: '+e,'err'); return; }
-  if(r.job_id){
-    const titles = {logs:'Logs', status:'Status', doctor:'Doctor', update:'Updating plugins',
-      snapshot:'Snapshot', restore:'Restoring', seed:'Importing content', xdebug:'Xdebug',
-      install:'Installing '+(extra.slug||'plugin'), wp:'wp '+(extra.args||'')};
-    pollJob(r.job_id, null, (titles[action]||cap(action))+' — '+name);
-  }
-  else { toast((r.output||'failed').split('\\n')[0],'err'); }
-}
-function doWp(name){
-  const el=$('wpArgs'); const args=el.value.trim();
-  if(!args){ toast('enter a wp-cli command','err'); return; }
-  op(name,'wp',{args});
-}
-async function doSnapshot(name){
-  const v = await modal({title:'Snapshot '+name, okText:'Save',
-    desc:'Save the current DB + uploads under this name.',
-    fields:[{key:'name', placeholder:'snapshot name'}]});
-  if(v && v.name) op(name,'snapshot',{name:v.name});
-}
-async function doRestore(name){
-  let snaps=[]; try{ snaps=(await api('/api/snapshots/'+name)).snapshots||[]; }catch(e){}
-  if(!snaps.length){ toast('no snapshots for '+name,'err'); return; }
-  const v = await modal({title:'Restore '+name, danger:true, okText:'Restore',
-    desc:'Overwrites the current DB + uploads with the chosen snapshot.',
-    fields:[{key:'name', type:'select', options:snaps}]});
-  if(v && v.name) op(name,'restore',{name:v.name});
-}
-async function doSeed(name){
-  const seeds=DATA.seeds||[];
-  if(!seeds.length){ toast('no WXR files in runtime/seeds/','err'); return; }
-  const v = await modal({title:'Seed '+name, okText:'Import',
-    desc:'Import a WXR content file into this instance.',
-    fields:[{key:'file', type:'select', options:seeds}]});
-  if(v && v.file) op(name,'seed',{file:v.file});
-}
-function copyText(t, btn){
-  navigator.clipboard.writeText(t).then(()=>{ const o=btn.textContent;
-    btn.textContent='copied'; setTimeout(()=>btn.textContent=o,1200); });
-}
-// Plugin search: filter the curated local plugins (symlink-able) live.
-function plugFilter(){
-  const q = ($('plugQ').value||'').toLowerCase().trim();
-  const box = $('plugResults');
-  if(!q){ box.innerHTML=''; return; }
-  const cur = DATA.instances.find(i=>i.name===selected);
-  const matches = (DATA.plugins||[]).filter(s=>s.toLowerCase().includes(q)).slice(0,8);
-  box.innerHTML = matches.map(s=>`
-    <div class="flex items-center gap-2 px-2.5 py-1.5 rounded border border-brd dark:border-neutral-800
-      text-[13px]">
-      <span class="flex-1 text-neutral-700 dark:text-neutral-300">${esc(s)}</span>
-      ${cur && cur.focus===s ? '<span class="text-[11px] text-emerald-500">focused</span>'
-        : `<button class="text-[12px] text-accent dark:text-blue-400 hover:underline"
-            onclick="doFocus('${cur?cur.name:''}','${esc(s)}')">Symlink + focus</button>`}
-    </div>`).join('')
-    || `<div class="text-[12px] text-neutral-400 px-1">No local source matches “${esc(q)}”.
-        Press Install to fetch it from WordPress.org.</div>`;
-}
-function doInstall(name){
-  const slug = ($('plugQ').value||'').trim().toLowerCase().replace(/\\s+/g,'-');
-  if(!slug){ toast('type a plugin slug to install','err'); return; }
-  op(name,'install',{slug});
-}
-$('newBtn').onclick = doCreate;
-$('startAll').onclick = ()=>act('*','start-all');
-$('stopAll').onclick = ()=>act('*','stop-all');
-$('helpBtn').onclick = showHelp;
-$('usageBtn').onclick = showUsage;
-$('termBtn').onclick = ()=>{
-  const inst = selected || (DATA.instances[0]&&DATA.instances[0].name);
-  if(!inst){ toast('create an instance first','err'); return; }
-  openTerminal(inst);
-};
-$('conClose').onclick = consoleClose;
-$('conInput').addEventListener('keydown', termKey);
-function showHelp(){
-  modal({title:'How Claude works here', input:false, okText:'Got it',
-    desc:'The sandbox gives Claude a live WordPress to act in, so it can verify '+
-      'instead of guess: run WP-CLI, hit REST + the DB, open pages in a real '+
-      'browser, read/edit your plugin\\'s code, and tail logs. Say "focus <plugin>" '+
-      'or "work on <plugin>" in chat — Claude picks the matching environment, '+
-      'symlinks the plugin in, loads its code + context, and can build, reproduce, '+
-      'and fix end-to-end. Each environment also has its own tool namespace '+
-      '(mcp__sandbox__* = main, mcp__sandbox-<name>__* = that one) so parallel '+
-      'sessions never collide. Open an environment on the left for its exact '+
-      'snippet. It\\'s real WordPress — break it freely, snapshot or delete anytime.'});
-}
-
-// ---- render ----
-// The sidebar + footer refresh every tick (cheap, no inputs). The detail
-// panel is re-rendered ONLY when its data actually changes AND the user isn't
-// mid-interaction (typing in an input / a select or modal is open) — otherwise
-// a 2s tick would wipe what you're typing. This is the fix for "the input
-// keeps resetting".
-let _detailSig = '';
-function detailSignature(r){
-  if(!r) return 'none';
-  // Only fields the panel renders from — busy state + status + focus + plugins.
-  return JSON.stringify([r.name, r.running, r.server, r.focus, r.project,
-                         busy[r.name]||'', DATA.plugins.length]);
-}
-function userIsInteracting(){
-  const a = document.activeElement;
-  if(a && (a.tagName==='INPUT' || a.tagName==='SELECT' || a.tagName==='TEXTAREA')) return true;
-  if(!$('modal').classList.contains('hidden')) return true;
-  return false;
-}
-function renderSidebar(){
-  const items = DATA.instances;
-  $('list').innerHTML = items.map(listItem).join('');
-  const running = items.filter(i=>i.running).length;
-  $('runcount').textContent = running+'/'+items.length;
-  $('footstat').textContent = items.length
-    ? running+' of '+items.length+' running' : 'no instances yet';
-}
-let viewMode = 'instance';   // 'instance' | 'usage'
-function renderDetail(force){
-  if(viewMode==='usage'){
-    if(force) $('detail').innerHTML = usageView();
-    return;   // usage view is static once rendered (refreshed by showUsage)
-  }
-  const cur = DATA.instances.find(i=>i.name===selected) || null;
-  const sig = detailSignature(cur);
-  if(!force && sig===_detailSig) return;          // unchanged → leave DOM alone
-  if(!force && userIsInteracting()) return;        // don't clobber active input
-  _detailSig = sig;
-  $('detail').innerHTML = detail(cur);
-}
-function render(){ renderSidebar(); renderDetail(true); }   // explicit full render (on select/action)
-let _autoSelected = false;
-async function refresh(){
-  if(paused) return;
-  let d; try { d = await api('/api/instances'); } catch(e){ return; }
-  DATA = d;
-  // Auto-select the first instance ONCE on initial load (so first-run users
-  // who land mid-list see something); after that, respect goHome()/selection.
-  if(!selected && !_autoSelected && d.instances.length){
-    selected = d.instances[0].name; _autoSelected = true;
-  }
-  renderSidebar();
-  renderDetail(false);                             // soft: only if changed + idle
-}
-refresh(); setInterval(refresh, 2000);
-</script></body></html>"""
+<script>__SANDBOX_WEB_JS__</script></body></html>"""
 
 
 def cmd_web(cfg, args) -> None:
@@ -5134,10 +4408,13 @@ def cmd_web(cfg, args) -> None:
             self.end_headers()
             self.wfile.write(data)
 
+        def _serve_page(self):
+            page = (_WEB_PAGE
+                    .replace("__SANDBOX_WEB_CSS__", _web_css())
+                    .replace("__SANDBOX_WEB_JS__", _web_js()))
+            return self._send(200, page, "text/html; charset=utf-8")
+
         def do_GET(self):
-            if self.path == "/" or self.path == "/index.html":
-                page = _WEB_PAGE.replace("__SANDBOX_WEB_CSS__", _web_css())
-                return self._send(200, page, "text/html; charset=utf-8")
             # Split path + query.
             from urllib.parse import urlparse, parse_qs
             u = urlparse(self.path)
@@ -5168,7 +4445,12 @@ def cmd_web(cfg, args) -> None:
                 cfg = load_config()
                 insts = list(resolve_instances(cfg).keys())
                 return self._send(200, json.dumps(claude_usage(insts)))
-            return self._send(404, json.dumps({"error": "not found"}))
+            if path.startswith("/api/"):
+                return self._send(404, json.dumps({"error": "not found"}))
+            # SPA fallback: any non-API path serves the app shell; the client
+            # router renders the right view from location.pathname. Lets deep
+            # links + hard-refresh on /instance/<name> and /usage work.
+            return self._serve_page()
 
         def do_POST(self):
             if self.path != "/api/action":

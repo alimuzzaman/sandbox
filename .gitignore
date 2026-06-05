@@ -43,3 +43,8 @@ runtime/.venv-tools/
 
 # Tailwind standalone CLI + scratch for scripts/build-web-css.sh
 .cache/
+
+# Web UI TypeScript toolchain (src/web). The built bundle config/sandbox-web.js
+# IS committed (vendored); only the dev deps + dist are ignored.
+src/web/node_modules/
+src/web/dist/

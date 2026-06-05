@@ -19,13 +19,26 @@ BREW_PREFIX="${HOMEBREW_PREFIX:-/opt/homebrew}"
 DNSMASQ_CONF="$BREW_PREFIX/etc/dnsmasq.d/sandbox-sb.conf"
 RESOLVER=/etc/resolver/sb
 
-restart_dnsmasq() {
-  # Prefer the brew service; fall back to launchd kickstart. Best-effort.
-  if command -v brew >/dev/null 2>&1; then
-    brew services restart dnsmasq >/dev/null 2>&1 && return 0
+reload_dnsmasq() {
+  # Reload the RUNNING dnsmasq + clear its cache, however it's managed. We've
+  # seen dnsmasq be Valet-run (root, NOT brew-managed), so `brew services
+  # restart` silently no-ops and a stale cached record (e.g. xspeed.sb pointing
+  # at an old IP) shadows the wildcard. So: SIGHUP every live dnsmasq by PID
+  # (clears cache + re-reads config — works regardless of manager), and also
+  # try brew/launchd as a belt-and-suspenders. All best-effort.
+  local pids
+  pids="$(pgrep dnsmasq 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    kill -HUP $pids 2>/dev/null || true
   fi
-  launchctl kickstart -k "system/$(ls /Library/LaunchDaemons 2>/dev/null \
-    | grep -i dnsmasq | head -1 | sed 's/\.plist$//')" 2>/dev/null || true
+  command -v brew >/dev/null 2>&1 && brew services restart dnsmasq >/dev/null 2>&1 || true
+}
+
+flush_macos_dns() {
+  # Drop macOS's own resolver cache so it re-queries dnsmasq for *.sb names.
+  dscacheutil -flushcache 2>/dev/null || true
+  killall -HUP mDNSResponder 2>/dev/null || true
 }
 
 action="${1:-}"
@@ -43,15 +56,24 @@ case "$action" in
       "$ALIAS_IP" > "$DNSMASQ_CONF"
     mkdir -p /etc/resolver
     printf 'nameserver 127.0.0.1\n' > "$RESOLVER"
-    restart_dnsmasq
+    reload_dnsmasq
+    flush_macos_dns
     ;;
   dns-down)
     rm -f "$DNSMASQ_CONF" "$RESOLVER"
-    restart_dnsmasq
+    reload_dnsmasq
+    flush_macos_dns
+    ;;
+  dns-flush)
+    # Self-heal: reload dnsmasq (drop stale cached *.sb records) + flush macOS
+    # cache. Called automatically by `sb` after any domain change, so the user
+    # never has to run a terminal command to fix resolution.
+    reload_dnsmasq
+    flush_macos_dns
     ;;
   *)
     echo "proxy-helper: unknown action '$action'" >&2
-    echo "usage: proxy-helper.sh alias-up|alias-down|dns-up|dns-down" >&2
+    echo "usage: proxy-helper.sh alias-up|alias-down|dns-up|dns-down|dns-flush" >&2
     exit 2
     ;;
 esac

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sandbox (dev)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Dev only: references the vendored Tailwind build. In production `sb`
+     inlines this same CSS via __SANDBOX_WEB_CSS__. The static body below MUST
+     match the body in `sb`'s _WEB_PAGE (same DOM IDs the TS binds to). -->
+<link rel="stylesheet" href="../../config/sandbox-web.css">
+<style>
+  html, body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  * { transition: background-color .14s ease, border-color .14s ease, color .12s ease,
+        box-shadow .14s ease, transform .08s ease; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: #8884; border-radius: 9999px; border: 2px solid transparent;
+    background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #8888; background-clip: padding-box; }
+  .spin { animation: sp 0.7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  button[disabled] { opacity: .4; cursor: default; }
+  main button:not([disabled]):active, footer button:not([disabled]):active { transform: translateY(0.5px); }
+  .rounded-full { border-radius: 7px !important; }
+  main .rounded-full, footer .rounded-full, aside .rounded-full { box-shadow: 0 1px 0 rgba(0,0,0,.03); }
+  .bg-accent { box-shadow: 0 1px 2px rgba(37,99,235,.35), inset 0 1px 0 rgba(255,255,255,.12); }
+  #list button { border-radius: 7px; }
+  #conBody { background: linear-gradient(180deg, rgba(255,255,255,.015), transparent 120px); }
+  #detail > * { animation: fadein .18s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+</style></head>
+<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark antialiased h-screen overflow-hidden flex flex-col">
+
+<div class="h-9 shrink-0 flex items-center px-3.5 gap-2 border-b border-brd dark:border-brd-dark
+     bg-neutral-100/80 dark:bg-neutral-900/80 backdrop-blur select-none">
+  <span class="w-3 h-3 rounded-full" style="background:#ff5f57"></span>
+  <span class="w-3 h-3 rounded-full" style="background:#febc2e"></span>
+  <span class="w-3 h-3 rounded-full" style="background:#28c840"></span>
+  <div class="flex-1 text-center text-[12px] font-medium text-neutral-500 dark:text-neutral-400">
+    Sandbox — WordPress dev environments</div>
+  <span class="w-12"></span>
+</div>
+
+<div class="flex flex-1 min-h-0">
+  <aside class="w-60 shrink-0 border-r border-brd dark:border-brd-dark
+                bg-neutral-100/60 dark:bg-neutral-950 flex flex-col">
+    <a href="/" data-link title="What is this?"
+      class="h-12 px-3.5 flex items-center gap-2 border-b border-brd dark:border-brd-dark
+             w-full hover:bg-neutral-200/50 dark:hover:bg-neutral-900 text-left">
+      <div class="w-5 h-5 rounded-md bg-accent flex items-center justify-center
+                  text-white text-[12px] font-bold">S</div>
+      <span class="font-semibold text-[13px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
+      <span id="runcount" class="ml-auto text-[11px] text-neutral-400"></span>
+    </a>
+    <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
+                text-neutral-400">Instances</div>
+    <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
+    <div class="p-2 border-t border-brd dark:border-brd-dark space-y-0.5">
+      <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded
+        text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[15px] leading-none">+</span> New instance</button>
+      <button id="termBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[13px] leading-none font-mono">›_</span> Terminal</button>
+      <a id="usageBtn" href="/usage" data-link class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[13px] leading-none">◴</span> Claude usage</a>
+      <button id="helpBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[14px] leading-none">?</span> Using Claude</button>
+    </div>
+  </aside>
+
+  <div class="flex-1 flex flex-col min-w-0">
+    <main id="detail" class="flex-1 overflow-auto"></main>
+    <footer class="h-12 shrink-0 border-t border-brd dark:border-brd-dark
+       bg-app dark:bg-card-dark px-5 flex items-center gap-3 text-[12.5px]">
+      <span id="footstat" class="text-neutral-500 dark:text-neutral-400"></span>
+      <div class="ml-auto flex items-center gap-2">
+        <button id="startAll" class="px-3 py-1 rounded border border-brd dark:border-neutral-700
+          text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">
+          Start all</button>
+        <button id="stopAll" class="px-3 py-1 rounded border border-red-200 dark:border-red-900/60
+          text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">
+          Stop all</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="console" class="shrink-0 w-0 overflow-hidden border-l border-neutral-800
+       bg-neutral-950 flex flex-col transition-[width] duration-300 ease-out">
+    <div class="w-[26rem] flex flex-col h-full">
+      <div class="h-14 px-4 flex items-center gap-2 border-b border-neutral-800 shrink-0">
+        <span id="conDot" class="w-2 h-2 rounded-full bg-neutral-500"></span>
+        <span id="conTitle" class="text-neutral-200 text-[13px] font-medium truncate flex-1">Activity</span>
+        <button id="conClose" class="text-neutral-500 hover:text-neutral-200 text-[18px] leading-none">×</button>
+      </div>
+      <pre id="conBody" class="flex-1 overflow-auto px-4 py-3 text-[11.5px] leading-relaxed
+        font-mono text-neutral-300 whitespace-pre-wrap"></pre>
+      <div id="conInputRow" class="hidden shrink-0 border-t border-neutral-800 flex items-center gap-1.5 px-3 py-2">
+        <span class="text-emerald-400 font-mono text-[12px]">›</span>
+        <input id="conInput" spellcheck="false" autocomplete="off"
+          placeholder="wp plugin list   ·   or any shell command"
+          class="flex-1 min-w-0 bg-transparent text-neutral-100 font-mono text-[12px] outline-none placeholder:text-neutral-600">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="modal" class="hidden fixed inset-0 z-50 flex items-center justify-center
+     bg-black/40 backdrop-blur-sm p-4">
+  <div class="bg-app dark:bg-card-dark border border-brd dark:border-brd-dark rounded-lg
+       shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 max-h-[85vh]">
+    <h2 id="mTitle" class="text-[15px] font-semibold text-neutral-900 dark:text-neutral-50"></h2>
+    <p id="mDesc" class="text-[13px] text-neutral-500 dark:text-neutral-400 leading-snug"></p>
+    <div id="mFields" class="flex flex-col gap-2.5 overflow-y-auto -mx-1 px-1"></div>
+    <div class="flex justify-end gap-2 pt-1">
+      <button id="mCancel" class="px-3 py-1.5 rounded border border-brd dark:border-neutral-700
+         text-[13px] text-neutral-600 dark:text-neutral-300
+         hover:bg-neutral-50 dark:hover:bg-neutral-800">Cancel</button>
+      <button id="mOk" class="px-3 py-1.5 rounded text-[13px] text-white
+         bg-accent border border-accent hover:bg-blue-700">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end"></div>
+
+<script type="module" src="/src/main.ts"></script>
+</body></html>

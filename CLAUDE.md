@@ -462,9 +462,19 @@ servers + focus handshake. Streaming jobs poll `GET /api/job/<id>?offset=N`
 (incremental); restore/seed pickers read `GET /api/snapshots/<inst>` + the
 `seeds` field on `/api/instances`.
 
+The dashboard is authored in **TypeScript** under `src/web` (a Vite project)
+and built to a single vendored bundle `config/sandbox-web.js` that `sb` inlines
+into the page — so running `./sb web` needs no node/CDN (works offline); only
+rebuilding does. It uses **History-API routing with clean URLs** (`/`,
+`/instance/<name>`, `/instance/<name>/console`, `/usage`); the server serves the
+app shell for any non-`/api/` path (SPA fallback) so deep links + refresh work.
+Inline handlers call a namespaced `window.sb.*` surface.
+After editing `src/web`, rebuild: `./scripts/build-web-js.sh`, then restart
+`./sb web`.
+
 The UI is styled with **vendored Tailwind** (xSpeed DESIGN.md tokens) inlined
 from `config/sandbox-web.css` — no CDN, fully self-contained, works offline.
-After changing Tailwind classes in the page markup, rebuild the CSS:
+After changing Tailwind classes, rebuild the CSS:
 `./scripts/build-web-css.sh` (uses the Tailwind standalone CLI; no npm).
 
 **Or do it by hand** (when you want specific ports or custom admin):

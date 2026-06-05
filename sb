@@ -944,25 +944,26 @@ def cmd_install(cfg, args) -> None:
     port = inst_cfg["wordpress_port"]
     server = inst_cfg.get("server", "apache")
 
-    # The official wordpress (apache/fpm) image ships WP core inside the
-    # image and its entrypoint copies it into the volume + generates
-    # wp-config.php from WORDPRESS_DB_*. The OpenLiteSpeed image ships
-    # NEITHER — its docroot is empty — so on litespeed we bootstrap WP
-    # ourselves: download core, then write wp-config.php, before install.
-    if server == "litespeed":
-        ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
-        if ver.returncode != 0:
-            info("litespeed: downloading WordPress core (OLS image ships none)…")
-            wpcli(["core", "download", "--force"], instance=inst, check=False)
-        chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
-        if chk.returncode != 0:
-            info("litespeed: generating wp-config.php (OLS image doesn't auto-create it)…")
-            wpcli([
-                "config", "create",
-                "--dbhost=db:3306", "--dbname=wp",
-                "--dbuser=wp", "--dbpass=wp",
-                "--skip-check",
-            ], instance=inst, check=False)
+    # WordPress bootstrap, made robust for EVERY server:
+    #  - apache/fpm images ship WP core + (usually) generate wp-config.php from
+    #    WORDPRESS_DB_* on first boot — but that can race the install, leaving
+    #    'wp-config.php not found'. The OpenLiteSpeed image ships neither.
+    # So: ensure core is present (download if missing), then ensure
+    # wp-config.php exists (create if missing) — regardless of server — before
+    # `wp core install`. Both checks are no-ops when the image already did it.
+    ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
+    if ver.returncode != 0:
+        info("downloading WordPress core…")
+        wpcli(["core", "download", "--force"], instance=inst, check=False)
+    chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
+    if chk.returncode != 0:
+        info("generating wp-config.php…")
+        wpcli([
+            "config", "create",
+            "--dbhost=db:3306", "--dbname=wp",
+            "--dbuser=wp", "--dbpass=wp",
+            "--skip-check", "--force",
+        ], instance=inst, check=False)
 
     wpcli([
         "core", "install",
@@ -2653,7 +2654,13 @@ def cmd_instance(cfg, args) -> None:
             "and contain only [a-z0-9_-] (max 31 chars)")
 
     server = _valid_server(getattr(args, "server", None) or "apache")
+    # Domain auto-defaults to <name>.sb unless --domain given or --no-domain set.
+    # The instance name is already a valid hostname label (validated above).
     domain = getattr(args, "domain", None)
+    if getattr(args, "no_domain", False):
+        domain = None
+    elif not domain and action == "create":
+        domain = f"{name}.sb"
     if domain:
         domain = _valid_domain(domain)
 
@@ -4247,13 +4254,13 @@ async function doDelete(name){
 async function doCreate(){
   const dready = DATA.domains_ready;
   const desc = dready
-    ? 'Pick a name, web server, and optional custom domain. Booting may take a minute.'
-    : 'Pick a name, web server, and optional custom domain. Tip: run `./sb domains setup` once for clean no-port URLs — until then a domain still works as <domain>:<port>.';
-  // Always offer the domain field so it's discoverable; setup only changes
-  // whether the URL is clean (proxy) or domain:port.
+    ? 'Pick a name and web server. Domain defaults to <name>.sb — change it or leave blank.'
+    : 'Pick a name and web server. Domain defaults to <name>.sb. Tip: run `./sb domains setup` once for clean no-port URLs.';
+  // Domain defaults to <name>.sb (auto from the name). Always shown so it's
+  // discoverable + editable.
   const fields = [{key:'name', placeholder:'name (a-z, 0-9, -)'},
                   {key:'server', type:'select', options:DATA.servers},
-                  {key:'domain', placeholder:'custom domain — optional, e.g. myapp.sb'}];
+                  {key:'domain', placeholder:'domain — defaults to <name>.sb'}];
   const v = await modal({title:'New instance', okText:'Create', desc, fields});
   if(!v || !v.name) return;
   const name = v.name.trim();
@@ -4615,7 +4622,9 @@ Then pick a project and a plugin:
     ins.add_argument("--server", choices=list(SERVERS), default="apache",
         help="web server stack for `create` (default: apache)")
     ins.add_argument("--domain", default=None,
-        help="custom local domain for `create` (e.g. myapp.sb) → /etc/hosts")
+        help="custom local domain for `create` (default: <name>.sb)")
+    ins.add_argument("--no-domain", action="store_true",
+        help="don't assign a custom domain (use plain localhost:<port>)")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
 

@@ -2923,12 +2923,26 @@ def _run_cmd_capture(fn, args_ns) -> tuple[bool, str]:
     return ok_flag, buf.getvalue()
 
 
+def _web_available_plugins(cfg: dict) -> list[str]:
+    """Plugin slugs the focus dropdown offers — sourced from the projects:
+    block in sandbox.yml (clean, curated) rather than the noisy plugins_home
+    directory listing."""
+    slugs = set()
+    for proj in (cfg.get("projects", {}) or {}).values():
+        for pl in (proj.get("plugins") or []):
+            s = (pl or {}).get("slug")
+            if s:
+                slugs.add(s)
+    return sorted(slugs)
+
+
 def _web_do_action(payload: dict) -> dict:
     """Dispatch a UI action to the matching cmd_*. Fast actions return output
-    inline; create/delete return a job_id and run in a background thread."""
+    inline; create/delete (and the all-* sweeps) return a job_id and run in a
+    background thread."""
     action = payload.get("action")
     name = (payload.get("instance") or "").strip()
-    valid_fast = {"start", "stop", "restart", "focus"}
+    valid_fast = {"start", "stop", "restart", "focus", "unfocus"}
 
     if action in valid_fast:
         if not name:
@@ -2951,7 +2965,40 @@ def _web_do_action(payload: dict) -> dict:
                     return {"ok": False, "output": "missing plugin slug"}
                 ok_f, out = _run_cmd_capture(cmd_focus, _types.SimpleNamespace(
                     resolved_instance=name, slug=slug, clear=False))
+            elif action == "unfocus":
+                ok_f, out = _run_cmd_capture(cmd_focus, _types.SimpleNamespace(
+                    resolved_instance=name, slug=None, clear=True))
         return {"ok": ok_f, "output": out}
+
+    # Sweep actions over every instance — backgrounded (booting all stacks is
+    # slow). The page polls the job and refreshes when done.
+    if action in ("start-all", "stop-all"):
+        _web_job_seq[0] += 1
+        job_id = str(_web_job_seq[0])
+        _web_jobs[job_id] = {"status": f"{action}…", "output": "",
+                             "done": False, "ok": None}
+
+        def sweep():
+            with _web_lock:
+                cfg = load_config()
+                names = list(resolve_instances(cfg).keys())
+                fn = cmd_up if action == "start-all" else cmd_down
+                buf = io.StringIO()
+                allok = True
+                for n in names:
+                    with redirect_stdout(buf), redirect_stderr(buf):
+                        try:
+                            fn(cfg, _types.SimpleNamespace(resolved_instance=n))
+                        except Exception as e:
+                            allok = False
+                            buf.write(f"\n{n}: error {e}\n")
+                    buf.write(f"— {action} {n} done\n")
+                _web_jobs[job_id].update(
+                    output=buf.getvalue(), done=True, ok=allok,
+                    status=f"{action} {'✓' if allok else '✗'}")
+
+        threading.Thread(target=sweep, daemon=True).start()
+        return {"ok": True, "job_id": job_id}
 
     if action in ("create", "delete"):
         if action == "delete" and name == DEFAULT_INSTANCE:
@@ -3003,58 +3050,69 @@ def _web_css() -> str:
 
 
 _WEB_PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>xSpeed Sandbox</title>
+<html lang="en"><head><meta charset="utf-8"><title>Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Vendored, pre-built Tailwind CSS (no CDN, works offline). Rebuild with
      scripts/build-web-css.sh after changing classes in this page. -->
 <style>__SANDBOX_WEB_CSS__</style>
 <style>
-  /* DESIGN.md §18 motion: 200ms ease theme/color transitions */
-  * { transition: background-color .2s ease, border-color .2s ease, color .15s ease; }
+  * { transition: background-color .15s ease, border-color .15s ease, color .12s ease; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #9993; border-radius: 9999px; }
+  .spin { animation: sp 0.7s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  button[disabled] { opacity: .45; cursor: default; }
 </style></head>
-<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark min-h-screen antialiased">
+<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark antialiased h-screen overflow-hidden">
 
-<header class="sticky top-0 z-10 border-b border-brd dark:border-brd-dark
-               bg-app/80 dark:bg-app-dark/80 backdrop-blur">
-  <div class="max-w-5xl mx-auto px-5 h-14 flex items-center gap-3">
-    <div class="w-6 h-6 rounded bg-accent flex items-center justify-center
-                text-white text-[13px] font-bold">x</div>
-    <h1 class="text-[15px] font-semibold text-neutral-900 dark:text-neutral-50">
-      xSpeed Sandbox</h1>
-    <span id="count" class="text-[12px] text-neutral-500 dark:text-neutral-400"></span>
-    <span class="ml-auto flex items-center gap-1.5 text-[12px]
-                 text-neutral-500 dark:text-neutral-400">
-      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>live</span>
-  </div>
-</header>
-
-<main class="max-w-5xl mx-auto px-5 py-6">
-  <div class="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]"
-       id="grid"></div>
-  <div id="logwrap" class="hidden mt-5">
-    <div class="flex items-center gap-2 mb-1.5">
-      <span class="text-[12px] font-medium text-neutral-500 dark:text-neutral-400">Output</span>
-      <button onclick="document.getElementById('logwrap').classList.add('hidden')"
-        class="ml-auto text-[12px] text-neutral-400 hover:text-neutral-600
-               dark:hover:text-neutral-200">clear</button>
+<div class="flex h-full">
+  <!-- Sidebar: instance list (Local-style) -->
+  <aside class="w-64 shrink-0 border-r border-brd dark:border-brd-dark
+                bg-neutral-50 dark:bg-neutral-950 flex flex-col">
+    <div class="h-14 px-4 flex items-center gap-2 border-b border-brd dark:border-brd-dark">
+      <div class="w-6 h-6 rounded bg-accent flex items-center justify-center
+                  text-white text-[13px] font-bold">S</div>
+      <span class="font-semibold text-[14px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
+      <span id="runcount" class="ml-auto text-[11px] text-neutral-400"></span>
     </div>
-    <pre id="log" class="text-[11.5px] leading-relaxed font-mono text-neutral-300
-        bg-neutral-950 rounded-lg p-3.5 whitespace-pre-wrap max-h-60 overflow-auto
-        border border-neutral-800"></pre>
-  </div>
-</main>
+    <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
+                text-neutral-400">Instances</div>
+    <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
+    <div class="p-2 border-t border-brd dark:border-brd-dark">
+      <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded
+        text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[15px] leading-none">+</span> New instance</button>
+    </div>
+  </aside>
 
-<!-- Modal (Flywheel-style): overlay + centered dialog. Hidden by default. -->
+  <!-- Detail panel -->
+  <div class="flex-1 flex flex-col min-w-0">
+    <main id="detail" class="flex-1 overflow-auto"></main>
+    <!-- Footer bar -->
+    <footer class="h-12 shrink-0 border-t border-brd dark:border-brd-dark
+       bg-app dark:bg-card-dark px-5 flex items-center gap-3 text-[12.5px]">
+      <span id="footstat" class="text-neutral-500 dark:text-neutral-400"></span>
+      <div class="ml-auto flex items-center gap-2">
+        <button id="startAll" class="px-3 py-1 rounded border border-brd dark:border-neutral-700
+          text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">
+          Start all</button>
+        <button id="stopAll" class="px-3 py-1 rounded border border-red-200 dark:border-red-900/60
+          text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40">
+          Stop all</button>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<!-- Modal -->
 <div id="modal" class="hidden fixed inset-0 z-50 flex items-center justify-center
      bg-black/40 backdrop-blur-sm p-4">
   <div class="bg-app dark:bg-card-dark border border-brd dark:border-brd-dark rounded-lg
        shadow-xl w-full max-w-sm p-5 flex flex-col gap-3.5">
     <h2 id="mTitle" class="text-[15px] font-semibold text-neutral-900 dark:text-neutral-50"></h2>
     <p id="mDesc" class="text-[13px] text-neutral-500 dark:text-neutral-400 leading-snug"></p>
-    <input id="mInput" class="px-3 py-1.5 rounded border border-brdin dark:border-neutral-700
-       bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
+    <div id="mFields" class="flex flex-col gap-2.5"></div>
     <div class="flex justify-end gap-2 pt-1">
       <button id="mCancel" class="px-3 py-1.5 rounded border border-brd dark:border-neutral-700
          text-[13px] text-neutral-600 dark:text-neutral-300
@@ -3065,177 +3123,217 @@ _WEB_PAGE = """<!doctype html>
   </div>
 </div>
 
-<!-- Toast stack (bottom-right). No alert()/console — DESIGN.md §14 toast feel. -->
 <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const showLog = (t) => { $('logwrap').classList.remove('hidden'); $('log').textContent = t; };
+const esc = (s) => String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-// Toast — transient notification, no alert()/console. type: ok | err | info.
+// ---- toast ----
 function toast(msg, type='info'){
-  const colors = {
-    ok:  'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-200 dark:border-emerald-800',
-    err: 'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/70 dark:text-red-200 dark:border-red-900',
-    info:'bg-app text-neutral-700 border-brd dark:bg-card-dark dark:text-neutral-200 dark:border-brd-dark',
-  };
+  const c = {
+    ok:'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-200 dark:border-emerald-800',
+    err:'bg-red-50 text-red-800 border-red-200 dark:bg-red-950/70 dark:text-red-200 dark:border-red-900',
+    info:'bg-app text-neutral-700 border-brd dark:bg-card-dark dark:text-neutral-200 dark:border-brd-dark'};
   const el = document.createElement('div');
-  el.className = 'pointer-events-auto text-[13px] px-3.5 py-2 rounded-lg border shadow-md '
-    + 'max-w-xs transition-all duration-200 ' + (colors[type]||colors.info);
-  el.textContent = msg;
-  $('toasts').appendChild(el);
-  setTimeout(() => { el.style.opacity='0'; el.style.transform='translateY(4px)';
-    setTimeout(()=>el.remove(), 220); }, 2600);
+  el.className = 'pointer-events-auto text-[13px] px-3.5 py-2 rounded-lg border shadow-md max-w-xs '+(c[type]||c.info);
+  el.textContent = msg; $('toasts').appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),220); }, 2600);
 }
 
-// Modal — promise-based. opts: {title, desc, value, placeholder, okText, danger}.
-// Resolves with the input string on confirm, or null on cancel.
-let _modalResolve = null;
+// ---- modal (supports text input or select fields) ----
+let _mResolve = null;
 function modal(opts={}){
-  return new Promise((resolve) => {
-    _modalResolve = resolve;
-    $('mTitle').textContent = opts.title || '';
-    $('mDesc').textContent  = opts.desc || '';
-    const inp = $('mInput');
-    inp.value = opts.value || '';
-    inp.placeholder = opts.placeholder || '';
-    inp.classList.toggle('hidden', opts.input === false);
-    const ok = $('mOk');
-    ok.textContent = opts.okText || 'Confirm';
-    ok.className = 'px-3 py-1.5 rounded text-[13px] text-white border '
-      + (opts.danger ? 'bg-red-600 border-red-600 hover:bg-red-700'
-                     : 'bg-accent border-accent hover:bg-blue-700');
+  return new Promise(res=>{
+    _mResolve = res;
+    $('mTitle').textContent = opts.title||'';
+    $('mDesc').textContent = opts.desc||'';
+    $('mFields').innerHTML = (opts.fields||[]).map(f=>{
+      if(f.type==='select')
+        return `<select data-k="${f.key}" class="px-3 py-1.5 rounded border border-brdin
+          dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
+          ${f.options.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
+      return `<input data-k="${f.key}" placeholder="${esc(f.placeholder||'')}" value="${esc(f.value||'')}"
+        class="px-3 py-1.5 rounded border border-brdin dark:border-neutral-700 bg-app
+        dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">`;
+    }).join('');
+    const ok=$('mOk'); ok.textContent=opts.okText||'Confirm';
+    ok.className='px-3 py-1.5 rounded text-[13px] text-white border '+
+      (opts.danger?'bg-red-600 border-red-600 hover:bg-red-700':'bg-accent border-accent hover:bg-blue-700');
     $('modal').classList.remove('hidden');
-    setTimeout(()=>{ opts.input === false ? ok.focus() : inp.focus(); }, 30);
+    setTimeout(()=>{ const f=$('mFields').querySelector('input,select'); (f||ok).focus(); },30);
   });
 }
-function closeModal(val){
-  $('modal').classList.add('hidden');
-  if (_modalResolve){ const r=_modalResolve; _modalResolve=null; r(val); }
-}
-$('mCancel').onclick = () => closeModal(null);
-$('mOk').onclick     = () => closeModal($('mInput').classList.contains('hidden') ? true : $('mInput').value.trim());
-$('mInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter') $('mOk').click();
-  if(e.key==='Escape') closeModal(null); });
-$('modal').addEventListener('click', (e)=>{ if(e.target===$('modal')) closeModal(null); });
+function closeModal(val){ $('modal').classList.add('hidden');
+  if(_mResolve){ const r=_mResolve; _mResolve=null; r(val); } }
+function modalValues(){ const o={}; $('mFields').querySelectorAll('[data-k]').forEach(e=>o[e.dataset.k]=e.value.trim()); return o; }
+$('mCancel').onclick=()=>closeModal(null);
+$('mOk').onclick=()=>closeModal(modalValues());
+$('modal').addEventListener('keydown',e=>{ if(e.key==='Enter')$('mOk').click(); if(e.key==='Escape')closeModal(null); });
+$('modal').addEventListener('click',e=>{ if(e.target===$('modal'))closeModal(null); });
+
+// ---- state ----
+let DATA = { instances: [], plugins: [], servers: ['apache','nginx','litespeed'] };
+let selected = null;            // selected instance name
+let busy = {};                  // name -> action string while in-flight (optimistic)
 
 async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
-async function act(instance, action, extra={}) {
-  const body = Object.assign({instance, action}, extra);
+
+async function act(instance, action, extra={}){
+  busy[instance] = action;      // optimistic: mark busy immediately
+  render();
   let r;
   try {
-    r = await api('/api/action', {method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify(body)});
-  } catch(e){ toast('request failed: '+e, 'err'); return; }
-  if (r.job_id) { toast(action+' '+(body.name||instance)+' started…', 'info'); pollJob(r.job_id); }
+    r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(Object.assign({instance,action},extra))});
+  } catch(e){ delete busy[instance]; toast('request failed: '+e,'err'); render(); return; }
+  if(r.job_id){ toast(action.replace('-',' ')+' started…','info'); pollJob(r.job_id, instance); }
   else {
-    if (r.ok) toast((action.charAt(0).toUpperCase()+action.slice(1))+' '+instance+' ✓', 'ok');
-    else toast((r.output||'action failed').split('\\n')[0], 'err');
-    if (r.output) showLog(r.output.trim());
-    refresh();
+    delete busy[instance];
+    if(r.ok) toast(cap(action)+' '+instance+' ✓','ok');
+    else toast((r.output||'failed').split('\\n')[0],'err');
+    await refresh();
   }
   return r;
 }
-let paused = false;
-async function pollJob(id){
-  paused = true;
-  const t = setInterval(async () => {
-    const j = await api('/api/job/'+id);
-    showLog((j.status||'') + "\\n\\n" + (j.output||''));
-    if (j.done){
-      clearInterval(t); paused=false;
-      toast(j.status || 'done', j.ok ? 'ok' : 'err');
-      refresh();
-    }
-  }, 1500);
+const cap = s => s.charAt(0).toUpperCase()+s.slice(1);
+
+let paused=false;
+async function pollJob(id, instance){
+  paused=true;
+  const t=setInterval(async()=>{
+    const j=await api('/api/job/'+id);
+    if(j.done){ clearInterval(t); paused=false; if(instance) delete busy[instance];
+      toast(j.status||'done', j.ok?'ok':'err'); await refresh(); }
+  },1500);
 }
 
-// Status pill — DESIGN.md §12 (emerald for running, neutral for stopped).
-function pill(running){
-  const base = "inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border";
+// ---- sidebar list ----
+function listItem(r){
+  const sel = r.name===selected;
+  const dot = r.running ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600';
+  const b = busy[r.name];
+  return `<button onclick="select_('${r.name}')" class="w-full text-left px-3 py-2 rounded
+     flex items-center gap-2.5 text-[13.5px] ${sel?'bg-white dark:bg-neutral-800 shadow-sm':'hover:bg-neutral-100 dark:hover:bg-neutral-800/60'}">
+     <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
+     <span class="truncate ${sel?'font-medium text-neutral-900 dark:text-neutral-50':'text-neutral-700 dark:text-neutral-300'}">${esc(r.name)}</span>
+     ${b?`<svg class="spin ml-auto w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-dasharray="42" stroke-linecap="round"/></svg>`:''}</button>`;
+}
+
+// ---- detail panel ----
+const row = (label,val) => `<div class="flex items-center py-3 border-b border-brd dark:border-brd-dark/70">
+  <div class="w-40 shrink-0 text-[13px] text-neutral-500 dark:text-neutral-400">${label}</div>
+  <div class="text-[13.5px] text-neutral-800 dark:text-neutral-200">${val}</div></div>`;
+
+function detail(r){
+  if(!r) return `<div class="h-full flex items-center justify-center text-neutral-400 text-[14px]">
+    Select an instance</div>`;
+  const b = busy[r.name];
+  const link = "text-accent dark:text-blue-400 hover:underline";
+  const p=r.wordpress_port, m=r.mailpit_port;
+  const primaryBtn = r.running
+    ? `<button onclick="act('${r.name}','stop')" ${b?'disabled':''} class="px-4 py-1.5 rounded-full border
+        border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px] font-medium
+        hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2">
+        ${b==='stop'?spinner():'<span class=\\'w-2 h-2 rounded-sm bg-red-500\\'></span>'}Stop site</button>`
+    : `<button onclick="act('${r.name}','start')" ${b?'disabled':''} class="px-4 py-1.5 rounded-full
+        bg-accent text-white text-[13px] font-medium hover:bg-blue-700
+        flex items-center gap-2">${b==='start'?spinner('white'):'▶'} Start site</button>`;
+  const focusOpts = ['<option value="">— none —</option>']
+    .concat(DATA.plugins.map(s=>`<option value="${esc(s)}" ${s===r.focus?'selected':''}>${esc(s)}</option>`)).join('');
+  return `
+  <div class="px-7 pt-6 pb-4 border-b border-brd dark:border-brd-dark flex items-start gap-4">
+    <div class="min-w-0">
+      <div class="flex items-center gap-3">
+        <h1 class="text-[24px] font-semibold text-neutral-900 dark:text-neutral-50 truncate">${esc(r.name)}</h1>
+        ${statusPill(r.running)}
+      </div>
+      <div class="mt-1 text-[12.5px] text-neutral-400 flex items-center gap-1">
+        ${r.url} · <code>${esc(r.mcp_server)}</code></div>
+    </div>
+    <div class="ml-auto flex items-center gap-2">
+      <a href="${r.url}/wp-admin" target="_blank" class="px-4 py-1.5 rounded-full border
+        border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
+        hover:bg-neutral-50 dark:hover:bg-neutral-800">Admin</a>
+      <a href="${r.url}" target="_blank" class="px-4 py-1.5 rounded-full border
+        border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
+        hover:bg-neutral-50 dark:hover:bg-neutral-800">View site</a>
+    </div>
+  </div>
+  <div class="px-7 py-5 flex items-center gap-2">
+    ${primaryBtn}
+    <button onclick="act('${r.name}','restart')" ${(!r.running||b)?'disabled':''} class="px-4 py-1.5 rounded-full border
+      border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
+      hover:bg-neutral-50 dark:hover:bg-neutral-800 flex items-center gap-2">
+      ${b==='restart'?spinner():''}Restart</button>
+    ${r.name==='main'?'':`<button onclick="doDelete('${r.name}')" ${b?'disabled':''} class="ml-auto px-4 py-1.5
+      rounded-full border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 text-[13px]
+      hover:bg-red-50 dark:hover:bg-red-950/40">Delete</button>`}
+  </div>
+  <div class="px-7 pb-8">
+    ${row('Web Server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
+    ${row('WordPress URL', `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`)}
+    ${row('Mailpit', `<a href="http://localhost:${m}" target="_blank" class="${link}">http://localhost:${m}</a>`)}
+    ${row('MCP server', `<code class="text-[12.5px]">${esc(r.mcp_server)}</code>`)}
+    ${row('Active project', esc(r.project))}
+    ${row('Focus plugin', `<div class="flex items-center gap-2">
+        <select id="focusSel" onchange="doFocus('${r.name}', this.value)" ${b?'disabled':''}
+          class="px-2.5 py-1 rounded border border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900
+          text-[13px] focus:border-accent outline-none w-44">${focusOpts}</select>
+        ${b==='focus'||b==='unfocus'?spinner():''}</div>`)}
+  </div>`;
+}
+function spinner(color){ return `<svg class="spin w-3.5 h-3.5 ${color==='white'?'text-white':'text-neutral-400'}"
+  viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"
+  stroke-dasharray="42" stroke-linecap="round"/></svg>`; }
+function statusPill(running){
+  const base="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border";
   return running
-   ? `<span class="${base} bg-emerald-50 text-emerald-700 border-emerald-200
-        dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
-        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>running</span>`
-   : `<span class="${base} bg-neutral-100 text-neutral-500 border-neutral-200
-        dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700">
-        <span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>stopped</span>`;
+   ? `<span class="${base} bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>running</span>`
+   : `<span class="${base} bg-neutral-100 text-neutral-500 border-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700"><span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>stopped</span>`;
 }
-const serverTag = (s) => `<span class="text-[11px] px-2 py-0.5 rounded-full
-  bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">${s}</span>`;
-const btn = "px-2.5 py-1 rounded border text-[12.5px] transition-colors";
-const btnN = btn + " border-brd dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
-const btnD = btn + " border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40";
-const link = "text-accent dark:text-blue-400 hover:underline";
 
-function card(r){
-  const p = r.wordpress_port, m = r.mailpit_port;
-  return `<div class="bg-card dark:bg-card-dark border border-brd dark:border-brd-dark
-      rounded-lg p-4 flex flex-col gap-3">
-    <div class="flex items-center gap-2">
-      <span class="font-semibold text-[14.5px] text-neutral-900 dark:text-neutral-50">${r.name}</span>
-      ${serverTag(r.server)}
-      <span class="ml-auto">${pill(r.running)}</span>
-    </div>
-    <div class="flex items-center gap-3 text-[12.5px]">
-      <a href="http://localhost:${p}/wp-admin" target="_blank" class="${link}">wp-admin</a>
-      <a href="http://localhost:${p}" target="_blank" class="${link}">site</a>
-      <a href="http://localhost:${m}" target="_blank" class="${link}">mailpit</a>
-    </div>
-    <div class="text-[12px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-x-3">
-      <span>mcp <code class="text-neutral-600 dark:text-neutral-300">${r.mcp_server}</code></span>
-      <span>focus <span class="text-neutral-600 dark:text-neutral-300">${r.focus}</span></span>
-      <span class="text-neutral-400 dark:text-neutral-500">:${p}</span>
-    </div>
-    <div class="flex flex-wrap gap-1.5 pt-1">
-      <button class="${btnN}" onclick="act('${r.name}','start')">Start</button>
-      <button class="${btnN}" onclick="act('${r.name}','stop')">Stop</button>
-      <button class="${btnN}" onclick="act('${r.name}','restart')">Restart</button>
-      <button class="${btnN}" onclick="doFocus('${r.name}')">Focus</button>
-      ${r.name==='main' ? '' : `<button class="${btnD}" onclick="doDelete('${r.name}')">Delete</button>`}
-    </div></div>`;
-}
-function newCard(){
-  return `<div class="border border-dashed border-brdin dark:border-neutral-700
-      rounded-lg p-4 flex flex-col gap-3">
-    <span class="font-semibold text-[14.5px] text-neutral-700 dark:text-neutral-300">New instance</span>
-    <div class="flex gap-2">
-      <input id="newname" placeholder="name" class="flex-1 min-w-0 px-2.5 py-1 rounded border
-        border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px]
-        focus:border-accent outline-none">
-      <select id="newserver" class="px-2 py-1 rounded border border-brdin dark:border-neutral-700
-        bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
-        <option value="apache">apache</option>
-        <option value="nginx">nginx</option>
-        <option value="litespeed">litespeed</option></select>
-    </div>
-    <div><button class="${btn} bg-accent text-white border-accent hover:bg-blue-700"
-      onclick="doCreate()">Create</button></div></div>`;
-}
-async function doFocus(name){
-  const slug = await modal({title:'Set focus', desc:'Which plugin should '+name+' focus on?',
-    placeholder:'plugin slug (e.g. xspeed)', okText:'Set focus'});
-  if (slug) act(name,'focus',{slug});
+function select_(name){ selected=name; render(); }
+
+// ---- actions ----
+async function doFocus(name, slug){
+  if(slug==='') act(name,'unfocus'); else if(slug) act(name,'focus',{slug});
 }
 async function doDelete(name){
-  const typed = await modal({title:'Delete '+name, danger:true, okText:'Delete',
-    desc:'This stops + removes the stack, DB volume, and files. Type the instance name to confirm.',
-    placeholder:name});
-  if (typed === name) act(name,'delete',{confirm:name});
-  else if (typed !== null) toast('name did not match — not deleted', 'err');
+  const v = await modal({title:'Delete '+name, danger:true, okText:'Delete',
+    desc:'Stops + removes the stack, DB volume, and files. Type the name to confirm.',
+    fields:[{key:'confirm', placeholder:name}]});
+  if(v && v.confirm===name) act(name,'delete',{confirm:name});
+  else if(v) toast('name did not match — not deleted','err');
 }
-function doCreate(){
-  const name=$('newname').value.trim(); const server=$('newserver').value;
-  if(!name){ toast('enter an instance name', 'err'); return; }
-  act(name,'create',{name,server});
-  $('newname').value='';
+async function doCreate(){
+  const v = await modal({title:'New instance', okText:'Create',
+    desc:'Pick a name and web server. Booting may take a minute.',
+    fields:[{key:'name', placeholder:'name (a-z, 0-9, -)'},
+            {key:'server', type:'select', options:DATA.servers}]});
+  if(v && v.name) act(v.name,'create',{name:v.name, server:v.server});
+}
+$('newBtn').onclick = doCreate;
+$('startAll').onclick = ()=>act('*','start-all');
+$('stopAll').onclick = ()=>act('*','stop-all');
+
+// ---- render ----
+function render(){
+  const items = DATA.instances;
+  $('list').innerHTML = items.map(listItem).join('');
+  const cur = items.find(i=>i.name===selected) || null;
+  $('detail').innerHTML = detail(cur);
+  const running = items.filter(i=>i.running).length;
+  $('runcount').textContent = running+'/'+items.length;
+  $('footstat').textContent = running+' of '+items.length+' running';
 }
 async function refresh(){
   if(paused) return;
   const d = await api('/api/instances');
-  const n = d.instances.length;
-  $('count').textContent = n + ' instance' + (n===1?'':'s');
-  $('grid').innerHTML = d.instances.map(card).join('') + newCard();
+  DATA = d;
+  if(!selected && d.instances.length) selected = d.instances[0].name;
+  render();
 }
 refresh(); setInterval(refresh, 2000);
 </script></body></html>"""
@@ -3264,8 +3362,12 @@ def cmd_web(cfg, args) -> None:
                 page = _WEB_PAGE.replace("__SANDBOX_WEB_CSS__", _web_css())
                 return self._send(200, page, "text/html; charset=utf-8")
             if self.path == "/api/instances":
-                rows = collect_instance_rows(load_config())
-                return self._send(200, json.dumps({"instances": rows}))
+                cfg = load_config()
+                return self._send(200, json.dumps({
+                    "instances": collect_instance_rows(cfg),
+                    "plugins": _web_available_plugins(cfg),
+                    "servers": list(SERVERS),
+                }))
             if self.path.startswith("/api/job/"):
                 jid = self.path.rsplit("/", 1)[-1]
                 job = _web_jobs.get(jid)

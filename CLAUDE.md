@@ -439,11 +439,17 @@ to **127.0.0.1 only** and serves a single-page dashboard.
 ./sb web --port 9000 --open    # custom port + open browser
 ```
 
-Cards per instance with live status (polls every ~2s), wp-admin/site/mailpit
-links, and Start/Stop/Restart/Focus/Delete buttons + a "New instance" form.
-Endpoints: `GET /api/instances`, `POST /api/action`, `GET /api/job/<id>`.
-Fast actions run inline; create/delete run as background jobs the page streams.
-`main` is delete-protected; deletes require name confirmation. Ctrl-C stops it.
+Local-by-Flywheel style: a left **sidebar** lists instances (status dot + name),
+click one for its **detail panel** — server, URLs, MCP server, and per-instance
+Start/Stop/Restart, Admin/View-site links, a **focus dropdown** (pick a plugin
+from the projects: list → symlinks it in via `cmd_focus`; "none" clears focus),
+and Delete. A **footer** shows N running + **Start all / Stop all**. The "+ New
+instance" button opens a modal (name + server). Actions are **optimistic** with
+per-action spinners; results surface as toasts (no `prompt()`/`alert()`).
+Endpoints: `GET /api/instances` (instances + plugins + servers),
+`POST /api/action`, `GET /api/job/<id>`. Fast actions inline; create/delete and
+start-all/stop-all run as background jobs. `main` is delete-protected; deletes
+require name confirmation. Ctrl-C stops the server.
 
 The UI is styled with **vendored Tailwind** (xSpeed DESIGN.md tokens) inlined
 from `config/sandbox-web.css` — no CDN, fully self-contained, works offline.

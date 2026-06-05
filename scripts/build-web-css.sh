@@ -50,6 +50,11 @@ cat > "$CACHE/tailwind.config.js" <<'EOF'
 module.exports = {
   content: ['./.cache/page.html'],
   darkMode: 'media',
+  // Safelist classes the regex scanner can miss inside minified JS template
+  // literals (arbitrary values + state variants).
+  safelist: [
+    'w-44', 'w-64', 'backdrop-blur-sm',
+  ],
   theme: { extend: {
     colors: {
       accent: '#2563eb',

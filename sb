@@ -3189,6 +3189,127 @@ def _web_list_seeds() -> list[str]:
                   if p.is_file() and p.suffix in (".xml", ".wxr"))
 
 
+# --------------------------- Claude usage ----------------------------
+#
+# Claude Code writes per-session transcripts (JSONL) under
+# ~/.claude/projects/<encoded-cwd>/. Each assistant turn records token usage.
+# We aggregate tokens + estimated cost across sandbox-related sessions, and
+# best-effort attribute each session to instance(s) by which
+# mcp__sandbox-<name>__* tools it called. Cost is ESTIMATED from a public
+# price table (Anthropic doesn't put $ in the transcript).
+
+# USD per 1M tokens — input / output / cache-write / cache-read. Update here.
+_CLAUDE_PRICES = {
+    "opus":   {"in": 15.0, "out": 75.0, "cw": 18.75, "cr": 1.50},
+    "sonnet": {"in": 3.0,  "out": 15.0, "cw": 3.75,  "cr": 0.30},
+    "haiku":  {"in": 0.80, "out": 4.0,  "cw": 1.00,  "cr": 0.08},
+}
+
+
+def _price_tier(model: str) -> str:
+    m = (model or "").lower()
+    if "opus" in m: return "opus"
+    if "haiku" in m: return "haiku"
+    return "sonnet"   # default/unknown → sonnet rates
+
+
+def _cost_for(tier: str, u: dict) -> float:
+    p = _CLAUDE_PRICES[tier]
+    return (u["in"]*p["in"] + u["out"]*p["out"]
+            + u["cw"]*p["cw"] + u["cr"]*p["cr"]) / 1_000_000
+
+
+def _claude_projects_dir() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def claude_usage(known_instances: list[str]) -> dict:
+    """Aggregate Claude token usage + estimated cost across all session
+    transcripts, with a best-effort per-instance breakdown (by MCP namespace).
+
+    Returns {total, by_model, per_instance, sessions:[...recent...], generated}.
+    Resilient: skips unreadable lines/files; never raises."""
+    import re as _re
+    pdir = _claude_projects_dir()
+    inst_by_ns = {mcp_server_name(i): i for i in known_instances}
+    blank = lambda: {"in": 0, "out": 0, "cw": 0, "cr": 0}
+
+    total = blank(); by_model = {}; per_instance = {}; sessions = []
+    if not pdir.exists():
+        return {"total": total, "tokens": 0, "cost": 0.0, "by_model": {},
+                "per_instance": {}, "sessions": [], "available": False}
+
+    ns_re = _re.compile(r"mcp__(sandbox[a-z0-9-]*)__")
+    for proj in pdir.iterdir():
+        if not proj.is_dir():
+            continue
+        for tf in proj.glob("*.jsonl"):
+            su = blank(); s_models = set(); s_ns = set()
+            s_mtime = tf.stat().st_mtime
+            try:
+                for line in tf.open(errors="ignore"):
+                    try:
+                        o = json.loads(line)
+                    except ValueError:
+                        continue
+                    msg = o.get("message") or {}
+                    u = msg.get("usage")
+                    if u:
+                        su["in"] += u.get("input_tokens", 0) or 0
+                        su["out"] += u.get("output_tokens", 0) or 0
+                        su["cw"] += u.get("cache_creation_input_tokens", 0) or 0
+                        su["cr"] += u.get("cache_read_input_tokens", 0) or 0
+                        if msg.get("model"):
+                            s_models.add(msg["model"])
+                    for blk in (msg.get("content") or []):
+                        if isinstance(blk, dict) and blk.get("type") == "tool_use":
+                            m = ns_re.match(blk.get("name", ""))
+                            if m:
+                                s_ns.add(m.group(1))
+            except OSError:
+                continue
+            if not any(su.values()):
+                continue
+            # Only count sessions that touched the sandbox at all (any
+            # sandbox* namespace) OR that ran from a sandbox project dir.
+            touched_sandbox = bool(s_ns) or "sandbox" in proj.name.lower()
+            if not touched_sandbox:
+                continue
+
+            tier = _price_tier(next(iter(s_models), ""))
+            cost = _cost_for(tier, su)
+            for k in total: total[k] += su[k]
+            bm = by_model.setdefault(tier, blank())
+            for k in bm: bm[k] += su[k]
+            # attribute to each instance namespace the session used
+            targets = [inst_by_ns[n] for n in s_ns if n in inst_by_ns] \
+                or (["main"] if "sandbox" in s_ns else ["unattributed"])
+            for inst in targets:
+                pi = per_instance.setdefault(inst, {**blank(), "cost": 0.0})
+                for k in su: pi[k] += su[k]
+                pi["cost"] += cost / len(targets)
+            sessions.append({
+                "id": tf.stem[:8], "model": tier, "mtime": s_mtime,
+                "tokens": sum(su.values()), "cost": round(cost, 4),
+                "instances": [inst_by_ns[n] for n in s_ns if n in inst_by_ns]
+                             or (["main"] if "sandbox" in s_ns else []),
+            })
+
+    total_tokens = sum(total.values())
+    total_cost = sum(_cost_for(t, by_model[t]) for t in by_model)
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    by_model_out = {t: {**by_model[t], "cost": round(_cost_for(t, by_model[t]), 4)}
+                    for t in by_model}
+    per_instance_out = {i: {**v, "cost": round(v["cost"], 4)}
+                        for i, v in per_instance.items()}
+    return {
+        "available": True,
+        "total": total, "tokens": total_tokens, "cost": round(total_cost, 4),
+        "by_model": by_model_out, "per_instance": per_instance_out,
+        "sessions": sessions[:25],
+    }
+
+
 def _web_available_plugins(cfg: dict) -> list[str]:
     """Plugin slugs the focus dropdown offers — sourced from the projects:
     block in sandbox.yml (clean, curated) rather than the noisy plugins_home
@@ -3450,6 +3571,10 @@ _WEB_PAGE = """<!doctype html>
         text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
         <span class="text-[15px] leading-none">+</span> New instance</button>
+      <button id="usageBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[13px] leading-none">◴</span> Claude usage</button>
       <button id="helpBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
@@ -3802,8 +3927,27 @@ function detail(r){
       <div class="text-neutral-600 dark:text-neutral-300">Or call this site's tools directly in a session:</div>
       ${snippet('mcp__'+r.mcp_server+'__*')}
       <div class="text-neutral-500 dark:text-neutral-400">Everything (admin, REST, wp-cli) targets <code>${r.url}</code>.</div>
+      ${instUsageLine(r.name)}
     </div>
   </div>`;
+}
+// Per-instance Claude usage summary (best-effort). Uses cached usageData if
+// present; otherwise offers to load it. Cost is estimated.
+function instUsageLine(name){
+  if(!usageData || !usageData.available)
+    return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1">
+      <button onclick="loadUsageThenRender()" class="text-accent dark:text-blue-400 hover:underline">Show Claude token usage →</button></div>`;
+  const v = usageData.per_instance[name];
+  if(!v) return `<div class="pt-1 border-t border-brd dark:border-brd-dark/60 mt-1 text-neutral-400">No Claude usage attributed to this instance yet.</div>`;
+  return `<div class="pt-2 border-t border-brd dark:border-brd-dark/60 mt-1 flex items-center gap-3">
+    <span class="text-neutral-600 dark:text-neutral-300">Claude usage (est.):</span>
+    <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmtN(tkSum(v))} tokens</span>
+    <span class="text-neutral-700 dark:text-neutral-200 font-medium">${fmt$(v.cost)}</span>
+    <button onclick="showUsage()" class="ml-auto text-accent dark:text-blue-400 hover:underline">details →</button></div>`;
+}
+async function loadUsageThenRender(){
+  try { usageData = await api('/api/usage'); } catch(e){ usageData={available:false}; }
+  render();
 }
 function sectionHead(title, hint){
   return `<div class="mb-2.5 mt-1">
@@ -3898,8 +4042,67 @@ function statusPill(running){
    : `<span class="${base} bg-neutral-100 text-neutral-500 border-neutral-200 dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700"><span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>stopped</span>`;
 }
 
-function select_(name){ selected=name; render(); }
-function goHome(){ selected=null; _autoSelected=true; render(); }   // show Welcome
+function select_(name){ selected=name; viewMode='instance'; render(); }
+function goHome(){ selected=null; viewMode='instance'; _autoSelected=true; render(); }
+
+// ---- Claude usage view ----
+let usageData = null;
+async function showUsage(){
+  viewMode='usage'; selected=null;
+  $('detail').innerHTML = `<div class="px-6 py-12 text-center text-neutral-400 text-[13px]">Loading Claude usage…</div>`;
+  try { usageData = await api('/api/usage'); } catch(e){ usageData = {available:false}; }
+  $('detail').innerHTML = usageView();
+}
+const fmtN = n => (n||0).toLocaleString();
+const fmt$ = n => '$'+(n||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const tkSum = u => (u.in||0)+(u.out||0)+(u.cw||0)+(u.cr||0);
+function usageView(){
+  const u = usageData;
+  if(!u || !u.available) return `<div class="px-6 py-12 text-center text-neutral-400 text-[14px]">
+    No Claude session data found.</div>`;
+  const t = u.total;
+  const statCard = (label, val, sub) => `<div class="rounded-lg border border-brd dark:border-brd-dark p-4">
+    <div class="text-[12px] text-neutral-400">${label}</div>
+    <div class="mt-1 text-[20px] font-semibold text-neutral-900 dark:text-neutral-50">${val}</div>
+    ${sub?`<div class="text-[12px] text-neutral-400 mt-0.5">${sub}</div>`:''}</div>`;
+  const modelRows = Object.entries(u.by_model).map(([m,v])=>`
+    <div class="flex items-center py-2 border-b border-brd dark:border-brd-dark/70 text-[13px]">
+      <span class="w-24 capitalize text-neutral-700 dark:text-neutral-300">${m}</span>
+      <span class="flex-1 text-neutral-500">${fmtN(tkSum(v))} tokens</span>
+      <span class="text-neutral-700 dark:text-neutral-200">${fmt$(v.cost)}</span></div>`).join('');
+  const instRows = Object.entries(u.per_instance).sort((a,b)=>b[1].cost-a[1].cost).map(([i,v])=>`
+    <div class="flex items-center py-2 border-b border-brd dark:border-brd-dark/70 text-[13px]">
+      <span class="w-32 truncate ${i==='unattributed'?'text-neutral-400 italic':'text-neutral-700 dark:text-neutral-300'}">${esc(i)}</span>
+      <span class="flex-1 text-neutral-500">${fmtN(tkSum(v))} tokens</span>
+      <span class="text-neutral-700 dark:text-neutral-200">${fmt$(v.cost)}</span></div>`).join('');
+  const sess = u.sessions.map(s=>`
+    <div class="flex items-center gap-3 py-1.5 text-[12.5px] border-b border-brd dark:border-brd-dark/60">
+      <code class="text-neutral-400">${s.id}</code>
+      <span class="w-16 capitalize text-neutral-500">${s.model}</span>
+      <span class="flex-1 text-neutral-400 truncate">${(s.instances||[]).join(', ')||'—'}</span>
+      <span class="text-neutral-500">${fmtN(s.tokens)}</span>
+      <span class="w-16 text-right text-neutral-700 dark:text-neutral-200">${fmt$(s.cost)}</span></div>`).join('');
+  return `<div class="px-6 py-6 max-w-3xl">
+    <h1 class="text-[19px] font-semibold text-neutral-900 dark:text-neutral-50">Claude usage</h1>
+    <p class="mt-1 text-[12.5px] text-neutral-400">Across all sandbox Claude sessions. Cost is <b>estimated</b> from public per-token prices.</p>
+    <div class="mt-5 grid grid-cols-3 gap-3">
+      ${statCard('Total tokens', fmtN(u.tokens))}
+      ${statCard('Estimated cost', fmt$(u.cost))}
+      ${statCard('Sessions', fmtN(u.sessions.length)+(u.sessions.length>=25?'+':''))}
+    </div>
+    <div class="mt-5 grid grid-cols-2 gap-3 text-[12px] text-neutral-400">
+      <div class="rounded-lg border border-brd dark:border-brd-dark p-3">in ${fmtN(t.in)} · out ${fmtN(t.out)}</div>
+      <div class="rounded-lg border border-brd dark:border-brd-dark p-3">cache write ${fmtN(t.cw)} · cache read ${fmtN(t.cr)}</div>
+    </div>
+    <div class="mt-6">${sectionHead('By model')}${modelRows||'<div class="text-[13px] text-neutral-400">—</div>'}</div>
+    <div class="mt-6">${sectionHead('By instance','Best-effort — attributed by which mcp__sandbox-… tools each session used')}${instRows||'<div class="text-[13px] text-neutral-400">—</div>'}</div>
+    <div class="mt-6">${sectionHead('Recent sessions')}
+      <div class="flex items-center gap-3 py-1 text-[11px] uppercase tracking-wide text-neutral-400 border-b border-brd dark:border-brd-dark">
+        <span>id</span><span class="w-16">model</span><span class="flex-1">instances</span><span>tokens</span><span class="w-16 text-right">cost</span></div>
+      ${sess}</div>
+    <button onclick="showUsage()" class="mt-5 text-[13px] text-accent dark:text-blue-400 hover:underline">↻ Refresh</button>
+  </div>`;
+}
 
 // ---- actions ----
 async function doFocus(name, slug){
@@ -4004,6 +4207,7 @@ $('newBtn').onclick = doCreate;
 $('startAll').onclick = ()=>act('*','start-all');
 $('stopAll').onclick = ()=>act('*','stop-all');
 $('helpBtn').onclick = showHelp;
+$('usageBtn').onclick = showUsage;
 $('conClose').onclick = consoleClose;
 function showHelp(){
   modal({title:'How Claude works here', input:false, okText:'Got it',
@@ -4045,7 +4249,12 @@ function renderSidebar(){
   $('footstat').textContent = items.length
     ? running+' of '+items.length+' running' : 'no instances yet';
 }
+let viewMode = 'instance';   // 'instance' | 'usage'
 function renderDetail(force){
+  if(viewMode==='usage'){
+    if(force) $('detail').innerHTML = usageView();
+    return;   // usage view is static once rendered (refreshed by showUsage)
+  }
   const cur = DATA.instances.find(i=>i.name===selected) || null;
   const sig = detailSignature(cur);
   if(!force && sig===_detailSig) return;          // unchanged → leave DOM alone
@@ -4117,6 +4326,10 @@ def cmd_web(cfg, args) -> None:
                 inst = path.rsplit("/", 1)[-1]
                 return self._send(200, json.dumps(
                     {"snapshots": _web_list_snapshots(inst)}))
+            if path == "/api/usage":
+                cfg = load_config()
+                insts = list(resolve_instances(cfg).keys())
+                return self._send(200, json.dumps(claude_usage(insts)))
             return self._send(404, json.dumps({"error": "not found"}))
 
         def do_POST(self):

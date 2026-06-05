@@ -3554,7 +3554,7 @@ def _web_do_action(payload: dict) -> dict:
     # (restore) are confirmed client-side. `shell`/`claude` are intentionally
     # NOT exposed (interactive, can't work over HTTP).
     OPS = {"logs", "status", "doctor", "snapshot", "restore", "seed",
-           "update", "xdebug", "wp", "introspect", "install"}
+           "update", "xdebug", "wp", "introspect", "install", "term"}
     if action in OPS:
         if not name:
             return {"ok": False, "output": "missing instance"}
@@ -3609,6 +3609,24 @@ def _web_do_action(payload: dict) -> dict:
                     print("invalid plugin slug"); return False
                 # Install from the wp.org directory + activate (streamed).
                 wpcli(["plugin", "install", slug, "--activate"], instance=name)
+            elif action == "term":
+                # Interactive terminal: run a command INSIDE the instance's
+                # container (not the host). `wp ...` → wpcli container; anything
+                # else → shell in the wp container. Streamed live.
+                line = (payload.get("cmd") or "").strip()
+                if not line:
+                    print("(empty)"); return True
+                import shlex as _shlex
+                if line == "wp" or line.startswith("wp "):
+                    rest = line[2:].strip()
+                    try:
+                        wpcli(_shlex.split(rest), instance=name, check=False)
+                    except Exception as e:
+                        print(f"error: {e}"); return False
+                else:
+                    # shell in the wp container (sh -c "<line>")
+                    compose("exec", "-T", "wp", "sh", "-c", line,
+                            instance=name, check=False)
             return True
 
         label = f"{action}" + (f" {name}" if action != "wp"
@@ -3733,6 +3751,10 @@ _WEB_PAGE = """<!doctype html>
         text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
         <span class="text-[15px] leading-none">+</span> New instance</button>
+      <button id="termBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[13px] leading-none font-mono">›_</span> Terminal</button>
       <button id="usageBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
         text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
@@ -3773,6 +3795,13 @@ _WEB_PAGE = """<!doctype html>
       </div>
       <pre id="conBody" class="flex-1 overflow-auto px-4 py-3 text-[11.5px] leading-relaxed
         font-mono text-neutral-300 whitespace-pre-wrap"></pre>
+      <!-- Interactive terminal input (runs in the selected instance's container) -->
+      <div id="conInputRow" class="hidden shrink-0 border-t border-neutral-800 flex items-center gap-1.5 px-3 py-2">
+        <span class="text-emerald-400 font-mono text-[12px]">›</span>
+        <input id="conInput" spellcheck="false" autocomplete="off"
+          placeholder="wp plugin list   ·   or any shell command"
+          class="flex-1 min-w-0 bg-transparent text-neutral-100 font-mono text-[12px] outline-none placeholder:text-neutral-600">
+      </div>
     </div>
   </div>
 </div>
@@ -3903,17 +3932,62 @@ function consoleOpen(title){
   $('console').classList.add('w-[26rem]');
   $('conTitle').textContent = title;
   $('conBody').textContent = '';
+  $('conInputRow').classList.add('hidden');   // activity mode, not terminal
   $('conDot').className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
 }
 function consoleClose(){
   $('console').classList.add('w-0');
   $('console').classList.remove('w-[26rem]');
+  $('conInputRow').classList.add('hidden');
 }
 function consoleWrite(t){ const b=$('conBody'); b.textContent += t;
   b.scrollTop = b.scrollHeight; }
 function consoleStatus(s, ok){
   $('conTitle').textContent = s;
   $('conDot').className = 'w-2 h-2 rounded-full '+(ok?'bg-emerald-500':'bg-red-500');
+}
+
+// ---- interactive terminal (runs inside the selected instance container) ----
+let termInstance = null, termHist = [], termHistIdx = -1, termBusy = false;
+function openTerminal(name){
+  termInstance = name;
+  $('console').classList.remove('w-0'); $('console').classList.add('w-[26rem]');
+  $('conTitle').textContent = 'Terminal — '+name;
+  $('conDot').className = 'w-2 h-2 rounded-full bg-emerald-500';
+  // Keep existing buffer; print a banner if empty.
+  if(!$('conBody').textContent.trim())
+    consoleWrite('Terminal for '+name+' — runs inside the container.\\n'+
+      'Try: wp plugin list · wp option get siteurl · ls wp-content/plugins\\n\\n');
+  $('conInputRow').classList.remove('hidden');
+  setTimeout(()=>$('conInput').focus(), 60);
+}
+async function runTerm(){
+  if(termBusy) return;
+  const cmd = $('conInput').value.trim();
+  if(!cmd || !termInstance) return;
+  termHist.push(cmd); termHistIdx = termHist.length;
+  $('conInput').value = '';
+  consoleWrite('› '+cmd+'\\n');
+  termBusy = true; $('conDot').className='w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+  let r;
+  try { r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({instance:termInstance, action:'term', cmd})}); }
+  catch(e){ consoleWrite('error: '+e+'\\n'); termBusy=false; return; }
+  if(!r.job_id){ consoleWrite((r.output||'failed')+'\\n'); termBusy=false; return; }
+  // stream the job into the console without resetting it
+  let offset=0;
+  const t=setInterval(async()=>{
+    const j=await api('/api/job/'+r.job_id+'?offset='+offset);
+    if(j.chunk){ consoleWrite(j.chunk); offset=j.offset; }
+    else if(typeof j.offset==='number') offset=j.offset;
+    if(j.done){ clearInterval(t); termBusy=false; consoleWrite('\\n');
+      $('conDot').className='w-2 h-2 rounded-full bg-emerald-500'; $('conInput').focus(); }
+  }, 500);
+}
+function termKey(e){
+  if(e.key==='Enter'){ runTerm(); }
+  else if(e.key==='ArrowUp'){ if(termHistIdx>0){ termHistIdx--; $('conInput').value=termHist[termHistIdx]||''; } e.preventDefault(); }
+  else if(e.key==='ArrowDown'){ if(termHistIdx<termHist.length-1){ termHistIdx++; $('conInput').value=termHist[termHistIdx]||''; } else { termHistIdx=termHist.length; $('conInput').value=''; } e.preventDefault(); }
 }
 
 // ---- sidebar list ----
@@ -4375,7 +4449,13 @@ $('startAll').onclick = ()=>act('*','start-all');
 $('stopAll').onclick = ()=>act('*','stop-all');
 $('helpBtn').onclick = showHelp;
 $('usageBtn').onclick = showUsage;
+$('termBtn').onclick = ()=>{
+  const inst = selected || (DATA.instances[0]&&DATA.instances[0].name);
+  if(!inst){ toast('create an instance first','err'); return; }
+  openTerminal(inst);
+};
 $('conClose').onclick = consoleClose;
+$('conInput').addEventListener('keydown', termKey);
 function showHelp(){
   modal({title:'How Claude works here', input:false, okText:'Got it',
     desc:'The sandbox gives Claude a live WordPress to act in, so it can verify '+

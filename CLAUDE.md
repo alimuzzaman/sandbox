@@ -429,6 +429,22 @@ Keys: `↑↓`/`jk` move · `s` start · `x` stop · `R` restart · `o` open
 Every action runs the same `cmd_*` the CLI uses, so behavior matches exactly.
 Piping the command to a non-tty falls back to the static `./sb instances` table.
 
+### Browser dashboard — `./sb web`
+
+Prefer a browser? `./sb web` starts a local HTTP server (stdlib, no deps) bound
+to **127.0.0.1 only** and serves a single-page dashboard.
+
+```
+./sb web              # http://127.0.0.1:8765
+./sb web --port 9000 --open    # custom port + open browser
+```
+
+Cards per instance with live status (polls every ~2s), wp-admin/site/mailpit
+links, and Start/Stop/Restart/Focus/Delete buttons + a "New instance" form.
+Endpoints: `GET /api/instances`, `POST /api/action`, `GET /api/job/<id>`.
+Fast actions run inline; create/delete run as background jobs the page streams.
+`main` is delete-protected; deletes require name confirmation. Ctrl-C stops it.
+
 **Or do it by hand** (when you want specific ports or custom admin):
 
 ```

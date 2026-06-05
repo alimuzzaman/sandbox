@@ -58,6 +58,10 @@ For a live view, **`./sb dashboard`** opens an interactive full-screen TUI of
 all instances with keys to start/stop/restart, open in browser, set focus, and
 create/delete — auto-refreshing status every couple of seconds.
 
+Prefer a browser? **`./sb web`** serves the same dashboard as a local web page
+(`http://127.0.0.1:8765`, localhost only, no extra deps) — instance cards with
+live status, links, and start/stop/restart/focus/create/delete controls.
+
 **Activation phrase: `focus <plugin>`.** Just say it in chat —
 "focus betterdocs", "focus embedpress", "work on xspeed" — and the
 agent runs the handshake automatically: persists the focus, loads

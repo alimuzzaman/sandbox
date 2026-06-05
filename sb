@@ -2923,6 +2923,90 @@ def _run_cmd_capture(fn, args_ns) -> tuple[bool, str]:
     return ok_flag, buf.getvalue()
 
 
+class _JobStream:
+    """File-like sink that appends every write to a job's output buffer under
+    lock, so the web console can poll incremental output while a command runs.
+    """
+    def __init__(self, job):
+        self._job = job
+
+    def write(self, s):
+        if s:
+            with _web_jobs_lock:
+                self._job["output"] += s
+        return len(s)
+
+    def flush(self):
+        pass
+
+
+_web_jobs_lock = threading.Lock()
+
+
+def _start_job(label: str, fn) -> str:
+    """Run `fn(stream)` in a background thread, streaming its output into a new
+    job. `fn` returns True/False for ok. Returns the job_id immediately so the
+    page can poll /api/job/<id>?offset=N for live output."""
+    _web_job_seq[0] += 1
+    job_id = str(_web_job_seq[0])
+    job = {"status": label, "output": "", "done": False, "ok": None}
+    _web_jobs[job_id] = job
+    stream = _JobStream(job)
+
+    def worker():
+        ok_flag = True
+        try:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                ok_flag = fn() is not False
+        except SystemExit as e:
+            ok_flag = (str(e) in ("0", "None"))
+        except Exception as e:
+            ok_flag = False
+            stream.write(f"\nerror: {e}\n")
+        with _web_jobs_lock:
+            job["done"] = True
+            job["ok"] = ok_flag
+            job["status"] = label + (" ✓" if ok_flag else " ✗")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return job_id
+
+
+def _job_snapshot(job_id: str, offset: int = 0) -> dict | None:
+    """Return a job's state with only output past `offset` (incremental)."""
+    job = _web_jobs.get(job_id)
+    if job is None:
+        return None
+    with _web_jobs_lock:
+        full = job["output"]
+        return {"status": job["status"], "done": job["done"], "ok": job["ok"],
+                "offset": len(full), "chunk": full[offset:] if offset < len(full) else ""}
+
+
+def _compose_no_follow_logs(instance: str, tail: int = 200) -> None:
+    """Print the last `tail` lines of wp+db logs WITHOUT -f (cmd_logs follows
+    forever, which would hang a web job). Prints to current stdout (captured
+    by the job stream)."""
+    compose("logs", "--no-color", f"--tail={tail}", "wp", "db",
+            instance=instance, check=False)
+
+
+def _web_list_snapshots(instance: str) -> list[str]:
+    """Snapshot names saved for an instance (for the restore picker)."""
+    d = snapshots_dir(instance)
+    if not d.exists():
+        return []
+    return sorted(p.name for p in d.iterdir() if p.is_dir())
+
+
+def _web_list_seeds() -> list[str]:
+    """WXR files available under runtime/seeds/ (for the seed picker)."""
+    if not SEEDS_DIR.exists():
+        return []
+    return sorted(p.name for p in SEEDS_DIR.iterdir()
+                  if p.is_file() and p.suffix in (".xml", ".wxr"))
+
+
 def _web_available_plugins(cfg: dict) -> list[str]:
     """Plugin slugs the focus dropdown offers — sourced from the projects:
     block in sandbox.yml (clean, curated) rather than the noisy plugins_home
@@ -2999,6 +3083,70 @@ def _web_do_action(payload: dict) -> dict:
 
         threading.Thread(target=sweep, daemon=True).start()
         return {"ok": True, "job_id": job_id}
+
+    # Ops / terminal actions — each streams output into a job the console
+    # panel tails. All read or scoped to one instance; destructive ones
+    # (restore) are confirmed client-side. `shell`/`claude` are intentionally
+    # NOT exposed (interactive, can't work over HTTP).
+    OPS = {"logs", "status", "doctor", "snapshot", "restore", "seed",
+           "update", "xdebug", "wp", "introspect"}
+    if action in OPS:
+        if not name:
+            return {"ok": False, "output": "missing instance"}
+        ns_base = {"resolved_instance": name}
+
+        def run_op():
+            cfg = load_config()
+            if action == "logs":
+                # Non-following snapshot of recent logs (the -f variant would
+                # never return). Tail the last N lines of wp+db.
+                _compose_no_follow_logs(name)
+            elif action == "status":
+                cmd_status(cfg, _types.SimpleNamespace(**ns_base))
+            elif action == "doctor":
+                cmd_doctor(cfg, _types.SimpleNamespace(**ns_base))
+            elif action == "update":
+                cmd_update(cfg, _types.SimpleNamespace(**ns_base))
+            elif action == "introspect":
+                cmd_introspect(cfg, _types.SimpleNamespace(
+                    target=payload.get("target") or "all", **ns_base))
+            elif action == "xdebug":
+                state = payload.get("state") or "status"
+                if state not in ("on", "off", "status"):
+                    print("invalid xdebug state"); return False
+                cmd_xdebug(cfg, _types.SimpleNamespace(state=state, **ns_base))
+            elif action == "snapshot":
+                snap = (payload.get("name") or "").strip()
+                if not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", snap):
+                    print("invalid snapshot name"); return False
+                cmd_snapshot(cfg, _types.SimpleNamespace(
+                    name=snap, force=bool(payload.get("force")), **ns_base))
+            elif action == "restore":
+                snap = (payload.get("name") or "").strip()
+                if not snap:
+                    print("missing snapshot name"); return False
+                cmd_restore(cfg, _types.SimpleNamespace(name=snap, **ns_base))
+            elif action == "seed":
+                f = (payload.get("file") or "").strip()
+                if not f:
+                    print("missing seed file"); return False
+                cmd_seed(cfg, _types.SimpleNamespace(file=f, **ns_base))
+            elif action == "wp":
+                argstr = (payload.get("args") or "").strip()
+                if not argstr:
+                    print("missing wp-cli args"); return False
+                import shlex as _shlex
+                cmd_wp(cfg, _types.SimpleNamespace(
+                    passthrough=_shlex.split(argstr), **ns_base))
+            return True
+
+        label = f"{action}" + (f" {name}" if action != "wp"
+                               else f" {name}: {payload.get('args','')}")
+        # Serialize against other mutating actions via the lock inside the job.
+        def locked():
+            with _web_lock:
+                return run_op()
+        return {"ok": True, "job_id": _start_job(label, locked)}
 
     if action in ("create", "delete"):
         if action == "delete" and name == DEFAULT_INSTANCE:
@@ -3078,17 +3226,33 @@ _WEB_PAGE = """<!doctype html>
     <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
                 text-neutral-400">Instances</div>
     <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
-    <div class="p-2 border-t border-brd dark:border-brd-dark">
+    <div class="p-2 border-t border-brd dark:border-brd-dark space-y-0.5">
       <button id="newBtn" class="w-full text-[13px] px-3 py-2 rounded
         text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800
         flex items-center gap-2">
         <span class="text-[15px] leading-none">+</span> New instance</button>
+      <button id="helpBtn" class="w-full text-[13px] px-3 py-2 rounded text-left
+        text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800
+        flex items-center gap-2">
+        <span class="text-[14px] leading-none">?</span> Using Claude</button>
     </div>
   </aside>
 
   <!-- Detail panel -->
   <div class="flex-1 flex flex-col min-w-0">
     <main id="detail" class="flex-1 overflow-auto"></main>
+
+    <!-- Live console panel (streams command output) -->
+    <div id="console" class="hidden shrink-0 border-t border-brd dark:border-brd-dark
+         bg-neutral-950 h-56 flex flex-col">
+      <div class="h-8 px-4 flex items-center gap-2 border-b border-neutral-800 text-[12px]">
+        <span id="conDot" class="w-2 h-2 rounded-full bg-neutral-500"></span>
+        <span id="conTitle" class="text-neutral-300 font-mono truncate">console</span>
+        <button id="conClose" class="ml-auto text-neutral-500 hover:text-neutral-300">close</button>
+      </div>
+      <pre id="conBody" class="flex-1 overflow-auto px-4 py-2 text-[11.5px] leading-relaxed
+        font-mono text-neutral-300 whitespace-pre-wrap"></pre>
+    </div>
     <!-- Footer bar -->
     <footer class="h-12 shrink-0 border-t border-brd dark:border-brd-dark
        bg-app dark:bg-card-dark px-5 flex items-center gap-3 text-[12.5px]">
@@ -3199,13 +3363,32 @@ async function act(instance, action, extra={}){
 const cap = s => s.charAt(0).toUpperCase()+s.slice(1);
 
 let paused=false;
-async function pollJob(id, instance){
+async function pollJob(id, instance, label){
   paused=true;
+  consoleOpen(label||('job '+id));
+  let offset=0;
   const t=setInterval(async()=>{
-    const j=await api('/api/job/'+id);
+    const j=await api('/api/job/'+id+'?offset='+offset);
+    if(j.chunk){ consoleWrite(j.chunk); offset=j.offset; }
+    else if(typeof j.offset==='number'){ offset=j.offset; }
     if(j.done){ clearInterval(t); paused=false; if(instance) delete busy[instance];
+      consoleStatus(j.status||'done', j.ok);
       toast(j.status||'done', j.ok?'ok':'err'); await refresh(); }
-  },1500);
+  },800);
+}
+
+// ---- live console panel ----
+function consoleOpen(title){
+  $('console').classList.remove('hidden');
+  $('conTitle').textContent = title;
+  $('conBody').textContent = '';
+  $('conDot').className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+}
+function consoleWrite(t){ const b=$('conBody'); b.textContent += t;
+  b.scrollTop = b.scrollHeight; }
+function consoleStatus(s, ok){
+  $('conTitle').textContent = s;
+  $('conDot').className = 'w-2 h-2 rounded-full '+(ok?'bg-emerald-500':'bg-red-500');
 }
 
 // ---- sidebar list ----
@@ -3282,7 +3465,51 @@ function detail(r){
           class="px-2.5 py-1 rounded border border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900
           text-[13px] focus:border-accent outline-none w-44">${focusOpts}</select>
         ${b==='focus'||b==='unfocus'?spinner():''}</div>`)}
+  </div>
+
+  <!-- Tools (terminal commands) -->
+  <div class="px-7 pb-6">
+    <div class="text-[11px] font-medium uppercase tracking-wide text-neutral-400 mb-2">Tools</div>
+    <div class="flex flex-wrap gap-1.5">
+      ${opBtn(r.name,'logs','Logs')}
+      ${opBtn(r.name,'status','Status')}
+      ${opBtn(r.name,'doctor','Doctor')}
+      ${opBtn(r.name,'update','Update plugins')}
+      <button class="${toolBtn}" onclick="doSnapshot('${r.name}')">Snapshot</button>
+      <button class="${toolBtn}" onclick="doRestore('${r.name}')">Restore…</button>
+      <button class="${toolBtn}" onclick="doSeed('${r.name}')">Seed…</button>
+      ${opBtn(r.name,'xdebug','Xdebug',{state:'status'})}
+    </div>
+    <div class="flex gap-2 mt-2.5">
+      <span class="px-2 py-1.5 text-[12.5px] font-mono text-neutral-400">wp</span>
+      <input id="wpArgs" placeholder="plugin list --status=active"
+        onkeydown="if(event.key==='Enter')doWp('${r.name}')"
+        class="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-brdin dark:border-neutral-700
+        bg-app dark:bg-neutral-900 text-[12.5px] font-mono focus:border-accent outline-none">
+      <button class="${toolBtn}" onclick="doWp('${r.name}')">Run</button>
+    </div>
+  </div>
+
+  <!-- Using Claude with THIS instance -->
+  <div class="px-7 pb-8">
+    <div class="text-[11px] font-medium uppercase tracking-wide text-neutral-400 mb-2">Use with Claude</div>
+    <div class="rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-3.5 text-[12.5px] space-y-2">
+      <div class="text-neutral-600 dark:text-neutral-300">This instance has its own MCP server. In a Claude session, use its tool namespace:</div>
+      ${snippet('mcp__'+r.mcp_server+'__*')}
+      <div class="text-neutral-600 dark:text-neutral-300">Or just tell Claude in chat (it runs the focus handshake on this instance):</div>
+      ${snippet('focus '+(r.focus && r.focus!=='—' ? r.focus : '<plugin>'))}
+      <div class="text-neutral-500 dark:text-neutral-400">Admin / REST / wp-cli all target <code>${r.url}</code> for this instance.</div>
+    </div>
   </div>`;
+}
+const toolBtn = "px-2.5 py-1.5 rounded border border-brd dark:border-neutral-700 text-[12.5px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
+function opBtn(name, action, label, extra){
+  return `<button class="${toolBtn}" onclick='op("${name}","${action}",${JSON.stringify(extra||{})})'>${label}</button>`;
+}
+function snippet(text){
+  return `<div class="flex items-center gap-2 bg-app dark:bg-neutral-950 border border-brd dark:border-neutral-800 rounded px-2.5 py-1.5">
+    <code class="flex-1 text-[12px] text-neutral-700 dark:text-neutral-200 truncate">${esc(text)}</code>
+    <button onclick='copyText(${JSON.stringify(text)}, this)' class="text-[11px] text-accent dark:text-blue-400 hover:underline shrink-0">copy</button></div>`;
 }
 function spinner(color){ return `<svg class="spin w-3.5 h-3.5 ${color==='white'?'text-white':'text-neutral-400'}"
   viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3"
@@ -3314,9 +3541,61 @@ async function doCreate(){
             {key:'server', type:'select', options:DATA.servers}]});
   if(v && v.name) act(v.name,'create',{name:v.name, server:v.server});
 }
+// Ops/terminal actions: always stream into the console panel.
+async function op(name, action, extra={}){
+  let r;
+  try {
+    r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(Object.assign({instance:name,action},extra))});
+  } catch(e){ toast('request failed: '+e,'err'); return; }
+  if(r.job_id) pollJob(r.job_id, null, action+' · '+name);
+  else { toast((r.output||'failed').split('\\n')[0],'err'); }
+}
+function doWp(name){
+  const el=$('wpArgs'); const args=el.value.trim();
+  if(!args){ toast('enter a wp-cli command','err'); return; }
+  op(name,'wp',{args});
+}
+async function doSnapshot(name){
+  const v = await modal({title:'Snapshot '+name, okText:'Save',
+    desc:'Save the current DB + uploads under this name.',
+    fields:[{key:'name', placeholder:'snapshot name'}]});
+  if(v && v.name) op(name,'snapshot',{name:v.name});
+}
+async function doRestore(name){
+  let snaps=[]; try{ snaps=(await api('/api/snapshots/'+name)).snapshots||[]; }catch(e){}
+  if(!snaps.length){ toast('no snapshots for '+name,'err'); return; }
+  const v = await modal({title:'Restore '+name, danger:true, okText:'Restore',
+    desc:'Overwrites the current DB + uploads with the chosen snapshot.',
+    fields:[{key:'name', type:'select', options:snaps}]});
+  if(v && v.name) op(name,'restore',{name:v.name});
+}
+async function doSeed(name){
+  const seeds=DATA.seeds||[];
+  if(!seeds.length){ toast('no WXR files in runtime/seeds/','err'); return; }
+  const v = await modal({title:'Seed '+name, okText:'Import',
+    desc:'Import a WXR content file into this instance.',
+    fields:[{key:'file', type:'select', options:seeds}]});
+  if(v && v.file) op(name,'seed',{file:v.file});
+}
+function copyText(t, btn){
+  navigator.clipboard.writeText(t).then(()=>{ const o=btn.textContent;
+    btn.textContent='copied'; setTimeout(()=>btn.textContent=o,1200); });
+}
 $('newBtn').onclick = doCreate;
 $('startAll').onclick = ()=>act('*','start-all');
 $('stopAll').onclick = ()=>act('*','stop-all');
+$('helpBtn').onclick = showHelp;
+$('conClose').onclick = ()=>$('console').classList.add('hidden');
+function showHelp(){
+  modal({title:'Using Claude with the sandbox', input:false, okText:'Got it',
+    desc:'Each instance runs its own MCP server. In a Claude session, call that '+
+      'instance\\'s tools — mcp__sandbox__* targets main, mcp__sandbox-<name>__* '+
+      'targets that instance (its own port, focus, and state). Or just say '+
+      '\"focus <plugin>\" / \"work on <plugin>\" in chat and Claude runs the focus '+
+      'handshake on that instance, symlinking the plugin in. Pick an instance on '+
+      'the left to see its exact namespace + copy snippets.'});
+}
 
 // ---- render ----
 function render(){
@@ -3361,19 +3640,30 @@ def cmd_web(cfg, args) -> None:
             if self.path == "/" or self.path == "/index.html":
                 page = _WEB_PAGE.replace("__SANDBOX_WEB_CSS__", _web_css())
                 return self._send(200, page, "text/html; charset=utf-8")
-            if self.path == "/api/instances":
+            # Split path + query.
+            from urllib.parse import urlparse, parse_qs
+            u = urlparse(self.path)
+            path, qs = u.path, parse_qs(u.query)
+
+            if path == "/api/instances":
                 cfg = load_config()
                 return self._send(200, json.dumps({
                     "instances": collect_instance_rows(cfg),
                     "plugins": _web_available_plugins(cfg),
                     "servers": list(SERVERS),
+                    "seeds": _web_list_seeds(),
                 }))
-            if self.path.startswith("/api/job/"):
-                jid = self.path.rsplit("/", 1)[-1]
-                job = _web_jobs.get(jid)
-                if not job:
+            if path.startswith("/api/job/"):
+                jid = path.rsplit("/", 1)[-1]
+                offset = int((qs.get("offset") or ["0"])[0])
+                snap = _job_snapshot(jid, offset)
+                if snap is None:
                     return self._send(404, json.dumps({"error": "no such job"}))
-                return self._send(200, json.dumps(job))
+                return self._send(200, json.dumps(snap))
+            if path.startswith("/api/snapshots/"):
+                inst = path.rsplit("/", 1)[-1]
+                return self._send(200, json.dumps(
+                    {"snapshots": _web_list_snapshots(inst)}))
             return self._send(404, json.dumps({"error": "not found"}))
 
         def do_POST(self):

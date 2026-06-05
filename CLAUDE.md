@@ -451,6 +451,17 @@ Endpoints: `GET /api/instances` (instances + plugins + servers),
 start-all/stop-all run as background jobs. `main` is delete-protected; deletes
 require name confirmation. Ctrl-C stops the server.
 
+Each instance's detail panel also has a **Tools** row exposing terminal
+commands — logs, status, doctor, update, snapshot, restore, seed, xdebug, and a
+free-form **wp-cli runner** — whose output **streams live into a console panel**
+at the bottom. (Interactive commands `shell`/`claude` are intentionally not
+web-exposed.) A **"Use with Claude"** block per instance shows that instance's
+`mcp__sandbox-<name>__*` namespace + the `focus <plugin>` phrase with copy
+buttons, and a sidebar **"Using Claude"** help explains the per-instance MCP
+servers + focus handshake. Streaming jobs poll `GET /api/job/<id>?offset=N`
+(incremental); restore/seed pickers read `GET /api/snapshots/<inst>` + the
+`seeds` field on `/api/instances`.
+
 The UI is styled with **vendored Tailwind** (xSpeed DESIGN.md tokens) inlined
 from `config/sandbox-web.css` — no CDN, fully self-contained, works offline.
 After changing Tailwind classes in the page markup, rebuild the CSS:

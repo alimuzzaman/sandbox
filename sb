@@ -2679,17 +2679,23 @@ def cmd_instance(cfg, args) -> None:
         info(f"web server: {server}")
 
         # Custom domain → map it to 127.0.0.1 in /etc/hosts (before install so
-        # WP's siteurl is set to the domain). If the hosts edit fails (e.g. no
-        # passwordless rule yet), fall back to localhost so create still works.
+        # WP's siteurl is set to the domain). First time, auto-run the one-time
+        # setup (password prompt once) so the user never has to run a separate
+        # command. In a non-interactive context (web/CI) we can't prompt for
+        # sudo → fall back to localhost with a clear message.
         if domain:
-            okh, msg = _hosts_edit("add", domain)
+            if not domains_ready():
+                if sys.stdin.isatty():
+                    info(f"'{domain}' needs a one-time domain setup. Doing it now…")
+                    _domains_setup(cfg)
+                else:
+                    info("custom domains need a one-time setup that requires a "
+                         "password — run `./sb domains setup` in your terminal.")
+            okh, msg = _hosts_edit("add", domain) if domains_ready() else (False, "not set up")
             if okh:
-                ok(f"mapped {domain} → 127.0.0.1 (/etc/hosts)")
+                ok(f"mapped {domain} → 127.0.0.1")
             else:
-                info(f"could not edit /etc/hosts ({msg}).")
-                info(f"run `./sb domains setup` once for password-free domains, "
-                     f"or add manually: 127.0.0.1  {domain}")
-                info(f"continuing with localhost for now.")
+                info(f"continuing on localhost for now ({msg}).")
                 domain = None
 
         block = {
@@ -2886,60 +2892,80 @@ def _free_port_80() -> None:
         import time; time.sleep(1)
 
 
+def domains_ready() -> bool:
+    """True when both prerequisites are in place: passwordless hosts edits AND
+    the clean-URL proxy running."""
+    return _hosts_passwordless() and _proxy_running()
+
+
+def _domains_setup(cfg, quiet: bool = False) -> bool:
+    """Do the one-time domain setup: install the passwordless hosts sudoers
+    rule (sudo prompt, once), free :80, and start the proxy. Returns True on
+    success. Requires an interactive terminal for the sudo prompt — callers
+    should check sys.stdin.isatty() first. Idempotent."""
+    # 1. Passwordless sudoers rule for the hosts helper.
+    if not _hosts_passwordless():
+        import getpass
+        user = getpass.getuser()
+        rule = (f"# Installed by the sandbox — lets it edit /etc/hosts for "
+                f"custom domains without a password.\n"
+                f"{user} ALL=(root) NOPASSWD: {HOSTS_HELPER}\n")
+        info("One-time domain setup — enter your password ONCE (never again).")
+        tmp = ROOT / "runtime" / "sandbox-hosts.sudoers"
+        tmp.write_text(rule)
+        chk = subprocess.run(["sudo", "visudo", "-cf", str(tmp)],
+                             capture_output=True, text=True)
+        if chk.returncode != 0:
+            tmp.unlink(missing_ok=True)
+            info(f"sudoers rule failed validation: {chk.stderr.strip()}")
+            return False
+        inst = subprocess.run(
+            ["sudo", "install", "-m", "0440", "-o", "root", "-g",
+             "wheel" if sys.platform == "darwin" else "root",
+             str(tmp), str(SUDOERS_FILE)], capture_output=True, text=True)
+        tmp.unlink(missing_ok=True)
+        if inst.returncode != 0:
+            info(f"failed to install sudoers rule: {inst.stderr.strip()}")
+            return False
+        ok("hosts edits are now password-free.")
+
+    # 2. Start the clean-URL proxy on :80.
+    _free_port_80()
+    write_proxy_config(cfg)
+    write_proxy_compose()
+    if not quiet:
+        info("starting domain proxy on :80")
+    up = subprocess.run(
+        ["docker", "compose", "-f", str(PROXY_COMPOSE),
+         "--project-directory", str(ROOT), "up", "-d"],
+        capture_output=True, text=True)
+    if up.returncode != 0:
+        info(f"proxy failed to start (is :80 free?): {up.stderr.strip()}")
+        return False
+    # 3. Add hosts entries for any existing domains.
+    for name, ic in resolve_instances(cfg).items():
+        if ic.get("domain"):
+            _hosts_edit("add", ic["domain"])
+    return True
+
+
 def cmd_domains(cfg, args) -> None:
     """Manage custom local domains + the clean-URL proxy.
 
-    `./sb domains setup` — one-time: install a scoped passwordless sudoers rule
-                           for hosts edits, free :80, and start the proxy so
-                           http://<name>.sb works with no port.
+    `./sb domains setup` — one-time: passwordless hosts rule + proxy on :80.
     `./sb domains list`  — show domain mappings + proxy status.
     `./sb domains down`  — stop the proxy.
     """
     action = getattr(args, "action", None) or "list"
 
     if action == "setup":
-        # 1. Passwordless sudoers rule for the hosts helper (idempotent).
-        if _hosts_passwordless():
-            ok(f"hosts rule already installed ({SUDOERS_FILE}).")
+        if domains_ready():
+            ok("Already set up — custom domains serve clean URLs.")
+            return
+        if _domains_setup(cfg):
+            ok("Done. Custom domains now serve clean URLs, e.g. http://myapp.sb")
         else:
-            import getpass
-            user = getpass.getuser()
-            rule = (f"# Installed by `./sb domains setup` — lets the sandbox "
-                    f"edit /etc/hosts for custom domains without a password.\n"
-                    f"{user} ALL=(root) NOPASSWD: {HOSTS_HELPER}\n")
-            info("One-time setup — you'll enter your password ONCE now.")
-            tmp = ROOT / "runtime" / "sandbox-hosts.sudoers"
-            tmp.write_text(rule)
-            chk = subprocess.run(["sudo", "visudo", "-cf", str(tmp)],
-                                 capture_output=True, text=True)
-            if chk.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                die(f"sudoers rule failed validation: {chk.stderr.strip()}")
-            inst = subprocess.run(
-                ["sudo", "install", "-m", "0440", "-o", "root", "-g",
-                 "wheel" if sys.platform == "darwin" else "root",
-                 str(tmp), str(SUDOERS_FILE)], capture_output=True, text=True)
-            tmp.unlink(missing_ok=True)
-            if inst.returncode != 0:
-                die(f"failed to install sudoers rule: {inst.stderr.strip()}")
-            ok("hosts edits are now password-free.")
-
-        # 2. Start the clean-URL proxy on :80.
-        _free_port_80()
-        write_proxy_config(cfg)
-        write_proxy_compose()
-        info("starting domain proxy on :80")
-        up = subprocess.run(
-            ["docker", "compose", "-f", str(PROXY_COMPOSE),
-             "--project-directory", str(ROOT), "up", "-d"],
-            capture_output=True, text=True)
-        if up.returncode != 0:
-            die(f"proxy failed to start (is :80 free?): {up.stderr.strip()}")
-        # 3. Add hosts entries for any existing domains.
-        for name, ic in resolve_instances(cfg).items():
-            if ic.get("domain"):
-                _hosts_edit("add", ic["domain"])
-        ok("Done. Custom domains now serve clean URLs, e.g. http://myapp.sb")
+            die("domain setup did not complete (see messages above).")
         return
 
     if action == "down":
@@ -4455,7 +4481,7 @@ def cmd_web(cfg, args) -> None:
                     "plugins": _web_available_plugins(cfg),
                     "servers": list(SERVERS),
                     "seeds": _web_list_seeds(),
-                    "domains_ready": _hosts_passwordless() and _proxy_running(),
+                    "domains_ready": domains_ready(),
                 }))
             if path.startswith("/api/job/"):
                 jid = path.rsplit("/", 1)[-1]

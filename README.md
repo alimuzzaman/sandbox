@@ -8,13 +8,17 @@ fix bugs, run migrations, query the DB, check email — without leaving this fol
 
 ---
 
-## Get started (3 commands)
+## Get started
 
 ```bash
 git clone <this-repo> sandbox
 cd sandbox
-./sb setup
+./install.sh
 ```
+
+`./install.sh` walks you through it step by step: it makes sure `python3` is
+present (offering to install it if not), then runs `./sb setup`. Prefer to skip
+the wrapper? Just run `./sb setup` directly — it does the same thing.
 
 `setup` checks prerequisites (Docker running, Python 3.9+), then boots Docker,
 installs WordPress, generates an Application Password, builds the MCP server, and

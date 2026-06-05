@@ -2986,113 +2986,164 @@ def _web_do_action(payload: dict) -> dict:
     return {"ok": False, "output": f"unknown action '{action}'"}
 
 
+_WEB_CSS_CACHE = [None]
+
+
+def _web_css() -> str:
+    """Vendored, pre-built Tailwind CSS (config/sandbox-web.css). Inlined into
+    the page so the UI is fully self-contained — no CDN, works offline.
+    Rebuild after editing classes: scripts/build-web-css.sh."""
+    if _WEB_CSS_CACHE[0] is None:
+        css_path = ROOT / "config" / "sandbox-web.css"
+        try:
+            _WEB_CSS_CACHE[0] = css_path.read_text()
+        except OSError:
+            _WEB_CSS_CACHE[0] = ""   # graceful: unstyled but functional
+    return _WEB_CSS_CACHE[0]
+
+
 _WEB_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Sandbox</title>
+<html lang="en"><head><meta charset="utf-8"><title>xSpeed Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Vendored, pre-built Tailwind CSS (no CDN, works offline). Rebuild with
+     scripts/build-web-css.sh after changing classes in this page. -->
+<style>__SANDBOX_WEB_CSS__</style>
 <style>
- :root { color-scheme: light dark; }
- body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0;
-        background: #f6f7f9; color: #1c1e21; }
- header { background: #1c1e21; color: #fff; padding: 12px 20px; font-weight: 600; }
- main { padding: 20px; max-width: 1100px; margin: 0 auto; }
- .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(320px,1fr)); }
- .card { background: #fff; border: 1px solid #e3e5e8; border-radius: 10px;
-         padding: 14px 16px; }
- .row { display: flex; align-items: center; gap: 8px; }
- .name { font-weight: 600; font-size: 15px; }
- .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
- .run { background: #2ecc71; } .stop { background: #c0c4cc; }
- .tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #eef0f3; color:#555; }
- .meta { color: #65676b; font-size: 12px; margin: 6px 0; }
- .meta a { color: #1877f2; text-decoration: none; margin-right: 10px; }
- .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
- button { font: inherit; border: 1px solid #d0d3d8; background: #fff; border-radius: 7px;
-          padding: 4px 10px; cursor: pointer; }
- button:hover { background: #f0f2f5; }
- button.danger { color: #c0392b; border-color: #e8b9b3; }
- .newcard { border-style: dashed; }
- input, select { font: inherit; padding: 4px 7px; border: 1px solid #d0d3d8; border-radius: 7px; }
- #log { background: #0e1116; color: #cdd9e5; font: 12px/1.45 ui-monospace, monospace;
-        border-radius: 10px; padding: 12px 14px; margin-top: 18px; white-space: pre-wrap;
-        max-height: 240px; overflow: auto; display: none; }
- @media (prefers-color-scheme: dark) {
-   body{background:#18191a;color:#e4e6eb} header{background:#000}
-   .card{background:#242526;border-color:#3a3b3c} .tag{background:#3a3b3c;color:#b0b3b8}
-   button{background:#3a3b3c;color:#e4e6eb;border-color:#4e4f50} button:hover{background:#4e4f50}
- }
+  /* DESIGN.md §18 motion: 200ms ease theme/color transitions */
+  * { transition: background-color .2s ease, border-color .2s ease, color .15s ease; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #9993; border-radius: 9999px; }
 </style></head>
-<body>
-<header>Sandbox — instance dashboard</header>
-<main>
- <div class="grid" id="grid"></div>
- <pre id="log"></pre>
+<body class="font-sans bg-page dark:bg-page-dark text-ink dark:text-ink-dark min-h-screen antialiased">
+
+<header class="sticky top-0 z-10 border-b border-brd dark:border-brd-dark
+               bg-app/80 dark:bg-app-dark/80 backdrop-blur">
+  <div class="max-w-5xl mx-auto px-5 h-14 flex items-center gap-3">
+    <div class="w-6 h-6 rounded bg-accent flex items-center justify-center
+                text-white text-[13px] font-bold">x</div>
+    <h1 class="text-[15px] font-semibold text-neutral-900 dark:text-neutral-50">
+      xSpeed Sandbox</h1>
+    <span id="count" class="text-[12px] text-neutral-500 dark:text-neutral-400"></span>
+    <span class="ml-auto flex items-center gap-1.5 text-[12px]
+                 text-neutral-500 dark:text-neutral-400">
+      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>live</span>
+  </div>
+</header>
+
+<main class="max-w-5xl mx-auto px-5 py-6">
+  <div class="grid gap-3.5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]"
+       id="grid"></div>
+  <div id="logwrap" class="hidden mt-5">
+    <div class="flex items-center gap-2 mb-1.5">
+      <span class="text-[12px] font-medium text-neutral-500 dark:text-neutral-400">Output</span>
+      <button onclick="document.getElementById('logwrap').classList.add('hidden')"
+        class="ml-auto text-[12px] text-neutral-400 hover:text-neutral-600
+               dark:hover:text-neutral-200">clear</button>
+    </div>
+    <pre id="log" class="text-[11.5px] leading-relaxed font-mono text-neutral-300
+        bg-neutral-950 rounded-lg p-3.5 whitespace-pre-wrap max-h-60 overflow-auto
+        border border-neutral-800"></pre>
+  </div>
 </main>
+
 <script>
-const log = (t) => { const l=document.getElementById('log'); l.style.display='block';
-  l.textContent += t + "\\n"; l.scrollTop = l.scrollHeight; };
+const $ = (id) => document.getElementById(id);
+const showLog = (t) => { $('logwrap').classList.remove('hidden'); $('log').textContent = t; };
 async function api(path, opts){ const r = await fetch(path, opts); return r.json(); }
 async function act(instance, action, extra={}) {
   const body = Object.assign({instance, action}, extra);
   const r = await api('/api/action', {method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify(body)});
   if (r.job_id) { pollJob(r.job_id); }
-  else { if(r.output) log(r.output.trim()); refresh(); }
+  else { if(r.output) showLog(r.output.trim()); refresh(); }
   return r;
 }
+let paused = false;
 async function pollJob(id){
   paused = true;
   const t = setInterval(async () => {
     const j = await api('/api/job/'+id);
-    document.getElementById('log').style.display='block';
-    document.getElementById('log').textContent = (j.status||'') + "\\n\\n" + (j.output||'');
+    showLog((j.status||'') + "\\n\\n" + (j.output||''));
     if (j.done){ clearInterval(t); paused=false; refresh(); }
   }, 1500);
 }
-let paused = false;
+
+// Status pill — DESIGN.md §12 (emerald for running, neutral for stopped).
+function pill(running){
+  const base = "inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded-full border";
+  return running
+   ? `<span class="${base} bg-emerald-50 text-emerald-700 border-emerald-200
+        dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>running</span>`
+   : `<span class="${base} bg-neutral-100 text-neutral-500 border-neutral-200
+        dark:bg-neutral-800 dark:text-neutral-400 dark:border-neutral-700">
+        <span class="w-1.5 h-1.5 rounded-full bg-neutral-400"></span>stopped</span>`;
+}
+const serverTag = (s) => `<span class="text-[11px] px-2 py-0.5 rounded-full
+  bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">${s}</span>`;
+const btn = "px-2.5 py-1 rounded border text-[12.5px] transition-colors";
+const btnN = btn + " border-brd dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
+const btnD = btn + " border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40";
+const link = "text-accent dark:text-blue-400 hover:underline";
+
 function card(r){
-  const dot = r.running ? 'run' : 'stop';
   const p = r.wordpress_port, m = r.mailpit_port;
-  return `<div class="card">
-    <div class="row"><span class="dot ${dot}"></span>
-      <span class="name">${r.name}</span>
-      <span class="tag">${r.server}</span></div>
-    <div class="meta">
-      <a href="http://localhost:${p}/wp-admin" target="_blank">wp-admin</a>
-      <a href="http://localhost:${p}" target="_blank">site</a>
-      <a href="http://localhost:${m}" target="_blank">mailpit</a></div>
-    <div class="meta">mcp: <code>${r.mcp_server}</code> · focus: ${r.focus}</div>
-    <div class="btns">
-      <button onclick="act('${r.name}','start')">Start</button>
-      <button onclick="act('${r.name}','stop')">Stop</button>
-      <button onclick="act('${r.name}','restart')">Restart</button>
-      <button onclick="doFocus('${r.name}')">Focus</button>
-      ${r.name==='main' ? '' :
-        `<button class="danger" onclick="doDelete('${r.name}')">Delete</button>`}
+  return `<div class="bg-card dark:bg-card-dark border border-brd dark:border-brd-dark
+      rounded-lg p-4 flex flex-col gap-3">
+    <div class="flex items-center gap-2">
+      <span class="font-semibold text-[14.5px] text-neutral-900 dark:text-neutral-50">${r.name}</span>
+      ${serverTag(r.server)}
+      <span class="ml-auto">${pill(r.running)}</span>
+    </div>
+    <div class="flex items-center gap-3 text-[12.5px]">
+      <a href="http://localhost:${p}/wp-admin" target="_blank" class="${link}">wp-admin</a>
+      <a href="http://localhost:${p}" target="_blank" class="${link}">site</a>
+      <a href="http://localhost:${m}" target="_blank" class="${link}">mailpit</a>
+    </div>
+    <div class="text-[12px] text-neutral-500 dark:text-neutral-400 flex flex-wrap gap-x-3">
+      <span>mcp <code class="text-neutral-600 dark:text-neutral-300">${r.mcp_server}</code></span>
+      <span>focus <span class="text-neutral-600 dark:text-neutral-300">${r.focus}</span></span>
+      <span class="text-neutral-400 dark:text-neutral-500">:${p}</span>
+    </div>
+    <div class="flex flex-wrap gap-1.5 pt-1">
+      <button class="${btnN}" onclick="act('${r.name}','start')">Start</button>
+      <button class="${btnN}" onclick="act('${r.name}','stop')">Stop</button>
+      <button class="${btnN}" onclick="act('${r.name}','restart')">Restart</button>
+      <button class="${btnN}" onclick="doFocus('${r.name}')">Focus</button>
+      ${r.name==='main' ? '' : `<button class="${btnD}" onclick="doDelete('${r.name}')">Delete</button>`}
     </div></div>`;
 }
 function newCard(){
-  return `<div class="card newcard">
-    <div class="name">＋ New instance</div>
-    <div class="meta"><input id="newname" placeholder="name" size="10">
-      <select id="newserver">
+  return `<div class="border border-dashed border-brdin dark:border-neutral-700
+      rounded-lg p-4 flex flex-col gap-3">
+    <span class="font-semibold text-[14.5px] text-neutral-700 dark:text-neutral-300">New instance</span>
+    <div class="flex gap-2">
+      <input id="newname" placeholder="name" class="flex-1 min-w-0 px-2.5 py-1 rounded border
+        border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px]
+        focus:border-accent outline-none">
+      <select id="newserver" class="px-2 py-1 rounded border border-brdin dark:border-neutral-700
+        bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
         <option value="apache">apache</option>
         <option value="nginx">nginx</option>
-        <option value="litespeed">litespeed</option></select></div>
-    <div class="btns"><button onclick="doCreate()">Create</button></div></div>`;
+        <option value="litespeed">litespeed</option></select>
+    </div>
+    <div><button class="${btn} bg-accent text-white border-accent hover:bg-blue-700"
+      onclick="doCreate()">Create</button></div></div>`;
 }
 function doFocus(name){ const s = prompt('Focus which plugin on '+name+'?'); if(s) act(name,'focus',{slug:s}); }
 function doDelete(name){ if(prompt('Type '+name+' to delete:')===name) act(name,'delete',{confirm:name}); }
 function doCreate(){
-  const name=document.getElementById('newname').value.trim();
-  const server=document.getElementById('newserver').value;
-  if(!name) return; log('creating '+name+' ('+server+')…');
+  const name=$('newname').value.trim(); const server=$('newserver').value;
+  if(!name) return; showLog('creating '+name+' ('+server+')…');
   api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({action:'create',name,server})}).then(r=>{ if(r.job_id) pollJob(r.job_id); });
 }
 async function refresh(){
   if(paused) return;
   const d = await api('/api/instances');
-  document.getElementById('grid').innerHTML = d.instances.map(card).join('') + newCard();
+  const n = d.instances.length;
+  $('count').textContent = n + ' instance' + (n===1?'':'s');
+  $('grid').innerHTML = d.instances.map(card).join('') + newCard();
 }
 refresh(); setInterval(refresh, 2000);
 </script></body></html>"""
@@ -3118,7 +3169,8 @@ def cmd_web(cfg, args) -> None:
 
         def do_GET(self):
             if self.path == "/" or self.path == "/index.html":
-                return self._send(200, _WEB_PAGE, "text/html; charset=utf-8")
+                page = _WEB_PAGE.replace("__SANDBOX_WEB_CSS__", _web_css())
+                return self._send(200, page, "text/html; charset=utf-8")
             if self.path == "/api/instances":
                 rows = collect_instance_rows(load_config())
                 return self._send(200, json.dumps({"instances": rows}))

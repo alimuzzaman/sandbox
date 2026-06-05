@@ -39,3 +39,6 @@ memory/repros/
 # Tooling venvs — auto-managed by ./sb
 .cli-venv/
 runtime/.venv-tools/
+
+# Tailwind standalone CLI + scratch for scripts/build-web-css.sh
+.cache/

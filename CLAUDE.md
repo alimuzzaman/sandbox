@@ -445,6 +445,11 @@ Endpoints: `GET /api/instances`, `POST /api/action`, `GET /api/job/<id>`.
 Fast actions run inline; create/delete run as background jobs the page streams.
 `main` is delete-protected; deletes require name confirmation. Ctrl-C stops it.
 
+The UI is styled with **vendored Tailwind** (xSpeed DESIGN.md tokens) inlined
+from `config/sandbox-web.css` — no CDN, fully self-contained, works offline.
+After changing Tailwind classes in the page markup, rebuild the CSS:
+`./scripts/build-web-css.sh` (uses the Tailwind standalone CLI; no npm).
+
 **Or do it by hand** (when you want specific ports or custom admin):
 
 ```

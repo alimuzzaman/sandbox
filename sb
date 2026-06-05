@@ -81,9 +81,41 @@ def ok(msg: str) -> None:
     print(f"✓ {msg}")
 
 
+# When set (by the web server during a job), run() streams subprocess output
+# line-by-line to the current stdout — which is the job's console buffer — so
+# the web UI shows REAL docker/wp-cli output live, not just the "$ cmd" line.
+# CLI usage leaves this False, so terminal behavior is unchanged.
+_WEB_STREAM = [False]
+
+
+class _RunResult:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
     if not capture:
         print(f"  $ {' '.join(cmd)}")
+
+    # Web-streaming path: only when not capturing (capture callers want the
+    # buffered value back) and the flag is on. Merge stderr into stdout and
+    # echo each line as it arrives so the console tails the real output.
+    if _WEB_STREAM[0] and not capture:
+        kw.pop("capture_output", None)
+        proc = subprocess.Popen(cmd, text=True, cwd=str(ROOT),
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, **kw)
+        collected = []
+        for line in proc.stdout:
+            collected.append(line)
+            print(line, end="")            # → active _JobStream (web console)
+        proc.wait()
+        if check and proc.returncode != 0:
+            sys.exit(proc.returncode)
+        return _RunResult(proc.returncode, "".join(collected))
+
     res = subprocess.run(cmd, check=False, text=True,
                          capture_output=capture, cwd=str(ROOT), **kw)
     if check and res.returncode != 0:
@@ -2957,7 +2989,11 @@ def _start_job(label: str, fn) -> str:
         ok_flag = True
         try:
             with redirect_stdout(stream), redirect_stderr(stream):
-                ok_flag = fn() is not False
+                _WEB_STREAM[0] = True       # stream real subprocess output → console
+                try:
+                    ok_flag = fn() is not False
+                finally:
+                    _WEB_STREAM[0] = False
         except SystemExit as e:
             ok_flag = (str(e) in ("0", "None"))
         except Exception as e:
@@ -3165,24 +3201,15 @@ def _web_do_action(payload: dict) -> dict:
             if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name):
                 return {"ok": False, "output": "invalid instance name"}
         server = _valid_server(payload.get("server") or "apache")
+        verb = "Creating" if action == "create" else "Deleting"
+        label = f"{verb} {name}"
 
-        _web_job_seq[0] += 1
-        job_id = str(_web_job_seq[0])
-        _web_jobs[job_id] = {"status": f"{action} {name}…", "output": "",
-                             "done": False, "ok": None}
-
-        def worker():
+        def do_inst():
             with _web_lock:
-                ns = _types.SimpleNamespace(
+                cmd_instance(load_config(), _types.SimpleNamespace(
                     action=action, name=name, server=server, yes=True,
-                    resolved_instance=name)
-                ok_f, out = _run_cmd_capture(cmd_instance, ns)
-                _web_jobs[job_id].update(
-                    output=out, done=True, ok=ok_f,
-                    status=f"{action} {name} {'✓' if ok_f else '✗'}")
-
-        threading.Thread(target=worker, daemon=True).start()
-        return {"ok": True, "job_id": job_id}
+                    resolved_instance=name))
+        return {"ok": True, "job_id": _start_job(label, do_inst)}
 
     return {"ok": False, "output": f"unknown action '{action}'"}
 
@@ -3404,7 +3431,8 @@ async function act(instance, action, extra={}){
     r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify(Object.assign({instance,action},extra))});
   } catch(e){ delete busy[instance]; toast('request failed: '+e,'err'); render(); return; }
-  if(r.job_id){ toast(action.replace('-',' ')+' started…','info'); pollJob(r.job_id, instance); }
+  if(r.job_id){ const lbl = ACTION_LABELS[action] ? ACTION_LABELS[action](instance) : (cap(action)+' '+instance);
+    toast(action.replace('-',' ')+' started…','info'); pollJob(r.job_id, instance, lbl); }
   else {
     delete busy[instance];
     if(r.ok) toast(cap(action)+' '+instance+' ✓','ok');
@@ -3414,14 +3442,19 @@ async function act(instance, action, extra={}){
   return r;
 }
 const cap = s => s.charAt(0).toUpperCase()+s.slice(1);
+const ACTION_LABELS = {
+  'create': n=>'Creating '+n, 'delete': n=>'Deleting '+n,
+  'start-all': ()=>'Starting all sites', 'stop-all': ()=>'Stopping all sites',
+};
 
 let paused=false;
 async function pollJob(id, instance, label){
   paused=true;
-  consoleOpen(label||('job '+id));
-  let offset=0;
+  consoleOpen(label||'Working…');
+  let offset=0, titled=!!label;
   const t=setInterval(async()=>{
     const j=await api('/api/job/'+id+'?offset='+offset);
+    if(!titled && j.status){ $('conTitle').textContent=j.status.replace(/ [✓✗]$/,''); titled=true; }
     if(j.chunk){ consoleWrite(j.chunk); offset=j.offset; }
     else if(typeof j.offset==='number'){ offset=j.offset; }
     if(j.done){ clearInterval(t); paused=false; if(instance) delete busy[instance];
@@ -3754,7 +3787,12 @@ async function op(name, action, extra={}){
     r = await api('/api/action',{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify(Object.assign({instance:name,action},extra))});
   } catch(e){ toast('request failed: '+e,'err'); return; }
-  if(r.job_id) pollJob(r.job_id, null, action+' · '+name);
+  if(r.job_id){
+    const titles = {logs:'Logs', status:'Status', doctor:'Doctor', update:'Updating plugins',
+      snapshot:'Snapshot', restore:'Restoring', seed:'Importing content', xdebug:'Xdebug',
+      install:'Installing '+(extra.slug||'plugin'), wp:'wp '+(extra.args||'')};
+    pollJob(r.job_id, null, (titles[action]||cap(action))+' — '+name);
+  }
   else { toast((r.output||'failed').split('\\n')[0],'err'); }
 }
 function doWp(name){

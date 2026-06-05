@@ -16,9 +16,18 @@ cd sandbox
 ./sb setup
 ```
 
-`setup` is non-interactive. It checks prerequisites (Docker running, Python
-3.9+), then boots Docker, installs WordPress, generates an Application
-Password, builds the MCP server, and writes `.mcp.json` inside this folder.
+`setup` checks prerequisites (Docker running, Python 3.9+), then boots Docker,
+installs WordPress, generates an Application Password, builds the MCP server, and
+writes `.mcp.json` inside this folder.
+
+**Missing a prerequisite?** `setup` offers to install it for you. If `python3`,
+Docker, or the `venv` module isn't found, it prompts `Install now? [y/N]` and
+runs the right command for your package manager (Homebrew / apt / dnf) — no
+hunting for install docs. The default is **No** (it never installs without your
+yes); non-interactive runs (CI) just print the command. Docker Desktop installs
+via `brew install --cask docker`; you then open it once to accept the license.
+The base install needs **no `sudo` password** — WordPress comes up at
+`http://localhost:8188` out of the box.
 
 Connect external integrations on demand — each one is its own command, so
 you only set up what you'll actually use:
@@ -54,13 +63,42 @@ Each instance can also run a different **web server** —
 `apache`). Useful for testing caching/permalink behavior across Apache, nginx,
 and OpenLiteSpeed. `./sb instances` shows each instance's server.
 
+### Clean URLs — `https://<name>.sb`
+
+By default instances serve at `http://localhost:<port>`. You can upgrade to a
+**trusted, no-port HTTPS URL** — `https://blog.sb`, `https://main.sb` — with one
+optional setup:
+
+```bash
+./sb domains setup     # one-time, asks your password ONCE
+```
+
+This installs a local certificate authority (via [mkcert](https://github.com/FiloSottile/mkcert)),
+wires `*.sb` resolution, and starts a small reverse proxy. It then gives **every**
+instance — including `main` — a `<name>.sb` domain with a trusted certificate, so
+nothing stays on `localhost`. After this, **every new instance gets its clean
+HTTPS URL automatically, with no further password.**
+
+You don't have to run it up front: the **first time** you create an instance,
+`./sb instance create blog` offers to enable HTTPS right then (`Enable trusted
+https://blog.sb? [y/N]`). Say no and it just uses a port (and won't ask again);
+say yes once and you're set for good. It coexists with Laravel Valet (binds a
+separate loopback IP, so your `.dev`/`.test` sites are untouched). Undo anytime
+with `./sb domains teardown`.
+
 For a live view, **`./sb dashboard`** opens an interactive full-screen TUI of
 all instances with keys to start/stop/restart, open in browser, set focus, and
 create/delete — auto-refreshing status every couple of seconds.
 
 Prefer a browser? **`./sb web`** serves the same dashboard as a local web page
 (`http://127.0.0.1:8765`, localhost only, no extra deps) — instance cards with
-live status, links, and start/stop/restart/focus/create/delete controls.
+live status, links, start/stop/restart/focus controls, a guided "New instance"
+form (name → server → plugins → content/options), and a built-in terminal. It
+has real navigable URLs (`/instance/<name>`, `/usage`) so pages are
+back/forward- and deep-link-friendly. The UI is authored in TypeScript under
+`src/web` and built to a vendored bundle (`config/sandbox-web.js`) that `sb`
+inlines — running `./sb web` needs no Node; only rebuilding does
+(`scripts/build-web-js.sh`).
 
 **Activation phrase: `focus <plugin>`.** Just say it in chat —
 "focus betterdocs", "focus embedpress", "work on xspeed" — and the

@@ -61,6 +61,20 @@ def _active_file(instance: str) -> Path:
     return SANDBOX_ROOT / f".active-project.{instance}"
 
 
+def _find_focus_instances(slug: str) -> list[str]:
+    """Every instance whose .focus.<inst> == slug. Lets focus_get redirect a
+    caller that hit the wrong server namespace (e.g. asked main about a plugin
+    that's actually focused on the embedpress instance) to the right one."""
+    hits = []
+    for fp in SANDBOX_ROOT.glob(".focus.*"):
+        try:
+            if fp.read_text().strip() == slug:
+                hits.append(fp.name[len(".focus."):])
+        except OSError:
+            pass
+    return sorted(hits)
+
+
 def _compose_file(instance: str) -> Path:
     return COMPOSE_DIR / f"{instance}.yml"
 
@@ -573,10 +587,46 @@ def focus_get(include_claude_md: bool = True,
     af = _active_file(instance)
     focus = ff.read_text().strip() if ff.exists() else None
     active = af.read_text().strip() if af.exists() else None
+
+    # Instance-correct URLs so callers never guess the port. The focused
+    # plugin lives on THIS instance, which may not be `main`/8188 — e.g.
+    # the embedpress instance is on 8190. Resolve from the instance's own
+    # config (env-primed for the bound instance) rather than hardcoding.
+    inst_cfg = _resolve_instance(instance)
+    wp_port = inst_cfg["wordpress_port"]
+    mp_port = inst_cfg["mailpit_port"]
+    wp_url = f"http://localhost:{wp_port}"
+
     out = {"ok": True, "instance": instance, "focus": focus,
            "active_project": active,
+           "wordpress_url": wp_url,
+           "admin_url": f"{wp_url}/wp-admin",
+           "mailpit_url": f"http://localhost:{mp_port}",
            "source_path": None, "claude_md": None, "available_skills": []}
     if not focus:
+        # This instance has no focus — but another instance might. Point the
+        # caller there (with its correct URL) so a wrong-namespace call still
+        # finds the focused plugin instead of silently returning nothing.
+        others = []
+        for fp in SANDBOX_ROOT.glob(".focus.*"):
+            other = fp.name[len(".focus."):]
+            if other == instance:
+                continue
+            try:
+                oslug = fp.read_text().strip()
+            except OSError:
+                continue
+            if oslug:
+                oport = _resolve_instance(other)["wordpress_port"]
+                others.append({"instance": other, "focus": oslug,
+                               "admin_url": f"http://localhost:{oport}/wp-admin"})
+        if others:
+            out["other_focused_instances"] = others
+            out["hint"] = ("no focus on instance '%s'. Focused elsewhere: %s. "
+                           "Use that instance's URL / mcp__sandbox-<inst>__* tools."
+                           % (instance, ", ".join(
+                               f"{o['focus']}→{o['instance']} ({o['admin_url']})"
+                               for o in others)))
         return out
 
     # Defensive check: warn when focus and active_project disagree (focused
@@ -687,11 +737,18 @@ def focus_set(plugin_slug: str,
         [str(sb), "--instance", instance, "focus", slug],
         capture_output=True, text=True, cwd=str(SANDBOX_ROOT), timeout=120,
     )
+    inst_cfg = _resolve_instance(instance)
+    wp_url = f"http://localhost:{inst_cfg['wordpress_port']}"
     out = {
         "ok": res.returncode == 0,
         "instance": instance,
         "focus": ff.read_text().strip() if ff.exists() else None,
         "active_project": af.read_text().strip() if af.exists() else None,
+        # Instance-correct URLs so the caller links to THIS instance's port
+        # (e.g. 8190 for embedpress), never a hardcoded 8188.
+        "wordpress_url": wp_url,
+        "admin_url": f"{wp_url}/wp-admin",
+        "mailpit_url": f"http://localhost:{inst_cfg['mailpit_port']}",
         "stdout": res.stdout,
     }
     if res.stderr.strip():

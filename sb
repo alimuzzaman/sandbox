@@ -501,6 +501,22 @@ def proxy_available() -> bool:
     return shutil.which("docker") is not None and _ca_installed()
 
 
+_HTTPS_OFFER_MARKER = ROOT / "runtime" / ".https-offer-declined"
+
+
+def _https_offer_declined() -> bool:
+    """True if the user previously declined the one-time HTTPS-setup offer, so
+    create doesn't nag on every new instance."""
+    return _HTTPS_OFFER_MARKER.exists()
+
+
+def _set_https_offer_declined() -> None:
+    _HTTPS_OFFER_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    _HTTPS_OFFER_MARKER.write_text(
+        "User declined the trusted-HTTPS offer at instance create. Delete this "
+        "file (or run `./sb domains setup`) to enable https://<name>.sb.\n")
+
+
 def _proxy_container_running() -> bool:
     """True if the sandbox-proxy Caddy container is up."""
     res = subprocess.run(
@@ -3108,10 +3124,37 @@ def cmd_instance(cfg, args) -> None:
 
         # Decide how this domain is served. Preferred path is the sandbox HTTPS
         # proxy (handled AFTER the instance block is written, since the Caddyfile
-        # is regenerated from config). Here we only handle the FALLBACKS for when
-        # the proxy isn't set up: Valet (legacy clean http) or an /etc/hosts
-        # mapping (<name>.sb:<port>). use_proxy gates the post-block wiring.
+        # is regenerated from config).
+        #
+        # If the proxy isn't set up yet AND this domain wants it (.sb), OFFER the
+        # one-time setup right here (it's the only password the user ever sees,
+        # and it's an explicit opt-in). Say yes once → trusted https://<name>.sb
+        # now and automatic for every future instance. Say no → fall back to a
+        # port, and we remember the "no" so we never nag again. Non-interactive
+        # contexts skip the offer entirely.
         use_proxy = bool(domain) and proxy_available()
+        if (domain and not use_proxy and domain.endswith(f".{PROXY_TLD}")
+                and shutil.which("docker") and sys.stdin.isatty()
+                and not _https_offer_declined()):
+            print()
+            print(f"  ▸ Enable trusted https://{domain} (no port)?")
+            print(f"    One-time setup — installs a local certificate authority")
+            print(f"    (asks your password ONCE). After this, every instance")
+            print(f"    gets a clean https URL automatically, no password.")
+            try:
+                ans = input("    Enable now? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"; print()
+            if ans in ("y", "yes"):
+                if proxy_setup(cfg):
+                    use_proxy = True
+                    ok("HTTPS ready — this and future instances use https://<name>.sb")
+                else:
+                    info("setup didn't complete — continuing on a port for now.")
+            else:
+                _set_https_offer_declined()
+                info("ok — using a port. Run `./sb domains setup` anytime to enable https.")
+
         if domain and not use_proxy:
             if _valet_available():
                 if valet_proxy_add(domain, ports["wordpress_port"]):
@@ -3435,13 +3478,61 @@ def proxy_setup(cfg) -> bool:
     # 4. LaunchDaemon to restore the alias on boot (best-effort).
     _install_alias_launchd()
 
-    # 5. Start the proxy with current routes (mints per-domain certs as needed).
+    # 5. Give EVERY instance a <name>.sb domain (incl. main) so nothing stays on
+    #    localhost once HTTPS is set up. Writes the domain into config, mints the
+    #    cert, and updates each running instance's WP siteurl/home to https.
+    cfg = _assign_domains_to_all(cfg)
+
+    # 6. Start the proxy with the routes (mints per-domain certs as needed).
     PROXY_COMPOSE.write_text(render_proxy_compose())
     regen_caddyfile(cfg)
     if not reload_proxy():
         info("proxy container did not start (is Docker running?).")
         return False
     return True
+
+
+def _assign_domains_to_all(cfg: dict):
+    """Assign <name>.sb to every instance lacking a domain (including the
+    implicit `main`), persist it to config, and point each running instance's WP
+    siteurl/home at https://<name>.sb. Returns the reloaded cfg. Idempotent."""
+    local = _local_yaml()
+    insts = local.setdefault("instances", {})
+    changed = []
+    for name in resolve_instances(cfg).keys():
+        block = insts.get(name)
+        if block is None:
+            # `main` (and any synthesized instance) has no explicit block yet —
+            # create a minimal one carrying just the domain; resolve_instances
+            # fills the rest from the runtime defaults.
+            block = {}
+            insts[name] = block
+        if not block.get("domain"):
+            block["domain"] = f"{name}.{PROXY_TLD}"
+            changed.append(name)
+    if changed:
+        _write_local_yaml(local)
+        ok(f"assigned domains: {', '.join(f'{n}.{PROXY_TLD}' for n in changed)}")
+    cfg = load_config()
+
+    # Update WP siteurl/home for instances that are up (so links/redirects use
+    # the https domain). Skip stopped ones — they'll get it on next install/up.
+    for name, ic in resolve_instances(cfg).items():
+        dom = ic.get("domain")
+        if not (dom and dom.endswith(f".{PROXY_TLD}")):
+            continue
+        if not _instance_running(name):
+            continue
+        url = f"https://{dom}"
+        cur = wpcli(["option", "get", "siteurl"], instance=name,
+                    check=False, capture=True)
+        if (getattr(cur, "stdout", "") or "").strip() == url:
+            continue
+        _write_ssl_muplugin(name)  # ensure WP trusts the proxy before switching
+        wpcli(["option", "update", "siteurl", url], instance=name, check=False)
+        wpcli(["option", "update", "home", url], instance=name, check=False)
+        info(f"{name}: WP url → {url}")
+    return cfg
 
 
 def _install_alias_launchd() -> None:
@@ -3501,45 +3592,6 @@ def proxy_teardown(cfg) -> None:
        "manually if desired).")
 
 
-def _domains_setup(cfg, quiet: bool = False) -> bool:
-    """One-time domain setup for the NO-Valet path: install a scoped passwordless
-    sudoers rule so the hosts helper can edit /etc/hosts without a prompt.
-    Requires an interactive terminal for the single sudo prompt. Idempotent.
-    With Valet present this is a no-op — Valet handles everything itself."""
-    if _valet_available():
-        return True
-    if not _hosts_passwordless():
-        import getpass
-        user = getpass.getuser()
-        rule = (f"# Installed by the sandbox — lets it edit /etc/hosts for "
-                f"custom domains without a password.\n"
-                f"{user} ALL=(root) NOPASSWD: {HOSTS_HELPER}\n")
-        info("One-time domain setup — enter your password ONCE (never again).")
-        tmp = ROOT / "runtime" / "sandbox-hosts.sudoers"
-        tmp.write_text(rule)
-        chk = subprocess.run(["sudo", "visudo", "-cf", str(tmp)],
-                             capture_output=True, text=True)
-        if chk.returncode != 0:
-            tmp.unlink(missing_ok=True)
-            info(f"sudoers rule failed validation: {chk.stderr.strip()}")
-            return False
-        inst = subprocess.run(
-            ["sudo", "install", "-m", "0440", "-o", "root", "-g",
-             "wheel" if sys.platform == "darwin" else "root",
-             str(tmp), str(SUDOERS_FILE)], capture_output=True, text=True)
-        tmp.unlink(missing_ok=True)
-        if inst.returncode != 0:
-            info(f"failed to install sudoers rule: {inst.stderr.strip()}")
-            return False
-        ok("hosts edits are now password-free.")
-
-    # Re-add /etc/hosts entries for any already-defined domains.
-    for name, ic in resolve_instances(cfg).items():
-        if ic.get("domain"):
-            _hosts_edit("add", ic["domain"])
-    return True
-
-
 def cmd_domains(cfg, args) -> None:
     """Manage custom local domains + the HTTPS proxy.
 
@@ -3558,14 +3610,21 @@ def cmd_domains(cfg, args) -> None:
 
     if action == "setup":
         if proxy_available() and _proxy_container_running():
-            ok("Already set up — instances get https://<name>.sb (no port).")
+            # Already set up — still (re)assign domains so any instance still on
+            # localhost (e.g. main, or one created before setup) gets its .sb
+            # domain + https. Idempotent; no password.
+            _assign_domains_to_all(cfg)
+            regen_caddyfile(load_config())
+            reload_proxy()
+            ok("All set — every instance serves https://<name>.sb (no port).")
             return
         if not sys.stdin.isatty():
             die("`./sb domains setup` needs an interactive terminal (it trusts "
                 "a local CA via sudo). Run it directly in your shell.")
         if proxy_setup(cfg):
-            ok(f"Done. New instances get https://<name>.{PROXY_TLD} — no port, "
-               f"trusted, no further sudo.")
+            _HTTPS_OFFER_MARKER.unlink(missing_ok=True)  # they opted in after all
+            ok(f"Done. Every instance serves https://<name>.{PROXY_TLD} — no "
+               f"port, trusted, no further sudo.")
         else:
             info("HTTPS proxy setup did not complete — instances will fall back "
                  "to http://<name>.sb:<port> until it does.")

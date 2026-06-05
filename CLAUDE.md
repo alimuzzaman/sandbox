@@ -388,6 +388,32 @@ era (a single `main` instance is synthesized from `runtime:`).
 ./sb instance delete qa                    # round-trip cleanup (containers + volume + files + yaml block)
 ```
 
+### Per-instance web server (apache / nginx / litespeed)
+
+Each instance can run a different web stack via `--server` (default `apache`).
+Only the compose web tier differs; the DB, mailpit, and wp-cli wiring adapt
+automatically (litespeed uses a different docroot + uid).
+
+| Server | Stack | Permalinks |
+|--------|-------|-----------|
+| `apache` (default) | `wordpress:latest`, Apache + mod_php | `.htaccess` |
+| `nginx` | `wordpress:*-fpm` + `nginx:alpine` sidecar | nginx `try_files … /index.php` |
+| `litespeed` | OpenLiteSpeed (lsphp, single container) | OLS vhost, `.htaccess` autoload |
+
+```
+./sb instance create lscache --server litespeed
+./sb instance create ngx     --server nginx
+./sb instances                              # SERVER column shows each one's stack
+```
+
+xSpeed-specific: on a `litespeed` instance the bundled **LiteSpeed Cache
+(LSCWP)** plugin is **auto-deactivated on install** so it can't shadow xSpeed's
+own page cache during testing. Re-activate it manually
+(`./sb wp --instance <name> plugin activate litespeed-cache`) if you want to
+exercise xSpeed's conflict detection against it. nginx config lives in
+`config/nginx-sandbox.conf`; litespeed needs no custom OLS config (the image's
+vhost template autoloads the WP `.htaccess` that install writes).
+
 **Or do it by hand** (when you want specific ports or custom admin):
 
 ```

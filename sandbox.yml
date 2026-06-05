@@ -38,6 +38,13 @@ runtime:
   mariadb_image: "mariadb:latest"
   wpcli_image: "wordpress:cli"
 
+  # Web server stack for instances that don't override it.
+  #   apache    (default) — wordpress:latest, Apache + mod_php, .htaccess
+  #   nginx     — wordpress:*-fpm + nginx sidecar
+  #   litespeed — OpenLiteSpeed (lsphp); pre-installed LiteSpeed Cache is
+  #               auto-deactivated on install so it can't shadow xSpeed
+  server: apache
+
   admin:
     user: admin
     password: admin
@@ -56,6 +63,7 @@ runtime:
 #     wordpress_port: 8288
 #     db_port: 3328
 #     mailpit_port: 8225
+#     server: nginx               # apache (default) | nginx | litespeed
 #     project: xspeed              # which projects entry to wire on `./sb use`
 #     admin:
 #       site_title: Sandbox QA
@@ -179,6 +187,9 @@ projects:
       - slug: xspeed
         github: "WPDevelopers/xspeed"
         source: "${plugins_home}/xspeed"
+      - slug: xspeed-pro
+        github: "WPDevelopers/xspeed-pro"
+        source: "${plugins_home}/xspeed-pro"
 
   # standalone:
   #   description: Misc standalone WPDeveloper plugins (SEO / redirects / meta).

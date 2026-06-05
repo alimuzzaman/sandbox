@@ -49,6 +49,11 @@ calling that server's tools (`mcp__sandbox-<name>__*`), so two concurrent
 sessions can work on different instances without their focus / active-project
 state colliding. `./sb instances` prints the instance→server mapping.
 
+Each instance can also run a different **web server** —
+`./sb instance create ngx --server nginx` (or `--server litespeed`, default
+`apache`). Useful for testing caching/permalink behavior across Apache, nginx,
+and OpenLiteSpeed. `./sb instances` shows each instance's server.
+
 **Activation phrase: `focus <plugin>`.** Just say it in chat —
 "focus betterdocs", "focus embedpress", "work on xspeed" — and the
 agent runs the handshake automatically: persists the focus, loads

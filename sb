@@ -3089,7 +3089,7 @@ def _web_do_action(payload: dict) -> dict:
     # (restore) are confirmed client-side. `shell`/`claude` are intentionally
     # NOT exposed (interactive, can't work over HTTP).
     OPS = {"logs", "status", "doctor", "snapshot", "restore", "seed",
-           "update", "xdebug", "wp", "introspect"}
+           "update", "xdebug", "wp", "introspect", "install"}
     if action in OPS:
         if not name:
             return {"ok": False, "output": "missing instance"}
@@ -3138,6 +3138,12 @@ def _web_do_action(payload: dict) -> dict:
                 import shlex as _shlex
                 cmd_wp(cfg, _types.SimpleNamespace(
                     passthrough=_shlex.split(argstr), **ns_base))
+            elif action == "install":
+                slug = (payload.get("slug") or "").strip()
+                if not re.match(r"^[a-z0-9][a-z0-9.-]{0,60}$", slug):
+                    print("invalid plugin slug"); return False
+                # Install from the wp.org directory + activate (streamed).
+                wpcli(["plugin", "install", slug, "--activate"], instance=name)
             return True
 
         label = f"{action}" + (f" {name}" if action != "wp"
@@ -3217,12 +3223,14 @@ _WEB_PAGE = """<!doctype html>
   <!-- Sidebar: instance list (Local-style) -->
   <aside class="w-64 shrink-0 border-r border-brd dark:border-brd-dark
                 bg-neutral-50 dark:bg-neutral-950 flex flex-col">
-    <div class="h-14 px-4 flex items-center gap-2 border-b border-brd dark:border-brd-dark">
+    <button onclick="goHome()" title="What is this?"
+      class="h-14 px-4 flex items-center gap-2 border-b border-brd dark:border-brd-dark
+             w-full hover:bg-neutral-100 dark:hover:bg-neutral-900 text-left">
       <div class="w-6 h-6 rounded bg-accent flex items-center justify-center
                   text-white text-[13px] font-bold">S</div>
       <span class="font-semibold text-[14px] text-neutral-900 dark:text-neutral-50">Sandbox</span>
       <span id="runcount" class="ml-auto text-[11px] text-neutral-400"></span>
-    </div>
+    </button>
     <div class="px-3 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wide
                 text-neutral-400">Instances</div>
     <nav id="list" class="flex-1 overflow-auto px-2 pb-2 space-y-0.5"></nav>
@@ -3313,10 +3321,16 @@ function modal(opts={}){
     $('mTitle').textContent = opts.title||'';
     $('mDesc').textContent = opts.desc||'';
     $('mFields').innerHTML = (opts.fields||[]).map(f=>{
-      if(f.type==='select')
-        return `<select data-k="${f.key}" class="px-3 py-1.5 rounded border border-brdin
-          dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
-          ${f.options.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
+      if(f.type==='select'){
+        const id = 'mcsel'+(++_cselSeq);
+        const optobjs = f.options.map(o=>({v:o, label:o}));
+        const val = f.value || (f.options[0]||'');
+        // Hidden input carries the value for modalValues(); the csel's pick
+        // callback writes the chosen value into it.
+        return `<input type="hidden" data-k="${f.key}" id="${id}_val" value="${esc(val)}">`
+          + csel(id, optobjs, val,
+                 `(v)=>{document.getElementById('${id}_val').value=v;}`, false);
+      }
       return `<input data-k="${f.key}" placeholder="${esc(f.placeholder||'')}" value="${esc(f.value||'')}"
         class="px-3 py-1.5 rounded border border-brdin dark:border-neutral-700 bg-app
         dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">`;
@@ -3469,12 +3483,8 @@ function detail(r){
         ${r.url} · <code>${esc(r.mcp_server)}</code></div>
     </div>
     <div class="ml-auto flex items-center gap-2">
-      <a href="${r.url}/wp-admin" target="_blank" class="px-4 py-1.5 rounded-full border
-        border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
-        hover:bg-neutral-50 dark:hover:bg-neutral-800">Admin</a>
-      <a href="${r.url}" target="_blank" class="px-4 py-1.5 rounded-full border
-        border-brd dark:border-neutral-700 text-[13px] text-neutral-700 dark:text-neutral-300
-        hover:bg-neutral-50 dark:hover:bg-neutral-800">View site</a>
+      ${pillLink(r.url+'/wp-admin', 'Admin', r.running)}
+      ${pillLink(r.url, 'View site', r.running)}
     </div>
   </div>
   <div class="px-7 py-5 flex items-center gap-2">
@@ -3490,13 +3500,16 @@ function detail(r){
   <div class="px-7 pb-2">
     ${sectionHead('Overview')}
     ${row('Web server', `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
-    ${row('Site address', `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`)}
-    ${row('Test inbox', `<a href="http://localhost:${m}" target="_blank" class="${link}">Mailpit · :${m}</a>`)}
+    ${row('Site address', r.running
+        ? `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`
+        : `<span class="text-neutral-400">${r.url} <span class="text-[11px]">(stopped)</span></span>`)}
+    ${row('Test inbox', r.running
+        ? `<a href="http://localhost:${m}" target="_blank" class="${link}">Mailpit · :${m}</a>`
+        : `<span class="text-neutral-400">Mailpit · :${m} <span class="text-[11px]">(start the site first)</span></span>`)}
     ${row('Active project', r.project==='—'?'<span class="text-neutral-400">none</span>':esc(r.project))}
     ${row('Focus plugin', `<div class="flex items-center gap-2">
-        <select id="focusSel" onchange="doFocus('${r.name}', this.value)" ${b?'disabled':''}
-          class="px-2.5 py-1 rounded border border-brdin dark:border-neutral-700 bg-app dark:bg-neutral-900
-          text-[13px] focus:border-accent outline-none w-44">${focusOpts}</select>
+        ${csel('focusSel', [{v:'',label:'— none —'}].concat(DATA.plugins.map(s=>({v:s,label:s}))),
+               r.focus && r.focus!=='—' ? r.focus : '', `(v)=>doFocus('${r.name}', v)`, b)}
         ${b==='focus'||b==='unfocus'?spinner():''}</div>`)}
   </div>
 
@@ -3523,6 +3536,19 @@ function detail(r){
     </div>
   </div>
 
+  <!-- Plugins: search → install (wp.org) or symlink a known source -->
+  <div class="px-7 pb-6">
+    ${sectionHead('Plugins', 'Search to install from WordPress.org, or symlink a local source')}
+    <div class="flex gap-2">
+      <input id="plugQ" placeholder="Search plugins by name or slug…" oninput="plugFilter()"
+        onkeydown="if(event.key==='Enter')doInstall('${r.name}')"
+        class="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-brdin dark:border-neutral-700
+        bg-app dark:bg-neutral-900 text-[13px] focus:border-accent outline-none">
+      <button class="${toolBtn}" onclick="doInstall('${r.name}')">Install from .org</button>
+    </div>
+    <div id="plugResults" class="mt-2 flex flex-col gap-1"></div>
+  </div>
+
   <!-- Using Claude with THIS instance -->
   <div class="px-7 pb-8">
     ${sectionHead('Use with Claude', 'Connect a Claude session to this exact site')}
@@ -3539,6 +3565,75 @@ function sectionHead(title, hint){
   return `<div class="mb-2.5 mt-1">
     <div class="text-[12px] font-semibold text-neutral-800 dark:text-neutral-100">${title}</div>
     ${hint?`<div class="text-[12px] text-neutral-400">${hint}</div>`:''}</div>`;
+}
+// ---- custom select ----
+// Styled dropdown replacing native <select>. opts: [{v,label}]. `onPick` is a
+// JS expression string taking (value). Searchable when >8 options.
+let _cselSeq = 0;
+const _cselCb = {};   // id -> picker fn
+function csel(id, opts, value, onPickExpr, disabled){
+  const cur = opts.find(o=>o.v===value);
+  const label = cur ? cur.label : (opts[0]?opts[0].label:'');
+  _cselCb[id] = eval(onPickExpr);
+  const dis = disabled ? 'opacity-50 pointer-events-none' : '';
+  return `<div class="relative inline-block" data-csel="${id}">
+    <button type="button" onclick="cselToggle('${id}')"
+      class="w-48 flex items-center gap-2 px-2.5 py-1.5 rounded border border-brdin
+      dark:border-neutral-700 bg-app dark:bg-neutral-900 text-[13px] text-left ${dis}">
+      <span class="truncate flex-1" data-csel-label>${esc(label)}</span>
+      <svg class="w-3.5 h-3.5 text-neutral-400 shrink-0" viewBox="0 0 24 24" fill="none">
+        <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+    <div data-csel-pop class="hidden absolute z-[60] mt-1 w-48 max-h-64 overflow-auto rounded-lg
+      border border-brd dark:border-neutral-700 bg-app dark:bg-card-dark shadow-xl py-1">
+      ${opts.length>8?`<input data-csel-search oninput="cselFilter('${id}')" placeholder="Search…"
+        class="w-[calc(100%-12px)] mx-1.5 mb-1 px-2 py-1 rounded border border-brdin dark:border-neutral-700
+        bg-app dark:bg-neutral-900 text-[12.5px] outline-none focus:border-accent">`:''}
+      <div data-csel-list>
+        ${opts.map(o=>`<button type="button" data-v="${esc(o.v)}" data-search="${esc(o.label.toLowerCase())}"
+          onclick="cselPick('${id}','${esc(o.v)}')"
+          class="w-full text-left px-3 py-1.5 text-[13px] hover:bg-neutral-100 dark:hover:bg-neutral-800
+          ${o.v===value?'text-accent dark:text-blue-400 font-medium':'text-neutral-700 dark:text-neutral-300'}">
+          ${esc(o.label)}</button>`).join('')}
+      </div>
+    </div></div>`;
+}
+function cselToggle(id){
+  document.querySelectorAll('[data-csel-pop]').forEach(p=>{
+    if(p.closest('[data-csel]').dataset.csel!==id) p.classList.add('hidden'); });
+  const pop = document.querySelector(`[data-csel="${id}"] [data-csel-pop]`);
+  if(!pop) return;
+  pop.classList.toggle('hidden');
+  if(!pop.classList.contains('hidden')){
+    const s = pop.querySelector('[data-csel-search]'); if(s){ s.value=''; cselFilter(id); s.focus(); }
+  }
+}
+function cselPick(id, v){
+  document.querySelector(`[data-csel="${id}"] [data-csel-pop]`).classList.add('hidden');
+  const lbl = document.querySelector(`[data-csel="${id}"] [data-csel-label]`);
+  const btn = document.querySelector(`[data-csel="${id}"] [data-v="${CSS.escape(v)}"]`);
+  if(lbl && btn) lbl.textContent = btn.textContent.trim();
+  if(_cselCb[id]) _cselCb[id](v);
+}
+function cselFilter(id){
+  const q = (document.querySelector(`[data-csel="${id}"] [data-csel-search]`)?.value||'').toLowerCase();
+  document.querySelectorAll(`[data-csel="${id}"] [data-csel-list] button`).forEach(b=>{
+    b.style.display = b.dataset.search.includes(q) ? '' : 'none';
+  });
+}
+document.addEventListener('click', e=>{
+  if(!e.target.closest('[data-csel]'))
+    document.querySelectorAll('[data-csel-pop]').forEach(p=>p.classList.add('hidden'));
+});
+
+// Pill link that's a real link when the site runs, greyed + inert when stopped.
+function pillLink(href, label, enabled){
+  const base = "px-4 py-1.5 rounded-full border text-[13px]";
+  if(enabled)
+    return `<a href="${href}" target="_blank" class="${base} border-brd dark:border-neutral-700
+      text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800">${label}</a>`;
+  return `<span title="Start the site first" class="${base} border-brd/60 dark:border-neutral-800
+    text-neutral-300 dark:text-neutral-600 cursor-default">${label}</span>`;
 }
 const toolBtn = "px-2.5 py-1.5 rounded border border-brd dark:border-neutral-700 text-[12.5px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800";
 function opBtn(name, action, label, extra){
@@ -3560,6 +3655,7 @@ function statusPill(running){
 }
 
 function select_(name){ selected=name; render(); }
+function goHome(){ selected=null; _autoSelected=true; render(); }   // show Welcome
 
 // ---- actions ----
 async function doFocus(name, slug){
@@ -3620,6 +3716,29 @@ function copyText(t, btn){
   navigator.clipboard.writeText(t).then(()=>{ const o=btn.textContent;
     btn.textContent='copied'; setTimeout(()=>btn.textContent=o,1200); });
 }
+// Plugin search: filter the curated local plugins (symlink-able) live.
+function plugFilter(){
+  const q = ($('plugQ').value||'').toLowerCase().trim();
+  const box = $('plugResults');
+  if(!q){ box.innerHTML=''; return; }
+  const cur = DATA.instances.find(i=>i.name===selected);
+  const matches = (DATA.plugins||[]).filter(s=>s.toLowerCase().includes(q)).slice(0,8);
+  box.innerHTML = matches.map(s=>`
+    <div class="flex items-center gap-2 px-2.5 py-1.5 rounded border border-brd dark:border-neutral-800
+      text-[13px]">
+      <span class="flex-1 text-neutral-700 dark:text-neutral-300">${esc(s)}</span>
+      ${cur && cur.focus===s ? '<span class="text-[11px] text-emerald-500">focused</span>'
+        : `<button class="text-[12px] text-accent dark:text-blue-400 hover:underline"
+            onclick="doFocus('${cur?cur.name:''}','${esc(s)}')">Symlink + focus</button>`}
+    </div>`).join('')
+    || `<div class="text-[12px] text-neutral-400 px-1">No local source matches “${esc(q)}”.
+        Press Install to fetch it from WordPress.org.</div>`;
+}
+function doInstall(name){
+  const slug = ($('plugQ').value||'').trim().toLowerCase().replace(/\\s+/g,'-');
+  if(!slug){ toast('type a plugin slug to install','err'); return; }
+  op(name,'install',{slug});
+}
 $('newBtn').onclick = doCreate;
 $('startAll').onclick = ()=>act('*','start-all');
 $('stopAll').onclick = ()=>act('*','stop-all');
@@ -3671,11 +3790,16 @@ function renderDetail(force){
   $('detail').innerHTML = detail(cur);
 }
 function render(){ renderSidebar(); renderDetail(true); }   // explicit full render (on select/action)
+let _autoSelected = false;
 async function refresh(){
   if(paused) return;
   let d; try { d = await api('/api/instances'); } catch(e){ return; }
   DATA = d;
-  if(!selected && d.instances.length) selected = d.instances[0].name;
+  // Auto-select the first instance ONCE on initial load (so first-run users
+  // who land mid-list see something); after that, respect goHome()/selection.
+  if(!selected && !_autoSelected && d.instances.length){
+    selected = d.instances[0].name; _autoSelected = true;
+  }
   renderSidebar();
   renderDetail(false);                             // soft: only if changed + idle
 }

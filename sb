@@ -3470,29 +3470,36 @@ const row = (label,val) => `<div class="flex items-center py-3 border-b border-b
 function welcome(){
   const n = DATA.instances.length;
   return `<div class="max-w-2xl mx-auto px-6 py-12">
-    <h1 class="text-[22px] font-semibold text-neutral-900 dark:text-neutral-50">Welcome to the Sandbox</h1>
+    <h1 class="text-[22px] font-semibold text-neutral-900 dark:text-neutral-50">Give Claude a real WordPress</h1>
     <p class="mt-2 text-[14px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
-      A sandbox is a <b>safe, throwaway WordPress site</b> for testing plugins and changes
-      without touching anything real. Each item on the left is one fully isolated site —
-      its own database, files, and address — so you can break things freely and reset anytime.</p>
+      The sandbox hands Claude a <b>live, disposable WordPress environment</b> to work in — so it
+      stops guessing and starts proving. Through the connected tools Claude can run WP-CLI, hit the
+      REST API and database, open pages in a real browser, read and edit your plugin's actual code,
+      and watch the logs. Each item on the left is one isolated environment Claude can fully control.</p>
 
     <div class="mt-7 grid grid-cols-3 gap-3">
-      ${infoCard('What', 'Disposable WordPress sites you fully control — start, stop, snapshot, or delete on a whim.')}
-      ${infoCard('Why', 'Test a plugin, reproduce a bug, or compare web servers (Apache / nginx / LiteSpeed) without risk to a live site.')}
-      ${infoCard('How', 'Pick a site on the left to open it, then Start it and click Admin. Use the + to make a new one.')}
+      ${infoCard('Build', 'Claude implements features against a running install and verifies them live — not from memory.')}
+      ${infoCard('Reproduce', 'Hand Claude the environment and it reproduces the bug on a real stack — confirmed, not assumed.')}
+      ${infoCard('Fix &amp; prove', 'Reproduce → fix the real code → re-verify in the same environment. Fast, and proven.')}
     </div>
 
-    <div class="mt-7 rounded-lg border border-brd dark:border-brd-dark bg-neutral-50 dark:bg-neutral-900/50 p-4">
-      <div class="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">Using it with Claude</div>
+    <div class="mt-7 rounded-lg border border-blue-200 dark:border-blue-500/30 bg-blue-50 dark:bg-blue-500/10 p-4">
+      <div class="text-[13px] font-medium text-neutral-800 dark:text-neutral-100">How Claude works here</div>
       <p class="mt-1 text-[13px] text-neutral-600 dark:text-neutral-300 leading-relaxed">
-        Each site has its own Claude connection. Open a site to copy its connection snippet,
-        or just tell Claude <code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">focus &lt;plugin&gt;</code>
-        and it will work on that site for you.</p>
-      <button onclick="showHelp()" class="mt-2 text-[13px] text-accent dark:text-blue-400 hover:underline">Learn more →</button>
+        Just tell Claude <code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">focus &lt;plugin&gt;</code>
+        in chat — it picks the right environment, loads your plugin's code + context, and can build,
+        debug, and fix it end-to-end. Every environment also exposes its own tools
+        (<code class="px-1 rounded bg-neutral-200 dark:bg-neutral-800">mcp__sandbox-&lt;name&gt;__*</code>)
+        so multiple Claude sessions can work in parallel without colliding.</p>
+      <button onclick="showHelp()" class="mt-2 text-[13px] text-accent dark:text-blue-400 hover:underline">How it works →</button>
     </div>
 
-    ${n ? `<p class="mt-7 text-[13px] text-neutral-400">${n} site${n===1?'':'s'} available — pick one on the left to begin.</p>`
-        : `<button onclick="doCreate()" class="mt-7 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-medium hover:bg-blue-700">Create your first site</button>`}
+    <p class="mt-5 text-[12.5px] text-neutral-400">
+      It's a real WordPress under the hood — break it, migrate it, throw it away. Snapshot or delete
+      anytime; nothing here is precious.</p>
+
+    ${n ? `<p class="mt-6 text-[13px] text-neutral-400">${n} environment${n===1?'':'s'} ready — pick one on the left, or hand one to Claude.</p>`
+        : `<button onclick="doCreate()" class="mt-6 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-medium hover:bg-blue-700">Create your first environment</button>`}
   </div>`;
 }
 function infoCard(title, body){
@@ -3810,13 +3817,16 @@ $('stopAll').onclick = ()=>act('*','stop-all');
 $('helpBtn').onclick = showHelp;
 $('conClose').onclick = consoleClose;
 function showHelp(){
-  modal({title:'Using Claude with the sandbox', input:false, okText:'Got it',
-    desc:'Each instance runs its own MCP server. In a Claude session, call that '+
-      'instance\\'s tools — mcp__sandbox__* targets main, mcp__sandbox-<name>__* '+
-      'targets that instance (its own port, focus, and state). Or just say '+
-      '\"focus <plugin>\" / \"work on <plugin>\" in chat and Claude runs the focus '+
-      'handshake on that instance, symlinking the plugin in. Pick an instance on '+
-      'the left to see its exact namespace + copy snippets.'});
+  modal({title:'How Claude works here', input:false, okText:'Got it',
+    desc:'The sandbox gives Claude a live WordPress to act in, so it can verify '+
+      'instead of guess: run WP-CLI, hit REST + the DB, open pages in a real '+
+      'browser, read/edit your plugin\\'s code, and tail logs. Say "focus <plugin>" '+
+      'or "work on <plugin>" in chat — Claude picks the matching environment, '+
+      'symlinks the plugin in, loads its code + context, and can build, reproduce, '+
+      'and fix end-to-end. Each environment also has its own tool namespace '+
+      '(mcp__sandbox__* = main, mcp__sandbox-<name>__* = that one) so parallel '+
+      'sessions never collide. Open an environment on the left for its exact '+
+      'snippet. It\\'s real WordPress — break it freely, snapshot or delete anytime.'});
 }
 
 // ---- render ----

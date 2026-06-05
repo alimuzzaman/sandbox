@@ -7,8 +7,34 @@
 # treats the next triple-quoted block as the module docstring and skips it.
 """:"
 if ! command -v python3 >/dev/null 2>&1; then
+    # Detect a package manager and offer to install python3 right here (this
+    # runs before any Python, so the offer must be shell). Default is No;
+    # non-interactive (no TTY) always falls through to the printed hint.
+    sb_pm=""; sb_cmd=""
+    if command -v brew >/dev/null 2>&1; then
+        sb_pm="Homebrew"; sb_cmd="brew install python"
+    elif command -v apt-get >/dev/null 2>&1; then
+        sb_pm="apt"; sb_cmd="sudo apt-get install -y python3 python3-venv"
+    elif command -v dnf >/dev/null 2>&1; then
+        sb_pm="dnf"; sb_cmd="sudo dnf install -y python3 python3-virtualenv"
+    fi
+    echo "python3 is required to run ./sb but was not found." >&2
+    if [ -n "$sb_cmd" ] && [ -t 0 ]; then
+        printf "Install python3 via %s now? [y/N] " "$sb_pm" >&2
+        read sb_ans
+        case "$sb_ans" in
+            y|Y|yes|YES)
+                echo "  running: $sb_cmd" >&2
+                if sh -c "$sb_cmd" >&2; then
+                    command -v python3 >/dev/null 2>&1 && exec python3 "$0" "$@"
+                    echo "install ran but python3 still not on PATH — open a new shell and re-run ./sb setup." >&2
+                    exit 1
+                fi
+                echo "install failed — run it manually, then re-run ./sb setup." >&2
+                exit 1 ;;
+        esac
+    fi
     cat <<'EOF' >&2
-error: python3 is required to run ./sb but was not found.
 
 Install it, then re-run ./sb setup:
   • macOS:          brew install python
@@ -2214,10 +2240,51 @@ def _write_env_local(values: dict) -> None:
         pass
 
 
+def _pkg_manager() -> tuple[str, str] | tuple[None, None]:
+    """Detect the platform package manager. Returns (name, sudo_prefix) where
+    sudo_prefix is '' for brew (never sudo) or 'sudo ' for apt/dnf."""
+    if shutil.which("brew"):
+        return ("brew", "")
+    if shutil.which("apt-get"):
+        return ("apt", "sudo ")
+    if shutil.which("dnf"):
+        return ("dnf", "sudo ")
+    return (None, None)
+
+
+def _offer_install(label: str, cmd: str, *, verb: str = "Install") -> bool:
+    """Offer to run a fix command for a missing/blocked prerequisite. Prompts
+    (default No); on 'y' runs it and returns True on success. Non-interactive
+    (no TTY) never runs — just prints the command and returns False, so CI/web
+    contexts fall back to the printed hint. The user types any sudo password at
+    the real prompt. `verb` tailors the wording (e.g. "Install", "Start")."""
+    if not sys.stdin.isatty():
+        print(f"      → run: {cmd}")
+        return False
+    try:
+        ans = input(f"      {verb} now? [y/N] ({cmd}): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if ans not in ("y", "yes"):
+        print(f"      → skipped. Run when ready: {cmd}")
+        return False
+    print(f"      running: {cmd}")
+    # Run through the shell so pipes/&& and sudo prompts work normally.
+    res = subprocess.run(cmd, shell=True)
+    if res.returncode == 0:
+        ok(f"{verb.lower().rstrip('e')}ed {label}")
+        return True
+    info(f"{verb.lower()} failed (exit {res.returncode}) — run manually: {cmd}")
+    return False
+
+
 def _docker_preflight() -> int:
-    """Check prerequisites are usable. Returns problem count."""
+    """Check prerequisites are usable. Returns problem count. For each missing
+    prerequisite, offer to install it (interactive, default No)."""
     problems = 0
     print("\nPrerequisites:")
+    pm, sudo = _pkg_manager()
 
     # Python — script wouldn't have started without it, but warn on too-old
     # versions and on missing `venv` module (Debian/Ubuntu split it out, which
@@ -2226,9 +2293,15 @@ def _docker_preflight() -> int:
     if (py_ver.major, py_ver.minor) < (3, 9):
         problems += 1
         print(f"  ✗ Python {py_ver.major}.{py_ver.minor} is too old (need 3.9+)")
-        print("      → macOS: `brew install python@3.12`")
-        print("      → Ubuntu/Debian: `sudo apt install python3.12 python3.12-venv`")
-        print("      → Or use pyenv: https://github.com/pyenv/pyenv")
+        cmd = ({"brew": "brew install python@3.12",
+                "apt": "sudo apt-get install -y python3.12 python3.12-venv",
+                "dnf": "sudo dnf install -y python3.12"}.get(pm))
+        if cmd:
+            print("      A newer python3 lives alongside the old one — install it,")
+            print("      then re-run `./sb setup` (it'll use the newer version).")
+            _offer_install("python 3.12", cmd)
+        else:
+            print("      → install Python 3.9+ (or use pyenv: https://github.com/pyenv/pyenv)")
     else:
         print(f"  ✓ python {py_ver.major}.{py_ver.minor}.{py_ver.micro}")
 
@@ -2237,8 +2310,13 @@ def _docker_preflight() -> int:
     if r.returncode != 0:
         problems += 1
         print("  ✗ python3 `venv` module not available")
-        print("      → Ubuntu/Debian: `sudo apt install python3-venv`")
-        print("      → (needed to build .cli-venv and mcp/wp-server/.venv)")
+        print("      (needed to build .cli-venv and mcp/wp-server/.venv)")
+        # Almost always Debian/Ubuntu splitting venv out. Offer the apt install.
+        if pm == "apt":
+            if _offer_install("python3-venv", "sudo apt-get install -y python3-venv"):
+                problems -= 1  # fixed in place
+        else:
+            print("      → install your distro's python3 venv package")
     else:
         print("  ✓ python3 -m venv works")
 
@@ -2246,7 +2324,13 @@ def _docker_preflight() -> int:
     if not docker_bin:
         problems += 1
         print("  ✗ docker not found in PATH")
-        print("      → install Docker Desktop: https://docs.docker.com/get-docker/")
+        if pm == "brew":
+            print("      Docker Desktop installs the app; you then OPEN it once")
+            print("      (accept the license) before `docker` works.")
+            if _offer_install("Docker Desktop", "brew install --cask docker"):
+                print("      → now OPEN Docker Desktop once, then re-run `./sb setup`.")
+        else:
+            print("      → install Docker: https://docs.docker.com/get-docker/")
         return problems
     print(f"  ✓ docker found ({docker_bin})")
 
@@ -2254,17 +2338,32 @@ def _docker_preflight() -> int:
     if r.returncode != 0:
         problems += 1
         print("  ✗ docker is installed but not running")
-        print("      → macOS:  open -a Docker      (then wait ~10s for it to start)")
-        print("      → Linux:  sudo systemctl start docker")
-        print("      → check:  docker info         (should print without errors)")
-        return problems
-    print("  ✓ docker daemon running")
+        start_cmd = ("open -a Docker" if sys.platform == "darwin"
+                     else "sudo systemctl start docker")
+        if _offer_install("Docker", start_cmd, verb="Start"):
+            # Give the daemon a moment, then re-check so setup can continue.
+            import time
+            print("      waiting for the Docker daemon…")
+            for _ in range(20):
+                time.sleep(1)
+                if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+                    print("  ✓ docker daemon running")
+                    problems -= 1
+                    break
+            else:
+                print("      still not ready — wait a few seconds, then re-run `./sb setup`.")
+        if problems:
+            return problems
+    else:
+        print("  ✓ docker daemon running")
 
     r = subprocess.run(["docker", "compose", "version"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         problems += 1
         print("  ✗ `docker compose` plugin not available")
+        print("      (it ships with Docker Desktop — usually means an old/CE")
+        print("       Docker without the v2 plugin)")
         print("      → install Compose v2: https://docs.docker.com/compose/install/")
     else:
         print(f"  ✓ {r.stdout.strip()}")

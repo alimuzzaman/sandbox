@@ -313,10 +313,11 @@ Claude Code's MCP server (`sandbox`) exposes these against the local stack:
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | WXR import from `runtime/seeds/` |
 
-Every tool accepts an optional `instance: str = "main"` argument that
-routes the call to a specific sandbox instance (see "Multi-instance"
-below). Omitting it targets `main` — the only instance that exists
-unless `instances:` is defined in `sandbox.yml`.
+Every tool accepts an optional `instance` argument that routes the call to a
+specific sandbox instance (see "Multi-instance" below). **Each instance has
+its own MCP server**, so omitting `instance` defaults to *that server's*
+instance — `mcp__sandbox__*` defaults to `main`, `mcp__sandbox-<name>__*`
+defaults to `<name>`. Pass `instance=` to override per call.
 
 Plus Claude's native `Read`/`Write`/`Edit` reach the plugin source — because
 sources are bind-mounted into the container, edits are live with no rebuild.
@@ -327,10 +328,28 @@ sources are bind-mounted into the container, edits are live with no rebuild.
 
 A single `sandbox.yml` can declare more than one WordPress instance.
 Each instance gets its own docker-compose project, DB volume, WP
-install dir (`runtime/wp-<instance>/`), ports, and state files
-(`.active-project.<instance>`, `.focus.<instance>`). The same `sb`
-CLI and the same MCP server manage all of them — instances are
-selected with `--instance <name>` (CLI) or `instance="..."` (MCP).
+install dir (`runtime/wp-<instance>/`), ports, state files
+(`.active-project.<instance>`, `.focus.<instance>`), **and its own
+registered MCP server**. The same `sb` CLI manages all of them —
+instances are selected with `--instance <name>` (CLI), or by calling the
+matching MCP server's tools (`mcp__sandbox-<name>__*`).
+
+### Per-instance MCP servers (session isolation)
+
+`./sb instance create <name>` (and `./sb apply`) registers one MCP server per
+instance at user scope, each with `SANDBOX_INSTANCE` baked into its env:
+
+| Instance | MCP server name | Claude tools | Defaults to |
+|----------|-----------------|--------------|-------------|
+| `main`   | `sandbox`       | `mcp__sandbox__*` | `main` |
+| `qa`     | `sandbox-qa`    | `mcp__sandbox-qa__*` | `qa` |
+
+This is what keeps **concurrent Claude sessions isolated**: a session working
+on EmbedPress calls `mcp__sandbox-embedpress__focus_set(...)`, which writes
+`.focus.embedpress`; a session on xSpeed uses `mcp__sandbox-xspeed__*` and
+writes `.focus.xspeed`. They never share focus/active-project state, and
+nothing silently defaults back to `main`. Use the tool namespace that matches
+the instance you're in; `./sb status` and `./sb instances` print the mapping.
 
 **When to use a second instance:**
 - Test a release zip in isolation, free of dev-symlink artifacts (the
@@ -389,11 +408,13 @@ focus_get(instance="qa")
 tail_log(instance="qa")
 ```
 
-The MCP server reads `sandbox.yml` on each call (cached on mtime),
+Each MCP server reads `sandbox.yml` on each call (cached on mtime),
 resolves per-instance ports + admin + app_password, and routes
-`docker compose -p sandbox-<inst> -f runtime/compose/<inst>.yml`. No
-restart needed when you add a new instance — just `./sb apply` and the
-next MCP tool call picks it up.
+`docker compose -p sandbox-<inst> -f runtime/compose/<inst>.yml`. Adding a
+new instance via `./sb instance create` (or `./sb apply`) registers its
+server; you may need to restart `claude` for it to see a newly-registered
+server. (You can still override the target on any existing server with an
+explicit `instance=` arg.)
 
 **Don't mix bind-mounted plugin sources between instances accidentally.**
 Both instances share the same `defaults.plugins_home`, so activating

@@ -242,6 +242,16 @@ def project_name(instance: str) -> str:
     return f"sandbox-{instance}"
 
 
+def mcp_server_name(instance: str) -> str:
+    """Claude MCP registration name for an instance's server.
+
+    `main` keeps the bare `sandbox` name so every existing skill/workflow/doc
+    that references `mcp__sandbox__*` keeps working untouched. Additional
+    instances get `sandbox-<name>`, exposing tools as `mcp__sandbox-<name>__*`.
+    """
+    return "sandbox" if instance == DEFAULT_INSTANCE else f"sandbox-{instance}"
+
+
 def _plugins_home(cfg: dict) -> Path:
     """Resolve `defaults.plugins_home` to an absolute path, creating it."""
     defaults = cfg.get("defaults", {}) or {}
@@ -510,6 +520,8 @@ def cmd_status(cfg, args) -> None:
     compose("ps", instance=inst)
     apf = active_project_file(inst)
     ff = focus_file(inst)
+    srv = mcp_server_name(inst)
+    ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
     if apf.exists():
         ok(f"Active project: {apf.read_text().strip()}")
     else:
@@ -1407,16 +1419,32 @@ def cmd_claude(cfg, args) -> None:
 PROJECT_MCP_JSON = ROOT / ".mcp.json"   # Claude Code auto-loads this when run from ROOT
 
 
-def _build_mcp_entry(cfg: dict) -> dict:
-    rt = cfg.get("runtime", {})
-    adm = rt.get("admin", {})
-    port = rt.get("wordpress_port", 8088)
-    mailpit_port = rt.get("mailpit_port", 8025)
-    app_pw = (cfg.get("mcp", {}) or {}).get("wp", {}).get("application_password", "")
+def _build_mcp_entry(cfg: dict, instance: str = DEFAULT_INSTANCE) -> dict:
+    """Build the Claude MCP registration entry for one instance's server.
+
+    Every per-instance server runs the SAME server.py but with the
+    instance-correct ports/creds baked into its env, plus SANDBOX_INSTANCE
+    so the server defaults all its tools to that instance. That env binding
+    is what keeps concurrent sessions on different instances isolated.
+    """
+    inst_cfg = resolve_instances(cfg)[instance]
+    adm = inst_cfg["admin"]
+    port = inst_cfg["wordpress_port"]
+    mailpit_port = inst_cfg["mailpit_port"]
+    # App password: per-instance under instances.<name>.app_password; for
+    # main, fall back to the legacy mcp.wp.application_password key. (Read
+    # from the raw block — resolve_instances() doesn't carry app_password.)
+    raw_inst = (cfg.get("instances") or {}).get(instance, {}) or {}
+    app_pw = raw_inst.get("app_password") or ""
+    if instance == DEFAULT_INSTANCE and not app_pw:
+        app_pw = (cfg.get("mcp", {}) or {}).get("wp", {}).get(
+            "application_password", "")
     return {
         "command": str(MCP_VENV / "bin" / "python"),
         "args": [str(MCP_DIR / "server.py")],
         "env": {
+            # Binds this server (and all its tools' defaults) to one instance.
+            "SANDBOX_INSTANCE": instance,
             "WP_URL": f"http://localhost:{port}",
             "WP_ADMIN_USER": adm.get("user", "admin"),
             # Browser-login password — `visit` uses this to authenticate
@@ -1432,29 +1460,13 @@ def _build_mcp_entry(cfg: dict) -> dict:
     }
 
 
-def register_claude_user_scope(cfg: dict) -> None:
-    """Register the sandbox MCP server at user scope so it's available in
-    every `claude` session on the machine, regardless of cwd.
-
-    Idempotent: removes any prior `sandbox` or `wp-sandbox` registration
-    (the latter was the pre-rename name) before re-adding under the
-    canonical `sandbox` name. Without this, the server only loads when
-    the user is in a directory whose .mcp.json includes it — i.e.
-    inside the sandbox repo — which silently breaks the
-    "work from anywhere" promise.
-    """
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        info("claude CLI not in PATH — skipping user-scope MCP registration.")
-        return
-
-    entry = _build_mcp_entry(cfg)
-    # Wipe any previous registrations under either name so re-running
-    # setup updates env vars (e.g. after a password rotation).
-    for name in ("sandbox", "wp-sandbox"):
-        subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", name],
-                       capture_output=True, text=True)
-
+def _register_one_mcp_server(claude_bin: str, cfg: dict, instance: str) -> bool:
+    """(Re)register a single instance's MCP server at user scope. Idempotent
+    wipe-then-add so re-running setup picks up rotated creds / ports."""
+    name = mcp_server_name(instance)
+    entry = _build_mcp_entry(cfg, instance)
+    subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", name],
+                   capture_output=True, text=True)
     env_args = []
     for k, v in (entry.get("env") or {}).items():
         env_args += ["-e", f"{k}={v}"]
@@ -1462,15 +1474,50 @@ def register_claude_user_scope(cfg: dict) -> None:
     # variadic and otherwise consumes the name as an env-var value.
     cmd = [
         claude_bin, "mcp", "add", "--scope", "user",
-        "sandbox", *env_args, "--",
+        name, *env_args, "--",
         entry["command"], *entry.get("args", []),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode == 0:
-        ok("Registered `sandbox` MCP at user scope — every claude session "
-           "on this machine can now use it.")
+    if res.returncode != 0:
+        info(f"  {name}: registration failed: {res.stderr.strip()}")
+        return False
+    return True
+
+
+def register_claude_user_scope(cfg: dict) -> None:
+    """Register ONE MCP server per sandbox instance at user scope, so every
+    `claude` session on the machine can reach every instance regardless of cwd.
+
+    Each instance's server bakes SANDBOX_INSTANCE (+ that instance's
+    WP_URL/creds) into its env, so a session that calls `mcp__sandbox-<name>__*`
+    defaults all its tools to that instance and never collides with another
+    session's focus/active-project state. `main` keeps the bare `sandbox` name.
+
+    Idempotent: each server is wiped and re-added so re-running setup updates
+    env vars (e.g. after a password rotation). The legacy `wp-sandbox` name
+    (pre-rename) is also removed once.
+    """
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        info("claude CLI not in PATH — skipping user-scope MCP registration.")
+        return
+
+    # One-time cleanup of the pre-rename name.
+    subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", "wp-sandbox"],
+                   capture_output=True, text=True)
+
+    registered = []
+    for instance in resolve_instances(cfg):
+        if _register_one_mcp_server(claude_bin, cfg, instance):
+            registered.append((instance, mcp_server_name(instance)))
+
+    if registered:
+        ok("Registered per-instance MCP servers at user scope:")
+        for instance, name in registered:
+            print(f"    {name:24s} → instance '{instance}'  "
+                  f"(tools: mcp__{name}__*)")
     else:
-        info(f"user-scope MCP registration failed: {res.stderr.strip()}")
+        info("No MCP servers registered.")
         info("Project-local .mcp.json still works when cwd is the sandbox.")
 
 
@@ -1479,7 +1526,11 @@ def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
 
     Claude Code (and other MCP clients) auto-load .mcp.json from the working
     directory. The user-scope registration (see register_claude_user_scope)
-    is what makes the server available outside the sandbox folder.
+    is what makes the servers available outside the sandbox folder.
+
+    Writes one server entry per instance (`sandbox` for main,
+    `sandbox-<name>` for others) — mirrors register_claude_user_scope so
+    cwd-local sessions get the same per-instance isolation.
     """
     existing = {}
     created = not PROJECT_MCP_JSON.exists()
@@ -1493,7 +1544,14 @@ def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
             existing = {}
             created = True
     servers = existing.setdefault("mcpServers", {})
-    servers["sandbox"] = _build_mcp_entry(cfg)
+    # Drop stale per-instance entries we own so deleted instances don't linger.
+    current = {mcp_server_name(i) for i in resolve_instances(cfg)}
+    for name in list(servers):
+        if (name == "sandbox" or name.startswith("sandbox-")) \
+                and name not in current:
+            del servers[name]
+    for instance in resolve_instances(cfg):
+        servers[mcp_server_name(instance)] = _build_mcp_entry(cfg, instance)
     PROJECT_MCP_JSON.write_text(json.dumps(existing, indent=2) + "\n")
     return PROJECT_MCP_JSON, created
 
@@ -2263,9 +2321,18 @@ def cmd_instance(cfg, args) -> None:
         print(f"\n▸ Installing WordPress on '{name}'…")
         cmd_install(cfg, args)
 
+        # Register this instance's own MCP server so Claude can reach it.
+        # Reload cfg first — cmd_install just wrote the app password into
+        # sandbox.local.yml, and registration bakes it into the server's env.
+        cfg = load_config()
+        print(f"\n▸ Registering MCP server for '{name}'…")
+        register_claude_user_scope(cfg)
+
+        srv = mcp_server_name(name)
         print()
         ok(f"Instance '{name}' ready at http://localhost:{port}/wp-admin/")
         print(f"  Admin: admin / admin")
+        print(f"  MCP server: {srv}  (Claude tools: mcp__{srv}__*)")
         print()
         print(f"  Next:")
         print(f"    ./sb use <project> --instance {name}     # link + activate plugins")
@@ -2328,6 +2395,15 @@ def cmd_instance(cfg, args) -> None:
         _write_local_yaml(local)
         info(f"removed instances.{name} from {CONFIG_LOCAL.name}")
 
+    # 6. Deregister this instance's MCP server (never the bare `sandbox` =
+    #    main — that's only removed by wiping main, not here).
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        srv = mcp_server_name(name)
+        subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", srv],
+                       capture_output=True, text=True)
+        info(f"deregistered MCP server {srv}")
+
     ok(f"Instance '{name}' deleted.")
 
 
@@ -2335,7 +2411,8 @@ def cmd_instances(cfg, args) -> None:
     """List defined instances + their status and ports."""
     instances = resolve_instances(cfg)
     print()
-    print(f"  {'STATUS':<10} {'NAME':<10} {'URL':<26} {'PROJECT':<18} FOCUS")
+    print(f"  {'STATUS':<10} {'NAME':<10} {'URL':<26} {'MCP SERVER':<18} "
+          f"{'PROJECT':<14} FOCUS")
     for name, inst_cfg in instances.items():
         # Check running by asking docker compose for the wp container's state.
         ps = compose("ps", "--format", "json", instance=name,
@@ -2355,7 +2432,12 @@ def cmd_instances(cfg, args) -> None:
         active = apf.read_text().strip() if apf.exists() else "—"
         focus = ff.read_text().strip() if ff.exists() else "—"
         url = f"http://localhost:{inst_cfg['wordpress_port']}"
-        print(f"  {status:<10} {name:<10} {url:<26} {active:<18} {focus}")
+        srv = mcp_server_name(name)
+        print(f"  {status:<10} {name:<10} {url:<26} {srv:<18} "
+              f"{active:<14} {focus}")
+    print()
+    print(f"  Claude tools per instance: mcp__<MCP SERVER>__*  "
+          f"(e.g. mcp__sandbox__focus_get)")
     print()
 
 

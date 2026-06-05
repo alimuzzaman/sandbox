@@ -12,6 +12,13 @@ Tools:
   - activate_plugin / deactivate_plugin / import_content (legacy helpers)
 
 Designed to be launched over stdio by an LLM client. See README.md.
+
+Multi-instance: the CLI registers ONE server per sandbox instance, baking
+SANDBOX_INSTANCE (+ that instance's WP_URL / WP_APP_PASSWORD / MAILPIT_URL)
+into each registration's env. So every tool defaults to THIS server's
+instance (SESSION_INSTANCE) instead of always `main`, and concurrent Claude
+sessions on different instances never collide on focus/active-project state.
+Pass `instance=` explicitly to override per call.
 """
 
 from __future__ import annotations
@@ -28,6 +35,13 @@ from mcp.server.fastmcp import FastMCP
 SANDBOX_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_DIR = SANDBOX_ROOT / "runtime" / "compose"
 DEFAULT_INSTANCE = "main"
+
+# The instance THIS server process is bound to. The CLI bakes
+# SANDBOX_INSTANCE into each per-instance MCP registration's env (one server
+# per instance), so a session that calls this server's tools defaults every
+# tool to its own instance instead of always landing on "main". Falls back to
+# "main" for the legacy single-server registration that predates this.
+SESSION_INSTANCE = os.environ.get("SANDBOX_INSTANCE", DEFAULT_INSTANCE)
 
 # Per-instance helpers — mirror the CLI's resolution.
 
@@ -98,8 +112,10 @@ def _resolve_instance(instance: str) -> dict:
     """Return per-instance ports/admin/app_password.
 
     Falls back to env vars (set by the CLI when registering the MCP
-    server) for the default instance — keeps the pre-multi-instance
-    `main`-only flow working even before sandbox.yml is read.
+    server) for the instance THIS server is bound to (SESSION_INSTANCE) —
+    each per-instance registration bakes that instance's WP_URL /
+    WP_APP_PASSWORD into env, so the env-priming path below applies to
+    whichever instance owns this process, not just `main`.
     """
     cfg = _load_sandbox_yml()
     runtime = cfg.get("runtime", {}) or {}
@@ -115,27 +131,37 @@ def _resolve_instance(instance: str) -> dict:
         "admin": {**rt_admin, **inst_admin},
     }
 
-    # App password: per-instance under instances.<name>.app_password,
-    # OR (for main only) the legacy mcp.wp.application_password key.
+    # App password file fallback: for `main` the legacy
+    # mcp.wp.application_password key; for any other instance, that
+    # instance's own instances.<name>.app_password.
     if instance == DEFAULT_INSTANCE:
-        app_pw = ((cfg.get("mcp") or {}).get("wp") or {}).get(
+        file_app_pw = ((cfg.get("mcp") or {}).get("wp") or {}).get(
             "application_password", ""
         )
-        # Env wins over file when both set — that's how the CLI primes the
-        # server on startup before sandbox.local.yml is even written.
-        out["app_password"] = os.environ.get("WP_APP_PASSWORD") or app_pw
+    else:
+        file_app_pw = inst.get("app_password", "")
+
+    # Env-prime the instance this server process is bound to. The CLI bakes
+    # the instance-correct WP_URL / WP_APP_PASSWORD into each per-instance
+    # registration's env, so this fires for `embedpress` on the embedpress
+    # server, `xspeed` on the xspeed server, etc. — not only `main`. Env
+    # wins over file (lets the CLI prime the server before sandbox.local.yml
+    # is even written).
+    if instance == SESSION_INSTANCE:
+        out["app_password"] = os.environ.get("WP_APP_PASSWORD") or file_app_pw
         out["wordpress_port"] = int(
             os.environ.get("WP_URL", "").rsplit(":", 1)[-1].split("/")[0]
             or out["wordpress_port"]
         ) if os.environ.get("WP_URL") else out["wordpress_port"]
     else:
-        out["app_password"] = inst.get("app_password", "")
+        out["app_password"] = file_app_pw
     return out
 
 
-# Default-instance values for tools that pre-date the multi-instance era
-# (and for the docstring defaults). The CLI sets these env vars when it
-# registers the MCP server; we honor them as the main instance.
+# Bound-instance values for tools that pre-date the multi-instance era.
+# The CLI bakes these env vars into this server's per-instance
+# registration; they describe whichever instance this process owns
+# (SESSION_INSTANCE), which is `main` for the legacy single-server setup.
 WP_URL = os.environ.get("WP_URL", "http://localhost:8088")
 WP_USER = os.environ.get("WP_ADMIN_USER", "admin")
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
@@ -150,6 +176,8 @@ SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a live
 ACTIVATION: user says `focus <plugin>` / `work on <plugin>` / names a WPDeveloper plugin in a working context → handshake `focus_set` → `load_context` → `focus_get`. Don't re-run. Also engage on WP errors, stack traces, wp-admin debugging, or "work with sandbox." Stay quiet on non-WP work.
 
 ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
+
+INSTANCE: each sandbox instance has its OWN MCP server — `mcp__sandbox__*` = main, `mcp__sandbox-<name>__*` = that instance. This server's tools default to THIS instance; focus/state are per-instance and never shared across servers. Use the namespace matching the instance you're working in.
 
 REFLEXES when engaged:
 - Bug / error / stack trace / "doesn't work" → first tool call REPRODUCES on the live stack. Not Read/Grep/find. Pick the lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered → visit. Can't reproduce → BLOCKED.
@@ -239,20 +267,21 @@ def _safe_json(text: str):
 
 @mcp.tool()
 def wp_cli(command: str, timeout: int = 60,
-           instance: str = DEFAULT_INSTANCE) -> dict:
+           instance: str = SESSION_INSTANCE) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
     `$(cat ...)`, pipes, or redirects, use wp_exec instead.
 
-    instance: which sandbox instance to target (default: main).
+    instance: which sandbox instance to target (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset).
     """
     return _wpcli(shlex.split(command), instance=instance, timeout=timeout)
 
 
 @mcp.tool()
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120, instance: str = DEFAULT_INSTANCE) -> dict:
+            timeout: int = 120, instance: str = SESSION_INSTANCE) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -260,7 +289,8 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     it goes through `sh -c`.
 
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
-    instance: which sandbox instance to target (default: main).
+    instance: which sandbox instance to target (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset).
     """
     args = ["exec"]
     if workdir:
@@ -272,12 +302,13 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
 @mcp.tool()
 def wp_rest(method: str, path: str, body: dict | None = None,
             query: dict | None = None,
-            instance: str = DEFAULT_INSTANCE) -> dict:
+            instance: str = SESSION_INSTANCE) -> dict:
     """Call the WordPress REST API.
 
     path: e.g. '/wp/v2/posts' (leading slash optional)
     Auth via Application Password — auto-provisioned by `./sb install`.
-    instance: which sandbox instance to hit (default: main).
+    instance: which sandbox instance to hit (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset).
     """
     inst_cfg = _resolve_instance(instance)
     app_pw = inst_cfg["app_password"]
@@ -346,14 +377,15 @@ def http_fetch(url: str, method: str = "GET", follow_redirects: bool = True,
 
 @mcp.tool()
 def db_query(sql: str, mutate: bool = False,
-             instance: str = DEFAULT_INSTANCE) -> dict:
+             instance: str = SESSION_INSTANCE) -> dict:
     """Run a SQL query against the WP database.
 
     Reads (SELECT/SHOW/DESCRIBE/EXPLAIN) run freely.
     Writes (INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE/REPLACE) require
     mutate=true — an explicit acknowledgement that this changes data.
 
-    instance: which sandbox instance to target (default: main).
+    instance: which sandbox instance to target (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset).
     """
     head = sql.strip().split(None, 1)[0].upper() if sql.strip() else ""
     reads = {"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}
@@ -370,8 +402,9 @@ def db_query(sql: str, mutate: bool = False,
 
 
 @mcp.tool()
-def tail_log(lines: int = 100, instance: str = DEFAULT_INSTANCE) -> dict:
-    """Tail wp-content/debug.log for one instance (default: main)."""
+def tail_log(lines: int = 100, instance: str = SESSION_INSTANCE) -> dict:
+    """Tail wp-content/debug.log for one instance (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset)."""
     log_path = _log_path(instance)
     if not log_path.exists():
         return {"ok": True, "lines": [], "note": "debug.log not yet created",
@@ -387,12 +420,13 @@ def tail_log(lines: int = 100, instance: str = DEFAULT_INSTANCE) -> dict:
 
 @mcp.tool()
 def fs_read(path: str, max_bytes: int = 200_000,
-            instance: str = DEFAULT_INSTANCE) -> dict:
+            instance: str = SESSION_INSTANCE) -> dict:
     """Read a file under runtime/wp-<instance>/ (the WordPress install).
 
     path is relative to runtime/wp-<instance>/ — e.g. 'wp-content/themes/my-theme/style.css'.
     Refuses paths that escape the WP root.
-    instance: which sandbox instance (default: main).
+    instance: which sandbox instance (default: this session's instance —
+    SANDBOX_INSTANCE, or main if unset).
     """
     wp_root = _wp_root(instance)
     target = _safe_resolve(path, wp_root)
@@ -416,11 +450,12 @@ def fs_read(path: str, max_bytes: int = 200_000,
 
 @mcp.tool()
 def fs_write(path: str, content: str, create_dirs: bool = True,
-             instance: str = DEFAULT_INSTANCE) -> dict:
+             instance: str = SESSION_INSTANCE) -> dict:
     """Write a file under runtime/wp-<instance>/. Creates parent dirs by default.
 
     Refuses paths that escape WP root. Returns bytes written.
-    instance: which sandbox instance (default: main).
+    instance: which sandbox instance (default: this session's instance —
+    SANDBOX_INSTANCE, or main if unset).
     """
     wp_root = _wp_root(instance)
     target = _safe_resolve(path, wp_root)
@@ -435,7 +470,7 @@ def fs_write(path: str, content: str, create_dirs: bool = True,
 
 @mcp.tool()
 def fs_list(path: str = "", depth: int = 1,
-            instance: str = DEFAULT_INSTANCE) -> dict:
+            instance: str = SESSION_INSTANCE) -> dict:
     """List files under runtime/wp-<instance>/<path>. depth=1 is shallow."""
     wp_root = _wp_root(instance)
     target = _safe_resolve(path or ".", wp_root)
@@ -460,14 +495,16 @@ def fs_list(path: str = "", depth: int = 1,
 # ------------------ Mailpit (test SMTP inbox) ------------------------
 
 def _mailpit_url(instance: str) -> str:
-    if instance == DEFAULT_INSTANCE and os.environ.get("MAILPIT_URL"):
+    # Env-prime the bound instance (the CLI bakes the instance-correct
+    # MAILPIT_URL into each per-instance registration's env).
+    if instance == SESSION_INSTANCE and os.environ.get("MAILPIT_URL"):
         return os.environ["MAILPIT_URL"]
     port = _resolve_instance(instance)["mailpit_port"]
     return f"http://localhost:{port}"
 
 
 @mcp.tool()
-def mail_list(limit: int = 20, instance: str = DEFAULT_INSTANCE) -> dict:
+def mail_list(limit: int = 20, instance: str = SESSION_INSTANCE) -> dict:
     """List the most recent messages caught by Mailpit (test SMTP)."""
     base = _mailpit_url(instance).rstrip("/")
     try:
@@ -480,7 +517,7 @@ def mail_list(limit: int = 20, instance: str = DEFAULT_INSTANCE) -> dict:
 
 
 @mcp.tool()
-def mail_get(message_id: str, instance: str = DEFAULT_INSTANCE) -> dict:
+def mail_get(message_id: str, instance: str = SESSION_INSTANCE) -> dict:
     """Get a single message from Mailpit (headers, text, html)."""
     base = _mailpit_url(instance).rstrip("/")
     try:
@@ -517,7 +554,7 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
 @mcp.tool()
 def focus_get(include_claude_md: bool = True,
               max_bytes: int = 16_000,
-              instance: str = DEFAULT_INSTANCE) -> dict:
+              instance: str = SESSION_INSTANCE) -> dict:
     """Return the currently-focused plugin's slug, source path, CLAUDE.md
     content, and any skill packs it ships (so Claude can read them on demand).
 
@@ -528,7 +565,8 @@ def focus_get(include_claude_md: bool = True,
     file edits, debugging, and questions to that plugin's repo, and should
     read any `available_skills[*]` SKILL.md that's relevant to the task.
 
-    instance: which sandbox instance (default: main). Focus + active project
+    instance: which sandbox instance (default: this session's instance —
+    SANDBOX_INSTANCE, or main if unset). Focus + active project
     are per-instance.
     """
     ff = _focus_file(instance)
@@ -619,7 +657,7 @@ def focus_get(include_claude_md: bool = True,
 
 @mcp.tool()
 def focus_set(plugin_slug: str,
-              instance: str = DEFAULT_INSTANCE) -> dict:
+              instance: str = SESSION_INSTANCE) -> dict:
     """Set the focused plugin slug. Pass empty string to clear.
 
     When setting a focus, this shells out to `./sb focus <slug>` so the
@@ -627,7 +665,8 @@ def focus_set(plugin_slug: str,
     the active project's plugin list, the active project is switched
     to one that contains it. Keeps focus + active_project consistent.
 
-    instance: which sandbox instance's focus to set (default: main).
+    instance: which sandbox instance's focus to set (default: this session's
+    instance — SANDBOX_INSTANCE, or main if unset).
     """
     ff = _focus_file(instance)
     af = _active_file(instance)
@@ -663,20 +702,20 @@ def focus_set(plugin_slug: str,
 # ------------------ legacy convenience -------------------------------
 
 @mcp.tool()
-def activate_plugin(slug: str, instance: str = DEFAULT_INSTANCE) -> dict:
+def activate_plugin(slug: str, instance: str = SESSION_INSTANCE) -> dict:
     """wp plugin activate <slug>. Slug must match the plugin folder name."""
     return _wpcli(["plugin", "activate", slug], instance=instance)
 
 
 @mcp.tool()
-def deactivate_plugin(slug: str, instance: str = DEFAULT_INSTANCE) -> dict:
+def deactivate_plugin(slug: str, instance: str = SESSION_INSTANCE) -> dict:
     """wp plugin deactivate <slug>."""
     return _wpcli(["plugin", "deactivate", slug], instance=instance)
 
 
 @mcp.tool()
 def import_content(seed_file: str, authors: str = "create",
-                   instance: str = DEFAULT_INSTANCE) -> dict:
+                   instance: str = SESSION_INSTANCE) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
     return _wpcli(["import", f"/seeds/{seed_file}",
                    f"--authors={authors}"], instance=instance, timeout=180)
@@ -693,7 +732,7 @@ def visit(url: str, login: bool = False, check_iframes: bool = False,
           screenshot: str | None = None, full_page: bool = False,
           timeout: int = 20, width: int = 1280, height: int = 800,
           wait_until: str = "domcontentloaded",
-          instance: str = DEFAULT_INSTANCE) -> dict:
+          instance: str = SESSION_INSTANCE) -> dict:
     """Load `url` in headless Chromium and return a structured report
     (status, title, console errors, network failures, iframe inventory).
 

@@ -42,6 +42,13 @@ now has it — regardless of which directory you launch from:
 claude          # in any project, in any dir
 ```
 
+If you run more than one WordPress instance (see `./sb instance create`),
+each instance gets its **own** MCP server: `sandbox` for `main`,
+`sandbox-<name>` for the rest. A Claude session targets an instance by
+calling that server's tools (`mcp__sandbox-<name>__*`), so two concurrent
+sessions can work on different instances without their focus / active-project
+state colliding. `./sb instances` prints the instance→server mapping.
+
 **Activation phrase: `focus <plugin>`.** Just say it in chat —
 "focus betterdocs", "focus embedpress", "work on xspeed" — and the
 agent runs the handshake automatically: persists the focus, loads
@@ -377,10 +384,14 @@ Every failure prints a `→ hint` next to it. Common ones:
 
 - **REST auth fails** — re-run `./sb setup` (regenerates the app password)
 - **MCP server not connected in Claude Code** — run `claude mcp list` and
-  confirm `sandbox` is `✓ Connected`. If missing, re-run `./sb setup`
-  (it re-registers the user-scope server). For project-local fallback,
-  `cat .mcp.json` and verify `./mcp/wp-server/.venv/bin/python` is the
-  Python path it references
+  confirm `sandbox` (+ any `sandbox-<instance>`) is `✓ Connected`. If
+  missing, re-run `./sb setup` (it re-registers every instance's user-scope
+  server). For project-local fallback, `cat .mcp.json` and verify
+  `./mcp/wp-server/.venv/bin/python` is the Python path it references
+- **A session keeps landing on the wrong instance** — you're calling the
+  wrong tool namespace. `mcp__sandbox__*` = `main`; use `mcp__sandbox-<name>__*`
+  for instance `<name>`. `./sb instances` shows the mapping. A freshly
+  created instance's server may need a `claude` restart to appear
 - **Sandbox prompt / reflexes not engaging** — the 2KB summary ships via
   the MCP `instructions` field on every session. If the model isn't
   picking up sandbox behavior, verify the server is connected (see

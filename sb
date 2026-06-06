@@ -3774,12 +3774,18 @@ def _sudo_env():
     return env
 
 
-def _sudo(cmd, **kw):
+def _sudo(cmd, reason=None, **kw):
     """Run `sudo <cmd>` using the GUI password dialog (sudo -A) when available.
     `cmd` is the argv AFTER 'sudo'. Use for INTERACTIVE sudo (first-time setup);
-    passwordless calls keep using `sudo -n` directly."""
+    passwordless calls keep using `sudo -n` directly.
+
+    `reason` is a human explanation of WHY the password is needed. It's passed via
+    `sudo -p` so it becomes the prompt the askpass dialog shows — the user sees a
+    concrete sentence ("Sandbox needs admin rights to …") instead of a bare
+    "Password:". Keep it one line; the dialog renders it verbatim."""
     flag = ["-A"] if (sys.platform == "darwin" and ASKPASS_HELPER.exists()) else []
-    return subprocess.run(["sudo", *flag, *cmd], env=_sudo_env(), **kw)
+    prompt = ["-p", reason] if reason else []
+    return subprocess.run(["sudo", *flag, *prompt, *cmd], env=_sudo_env(), **kw)
 
 
 def _ensure_url_proxy(cfg, *, quiet: bool = False):
@@ -3811,7 +3817,12 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
              "ONCE (no certificate, no browser warning).")
         tmp = ROOT / "runtime" / "sandbox-proxy.sudoers"
         tmp.write_text(rule)
-        chk = _sudo(["visudo", "-cf", str(tmp)],
+        _SUDOERS_REASON = (
+            "Sandbox would like to set up clean local URLs so your sites open at "
+            "http://<name>.sb instead of localhost:8188. This one-time step lets "
+            "it manage local DNS for *.sb without asking again — all local, and "
+            "undoable anytime with ./sb uninstall.")
+        chk = _sudo(["visudo", "-cf", str(tmp)], reason=_SUDOERS_REASON,
                     capture_output=True, text=True)
         if chk.returncode != 0:
             tmp.unlink(missing_ok=True)
@@ -3820,7 +3831,8 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
         inst = _sudo(
             ["install", "-m", "0440", "-o", "root", "-g",
              "wheel" if sys.platform == "darwin" else "root",
-             str(tmp), str(PROXY_SUDOERS)], capture_output=True, text=True)
+             str(tmp), str(PROXY_SUDOERS)], reason=_SUDOERS_REASON,
+            capture_output=True, text=True)
         tmp.unlink(missing_ok=True)
         if inst.returncode != 0:
             info(f"failed to install sudoers rule: {inst.stderr.strip()}")
@@ -3959,14 +3971,19 @@ def _install_alias_launchd() -> None:
 """
     tmp = ROOT / "runtime" / "com.sandbox.lo0alias.plist"
     tmp.write_text(plist)
+    _LAUNCHD_REASON = (
+        "Sandbox would like to keep your clean URLs working after a reboot. It "
+        "adds a small startup item that re-enables local *.sb sites. You can "
+        "remove it anytime with ./sb uninstall.")
     res = _sudo(
         ["install", "-m", "0644", "-o", "root", "-g",
          "wheel" if sys.platform == "darwin" else "root",
-         str(tmp), str(LAUNCHD_PLIST)], capture_output=True, text=True)
+         str(tmp), str(LAUNCHD_PLIST)], reason=_LAUNCHD_REASON,
+        capture_output=True, text=True)
     tmp.unlink(missing_ok=True)
     if res.returncode == 0:
         _sudo(["launchctl", "load", "-w", str(LAUNCHD_PLIST)],
-              capture_output=True, text=True)
+              reason=_LAUNCHD_REASON, capture_output=True, text=True)
         ok("installed boot-time loopback-alias LaunchDaemon")
     else:
         info("skipped LaunchDaemon (alias restored by `./sb domains up` after "
@@ -3987,10 +4004,14 @@ def proxy_teardown(cfg) -> None:
                        capture_output=True, text=True)
     if shutil.which("mkcert"):
         subprocess.run(["mkcert", "-uninstall"], capture_output=True, text=True)
+    _UNINSTALL_REASON = (
+        "Sandbox is cleaning up its clean-URL setup — removing the startup item "
+        "and the local DNS rule it added. Your Mac password confirms this final "
+        "step.")
     _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
-          capture_output=True, text=True)
+          reason=_UNINSTALL_REASON, capture_output=True, text=True)
     _sudo(["rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS)],
-          capture_output=True, text=True)
+          reason=_UNINSTALL_REASON, capture_output=True, text=True)
     ok("HTTPS proxy torn down (certs left in runtime/proxy/certs — delete "
        "manually if desired).")
 

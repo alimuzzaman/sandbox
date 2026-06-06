@@ -370,6 +370,7 @@ PROXY_CERTS_DIR = PROXY_DIR / "certs"
 PROXY_CADDYFILE = PROXY_DIR / "Caddyfile"
 PROXY_COMPOSE   = PROXY_DIR / "proxy.yml"
 PROXY_HELPER    = TOOLS_DIR / "proxy-helper.sh"
+ASKPASS_HELPER  = TOOLS_DIR / "askpass.sh"
 PROXY_SUDOERS   = Path("/etc/sudoers.d/sandbox-proxy")
 PROXY_PROJECT   = "sandbox-proxy"
 PROXY_BIND_IP   = "127.0.0.77"
@@ -2708,6 +2709,20 @@ def cmd_setup(cfg, args) -> None:
         print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
         cmd_install(cfg, sub_args)
 
+    # Clean URLs: give every instance a http://<name>.sb (no port) via the URL
+    # proxy. Interactive + Docker only (one-time password for the proxy infra);
+    # otherwise instances stay on localhost:<port>. Plain http → no cert.
+    if sys.stdin.isatty() and not getattr(args, "no_domain", False):
+        print("\n▸ Setting up clean URLs (http://<name>.sb, no port)…")
+        up, cfg = _ensure_url_proxy(cfg)
+        if up:
+            cfg = _assign_domains_to_all(cfg)
+            regen_caddyfile(cfg)
+            reload_proxy()
+            ok("clean URLs ready — instances serve http://<name>.sb")
+        else:
+            info("staying on http://localhost:<port> (clean URLs are optional).")
+
     print("\n▸ Building wp-mcp Python venv…")
     cmd_mcp_install(cfg, args)
 
@@ -3663,6 +3678,24 @@ def _proxy_sudoers_installed() -> bool:
         return False
 
 
+def _sudo_env():
+    """Environment for interactive sudo that pops a native macOS password dialog
+    (via SUDO_ASKPASS) instead of prompting in the terminal. Falls back silently
+    to the terminal if the helper/osascript isn't usable."""
+    env = dict(os.environ)
+    if sys.platform == "darwin" and ASKPASS_HELPER.exists():
+        env["SUDO_ASKPASS"] = str(ASKPASS_HELPER)
+    return env
+
+
+def _sudo(cmd, **kw):
+    """Run `sudo <cmd>` using the GUI password dialog (sudo -A) when available.
+    `cmd` is the argv AFTER 'sudo'. Use for INTERACTIVE sudo (first-time setup);
+    passwordless calls keep using `sudo -n` directly."""
+    flag = ["-A"] if (sys.platform == "darwin" and ASKPASS_HELPER.exists()) else []
+    return subprocess.run(["sudo", *flag, *cmd], env=_sudo_env(), **kw)
+
+
 def _ensure_url_proxy(cfg, *, quiet: bool = False):
     """Ensure the clean-URL HTTP proxy infra is up (no certs): the passwordless
     sudoers rule, the lo0 alias, dnsmasq/resolver for *.sb, the boot LaunchDaemon,
@@ -3692,14 +3725,14 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
              "ONCE (no certificate, no browser warning).")
         tmp = ROOT / "runtime" / "sandbox-proxy.sudoers"
         tmp.write_text(rule)
-        chk = subprocess.run(["sudo", "visudo", "-cf", str(tmp)],
-                             capture_output=True, text=True)
+        chk = _sudo(["visudo", "-cf", str(tmp)],
+                    capture_output=True, text=True)
         if chk.returncode != 0:
             tmp.unlink(missing_ok=True)
             info(f"sudoers rule failed validation: {chk.stderr.strip()}")
             return False, cfg
-        inst = subprocess.run(
-            ["sudo", "install", "-m", "0440", "-o", "root", "-g",
+        inst = _sudo(
+            ["install", "-m", "0440", "-o", "root", "-g",
              "wheel" if sys.platform == "darwin" else "root",
              str(tmp), str(PROXY_SUDOERS)], capture_output=True, text=True)
         tmp.unlink(missing_ok=True)
@@ -3797,20 +3830,22 @@ def _assign_domains_to_all(cfg: dict):
         ok(f"assigned domains: {', '.join(f'{n}.{PROXY_TLD}' for n in changed)}")
     cfg = load_config()
 
-    # Update WP siteurl/home for instances that are up (so links/redirects use
-    # the https domain). Skip stopped ones — they'll get it on next install/up.
+    # Point each running instance's WP siteurl/home at its clean URL. Uses
+    # site_url() so it's http://<name>.sb by default, or https when secured.
+    # Skip stopped ones — they get it on next up/install.
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
         if not (dom and dom.endswith(f".{PROXY_TLD}")):
             continue
         if not _instance_running(name):
             continue
-        url = f"https://{dom}"
+        url = site_url(ic)
         cur = wpcli(["option", "get", "siteurl"], instance=name,
                     check=False, capture=True)
         if (getattr(cur, "stdout", "") or "").strip() == url:
             continue
-        _write_ssl_muplugin(name)  # ensure WP trusts the proxy before switching
+        if url.startswith("https://"):
+            _write_ssl_muplugin(name)  # trust the proxy's TLS before switching
         wpcli(["option", "update", "siteurl", url], instance=name, check=False)
         wpcli(["option", "update", "home", url], instance=name, check=False)
         info(f"{name}: WP url → {url}")
@@ -3838,14 +3873,14 @@ def _install_alias_launchd() -> None:
 """
     tmp = ROOT / "runtime" / "com.sandbox.lo0alias.plist"
     tmp.write_text(plist)
-    res = subprocess.run(
-        ["sudo", "install", "-m", "0644", "-o", "root", "-g",
+    res = _sudo(
+        ["install", "-m", "0644", "-o", "root", "-g",
          "wheel" if sys.platform == "darwin" else "root",
          str(tmp), str(LAUNCHD_PLIST)], capture_output=True, text=True)
     tmp.unlink(missing_ok=True)
     if res.returncode == 0:
-        subprocess.run(["sudo", "launchctl", "load", "-w", str(LAUNCHD_PLIST)],
-                       capture_output=True, text=True)
+        _sudo(["launchctl", "load", "-w", str(LAUNCHD_PLIST)],
+              capture_output=True, text=True)
         ok("installed boot-time loopback-alias LaunchDaemon")
     else:
         info("skipped LaunchDaemon (alias restored by `./sb domains up` after "
@@ -3866,10 +3901,10 @@ def proxy_teardown(cfg) -> None:
                        capture_output=True, text=True)
     if shutil.which("mkcert"):
         subprocess.run(["mkcert", "-uninstall"], capture_output=True, text=True)
-    subprocess.run(["sudo", "launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
-                   capture_output=True, text=True)
-    subprocess.run(["sudo", "rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS)],
-                   capture_output=True, text=True)
+    _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
+          capture_output=True, text=True)
+    _sudo(["rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS)],
+          capture_output=True, text=True)
     ok("HTTPS proxy torn down (certs left in runtime/proxy/certs — delete "
        "manually if desired).")
 
@@ -4990,6 +5025,8 @@ Then pick a project and a plugin:
     sp = sub.add_parser("setup", help="One-shot: boot, install WP, build MCP, wire Claude")
     sp.add_argument("--no-pick", action="store_true",
                     help="skip the post-setup plugin picker (CI / re-run)")
+    sp.add_argument("--no-domain", action="store_true",
+                    help="skip clean-URL proxy setup (stay on localhost:<port>)")
     ap = sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
 

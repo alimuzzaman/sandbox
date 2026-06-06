@@ -1956,7 +1956,7 @@ def ensure_tools_venv() -> Path:
     if not py.exists():
         info("Creating tools venv at runtime/.venv-tools/ (one-time)…")
         TOOLS_VENV.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call([find_modern_python(), "-m", "venv", str(TOOLS_VENV)])
+        _make_venv(find_modern_python(), TOOLS_VENV)
 
     pip = TOOLS_VENV / "bin" / "pip"
     info("Installing Playwright (one-time)…")
@@ -1985,11 +1985,16 @@ def cmd_visit(cfg, args) -> None:
 
 
 def find_modern_python() -> str:
-    """Pick a Python >= 3.10 for the wp-mcp venv (mcp package needs it)."""
+    """Pick a Python >= 3.10 that can actually build a working venv. We've seen
+    a Homebrew python3.13 with a broken pyexpat (libexpat symbol mismatch) that
+    passes a version check but fails ensurepip — so each candidate is validated
+    by importing the stdlib modules venv/ensurepip need, not just its version.
+    Prefers the highest usable version; includes python3/3.14 in the list."""
     candidates = [
-        "python3.13", "python3.12", "python3.11", "python3.10",
-        "/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+        "python3.14", "python3.13", "python3.12", "python3.11", "python3.10",
+        "python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3",
     ]
+    fallback = None
     for c in candidates:
         if not shutil.which(c) and not Path(c).exists():
             continue
@@ -1997,13 +2002,22 @@ def find_modern_python() -> str:
             v = subprocess.check_output(
                 [c, "-c", "import sys;print(sys.version_info[:2])"], text=True
             ).strip()
-            major, minor = eval(v)
-            if (major, minor) >= (3, 10):
+            if eval(v) < (3, 10):
+                continue
+            fallback = fallback or c
+            # Validate the interpreter is actually usable for a venv: the
+            # modules ensurepip pulls in (pyexpat via xml, ssl, ensurepip) must
+            # import cleanly. A broken pyexpat here is what fails `-m venv`.
+            chk = subprocess.run(
+                [c, "-c", "import ensurepip, ssl, pyexpat, xml.parsers.expat"],
+                capture_output=True, text=True)
+            if chk.returncode == 0:
                 return c
         except Exception:
             continue
-    # Last resort: system python3 — pip install will fail loudly if too old.
-    return "python3"
+    # No fully-validated interpreter — return the best version-only match (the
+    # venv builder has its own --without-pip + get-pip fallback) or python3.
+    return fallback or "python3"
 
 
 def cmd_mcp_install(cfg, args) -> None:
@@ -2023,11 +2037,41 @@ def cmd_mcp_install(cfg, args) -> None:
     if not MCP_VENV.exists():
         py = find_modern_python()
         info(f"Creating mcp/wp-server/.venv (using {py}) …")
-        run([py, "-m", "venv", str(MCP_VENV)])
-    pip = MCP_VENV / "bin" / "pip"
-    run([str(pip), "install", "--upgrade", "--quiet", "pip"])
-    run([str(pip), "install", "--quiet", "-r", str(MCP_DIR / "requirements.txt")])
+        _make_venv(py, MCP_VENV)
+    vpy = MCP_VENV / "bin" / "python"
+    # Use `python -m pip` (not the pip shim) — works even when pip was just
+    # bootstrapped via ensurepip into a --without-pip venv.
+    run([str(vpy), "-m", "pip", "install", "--upgrade", "--quiet", "pip"])
+    run([str(vpy), "-m", "pip", "install", "--quiet", "-r",
+         str(MCP_DIR / "requirements.txt")])
     ok("wp-mcp dependencies installed")
+
+
+def _make_venv(py: str, path: Path) -> None:
+    """Create a venv robustly. Some interpreters (e.g. Homebrew python3.13) fail
+    `python -m venv` at the internal ensurepip step. Fall back to building the
+    venv WITHOUT pip, then bootstrap pip via ensurepip → get-pip."""
+    r = subprocess.run([py, "-m", "venv", str(path)],
+                       capture_output=True, text=True)
+    vpy = path / "bin" / "python"
+    if r.returncode == 0 and vpy.exists():
+        return
+    # Fallback: pip-less venv + bootstrap pip.
+    info("venv+pip failed; retrying without pip, then bootstrapping pip…")
+    shutil.rmtree(path, ignore_errors=True)
+    run([py, "-m", "venv", "--without-pip", str(path)])
+    # 1) try ensurepip inside the venv
+    if subprocess.run([str(vpy), "-m", "ensurepip", "--upgrade"],
+                      capture_output=True, text=True).returncode == 0:
+        return
+    # 2) last resort: get-pip.py
+    import urllib.request, tempfile
+    info("ensurepip unavailable; fetching get-pip.py…")
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as f:
+        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", f.name)
+        gp = f.name
+    run([str(vpy), gp])
+    Path(gp).unlink(missing_ok=True)
 
 
 def cmd_claude(cfg, args) -> None:
@@ -2943,6 +2987,74 @@ def cmd_clean(cfg, args) -> None:
     ok(f"Stopped and wiped DB volume for instance '{inst}'")
 
 
+def cmd_uninstall(cfg, args) -> None:
+    """Tear down the whole sandbox install: stop + remove every instance's
+    containers + DB volumes, remove the HTTPS proxy + domain config, deregister
+    the MCP servers from Claude, and (optionally) delete this install directory.
+    Reversible only by reinstalling. Asks once unless --yes."""
+    instances = list(resolve_instances(cfg).keys())
+    print()
+    print("  This will REMOVE the entire sandbox:")
+    print(f"    • containers + DB volumes for: {', '.join(instances)}")
+    print(f"    • the HTTPS proxy + *.sb domain config (if set up)")
+    print(f"    • the MCP servers registered with Claude")
+    print(f"    • optionally, this folder: {ROOT}")
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            die("refusing to uninstall non-interactively without --yes.")
+        try:
+            ans = input("\n  Type 'remove' to confirm: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(); return
+        if ans != "remove":
+            info("cancelled."); return
+
+    # 1. Stop + wipe every instance (containers + volumes).
+    for name in instances:
+        print(f"\n▸ Removing instance '{name}' (containers + volume)…")
+        compose("down", "-v", instance=name, check=False)
+
+    # 2. Tear down the HTTPS proxy + domains (untrust CA, dnsmasq, alias).
+    if proxy_available() or _proxy_container_running():
+        print("\n▸ Tearing down the HTTPS proxy + domains…")
+        try:
+            proxy_teardown(cfg)
+        except Exception as e:
+            info(f"proxy teardown had issues (continuing): {e}")
+
+    # 3. Deregister MCP servers from Claude (user scope).
+    claude_bin = shutil.which("claude")
+    if claude_bin:
+        print("\n▸ Deregistering MCP servers from Claude…")
+        for name in instances:
+            srv = mcp_server_name(name)
+            subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", srv],
+                           capture_output=True, text=True)
+            info(f"removed {srv}")
+
+    # 4. Remove the hosts-helper sudoers rule if present (best-effort).
+    if SUDOERS_FILE.exists():
+        subprocess.run(["sudo", "-n", "rm", "-f", str(SUDOERS_FILE)],
+                       capture_output=True, text=True)
+
+    ok("Sandbox uninstalled (containers, volumes, proxy, MCP servers removed).")
+
+    # 5. Optionally delete the install directory itself.
+    remove_dir = getattr(args, "purge", False)
+    if not remove_dir and sys.stdin.isatty() and not getattr(args, "yes", False):
+        try:
+            ans = input(f"\n  Also delete the folder {ROOT}? [y/N]: ").strip().lower()
+            remove_dir = ans in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print()
+    if remove_dir:
+        # Don't rm the cwd out from under us — print the command instead if we
+        # can't safely self-delete.
+        print(f"\n  To remove the folder, run:\n    rm -rf {ROOT}")
+    else:
+        info(f"left the folder in place: {ROOT}")
+
+
 def _next_free_port(start: int, used: set[int]) -> int:
     """Find the next port >= start that is not in `used` and not bound by
     another local listener. Avoids handing out a port the OS will reject."""
@@ -2977,6 +3089,42 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
         "db_port": _next_free_port(main.get("db_port", 3318) + 1, used),
         "mailpit_port": _next_free_port(main.get("mailpit_port", 8125) + 1, used),
     }
+
+
+def cmd_onboard(cfg, args) -> None:
+    """Run the guided onboarding against an existing instance (default: main).
+    The same flow as `./sb instance create` offers — pick plugins/projects,
+    enable trusted https, set Claude focus, seed content — so a freshly
+    installed sandbox can be configured without recreating it. Used by the
+    installer after `./sb setup`, and runnable anytime: `./sb onboard`."""
+    name = args.resolved_instance
+    if name not in resolve_instances(cfg):
+        die(f"unknown instance '{name}'. Run: ./sb instances")
+    print(f"\n▸ Onboarding '{name}' — set up plugins, https, and Claude focus.")
+    _onboard_instance(cfg, name, args)
+    # Offer trusted https for this instance's domain (reuses the create-time
+    # offer path): if not set up + interactive, prompt once.
+    inst = resolve_instances(cfg)[name]
+    dom = inst.get("domain")
+    if (dom and dom.endswith(f".{PROXY_TLD}") and not proxy_available()
+            and shutil.which("docker") and sys.stdin.isatty()
+            and not _https_offer_declined()):
+        print(f"\n  ▸ Enable trusted https://{dom} (no port)? One-time setup,")
+        print(f"    asks your password once; then it's automatic forever.")
+        try:
+            ans = input("    Enable now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"; print()
+        if ans in ("y", "yes"):
+            if proxy_setup(cfg):
+                cfg = load_config()
+                ok(f"https://{dom} is live.")
+        else:
+            _set_https_offer_declined()
+    url = site_url(resolve_instances(cfg)[name])
+    print()
+    ok(f"'{name}' is set up — {url}/wp-admin  (admin / admin)")
+    print(f"  Tell Claude in chat:  focus <plugin>")
 
 
 def _onboard_instance(cfg: dict, name: str, args) -> None:
@@ -4779,6 +4927,26 @@ Then pick a project and a plugin:
     ins.add_argument("--minimal", action="store_true",
         help="skip onboarding prompts (bare instance — CI-friendly)")
 
+    ob = sub.add_parser("onboard",
+        help="Guided setup for an existing instance (plugins, https, focus)")
+    ob.add_argument("--project", default=None,
+        help="project from sandbox.yml to install")
+    ob.add_argument("--plugin", dest="plugins", action="append", default=None,
+        help="plugin/project slug to set up (repeatable)")
+    ob.add_argument("--seed", default=None, help="WXR file in runtime/seeds/")
+    ob.add_argument("--theme", default=None, help="theme slug to activate")
+    ob.add_argument("--wp-debug", dest="wp_debug", action="store_true",
+        help="enable WP_DEBUG")
+    ob.add_argument("--minimal", action="store_true",
+        help="skip prompts (non-interactive)")
+    ob.add_argument("--site-title", dest="site_title", default=None)
+
+    un = sub.add_parser("uninstall",
+        help="Remove the whole sandbox (containers, volumes, proxy, MCP)")
+    un.add_argument("--yes", action="store_true", help="skip confirmation")
+    un.add_argument("--purge", action="store_true",
+        help="also remove the install directory")
+
     dm = sub.add_parser("domains",
         help="Manage custom domains + HTTPS proxy (setup|up|down|teardown|list)")
     dm.add_argument("action", nargs="?",
@@ -4842,6 +5010,8 @@ Then pick a project and a plugin:
         "visit": cmd_visit,
         "instances": cmd_instances,
         "instance": cmd_instance,
+        "onboard": cmd_onboard,
+        "uninstall": cmd_uninstall,
         "domains": cmd_domains,
         "dashboard": cmd_dashboard, "ui": cmd_dashboard,
         "web": cmd_web,

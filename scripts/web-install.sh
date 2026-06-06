@@ -96,14 +96,20 @@ else
 fi
 
 # ---- Step 3: run setup ------------------------------------------------------
-step "Step 3/3  Running setup"
+step "Step 3/4  Running setup"
 printf '%s  Checks Docker, boots WordPress, builds the MCP server, wires Claude.%s\n' "$DIM" "$N"
 cd "$DIR"
-./sb setup
+./sb setup --no-pick
+
+# ---- Step 4: guided onboarding (plugins / https / focus) --------------------
+step "Step 4/4  Onboarding"
+printf '%s  Pick plugins, optionally enable trusted https, set Claude focus.%s\n' "$DIM" "$N"
+./sb onboard || true   # never fail the install if onboarding is skipped
 
 printf '\n'
 ok "Sandbox is ready in $DIR"
 printf '\n  Next:\n'
 printf '    cd %s\n' "$DIR"
 printf '    ./sb web        # browser dashboard\n'
-printf '    claude          # Claude can now drive your WordPress\n\n'
+printf '    claude          # Claude can now drive your WordPress\n'
+printf '    ./sb uninstall  # remove everything (containers, files)\n\n'

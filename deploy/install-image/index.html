@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox — a real WordPress for Claude</title>
+<meta name="description" content="A real, disposable WordPress environment that Claude (or any MCP client) can drive — run WP-CLI, hit REST + the DB, open pages in a real browser, fix bugs end-to-end. One command to install.">
+<meta property="og:title" content="Sandbox — a real WordPress for Claude">
+<meta property="og:description" content="One command. A live WordPress Claude can actually drive.">
+<meta property="og:type" content="website">
+<style>
+  :root{
+    --bg:#0a0a0b; --panel:#111114; --panel2:#16161a; --brd:#26262c;
+    --ink:#f4f4f5; --dim:#a1a1aa; --dim2:#71717a; --accent:#3b82f6; --accent2:#60a5fa;
+    --green:#34d399;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    background-image:radial-gradient(900px 500px at 50% -10%, rgba(59,130,246,.12), transparent 60%);
+    min-height:100vh;
+  }
+  a{color:var(--accent2); text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:780px; margin:0 auto; padding:0 24px}
+  header{display:flex; align-items:center; gap:10px; padding:22px 0}
+  .logo{width:30px;height:30px;border-radius:8px;background:var(--accent);
+    display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff}
+  .brand{font-weight:600;letter-spacing:.2px}
+  .ghost{margin-left:auto;color:var(--dim);font-size:13px}
+
+  .hero{padding:56px 0 8px;text-align:center}
+  .badge{display:inline-block;font-size:12px;color:var(--accent2);
+    border:1px solid rgba(96,165,250,.3);background:rgba(59,130,246,.08);
+    padding:4px 11px;border-radius:999px;margin-bottom:22px;letter-spacing:.3px}
+  h1{font-size:42px;line-height:1.1;margin:0 0 16px;letter-spacing:-.5px;font-weight:700}
+  h1 .grad{background:linear-gradient(90deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
+    background-clip:text;-webkit-text-fill-color:transparent}
+  .sub{font-size:17px;color:var(--dim);max-width:600px;margin:0 auto 32px}
+
+  .cmd{display:flex;align-items:center;gap:12px;max-width:600px;margin:0 auto;
+    background:var(--panel);border:1px solid var(--brd);border-radius:12px;
+    padding:14px 16px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .cmd code{flex:1;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    color:var(--ink);text-align:left;overflow-x:auto;white-space:nowrap}
+  .cmd .dollar{color:var(--dim2);user-select:none}
+  .copy{flex:none;background:var(--accent);color:#fff;border:0;border-radius:8px;
+    padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s}
+  .copy:hover{background:#2563eb}
+  .copy.done{background:var(--green);color:#06281d}
+  .hint{margin:14px 0 0;font-size:13px;color:var(--dim2)}
+
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:56px 0 0}
+  .card{background:var(--panel);border:1px solid var(--brd);border-radius:12px;padding:18px}
+  .card h3{margin:0 0 6px;font-size:14px;color:var(--accent2);text-transform:uppercase;
+    letter-spacing:.4px;font-weight:700}
+  .card p{margin:0;font-size:13.5px;color:var(--dim);line-height:1.55}
+
+  .how{margin:56px 0 0;background:var(--panel2);border:1px solid var(--brd);
+    border-radius:14px;padding:26px 28px}
+  .how h2{margin:0 0 14px;font-size:18px}
+  .steps{margin:0;padding:0;list-style:none;counter-reset:s}
+  .steps li{counter-increment:s;position:relative;padding:8px 0 8px 38px;color:var(--dim);font-size:14px;
+    border-bottom:1px solid rgba(255,255,255,.05)}
+  .steps li:last-child{border-bottom:0}
+  .steps li::before{content:counter(s);position:absolute;left:0;top:8px;width:24px;height:24px;
+    border-radius:7px;background:rgba(59,130,246,.15);color:var(--accent2);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+  .steps b{color:var(--ink);font-weight:600}
+  .steps code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;
+    background:#000;border:1px solid var(--brd);border-radius:5px;padding:1px 6px;color:var(--ink)}
+
+  footer{margin:64px 0 40px;text-align:center;color:var(--dim2);font-size:12.5px}
+  footer .row{display:flex;gap:18px;justify-content:center;margin-bottom:10px;flex-wrap:wrap}
+
+  @media (max-width:640px){
+    h1{font-size:32px}
+    .grid{grid-template-columns:1fr}
+    .cmd code{font-size:12.5px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">S</div>
+    <span class="brand">Sandbox</span>
+    <span class="ghost">a real WordPress for Claude</span>
+  </header>
+
+  <section class="hero">
+    <span class="badge">ONE COMMAND · NO CLONE · NO SETUP</span>
+    <h1>Give Claude a <span class="grad">real WordPress</span><br>it can actually drive</h1>
+    <p class="sub">
+      A live, disposable WordPress environment wired to Claude (or any MCP client).
+      Claude runs WP-CLI, hits the REST API and database, opens pages in a real
+      browser, reads and edits your plugin's code, and fixes bugs end-to-end —
+      instead of guessing.
+    </p>
+
+    <div class="cmd">
+      <span class="dollar">$</span>
+      <code id="cmd">curl -fsSL https://sandbox.xc1.app/install.sh | sh</code>
+      <button class="copy" id="copy" onclick="copyCmd()">Copy</button>
+    </div>
+    <p class="hint">macOS / Linux. Installs prerequisites, sets up WordPress, wires Claude — step by step.</p>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h3>Build</h3>
+      <p>Claude implements features against a running install and verifies them live — not from memory.</p>
+    </div>
+    <div class="card">
+      <h3>Reproduce</h3>
+      <p>Hand Claude the environment and it reproduces the bug on a real stack — confirmed, not assumed.</p>
+    </div>
+    <div class="card">
+      <h3>Fix &amp; prove</h3>
+      <p>Reproduce → fix the real code → re-verify in the same environment. Fast, and proven.</p>
+    </div>
+  </section>
+
+  <section class="how">
+    <h2>What the one command does</h2>
+    <ol class="steps">
+      <li>Checks prerequisites and <b>offers to install</b> what's missing (Python, Docker) — your call, never silent.</li>
+      <li>Downloads and unpacks the sandbox to <code>~/sandbox</code> — no git, no repo access needed.</li>
+      <li>Boots Docker, installs WordPress, builds the MCP server, and <b>wires Claude</b> to it.</li>
+      <li>You're live at <code>http://localhost:8188</code> — then just tell Claude <code>focus &lt;plugin&gt;</code>.</li>
+    </ol>
+  </section>
+
+  <footer>
+    <div class="row">
+      <a href="/install.sh">view install.sh</a>
+      <a href="/sandbox-latest.tar.gz">download tarball</a>
+    </div>
+    <div>It's real WordPress — break it, snapshot it, throw it away. Nothing here is precious.</div>
+  </footer>
+
+</div>
+
+<script>
+function copyCmd(){
+  var txt = document.getElementById('cmd').textContent;
+  var btn = document.getElementById('copy');
+  navigator.clipboard.writeText(txt).then(function(){
+    btn.textContent='Copied'; btn.classList.add('done');
+    setTimeout(function(){ btn.textContent='Copy'; btn.classList.remove('done'); }, 1600);
+  });
+}
+</script>
+</body>
+</html>

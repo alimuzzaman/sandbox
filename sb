@@ -3879,7 +3879,12 @@ def proxy_setup(cfg) -> bool:
         if subprocess.run(["brew", "install", "mkcert", "nss"]).returncode != 0:
             info("brew install mkcert failed.")
             return False
-    info("trusting the mkcert local CA \u2014 enter your password if prompted (once).")
+    if sys.platform == "darwin":
+        info("macOS will ask for Touch ID (or your password) to trust the local "
+             "HTTPS certificate \u2014 that's expected, and only happens once.")
+    else:
+        info("trusting the local HTTPS certificate \u2014 enter your password if "
+             "prompted (once).")
     r = subprocess.run(["mkcert", "-install"], capture_output=True, text=True)
     if r.returncode != 0:
         info(f"mkcert -install failed: {(r.stderr or r.stdout).strip()[:200]}")

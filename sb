@@ -543,14 +543,42 @@ def _cert_paths(domain: str) -> tuple[Path, Path]:
 
 
 def _ca_installed() -> bool:
-    """True if mkcert is present and its local CA root exists (trusted once at
-    setup). This — not a wildcard cert — gates whether HTTPS can be served."""
+    """True only if the mkcert CA is actually TRUSTED by the OS — not merely
+    present on disk. (A rootCA.pem on disk that isn't trusted in the keychain is
+    exactly what causes the browser's ERR_CERT_AUTHORITY_INVALID while curl with
+    --cacert still works.) We verify trust by minting a throwaway cert and
+    asking the OS to verify its chain via `security verify-cert` (macOS). On
+    non-macOS, fall back to the on-disk check."""
     if shutil.which("mkcert") is None:
         return False
     res = subprocess.run(["mkcert", "-CAROOT"], capture_output=True, text=True)
-    if res.returncode != 0:
+    if res.returncode != 0 or not (Path(res.stdout.strip()) / "rootCA.pem").exists():
         return False
-    return (Path(res.stdout.strip()) / "rootCA.pem").exists()
+    if sys.platform != "darwin":
+        return True  # Linux: trust check is distro-specific; assume on-disk = ok
+    return _ca_trusted_macos()
+
+
+def _ca_trusted_macos() -> bool:
+    """Mint a throwaway leaf cert and ask macOS to verify its chain. Returns
+    True only if the OS trusts the mkcert CA (what browsers actually require)."""
+    import tempfile
+    d = tempfile.mkdtemp()
+    cert = Path(d) / "probe.pem"
+    key = Path(d) / "probe-key.pem"
+    try:
+        g = subprocess.run(
+            ["mkcert", "-cert-file", str(cert), "-key-file", str(key),
+             "sb-trust-probe.sb"], capture_output=True, text=True)
+        if g.returncode != 0 or not cert.exists():
+            return False
+        v = subprocess.run(["security", "verify-cert", "-c", str(cert)],
+                           capture_output=True, text=True)
+        return v.returncode == 0
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _mint_cert(domain: str) -> bool:
@@ -3698,10 +3726,21 @@ def proxy_setup(cfg) -> bool:
             return False
     info("trusting the mkcert local CA — enter your password if prompted "
          "(once).")
-    if subprocess.run(["mkcert", "-install"]).returncode != 0:
-        info("mkcert -install failed.")
+    r = subprocess.run(["mkcert", "-install"], capture_output=True, text=True)
+    if r.returncode != 0:
+        info(f"mkcert -install failed: {(r.stderr or r.stdout).strip()[:200]}")
+        info("  this usually means the keychain rejected the add — try running "
+             "`mkcert -install` yourself in a terminal, then re-run setup.")
         return False
-    ok("mkcert local CA is trusted.")
+    # Verify the CA is ACTUALLY trusted by the OS (mkcert -install can report
+    # success but leave trust unset, which gives browsers ERR_CERT_AUTHORITY_
+    # INVALID while curl --cacert still works). Don't proceed on a false win.
+    if sys.platform == "darwin" and not _ca_trusted_macos():
+        info("mkcert ran but the OS still doesn't trust the CA. Likely stale/")
+        info("duplicate mkcert CAs in the keychain. Fix it with:")
+        info("    ./sb domains repair-ca     (removes stale CAs + re-trusts)")
+        return False
+    ok("mkcert local CA is trusted (verified).")
     PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # 2. Passwordless sudoers rule for proxy-helper.sh (alias + dnsmasq).
@@ -3917,6 +3956,38 @@ def cmd_domains(cfg, args) -> None:
 
     if action == "teardown":
         proxy_teardown(cfg)
+        return
+
+    if action == "repair-ca":
+        if not sys.stdin.isatty():
+            die("repair-ca needs an interactive terminal (re-trusts the CA via "
+                "sudo). Run it directly in your shell.")
+        info("Repairing the local CA — removes stale/duplicate mkcert CAs and "
+             "re-trusts a single fresh one (asks your password).")
+        # mkcert -uninstall removes the CA from every trust store; -install then
+        # creates + trusts a clean one. This clears the 'multiple stale CAs,
+        # none trusted' state that causes ERR_CERT_AUTHORITY_INVALID.
+        subprocess.run(["mkcert", "-uninstall"])
+        if subprocess.run(["mkcert", "-install"]).returncode != 0:
+            die("mkcert -install failed — run it yourself, then re-run repair-ca.")
+        if sys.platform == "darwin" and not _ca_trusted_macos():
+            die("CA still not trusted after reinstall. A keychain GUI prompt may "
+                "need approving — open Keychain Access, or run `mkcert -install` "
+                "interactively, then re-run.")
+        ok("CA is trusted (verified).")
+        # Re-mint every instance's cert against the new CA + reload the proxy.
+        n = 0
+        for name, ic in resolve_instances(cfg).items():
+            dom = ic.get("domain")
+            if dom and dom.endswith(f".{PROXY_TLD}"):
+                for p in _cert_paths(dom):
+                    p.unlink(missing_ok=True)
+                if _mint_cert(dom):
+                    n += 1
+        regen_caddyfile(cfg)
+        reload_proxy()
+        ok(f"re-minted {n} cert(s) against the trusted CA. Hard-refresh your "
+           f"browser (or restart it) to drop the cached cert verdict.")
         return
 
     if action == "list":
@@ -5085,7 +5156,8 @@ Then pick a project and a plugin:
     dm = sub.add_parser("domains",
         help="Manage custom domains + HTTPS proxy (setup|up|down|teardown|list)")
     dm.add_argument("action", nargs="?",
-        choices=["setup", "up", "down", "teardown", "list"], default="list")
+        choices=["setup", "up", "down", "teardown", "repair-ca", "list"],
+        default="list")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

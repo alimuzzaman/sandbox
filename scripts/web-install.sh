@@ -91,24 +91,36 @@ else
 fi
 
 # ---- Step 2: download + unpack ----------------------------------------------
+# Always download the latest release and unpack it over $DIR. The tarball holds
+# ONLY committed code (sb, config/, mcp/, tools/, docs) — it excludes runtime/,
+# sandbox.local.yml, .cli-venv and other state — so re-running the installer
+# UPDATES an existing install to the newest code without touching your sites or
+# settings. (Earlier behavior left a stale copy in place; that meant new commands
+# like `sb global` never arrived on a re-run.)
 step "Step 2/3  Downloading the sandbox"
-if [ -e "$DIR" ] && [ -f "$DIR/sb" ]; then
-  warn "$DIR already has a sandbox — leaving it in place (re-running setup)."
+UPDATING=0
+if [ -e "$DIR" ] && [ ! -f "$DIR/sb" ]; then
+  die "$DIR exists but isn't a sandbox. Move it or set SANDBOX_DIR."
+fi
+[ -f "$DIR/sb" ] && UPDATING=1
+
+tmp="$(mktemp -d)"
+printf '  fetching %s\n' "$TARBALL_URL"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$TARBALL_URL" -o "$tmp/sandbox.tar.gz" \
+    || die "download failed ($TARBALL_URL). Check the URL/host."
 else
-  [ -e "$DIR" ] && die "$DIR exists but isn't a sandbox. Move it or set SANDBOX_DIR."
-  tmp="$(mktemp -d)"
-  printf '  fetching %s\n' "$TARBALL_URL"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$TARBALL_URL" -o "$tmp/sandbox.tar.gz" \
-      || die "download failed ($TARBALL_URL). Check the URL/host."
-  else
-    wget -qO "$tmp/sandbox.tar.gz" "$TARBALL_URL" \
-      || die "download failed ($TARBALL_URL). Check the URL/host."
-  fi
-  mkdir -p "$DIR"
-  # tarball has a top-level sandbox/ dir → strip it into $DIR.
-  tar -xzf "$tmp/sandbox.tar.gz" -C "$DIR" --strip-components=1
-  rm -rf "$tmp"
+  wget -qO "$tmp/sandbox.tar.gz" "$TARBALL_URL" \
+    || die "download failed ($TARBALL_URL). Check the URL/host."
+fi
+mkdir -p "$DIR"
+# tarball has a top-level sandbox/ dir → strip it into $DIR. Overwrites code
+# files; leaves anything not in the tarball (runtime/, *.local.yml) untouched.
+tar -xzf "$tmp/sandbox.tar.gz" -C "$DIR" --strip-components=1
+rm -rf "$tmp"
+if [ "$UPDATING" = "1" ]; then
+  ok "updated $DIR to the latest version (your sites + settings kept)."
+else
   ok "installed to $DIR"
 fi
 

@@ -14,7 +14,7 @@ RUN printf '%s\n' \
   '    root /usr/share/nginx/html;' \
   '    index index.html;' \
   '    location = /install.sh { default_type text/x-shellscript; add_header Cache-Control "no-cache"; }' \
-  '    location ~ \.tar\.gz$ { default_type application/gzip; }' \
+  '    location ~ \.tar\.gz$ { default_type application/gzip; add_header Cache-Control "no-cache"; }' \
   '    location / { try_files $uri $uri/ =404; }' \
   '}' > /etc/nginx/conf.d/default.conf
 

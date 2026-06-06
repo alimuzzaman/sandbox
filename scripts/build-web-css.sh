@@ -32,9 +32,9 @@ if [ ! -x "$BIN" ]; then
   chmod +x "$BIN"
 fi
 
-# 2. Extract the page markup from sb so Tailwind can scan the classes it uses
-#    (classes live in both static HTML and JS template strings — Tailwind's
-#    content scanner reads the raw text, so it catches both).
+# 2. Extract the page shell (_WEB_PAGE) from sb so Tailwind can scan its classes.
+#    The dashboard's classes mostly live in src/web/src/*.ts now (post-TS
+#    migration) and are scanned directly via the content globs below.
 python3 - "$ROOT" <<'PY'
 import sys, types, os
 root = sys.argv[1]
@@ -48,7 +48,14 @@ PY
 # 3. Config mirrors xSpeed DESIGN.md §2 tokens + §5 radius.
 cat > "$CACHE/tailwind.config.js" <<'EOF'
 module.exports = {
-  content: ['./.cache/page.html'],
+  // Scan BOTH the inlined page shell (_WEB_PAGE, extracted to page.html) AND
+  // the TypeScript dashboard source — after the TS migration most class names
+  // live in src/web/src/*.ts template strings, not in _WEB_PAGE.
+  content: [
+    './.cache/page.html',
+    './src/web/src/**/*.ts',
+    './src/web/index.html',
+  ],
   darkMode: 'media',
   // Safelist classes the regex scanner can miss inside minified JS template
   // literals (arbitrary values + state variants).

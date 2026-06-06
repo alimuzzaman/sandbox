@@ -145,6 +145,11 @@ fi
 printf '\n'
 ok "Sandbox is ready in $DIR"
 
+# ---- Make `sb` global so it runs from any folder ----------------------------
+# Symlink onto PATH so users type `sb …` anywhere instead of `cd $DIR && ./sb`.
+# Best-effort: if it can't (no writable PATH dir), it prints how to add one.
+./sb global <"$SBIN" || true
+
 # ---- Ask how they want to use it --------------------------------------------
 # One simple choice. Web UI → open the dashboard and create instances there.
 # Terminal → just drop them at the shell with a one-liner to create a site.
@@ -165,11 +170,11 @@ fi
 case "$choice" in
   2|terminal|t|T)
     printf '\n'
-    ok "All set. Create your first site:"
-    printf '    cd %s\n' "$DIR"
-    printf '    ./sb instance create mysite   # create + boot a WordPress site\n'
-    printf '    ./sb web                      # or open the dashboard anytime\n'
-    printf '    ./sb uninstall                # remove everything\n\n'
+    ok "All set. Create your first site (from any folder):"
+    printf '    sb instance create mysite   # create + boot a WordPress site\n'
+    printf '    sb web                      # or open the dashboard anytime\n'
+    printf '    sb uninstall                # remove everything\n\n'
+    printf '%s  (If `sb` isn'\''t found yet, open a new terminal, or use %s./sb%s in %s.)%s\n\n' "$DIM" "$N$DIM" "$N$DIM" "$DIR" "$N"
     ;;
   *)
     printf '\n%s▸ Opening the dashboard… create your first site with "New instance".%s\n' "$B" "$N"

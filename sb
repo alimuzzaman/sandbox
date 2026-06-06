@@ -3151,6 +3151,108 @@ def cmd_clean(cfg, args) -> None:
     ok(f"Stopped and wiped DB volume for instance '{inst}'")
 
 
+def _global_link_dir() -> tuple[Path, bool]:
+    """Pick where to drop the global `sb` symlink. Returns (dir, needs_sudo).
+
+    Preference order, first that's on PATH:
+      1. a user dir we can write without sudo  (~/.local/bin, ~/bin)
+      2. Homebrew bin                          (/opt/homebrew/bin, /usr/local/bin)
+      3. /usr/local/bin with sudo
+    Falling back to ~/.local/bin (creating it) if nothing on PATH is writable —
+    the caller then tells the user to add it to PATH."""
+    path_dirs = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    on_path = lambda d: d in path_dirs
+    home = Path.home()
+    # 1. user-writable dirs already on PATH (no sudo)
+    for d in (home / ".local" / "bin", home / "bin",
+              Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+        if on_path(d) and os.access(d, os.W_OK):
+            return d, False
+    # 2. /usr/local/bin on PATH but not writable → sudo
+    ulb = Path("/usr/local/bin")
+    if on_path(ulb) and ulb.exists():
+        return ulb, True
+    # 3. last resort: ~/.local/bin (create it), warn about PATH
+    return home / ".local" / "bin", False
+
+
+def cmd_global(cfg, args) -> None:
+    """Install (or remove) a global `sb` command so you can run it from anywhere
+    instead of `cd <dir> && ./sb`.
+
+    It's a symlink to this file. `sb` resolves its own location via the symlink
+    (Path(__file__).resolve()), so it still finds THIS install — no wrapper, no
+    hardcoded paths. `./sb global --remove` deletes the link."""
+    self_path = Path(__file__).resolve()
+    remove = getattr(args, "remove", False)
+
+    if remove:
+        # Remove any `sb` on PATH that points back at this install.
+        removed = []
+        for p in os.environ.get("PATH", "").split(os.pathsep):
+            link = Path(p) / "sb"
+            try:
+                if link.is_symlink() and link.resolve() == self_path:
+                    if os.access(link.parent, os.W_OK):
+                        link.unlink()
+                    else:
+                        _sudo(["rm", "-f", str(link)],
+                              reason="Sandbox is removing its global `sb` command.",
+                              capture_output=True, text=True)
+                    removed.append(str(link))
+            except OSError:
+                continue
+        if removed:
+            ok("Removed global `sb`: " + ", ".join(removed))
+        else:
+            info("No global `sb` symlink pointing at this install was found.")
+        return
+
+    target_dir, needs_sudo = _global_link_dir()
+    target = target_dir / "sb"
+
+    # Already linked here and pointing at us? Done.
+    if target.is_symlink():
+        try:
+            if target.resolve() == self_path:
+                ok(f"`sb` is already global → {target}")
+                return
+        except OSError:
+            pass
+    if target.exists() and not target.is_symlink():
+        die(f"{target} already exists and isn't a symlink. Move it aside, then "
+            f"re-run, or pick another PATH dir.")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if needs_sudo:
+        info(f"Linking {target} → {self_path} (needs your password once).")
+        r = _sudo(["ln", "-sf", str(self_path), str(target)],
+                  reason="Sandbox is installing a global `sb` command in "
+                         "/usr/local/bin so you can run it from any folder.",
+                  capture_output=True, text=True)
+        if r.returncode != 0:
+            die(f"failed to create symlink: {(r.stderr or '').strip()}")
+    else:
+        if target.is_symlink() or target.exists():
+            target.unlink()
+        target.symlink_to(self_path)
+
+    ok(f"Installed global `sb` → {target}")
+
+    # If the chosen dir isn't on PATH, tell the user how to add it.
+    path_dirs = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if target_dir not in path_dirs:
+        shell = os.environ.get("SHELL", "")
+        rc = "~/.zshrc" if shell.endswith("zsh") else "~/.bashrc"
+        info(f"{target_dir} isn't on your PATH yet. Add it:")
+        print(f'    echo \'export PATH="{target_dir}:$PATH"\' >> {rc}')
+        print(f"    source {rc}")
+        print("  Then `sb` works from anywhere. (New terminals pick it up "
+              "automatically.)")
+    else:
+        print("  Now run `sb` from any folder — e.g. `sb web`, `sb instances`.")
+
+
 def cmd_uninstall(cfg, args) -> None:
     """Tear down the whole sandbox install: stop + remove every instance's
     containers + DB volumes, remove the HTTPS proxy + domain config, deregister
@@ -3200,6 +3302,13 @@ def cmd_uninstall(cfg, args) -> None:
     if SUDOERS_FILE.exists():
         subprocess.run(["sudo", "-n", "rm", "-f", str(SUDOERS_FILE)],
                        capture_output=True, text=True)
+
+    # 5. Remove the global `sb` command if it points at this install.
+    try:
+        import types as _types
+        cmd_global(cfg, _types.SimpleNamespace(remove=True))
+    except Exception:
+        pass
 
     ok("Sandbox uninstalled (containers, volumes, proxy, MCP servers removed).")
 
@@ -5284,6 +5393,11 @@ Then pick a project and a plugin:
         help="skip prompts (non-interactive)")
     ob.add_argument("--site-title", dest="site_title", default=None)
 
+    gl = sub.add_parser("global",
+        help="Install a global `sb` command so you can run it from any folder")
+    gl.add_argument("--remove", action="store_true",
+        help="remove the global `sb` symlink instead of installing it")
+
     un = sub.add_parser("uninstall",
         help="Remove the whole sandbox (containers, volumes, proxy, MCP)")
     un.add_argument("--yes", action="store_true", help="skip confirmation")
@@ -5356,6 +5470,7 @@ Then pick a project and a plugin:
         "instance": cmd_instance,
         "onboard": cmd_onboard,
         "secure": cmd_secure,
+        "global": cmd_global,
         "uninstall": cmd_uninstall,
         "domains": cmd_domains,
         "dashboard": cmd_dashboard, "ui": cmd_dashboard,

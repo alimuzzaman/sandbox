@@ -37,6 +37,18 @@ private), unpacks it to `~/sandbox`, and runs setup. To publish a release:
 installs WordPress, generates an Application Password, builds the MCP server, and
 writes `.mcp.json` inside this folder.
 
+**Run `sb` from anywhere.** The one-line installer makes `sb` a global command,
+so you don't have to `cd` into the folder — `sb web`, `sb instances`, etc. work
+from any directory. Installed from git instead? Run it once yourself:
+
+```bash
+./sb global            # symlink `sb` onto your PATH
+./sb global --remove   # undo it
+```
+
+It's just a symlink back to this install, so `sb` always targets the right
+sandbox. (`./sb` from inside the folder keeps working too.)
+
 **Missing a prerequisite?** `setup` offers to install it for you. If `python3`,
 Docker, or the `venv` module isn't found, it prompts `Install now? [y/N]` and
 runs the right command for your package manager (Homebrew / apt / dnf) — no

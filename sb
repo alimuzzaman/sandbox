@@ -2719,7 +2719,12 @@ def cmd_setup(cfg, args) -> None:
     # install never silently lands on a busy port.
     cfg = _resolve_port_conflicts(cfg)
 
-    instances = resolve_instances(cfg)
+    # --no-instances: just prepare the CLI + MCP venv + Claude wiring. No
+    # WordPress is booted — the user creates their first site afterwards (from
+    # the web UI or `./sb add`). Keeps a fresh install fast and empty-start.
+    no_instances = getattr(args, "no_instances", False)
+
+    instances = {} if no_instances else resolve_instances(cfg)
     import types
     import urllib.request, time
     for inst_name, inst_cfg in instances.items():
@@ -2743,8 +2748,9 @@ def cmd_setup(cfg, args) -> None:
 
     # Clean URLs: give every instance a http://<name>.sb (no port) via the URL
     # proxy. Local + interactive + Docker only. Skipped in server mode (the box
-    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot).
-    if not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
+    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot)
+    # and when no instances were booted (nothing to route yet).
+    if instances and not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
         print("\n▸ Setting up clean URLs (http://<name>.sb, no port)…")
         up, cfg = _ensure_url_proxy(cfg)
         if up:
@@ -5097,6 +5103,10 @@ Then pick a project and a plugin:
     sp.add_argument("--server", action="store_true",
                     help="headless/server mode: no proxy/Claude/browser; reach "
                          "it via an SSH tunnel to localhost")
+    sp.add_argument("--no-instances", action="store_true",
+                    help="don't boot/install any WordPress instance — just "
+                         "prepare the CLI + MCP. Create sites later from the "
+                         "web UI or with ./sb instance create <name>.")
     ap = sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
 

@@ -2776,15 +2776,28 @@ def cmd_setup(cfg, args) -> None:
     else:
         info("skipped user-scope MCP registration (no claude CLI / server mode).")
 
-    print("\n▸ Verifying…")
-    try:
-        cmd_doctor(cfg, args)
-    except SystemExit:
-        pass  # doctor exits 1 on problems; we want to keep going to print next steps
+    # Verify the running stack — but only if we actually booted instances.
+    # With --no-instances there's nothing to check yet (doctor would just print
+    # a wall of "not running" noise for a site the user hasn't created).
+    if not no_instances:
+        print("\n▸ Verifying…")
+        try:
+            cmd_doctor(cfg, args)
+        except SystemExit:
+            pass  # doctor exits 1 on problems; keep going to print next steps
 
     print()
     ok("Setup complete.")
     print()
+
+    # Empty-start: nothing booted. The caller (installer or user) decides what's
+    # next — create a site from the web UI or `./sb instance create <name>`. Skip
+    # the plugin-picker + "Next:" epilogue, which assume a running instance.
+    if no_instances:
+        info("No site yet. Create one:")
+        print("    ./sb instance create <name>   # create + boot a WordPress site")
+        print("    ./sb web                      # or open the dashboard")
+        return
 
     # Offer the plugin picker as the natural next step. Skip on --no-pick
     # (CI / re-runs) or if no projects are defined.

@@ -8,6 +8,30 @@ import { usageTokenSum } from "./usage";
 import { welcome } from "./welcome";
 import type { Instance } from "../types";
 
+// Domain row: shows the .sb domain + whether it's plain http or secured https.
+// On plain http it surfaces how to upgrade — `./sb secure <name>` — because the
+// CA-trust step needs an interactive sudo password and so can't run from a UI
+// button (it would hang headless); we show the exact command to run instead.
+function domainCell(r: Instance): string {
+  const dom = r.domain || "";
+  const secured = r.url.startsWith("https://");
+  const isSb = dom.endsWith(".sb");
+  if (secured) {
+    return `<span class="text-neutral-700 dark:text-neutral-200">${esc(dom)}</span>
+      <span class="inline-flex items-center gap-1 ml-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+        <span>🔒</span> https (trusted)</span>`;
+  }
+  const tip = isSb
+    ? `<div class="mt-1.5">
+         <div class="text-[11.5px] text-neutral-500 dark:text-neutral-400 mb-1">
+           🔒 Want HTTPS? Run this once in your terminal:</div>
+         ${snippet("./sb secure " + r.name)}
+       </div>`
+    : "";
+  return `<span class="text-neutral-700 dark:text-neutral-200">${esc(dom)}</span>
+    <span class="text-[11px] text-neutral-400 ml-1">http (no cert)</span>${tip}`;
+}
+
 // Per-instance Claude usage summary (best-effort, cached).
 function instUsageLine(name: string): string {
   const u = store.usage;
@@ -77,8 +101,7 @@ export function instanceView(r: Instance | null): string {
   <div class="px-6 pb-2">
     ${sectionHead("Overview")}
     ${row("Web server", `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
-    ${r.domain ? row("Domain", `<span class="text-neutral-700 dark:text-neutral-200">${esc(r.domain)}</span>
-        <span class="text-[11px] text-neutral-400">→ 127.0.0.1</span>`) : ""}
+    ${r.domain ? row("Domain", domainCell(r)) : ""}
     ${row("Site address", r.running
         ? `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`
         : `<span class="text-neutral-400">${r.url} <span class="text-[11px]">(stopped)</span></span>`)}

@@ -22,10 +22,9 @@ export function domainEdited(): void { domainTouched = true; }
 
 export async function doCreate(): Promise<void> {
   domainTouched = false;
-  const dready = store.data.domains_ready;
-  const desc = dready
-    ? "Name it, pick a web server, then optionally add plugins and demo content. The domain fills in from the name."
-    : "Name it, pick a web server, then optionally add plugins and demo content. Tip: run `./sb domains setup` once for trusted no-port HTTPS.";
+  const desc = "Name it, pick a web server, then optionally add plugins and demo "
+    + "content. It'll serve at a clean http://<name>.sb (no port). Want HTTPS? "
+    + "run `./sb secure <name>` after.";
 
   const projOpts: ChecklistOption[] = (store.data.projects || []).map((p) => ({
     value: p.name, label: p.name,

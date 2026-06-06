@@ -4890,7 +4890,23 @@ def cmd_web(cfg, args) -> None:
             code = 200 if result.get("ok") or result.get("job_id") else 400
             return self._send(code, json.dumps(result))
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # Bind the requested port; if it's busy (a previous `./sb web` still up, or
+    # anything else), auto-pick the next free one instead of crashing.
+    requested = port
+    httpd = None
+    for cand in range(requested, requested + 20):
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", cand), Handler)
+            port = cand
+            break
+        except OSError:
+            continue
+    if httpd is None:
+        die(f"couldn't bind a port in {requested}–{requested+19}. "
+            f"Something may be stuck — try: lsof -iTCP:{requested} -sTCP:LISTEN")
+    if port != requested:
+        info(f"port {requested} was busy — using {port} instead "
+             f"(another `./sb web` may already be running).")
     url = f"http://127.0.0.1:{port}"
     ok(f"Sandbox web UI: {url}  (localhost only — Ctrl-C to stop)")
     opener = "open" if sys.platform == "darwin" else "xdg-open"

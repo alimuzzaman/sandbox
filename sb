@@ -1867,22 +1867,49 @@ def cmd_doctor(cfg, args) -> None:
     check("application_password set", bool(app_pw),
           hint=f"./sb install --instance {inst}   (auto-provisions)")
     if app_pw:
-        try:
-            import base64, urllib.request, urllib.error
-            req = urllib.request.Request(
-                f"http://localhost:{port}/wp-json/wp/v2/users/me")
-            token = base64.b64encode(
-                f"{adm.get('user', 'admin')}:{app_pw}".encode()).decode()
+        import base64, urllib.request, urllib.error, time as _t
+        token = base64.b64encode(
+            f"{adm.get('user', 'admin')}:{app_pw}".encode()).decode()
+
+        import ssl as _ssl
+        _noverify = _ssl.create_default_context()
+        _noverify.check_hostname = False
+        _noverify.verify_mode = _ssl.CERT_NONE
+
+        def _rest_probe(url):
+            req = urllib.request.Request(url + "/wp-json/wp/v2/users/me")
             req.add_header("Authorization", f"Basic {token}")
+            # Local probe — don't fail on the mkcert cert not being in Python's
+            # trust store (it's a connectivity/auth check, not a security gate).
+            ctx = _noverify if url.startswith("https") else None
             try:
-                with urllib.request.urlopen(req, timeout=5) as r:
-                    status = r.status
+                with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
+                    return r.status
             except urllib.error.HTTPError as e:
-                status = e.code
-            check(f"REST auth works (status {status})", 200 <= status < 300,
-                  hint=f"rerun ./sb install --instance {inst} to refresh the password")
-        except Exception as e:
-            check("REST auth works", False, hint=str(e))
+                return e.code
+            except Exception:
+                return 0
+
+        # Probe BOTH the canonical site URL and localhost:port. A custom domain
+        # makes WP redirect localhost→https://<domain>, which can drop the auth
+        # header (→ 403). Auth is fine if EITHER endpoint accepts it. Retry once
+        # to ride out the brief window right after the password is provisioned.
+        urls = []
+        canon = site_url(resolve_instances(cfg).get(inst, {}))
+        if canon:
+            urls.append(canon)
+        urls.append(f"http://localhost:{port}")
+        status = 0
+        for attempt in range(2):
+            for u in urls:
+                status = _rest_probe(u)
+                if 200 <= status < 300:
+                    break
+            if 200 <= status < 300:
+                break
+            _t.sleep(1.5)
+        check(f"REST auth works (status {status})", 200 <= status < 300,
+              hint=f"rerun ./sb install --instance {inst} to refresh the password")
     check("wp-mcp venv built", (MCP_VENV / "bin" / "python").exists(),
           hint="./sb mcp-install")
 

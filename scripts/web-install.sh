@@ -17,6 +17,12 @@
 #   SANDBOX_DIR       install location      (default: $HOME/sandbox)
 set -eu
 
+# Run from a known-good directory. If the caller's cwd was deleted (e.g. they
+# ran this from a folder that no longer exists), getcwd fails and every child
+# process errors with "cannot access parent directories". cd to HOME up front so
+# the whole install is immune to a broken cwd.
+cd "$HOME" 2>/dev/null || cd / 2>/dev/null || true
+
 # ---- CONFIGURE ME: the public host serving install.sh + the tarball ----------
 BASE_URL="${SANDBOX_BASE_URL:-https://sandbox.example.com}"
 # -----------------------------------------------------------------------------

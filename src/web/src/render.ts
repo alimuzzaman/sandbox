@@ -43,7 +43,8 @@ function detailSignature(route: Route): string {
     const r = store.data.instances.find((i) => i.name === route.name) || null;
     if (!r) return "instance:none:" + route.name;
     return JSON.stringify(["instance", r.name, r.running, r.server, r.focus,
-      r.project, !!r.pending, store.busy[r.name] || "", store.data.plugins.length]);
+      r.project, !!r.pending, r.url, r.domain || "",
+      store.busy[r.name] || "", store.data.plugins.length]);
   }
   if (route.page === "usage") return "usage:" + (store.usage ? "loaded" : "pending");
   return route.page;

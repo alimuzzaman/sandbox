@@ -60,7 +60,9 @@ if [ ! -f "$STAGE/sandbox/config/sandbox-web.js" ]; then
   exit 1
 fi
 
-tar -czf "$TARBALL" -C "$STAGE" sandbox
+# COPYFILE_DISABLE stops macOS bsdtar from writing ._* / xattr headers that
+# GNU tar on Linux warns about ("Ignoring unknown extended header keyword").
+COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGE" sandbox
 cp "$TARBALL" "$LATEST"
 
 SIZE="$(du -h "$TARBALL" | cut -f1)"

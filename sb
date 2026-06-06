@@ -2455,6 +2455,21 @@ def _docker_preflight() -> int:
 
     r = subprocess.run(["docker", "info"], capture_output=True, text=True)
     if r.returncode != 0:
+        # On Linux, distinguish "daemon down" from "I'm not in the docker group"
+        # (daemon up, but this user can't reach the socket) — different fix.
+        if sys.platform != "darwin":
+            sudo_ok = subprocess.run(["sudo", "-n", "docker", "info"],
+                                     capture_output=True).returncode == 0
+            err = (r.stderr or "")
+            if sudo_ok or "permission denied" in err.lower():
+                problems += 1
+                user = os.environ.get("USER", "$USER")
+                print("  ✗ docker is running, but this user can't access it")
+                print(f"      → add yourself to the docker group, then re-login:")
+                print(f"          sudo usermod -aG docker {user}")
+                print(f"          newgrp docker   # or log out/in")
+                print(f"        then re-run:  ./sb setup")
+                return problems
         problems += 1
         print("  ✗ docker is installed but not running")
         start_cmd = ("open -a Docker" if sys.platform == "darwin"

@@ -2661,6 +2661,20 @@ def cmd_connect(cfg, args) -> None:
         _connect_github(cfg)
 
 
+def _is_server(args) -> bool:
+    """Headless/server mode: skip the desktop-only steps (clean-URL proxy +
+    mkcert + GUI askpass, Claude MCP wiring, browser auto-open). True when
+    --server is passed, SANDBOX_SERVER=1 is set, or we auto-detect a headless
+    box (not macOS, no claude CLI, and no controlling terminal)."""
+    if getattr(args, "server", False):
+        return True
+    if os.environ.get("SANDBOX_SERVER") == "1":
+        return True
+    return (sys.platform != "darwin"
+            and shutil.which("claude") is None
+            and not sys.stdin.isatty())
+
+
 def cmd_setup(cfg, args) -> None:
     """One command: boot the stack, install WP, build MCP, wire Claude.
 
@@ -2672,6 +2686,9 @@ def cmd_setup(cfg, args) -> None:
     booting + installing each one. Without an `instances:` block, this
     behaves identically to the pre-multi-instance flow against `main`.
     """
+    server = _is_server(args)
+    if server:
+        print("  (server mode — headless: localhost only, no proxy/Claude/browser)")
     problems = _docker_preflight()
     sys.stdout.flush()
     if problems:
@@ -2710,9 +2727,9 @@ def cmd_setup(cfg, args) -> None:
         cmd_install(cfg, sub_args)
 
     # Clean URLs: give every instance a http://<name>.sb (no port) via the URL
-    # proxy. Interactive + Docker only (one-time password for the proxy infra);
-    # otherwise instances stay on localhost:<port>. Plain http → no cert.
-    if sys.stdin.isatty() and not getattr(args, "no_domain", False):
+    # proxy. Local + interactive + Docker only. Skipped in server mode (the box
+    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot).
+    if not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
         print("\n▸ Setting up clean URLs (http://<name>.sb, no port)…")
         up, cfg = _ensure_url_proxy(cfg)
         if up:
@@ -2726,12 +2743,17 @@ def cmd_setup(cfg, args) -> None:
     print("\n▸ Building wp-mcp Python venv…")
     cmd_mcp_install(cfg, args)
 
+    # Wire Claude Code. The project .mcp.json is always written (harmless, used
+    # if anyone runs Claude in this dir). User-scope registration is skipped in
+    # server mode / when there's no claude CLI (nothing to register against).
     print("\n▸ Wiring Claude Code…")
-    # Reload cfg so the freshly-written app password is picked up.
-    cfg = load_config()
+    cfg = load_config()  # reload so the freshly-written app password is picked up
     path, created = write_claude_mcp_config(cfg)
     ok(f"{'Wrote' if created else 'Updated'} {path}")
-    register_claude_user_scope(cfg)
+    if not server and shutil.which("claude"):
+        register_claude_user_scope(cfg)
+    else:
+        info("skipped user-scope MCP registration (no claude CLI / server mode).")
 
     print("\n▸ Verifying…")
     try:
@@ -2756,6 +2778,24 @@ def cmd_setup(cfg, args) -> None:
         if ans in ("", "y", "yes"):
             cmd_pick(cfg, args)
             print()
+
+    if server:
+        # Headless: tell the user how to reach it over an SSH tunnel from their
+        # laptop (the box binds localhost only). Use the actual ports.
+        insts = resolve_instances(cfg)
+        wp_ports = sorted({ic["wordpress_port"] for ic in insts.values()})
+        try:
+            host = subprocess.check_output(["hostname"], text=True).strip()
+        except Exception:
+            host = "<server>"
+        tunnels = " ".join(f"-L {p}:127.0.0.1:{p}" for p in wp_ports)
+        print("  Reach it from your laptop over an SSH tunnel:")
+        print(f"    ssh -L 8765:127.0.0.1:8765 {tunnels} <user>@{host}")
+        print(f"    # then on the server:  cd {ROOT} && ./sb web")
+        print(f"    # and open on your laptop:  http://localhost:8765")
+        for p in wp_ports:
+            print(f"    #   WordPress: http://localhost:{p}")
+        return
 
     print("  Next:")
     print(f"    ./sb web            # open the dashboard (manage instances in the browser)")
@@ -5039,6 +5079,9 @@ Then pick a project and a plugin:
                     help="skip the post-setup plugin picker (CI / re-run)")
     sp.add_argument("--no-domain", action="store_true",
                     help="skip clean-URL proxy setup (stay on localhost:<port>)")
+    sp.add_argument("--server", action="store_true",
+                    help="headless/server mode: no proxy/Claude/browser; reach "
+                         "it via an SSH tunnel to localhost")
     ap = sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
 

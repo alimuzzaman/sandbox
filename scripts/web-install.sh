@@ -23,6 +23,17 @@ BASE_URL="${SANDBOX_BASE_URL:-https://sandbox.example.com}"
 DIR="${SANDBOX_DIR:-$HOME/sandbox}"
 TARBALL_URL="$BASE_URL/sandbox-latest.tar.gz"
 
+# Headless/server mode: forced by SANDBOX_SERVER=1, or auto-detected on a Linux
+# box with no GUI ($DISPLAY) and no `claude` CLI. In server mode we skip the
+# onboarding-with-browser + the dashboard auto-open and print SSH-tunnel hints.
+SERVER=0
+if [ "${SANDBOX_SERVER:-}" = "1" ]; then
+  SERVER=1
+elif [ "$(uname -s)" = "Linux" ] && [ -z "${DISPLAY:-}" ] \
+     && ! command -v claude >/dev/null 2>&1; then
+  SERVER=1
+fi
+
 if [ -t 1 ]; then
   B="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"; G="$(printf '\033[32m')"
   Y="$(printf '\033[33m')"; R="$(printf '\033[31m')"; N="$(printf '\033[0m')"
@@ -96,14 +107,24 @@ else
 fi
 
 # ---- Step 3: run setup ------------------------------------------------------
-step "Step 3/4  Running setup"
-printf '%s  Checks Docker, boots WordPress, builds the MCP server, wires Claude.%s\n' "$DIM" "$N"
+step "Step 3/3  Running setup"
+printf '%s  Checks Docker, boots WordPress, builds the MCP server.%s\n' "$DIM" "$N"
 cd "$DIR"
+if [ "$SERVER" = "1" ]; then
+  # Headless: localhost-only, no proxy/Claude/browser. setup prints the tunnel
+  # instructions itself.
+  ./sb setup --server --no-pick
+  printf '\n'
+  ok "Sandbox is ready in $DIR (server mode)"
+  printf '  See the SSH-tunnel command above to reach it from your laptop.\n\n'
+  exit 0
+fi
+
 ./sb setup --no-pick
 
-# ---- Step 4: guided onboarding (plugins / https / focus) --------------------
-step "Step 4/4  Onboarding"
-printf '%s  Pick plugins, optionally enable trusted https, set Claude focus.%s\n' "$DIM" "$N"
+# ---- Onboarding (local) -----------------------------------------------------
+step "Onboarding"
+printf '%s  Pick plugins, set Claude focus.%s\n' "$DIM" "$N"
 ./sb onboard || true   # never fail the install if onboarding is skipped
 
 printf '\n'
@@ -113,7 +134,5 @@ printf '    claude          # let Claude drive your WordPress (run in %s)\n' "$D
 printf '    ./sb uninstall  # remove everything\n'
 
 # ---- Open the dashboard (foreground) ----------------------------------------
-# Launch the web UI + open the browser so the user lands in the dashboard.
-# Runs in this terminal until Ctrl-C; the install is already complete.
 printf '\n%s▸ Opening the dashboard… (Ctrl-C to stop the server)%s\n' "$B" "$N"
 exec ./sb web --open

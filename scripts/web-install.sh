@@ -116,22 +116,31 @@ fi
 step "Step 3/3  Running setup"
 printf '%s  Checks Docker, boots WordPress, builds the MCP server.%s\n' "$DIM" "$N"
 cd "$DIR"
+# When this script is run as `curl … | sh`, the shell reads its OWN body from
+# the pipe (stdin). A child that also reads stdin (python's input(), or any
+# subprocess that drains it) eats the rest of the script — so `sh` hits EOF and
+# silently stops after that child, skipping every line below it. That's why the
+# dashboard never auto-opened: `./sb setup` swallowed the remaining lines. Fix:
+# give every interactive-ish child its OWN stdin (the terminal if there is one,
+# else /dev/null) so the shell keeps reading the script to the end.
+if [ -e /dev/tty ]; then SBIN=/dev/tty; else SBIN=/dev/null; fi
+
 if [ "$SERVER" = "1" ]; then
   # Headless: localhost-only, no proxy/Claude/browser. setup prints the tunnel
   # instructions itself.
-  ./sb setup --server --no-pick
+  ./sb setup --server --no-pick </dev/null
   printf '\n'
   ok "Sandbox is ready in $DIR (server mode)"
   printf '  See the SSH-tunnel command above to reach it from your laptop.\n\n'
   exit 0
 fi
 
-./sb setup --no-pick
+./sb setup --no-pick <"$SBIN"
 
 # ---- Onboarding (local) -----------------------------------------------------
 step "Onboarding"
 printf '%s  Pick plugins, set Claude focus.%s\n' "$DIM" "$N"
-./sb onboard || true   # never fail the install if onboarding is skipped
+./sb onboard <"$SBIN" || true   # never fail the install if onboarding is skipped
 
 printf '\n'
 ok "Sandbox is ready in $DIR"
@@ -140,5 +149,7 @@ printf '    claude          # let Claude drive your WordPress (run in %s)\n' "$D
 printf '    ./sb uninstall  # remove everything\n'
 
 # ---- Open the dashboard (foreground) ----------------------------------------
+# Give the server the terminal as stdin too, so Ctrl-C reaches it cleanly when
+# launched through `curl … | sh` (whose own stdin is the now-exhausted pipe).
 printf '\n%s▸ Opening the dashboard… (Ctrl-C to stop the server)%s\n' "$B" "$N"
-exec ./sb web --open
+exec ./sb web --open <"$SBIN"

@@ -123,7 +123,10 @@ cd "$DIR"
 # dashboard never auto-opened: `./sb setup` swallowed the remaining lines. Fix:
 # give every interactive-ish child its OWN stdin (the terminal if there is one,
 # else /dev/null) so the shell keeps reading the script to the end.
-if [ -e /dev/tty ]; then SBIN=/dev/tty; else SBIN=/dev/null; fi
+# Prefer the real terminal so setup's prompts still work; fall back to /dev/null.
+# Test that /dev/tty is actually OPENABLE (it can exist as a node yet fail with
+# "Device not configured" when there's no controlling terminal, e.g. piped/CI).
+if ( : <"/dev/tty" ) 2>/dev/null; then SBIN=/dev/tty; else SBIN=/dev/null; fi
 
 if [ "$SERVER" = "1" ]; then
   # Headless: localhost-only, no proxy/Claude/browser. setup prints the tunnel

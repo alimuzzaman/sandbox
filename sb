@@ -2758,15 +2758,27 @@ def cmd_setup(cfg, args) -> None:
             print()
 
     print("  Next:")
+    print(f"    ./sb web            # open the dashboard (manage instances in the browser)")
     if projs:
         print(f"    ./sb pick           # interactive checklist of plugins")
-        print(f"    ./sb add <repo>     # clone + activate a single plugin")
         print(f"    ./sb focus <slug>   # tell Claude which plugin you're on")
     print(f"    cd {ROOT} && claude   # run Claude Code here — .mcp.json auto-loads")
     print()
     print("  Optional — connect external integrations on demand:")
     print("    ./sb connect fb     # FluentBoards (standup/report skills)")
     print("    ./sb connect gh     # GitHub (auto-detects gh CLI auth)")
+
+    # Direct `./sb setup` on a terminal: offer to open the dashboard now. The
+    # one-line installer passes --no-pick and launches the UI itself, so this
+    # won't double-open there.
+    if sys.stdin.isatty() and not getattr(args, "no_pick", False):
+        try:
+            ans = input("\n  Open the dashboard now? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"; print()
+        if ans in ("", "y", "yes"):
+            import types as _t
+            cmd_web(load_config(), _t.SimpleNamespace(port=None, open=True))
     print()
 
 

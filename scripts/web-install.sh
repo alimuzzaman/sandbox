@@ -108,8 +108,12 @@ printf '%s  Pick plugins, optionally enable trusted https, set Claude focus.%s\n
 
 printf '\n'
 ok "Sandbox is ready in $DIR"
-printf '\n  Next:\n'
-printf '    cd %s\n' "$DIR"
-printf '    ./sb web        # browser dashboard\n'
-printf '    claude          # Claude can now drive your WordPress\n'
-printf '    ./sb uninstall  # remove everything (containers, files)\n\n'
+printf '\n  %sFrom here:%s\n' "$DIM" "$N"
+printf '    claude          # let Claude drive your WordPress (run in %s)\n' "$DIR"
+printf '    ./sb uninstall  # remove everything\n'
+
+# ---- Open the dashboard (foreground) ----------------------------------------
+# Launch the web UI + open the browser so the user lands in the dashboard.
+# Runs in this terminal until Ctrl-C; the install is already complete.
+printf '\n%s▸ Opening the dashboard… (Ctrl-C to stop the server)%s\n' "$B" "$N"
+exec ./sb web --open

@@ -2623,6 +2623,11 @@ def cmd_setup(cfg, args) -> None:
         print()
         sys.exit(1)
 
+    # Auto-pick free ports if the configured ones collide with something else
+    # already on the machine (e.g. another sandbox, or a reinstall) — so a fresh
+    # install never silently lands on a busy port.
+    cfg = _resolve_port_conflicts(cfg)
+
     instances = resolve_instances(cfg)
     import types
     import urllib.request, time
@@ -3091,6 +3096,65 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     }
 
 
+def _port_busy_by_other(port: int, own_project: str) -> bool:
+    """True if `port` is bound by something OTHER than this instance's own
+    compose project. A port published by our own (already-running) container is
+    NOT a conflict — re-running setup on a healthy install must not churn ports.
+    """
+    import socket
+    # Free to bind → not busy at all.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port)); return False
+        except OSError:
+            pass
+    # Busy — is it OUR container holding it? Check docker for a published port
+    # owned by own_project. If yes, not a conflict.
+    res = subprocess.run(
+        ["docker", "ps", "--filter", f"publish={port}",
+         "--format", "{{.Names}}"], capture_output=True, text=True)
+    names = (res.stdout or "")
+    return own_project not in names
+
+
+def _resolve_port_conflicts(cfg: dict) -> dict:
+    """Before booting, ensure each instance's ports are free (or already ours).
+    If a port collides with another listener, bump the whole instance to a free
+    trio and persist to sandbox.local.yml. Returns the (possibly reloaded) cfg.
+    """
+    instances = resolve_instances(cfg)
+    used: set[int] = set()
+    for ic in instances.values():
+        used.update({ic["wordpress_port"], ic["db_port"], ic["mailpit_port"]})
+    changed = False
+    local = _local_yaml()
+    for name, ic in instances.items():
+        proj = project_name(name)
+        wp, db, mp = ic["wordpress_port"], ic["db_port"], ic["mailpit_port"]
+        conflict = (_port_busy_by_other(wp, proj)
+                    or _port_busy_by_other(db, proj)
+                    or _port_busy_by_other(mp, proj))
+        if not conflict:
+            continue
+        # Pick a fresh free trio (avoid all currently-claimed ports).
+        used.discard(wp); used.discard(db); used.discard(mp)
+        new_wp = _next_free_port(max(wp, 8188), used); used.add(new_wp)
+        new_db = _next_free_port(max(db, 3318), used); used.add(new_db)
+        new_mp = _next_free_port(max(mp, 8125), used); used.add(new_mp)
+        info(f"port conflict for '{name}' (WP {wp}/DB {db}/mail {mp} busy) → "
+             f"using WP {new_wp}/DB {new_db}/mail {new_mp}")
+        blk = local.setdefault("instances", {}).setdefault(name, {})
+        blk["wordpress_port"], blk["db_port"], blk["mailpit_port"] = \
+            new_wp, new_db, new_mp
+        changed = True
+    if changed:
+        _write_local_yaml(local)
+        cfg = load_config()
+        write_compose_files(cfg)
+        ok("adjusted ports to avoid conflicts (saved to sandbox.local.yml)")
+    return cfg
+
+
 def cmd_onboard(cfg, args) -> None:
     """Run the guided onboarding against an existing instance (default: main).
     The same flow as `./sb instance create` offers — pick plugins/projects,
@@ -3100,27 +3164,55 @@ def cmd_onboard(cfg, args) -> None:
     name = args.resolved_instance
     if name not in resolve_instances(cfg):
         die(f"unknown instance '{name}'. Run: ./sb instances")
-    print(f"\n▸ Onboarding '{name}' — set up plugins, https, and Claude focus.")
+    print(f"\n▸ Onboarding '{name}' — set up plugins, a custom domain, and focus.")
     _onboard_instance(cfg, name, args)
-    # Offer trusted https for this instance's domain (reuses the create-time
-    # offer path): if not set up + interactive, prompt once.
+
+    # --- Custom domain + trusted HTTPS (the option you choose here) ---
+    # Default instances serve at http://localhost:<port>. Offer to give this
+    # instance a clean, trusted https://<name>.sb URL via the one-time proxy
+    # setup. Skippable; the choice is remembered so it won't nag.
     inst = resolve_instances(cfg)[name]
     dom = inst.get("domain")
-    if (dom and dom.endswith(f".{PROXY_TLD}") and not proxy_available()
-            and shutil.which("docker") and sys.stdin.isatty()
-            and not _https_offer_declined()):
-        print(f"\n  ▸ Enable trusted https://{dom} (no port)? One-time setup,")
-        print(f"    asks your password once; then it's automatic forever.")
+    interactive = sys.stdin.isatty() and not getattr(args, "minimal", False)
+    if (interactive and shutil.which("docker") and not _https_offer_declined()
+            and not (dom and _sandbox_proxy_active(dom))):
+        default_dom = dom or f"{name}.{PROXY_TLD}"
+        print(f"\n  ▸ Custom domain: serve this site at a clean, trusted HTTPS URL")
+        print(f"    instead of http://localhost:{inst['wordpress_port']}?")
+        print(f"      • Enter a domain (default: {default_dom}), or")
+        print(f"      • press Enter to use {default_dom}, or type 'no' to skip.")
+        print(f"    First time enables it (one password); then it's automatic.")
         try:
-            ans = input("    Enable now? [y/N]: ").strip().lower()
+            ans = input(f"    Domain [{default_dom} / no]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            ans = "n"; print()
-        if ans in ("y", "yes"):
-            if proxy_setup(cfg):
-                cfg = load_config()
-                ok(f"https://{dom} is live.")
-        else:
+            ans = "no"; print()
+        if ans in ("no", "n", "skip"):
             _set_https_offer_declined()
+        else:
+            chosen = default_dom if ans == "" else _valid_domain(ans)
+            # Persist the domain on the instance.
+            local = _local_yaml()
+            local.setdefault("instances", {}).setdefault(name, {})["domain"] = chosen
+            _write_local_yaml(local)
+            cfg = load_config()
+            # Enable the proxy if it isn't already (one-time, asks password).
+            ready = proxy_available()
+            if not ready:
+                ready = proxy_setup(cfg)
+                cfg = load_config()
+            if ready:
+                # mint cert + route + point WP at https, regen + reload.
+                _mint_cert(chosen)
+                _write_ssl_muplugin(name)
+                regen_caddyfile(cfg)
+                reload_proxy()
+                url = f"https://{chosen}"
+                wpcli(["option", "update", "siteurl", url], instance=name, check=False)
+                wpcli(["option", "update", "home", url], instance=name, check=False)
+                ok(f"{name} now serves {url}")
+            else:
+                info("HTTPS setup didn't complete — staying on the port for now.")
+
     url = site_url(resolve_instances(cfg)[name])
     print()
     ok(f"'{name}' is set up — {url}/wp-admin  (admin / admin)")

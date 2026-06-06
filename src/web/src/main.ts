@@ -105,8 +105,21 @@ function boot(): void {
   render();
   const r0 = currentRoute();
   if (r0.page === "instance" && r0.console) openTerminal(r0.name);
+  startPolling();
+}
+
+// Live status polling that's cheap when idle: refresh every 5s, but ONLY while
+// the tab is visible. Hidden tabs poll nothing; becoming visible triggers an
+// immediate refresh so the view is fresh the moment you look at it.
+const POLL_MS = 5000;
+function startPolling(): void {
   refresh();
-  setInterval(refresh, 2000);
+  window.setInterval(() => {
+    if (document.visibilityState === "visible") refresh();
+  }, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refresh(); // catch up at once
+  });
 }
 
 boot();

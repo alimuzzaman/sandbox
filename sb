@@ -3218,7 +3218,8 @@ def cmd_secure(cfg, args) -> None:
     OPT-IN: installs + trusts the mkcert CA (one password), mints a cert for the
     domain, switches WP's siteurl to https, and reloads the proxy. The default
     install never does this — plain http needs no cert + never warns."""
-    name = args.resolved_instance
+    # Accept the instance as a positional (`./sb secure he`) or via --instance.
+    name = getattr(args, "name", None) or args.resolved_instance
     inst = resolve_instances(cfg).get(name)
     if not inst:
         die(f"unknown instance '{name}'. Run: ./sb instances")
@@ -5108,8 +5109,10 @@ Then pick a project and a plugin:
     ins.add_argument("--minimal", action="store_true",
         help="skip onboarding prompts (bare instance — CI-friendly)")
 
-    sub.add_parser("secure",
+    sec = sub.add_parser("secure",
         help="Upgrade an instance to trusted https://<name>.sb (opt-in)")
+    sec.add_argument("name", nargs="?",
+        help="instance to secure (default: the targeted/main instance)")
 
     ob = sub.add_parser("onboard",
         help="Guided setup for an existing instance (plugins, https, focus)")

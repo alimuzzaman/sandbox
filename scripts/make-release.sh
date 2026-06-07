@@ -2,10 +2,12 @@
 # Build a runtime-only release tarball for the public `curl | sh` installer.
 #
 # Ships ONLY what running the sandbox needs (sb, config/, mcp/, tools/, skills/,
-# workflows/, sandbox.yml, docker-compose.yml, docs). Excludes dev-only and
-# secret/generated files: .git, src/web (TypeScript source — the built bundle in
-# config/ ships instead), node_modules, .cli-venv, runtime/, *.local.yml, .env*,
-# per-instance state, caches.
+# workflows/, sandbox.yml, docker-compose.yml, README/CLAUDE). Excludes dev-only
+# and secret/generated files: .git, src/web (TypeScript source — the built
+# bundle in config/ ships instead), node_modules, .cli-venv, runtime/,
+# *.local.yml, .env*, per-instance state, caches. Also pruned below as
+# maintainer-only: deploy/ (release tooling), docs/ (internal planning),
+# skills/sandbox-release (this release flow), the build-* + make-release scripts.
 #
 # Output:  dist/sandbox-<version>.tar.gz  +  dist/sandbox-latest.tar.gz
 # Upload both to your public host (the install.sh BASE_URL).
@@ -52,6 +54,8 @@ rm -rf \
   "$STAGE/sandbox/scripts/build-web-js.sh" \
   "$STAGE/sandbox/scripts/build-web-css.sh" \
   "$STAGE/sandbox/skills/sandbox-release" \
+  "$STAGE/sandbox/deploy" \
+  "$STAGE/sandbox/docs" \
   "$STAGE/sandbox/.github" 2>/dev/null || true
 
 # Sanity: the built web bundle MUST be present (it's what `./sb web` serves).

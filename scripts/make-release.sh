@@ -51,6 +51,7 @@ rm -rf \
   "$STAGE/sandbox/scripts/make-release.sh" \
   "$STAGE/sandbox/scripts/build-web-js.sh" \
   "$STAGE/sandbox/scripts/build-web-css.sh" \
+  "$STAGE/sandbox/skills/sandbox-release" \
   "$STAGE/sandbox/.github" 2>/dev/null || true
 
 # Sanity: the built web bundle MUST be present (it's what `./sb web` serves).

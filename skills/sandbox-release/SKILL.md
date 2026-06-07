@@ -16,6 +16,11 @@ This is the sandbox-infra release flow. It is NOT a plugin release — for a
 WordPress plugin (xspeed, embedpress, …) use that plugin's own dist/share-build
 flow instead.
 
+> **Dev-only.** This is a maintainer skill for releasing *this* box. It is
+> stripped from the public install tarball by `scripts/make-release.sh` (in the
+> prune list) so it never reaches end users. Keep that exclusion if you rename
+> or move it.
+
 ## ⛔ Gate — these are per-action approvals
 
 `commit`, `push`, and `deploy to the live public site` each need the user's

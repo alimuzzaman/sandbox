@@ -15,6 +15,11 @@ ROOT="$(cd "$HERE/../.." && pwd)"          # repo root
 PUBLIC="$HERE/public"
 BASE_URL="${SANDBOX_BASE_URL:-https://sandbox.xc1.app}"
 
+# Release version from sandbox.yml (`version: N`), fallback to short git sha —
+# matches scripts/make-release.sh so the badge on the page == the tarball name.
+VER="$(awk -F': *' '/^version:/{print $2; exit}' "$ROOT/sandbox.yml" 2>/dev/null || true)"
+[ -n "${VER:-}" ] || VER="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+
 mkdir -p "$PUBLIC"
 
 echo "• building release tarball…"
@@ -41,6 +46,14 @@ text = re.sub(
 open(dst, "w").write(text)
 PY
 chmod +x "$PUBLIC/install.sh"
+
+echo "• staging index.html with version ${VER} …"
+# Bake the release version into the served landing page (replaces {{VERSION}}).
+python3 - "$ROOT/deploy/install-image/index.html" "$PUBLIC/index.html" "$VER" <<'PY'
+import sys
+src, dst, ver = sys.argv[1], sys.argv[2], sys.argv[3]
+open(dst, "w").write(open(src).read().replace("{{VERSION}}", ver))
+PY
 
 echo "✓ staged:"
 ls -lh "$PUBLIC"

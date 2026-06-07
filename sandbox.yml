@@ -5,7 +5,7 @@
 # Anything humans configure lives here. Things LLMs consume (skills,
 # workflows) stay as markdown elsewhere.
 
-version: 1
+version: 0.1.0
 
 # ---------------------------------------------------------------------------
 # Defaults — referenced as ${VAR} below.

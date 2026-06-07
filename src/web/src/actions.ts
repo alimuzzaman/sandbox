@@ -67,6 +67,26 @@ export async function doFocus(name: string, slug: string): Promise<void> {
   else if (slug) act(name, "focus", { slug });
 }
 
+// Switch the instance's web server in place. Backgrounded + streamed (it
+// recreates the web tier and may pull the OpenLiteSpeed image). No-op if the
+// picked server is the one already running.
+export async function doServer(name: string, server: string): Promise<void> {
+  const cur = store.data.instances.find((i) => i.name === name);
+  if (!server || (cur && cur.server === server)) return;
+  store.busy[name] = "server";
+  render();
+  let r;
+  try { r = await postAction({ instance: name, action: "server", server }); }
+  catch (e) { delete store.busy[name]; render(); toast("request failed: " + e, "err"); return; }
+  if (r.job_id) {
+    toast("switching " + name + " → " + server + "…", "info");
+    pollJob(r.job_id, name, "Switching " + name + " → " + server);
+  } else {
+    delete store.busy[name]; render();
+    toast((r.output || "failed").split("\n")[0], "err");
+  }
+}
+
 export async function doDelete(name: string): Promise<void> {
   const v = await modal({
     title: "Delete " + name, danger: true, okText: "Delete",

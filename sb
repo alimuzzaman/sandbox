@@ -1129,6 +1129,52 @@ def _web_services(server: str) -> list[str]:
     return base
 
 
+def _ensure_litespeed_htaccess(inst: str) -> None:
+    """Write the canonical WP rewrite .htaccess into the docroot and reload
+    OpenLiteSpeed so it honors it. WordPress only writes a physical .htaccess
+    under Apache — under OLS it writes none, so pretty permalinks + /wp-json/
+    404 without this. The image's vhost template does `autoLoadHtaccess`, but
+    only re-reads on reload. Idempotent: keeps an existing .htaccess as-is.
+    Called on install AND when switching an instance to the litespeed server."""
+    htaccess = wp_dir(inst) / ".htaccess"
+    if not htaccess.exists():
+        info("litespeed: writing WordPress .htaccess (OLS autoloads it for rewrites)…")
+        htaccess.write_text(
+            "# BEGIN WordPress\n"
+            "<IfModule mod_rewrite.c>\n"
+            "RewriteEngine On\n"
+            "RewriteBase /\n"
+            "RewriteRule ^index\\.php$ - [L]\n"
+            "RewriteCond %{REQUEST_FILENAME} !-f\n"
+            "RewriteCond %{REQUEST_FILENAME} !-d\n"
+            "RewriteRule . /index.php [L]\n"
+            "</IfModule>\n"
+            "# END WordPress\n"
+        )
+    # OLS cached the vhost on boot BEFORE the .htaccess existed, so it won't
+    # honor it until reloaded. Graceful reload picks it up.
+    info("litespeed: reloading OpenLiteSpeed to load the new .htaccess…")
+    compose("exec", "-T", "wp", "/usr/local/lsws/bin/lswsctrl", "restart",
+            instance=inst, check=False)
+
+
+def _pin_db_creds_in_config(inst: str) -> None:
+    """Write the DB credentials as LITERAL constants into wp-config.php.
+
+    The default wp-config resolves creds via getenv_docker('WORDPRESS_DB_*').
+    That works under the official wordpress image (apache/nginx) because its
+    entrypoint exports those env vars to php-fpm — but OpenLiteSpeed's lsphp
+    runs via suExec and does NOT inherit the container environment, so getenv()
+    returns empty and WP 500s with "Error establishing a database connection"
+    the moment an instance is switched to litespeed. Pinning literal values
+    makes the config server-agnostic: correct under apache, nginx, AND OLS.
+    Idempotent — `wp config set` overwrites the constant in place."""
+    info("pinning DB credentials into wp-config.php (server-agnostic)…")
+    for const, val in (("DB_HOST", "db:3306"), ("DB_USER", "wp"),
+                       ("DB_PASSWORD", "wp"), ("DB_NAME", "wp")):
+        wpcli(["config", "set", const, val], instance=inst, check=False)
+
+
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
     inst_cfg = resolve_instances(cfg)[inst]
@@ -1325,26 +1371,7 @@ def cmd_install(cfg, args) -> None:
     # writes none, so pretty permalinks + /wp-json/ 404. Drop the canonical
     # WP rewrite .htaccess into the docroot so OLS's autoload picks it up.
     if server == "litespeed":
-        htaccess = wp_dir(inst) / ".htaccess"
-        if not htaccess.exists():
-            info("litespeed: writing WordPress .htaccess (OLS autoloads it for rewrites)…")
-            htaccess.write_text(
-                "# BEGIN WordPress\n"
-                "<IfModule mod_rewrite.c>\n"
-                "RewriteEngine On\n"
-                "RewriteBase /\n"
-                "RewriteRule ^index\\.php$ - [L]\n"
-                "RewriteCond %{REQUEST_FILENAME} !-f\n"
-                "RewriteCond %{REQUEST_FILENAME} !-d\n"
-                "RewriteRule . /index.php [L]\n"
-                "</IfModule>\n"
-                "# END WordPress\n"
-            )
-        # OLS cached the vhost on boot BEFORE the .htaccess existed, so it
-        # won't honor it until reloaded. Graceful reload picks it up.
-        info("litespeed: reloading OpenLiteSpeed to load the new .htaccess…")
-        compose("exec", "-T", "wp", "/usr/local/lsws/bin/lswsctrl", "restart",
-                instance=inst, check=False)
+        _ensure_litespeed_htaccess(inst)
 
     # Auto-provision an Application Password for the MCP server so wp_rest
     # works out of the box. Idempotent: deletes any prior 'wp-mcp' password
@@ -3502,6 +3529,94 @@ def cmd_secure(cfg, args) -> None:
     ok(f"{name} now serves {url}  (hard-refresh your browser)")
 
 
+def _relax_perms_for_uid_switch(inst: str) -> None:
+    """Make the instance's WP files readable+writable across web-server uids.
+
+    apache/nginx serve as www-data (uid 33); OpenLiteSpeed runs lsphp as uid
+    1000. The WP files are the SAME bind-mounted host dir (runtime/wp-<inst>) —
+    switching servers doesn't move data, but files written under one uid must
+    stay readable (and uploads writable) under the other. The real fix for a
+    bind-mounted dev tree is permissive group/other bits: a+rX everywhere, and
+    a+rwX on the writable trees (uploads, cache, upgrade). No sudo, no chown —
+    works whoever owns the files on the host."""
+    root = wp_dir(inst)
+    if not root.exists():
+        return
+    info(f"relaxing file perms on {root.name} so both web-server uids can read/write…")
+    for p in root.rglob("*"):
+        try:
+            if p.is_dir():
+                p.chmod(p.stat().st_mode | 0o055)        # a+rx on dirs
+            else:
+                p.chmod(p.stat().st_mode | 0o044)        # a+r on files
+        except OSError:
+            pass
+    # The trees WP writes to at runtime need group/other write too.
+    for sub in ("wp-content/uploads", "wp-content/cache", "wp-content/upgrade"):
+        d = root / sub
+        for p in [d, *d.rglob("*")] if d.exists() else []:
+            try:
+                p.chmod(p.stat().st_mode | (0o022 if p.is_dir() else 0o022))
+            except OSError:
+                pass
+
+
+def cmd_server(cfg, args) -> None:
+    """Switch an existing instance's web server in place: apache | nginx |
+    litespeed. Mutates the instance's `server` field, regenerates its compose,
+    and recreates the web tier — swapping the wp image (litespeed uses the OLS
+    image), adding/removing the nginx sidecar, and re-asserting permalinks — so
+    the SAME site is served by the new stack on the SAME URL. No new ports, no
+    new DB, no content move (the WP files are the same bind-mounted host dir)."""
+    name = getattr(args, "name", None) or args.resolved_instance
+    inst = resolve_instances(cfg).get(name)
+    if not inst:
+        die(f"unknown instance '{name}'. Run: ./sb instances")
+    target = _valid_server(args.server_type)
+    current = inst.get("server", "apache")
+    if target == current:
+        ok(f"{name} already uses {current} — nothing to change.")
+        return
+
+    info(f"switching {name}: {current} → {target}")
+
+    # 1. Persist the new server to the instance's block, then reload + regen
+    #    compose so the generated stack reflects the new web tier.
+    local = _local_yaml()
+    blk = local.setdefault("instances", {}).setdefault(name, {})
+    blk["server"] = target
+    _write_local_yaml(local)
+    cfg = load_config()
+    write_compose_files(cfg)
+
+    # 2. Cross-uid file perms when litespeed is on either side of the switch
+    #    (33 ↔ 1000). Same files, different serving uid — relax so both read.
+    if "litespeed" in (current, target):
+        _relax_perms_for_uid_switch(name)
+
+    # 3. Recreate the web tier from the NEW server. --remove-orphans drops the
+    #    nginx sidecar when leaving nginx; --force-recreate swaps the wp image
+    #    (e.g. wordpress:latest ↔ OpenLiteSpeed) even if the service name is
+    #    unchanged.
+    inst = resolve_instances(cfg)[name]
+    compose("up", "-d", "--force-recreate", "--remove-orphans",
+            *_web_services(target), instance=name, check=False)
+
+    # 4. litespeed needs: literal DB creds in wp-config (lsphp doesn't inherit
+    #    the container env that getenv_docker relies on, so env-based config
+    #    500s), its WP .htaccess in the docroot (WP won't write one under OLS),
+    #    and an OLS reload. Apache/nginx derive both natively from the image.
+    if target == "litespeed":
+        _pin_db_creds_in_config(name)
+        _ensure_litespeed_htaccess(name)
+
+    # 5. Re-assert permalinks so /wp-json/ + pretty URLs work on the new stack.
+    wpcli(["rewrite", "structure", "/%postname%/"], instance=name, check=False)
+    wpcli(["rewrite", "flush"], instance=name, check=False)
+
+    ok(f"{name} now served by {target}: {site_url(inst)}  (hard-refresh your browser)")
+
+
 def cmd_onboard(cfg, args) -> None:
     """Run the guided onboarding against an existing instance (default: main).
     The same flow as `./sb instance create` offers — pick plugins/projects,
@@ -4948,6 +5063,23 @@ def _web_do_action(payload: dict) -> dict:
                 return run_op()
         return {"ok": True, "job_id": _start_job(label, locked)}
 
+    # Switch an instance's web server in place. Backgrounded + streamed because
+    # it recreates the web tier and may pull the OpenLiteSpeed image (slow).
+    if action == "server":
+        if not name:
+            return {"ok": False, "output": "missing instance"}
+        try:
+            target = _valid_server(payload.get("server"))
+        except SystemExit:
+            return {"ok": False, "output": "invalid server (apache|nginx|litespeed)"}
+        label = f"server {name} → {target}"
+
+        def do_server():
+            with _web_lock:
+                cmd_server(load_config(), _types.SimpleNamespace(
+                    name=name, server_type=target, resolved_instance=name))
+        return {"ok": True, "job_id": _start_job(label, do_server)}
+
     if action in ("create", "delete"):
         if action == "delete" and name == DEFAULT_INSTANCE:
             return {"ok": False, "output": "refusing to delete 'main'"}
@@ -5430,6 +5562,13 @@ Then pick a project and a plugin:
     sec.add_argument("name", nargs="?",
         help="instance to secure (default: the targeted/main instance)")
 
+    srv = sub.add_parser("server",
+        help="Switch an instance's web server in place (apache|nginx|litespeed)")
+    srv.add_argument("name", nargs="?",
+        help="instance to switch (default: the targeted/main instance)")
+    srv.add_argument("server_type", choices=list(SERVERS),
+        help="web server to switch to")
+
     ob = sub.add_parser("onboard",
         help="Guided setup for an existing instance (plugins, https, focus)")
     ob.add_argument("--project", default=None,
@@ -5525,6 +5664,7 @@ Then pick a project and a plugin:
         "instance": cmd_instance,
         "onboard": cmd_onboard,
         "secure": cmd_secure,
+        "server": cmd_server,
         "global": cmd_global,
         "uninstall": cmd_uninstall,
         "domains": cmd_domains,

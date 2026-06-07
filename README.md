@@ -96,6 +96,18 @@ Each instance can also run a different **web server** —
 `apache`). Useful for testing caching/permalink behavior across Apache, nginx,
 and OpenLiteSpeed. `./sb instances` shows each instance's server.
 
+You can also **switch an existing instance's server in place** — no need to
+spin up a separate instance per stack:
+
+```bash
+./sb server <name> nginx        # apache → nginx (adds the nginx sidecar)
+./sb server <name> litespeed    # → OpenLiteSpeed
+./sb server <name> apache       # → back to apache (removes the nginx orphan)
+```
+
+It keeps the same URL, port, DB, and content — only the serving tier swaps. The
+same site can be compared across all three servers without re-importing content.
+
 ### Clean URLs — `https://<name>.sb`
 
 By default instances serve at `http://localhost:<port>`. You can upgrade to a

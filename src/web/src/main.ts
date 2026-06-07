@@ -14,7 +14,7 @@ import {
 } from "./ui/console";
 import { toast } from "./ui/toast";
 import {
-  act, op, doFocus, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
+  act, op, doFocus, doServer, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
 import { doCreate, submitCreate, syncDomainFromName, domainEdited } from "./pages/create";
@@ -59,7 +59,7 @@ function showHelp(): void {
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
   navigate, goHome, selectInstance, showUsage, showHelp, openTerminal,
-  doCreate, submitCreate, doDelete, doFocus, doSnapshot, doRestore, doSeed, doWp, doInstall,
+  doCreate, submitCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
   loadUsageThenRender,
   act, op,

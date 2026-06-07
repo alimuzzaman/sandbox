@@ -89,6 +89,7 @@ export interface SbApi {
   submitCreate(): void;
   doDelete(name: string): void;
   doFocus(name: string, slug: string): void;
+  doServer(name: string, server: string): void;
   doSnapshot(name: string): void;
   doRestore(name: string): void;
   doSeed(name: string): void;

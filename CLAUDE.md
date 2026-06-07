@@ -442,6 +442,24 @@ automatically (litespeed uses a different docroot + uid).
 ./sb instances                              # SERVER column shows each one's stack
 ```
 
+**Switch an existing instance's server in place** — no need to create a separate
+instance per stack. `./sb server <name> <apache|nginx|litespeed>` mutates the
+instance's `server`, regenerates its compose, and recreates the web tier on the
+**same** URL/port/DB/content (the WP files are the same bind-mounted host dir):
+
+```
+./sb server main nginx       # apache → nginx (adds the nginx sidecar)
+./sb server main litespeed   # → OLS image; pins literal DB creds + writes .htaccess
+./sb server main apache      # → back to apache; removes the nginx orphan
+```
+
+Switching to litespeed pins literal `DB_*` constants into `wp-config.php` —
+OLS's lsphp runs via suExec and does NOT inherit the container env that the
+default `getenv_docker(...)` config relies on, so an env-based config 500s with
+"Error establishing a database connection" the moment you switch. Literal creds
+are server-agnostic (correct under apache, nginx, AND OLS). Switching away from
+nginx drops the orphaned sidecar via `--remove-orphans`.
+
 xSpeed-specific: on a `litespeed` instance the bundled **LiteSpeed Cache
 (LSCWP)** plugin is **auto-deactivated on install** so it can't shadow xSpeed's
 own page cache during testing. Re-activate it manually
@@ -479,6 +497,8 @@ Local-by-Flywheel style: a left **sidebar** lists instances (status dot + name),
 click one for its **detail panel** — server, URLs, MCP server, and per-instance
 Start/Stop/Restart, Admin/View-site links, a **focus dropdown** (pick a plugin
 from the projects: list → symlinks it in via `cmd_focus`; "none" clears focus),
+a **web-server dropdown** (apache/nginx/litespeed → switches in place via
+`cmd_server`; streams into the console, disabled while the site is stopped),
 and Delete. A **footer** shows N running + **Start all / Stop all**. The "+ New
 instance" button opens a modal (name + server). Actions are **optimistic** with
 per-action spinners; results surface as toasts (no `prompt()`/`alert()`).

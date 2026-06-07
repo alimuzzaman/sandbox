@@ -100,7 +100,12 @@ export function instanceView(r: Instance | null): string {
   </div>
   <div class="px-6 pb-2">
     ${sectionHead("Overview")}
-    ${row("Web server", `<span class="px-2.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[12.5px]">${esc(r.server)}</span>`)}
+    ${row("Web server", `<div class="flex items-center gap-2">
+        ${csel("serverSel", (store.data.servers && store.data.servers.length
+                 ? store.data.servers : ["apache", "nginx", "litespeed"]).map((s) => ({ v: s, label: s })),
+               r.server, (v) => window.sb.doServer(r.name, v), !!b || !r.running)}
+        ${b === "server" ? spinner() : ""}
+        ${!r.running ? '<span class="text-[11px] text-neutral-400">start the site to switch</span>' : ""}</div>`)}
     ${r.domain ? row("Domain", domainCell(r)) : ""}
     ${row("Site address", r.running
         ? `<a href="${r.url}" target="_blank" class="${link}">${r.url}</a>`

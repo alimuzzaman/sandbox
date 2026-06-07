@@ -2817,9 +2817,16 @@ def cmd_setup(cfg, args) -> None:
 
     # Clean URLs: give every instance a http://<name>.sb (no port) via the URL
     # proxy. Local + interactive + Docker only. Skipped in server mode (the box
-    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot)
-    # and when no instances were booted (nothing to route yet).
-    if instances and not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
+    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot).
+    #
+    # We set the proxy up even with --no-instances (no site booted yet): the
+    # one-time sudo password can ONLY be collected here, while setup still has a
+    # TTY. If we waited until the first instance, that's often created from the
+    # web dashboard (no TTY) — _ensure_url_proxy can't prompt there, silently
+    # falls back to localhost:<port>, and the user gets a port (or, with a stale
+    # domain, a hang) instead of the clean http://<name>.sb they wanted. Setting
+    # it up now means every later instance — CLI or dashboard — gets a clean URL.
+    if not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
         print("\n▸ Setting up clean URLs (http://<name>.sb, no port)…")
         up, cfg = _ensure_url_proxy(cfg)
         if up:

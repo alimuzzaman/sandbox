@@ -735,11 +735,18 @@ def _write_ssl_muplugin(instance: str) -> None:
 
 def site_url(inst_cfg: dict) -> str:
     """Browser URL for an instance. Precedence:
-      • https://<domain>       — proxy serves it AND it's been secured (cert)
-      • http://<domain>        — proxy serves this .sb domain (clean, no port)
-      • http://<domain>        — legacy Valet proxy (no port)
-      • http://<domain>:<port> — domain set but proxy not up yet
-      • http://localhost:<port> — no domain
+      • https://<domain>        — proxy serves it AND it's been secured (cert)
+      • http://<domain>         — proxy serves this .sb domain (clean, no port)
+      • http://<domain>         — legacy Valet proxy (no port)
+      • http://localhost:<port> — domain set but proxy NOT serving it, or no domain
+
+    Critical: a `.sb` domain only resolves while the proxy + its *.sb DNS are
+    up. If a domain is set but the proxy isn't actually serving it (proxy down,
+    DNS not installed, or the lo0 alias dropped after a reboot), we must fall
+    back to http://localhost:<port> — NOT http://<domain>:<port>. The latter is
+    never valid (the proxy serves clean URLs with no port) and points at a host
+    that won't resolve on a clean box, so the browser hangs ("loading forever").
+    localhost:<port> always works because the WP container publishes that port.
     """
     port = inst_cfg["wordpress_port"]
     dom = inst_cfg.get("domain")
@@ -748,8 +755,6 @@ def site_url(inst_cfg: dict) -> str:
         return (f"https://{dom}" if cert.exists() else f"http://{dom}")
     if dom and _valet_proxy_active(dom):
         return f"http://{dom}"
-    if dom:
-        return f"http://{dom}:{port}"
     return f"http://localhost:{port}"
 
 
@@ -4395,9 +4400,11 @@ def cmd_domains(cfg, args) -> None:
         if not any_dom:
             info("No custom domains. Create one: ./sb instance create <name>")
         print()
-        # Per-instance: which are plain http vs secured https.
+        # Per-instance: which are plain http vs secured https. `.get("domain")`
+        # can be None (key present but empty in sandbox.local.yml), so coerce to
+        # "" before .endswith — the bare default doesn't cover an explicit None.
         http_doms = [ic["domain"] for ic in resolve_instances(cfg).values()
-                     if ic.get("domain", "").endswith(f".{PROXY_TLD}")
+                     if (ic.get("domain") or "").endswith(f".{PROXY_TLD}")
                      and not _cert_paths(ic["domain"])[0].exists()]
         running = _proxy_container_running()
         print(f"  Proxy: {'✓ running' if running else '○ not running'} on "

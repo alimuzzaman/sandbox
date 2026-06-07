@@ -227,8 +227,13 @@ def _site_url(inst_cfg: dict) -> str:
       • https://<domain>        — proxy serves it AND it's secured (cert)
       • http://<domain>         — proxy serves this .sb domain (clean, no port)
       • http://<domain>         — legacy Valet proxy (no port)
-      • http://<domain>:<port>  — domain set but proxy not up yet
-      • http://localhost:<port> — no domain
+      • http://localhost:<port> — domain set but proxy NOT serving it, or no domain
+
+    A .sb domain only resolves while the proxy + its *.sb DNS are up. When a
+    domain is set but the proxy isn't serving it (down / DNS missing / lo0 alias
+    dropped after reboot), fall back to localhost:<port> — NOT <domain>:<port>,
+    which never resolves on a clean box and hangs the browser ("loading
+    forever"). Mirrors sb.site_url().
     """
     port = inst_cfg["wordpress_port"]
     dom = inst_cfg.get("domain")
@@ -237,8 +242,6 @@ def _site_url(inst_cfg: dict) -> str:
         return f"https://{dom}" if cert.exists() else f"http://{dom}"
     if dom and _valet_proxy_active(dom):
         return f"http://{dom}"
-    if dom:
-        return f"http://{dom}:{port}"
     return f"http://localhost:{port}"
 
 

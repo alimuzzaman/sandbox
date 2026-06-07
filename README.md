@@ -10,28 +10,32 @@ fix bugs, run migrations, query the DB, check email — without leaving this fol
 
 ## Get started
 
+**One-line install.** You don't need git or repo access — paste a single line:
+
 ```bash
-git clone <this-repo> sandbox
+curl -fsSL https://sandbox.xc1.app/install.sh | sh
+```
+
+It downloads a packaged release, unpacks it to `~/sandbox`, checks prerequisites
+(offering to install what's missing), boots Docker, installs WordPress, and wires
+Claude to the MCP server. Then, in any Claude session, say `focus <plugin>` —
+e.g. `focus embedpress`. That's it.
+
+**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any MCP
+client — Cursor, Cline, Continue, Zed).
+
+**From git instead.** Working on the sandbox itself? Clone and run setup:
+
+```bash
+git clone https://github.com/wpdevelopers/sandbox
 cd sandbox
-./install.sh
+./sb setup            # same thing; or ./install.sh for the python3 prereq wrapper
 ```
 
-`./install.sh` walks you through it step by step: it makes sure `python3` is
-present (offering to install it if not), then runs `./sb setup`. Prefer to skip
-the wrapper? Just run `./sb setup` directly — it does the same thing.
-
-**One-line install (production).** End users don't need the repo or git — once
-the release is published to a public host, they paste a single line:
-
-```bash
-curl -fsSL https://<your-host>/install.sh | sh
-```
-
-That downloads a packaged release (no GitHub access needed — the dev repo stays
-private), unpacks it to `~/sandbox`, and runs setup. To publish a release:
-`./scripts/make-release.sh` builds `dist/sandbox-latest.tar.gz`; upload it plus
-`scripts/web-install.sh` (as `install.sh`) to your host, and point the script's
-`BASE_URL` at it. See the headers of those two scripts for details.
+**Publish a release** (maintainers): `./scripts/make-release.sh` builds
+`dist/sandbox-latest.tar.gz` from `HEAD`; `deploy/install-site/publish.sh` stages
+it plus `install.sh` (with `BASE_URL` baked in) for the public host. See the
+headers of those scripts and `deploy/install-site/README.md` for details.
 
 `setup` checks prerequisites (Docker running, Python 3.9+), then boots Docker,
 installs WordPress, generates an Application Password, builds the MCP server, and

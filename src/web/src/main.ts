@@ -8,6 +8,7 @@ import { navigate, initRouter, onRoute, currentRoute, instancePath } from "./rou
 import { render, renderSidebar, renderDetail, activeInstanceName } from "./render";
 import { initModal, modal } from "./ui/modal";
 import { cselToggle, cselPick, cselFilter, initCselOutsideClose } from "./ui/csel";
+import { rowMenuToggle, rowMenuClose, initRowMenuClose } from "./ui/rowmenu";
 import {
   initConsole, setConsoleRefresh, consoleClose, openTerminal,
 } from "./ui/console";
@@ -16,7 +17,7 @@ import {
   act, op, doFocus, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
-import { doCreate, syncDomainFromName, domainEdited } from "./pages/create";
+import { doCreate, submitCreate, syncDomainFromName, domainEdited } from "./pages/create";
 import type { SbApi } from "./types";
 
 // ---- data refresh tick ----
@@ -58,12 +59,13 @@ function showHelp(): void {
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
   navigate, goHome, selectInstance, showUsage, showHelp, openTerminal,
-  doCreate, doDelete, doFocus, doSnapshot, doRestore, doSeed, doWp, doInstall,
+  doCreate, submitCreate, doDelete, doFocus, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
   loadUsageThenRender,
   act, op,
   syncDomainFromName, domainEdited,
   cselToggle, cselPick, cselFilter,
+  rowMenuToggle, rowMenuClose,
   consoleClose,
   copyText,
 };
@@ -76,6 +78,7 @@ function boot(): void {
   initModal();
   initConsole();
   initCselOutsideClose();
+  initRowMenuClose();
   initRouter();
 
   // Static sidebar buttons (not data-link).

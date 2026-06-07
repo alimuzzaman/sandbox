@@ -11,6 +11,7 @@
 
 export type Route =
   | { page: "home" }
+  | { page: "create" }
   | { page: "instance"; name: string; console: boolean }
   | { page: "usage" }
   | { page: "notfound" };
@@ -18,6 +19,7 @@ export type Route =
 export function parse(pathname: string): Route {
   const parts = pathname.replace(/\/+$/, "").split("/").filter(Boolean);
   if (parts.length === 0) return { page: "home" };
+  if (parts[0] === "create" && parts.length === 1) return { page: "create" };
   if (parts[0] === "usage" && parts.length === 1) return { page: "usage" };
   if (parts[0] === "instance" && parts[1]) {
     return { page: "instance", name: decodeURIComponent(parts[1]),

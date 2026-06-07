@@ -656,6 +656,14 @@ def regen_caddyfile(cfg: dict) -> None:
 # instance create/delete.
 {{
     auto_https off
+    # Serve HTTP/1.1 + HTTP/2 only — no HTTP/3. Caddy's default h3 makes it
+    # advertise `alt-svc: h3` (cached 30d), which pins long-running browsers to
+    # a QUIC connection holding a STALE cert verdict from before `./sb secure`
+    # ran — so the same browser keeps showing "Not Secure" while a freshly
+    # opened one trusts the cert fine. QUIC buys nothing for local dev; drop it.
+    servers {{
+        protocols h1 h2
+    }}
 }}
 """]
     for name, ic in resolve_instances(cfg).items():
@@ -839,6 +847,12 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       # Same WP files nginx serves statically + computes $document_root from.
       - ./runtime/wp-{instance}:/var/www/html:ro
+      # Plugins are symlinked into wp-content/plugins as ABSOLUTE host paths
+      # under plugins_host. nginx serves their static assets (js/css/images)
+      # itself, so it must resolve those symlinks too — mount plugins_host at
+      # the same path it does in the fpm `wp` service, or every symlinked
+      # plugin's assets 404 and its admin UI renders blank.
+      - {plugins_host}:{plugins_host}:ro
       - ./config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
 """
 
@@ -1198,6 +1212,29 @@ def cmd_focus(cfg, args) -> None:
         else:
             info("No focused plugin set")
         return
+    # Singleton focus invariant: a plugin is focused in AT MOST one
+    # instance at a time. Before focusing it here, clear the same plugin's
+    # focus on every OTHER instance. This is what lets "focus <plugin>"
+    # resolve to exactly one instance later — the plugin name, not the
+    # instance name, becomes the unambiguous lookup key.
+    #   `--here` is the explicit override: focus here WITHOUT stealing it
+    #   from other instances (for deliberate A/B / multi-instance work).
+    if not getattr(args, "here", False):
+        stolen = []
+        for fp in ROOT.glob(".focus.*"):
+            other = fp.name[len(".focus."):]
+            if other == inst:
+                continue
+            try:
+                if fp.read_text().strip() == args.slug:
+                    fp.unlink()
+                    stolen.append(other)
+            except OSError:
+                pass
+        if stolen:
+            info(f"moved focus of '{args.slug}' here from: "
+                 f"{', '.join(stolen)}")
+
     ff.write_text(args.slug)
     ok(f"Focused plugin: {args.slug}")
 
@@ -3448,6 +3485,17 @@ def cmd_secure(cfg, args) -> None:
     _write_ssl_muplugin(name)
     regen_caddyfile(cfg)
     reload_proxy()
+    # Regenerate the instance's compose + recreate its web tier so the LIVE
+    # container always matches the current generated compose. Without this, a
+    # container created before a compose-template change (e.g. the nginx
+    # plugins_host mount that lets symlinked-plugin assets resolve) keeps its
+    # stale mounts — so a secured nginx instance 404s plugin assets and renders
+    # the admin UI blank. Cheap + idempotent; recreates only the web service(s).
+    write_compose_files(cfg)
+    inst = resolve_instances(cfg)[name]
+    compose("up", "-d", "--force-recreate",
+            *_web_services(inst.get("server", "apache")),
+            instance=name, check=False)
     url = f"https://{dom}"
     wpcli(["option", "update", "siteurl", url], instance=name, check=False)
     wpcli(["option", "update", "home", url], instance=name, check=False)
@@ -5298,6 +5346,9 @@ Then pick a project and a plugin:
         help="Set/show which plugin Claude defaults to working on")
     f.add_argument("slug", nargs="?")
     f.add_argument("--clear", action="store_true")
+    f.add_argument("--here", action="store_true",
+        help="Focus here WITHOUT clearing the same plugin's focus on other "
+             "instances (override the one-plugin-one-instance invariant).")
 
     sub.add_parser("mcp-install", help="Install Python deps for wp-mcp")
     cl = sub.add_parser("claude",
@@ -5424,7 +5475,11 @@ Then pick a project and a plugin:
         # (none currently do; future-proof).
         if not any(a.option_strings == ["--instance"]
                    for a in sp_parser._actions):
-            sp_parser.add_argument("--instance", default=None)
+            # default=SUPPRESS so that when --instance is NOT passed after the
+            # subcommand, the subparser doesn't clobber a value the top-level
+            # parser already set from a BEFORE-subcommand --instance. Without
+            # this, `./sb --instance xx focus` silently resolved to main.
+            sp_parser.add_argument("--instance", default=argparse.SUPPRESS)
 
     args = p.parse_args()
     if not args.cmd:
@@ -5435,7 +5490,7 @@ Then pick a project and a plugin:
 
     # Resolve which instance this invocation targets.
     instances = resolve_instances(cfg)
-    chosen = args.instance or os.environ.get("SANDBOX_INSTANCE") or DEFAULT_INSTANCE
+    chosen = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE") or DEFAULT_INSTANCE
     if chosen not in instances:
         die(f"unknown instance '{chosen}'. Defined: "
             f"{', '.join(instances.keys())}.\n"

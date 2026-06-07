@@ -309,7 +309,8 @@ Claude Code's MCP server (`sandbox`) exposes these against the local stack:
 | `tail_log` | Tail `wp-content/debug.log` |
 | `fs_read` / `fs_write` / `fs_list` | Files under `runtime/wp-<instance>/` (scoped) |
 | `mail_list` / `mail_get` | Mailpit (test SMTP inbox) |
-| `focus_get` / `focus_set` | Which plugin Claude is currently working on |
+| `focus_resolve` | "Which instance is plugin `<slug>` focused in?" — call FIRST on `focus <plugin>` to route without guessing |
+| `focus_get` / `focus_set` | Which plugin Claude is currently working on (per instance) |
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | WXR import from `runtime/seeds/` |
 
@@ -318,6 +319,41 @@ specific sandbox instance (see "Multi-instance" below). **Each instance has
 its own MCP server**, so omitting `instance` defaults to *that server's*
 instance — `mcp__sandbox__*` defaults to `main`, `mcp__sandbox-<name>__*`
 defaults to `<name>`. Pass `instance=` to override per call.
+
+### Focus = singleton; the handshake never guesses an instance
+
+Focus has two axes, and they are set by two *different* mechanisms — never
+conflate them:
+
+- **Instance ("where")** is chosen by the **MCP namespace** — `mcp__sandbox__*`
+  = `main`, `mcp__sandbox-<name>__*` = that instance. NOT by any argument.
+- **Plugin ("what")** is the `focus_set` argument. The word after `focus`
+  is **always a plugin slug, never an instance name.**
+
+Focus is a **singleton**: a plugin is focused in **at most one instance** at a
+time. `focus_set` on instance N auto-clears that plugin's focus on every other
+instance. This is what lets `focus <plugin>` resolve unambiguously.
+
+**Handshake on "focus `<plugin>`" / "work on `<plugin>`":**
+
+1. `focus_resolve(<plugin>)` — find the instance.
+   - `status="resolved"` → use that instance's namespace + URL. No guessing.
+   - `status="none"` → not focused yet. One candidate → `focus_set` there.
+     Several → **ask which**. None → ask which instance to set up.
+   - `status="ambiguous"` → invariant broke (focused in >1); `focus_set` on the
+     intended one to repair.
+2. `load_context` (if you need the deep guide).
+3. that instance's `focus_get`.
+
+**Override (deliberate A/B across instances):** `focus_set(here_only=True)` or
+`./sb focus <plugin> --here` focuses here WITHOUT stealing it from other
+instances. Use only when you intentionally want the same plugin focused in two
+places at once.
+
+> Naming hygiene: don't name an instance after a plugin (e.g. an instance
+> literally named `xspeed`). Even though `focus_resolve` removes the ambiguity,
+> a same-named instance makes `focus <plugin>` read as "focus that instance" to
+> humans. Name instances by role/stack (`main`, `qa`, `nginx`, `lscache`).
 
 Plus Claude's native `Read`/`Write`/`Edit` reach the plugin source — because
 sources are bind-mounted into the container, edits are live with no rebuild.

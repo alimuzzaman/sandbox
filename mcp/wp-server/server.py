@@ -34,6 +34,16 @@ from mcp.server.fastmcp import FastMCP
 
 SANDBOX_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_DIR = SANDBOX_ROOT / "runtime" / "compose"
+
+# Sandbox HTTPS proxy — mirrors the constants in `sb` so _site_url() can
+# resolve the clean no-port browser URL (https://<inst>.sb) instead of a
+# bare localhost:<port>. Keep in sync with sb's PROXY_* block.
+PROXY_TLD = "sb"
+PROXY_DIR = SANDBOX_ROOT / "runtime" / "proxy"
+PROXY_CERTS_DIR = PROXY_DIR / "certs"
+PROXY_CADDYFILE = PROXY_DIR / "Caddyfile"
+PROXY_COMPOSE = PROXY_DIR / "proxy.yml"
+PROXY_PROJECT = "sandbox-proxy"
 DEFAULT_INSTANCE = "main"
 
 # The instance THIS server process is bound to. The CLI bakes
@@ -143,6 +153,9 @@ def _resolve_instance(instance: str) -> dict:
         "mailpit_port": inst.get("mailpit_port",
                                  runtime.get("mailpit_port", 8025)),
         "admin": {**rt_admin, **inst_admin},
+        # Optional custom local domain (e.g. xx.sb) served by the sandbox
+        # proxy. _site_url() turns this into the clean no-port browser URL.
+        "domain": inst.get("domain"),
     }
 
     # App password file fallback: for `main` the legacy
@@ -172,6 +185,63 @@ def _resolve_instance(instance: str) -> dict:
     return out
 
 
+def _proxy_container_running() -> bool:
+    """True if the sandbox-proxy Caddy container is up. Mirrors sb."""
+    try:
+        res = subprocess.run(
+            ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
+             "--project-directory", str(SANDBOX_ROOT), "ps", "-q", "proxy"],
+            capture_output=True, text=True, timeout=10)
+        return res.returncode == 0 and bool((res.stdout or "").strip())
+    except Exception:
+        return False
+
+
+def _sandbox_proxy_active(domain: str) -> bool:
+    """True when the proxy is running AND has a route for this domain. Mirrors
+    sb._sandbox_proxy_active so the URL reported matches what `./sb instances`
+    prints."""
+    if not domain or not PROXY_CADDYFILE.exists():
+        return False
+    try:
+        txt = PROXY_CADDYFILE.read_text()
+    except OSError:
+        return False
+    if f"http://{domain} {{" not in txt and f"\n{domain} {{" not in txt:
+        return False
+    return _proxy_container_running()
+
+
+def _valet_proxy_active(domain: str) -> bool:
+    """True when legacy Valet serves a proxy for this domain. Mirrors sb."""
+    if not domain:
+        return False
+    return (Path.home() / ".config" / "valet" / "Nginx" / domain).exists()
+
+
+def _site_url(inst_cfg: dict) -> str:
+    """The ACTUAL browser URL for an instance — the clean no-port proxy domain
+    when one is serving, else localhost:<port>. Mirrors sb.site_url() precedence
+    so MCP-reported URLs match `./sb instances`.
+
+      • https://<domain>        — proxy serves it AND it's secured (cert)
+      • http://<domain>         — proxy serves this .sb domain (clean, no port)
+      • http://<domain>         — legacy Valet proxy (no port)
+      • http://<domain>:<port>  — domain set but proxy not up yet
+      • http://localhost:<port> — no domain
+    """
+    port = inst_cfg["wordpress_port"]
+    dom = inst_cfg.get("domain")
+    if dom and dom.endswith(f".{PROXY_TLD}") and _sandbox_proxy_active(dom):
+        cert = PROXY_CERTS_DIR / f"{dom}.pem"
+        return f"https://{dom}" if cert.exists() else f"http://{dom}"
+    if dom and _valet_proxy_active(dom):
+        return f"http://{dom}"
+    if dom:
+        return f"http://{dom}:{port}"
+    return f"http://localhost:{port}"
+
+
 # Bound-instance values for tools that pre-date the multi-instance era.
 # The CLI bakes these env vars into this server's per-instance
 # registration; they describe whichever instance this process owns
@@ -187,11 +257,16 @@ MAILPIT_URL = os.environ.get("MAILPIT_URL", "http://localhost:8025")
 # CLAUDE.md and is loadable on demand via load_context().
 SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a live WordPress dev stack with MCP tools (wp_cli, wp_rest, db_query, tail_log, visit, fs_read, ...) wired to WP_URL.
 
-ACTIVATION: user says `focus <plugin>` / `work on <plugin>` / names a WPDeveloper plugin in a working context → handshake `focus_set` → `load_context` → `focus_get`. Don't re-run. Also engage on WP errors, stack traces, wp-admin debugging, or "work with sandbox." Stay quiet on non-WP work.
+ACTIVATION: user says `focus <plugin>` / `work on <plugin>` / names a WPDeveloper plugin → the word after "focus" is ALWAYS a plugin slug, NEVER an instance name. Handshake: 1) `focus_resolve(<plugin>)` to find WHICH instance to use, 2) `load_context`, 3) that instance's `focus_get`. Don't re-run. Also engage on WP errors, stack traces, wp-admin debugging, or "work with sandbox." Stay quiet on non-WP work.
 
 ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
 
-INSTANCE: each sandbox instance has its OWN MCP server — `mcp__sandbox__*` = main, `mcp__sandbox-<name>__*` = that instance. This server's tools default to THIS instance; focus/state are per-instance and never shared across servers. Use the namespace matching the instance you're working in.
+INSTANCE = "where", PLUGIN = "what" — two axes. Instance is chosen by the MCP namespace (`mcp__sandbox__*` = main, `mcp__sandbox-<name>__*` = that instance), NOT by the focus argument. Focus is a SINGLETON: a plugin is focused in at most one instance, so the plugin name resolves to exactly one instance.
+- "focus <plugin>" → `focus_resolve(<plugin>)`:
+  - status="resolved" → use that instance's namespace + URL. Done, no guessing.
+  - status="none" → not focused anywhere. If exactly one candidate instance lists it, focus_set there. If several, ASK which. If none, ask which instance to set up.
+  - status="ambiguous" → focus_set on the intended instance to repair to one holder.
+- Focusing a plugin auto-clears its focus on other instances. For deliberate A/B across instances, focus_set(here_only=True) or `./sb focus <plugin> --here`.
 
 REFLEXES when engaged:
 - Bug / error / stack trace / "doesn't work" → first tool call REPRODUCES on the live stack. Not Read/Grep/find. Pick the lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered → visit. Can't reproduce → BLOCKED.
@@ -593,9 +668,8 @@ def focus_get(include_claude_md: bool = True,
     # the embedpress instance is on 8190. Resolve from the instance's own
     # config (env-primed for the bound instance) rather than hardcoding.
     inst_cfg = _resolve_instance(instance)
-    wp_port = inst_cfg["wordpress_port"]
     mp_port = inst_cfg["mailpit_port"]
-    wp_url = f"http://localhost:{wp_port}"
+    wp_url = _site_url(inst_cfg)
 
     out = {"ok": True, "instance": instance, "focus": focus,
            "active_project": active,
@@ -617,9 +691,9 @@ def focus_get(include_claude_md: bool = True,
             except OSError:
                 continue
             if oslug:
-                oport = _resolve_instance(other)["wordpress_port"]
+                ourl = _site_url(_resolve_instance(other))
                 others.append({"instance": other, "focus": oslug,
-                               "admin_url": f"http://localhost:{oport}/wp-admin"})
+                               "admin_url": f"{ourl}/wp-admin"})
         if others:
             out["other_focused_instances"] = others
             out["hint"] = ("no focus on instance '%s'. Focused elsewhere: %s. "
@@ -707,13 +781,21 @@ def focus_get(include_claude_md: bool = True,
 
 @mcp.tool()
 def focus_set(plugin_slug: str,
-              instance: str = SESSION_INSTANCE) -> dict:
+              instance: str = SESSION_INSTANCE,
+              here_only: bool = False) -> dict:
     """Set the focused plugin slug. Pass empty string to clear.
 
     When setting a focus, this shells out to `./sb focus <slug>` so the
     CLI's auto-link logic runs: if the focused plugin isn't already in
     the active project's plugin list, the active project is switched
     to one that contains it. Keeps focus + active_project consistent.
+
+    SINGLETON INVARIANT: a plugin is focused in AT MOST one instance. By
+    default, focusing a plugin here CLEARS its focus on every other instance
+    (so "focus <plugin>" later resolves to exactly one instance — the plugin
+    name is the unambiguous key, never the instance name). Set here_only=True
+    to override — focus here without stealing it from other instances (for
+    deliberate A/B / parallel multi-instance work).
 
     instance: which sandbox instance's focus to set (default: this session's
     instance — SANDBOX_INSTANCE, or main if unset).
@@ -733,12 +815,15 @@ def focus_set(plugin_slug: str,
         return {"ok": True, "instance": instance, "focus": slug,
                 "warning": "./sb not found — focus set without auto-link"}
 
+    cmd = [str(sb), "--instance", instance, "focus", slug]
+    if here_only:
+        cmd.append("--here")
     res = subprocess.run(
-        [str(sb), "--instance", instance, "focus", slug],
+        cmd,
         capture_output=True, text=True, cwd=str(SANDBOX_ROOT), timeout=120,
     )
     inst_cfg = _resolve_instance(instance)
-    wp_url = f"http://localhost:{inst_cfg['wordpress_port']}"
+    wp_url = _site_url(inst_cfg)
     out = {
         "ok": res.returncode == 0,
         "instance": instance,
@@ -754,6 +839,84 @@ def focus_set(plugin_slug: str,
     if res.stderr.strip():
         out["stderr"] = res.stderr
     return out
+
+
+@mcp.tool()
+def focus_resolve(plugin_slug: str) -> dict:
+    """Answer "which instance is plugin <slug> focused in?" — the lookup-first
+    entry point for the handshake.
+
+    Because focus is a SINGLETON (a plugin is focused in at most one instance),
+    this resolves "focus <plugin>" to exactly one instance without guessing.
+    Call this FIRST when a user says "focus <plugin>" / "work on <plugin>" and
+    you don't already know which instance to use — then call that instance's
+    mcp__sandbox[-<inst>]__focus_get / wp_cli / etc.
+
+    Returns one of:
+      status="resolved"  → `instance` holds the focus; use its tools/URL.
+      status="none"      → no instance has it focused yet. `candidates` lists
+                           instances whose active project contains the plugin;
+                           pick one (or ask the user) and focus_set there.
+      status="ambiguous" → invariant violated (focused in >1 instance);
+                           `instances` lists them. Should not happen normally —
+                           re-focus to repair.
+    """
+    slug = plugin_slug.strip()
+    hits = _find_focus_instances(slug)
+    if len(hits) == 1:
+        inst = hits[0]
+        cfg = _resolve_instance(inst)
+        wp_url = _site_url(cfg)
+        return {
+            "ok": True, "status": "resolved", "plugin": slug,
+            "instance": inst,
+            "mcp_namespace": ("mcp__sandbox__*" if inst == DEFAULT_INSTANCE
+                              else f"mcp__sandbox-{inst}__*"),
+            "wordpress_url": wp_url,
+            "admin_url": f"{wp_url}/wp-admin",
+            "mailpit_url": f"http://localhost:{cfg['mailpit_port']}",
+            "hint": (f"plugin '{slug}' is focused on instance '{inst}'. "
+                     f"Use {('mcp__sandbox__*' if inst == DEFAULT_INSTANCE else f'mcp__sandbox-{inst}__*')} "
+                     f"tools and URL {wp_url}."),
+        }
+    if len(hits) > 1:
+        return {
+            "ok": False, "status": "ambiguous", "plugin": slug,
+            "instances": hits,
+            "hint": (f"INVARIANT VIOLATED: '{slug}' is focused on multiple "
+                     f"instances {hits}. focus_set it on the one you want to "
+                     f"repair to a single holder."),
+        }
+    # No instance has it focused — surface instances whose active project
+    # lists this plugin, so the caller can pick one to focus_set.
+    cfg = _load_sandbox_yml()
+    projs = (cfg.get("projects") or {})
+    candidates = []
+    for fp in SANDBOX_ROOT.glob(".active-project.*"):
+        inst = fp.name[len(".active-project."):]
+        try:
+            active = fp.read_text().strip()
+        except OSError:
+            continue
+        slugs = [(pl or {}).get("slug")
+                 for pl in ((projs.get(active) or {}).get("plugins") or [])]
+        if slug in slugs:
+            ic = _resolve_instance(inst)
+            candidates.append({
+                "instance": inst,
+                "active_project": active,
+                "admin_url": f"{_site_url(ic)}/wp-admin",
+            })
+    return {
+        "ok": True, "status": "none", "plugin": slug,
+        "candidates": candidates,
+        "hint": (f"plugin '{slug}' isn't focused on any instance yet. "
+                 + (f"It's available in: {[c['instance'] for c in candidates]}. "
+                    "Pick one (or ask the user) and focus_set it there."
+                    if candidates else
+                    "No instance's active project lists it — check the "
+                    "instance you want and focus_set it there.")),
+    }
 
 
 # ------------------ legacy convenience -------------------------------

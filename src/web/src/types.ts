@@ -86,6 +86,7 @@ export interface SbApi {
   showHelp(): void;
   openTerminal(name: string): void;
   doCreate(): void;
+  submitCreate(): void;
   doDelete(name: string): void;
   doFocus(name: string, slug: string): void;
   doSnapshot(name: string): void;
@@ -102,6 +103,8 @@ export interface SbApi {
   cselToggle(id: string): void;
   cselPick(id: string, v: string): void;
   cselFilter(id: string): void;
+  rowMenuToggle(id: string): void;
+  rowMenuClose(): void;
   consoleClose(): void;
   copyText(t: string, btn: HTMLElement): void;
 }

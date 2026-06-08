@@ -18,6 +18,9 @@ runtime/plugins/*
 runtime/snapshots/
 runtime/compose/
 runtime/proxy/
+runtime/registry.json
+runtime/registry.lock
+runtime/locks/
 
 # Plugin repos cloned by `./sb add` live here by default.
 # Each plugin has its own git history; never check them into the sandbox repo.

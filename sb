@@ -3918,6 +3918,162 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         )
 
 
+# --------------------------------------------------------------------------- #
+# Test harness (Phase 1). Sandbox provides the WP test suite + phpunit +
+# polyfills + composer EXTERNALLY (cached under runtime/), so a plugin's
+# composer.json needs none of the WP testing infra. Mounted into the container
+# only at test time. See docs/sandbox-mcp-tasks.md Phase 1.
+# --------------------------------------------------------------------------- #
+
+TEST_SUITE_DIR = ROOT / "runtime" / "test-suite"     # wordpress-develop checkout
+TEST_TOOLS_DIR = ROOT / "runtime" / "test-tools"     # phpunit/composer phars + polyfills
+_WPDEVELOP_REPO = "https://github.com/WordPress/wordpress-develop.git"
+_PHPUNIT_PHAR_URL = "https://phar.phpunit.de/phpunit-9.phar"
+_COMPOSER_PHAR_URL = "https://getcomposer.org/composer-stable.phar"
+_POLYFILLS_REPO = "https://github.com/Yoast/PHPUnit-Polyfills.git"
+_POLYFILLS_TAG = "2.0.1"      # supports PHPUnit 5.7–10 → good for phpunit 9 on PHP 8.3
+TESTS_DB_NAME = "wp_tests"    # isolated test DB; the installer wipes wptests_ tables
+
+
+def _git_q(*args, check=True):
+    return subprocess.run(["git", *args], check=check, capture_output=True, text=True)
+
+
+def _ensure_wp_test_suite(wp_version) -> Path:
+    """Sparse-clone wordpress-develop's tests/phpunit at the WP version (trunk
+    for latest/unpinned). Cached; returns the tests/phpunit dir."""
+    ref = "trunk"
+    if wp_version and re.match(r"^\d+\.\d+", str(wp_version)):
+        v = str(wp_version)
+        ref = v if v.count(".") >= 2 else v + ".0"
+    phpunit_dir = TEST_SUITE_DIR / "tests" / "phpunit"
+    marker = TEST_SUITE_DIR / ".ref"
+    if phpunit_dir.exists() and marker.exists() and marker.read_text().strip() == ref:
+        return phpunit_dir
+    if not (TEST_SUITE_DIR / ".git").exists():
+        TEST_SUITE_DIR.mkdir(parents=True, exist_ok=True)
+        info("cloning wordpress-develop test suite (sparse, depth 1)…")
+        _git_q("clone", "--depth", "1", "--filter=blob:none", "--no-checkout",
+               _WPDEVELOP_REPO, str(TEST_SUITE_DIR))
+        _git_q("-C", str(TEST_SUITE_DIR), "sparse-checkout", "set", "--cone",
+               "tests/phpunit")
+    if ref != "trunk":
+        got = _git_q("-C", str(TEST_SUITE_DIR), "fetch", "origin", "tag", ref,
+                     "--depth", "1", check=False)
+        if got.returncode != 0 or _git_q("-C", str(TEST_SUITE_DIR), "checkout",
+                                          ref, check=False).returncode != 0:
+            info(f"WP suite tag {ref} unavailable — using trunk")
+            ref = "trunk"
+    if ref == "trunk":
+        _git_q("-C", str(TEST_SUITE_DIR), "fetch", "origin", "trunk", "--depth", "1")
+        _git_q("-C", str(TEST_SUITE_DIR), "checkout", "trunk")
+    info(f"WP test suite → {ref}")
+    marker.write_text(ref)
+    return phpunit_dir
+
+
+def _download(url: str, dest: Path) -> None:
+    """Stream a URL to dest with a real User-Agent (phar.phpunit.de etc. 403 the
+    default urllib UA)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "sandbox-sb/1.0"})
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with urllib.request.urlopen(req, timeout=180) as r, open(tmp, "wb") as f:
+        shutil.copyfileobj(r, f)
+    os.replace(tmp, dest)
+
+
+def _ensure_test_tools() -> dict:
+    """Download phpunit.phar + composer.phar and clone polyfills (cached)."""
+    TEST_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    phpunit = TEST_TOOLS_DIR / "phpunit.phar"
+    if not phpunit.exists():
+        info("downloading phpunit.phar (9.x)…")
+        _download(_PHPUNIT_PHAR_URL, phpunit)
+    composer = TEST_TOOLS_DIR / "composer.phar"
+    if not composer.exists():
+        info("downloading composer.phar…")
+        _download(_COMPOSER_PHAR_URL, composer)
+    poly = TEST_TOOLS_DIR / "phpunit-polyfills"
+    if not (poly / "phpunitpolyfills-autoload.php").exists():
+        if poly.exists():
+            shutil.rmtree(poly)
+        info("cloning phpunit-polyfills…")
+        _git_q("clone", "--depth", "1", "--branch", _POLYFILLS_TAG,
+               _POLYFILLS_REPO, str(poly))
+    return {"phpunit": phpunit, "composer": composer, "polyfills": poly}
+
+
+def _ensure_tests_db(instance: str) -> None:
+    """Create the isolated wp_tests DB + grant (idempotent). NEVER the dev DB —
+    the WP installer drops every wptests_ table on each run."""
+    sql = (f"CREATE DATABASE IF NOT EXISTS {TESTS_DB_NAME}; "
+           f"GRANT ALL ON {TESTS_DB_NAME}.* TO 'wp'@'%'; FLUSH PRIVILEGES;")
+    compose("exec", "-T", "db", "mariadb", "-uroot", "-proot", "-e", sql,
+            instance=instance, check=False)
+
+
+def _write_wp_tests_config() -> Path:
+    """Sandbox-owned wp-tests-config.php matching the sandbox DB topology
+    (host db / user wp / pass wp / db wp_tests). Cached under test-tools."""
+    cfg_php = (
+        "<?php\n"
+        "define( 'ABSPATH', '/var/www/html/' );\n"
+        "define( 'WP_DEFAULT_THEME', 'default' );\n"
+        f"define( 'DB_NAME', '{TESTS_DB_NAME}' );\n"
+        "define( 'DB_USER', 'wp' );\n"
+        "define( 'DB_PASSWORD', 'wp' );\n"
+        "define( 'DB_HOST', 'db' );\n"
+        "define( 'DB_CHARSET', 'utf8' );\n"
+        "define( 'DB_COLLATE', '' );\n"
+        "$table_prefix = 'wptests_';\n"
+        "define( 'WP_TESTS_DOMAIN', 'localhost' );\n"
+        "define( 'WP_TESTS_EMAIL', 'admin@example.org' );\n"
+        "define( 'WP_TESTS_TITLE', 'Sandbox Tests' );\n"
+        "define( 'WP_PHP_BINARY', 'php' );\n"
+        "define( 'WP_TESTS_MULTISITE', false );\n"
+        "foreach ( array('AUTH_KEY','SECURE_AUTH_KEY','LOGGED_IN_KEY','NONCE_KEY',"
+        "'AUTH_SALT','SECURE_AUTH_SALT','LOGGED_IN_SALT','NONCE_SALT') as $k ) "
+        "{ if ( ! defined($k) ) define($k, 'test'); }\n"
+    )
+    path = TEST_TOOLS_DIR / "wp-tests-config.php"
+    path.write_text(cfg_php)
+    return path
+
+
+def cmd_test(cfg, args) -> None:
+    """`./sb test [--project-dir DIR]` — provision the (cached) WP test harness
+    for a project's instance: WP suite + phpunit + polyfills + composer + the
+    isolated wp_tests DB + sandbox wp-tests-config.php. (Running phpunit: T1.3.)"""
+    sc = _core()
+    pd = getattr(args, "project_dir", None) or os.getcwd()
+    try:
+        pconf = sc.load_project_config(pd)
+    except sc.ConfigError as e:
+        die(str(e))
+    entry = sc.registry_get(pconf["root"])
+    if not entry:
+        die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
+    inst = entry["instance"]
+
+    info("Provisioning test harness (cached)…")
+    suite = _ensure_wp_test_suite(pconf.get("wpVersion"))
+    tools = _ensure_test_tools()
+    _ensure_tests_db(inst)
+    config = _write_wp_tests_config()
+    # The WP suite bootstrap auto-discovers wp-tests-config.php at the suite dir
+    # (mounted as /wordpress-phpunit), so drop a copy in alongside it.
+    shutil.copy(config, suite / "wp-tests-config.php")
+    ok("Test harness ready:")
+    print(f"  instance:   {inst}")
+    print(f"  WP suite:   {suite}")
+    print(f"  phpunit:    {tools['phpunit']}")
+    print(f"  composer:   {tools['composer']}")
+    print(f"  polyfills:  {tools['polyfills']}")
+    print(f"  tests DB:   {TESTS_DB_NAME} (prefix wptests_)")
+    print(f"  config:     {config}")
+
+
 def cmd_mcp(cfg, args) -> None:
     """Run the sandbox MCP server over stdio. ONE server for all projects —
     every tool resolves its target instance per call from `project_dir`.
@@ -5752,6 +5908,11 @@ Then pick a project and a plugin:
     sub.add_parser("mcp",
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
 
+    ts = sub.add_parser("test",
+        help="Provision the WP test harness (phpunit/suite/polyfills) for a project dir")
+    ts.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)")
+
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
     en.add_argument("--project-dir", dest="project_dir", default=None,
@@ -5894,6 +6055,7 @@ Then pick a project and a plugin:
         "instance": cmd_instance,
         "ensure": cmd_ensure,
         "mcp": cmd_mcp,
+        "test": cmd_test,
         "onboard": cmd_onboard,
         "secure": cmd_secure,
         "server": cmd_server,

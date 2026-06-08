@@ -127,7 +127,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 1 — PHP test harness (the core value)
 
-### [ ] T1.1 — `ensure_test_harness(project_dir)`
+### [x] T1.1 — `ensure_test_harness(project_dir)`
+- **Done:** `./sb test` provisions a cached, external harness under `runtime/`: sparse-clones
+  `wordpress-develop` `tests/phpunit` (trunk for latest, tag for pinned `wpVersion`), downloads
+  `phpunit.phar` (9.6.34) + `composer.phar` (UA-bearing download — phar.phpunit.de 403s the
+  default UA), clones `yoast/phpunit-polyfills`. Idempotent (7.5s warm). Verified all artifacts.
+- **Still open:** ensure container-global phpunit on PATH is replaced by mounting `phpunit.phar`
+  at run time (T1.3); WP-version match uses trunk for "latest" pending a real version probe.
 - **Files:** `sb` (core fn) + `server.py` (tool).
 - **Do (per [`sandbox-notes.md`] mechanism):**
   - Clone `WordPress/wordpress-develop` `tests/phpunit` (sparse, depth 1, at the instance's
@@ -139,7 +145,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Verify:** after running it, `wp_exec(container=wp, command="which phpunit")` resolves and
   `/wordpress-phpunit/includes/bootstrap.php` exists in the container.
 
-### [ ] T1.2 — Separate tests DB + sandbox `wp-tests-config.php`
+### [x] T1.2 — Separate tests DB + sandbox `wp-tests-config.php`
+- **Done:** creates the isolated `wp_tests` DB (+ grant) on the instance's mariadb via root
+  (`MARIADB_ROOT_PASSWORD=root`); generates a sandbox `wp-tests-config.php` (host `db`, `wp_tests`,
+  user `wp`, `wptests_` prefix) and places it inside the suite dir so the WP bootstrap
+  auto-discovers it (confirmed via `includes/bootstrap.php` lines 6–16). Verified `wp_tests` exists.
 - **Files:** `sb` core; a shipped `mcp/.../wp-tests-config.php` (or generated under `runtime/`).
 - **Do:** create a `wp_tests` database on the `db` service; ship a config with `DB_HOST=db`,
   `DB_NAME=wp_tests`, `DB_USER=wp`, `DB_PASSWORD=wp`, `$table_prefix='wptests_'`,

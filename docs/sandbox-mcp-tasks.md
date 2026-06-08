@@ -20,7 +20,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 0 — Per-project config + single MCP server + registry (backbone)
 
-### [ ] T0.1 — Per-project config loader
+### [x] T0.1 — Per-project config loader
 - **Files:** `sb` (new `load_project_config(project_dir)`), shared with `server.py`.
 - **Do:**
   - Walk up from `project_dir` to find the project root (nearest `sandbox.config.json`
@@ -35,7 +35,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   multisite from `.wp-env.json`; on a dir with a hand-written `sandbox.config.yml` returns
   that, with `.override` applied.
 
-### [ ] T0.2 — On-disk instance registry + create-lock
+### [x] T0.2 — On-disk instance registry + create-lock
 - **Files:** `sb` (new `registry.py`-style functions, or a section in `sb`); state file
   e.g. `runtime/registry.json`.
 - **Do:** map `canonical project-root path → { instance, ports, server, status, wp_version }`.
@@ -44,7 +44,16 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Verify:** two rapid `ensure_instance` calls for the same root produce **one** instance
   (second returns the first); registry survives process restart.
 
-### [ ] T0.3 — `ensure_instance(project_dir)` core (create-if-missing)
+### [x] T0.3 — `ensure_instance(project_dir)` core (create-if-missing)
+- **Done:** `ensure_instance` + `cmd_ensure` (`./sb ensure --project-dir DIR --json`) in `sb`;
+  derives a per-dir instance name, picks ports, writes the instance block, boots via
+  `cmd_up`/`cmd_install`, wires plugins/mappings from the project config, records in the
+  registry. Verified: disable-comments booted on :8190 (54s), 2nd call returns in 1.2s,
+  registry + reachability + plugin activation confirmed.
+- **Follow-ups (scoped out, tracked):** (a) map the config's `config{}` constants →
+  `WORDPRESS_CONFIG_EXTRA` (not yet applied — see T2.2); (b) when the project root is
+  **outside** `defaults.plugins_home`, add its own bind mount or absolute symlinks 404
+  in-container (see T0.4).
 - **Files:** `sb` — extract today's `cmd_instance` create path (`sb:3754`) into a callable
   `ensure_instance(root, config)` returning `{ instance, url, ports, status }`.
 - **Do:** if registry has a ready instance for `root` → return it. Else: pick free ports
@@ -54,7 +63,20 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Verify:** in a fresh plugin dir, `ensure_instance` boots a reachable
   `http://localhost:<port>` and records it; a second call returns instantly.
 
-### [ ] T0.4 — Collapse to a single MCP server; tools take `project_dir`
+### [x] T0.4 — Collapse to a single MCP server; tools take `project_dir`
+- **Done (hard cut):** removed `SESSION_INSTANCE` + the env-baked WP_URL/WP_APP_PASSWORD/
+  MAILPIT_URL globals; added `_core()` + `_project_instance(project_dir)` resolving via the
+  registry; converted every stack tool (`wp_cli`/`wp_exec`/`wp_rest`/`db_query`/`tail_log`/
+  `fs_*`/`mail_*`/`activate_plugin`/`deactivate_plugin`/`import_content`) to a required
+  keyword-only `project_dir`; added the `ensure_instance` tool (shells `./sb ensure --json`);
+  rewrote `focus_get` to read the project root directly; **removed** the deprecated
+  cross-instance `focus_set`/`focus_resolve`; `visit` drops the unused instance + passes admin
+  creds. Fixed a latent `_compose` bug (missing `--project-directory` made relative WP mounts
+  miss). Verified end-to-end against the live disable-comments instance (wp_cli/wp_rest/focus_get
+  green; no-instance dir returns an actionable error).
+- **Still open:** the arbitrary-root **bind mount** below (projects under `plugins_home` work;
+  outside it needs the extra mount), and the 2 cosmetic `SESSION_INSTANCE` mentions left in
+  docstrings (lines ~19, ~168).
 - **Files:** `mcp/wp-server/server.py`.
 - **Do:**
   - Drop the `SANDBOX_INSTANCE` env binding (`server.py:54`) as the routing mechanism.
@@ -66,11 +88,22 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   - Add new tools: `ensure_instance(project_dir, config?)`, `instance_status(project_dir)`,
     `stop_instance` / `destroy_instance`, `apply_config(project_dir, override?)`.
   - Keep `load_skill`/`load_context`/`load_workflow` as-is (already correct).
+  - **Bind mount for arbitrary roots:** when a project root is outside
+    `defaults.plugins_home`, the compose web/cli services must also mount that root at
+    its identical host path (like the existing `{plugins_host}:{plugins_host}` mount),
+    else the absolute plugin symlink 404s in-container. Add a per-instance mount derived
+    from the registry's project root.
 - **Verify:** with one registration, `wp_cli(project_dir=<templately>, command="plugin list")`
   hits templately's instance and `wp_cli(project_dir=<disable-comments>, …)` hits a different
   one — no `SANDBOX_INSTANCE` env set.
 
-### [ ] T0.5 — `sandbox mcp` CLI entrypoint + single registration
+### [x] T0.5 — `sandbox mcp` CLI entrypoint + single registration
+- **Done:** `./sb mcp` (`cmd_mcp`) execs the venv stdio server; verified as a real MCP server
+  (initialize → "sandbox", tools/list → 20 tools incl. ensure_instance/wp_cli). Register with
+  `claude mcp add --scope user sandbox -- ./sb mcp`.
+- **Still open:** update the *auto*-registration (`register_claude_user_scope` /
+  `write_claude_mcp_config`, `sb:2252+`) so `./sb setup` / `instance create` register the single
+  `sandbox` server instead of per-instance `sandbox-<name>` ones. Manual registration works today.
 - **Files:** `sb` (new `cmd_mcp` + subparser; update `register_claude_user_scope`/
   `_build_mcp_entry` `sb:2252-2386`).
 - **Do:** `sandbox mcp` execs `MCP_VENV/bin/python mcp/wp-server/server.py` (stdio). Replace
@@ -80,7 +113,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Verify:** `claude mcp list` shows a single `sandbox`; `claude mcp get sandbox` connects;
   tools work from any directory.
 
-### [ ] T0.6 — Teach the handshake in `instructions`
+### [x] T0.6 — Teach the handshake in `instructions`
+- **Done:** rewrote `SANDBOX_INSTRUCTIONS` to the project-handshake (always pass `project_dir`;
+  call `ensure_instance` first; one dir ↔ one instance) as part of T0.4.
 - **Files:** `server.py` `SANDBOX_INSTRUCTIONS` (the `FastMCP(..., instructions=…)` baseline,
   `server.py:293`).
 - **Do:** state: always pass `project_dir` = the project root if known, else cwd; call

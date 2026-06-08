@@ -780,6 +780,43 @@ def deactivate_plugin(slug: str, *, project_dir: str) -> dict:
 
 
 @mcp.tool()
+def run_tests(project_dir: str, phpunit_args: str = "") -> dict:
+    """Run the plugin's phpunit tests against an externally-provisioned WP test
+    harness — the WP test suite, phpunit, polyfills, and an isolated wp_tests DB
+    are all supplied by Sandbox (none need to be in the plugin's composer).
+
+    project_dir: the plugin project (its instance must exist — call
+      ensure_instance first).
+    phpunit_args: optional args passed through to phpunit (e.g. "--filter Foo"
+      or a specific test file path).
+
+    Returns {ok, passed, summary, output}. This is live evidence — prefer it to
+    asserting a fix works from code reading.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    sb = SANDBOX_ROOT / "sb"
+    cmd = [str(sb), "test", "--project-dir", project_dir]
+    if phpunit_args.strip():
+        cmd += ["--", *shlex.split(phpunit_args)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=900, cwd=str(SANDBOX_ROOT))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "run_tests timed out after 900s"}
+    out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+    import re as _re
+    m = _re.search(r"(OK \(\d+ test.*?\)|FAILURES!.*|ERRORS!.*|Tests: \d.*)", out)
+    return {
+        "ok": res.returncode == 0,
+        "passed": res.returncode == 0,
+        "summary": m.group(1) if m else None,
+        "output": out[-4000:],
+    }
+
+
+@mcp.tool()
 def import_content(seed_file: str, authors: str = "create",
                    *, project_dir: str) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""

@@ -4027,6 +4027,9 @@ def _write_wp_tests_config() -> Path:
         "define( 'DB_CHARSET', 'utf8' );\n"
         "define( 'DB_COLLATE', '' );\n"
         "$table_prefix = 'wptests_';\n"
+        # The WP Core bootstrap wants the polyfills path as a CONSTANT (not an
+        # env var). /wp-phpunit-polyfills is where _run_tests mounts them.
+        "define( 'WP_TESTS_PHPUNIT_POLYFILLS_PATH', '/wp-phpunit-polyfills' );\n"
         "define( 'WP_TESTS_DOMAIN', 'localhost' );\n"
         "define( 'WP_TESTS_EMAIL', 'admin@example.org' );\n"
         "define( 'WP_TESTS_TITLE', 'Sandbox Tests' );\n"
@@ -4041,10 +4044,48 @@ def _write_wp_tests_config() -> Path:
     return path
 
 
+def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> int:
+    """composer install (the plugin's OWN dev deps) if needed, then run phpunit
+    with the external harness mounted. The project root is bind-mounted at the
+    identical path in-container, so it doubles as the phpunit workdir. Streams
+    output; returns the phpunit exit code."""
+    plug = str(root)
+    if not (Path(root) / "vendor" / "autoload.php").exists():
+        info("composer install (plugin dev deps)…")
+        # --no-plugins: skip composer/installers etc. (not needed to build the
+        #   test vendor, and they trip composer 2.2's allow-plugins gate).
+        # COMPOSER_ALLOW_SUPERUSER: the container runs composer as root.
+        base = ["run", "--rm",
+                "-e", "COMPOSER_HOME=/tmp/composer",
+                "-e", "COMPOSER_ALLOW_SUPERUSER=1",
+                "-v", f"{tools['composer']}:/composer.phar:ro",
+                "-w", plug, "--entrypoint", "php", "wpcli", "/composer.phar"]
+        flags = ["--no-interaction", "--no-progress", "--no-plugins"]
+        r = compose(*base, "install", *flags,
+                    instance=inst, check=False, capture=True)
+        if getattr(r, "returncode", 1) != 0:
+            # Stale/incompatible composer.lock (common: a lock pinned for PHP 7
+            # against a PHP 8.x container) — regenerate it for the live PHP.
+            info("locked install failed (stale lock) — running composer update…")
+            compose(*base, "update", *flags, instance=inst, check=False)
+    info("running phpunit…")
+    r = compose("run", "--rm",
+                "-v", f"{suite}:/wordpress-phpunit",
+                "-v", f"{tools['polyfills']}:/wp-phpunit-polyfills:ro",
+                "-v", f"{tools['phpunit']}:/phpunit.phar:ro",
+                "-e", "WP_TESTS_DIR=/wordpress-phpunit",
+                "-e", "WP_TESTS_PHPUNIT_POLYFILLS_PATH=/wp-phpunit-polyfills",
+                "-w", plug, "--entrypoint", "php", "wpcli",
+                "/phpunit.phar", *extra,
+                instance=inst, check=False)
+    return getattr(r, "returncode", 1)
+
+
 def cmd_test(cfg, args) -> None:
-    """`./sb test [--project-dir DIR]` — provision the (cached) WP test harness
-    for a project's instance: WP suite + phpunit + polyfills + composer + the
-    isolated wp_tests DB + sandbox wp-tests-config.php. (Running phpunit: T1.3.)"""
+    """`./sb test [--project-dir DIR] [--provision-only] [-- <phpunit args>]` —
+    provision the (cached) external WP test harness (suite + phpunit + polyfills
+    + composer + the isolated wp_tests DB + sandbox wp-tests-config.php) for a
+    project's instance, then run phpunit at the plugin dir."""
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     try:
@@ -4072,6 +4113,17 @@ def cmd_test(cfg, args) -> None:
     print(f"  polyfills:  {tools['polyfills']}")
     print(f"  tests DB:   {TESTS_DB_NAME} (prefix wptests_)")
     print(f"  config:     {config}")
+
+    if getattr(args, "provision_only", False):
+        return
+    extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
+    print()
+    code = _run_tests(inst, pconf["root"], suite, tools, extra)
+    print()
+    if code == 0:
+        ok("tests passed")
+    else:
+        die(f"tests failed (phpunit exit {code})")
 
 
 def cmd_mcp(cfg, args) -> None:
@@ -5909,9 +5961,13 @@ Then pick a project and a plugin:
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
 
     ts = sub.add_parser("test",
-        help="Provision the WP test harness (phpunit/suite/polyfills) for a project dir")
+        help="Run the plugin's phpunit tests (externally-provisioned WP harness)")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    ts.add_argument("--provision-only", dest="provision_only", action="store_true",
+        help="set up the harness but don't run phpunit")
+    ts.add_argument("passthrough", nargs=argparse.REMAINDER,
+        help="args after `--` are passed to phpunit (e.g. --filter foo)")
 
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")

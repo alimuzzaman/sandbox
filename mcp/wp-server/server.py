@@ -46,12 +46,41 @@ PROXY_COMPOSE = PROXY_DIR / "proxy.yml"
 PROXY_PROJECT = "sandbox-proxy"
 DEFAULT_INSTANCE = "main"
 
-# The instance THIS server process is bound to. The CLI bakes
-# SANDBOX_INSTANCE into each per-instance MCP registration's env (one server
-# per instance), so a session that calls this server's tools defaults every
-# tool to its own instance instead of always landing on "main". Falls back to
-# "main" for the legacy single-server registration that predates this.
-SESSION_INSTANCE = os.environ.get("SANDBOX_INSTANCE", DEFAULT_INSTANCE)
+
+# MCP-first model: ONE server. Every tool takes `project_dir` and resolves the
+# target instance from the on-disk registry (sandbox_core). There is no
+# SANDBOX_INSTANCE env binding and no per-instance server.
+
+def _core():
+    """Import the shared sandbox_core (config + registry). SANDBOX_ROOT is the
+    sandbox install dir, so this resolves regardless of the server's cwd."""
+    import sys
+    if str(SANDBOX_ROOT) not in sys.path:
+        sys.path.insert(0, str(SANDBOX_ROOT))
+    import sandbox_core
+    return sandbox_core
+
+
+def _project_instance(project_dir: str):
+    """Resolve a project dir to its instance NAME.
+
+    Returns (name, None) when an instance exists, or (None, error_dict) when the
+    path is invalid or no instance has been created yet. The error is returned
+    (not raised) so tools surface it cleanly to the agent.
+    """
+    sc = _core()
+    try:
+        root = str(sc.find_project_root(project_dir))
+    except Exception as e:  # ConfigError / bad path
+        return None, {"ok": False, "error": f"invalid project_dir {project_dir!r}: {e}"}
+    entry = sc.registry_get(root)
+    if not entry or not entry.get("instance"):
+        return None, {
+            "ok": False,
+            "error": f"no sandbox instance for project '{root}'. "
+                     f"Call ensure_instance(project_dir={project_dir!r}) first.",
+        }
+    return entry["instance"], None
 
 # Per-instance helpers — mirror the CLI's resolution.
 
@@ -168,20 +197,7 @@ def _resolve_instance(instance: str) -> dict:
     else:
         file_app_pw = inst.get("app_password", "")
 
-    # Env-prime the instance this server process is bound to. The CLI bakes
-    # the instance-correct WP_URL / WP_APP_PASSWORD into each per-instance
-    # registration's env, so this fires for `embedpress` on the embedpress
-    # server, `xspeed` on the xspeed server, etc. — not only `main`. Env
-    # wins over file (lets the CLI prime the server before sandbox.local.yml
-    # is even written).
-    if instance == SESSION_INSTANCE:
-        out["app_password"] = os.environ.get("WP_APP_PASSWORD") or file_app_pw
-        out["wordpress_port"] = int(
-            os.environ.get("WP_URL", "").rsplit(":", 1)[-1].split("/")[0]
-            or out["wordpress_port"]
-        ) if os.environ.get("WP_URL") else out["wordpress_port"]
-    else:
-        out["app_password"] = file_app_pw
+    out["app_password"] = file_app_pw
     return out
 
 
@@ -245,44 +261,38 @@ def _site_url(inst_cfg: dict) -> str:
     return f"http://localhost:{port}"
 
 
-# Bound-instance values for tools that pre-date the multi-instance era.
-# The CLI bakes these env vars into this server's per-instance
-# registration; they describe whichever instance this process owns
-# (SESSION_INSTANCE), which is `main` for the legacy single-server setup.
-WP_URL = os.environ.get("WP_URL", "http://localhost:8088")
-WP_USER = os.environ.get("WP_ADMIN_USER", "admin")
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "")
-MAILPIT_URL = os.environ.get("MAILPIT_URL", "http://localhost:8025")
+# Uniform admin creds (same across instances) for visit() auto-login —
+# resolved from sandbox.yml runtime.admin, no per-instance env binding.
+
+def _admin_creds() -> tuple[str, str]:
+    rt = (_load_sandbox_yml().get("runtime") or {}).get("admin") or {}
+    return rt.get("user", "admin"), rt.get("password", "admin")
 
 # Server-level instructions — Claude Code (and other MCP clients) surface
 # this in the model's system context automatically on connect. Capped at
 # 2KB by Claude Code; keep it punchy. Full operating prompt lives in
 # CLAUDE.md and is loadable on demand via load_context().
-SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a live WordPress dev stack with MCP tools (wp_cli, wp_rest, db_query, tail_log, visit, fs_read, ...) wired to WP_URL.
+SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a per-project WordPress dev/test stack driven by MCP tools (ensure_instance, wp_cli, wp_rest, db_query, tail_log, run_tests, visit, fs_read, ...).
 
-ACTIVATION: user says `focus <plugin>` / `work on <plugin>` / names a WPDeveloper plugin → the word after "focus" is ALWAYS a plugin slug, NEVER an instance name. Handshake: 1) `focus_resolve(<plugin>)` to find WHICH instance to use, 2) `load_context`, 3) that instance's `focus_get`. Don't re-run. Also engage on WP errors, stack traces, wp-admin debugging, or "work with sandbox." Stay quiet on non-WP work.
+PROJECT HANDSHAKE — this is mandatory:
+- Every tool takes `project_dir`. ALWAYS pass your current working directory (or the plugin's project root if you can determine it — the dir holding sandbox.config.* / .wp-env.json / .git). The server is a separate process; it cannot see your cd, so it relies on this.
+- Before using any stack tool, call `ensure_instance(project_dir=...)`. It returns the instance + URL, booting one on demand if needed (may take ~1 min the first time). Other tools error with "call ensure_instance first" until then.
+- One project directory ↔ one instance (per worktree). focus_get(project_dir) returns the project's plugin + its CLAUDE.md.
 
-ADMIN ACCESS: sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
+ACTIVATION: engage when the user wants to run/test a plugin, names a WPDeveloper plugin, or hits a WP error / stack trace / wp-admin issue. Stay quiet on non-WP work.
 
-INSTANCE = "where", PLUGIN = "what" — two axes. Instance is chosen by the MCP namespace (`mcp__sandbox__*` = main, `mcp__sandbox-<name>__*` = that instance), NOT by the focus argument. Focus is a SINGLETON: a plugin is focused in at most one instance, so the plugin name resolves to exactly one instance.
-- "focus <plugin>" → `focus_resolve(<plugin>)`:
-  - status="resolved" → use that instance's namespace + URL. Done, no guessing.
-  - status="none" → not focused anywhere. If exactly one candidate instance lists it, focus_set there. If several, ASK which. If none, ask which instance to set up.
-  - status="ambiguous" → focus_set on the intended instance to repair to one holder.
-- Focusing a plugin auto-clears its focus on other instances. For deliberate A/B across instances, focus_set(here_only=True) or `./sb focus <plugin> --here`.
+ADMIN ACCESS: the sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
 
 REFLEXES when engaged:
-- Bug / error / stack trace / "doesn't work" → first tool call REPRODUCES on the live stack. Not Read/Grep/find. Pick the lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log. Browser-rendered → visit. Can't reproduce → BLOCKED.
-- "Add" / "build" / "implement" / "create new" X → load_workflow('build-feature'); emit each phase as prose with bold headers (NOT fenced code blocks). Gates scale by Size: S = no gates after Phase 1 (auto-proceed), M = 1 gate after Phase 1, L = 2 gates (after Phase 1 + Phase 2).
+- Bug / error / stack trace / "doesn't work" → first call ensure_instance, then REPRODUCE on the live stack. Lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log; browser-rendered → visit; tests → run_tests. Can't reproduce → BLOCKED.
 - Any WP action → MCP tool, never raw bash / docker / curl / mysql.
 - About to mutate DB / migrate / touch licensing → snapshot first.
-- Editor authoring (Gutenberg stateful save, Elementor) → load_skill('wp-pilot'), drive real wp-admin.
 - About to commit / push / tag / open PR → STOP, wait for user.
 
-DEEPER CONTEXT: load_context (full guide), load_skill(name) for fix/bug-repro/snapshot/wp-debug/wp-pilot/fluentboards, load_workflow('build-feature') for new features.
+DEEPER CONTEXT: load_context (full guide); load_skill(name) for fix/bug-repro/snapshot/wp-debug/wp-pilot; load_workflow('build-feature') for new features.
 
 ANTI-PATTERNS — catch yourself:
-- FIXED from code reading. Only live MCP calls count as evidence.
+- "FIXED" from code reading. Only live MCP calls count as evidence.
 - Bug-fix slicing (edit, test, edit, test) — use load_skill('fix'): read all, batch edits, verify once.
 - Bash where an MCP tool exists.
 - 3 clarifying questions — pick likeliest interpretation, work, flag the assumption.
@@ -305,9 +315,13 @@ def _compose(*args: str, instance: str = DEFAULT_INSTANCE,
                      f"(expected {cf}). Run `./sb apply` from the sandbox "
                      f"dir to regenerate.",
         }
+    # --project-directory pins relative volume paths (./runtime/wp-<inst>) to the
+    # sandbox root; without it docker resolves them against the compose file's
+    # own dir (runtime/compose/) and the WP bind-mount silently misses.
     cmd = ["docker", "compose",
            "-p", _project_name(instance),
-           "-f", str(cf), *args]
+           "-f", str(cf),
+           "--project-directory", str(SANDBOX_ROOT), *args]
     try:
         res = subprocess.run(
             cmd, capture_output=capture, text=True,
@@ -358,22 +372,53 @@ def _safe_json(text: str):
 # ----------------------------- tools ---------------------------------
 
 @mcp.tool()
-def wp_cli(command: str, timeout: int = 60,
-           instance: str = SESSION_INSTANCE) -> dict:
+def ensure_instance(project_dir: str) -> dict:
+    """Ensure a sandbox WordPress instance exists for `project_dir`, creating it
+    on demand, and return {ok, instance, url, ports, status, root, source}.
+
+    project_dir: the plugin's project root (or your cwd). The server reads its
+    sandbox.config.* / .wp-env.json, boots an instance keyed by that directory
+    (one per worktree), installs WordPress, wires the plugin, and records it.
+    **Call this FIRST** — other tools error until an instance exists. Idempotent:
+    a ready project returns instantly; a cold boot pulls images + installs WP and
+    can take ~1 minute.
+    """
+    sb = SANDBOX_ROOT / "sb"
+    try:
+        res = subprocess.run(
+            [str(sb), "ensure", "--project-dir", project_dir, "--json"],
+            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "ensure_instance timed out after 600s"}
+    lines = (res.stdout or "").strip().splitlines()
+    entry = _safe_json(lines[-1]) if lines else None
+    if isinstance(entry, dict) and "instance" in entry:
+        entry.setdefault("ok", True)
+        return entry
+    return {"ok": False, "code": res.returncode,
+            "error": (res.stderr or res.stdout or "ensure failed").strip()[:1000]}
+
+
+@mcp.tool()
+def wp_cli(command: str, timeout: int = 60, *, project_dir: str) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
     `$(cat ...)`, pipes, or redirects, use wp_exec instead.
 
-    instance: which sandbox instance to target (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset).
+    project_dir: the plugin project to target (its instance must already exist —
+    call ensure_instance first).
     """
-    return _wpcli(shlex.split(command), instance=instance, timeout=timeout)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    return _wpcli(shlex.split(command), instance=inst, timeout=timeout)
 
 
 @mcp.tool()
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120, instance: str = SESSION_INSTANCE) -> dict:
+            timeout: int = 120, *, project_dir: str) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -381,35 +426,37 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     it goes through `sh -c`.
 
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
-    instance: which sandbox instance to target (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset).
+    project_dir: the plugin project to target (call ensure_instance first).
     """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
     args = ["exec"]
     if workdir:
         args += ["-w", workdir]
     args += ["-T", container, "sh", "-c", command]
-    return _compose(*args, instance=instance, timeout=timeout)
+    return _compose(*args, instance=inst, timeout=timeout)
 
 
 @mcp.tool()
 def wp_rest(method: str, path: str, body: dict | None = None,
-            query: dict | None = None,
-            instance: str = SESSION_INSTANCE) -> dict:
+            query: dict | None = None, *, project_dir: str) -> dict:
     """Call the WordPress REST API.
 
     path: e.g. '/wp/v2/posts' (leading slash optional)
-    Auth via Application Password — auto-provisioned by `./sb install`.
-    instance: which sandbox instance to hit (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset).
+    Auth via Application Password — auto-provisioned when the instance installs.
+    project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst_cfg = _resolve_instance(instance)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    inst_cfg = _resolve_instance(inst)
     app_pw = inst_cfg["app_password"]
     if not app_pw:
         return {
             "ok": False,
-            "error": f"no application_password for instance '{instance}'. "
-                     f"Run `./sb install --instance {instance}` "
-                     f"(auto-provisions one).",
+            "error": f"no application_password for instance '{inst}'. "
+                     f"Re-run ensure_instance(project_dir={project_dir!r}).",
         }
     port = inst_cfg["wordpress_port"]
     user = inst_cfg["admin"].get("user", "admin")
@@ -468,17 +515,18 @@ def http_fetch(url: str, method: str = "GET", follow_redirects: bool = True,
 
 
 @mcp.tool()
-def db_query(sql: str, mutate: bool = False,
-             instance: str = SESSION_INSTANCE) -> dict:
+def db_query(sql: str, mutate: bool = False, *, project_dir: str) -> dict:
     """Run a SQL query against the WP database.
 
     Reads (SELECT/SHOW/DESCRIBE/EXPLAIN) run freely.
     Writes (INSERT/UPDATE/DELETE/ALTER/CREATE/DROP/TRUNCATE/REPLACE) require
     mutate=true — an explicit acknowledgement that this changes data.
 
-    instance: which sandbox instance to target (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset).
+    project_dir: the plugin project to target (call ensure_instance first).
     """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
     head = sql.strip().split(None, 1)[0].upper() if sql.strip() else ""
     reads = {"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}
     writes = {"INSERT", "UPDATE", "DELETE", "REPLACE", "ALTER",
@@ -490,14 +538,16 @@ def db_query(sql: str, mutate: bool = False,
         }
     if head not in reads and head not in writes:
         return {"ok": False, "error": f"unrecognized statement type: {head!r}"}
-    return _wpcli(["db", "query", sql], instance=instance)
+    return _wpcli(["db", "query", sql], instance=inst)
 
 
 @mcp.tool()
-def tail_log(lines: int = 100, instance: str = SESSION_INSTANCE) -> dict:
-    """Tail wp-content/debug.log for one instance (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset)."""
-    log_path = _log_path(instance)
+def tail_log(lines: int = 100, *, project_dir: str) -> dict:
+    """Tail wp-content/debug.log for the project's instance."""
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    log_path = _log_path(inst)
     if not log_path.exists():
         return {"ok": True, "lines": [], "note": "debug.log not yet created",
                 "path": str(log_path)}
@@ -511,16 +561,17 @@ def tail_log(lines: int = 100, instance: str = SESSION_INSTANCE) -> dict:
 
 
 @mcp.tool()
-def fs_read(path: str, max_bytes: int = 200_000,
-            instance: str = SESSION_INSTANCE) -> dict:
-    """Read a file under runtime/wp-<instance>/ (the WordPress install).
+def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str) -> dict:
+    """Read a file under the project instance's WordPress install.
 
-    path is relative to runtime/wp-<instance>/ — e.g. 'wp-content/themes/my-theme/style.css'.
+    path is relative to the WP root — e.g. 'wp-content/themes/my-theme/style.css'.
     Refuses paths that escape the WP root.
-    instance: which sandbox instance (default: this session's instance —
-    SANDBOX_INSTANCE, or main if unset).
+    project_dir: the plugin project to target (call ensure_instance first).
     """
-    wp_root = _wp_root(instance)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    wp_root = _wp_root(inst)
     target = _safe_resolve(path, wp_root)
     if target is None:
         return {"ok": False, "error": f"path escapes WP root: {path!r}"}
@@ -542,14 +593,16 @@ def fs_read(path: str, max_bytes: int = 200_000,
 
 @mcp.tool()
 def fs_write(path: str, content: str, create_dirs: bool = True,
-             instance: str = SESSION_INSTANCE) -> dict:
-    """Write a file under runtime/wp-<instance>/. Creates parent dirs by default.
+             *, project_dir: str) -> dict:
+    """Write a file under the project instance's WordPress install. Creates
+    parent dirs by default. Refuses paths that escape WP root. Returns bytes.
 
-    Refuses paths that escape WP root. Returns bytes written.
-    instance: which sandbox instance (default: this session's instance —
-    SANDBOX_INSTANCE, or main if unset).
+    project_dir: the plugin project to target (call ensure_instance first).
     """
-    wp_root = _wp_root(instance)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    wp_root = _wp_root(inst)
     target = _safe_resolve(path, wp_root)
     if target is None:
         return {"ok": False, "error": f"path escapes WP root: {path!r}"}
@@ -561,10 +614,12 @@ def fs_write(path: str, content: str, create_dirs: bool = True,
 
 
 @mcp.tool()
-def fs_list(path: str = "", depth: int = 1,
-            instance: str = SESSION_INSTANCE) -> dict:
-    """List files under runtime/wp-<instance>/<path>. depth=1 is shallow."""
-    wp_root = _wp_root(instance)
+def fs_list(path: str = "", depth: int = 1, *, project_dir: str) -> dict:
+    """List files under the project instance's WP install. depth=1 is shallow."""
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    wp_root = _wp_root(inst)
     target = _safe_resolve(path or ".", wp_root)
     if target is None or not target.exists():
         return {"ok": False, "error": f"not found or escapes root: {path!r}"}
@@ -587,18 +642,17 @@ def fs_list(path: str = "", depth: int = 1,
 # ------------------ Mailpit (test SMTP inbox) ------------------------
 
 def _mailpit_url(instance: str) -> str:
-    # Env-prime the bound instance (the CLI bakes the instance-correct
-    # MAILPIT_URL into each per-instance registration's env).
-    if instance == SESSION_INSTANCE and os.environ.get("MAILPIT_URL"):
-        return os.environ["MAILPIT_URL"]
     port = _resolve_instance(instance)["mailpit_port"]
     return f"http://localhost:{port}"
 
 
 @mcp.tool()
-def mail_list(limit: int = 20, instance: str = SESSION_INSTANCE) -> dict:
+def mail_list(limit: int = 20, *, project_dir: str) -> dict:
     """List the most recent messages caught by Mailpit (test SMTP)."""
-    base = _mailpit_url(instance).rstrip("/")
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    base = _mailpit_url(inst).rstrip("/")
     try:
         r = httpx.get(f"{base}/api/v1/messages",
                       params={"limit": limit}, timeout=10.0)
@@ -609,9 +663,12 @@ def mail_list(limit: int = 20, instance: str = SESSION_INSTANCE) -> dict:
 
 
 @mcp.tool()
-def mail_get(message_id: str, instance: str = SESSION_INSTANCE) -> dict:
+def mail_get(message_id: str, *, project_dir: str) -> dict:
     """Get a single message from Mailpit (headers, text, html)."""
-    base = _mailpit_url(instance).rstrip("/")
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    base = _mailpit_url(inst).rstrip("/")
     try:
         r = httpx.get(f"{base}/api/v1/message/{message_id}", timeout=10.0)
         return {"ok": r.is_success, "status": r.status_code,
@@ -644,130 +701,45 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
 
 
 @mcp.tool()
-def focus_get(include_claude_md: bool = True,
-              max_bytes: int = 16_000,
-              instance: str = SESSION_INSTANCE) -> dict:
-    """Return the currently-focused plugin's slug, source path, CLAUDE.md
-    content, and any skill packs it ships (so Claude can read them on demand).
+def focus_get(project_dir: str, include_claude_md: bool = True,
+              max_bytes: int = 16_000) -> dict:
+    """Return the project's instance + focused plugin, its CLAUDE.md, and any
+    skill packs it ships (so Claude can read them on demand).
 
-    Works for ANY plugin — looks for `CLAUDE.md` and `.claude/skills/*/SKILL.md`
-    inside the focused plugin's source repo. No plugin name is hardcoded.
-
-    Devs set focus with `./sb focus <slug>`. Claude should default
-    file edits, debugging, and questions to that plugin's repo, and should
-    read any `available_skills[*]` SKILL.md that's relevant to the task.
-
-    instance: which sandbox instance (default: this session's instance —
-    SANDBOX_INSTANCE, or main if unset). Focus + active project
-    are per-instance.
+    In the per-project model the project root IS the plugin's source repo, so
+    this reads CLAUDE.md / .claude/skills/*/SKILL.md from `project_dir` directly.
+    Requires the instance to exist — call ensure_instance first.
     """
-    ff = _focus_file(instance)
-    af = _active_file(instance)
-    focus = ff.read_text().strip() if ff.exists() else None
-    active = af.read_text().strip() if af.exists() else None
-
-    # Instance-correct URLs so callers never guess the port. The focused
-    # plugin lives on THIS instance, which may not be `main`/8188 — e.g.
-    # the embedpress instance is on 8190. Resolve from the instance's own
-    # config (env-primed for the bound instance) rather than hardcoding.
-    inst_cfg = _resolve_instance(instance)
-    mp_port = inst_cfg["mailpit_port"]
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    sc = _core()
+    root = Path(sc.find_project_root(project_dir))
+    inst_cfg = _resolve_instance(inst)
     wp_url = _site_url(inst_cfg)
+    ff = _focus_file(inst)
+    focus = ff.read_text().strip() if ff.exists() else root.name
 
-    out = {"ok": True, "instance": instance, "focus": focus,
-           "active_project": active,
-           "wordpress_url": wp_url,
-           "admin_url": f"{wp_url}/wp-admin",
-           "mailpit_url": f"http://localhost:{mp_port}",
-           "source_path": None, "claude_md": None, "available_skills": []}
-    if not focus:
-        # This instance has no focus — but another instance might. Point the
-        # caller there (with its correct URL) so a wrong-namespace call still
-        # finds the focused plugin instead of silently returning nothing.
-        others = []
-        for fp in SANDBOX_ROOT.glob(".focus.*"):
-            other = fp.name[len(".focus."):]
-            if other == instance:
-                continue
-            try:
-                oslug = fp.read_text().strip()
-            except OSError:
-                continue
-            if oslug:
-                ourl = _site_url(_resolve_instance(other))
-                others.append({"instance": other, "focus": oslug,
-                               "admin_url": f"{ourl}/wp-admin"})
-        if others:
-            out["other_focused_instances"] = others
-            out["hint"] = ("no focus on instance '%s'. Focused elsewhere: %s. "
-                           "Use that instance's URL / mcp__sandbox-<inst>__* tools."
-                           % (instance, ", ".join(
-                               f"{o['focus']}→{o['instance']} ({o['admin_url']})"
-                               for o in others)))
-        return out
+    out = {
+        "ok": True, "instance": inst, "project_root": str(root),
+        "focus": focus,
+        "wordpress_url": wp_url,
+        "admin_url": f"{wp_url}/wp-admin",
+        "mailpit_url": f"http://localhost:{inst_cfg['mailpit_port']}",
+        "source_path": str(root), "claude_md": None, "available_skills": [],
+    }
 
-    # Defensive check: warn when focus and active_project disagree (focused
-    # on a plugin that isn't in the active project's plugin list). Common
-    # cause: user ran `./sb use <project-A>` then `./sb focus <plugin-not-in-A>`
-    # before the auto-link landed. Tells the agent the state is drifty.
-    if active:
-        try:
-            import yaml as _yaml
-            cfg_path = SANDBOX_ROOT / "sandbox.yml"
-            local_path = SANDBOX_ROOT / "sandbox.local.yml"
-            cfg_data = {}
-            for p in (cfg_path, local_path):
-                if p.exists():
-                    loaded = _yaml.safe_load(p.read_text()) or {}
-                    # Shallow merge — local overrides
-                    projs = (loaded.get("projects") or {})
-                    cfg_data.setdefault("projects", {}).update(projs)
-            proj = (cfg_data.get("projects") or {}).get(active) or {}
-            active_slugs = [(pl or {}).get("slug")
-                            for pl in (proj.get("plugins") or [])]
-            if active_slugs and focus not in active_slugs:
-                out["mismatch_warning"] = (
-                    f"focus '{focus}' isn't in active_project '{active}'"
-                    f" (which contains {active_slugs}). Run `./sb focus"
-                    f" {focus}` to auto-switch the active project."
-                )
-        except Exception:
-            # Don't break focus_get over a config-read error.
-            pass
-
-    # Resolve focused plugin's source repo. Symlinks now live at depth 1
-    # inside wp-content/plugins/ (was runtime/plugins/ — depth 2 — pre-fix).
-    candidates = [
-        _wp_root(instance) / "wp-content" / "plugins" / focus,
-        SANDBOX_ROOT / "runtime" / "wp" / "wp-content" / "plugins" / focus,
-        SANDBOX_ROOT / "runtime" / "plugins" / focus,           # legacy
-        SANDBOX_ROOT / "plugins" / focus,                       # default plugins_home
-    ]
-    src = None
-    for link in candidates:
-        if link.is_symlink() or link.is_dir():
-            src = link.resolve()
-            break
-    if not src or not src.exists():
-        out["error"] = (f"focused plugin '{focus}' not found in any of: "
-                        f"{', '.join(str(c) for c in candidates)}")
-        return out
-    out["source_path"] = str(src)
-
-    # 1. Plugin's own CLAUDE.md (auto-injected).
     if include_claude_md:
         for candidate in ("CLAUDE.md", ".claude/CLAUDE.md"):
-            cmd = src / candidate
-            if cmd.exists() and cmd.is_file():
-                data = cmd.read_bytes()[:max_bytes]
-                out["claude_md"] = data.decode("utf-8", errors="replace")
+            cmd = root / candidate
+            if cmd.is_file():
+                out["claude_md"] = cmd.read_bytes()[:max_bytes].decode(
+                    "utf-8", errors="replace")
                 out["claude_md_path"] = str(cmd)
                 out["claude_md_truncated"] = cmd.stat().st_size > max_bytes
                 break
 
-    # 2. Plugin's skill packs at .claude/skills/<name>/SKILL.md — enumerate
-    #    them but don't inline content (Claude reads on demand via fs_read).
-    skills_dir = src / ".claude" / "skills"
+    skills_dir = root / ".claude" / "skills"
     if skills_dir.is_dir():
         for entry in sorted(skills_dir.iterdir()):
             skill_md = entry / "SKILL.md"
@@ -778,170 +750,44 @@ def focus_get(include_claude_md: bool = True,
                     "description": meta["description"],
                     "path": str(skill_md),
                 })
-
     return out
 
 
-@mcp.tool()
-def focus_set(plugin_slug: str,
-              instance: str = SESSION_INSTANCE,
-              here_only: bool = False) -> dict:
-    """Set the focused plugin slug. Pass empty string to clear.
-
-    When setting a focus, this shells out to `./sb focus <slug>` so the
-    CLI's auto-link logic runs: if the focused plugin isn't already in
-    the active project's plugin list, the active project is switched
-    to one that contains it. Keeps focus + active_project consistent.
-
-    SINGLETON INVARIANT: a plugin is focused in AT MOST one instance. By
-    default, focusing a plugin here CLEARS its focus on every other instance
-    (so "focus <plugin>" later resolves to exactly one instance — the plugin
-    name is the unambiguous key, never the instance name). Set here_only=True
-    to override — focus here without stealing it from other instances (for
-    deliberate A/B / parallel multi-instance work).
-
-    instance: which sandbox instance's focus to set (default: this session's
-    instance — SANDBOX_INSTANCE, or main if unset).
-    """
-    ff = _focus_file(instance)
-    af = _active_file(instance)
-    if not plugin_slug:
-        if ff.exists():
-            ff.unlink()
-        return {"ok": True, "instance": instance, "focus": None}
-
-    slug = plugin_slug.strip()
-    sb = SANDBOX_ROOT / "sb"
-    if not sb.exists():
-        # Fallback: just write the file without the auto-link niceties.
-        ff.write_text(slug)
-        return {"ok": True, "instance": instance, "focus": slug,
-                "warning": "./sb not found — focus set without auto-link"}
-
-    cmd = [str(sb), "--instance", instance, "focus", slug]
-    if here_only:
-        cmd.append("--here")
-    res = subprocess.run(
-        cmd,
-        capture_output=True, text=True, cwd=str(SANDBOX_ROOT), timeout=120,
-    )
-    inst_cfg = _resolve_instance(instance)
-    wp_url = _site_url(inst_cfg)
-    out = {
-        "ok": res.returncode == 0,
-        "instance": instance,
-        "focus": ff.read_text().strip() if ff.exists() else None,
-        "active_project": af.read_text().strip() if af.exists() else None,
-        # Instance-correct URLs so the caller links to THIS instance's port
-        # (e.g. 8190 for embedpress), never a hardcoded 8188.
-        "wordpress_url": wp_url,
-        "admin_url": f"{wp_url}/wp-admin",
-        "mailpit_url": f"http://localhost:{inst_cfg['mailpit_port']}",
-        "stdout": res.stdout,
-    }
-    if res.stderr.strip():
-        out["stderr"] = res.stderr
-    return out
-
-
-@mcp.tool()
-def focus_resolve(plugin_slug: str) -> dict:
-    """Answer "which instance is plugin <slug> focused in?" — the lookup-first
-    entry point for the handshake.
-
-    Because focus is a SINGLETON (a plugin is focused in at most one instance),
-    this resolves "focus <plugin>" to exactly one instance without guessing.
-    Call this FIRST when a user says "focus <plugin>" / "work on <plugin>" and
-    you don't already know which instance to use — then call that instance's
-    mcp__sandbox[-<inst>]__focus_get / wp_cli / etc.
-
-    Returns one of:
-      status="resolved"  → `instance` holds the focus; use its tools/URL.
-      status="none"      → no instance has it focused yet. `candidates` lists
-                           instances whose active project contains the plugin;
-                           pick one (or ask the user) and focus_set there.
-      status="ambiguous" → invariant violated (focused in >1 instance);
-                           `instances` lists them. Should not happen normally —
-                           re-focus to repair.
-    """
-    slug = plugin_slug.strip()
-    hits = _find_focus_instances(slug)
-    if len(hits) == 1:
-        inst = hits[0]
-        cfg = _resolve_instance(inst)
-        wp_url = _site_url(cfg)
-        return {
-            "ok": True, "status": "resolved", "plugin": slug,
-            "instance": inst,
-            "mcp_namespace": ("mcp__sandbox__*" if inst == DEFAULT_INSTANCE
-                              else f"mcp__sandbox-{inst}__*"),
-            "wordpress_url": wp_url,
-            "admin_url": f"{wp_url}/wp-admin",
-            "mailpit_url": f"http://localhost:{cfg['mailpit_port']}",
-            "hint": (f"plugin '{slug}' is focused on instance '{inst}'. "
-                     f"Use {('mcp__sandbox__*' if inst == DEFAULT_INSTANCE else f'mcp__sandbox-{inst}__*')} "
-                     f"tools and URL {wp_url}."),
-        }
-    if len(hits) > 1:
-        return {
-            "ok": False, "status": "ambiguous", "plugin": slug,
-            "instances": hits,
-            "hint": (f"INVARIANT VIOLATED: '{slug}' is focused on multiple "
-                     f"instances {hits}. focus_set it on the one you want to "
-                     f"repair to a single holder."),
-        }
-    # No instance has it focused — surface instances whose active project
-    # lists this plugin, so the caller can pick one to focus_set.
-    cfg = _load_sandbox_yml()
-    projs = (cfg.get("projects") or {})
-    candidates = []
-    for fp in SANDBOX_ROOT.glob(".active-project.*"):
-        inst = fp.name[len(".active-project."):]
-        try:
-            active = fp.read_text().strip()
-        except OSError:
-            continue
-        slugs = [(pl or {}).get("slug")
-                 for pl in ((projs.get(active) or {}).get("plugins") or [])]
-        if slug in slugs:
-            ic = _resolve_instance(inst)
-            candidates.append({
-                "instance": inst,
-                "active_project": active,
-                "admin_url": f"{_site_url(ic)}/wp-admin",
-            })
-    return {
-        "ok": True, "status": "none", "plugin": slug,
-        "candidates": candidates,
-        "hint": (f"plugin '{slug}' isn't focused on any instance yet. "
-                 + (f"It's available in: {[c['instance'] for c in candidates]}. "
-                    "Pick one (or ask the user) and focus_set it there."
-                    if candidates else
-                    "No instance's active project lists it — check the "
-                    "instance you want and focus_set it there.")),
-    }
+# Note: the old cross-instance focus_set / focus_resolve handshake is removed —
+# in the per-project model each project dir has exactly one instance, and
+# ensure_instance presets focus to the project's plugin. focus_get(project_dir)
+# is the only focus tool needed.
 
 
 # ------------------ legacy convenience -------------------------------
 
 @mcp.tool()
-def activate_plugin(slug: str, instance: str = SESSION_INSTANCE) -> dict:
+def activate_plugin(slug: str, *, project_dir: str) -> dict:
     """wp plugin activate <slug>. Slug must match the plugin folder name."""
-    return _wpcli(["plugin", "activate", slug], instance=instance)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    return _wpcli(["plugin", "activate", slug], instance=inst)
 
 
 @mcp.tool()
-def deactivate_plugin(slug: str, instance: str = SESSION_INSTANCE) -> dict:
+def deactivate_plugin(slug: str, *, project_dir: str) -> dict:
     """wp plugin deactivate <slug>."""
-    return _wpcli(["plugin", "deactivate", slug], instance=instance)
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    return _wpcli(["plugin", "deactivate", slug], instance=inst)
 
 
 @mcp.tool()
 def import_content(seed_file: str, authors: str = "create",
-                   instance: str = SESSION_INSTANCE) -> dict:
+                   *, project_dir: str) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
     return _wpcli(["import", f"/seeds/{seed_file}",
-                   f"--authors={authors}"], instance=instance, timeout=180)
+                   f"--authors={authors}"], instance=inst, timeout=180)
 
 
 # ----------------------------- headless browser ------------------------
@@ -954,8 +800,7 @@ TOOLS_VENV_PY = SANDBOX_ROOT / "runtime" / ".venv-tools" / "bin" / "python"
 def visit(url: str, login: bool = False, check_iframes: bool = False,
           screenshot: str | None = None, full_page: bool = False,
           timeout: int = 20, width: int = 1280, height: int = 800,
-          wait_until: str = "domcontentloaded",
-          instance: str = SESSION_INSTANCE) -> dict:
+          wait_until: str = "domcontentloaded") -> dict:
     """Load `url` in headless Chromium and return a structured report
     (status, title, console errors, network failures, iframe inventory).
 
@@ -993,9 +838,12 @@ def visit(url: str, login: bool = False, check_iframes: bool = False,
         if full_page:
             cmd.append("--full-page")
     try:
+        _u, _p = _admin_creds()
         res = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=max(timeout + 30, 60),
-                             cwd=str(SANDBOX_ROOT))
+                             cwd=str(SANDBOX_ROOT),
+                             env={**os.environ, "WP_ADMIN_USER": _u,
+                                  "WP_ADMIN_PASSWORD": _p})
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"visit subprocess timed out after {timeout + 30}s"}
     # visit.py emits JSON on stdout regardless of exit code; exit-nonzero

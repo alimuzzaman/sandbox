@@ -3751,6 +3751,212 @@ def _onboard_instance(cfg: dict, name: str, args) -> None:
             info(f"seed import failed: {e}")
 
 
+# --------------------------------------------------------------------------- #
+# Per-project instances (MCP-first / per-worktree).
+#
+# ensure_instance() boots an instance keyed by a PROJECT ROOT (not a name in
+# sandbox.yml), reusing the cmd_up/cmd_install machinery and recording the
+# project->instance mapping in the on-disk registry (sandbox_core). This is the
+# create-if-missing primitive the MCP server drives.
+# --------------------------------------------------------------------------- #
+
+def _core():
+    """Lazy import of the shared sandbox_core module (CLI + MCP share it).
+    ROOT is the resolved sandbox dir, so this works even via the global symlink."""
+    import sys
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import sandbox_core
+    return sandbox_core
+
+
+def _derive_instance_name(root: str, taken: set) -> str:
+    """A valid, unique instance name from a project dir basename."""
+    base = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower()).strip("-")[:24] or "proj"
+    if not re.match(r"^[a-z0-9]", base):
+        base = "p-" + base
+    name, i = base, 2
+    while name in taken or name == DEFAULT_INSTANCE:
+        name, i = f"{base}-{i}", i + 1
+    return name
+
+
+def _image_for_versions(php, wp):
+    """Per-project wordpress image tag. None → the runtime default (latest)."""
+    if wp and php:
+        return f"wordpress:{wp}-php{php}"
+    if wp:
+        return f"wordpress:{wp}"
+    if php:
+        return f"wordpress:php{php}"
+    return None
+
+
+def _wait_http(port: int, timeout: int = 30) -> bool:
+    import urllib.request
+    import time
+    for _ in range(timeout):
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+
+def _instance_reachable(entry: dict) -> bool:
+    port = entry.get("wordpress_port")
+    if not port:
+        return False
+    import urllib.request
+    try:
+        urllib.request.urlopen(f"http://localhost:{port}", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
+    """Symlink the project's plugins + mappings into the instance, then activate.
+
+    NOTE: absolute symlinks only resolve inside the container when the target is
+    under a bind-mounted host path. Sources under defaults.plugins_home work
+    today; a project root outside it needs its own bind mount (T0.4 follow-up)."""
+    pdir = plugins_dir(name)
+    pdir.mkdir(parents=True, exist_ok=True)
+    root_path = Path(root)
+    activate, zips, slugs = [], [], []
+    for entry in pconf.get("plugins") or ["."]:
+        if entry == ".":
+            slug = root_path.name
+            _force_symlink(pdir / slug, root_path)
+            activate.append(slug)
+        elif isinstance(entry, str) and entry.startswith("http") and entry.endswith(".zip"):
+            zips.append(entry)
+        elif isinstance(entry, str) and ("/" in entry or entry.startswith((".", "~"))):
+            src = Path(entry).expanduser()
+            if not src.is_absolute():
+                src = (root_path / entry).resolve()
+            if src.exists():
+                _force_symlink(pdir / src.name, src)
+                activate.append(src.name)
+        elif entry:
+            slugs.append(entry)
+    wp_root = wp_dir(name)
+    for wp_path, src in (pconf.get("mappings") or {}).items():
+        src_p = Path(str(src)).expanduser()
+        if src_p.exists():
+            dest = wp_root / wp_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _force_symlink(dest, src_p)
+    if zips or slugs:
+        wpcli(["plugin", "install", *zips, *slugs, "--activate"],
+              instance=name, check=False)
+    if activate:
+        wpcli(["plugin", "activate", *activate], instance=name, check=False)
+
+
+def ensure_instance(cfg: dict, project_dir: str) -> dict:
+    """Create-if-missing: boot a per-directory instance for the project at
+    `project_dir`, keyed by its canonical root in the registry. Idempotent — a
+    second call for a ready project returns the existing record."""
+    import types
+    sc = _core()
+    pconf = sc.load_project_config(project_dir)
+    root = pconf["root"]
+
+    with sc.project_lock(root):
+        existing = sc.registry_get(root)
+        if existing and existing.get("status") == "ready" \
+                and _instance_reachable(existing):
+            return existing
+
+        taken = set(resolve_instances(cfg).keys())
+        taken |= {e.get("instance") for e in sc.registry_all().values()
+                  if e.get("instance")}
+        name = _derive_instance_name(root, taken)
+
+        ports = _pick_instance_ports(cfg)
+        server = _valid_server(pconf.get("server") or "apache")
+        image = _image_for_versions(pconf.get("phpVersion"), pconf.get("wpVersion"))
+        info(f"ensure_instance: {root} → instance '{name}' "
+             f"(WP={ports['wordpress_port']} server={server})")
+
+        block = {
+            "wordpress_port": ports["wordpress_port"],
+            "db_port": ports["db_port"],
+            "mailpit_port": ports["mailpit_port"],
+            "server": server,
+            "admin": {"site_title": f"Sandbox {name}"},
+        }
+        if image:
+            block["wordpress_image"] = image
+        local = _local_yaml()
+        local.setdefault("instances", {})[name] = block
+        _write_local_yaml(local)
+
+        cfg = load_config()
+        write_compose_files(cfg)
+
+        ns = types.SimpleNamespace(resolved_instance=name)
+        cmd_up(cfg, ns)
+        _wait_http(ports["wordpress_port"])
+        cmd_install(cfg, ns)
+        _wire_project_plugins(name, root, pconf)
+
+        return sc.registry_put(
+            root,
+            instance=name,
+            url=f"http://localhost:{ports['wordpress_port']}",
+            wordpress_port=ports["wordpress_port"],
+            db_port=ports["db_port"],
+            mailpit_port=ports["mailpit_port"],
+            server=server,
+            wp_version=pconf.get("wpVersion"),
+            source=pconf.get("source"),
+            status="ready",
+        )
+
+
+def cmd_mcp(cfg, args) -> None:
+    """Run the sandbox MCP server over stdio. ONE server for all projects —
+    every tool resolves its target instance per call from `project_dir`.
+
+    Register once (then `cd` into any plugin and use the tools):
+        claude mcp add --scope user sandbox -- ./sb mcp
+    """
+    py = MCP_VENV / "bin" / "python"
+    server = MCP_DIR / "server.py"
+    if not py.exists():
+        die("MCP venv not built — run `./sb mcp-install` first.")
+    if not server.exists():
+        die(f"MCP server not found at {server}")
+    # Replace this process with the stdio server (FastMCP mcp.run()).
+    os.execv(str(py), [str(py), str(server)])
+
+
+def cmd_ensure(cfg, args) -> None:
+    """`./sb ensure [--project-dir DIR]` — boot the instance for a project
+    directory (create-if-missing) and print its URL. The MCP server's
+    ensure_instance tool wraps this; also usable by hand."""
+    sc = _core()
+    pd = getattr(args, "project_dir", None) or os.getcwd()
+    try:
+        entry = ensure_instance(cfg, pd)
+    except sc.ConfigError as e:
+        die(str(e))
+    if getattr(args, "json", False):
+        # Compact single line as the LAST stdout line so the MCP server can
+        # parse it past any boot/progress output above.
+        print(json.dumps(entry))
+    else:
+        ok(f"instance '{entry['instance']}' ready at {entry['url']}")
+        print(f"  project: {entry['root']}")
+        print(f"  ports:   WP={entry['wordpress_port']} "
+              f"DB={entry['db_port']} mail={entry['mailpit_port']}")
+        print(f"  server:  {entry['server']}  (source: {entry.get('source')})")
+
+
 def cmd_instance(cfg, args) -> None:
     """Create / delete a sandbox instance end-to-end.
 
@@ -5543,6 +5749,16 @@ Then pick a project and a plugin:
     web.add_argument("--open", action="store_true",
         help="open the dashboard in your browser on start")
 
+    sub.add_parser("mcp",
+        help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
+
+    en = sub.add_parser("ensure",
+        help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
+    en.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)")
+    en.add_argument("--json", action="store_true",
+        help="print the instance record as JSON (for the MCP server)")
+
     ins = sub.add_parser("instance",
         help="Create or delete a sandbox instance (auto-picks ports)")
     ins.add_argument("action", choices=["create", "delete"])
@@ -5676,6 +5892,8 @@ Then pick a project and a plugin:
         "visit": cmd_visit,
         "instances": cmd_instances,
         "instance": cmd_instance,
+        "ensure": cmd_ensure,
+        "mcp": cmd_mcp,
         "onboard": cmd_onboard,
         "secure": cmd_secure,
         "server": cmd_server,

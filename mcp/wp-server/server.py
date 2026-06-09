@@ -396,6 +396,76 @@ def ensure_instance(project_dir: str) -> dict:
 
 
 @mcp.tool()
+def destroy_instance(project_dir: str) -> dict:
+    """Stop and permanently delete the sandbox instance for `project_dir`.
+
+    Removes containers, the DB volume, the wp dir, and the registry entry.
+    This is irreversible — all database data and uploads are lost. Call
+    ensure_instance(project_dir=...) afterwards to recreate from scratch.
+
+    project_dir: the plugin project whose instance to destroy.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    sb = SANDBOX_ROOT / "sb"
+    try:
+        res = subprocess.run(
+            [str(sb), "instance", "delete", inst, "--yes"],
+            capture_output=True, text=True, timeout=120, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "destroy_instance timed out after 120s"}
+    if res.returncode == 0:
+        return {"ok": True, "instance": inst,
+                "message": f"Instance '{inst}' deleted. Call ensure_instance to recreate."}
+    return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
+
+
+@mcp.tool()
+def recreate_instance(project_dir: str) -> dict:
+    """Destroy and immediately recreate the sandbox instance for `project_dir`.
+
+    Equivalent to destroy_instance followed by ensure_instance — useful when
+    you want a clean WP install (fresh DB, fresh uploads) without manually
+    running two steps. The new instance boots from the current sandbox.config.*
+    and installs the same plugin(s).
+
+    project_dir: the plugin project to recreate.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    sb = SANDBOX_ROOT / "sb"
+    # destroy
+    try:
+        res = subprocess.run(
+            [str(sb), "instance", "delete", inst, "--yes"],
+            capture_output=True, text=True, timeout=120, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "recreate_instance: destroy timed out after 120s"}
+    if res.returncode != 0:
+        return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
+    # recreate
+    try:
+        res2 = subprocess.run(
+            [str(sb), "ensure", "--project-dir", project_dir, "--json"],
+            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "recreate_instance: ensure timed out after 600s"}
+    lines = (res2.stdout or "").strip().splitlines()
+    entry = _safe_json(lines[-1]) if lines else None
+    if isinstance(entry, dict) and "instance" in entry:
+        entry.setdefault("ok", True)
+        entry["recreated"] = True
+        return entry
+    return {"ok": False, "code": res2.returncode,
+            "error": (res2.stderr or res2.stdout or "ensure failed after destroy").strip()[:1000]}
+
+
+@mcp.tool()
 def wp_cli(command: str, timeout: int = 60, *, project_dir: str) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 

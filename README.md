@@ -32,15 +32,20 @@ bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE
 ```bash
 git clone -b alim-dev https://github.com/WPDevelopers/sandbox.git
 cd sandbox
-./sb setup            # build the MCP venv, register the server, wire Claude
+./sb global           # puts `sb` on your PATH (do this first)
+./sb mcp-install      # builds the MCP server's Python venv
+./sb setup            # registers the MCP server with Claude + wires everything
 ```
 
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
 
-`setup` registers **one** MCP server named `sandbox` at user scope
-(`claude mcp add --scope user sandbox -- ./sb mcp`), so **every** `claude`
-session on the machine has it — from any directory:
+Running `./sb global` first means the MCP registration uses `sb` (PATH-based,
+like `@wordpress/env`) rather than a hardcoded absolute path — so the
+registration survives the repo being moved or re-cloned.
+
+`setup` registers **one** MCP server named `sandbox` at user scope so
+**every** `claude` session on the machine has it — from any directory:
 
 ```bash
 claude          # in any project, in any dir
@@ -48,12 +53,6 @@ claude          # in any project, in any dir
 
 That single server routes by the `project_dir` every tool receives — there are
 no per-instance servers to manage.
-
-**Run `sb` from anywhere.** After cloning, do it once:
-```bash
-./sb global       # adds `sb` and `sandbox` to your PATH
-                  # undo with: ./sb global --remove
-```
 
 ---
 

@@ -1873,8 +1873,15 @@ def _build_mcp_entry(cfg: dict | None = None) -> dict:
     """The SINGLE 'sandbox' MCP server registration entry. One server for all
     projects: it takes NO per-instance env — every tool routes by `project_dir`
     and resolves the instance from the on-disk registry per call. Launched via
-    `<sb> mcp` (the stdio entrypoint), which execs the venv server.py."""
-    return {"command": str(ROOT / "sb"), "args": ["mcp"]}
+    `<sb> mcp` (the stdio entrypoint), which execs the venv server.py.
+
+    Prefer the PATH-resolved `sb` name (set by `./sb global`) so the
+    registration survives the repo being moved or re-cloned — same as how
+    @wordpress/env uses a PATH-based npm bin. Fall back to the absolute path
+    when `sb` isn't on PATH yet."""
+    sb_on_path = shutil.which("sb")
+    command = "sb" if sb_on_path else str(ROOT / "sb")
+    return {"command": command, "args": ["mcp"]}
 
 
 def _stale_mcp_servers(claude_bin: str) -> list[str]:
@@ -3352,6 +3359,19 @@ def _derive_instance_name(root: str, taken: set) -> str:
     return name
 
 
+def _wp_docker_tag(wp_version) -> str | None:
+    """Reduce a full WP version string to major.minor for Docker image tags.
+
+    Docker Hub publishes wordpress:X.Y-phpA.B reliably (and updates it in place
+    for patch releases), but wordpress:X.Y.Z-phpA.B is NOT always published —
+    new patch releases often lag by days or are never tagged at the patch level.
+    Using X.Y avoids 'manifest unknown' errors while still pinning the minor."""
+    if not wp_version:
+        return None
+    parts = str(wp_version).split(".")
+    return f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else str(wp_version)
+
+
 def _web_image(server: str, php=None, wp=None, explicit=None) -> str:
     """Resolve the web-tier container image for a server stack + version pins.
 
@@ -3366,12 +3386,14 @@ def _web_image(server: str, php=None, wp=None, explicit=None) -> str:
     if server == "litespeed":
         return f"litespeedtech/openlitespeed:1.8.2-lsphp{(php or '8.3').replace('.', '')}"
     fpm = "-fpm" if server == "nginx" else ""
-    if wp and php:
-        return f"wordpress:{wp}-php{php}{fpm}"
+    # Docker Hub only reliably publishes major.minor PHP-variant tags, not patch.
+    wp_tag = _wp_docker_tag(wp)
+    if wp_tag and php:
+        return f"wordpress:{wp_tag}-php{php}{fpm}"
     if php:
         return f"wordpress:php{php}{fpm}"
-    if wp:
-        return f"wordpress:{wp}{fpm}"
+    if wp_tag:
+        return f"wordpress:{wp_tag}{fpm}"
     return "wordpress:php8.3-fpm" if server == "nginx" else "wordpress:latest"
 
 

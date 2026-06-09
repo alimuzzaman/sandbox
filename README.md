@@ -191,6 +191,8 @@ and resolves the target instance from the registry — booting one if needed.
 | Tool | Purpose |
 |------|---------|
 | `ensure_instance` | Boot (create-if-missing) the instance for a project dir; returns its URL |
+| `destroy_instance` | Permanently delete an instance (containers, DB volume, wp dir, registry) |
+| `recreate_instance` | Destroy then immediately recreate — clean WP install from current config |
 | `run_tests` | Run the plugin's phpunit tests on the external WP harness → pass/fail + failures |
 | `wp_cli` | Run any `wp` command |
 | `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |

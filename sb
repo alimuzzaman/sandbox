@@ -787,6 +787,21 @@ def _plugins_home(cfg: dict) -> Path:
     return p
 
 
+def _extra_vol_lines(inst_cfg: dict, indent: int = 6, ro: bool = False) -> str:
+    """Extra bind-mount lines for paths in inst_cfg["extra_mounts"].
+
+    Injected into every service tier so symlinks to sources outside
+    plugins_home (e.g. a plugin repo at ~/Sites/git/templately) resolve
+    inside the container. Without these mounts the symlinks are dangling
+    and WP silently skips the plugins."""
+    mounts = inst_cfg.get("extra_mounts") or []
+    if not mounts:
+        return ""
+    pad = " " * indent
+    suffix = ":ro" if ro else ""
+    return "\n" + "\n".join(f"{pad}- {m}:{m}{suffix}" for m in mounts)
+
+
 def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
     Kept byte-identical to the pre-multi-server template so existing
@@ -824,7 +839,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # Bind-mount plugin sources at the same absolute host path so the
       # symlinks ensure_instance creates under wp-content/plugins/ resolve
       # inside the container.
-      - {plugins_host}:{plugins_host}
+      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
 """
 
@@ -859,7 +874,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
-      - {plugins_host}:{plugins_host}
+      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
 
   nginx:
@@ -876,7 +891,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # itself, so it must resolve those symlinks too — mount plugins_host at
       # the same path it does in the fpm `wp` service, or every symlinked
       # plugin's assets 404 and its admin UI renders blank.
-      - {plugins_host}:{plugins_host}:ro
+      - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg, ro=True)}
       - ./config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
 """
 
@@ -905,7 +920,7 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - ./runtime/wp-{instance}:{docroot}
       - ./runtime/seeds:/seeds
-      - {plugins_host}:{plugins_host}
+      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
 """
 
 
@@ -929,7 +944,7 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - ./runtime/wp-{instance}:{docroot}
       - ./runtime/seeds:/seeds
-      - {plugins_host}:{plugins_host}
+      - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
     entrypoint: ["wp", "--allow-root"]
     command: ["--info"]
@@ -3435,6 +3450,8 @@ def _instance_reachable(entry: dict) -> bool:
 def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
     """Symlink the project's plugins + mappings into the instance, then activate.
 
+    Relative mapping sources ("." or "../sibling") are resolved relative to
+    root_path (the project dir), matching wp-env's convention.
     NOTE: absolute symlinks only resolve inside the container when the target is
     under a bind-mounted host path. Sources under defaults.plugins_home work
     today; a project root outside it needs its own bind mount (T0.4 follow-up)."""
@@ -3461,6 +3478,8 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
     wp_root = wp_dir(name)
     for wp_path, src in (pconf.get("mappings") or {}).items():
         src_p = Path(str(src)).expanduser()
+        if not src_p.is_absolute():
+            src_p = (root_path / src_p).resolve()
         if src_p.exists():
             dest = wp_root / wp_path
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -3531,6 +3550,36 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             block["php_version"] = str(php_v)
         if wp_v:
             block["wp_version"] = str(wp_v)
+
+        # Collect source paths that need extra Docker bind-mounts — any mapping
+        # source or local plugin path outside plugins_home won't be visible
+        # inside the container, so symlinks there are dangling and WP skips them.
+        plugins_home_p = _plugins_home(cfg).resolve()
+        root_p = Path(root)
+        _extra: list[str] = []
+        for _entry in pconf.get("plugins") or []:
+            if _entry == ".":
+                _src = root_p
+            elif isinstance(_entry, str) and ("/" in _entry or _entry.startswith((".", "~"))):
+                _src = Path(_entry).expanduser()
+                if not _src.is_absolute():
+                    _src = (root_p / _entry).resolve()
+                _src = _src.resolve()
+            else:
+                continue
+            if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+        for _src_raw in (pconf.get("mappings") or {}).values():
+            _src = Path(str(_src_raw)).expanduser()
+            if not _src.is_absolute():
+                _src = (root_p / _src).resolve()
+            _src = _src.resolve()
+            if _src.exists() and not _src.is_relative_to(plugins_home_p):
+                _extra.append(str(_src))
+        extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
+        if extra_mounts:
+            block["extra_mounts"] = extra_mounts
+
         local = _local_yaml()
         local.setdefault("instances", {})[name] = block
         _write_local_yaml(local)

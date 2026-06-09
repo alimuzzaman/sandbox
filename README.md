@@ -12,26 +12,31 @@ phpunit tests** — no central catalog, nothing to pre-register.
 
 ## Get started
 
-**One-line install** (no git or repo access needed):
+> **Note:** This is the `alim-dev` branch — a major rewrite to the
+> per-project model. The curl/npm/Homebrew installers and `main` still
+> ship the previous version. Install from this branch directly:
+
+**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any
+MCP client). On a fresh machine, run the OS bootstrap script first:
 
 ```bash
-curl -fsSL https://sandbox.xc1.app/install.sh | sh
+# macOS
+bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop
+
+# Ubuntu / Debian
+bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE
 ```
 
-It downloads a packaged release, unpacks it to `~/sandbox`, checks prerequisites
-(offering to install what's missing), builds the MCP server, and registers it
-with Claude. Or install via **npm** (`npm i -g @wpdeveloper/sandbox`) or
-**Homebrew** (see `packaging/`). Working on the sandbox itself? Clone and run setup:
+**Clone and set up:**
 
 ```bash
-git clone https://github.com/wpdevelopers/sandbox
+git clone -b alim-dev https://github.com/WPDevelopers/sandbox.git
 cd sandbox
 ./sb setup            # build the MCP venv, register the server, wire Claude
 ```
 
-**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any MCP
-client). `setup` offers to install missing ones (Homebrew / apt / dnf); the
-default is always **No**, and it never needs `sudo` for the base install.
+`setup` offers to install missing prerequisites (default always **No**)
+and never needs `sudo` for the base install.
 
 `setup` registers **one** MCP server named `sandbox` at user scope
 (`claude mcp add --scope user sandbox -- ./sb mcp`), so **every** `claude`
@@ -44,8 +49,11 @@ claude          # in any project, in any dir
 That single server routes by the `project_dir` every tool receives — there are
 no per-instance servers to manage.
 
-**Run `sb` from anywhere.** The installer puts `sb` on your PATH. From a git
-clone, do it once: `./sb global` (undo with `./sb global --remove`).
+**Run `sb` from anywhere.** After cloning, do it once:
+```bash
+./sb global       # adds `sb` and `sandbox` to your PATH
+                  # undo with: ./sb global --remove
+```
 
 ---
 

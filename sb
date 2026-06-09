@@ -2169,9 +2169,27 @@ def _refresh_env_local() -> None:
     })
 
 
-def _connect_fluentboards(cfg) -> None:
+def _connect_fluentboards(cfg, non_interactive: bool = False) -> None:
     local = _local_yaml()
     fb = local.setdefault("fluentboards", {})
+
+    if non_interactive:
+        # Read from environment; require at least URL + app password.
+        url = os.environ.get("FLUENTBOARDS_URL", "").strip()
+        email = os.environ.get("FLUENTBOARDS_EMAIL", "").strip()
+        pw = os.environ.get("FLUENTBOARDS_APP_PASSWORD", "").strip()
+        if not url or not pw:
+            die("--non-interactive requires FLUENTBOARDS_URL and "
+                "FLUENTBOARDS_APP_PASSWORD to be set in the environment.")
+        fb["url"] = url
+        fb["email"] = email
+        fb["app_password"] = pw
+        _write_local_yaml(local)
+        _refresh_env_local()
+        ok(f"FluentBoards credentials saved (non-interactive) to "
+           f"{CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+        return
+
     print("\nFluentBoards")
     print("  Used by the standup/report skills to read your My Day cards.")
     print("  Generate an Application Password at:")
@@ -2212,11 +2230,22 @@ def _gh_cli_orgs() -> list[str]:
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
-def _connect_github(cfg) -> None:
+def _connect_github(cfg, non_interactive: bool = False) -> None:
     local = _local_yaml()
     defaults = local.setdefault("defaults", {})
     cur = (defaults.get("github_org")
            or (cfg.get("defaults", {}) or {}).get("github_org") or "")
+
+    if non_interactive:
+        org = os.environ.get("GITHUB_ORG", "").strip()
+        if not org:
+            die("--non-interactive requires GITHUB_ORG to be set in the environment.")
+        defaults["github_org"] = org
+        _write_local_yaml(local)
+        _refresh_env_local()
+        ok(f"github_org='{org}' saved (non-interactive) to "
+           f"{CONFIG_LOCAL.name} + {SECRETS_ENV.name}")
+        return
 
     print("\nGitHub")
     print("  Sets defaults.github_org + ensures the `gh` CLI can read private")
@@ -2302,10 +2331,11 @@ def cmd_connect(cfg, args) -> None:
         die(f"unknown target '{target}'. "
             f"Try: {', '.join(sorted(set(CONNECT_TARGETS)))}")
 
+    ni = getattr(args, "non_interactive", False)
     if canonical == "fluentboards":
-        _connect_fluentboards(cfg)
+        _connect_fluentboards(cfg, non_interactive=ni)
     elif canonical == "github":
-        _connect_github(cfg)
+        _connect_github(cfg, non_interactive=ni)
 
 
 def _is_server(args) -> bool:
@@ -5397,6 +5427,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Save credentials for an integration (fb/fluentboards/gh/github)")
     cn.add_argument("target", nargs="?",
                     help="fb, fluentboards, gh, or github (omit to list)")
+    cn.add_argument("-n", "--non-interactive", action="store_true",
+                    help="read values from env vars instead of prompting "
+                         "(FLUENTBOARDS_URL/EMAIL/APP_PASSWORD, GITHUB_ORG)")
     sub.add_parser("up", help="Boot the docker stack")
     sub.add_parser("down", help="Stop the stack")
     sub.add_parser("status", help="Show container + project status")

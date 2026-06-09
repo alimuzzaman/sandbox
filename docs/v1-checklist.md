@@ -33,12 +33,12 @@ from their reports, then cut `v1`.
 - [ ] **Workflow library has at least 2-3 *used* (not just authored)
       end-to-end flows.** Vision promises "ship plugins faster" — that
       needs proof. Document a real shipped fix using `workflows/`.
-- [ ] **`connect` accepts env-var override** (e.g.
-      `FLUENTBOARDS_APP_PASSWORD=… ./sb connect fb
-      --non-interactive`) so CI / scripted setups don't need a TTY.
-- [ ] **Per-OS install scripts** (`scripts/install-macos.sh`,
-      `scripts/install-ubuntu.sh`) that handle Docker + Python in one
-      shot for newcomers who don't have either.
+- [x] **`connect` accepts env-var override** — `./sb connect fb -n` reads
+      `FLUENTBOARDS_URL/EMAIL/APP_PASSWORD` from env; `./sb connect gh -n`
+      reads `GITHUB_ORG`. Fails fast if required vars are missing.
+- [x] **Per-OS install scripts** — `scripts/install-macos.sh` (Homebrew →
+      python3 → Docker Desktop) and `scripts/install-ubuntu.sh` (apt →
+      Docker CE) both hand off to `./install.sh` after prereqs are set up.
 - [ ] **MCP server hot-reload.** Right now editing `mcp/wp-server/server.py`
       requires reopening Claude Code. A file-watcher restart would help
       anyone extending the toolset.

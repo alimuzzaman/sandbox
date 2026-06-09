@@ -301,24 +301,38 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   attribution had collapsed onto `main` (MCP namespace is constant now) → re-pointed to attribute
   by each sandbox tool call's `project_dir` via the registry; stale `server.py` docstrings (old
   per-instance env-binding model) → rewritten to the single-server `project_dir` model.
-- **Known follow-up (env-blocked):** the web dashboard's "New instance" form still references the
-  removed `projects` payload (renders an empty plugin checklist) and POSTs to the now-rejected
-  create action — it fails *gracefully* with a "run `./sb init`" pointer. Fully removing the form
-  needs a `src/web` TS edit + bundle rebuild (`cd src/web && npm i && ../../scripts/build-web-js.sh`);
-  `node_modules` isn't present in this environment, so it's deferred.
-- **Files:** `sb`, `sandbox.yml`, `mcp/wp-server/server.py`.
+- **Web dashboard follow-up (done):** the "New instance" form (which read the removed `projects`
+  payload + POSTed to the rejected create action) was replaced with a per-project pointer page;
+  dropped the dead `Project` type/field + form helpers across `create.ts`/`types.ts`/`state.ts`/
+  `main.ts`; rebuilt the vendored bundle (`config/sandbox-web.js`, typecheck clean). `build-web-js.sh`
+  runs `npm ci` itself, so no manual `node_modules` step was needed.
+- **Files:** `sb`, `sandbox.yml`, `mcp/wp-server/server.py`, `src/web/*`, `config/sandbox-web.js`.
 
 ---
 
 ## Phase 3 — Documentation (post-refactor)
 
-### [ ] T3.1 — Rewrite docs to the shipped model
-- **Files:** `README.md` (full rewrite), `CLAUDE.md`, `server.py` `instructions` baseline,
-  a new `sandbox.config.*` reference.
-- **Do:** teach per-project config, the one-time `claude mcp add … sandbox mcp` registration,
-  `cd plugin` → tools, `sandbox test`. Remove central/CLI-first descriptions. Only after
-  Phases 0–2 are merged, so it documents shipped behavior.
-- **Verify:** a new dev, following only the README, gets a plugin tested end-to-end.
+### [x] T3.1 — Rewrite docs to the shipped model
+- **Done:**
+  - **README.md** — full rewrite to the per-project model: install (curl/npm/brew) + the
+    one-time single-server `claude mcp add --scope user sandbox -- ./sb mcp`; the
+    `sandbox.config.json` + `cd plugin` → `init`/`ensure`/`test` flow; the test-harness pitch;
+    the ~21-tool table (project_dir routing, `ensure_instance`/`run_tests`); instance management
+    via the dashboards/`server`/`instance delete`. Kept the strong "Plain Claude vs sandbox"
+    comparison. Removed all catalog/`./sb use|pick|add`/per-instance-MCP/`focus <plugin>` content.
+  - **CLAUDE.md** — replaced the MCP-surface table (15→~21 tools, no `focus_set`/`focus_resolve`),
+    the focus-singleton handshake (→ the `project_dir` handshake), the whole multi-instance section
+    (→ per-project instances + dashboards/server-switch, no per-instance servers / `instance create`),
+    the `${var}` `projects:` example, the catalog-based Common loops, and the folder layout.
+  - **docs/sandbox-config-reference.md** — new: full schema (plugins/themes/mappings/php+wpVersion/
+    multisite/server/config/port/tests), resolution order + override, server-aware version table,
+    `.wp-env.json` import mapping, and where each field is consumed.
+  - **server.py `instructions`** — verified current (2232 chars; `project_dir`/`ensure_instance`;
+    no stale `focus_set`/`sandbox-<name>`/`instance create`/`projects`). No change needed.
+- **Verify:** README's commands all map to shipped behavior (`init`/`ensure`/`test` exist; single
+  `sandbox` registration; the config-reference link resolves); zero stale `./sb use|pick|add`,
+  per-instance-MCP, or `focus <plugin>` refs remain in README/CLAUDE.md.
+- **Files:** `README.md`, `CLAUDE.md`, `docs/sandbox-config-reference.md`.
 
 ---
 

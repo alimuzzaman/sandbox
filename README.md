@@ -3,498 +3,358 @@
 A real WordPress environment for designers, developers, and QA at WPDeveloper —
 drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
-**One folder.** One config file. One CLI. Everything Claude needs to design pages,
-fix bugs, run migrations, query the DB, check email — without leaving this folder.
+**MCP-first and per-project.** Each plugin repo carries its own
+`sandbox.config.json`. You `cd` into a plugin, and a single MCP server boots a
+WordPress instance for that directory on demand and runs the plugin's **real
+phpunit tests** — no central catalog, nothing to pre-register.
 
 ---
 
 ## Get started
 
-**One-line install.** You don't need git or repo access — paste a single line:
+**One-line install** (no git or repo access needed):
 
 ```bash
 curl -fsSL https://sandbox.xc1.app/install.sh | sh
 ```
 
 It downloads a packaged release, unpacks it to `~/sandbox`, checks prerequisites
-(offering to install what's missing), boots Docker, installs WordPress, and wires
-Claude to the MCP server. Then, in any Claude session, say `focus <plugin>` —
-e.g. `focus embedpress`. That's it.
-
-**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any MCP
-client — Cursor, Cline, Continue, Zed).
-
-**From git instead.** Working on the sandbox itself? Clone and run setup:
+(offering to install what's missing), builds the MCP server, and registers it
+with Claude. Or install via **npm** (`npm i -g @wpdeveloper/sandbox`) or
+**Homebrew** (see `packaging/`). Working on the sandbox itself? Clone and run setup:
 
 ```bash
 git clone https://github.com/wpdevelopers/sandbox
 cd sandbox
-./sb setup            # same thing; or ./install.sh for the python3 prereq wrapper
+./sb setup            # build the MCP venv, register the server, wire Claude
 ```
 
-**Publish a release** (maintainers): `./scripts/make-release.sh` builds
-`dist/sandbox-latest.tar.gz` from `HEAD`; `deploy/install-site/publish.sh` stages
-it plus `install.sh` (with `BASE_URL` baked in) for the public host. See the
-headers of those scripts and `deploy/install-site/README.md` for details.
+**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any MCP
+client). `setup` offers to install missing ones (Homebrew / apt / dnf); the
+default is always **No**, and it never needs `sudo` for the base install.
 
-`setup` checks prerequisites (Docker running, Python 3.9+), then boots Docker,
-installs WordPress, generates an Application Password, builds the MCP server, and
-writes `.mcp.json` inside this folder.
-
-**Run `sb` from anywhere.** The one-line installer makes `sb` a global command,
-so you don't have to `cd` into the folder — `sb web`, `sb instances`, etc. work
-from any directory. Installed from git instead? Run it once yourself:
-
-```bash
-./sb global            # symlink `sb` onto your PATH
-./sb global --remove   # undo it
-```
-
-It's just a symlink back to this install, so `sb` always targets the right
-sandbox. (`./sb` from inside the folder keeps working too.)
-
-**Missing a prerequisite?** `setup` offers to install it for you. If `python3`,
-Docker, or the `venv` module isn't found, it prompts `Install now? [y/N]` and
-runs the right command for your package manager (Homebrew / apt / dnf) — no
-hunting for install docs. The default is **No** (it never installs without your
-yes); non-interactive runs (CI) just print the command. Docker Desktop installs
-via `brew install --cask docker`; you then open it once to accept the license.
-The base install needs **no `sudo` password** — WordPress comes up at
-`http://localhost:8188` out of the box.
-
-Connect external integrations on demand — each one is its own command, so
-you only set up what you'll actually use:
-
-```bash
-./sb connect fb     # FluentBoards (URL + email + app password)
-./sb connect gh     # GitHub org/user (auto-detects gh CLI auth)
-```
-
-Skipping these is fine — the sandbox itself runs without them. `gh` is
-detected automatically: if you're already signed in with `gh auth login`,
-`connect gh` just reports the existing connection and saves the username.
-
-Saved to the gitignored `sandbox.local.yml` (+ mirrored to `.env.local`).
-
-That's it. `./sb setup` registered the `sandbox` MCP server at user
-scope (`~/.claude.json`), so **every** `claude` session on the machine
-now has it — regardless of which directory you launch from:
+`setup` registers **one** MCP server named `sandbox` at user scope
+(`claude mcp add --scope user sandbox -- ./sb mcp`), so **every** `claude`
+session on the machine has it — from any directory:
 
 ```bash
 claude          # in any project, in any dir
 ```
 
-If you run more than one WordPress instance (see `./sb instance create`),
-each instance gets its **own** MCP server: `sandbox` for `main`,
-`sandbox-<name>` for the rest. A Claude session targets an instance by
-calling that server's tools (`mcp__sandbox-<name>__*`), so two concurrent
-sessions can work on different instances without their focus / active-project
-state colliding. `./sb instances` prints the instance→server mapping.
+That single server routes by the `project_dir` every tool receives — there are
+no per-instance servers to manage.
 
-Each instance can also run a different **web server** —
-`./sb instance create ngx --server nginx` (or `--server litespeed`, default
-`apache`). Useful for testing caching/permalink behavior across Apache, nginx,
-and OpenLiteSpeed. `./sb instances` shows each instance's server.
+**Run `sb` from anywhere.** The installer puts `sb` on your PATH. From a git
+clone, do it once: `./sb global` (undo with `./sb global --remove`).
 
-You can also **switch an existing instance's server in place** — no need to
-spin up a separate instance per stack:
+---
+
+## The per-project model
+
+A plugin repo carries a **`sandbox.config.json`** describing its stack:
+
+```jsonc
+{
+  "plugins":   ["."],                 // this repo; sibling slugs/paths/zip-URLs for addons
+  "mappings":  { "wp-content/plugins/elementor-pro": "/abs/path" },
+  "phpVersion": null,                 // null → wordpress:latest; e.g. "8.1"
+  "wpVersion":  null,                 // e.g. "6.4"
+  "server":     "apache",             // apache | nginx | litespeed
+  "config":     { "WP_DEBUG": true }, // → wp-config constants
+  "tests":      { "suite": "auto" }   // auto-detect WP_UnitTestCase vs Brain/Monkey
+}
+```
+
+(An existing **`.wp-env.json`** is read as a fallback and converted on
+`sandbox init`. Full schema: [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).)
+
+Then, from the plugin directory:
 
 ```bash
-./sb server <name> nginx        # apache → nginx (adds the nginx sidecar)
-./sb server <name> litespeed    # → OpenLiteSpeed
-./sb server <name> apache       # → back to apache (removes the nginx orphan)
+cd ~/dev/embedpress
+sandbox init      # scaffold sandbox.config.json (or convert .wp-env.json),
+                  #   boot a per-directory instance, provision the test harness
+sandbox test      # run the plugin's phpunit tests on the externally-provisioned
+                  #   WP suite — zero WP-testing deps in the plugin's composer.json
+sandbox ensure    # just boot/refresh this project's instance (create-if-missing)
 ```
 
-It keeps the same URL, port, DB, and content — only the serving tier swaps. The
-same site can be compared across all three servers without re-importing content.
+`init` is the one command from a bare checkout to a running, testable stack.
+Each project gets **one instance**, keyed by its directory and tracked in an
+on-disk registry. Sibling plugins listed in one config share that instance.
 
-### Clean URLs — `https://<name>.sb`
+**With Claude, you don't even run those** — the MCP tools take `project_dir`
+(the agent passes your plugin dir), and `ensure_instance` boots on demand. Just
+work in the plugin and ask Claude to test/fix/build.
 
-By default instances serve at `http://localhost:<port>`. You can upgrade to a
-**trusted, no-port HTTPS URL** — `https://blog.sb`, `https://main.sb` — with one
-optional setup:
+### The test harness (the core value)
 
-```bash
-./sb domains setup     # one-time, asks your password ONCE
-```
+Sandbox provides the WP test suite, phpunit, the Yoast polyfills, composer, and
+an isolated `wp_tests` database **externally** — mounted only at test time — so
+a plugin's `composer.json` stays clean. `sandbox test` auto-detects the shape
+(`WP_UnitTestCase` integration vs. Brain/Monkey pure-unit) and runs it; the
+`run_tests` MCP tool returns the same pass/fail summary as live evidence.
 
-This installs a local certificate authority (via [mkcert](https://github.com/FiloSottile/mkcert)),
-wires `*.sb` resolution, and starts a small reverse proxy. It then gives **every**
-instance — including `main` — a `<name>.sb` domain with a trusted certificate, so
-nothing stays on `localhost`. After this, **every new instance gets its clean
-HTTPS URL automatically, with no further password.**
-
-You don't have to run it up front: the **first time** you create an instance,
-`./sb instance create blog` offers to enable HTTPS right then (`Enable trusted
-https://blog.sb? [y/N]`). Say no and it just uses a port (and won't ask again);
-say yes once and you're set for good. It coexists with Laravel Valet (binds a
-separate loopback IP, so your `.dev`/`.test` sites are untouched). Undo anytime
-with `./sb domains teardown`.
-
-For a live view, **`./sb dashboard`** opens an interactive full-screen TUI of
-all instances with keys to start/stop/restart, open in browser, set focus, and
-create/delete — auto-refreshing status every couple of seconds.
-
-Prefer a browser? **`./sb web`** serves the same dashboard as a local web page
-(`http://127.0.0.1:8765`, localhost only, no extra deps) — instance cards with
-live status, links, start/stop/restart/focus controls, a guided "New instance"
-form (name → server → plugins → content/options), and a built-in terminal. It
-has real navigable URLs (`/instance/<name>`, `/usage`) so pages are
-back/forward- and deep-link-friendly. The UI is authored in TypeScript under
-`src/web` and built to a vendored bundle (`config/sandbox-web.js`) that `sb`
-inlines — running `./sb web` needs no Node; only rebuilding does
-(`scripts/build-web-js.sh`).
-
-**Activation phrase: `focus <plugin>`.** Just say it in chat —
-"focus betterdocs", "focus embedpress", "work on xspeed" — and the
-agent runs the handshake automatically: persists the focus, loads
-the full sandbox `CLAUDE.md`, fetches the plugin's own conventions
-and available skills. After that the session is in sandbox mode for
-that plugin until you close it.
-
-The 2KB operating summary ships on every session via the MCP
-`instructions` field, so the agent already knows the activation
-trigger and the core reflexes (live repro before any fix, MCP tools
-over raw bash, snapshot before destructive DB ops, never commit/push
-without your word). Deeper context is loaded on demand via
-`load_context` and `load_skill(name)`.
-
-You can also invoke any skill as a slash command:
-
-```
-/mcp__sandbox__focus <plugin>          # explicit activation handshake
-/mcp__sandbox__activate                # load full sandbox operating guide
-/mcp__sandbox__fix <task>              # engage the one-pass bug-fix loop
-/mcp__sandbox__build_feature <task>    # three-phase feature workflow (establish → plan → build)
-/mcp__sandbox__bug_repro               # reproduce a bug live
-/mcp__sandbox__wp_pilot                # headless wp-admin authoring
-/mcp__sandbox__snapshot                # snapshot/restore guidance
-/mcp__sandbox__wp_debug                # debugging the WP stack
-```
-
-Claude now has 20 tools wired to your local WordPress (`wp_cli`,
-`wp_rest`, `http_fetch`, `db_query`, `tail_log`, `visit` (headless
-Chromium with auto-login on `/wp-admin/`), `fs_read/write/list`,
-`mail_list/get`, `focus_get/set`, `load_context`, `load_skill`,
-`load_workflow`, and more).
+Version pins resolve server-aware: `phpVersion: "8.1"` boots `wordpress:php8.1`
+on apache, the `-fpm` flavor on nginx, and an OpenLiteSpeed `lsphp81` image on
+litespeed; the wp-cli container (where tests run) follows the PHP pin too.
 
 ---
 
 ## Plain Claude vs. Claude + sandbox
 
-Claude in your IDE is already smart. It can read your code, propose
-diffs, talk through architecture. What it **cannot** do alone is run
-your WordPress, see what your block actually renders, query your DB,
-check `debug.log`, or know your plugin's specific conventions
-(build pipeline, textdomain rules, BC traps, where the source folder
-lives vs. the build output). It's a brilliant pair-programmer
-working blindfolded against an unfamiliar codebase.
-
-The sandbox removes the blindfold and hands it the keys.
+Claude in your IDE is already smart. It can read your code, propose diffs, talk
+through architecture. What it **cannot** do alone is run your WordPress, see
+what your block actually renders, query your DB, check `debug.log`, or know your
+plugin's specific conventions. It's a brilliant pair-programmer working
+blindfolded against an unfamiliar codebase. The sandbox removes the blindfold
+and hands it the keys.
 
 ### What plain Claude has
 
 - Your source code on disk (Read / Write / Edit).
 - The internet (web search, fetch).
 - Its training knowledge of WordPress / PHP / JS.
-- Nothing about *your* WordPress, *your* plugin's conventions, or
-  whether the edit it just made actually works.
+- Nothing about *your* WordPress, *your* plugin's conventions, or whether the
+  edit it just made actually works.
 
 ### What Claude + sandbox has, on top of that
 
-- **A live WordPress at `http://localhost:8188`** with your plugins
-  symlinked in. Edits land in seconds, no rebuild.
-- **20 MCP tools** to drive it: `wp_cli`, `wp_rest`, `db_query`,
-  `tail_log`, `visit` (headless Chromium, auto-login on wp-admin),
-  `http_fetch`, `fs_read/write`, `mail_list/get`, etc. The agent acts
-  on your stack instead of guessing at it.
-- **Your plugin's institutional knowledge** auto-loaded. The focused
-  plugin's `CLAUDE.md` (textdomain rules, save() BC traps, build
-  conventions, task-tracker board, sister-repo location) reaches the
-  model on every session via `focus_get`.
-- **A 2KB operating prompt** in every Claude session via the MCP
-  `instructions` field — reflexes ("first tool call reproduces, not
-  Read"), anti-patterns ("declaring fixed from code reading"),
-  workflow triggers ("focus &lt;plugin&gt;" → handshake).
-- **Skills + workflows** for the patterns that repeat: `fix` for
-  bugs (one-pass loop with paired before/after evidence),
-  `build-feature` for new features (three-phase: establish → plan →
-  build with size-scaled gates), `wp-pilot` for editor-stateful
-  authoring, `fluentboards` for task management.
+- **A live WordPress** with your plugin symlinked in. Edits land in seconds, no
+  rebuild. The agent acts on the stack instead of guessing at it.
+- **Real tests on demand** — `run_tests` runs the plugin's phpunit suite against
+  an externally-provisioned WP test harness, so "it works" is backed by a green
+  run, not a `php -l`.
+- **Your plugin's institutional knowledge** auto-loaded. The project's
+  `CLAUDE.md` (textdomain rules, `save()` BC traps, build conventions,
+  task-tracker board, sister-repo location) reaches the model via `focus_get`.
+- **A compact operating prompt** in every Claude session via the MCP
+  `instructions` field — reflexes ("first tool call reproduces, not Read"),
+  anti-patterns ("declaring fixed from code reading"), the project handshake
+  (always pass `project_dir`; call `ensure_instance` first). Deeper guidance
+  loads on demand via `load_context` / `load_skill(name)`.
+- **Skills + workflows** for the patterns that repeat: `fix` for bugs (one-pass
+  loop with paired before/after evidence), `build-feature` for new features
+  (three-phase, size-scaled gates), `wp-pilot` for editor-stateful authoring,
+  `fluentboards` for task management.
 
 ### What that means on three tasks you actually do
 
-Same task, two agents — what changes, step by step.
-
-**Fix a bug in your plugin.** A customer reports something breaks
-under a specific condition.
+**Fix a bug in your plugin.**
 
 | Step | Plain Claude | Claude + sandbox |
 |------|--------------|------------------|
-| **1. Understand the report** | Asks you what version, what other plugins are active, what theme. Reads the report's file paths. | Your plugin's `CLAUDE.md` is already in context (textdomain rules, BC traps, source layout). Can fetch the task-tracker card body via REST in one tool call. |
-| **2. Reproduce** | "Let me look at the file" → reads the code, spots the suspect line, says "looks like X is the cause." Can't actually verify. | First tool call provisions whatever the bug needs to fire (a translation file, a missing row, a setting flip) and triggers it on the live WP. Captures the real error in the log as `EVIDENCE.before`. |
-| **3. Find every affected site** | Reads the file the report names. Misses the sibling implementation and the Pro-side mirror. | Greps every call site across the focused plugin AND its `-pro` sibling in one pass. Same pattern caught wherever it lives. |
-| **4. Fix** | Edits file 1, asks you to test, edits file 2, asks again. 15-25 min per round, 3-5 rounds. | Batch-edits every affected file in one pass. No fix-test-fix loop. |
-| **5. Verify** | "Looks right." Or `php -l`. Or "tested on my machine." | Re-triggers the exact same failing call from step 2 — confirms output flipped → `EVIDENCE.after`. Real before/after pair against the actual failure path. |
-| **6. Report** | Prose summary you have to parse to figure out what shipped. | `STATUS: FIXED` block: files changed, paired evidence rows, what was deferred, suggested branch name. |
-| **7. Ship** | Commit + push + task-tracker update in one breath, because the agent assumed you wanted that. | Stops at the working tree. Commit, push, card update — each waits for explicit "go." |
+| **Understand** | Asks you the version, the active plugins, the theme. | The project's `CLAUDE.md` is already in context; can fetch the task-tracker card via REST in one call. |
+| **Reproduce** | "Let me look at the file" → guesses the cause; can't verify. | First tool call provisions whatever the bug needs and triggers it on the live WP; captures the real error as `EVIDENCE.before`. |
+| **Find every site** | Reads the file the report names; misses the Pro-side mirror. | Greps every call site across the plugin AND its `-pro` sibling in one pass. |
+| **Fix** | Edit, ask you to test, edit again. 3–5 rounds. | Batch-edits every affected file in one pass. |
+| **Verify** | "Looks right," or `php -l`. | Re-triggers the failing call → confirms the output flipped → `EVIDENCE.after`. Or `sandbox test` → green. |
+| **Ship** | Commit + push + card update in one breath. | Stops at the working tree. Each of commit / push / card-move waits for your "go." |
 
-**Build a new feature in your plugin.** A founder request or a
-task-tracker card asking for net-new functionality.
+**Build a new feature.** `load_workflow('build-feature')` → Phase 1 ESTABLISH
+(verb-led title, size class, live-verifiable success criteria, out-of-scope,
+edge cases) → Phase 2 PLAN (reuse audit naming every existing helper/table/route
+it'll ride on; cross-surface grep) → Phase 3 BUILD (vertical slices, each
+verified by an MCP call; non-negotiables — auth, sanitize-in/escape-out, slug
+prefixing — enforced per Edit). Final `STATUS: SHIPPED` block pairs every
+success criterion with live evidence + rollout notes.
 
-| Step | Plain Claude | Claude + sandbox |
-|------|--------------|------------------|
-| **1. Specify** | Agent infers what it can from the request and starts coding. Misunderstandings surface during review. | `load_workflow('build-feature')` → Phase 1 ESTABLISH block: verb-led title, size class, live-verifiable success criteria, out-of-scope list, impact analysis, edge cases. You sign off or redirect *before* any code is written. |
-| **2. Plan** | Skipped. Or done in chat as prose nobody references later. | Phase 2 PLAN: **reuse audit** names every existing helper / table / REST route / hook the feature will ride on instead of reinventing. **Cross-surface grep** catches discrepancies between render paths in advance. |
-| **3. Know your code** | Generic WP knowledge. Doesn't know your plugin's build pipeline, textdomain rules, or BC patterns. | Focused plugin's `CLAUDE.md` auto-loaded by `focus_get`. Source layout, build commands, BC patterns, task-tracker board — all in context before any code is read. |
-| **4. Slice the build** | Horizontally: "first the DB, then the API, then the UI." Integration bugs surface at the end. | Vertical slices: thinnest possible end-to-end through every layer first, then thicken. Integration bugs surface on day 1. |
-| **5. Apply non-negotiables** | You have to remember to ask: nonce? capability? plugin-slug prefix? Escape on output? | Workflow enforces them per-Edit: auth on every handler, sanitize-in / escape-out, prefix everything with the plugin slug, WP APIs over raw PHP. Listed in the contract, applied automatically. |
-| **6. Verify** | "Compiled OK, looks right." Or `php -l`. Or "tested on my machine." | Each slice: trigger via the right MCP tool → capture output → compare against that slice's success criterion. Real evidence per slice, not "looks right" once at the end. |
-| **7. Handle mid-build redirects** | You say "wait, also handle X" — agent silently expands scope. You discover later. | Same redirect → agent acknowledges, builds the addition, re-verifies. Final SHIPPED block carries a **Spec drift** section: *what Phase 1 said / what shipped instead / why*. |
-| **8. Report** | Prose summary you have to read to figure out what shipped. | `STATUS: SHIPPED` block: every Phase 1 success criterion gets a paired evidence row from a live MCP call. Rollout notes (toggle + default, flush requirement, free/Pro gating). Draft changelog entry. Suggested branch name. |
-| **9. Ship** | Commit + push in one go because the agent assumed you wanted that. | Stops at the working tree. Commit, push, task-tracker move — each requires explicit "go." |
-
-**Design a page in WordPress.** A landing page, a help-center index,
-a marketing page — anything you'd normally build by hand in wp-admin.
-
-| Step | Plain Claude | Claude + sandbox |
-|------|--------------|------------------|
-| **1. Create the page** | Describes it in chat; you create it manually in wp-admin. | `wp_rest` POST creates the page in one call and returns the post ID. |
-| **2. Build the layout** | Generates a block-markup string and hopes you paste it in correctly. | Writes block JSON directly via `fs_write`. For stateful blocks / Elementor widgets, `load_skill('wp-pilot')` drives real wp-admin headlessly with auto-login so the editor output is byte-perfect. |
-| **3. Use your plugin's blocks** | Knows the block name from training data, guesses at attribute shape. Often wrong. | Focused plugin's `CLAUDE.md` is loaded — block attribute names + defaults + BC rules are in context before the JSON is written. |
-| **4. Verify rendering** | "Open the page in your browser and see." | `visit` returns a PNG screenshot + DOM + console errors + network failures in one call. If a CSS class is missing or an image 404s, the agent sees it without you switching tabs. |
-| **5. Iterate** | "Try this CSS." You paste, refresh, screenshot, paste back, repeat. | Agent edits the stylesheet → re-`visit` with `--screenshot` → diffs against the previous PNG. You're not in the middle of every cycle. |
-| **6. Ship** | Manual: copy markup into staging, eyeball it. | Stops at the working tree. Export via WXR or commit the block JSON — your call, on your "go." |
+**Design a page.** `wp_rest` POST creates the page; block JSON written via
+`fs_write` (or `load_skill('wp-pilot')` drives real wp-admin headlessly for
+stateful blocks/Elementor); `visit` returns a screenshot + DOM + console errors
+to verify rendering without you switching tabs.
 
 ### The two underlying patterns
 
-1. **Live evidence is the only evidence.** Plain Claude can't reach
-   your stack, so it ships claims. Sandbox-Claude can reach your stack,
-   so it ships evidence. Every "fixed" / "shipped" / "verified" is
-   backed by an MCP call against the running WordPress.
+1. **Live evidence is the only evidence.** Every "fixed" / "shipped" /
+   "verified" is backed by an MCP call (or a test run) against the running
+   WordPress — not a claim from reading code.
+2. **The work stops at the working tree.** Commits, pushes, card updates, PRs —
+   all wait for explicit confirmation. The sandbox makes Claude powerful; the
+   gates make sure that power doesn't outrun your intent.
 
-2. **The work stops at the working tree.** Commits, pushes, FB card
-   updates, PR creations — all wait for explicit user confirmation.
-   The sandbox makes Claude powerful; the gates make sure that power
-   doesn't outrun your intent.
+---
 
-Net effect: Claude's intelligence stays the same; its **leverage on
-your codebase** changes by an order of magnitude. The same model that
-guessed wrong yesterday can ship a verified three-surface feature today
-because it has the stack, the conventions, and the tools.
+## What Claude can do — the MCP tools
+
+After `setup`, the single `sandbox` server exposes these against the live stack.
+**Every tool takes `project_dir`** (the agent passes your plugin's root, or cwd)
+and resolves the target instance from the registry — booting one if needed.
+
+| Tool | Purpose |
+|------|---------|
+| `ensure_instance` | Boot (create-if-missing) the instance for a project dir; returns its URL |
+| `run_tests` | Run the plugin's phpunit tests on the external WP harness → pass/fail + failures |
+| `wp_cli` | Run any `wp` command |
+| `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
+| `wp_rest` | Call the WordPress REST API (pre-wired app password) |
+| `http_fetch` | Lightweight anonymous HTTP probe — status, headers, body, redirects |
+| `visit` | Headless Chromium; auto-logs in on `/wp-admin/`. Returns status + DOM + iframes + console + network + optional screenshot |
+| `db_query` | Run SQL — writes require `mutate: true` |
+| `tail_log` | Tail `wp-content/debug.log` |
+| `fs_read` / `fs_write` / `fs_list` | Read/write files under the instance's WP dir |
+| `mail_list` / `mail_get` | Read Mailpit (test SMTP inbox) |
+| `focus_get` | The project's focused plugin + its `CLAUDE.md` |
+| `activate_plugin` / `deactivate_plugin` | Toggle plugins |
+| `import_content` | Import a WXR XML from `runtime/seeds/` |
+| `load_context` | Pull the full sandbox `CLAUDE.md` on demand (the compact summary ships automatically) |
+| `load_skill` | Pull a skill (`fix`, `bug-repro`, `snapshot`, `wp-debug`, `wp-pilot`, `fluentboards`) |
+| `load_workflow` | Pull a workflow (`build-feature`) |
+
+Plus Claude's normal `Read`/`Write`/`Edit` reach the plugin source on disk —
+bind-mounted into the container, so edits are live with no rebuild.
+
+You can also invoke skills as slash commands, e.g.
+`/mcp__sandbox__activate` (load the full operating guide) or
+`/mcp__sandbox__fix <task>` (one-pass bug-fix loop).
+
+---
+
+## Managing instances
+
+Instances are created per-project by `init`/`ensure` — there's no
+`instance create`. But you can view and drive them:
+
+```bash
+./sb instances            # list every per-project instance + status + URL
+./sb dashboard            # full-screen TUI: start/stop/restart/open/focus/delete
+./sb web                  # the same dashboard in the browser (127.0.0.1:8765)
+./sb instance delete <name>   # tear one down (containers, volume, files, registry)
+```
+
+Each instance can run a different **web server**, and you can switch in place
+without re-importing content:
+
+```bash
+./sb server <name> nginx        # apache → nginx (adds the nginx sidecar)
+./sb server <name> litespeed    # → OpenLiteSpeed
+./sb server <name> apache       # → back to apache
+```
+
+### Clean URLs — `https://<name>.sb`
+
+By default instances serve at `http://localhost:<port>`. Upgrade to a trusted,
+no-port HTTPS URL with one optional setup:
+
+```bash
+./sb domains setup     # one-time, asks your password ONCE (installs a local CA)
+./sb secure <name>     # mint a trusted cert for one instance → https://<name>.sb
+```
+
+It coexists with Laravel Valet (separate loopback IP). Undo with
+`./sb domains teardown`.
 
 ---
 
 ## Daily commands
 
 ```bash
-./sb pick                 # interactive checklist of WPDeveloper plugins
-./sb use <project>        # activate a profile (embedpress, design-elementor, …)
-./sb add <repo>           # clone + link a single plugin from GitHub
-./sb update               # git pull every plugin in the active project
-./sb focus <plugin>       # tell Claude which plugin is the active one
+sandbox init              # in a plugin dir: config + instance + test harness
+sandbox ensure            # boot/refresh this project's instance
+sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit args after --)
+./sb focus <plugin>       # mark which plugin is focused (for Claude)
 ./sb open [admin|site|mail]  # open in browser (default: admin)
-./sb visit <url> [...]    # load URL in headless Chromium, report DOM/console/iframes as JSON
-./sb snapshot <name>      # save DB + uploads (for fast bug repro / QA)
+./sb visit <url> [...]    # load URL in headless Chromium, report DOM/console/iframes
+./sb snapshot <name>      # save DB + uploads (fast bug repro / QA)
 ./sb restore <name>       # restore a saved snapshot
-./sb snapshots            # list saved snapshots
+./sb update               # git pull the project repo this instance tracks
 ./sb xdebug on|off        # toggle step-debug (port 9003, host trigger)
-./sb doctor               # audit the stack — runs after setup, run anytime
-./sb connect <fb|gh>      # save FluentBoards or GitHub creds
+./sb doctor               # audit the stack
 ./sb status               # which containers + project + focus are active
-./sb down                 # stop containers (state is preserved)
+./sb down                 # stop containers (state preserved)
 ./sb clean                # stop + wipe DB volume (start fresh)
 ```
 
-Run `./sb` with no args for the full list.
-
-### Working on a plugin
-
-```bash
-./sb use embedpress                  # the profile bundles embedpress + deps
-./sb add wpdeveloper/embedpress-pro  # clone + link Pro repo too
-./sb focus embedpress-pro            # Claude defaults to this repo
-```
-
-`add` accepts `org/repo`, full HTTPS URL, SSH URL, or bare `repo` (if you set
-`defaults.github_org` in `sandbox.yml`). It clones into `./plugins/`, symlinks
-into the running WordPress, activates it, and persists into `sandbox.local.yml`.
+Run `./sb` with no args for the full list. Most of these accept
+`--instance <name>` (or `--project-dir <dir>` for `ensure`/`test`/`init`) to
+target a specific project.
 
 ---
 
-## What Claude can do
+## Configuration
 
-After `setup`, Claude has these 20 MCP tools (auto-registered at user
-scope so they're available in every Claude session on the machine):
+Two layers:
 
-| Tool | Purpose |
-|------|---------|
-| `wp_cli` | Run any `wp` command |
-| `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
-| `wp_rest` | Call the WordPress REST API (uses pre-wired app password) |
-| `http_fetch` | Lightweight anonymous HTTP probe — status, headers, body, redirects. Right tool when `wp_rest` is wrong (no auth wanted) and `visit` is overkill (no browser needed) |
-| `visit` | Headless Chromium. Auto-logs in on `/wp-admin/` URLs using pre-wired admin creds. Returns status + title + iframes + console + network + optional screenshot |
-| `db_query` | Run SQL — writes require `mutate: true` |
-| `tail_log` | Tail `wp-content/debug.log` |
-| `fs_read` / `fs_write` / `fs_list` | Read/write files under `runtime/wp/` |
-| `mail_list` / `mail_get` | Read Mailpit (test SMTP inbox) |
-| `focus_get` / `focus_set` | Focus on a plugin. `focus_set` auto-switches the active project to one that contains the plugin |
-| `activate_plugin` / `deactivate_plugin` | Toggle plugins |
-| `import_content` | Import a WXR XML from `runtime/seeds/` |
-| `load_context` | Pull the full sandbox `CLAUDE.md` into the conversation on demand (the 2KB summary ships automatically) |
-| `load_skill` | Pull a sandbox skill (`fix`, `bug-repro`, `snapshot`, `wp-debug`, `wp-pilot`, `fluentboards`) on demand |
-| `load_workflow` | Pull a sandbox workflow (`build-feature`) on demand |
-
-Plus Claude's normal `Read`/`Write`/`Edit` reach the plugin source on disk —
-because the source is bind-mounted into the WP container, edits are live with
-no rebuild.
-
----
-
-## Bringing your own skills, CLAUDE.md, and configs
-
-Three attach points, all automatic:
-
-1. **Folder-level CLAUDE.md** — drop a `CLAUDE.md` at the sandbox root. Claude
-   Code auto-loads it for every conversation started here.
-
-2. **Plugin-level CLAUDE.md** — if a plugin repo you `add`ed has its own
-   `CLAUDE.md`, `./sb focus <slug>` makes Claude pull it in via
-   `focus_get`. Your plugin docs travel with the plugin.
-
-3. **Personal skills** — `~/.claude/skills/*.md` are loaded by Claude Code
-   itself. They work alongside the sandbox without conflict.
-
-### Skills + workflows shipping today
-
-**Skills** (single-purpose reflexes, loaded via `load_skill('<name>')` or
-the matching `/mcp__sandbox__<name>` slash command):
-
-| Skill | Purpose |
-|-------|---------|
-| `fix` | One-pass bug-fix loop (reproduce live → read all call sites → batch edit → verify) |
-| `bug-repro` | Canonical reproduction loop on the live stack |
-| `snapshot` | DB + uploads snapshot/restore guidance |
-| `wp-debug` | Diagnosing WP / plugin errors (tail_log, Xdebug, Query Monitor, symptom→cause table) |
-| `wp-pilot` | Headless wp-admin authoring (Gutenberg blocks with stateful `save()`, Elementor widgets) |
-| `fluentboards` | Read/update FluentBoards tasks via REST |
-
-**Workflows** (multi-phase playbooks with user gates, loaded via
-`load_workflow('<name>')` or `/mcp__sandbox__<name>`):
-
-| Workflow | Purpose |
-|----------|---------|
-| `build-feature` | Three-phase feature build: ESTABLISH (spec + impact + edge cases) → PLAN (file plan + reuse audit + slicing + rollout) → BUILD (slice by slice with live verification). Size-scaled gates (S=0, M=1, L=2) |
-
-### Adding a new skill or workflow
-
-One folder per skill / workflow, named after itself, with a single canonical
-entry file. Supporting assets (examples, screenshots, helper scripts) live
-alongside it in the same folder.
-
-```
-skills/
-└── my-new-skill/
-    ├── SKILL.md              # the entry file — required, uppercase
-    ├── examples/             # optional supporting files
-    └── notes.md              # optional supporting files
-
-workflows/
-└── my-new-workflow/
-    └── WORKFLOW.md           # required, uppercase
-```
-
-Reference one from another by its full path:
-`workflows/build-feature/WORKFLOW.md`, `skills/fix/SKILL.md`.
-
----
-
-## Customizing
-
-All knobs live in [sandbox.yml](sandbox.yml). Edit, then re-run setup:
-
-```bash
-nano sandbox.yml          # change ports, admin creds, projects, etc.
-./sb setup        # idempotent — applies only what changed
-```
-
-Per-machine overrides (not committed) go in `sandbox.local.yml`. Things to
-override there:
+- **Per-project** `sandbox.config.json` (in the plugin repo, canonical) +
+  gitignored `sandbox.config.override.json`. This is what makes a plugin a
+  sandbox project. See [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).
+- **Machine/global** [`sandbox.yml`](sandbox.yml) — ports base, admin creds,
+  image defaults. Per-machine overrides go in the gitignored `sandbox.local.yml`:
 
 ```yaml
 defaults:
-  plugins_home: "$HOME/dev"     # use your existing plugin clones instead of ./plugins
-  github_org: "wpdeveloper"     # so `./sb add embedpress` resolves
+  plugins_home: "$HOME/dev"     # where cloned plugins live
+  github_org: "wpdeveloper"
 ```
 
-To add a new project, copy a `projects:` block in `sandbox.yml`, change the
-slug + source, save, run `./sb use <new-name>`.
+There is **no central project catalog** — each plugin self-describes.
 
 ---
 
-## What lives where (everything stays inside the folder)
+## Bringing your own CLAUDE.md and skills
+
+Three attach points, all automatic:
+
+1. **Sandbox `CLAUDE.md`** — the operating guide, loaded on demand via
+   `load_context` (the compact summary ships every session via the MCP
+   `instructions` field).
+2. **Project `CLAUDE.md`** — a plugin repo's own `CLAUDE.md` (+ any
+   `.claude/skills/<area>/SKILL.md`) is surfaced by `focus_get` for that project.
+3. **Personal skills** — `~/.claude/skills/*/SKILL.md` are loaded by Claude Code
+   itself, alongside the sandbox.
+
+**Skills** (loaded via `load_skill('<name>')`): `fix`, `bug-repro`, `snapshot`,
+`wp-debug`, `wp-pilot`, `fluentboards`. **Workflows** (`load_workflow('<name>')`):
+`build-feature`. Each lives in its own folder with an uppercase entry file
+(`skills/<name>/SKILL.md`, `workflows/<name>/WORKFLOW.md`).
+
+---
+
+## What lives where
 
 ```
 sandbox/
-├── sb                      # the CLI (Python script — invoke as ./sb)
-├── sandbox.yml             # single source of truth — edit this
+├── sb                      # the CLI (Python — invoke as ./sb or `sandbox`)
+├── sandbox_core.py         # shared core: per-project config + registry
+├── sandbox.yml             # machine/global defaults
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
-├── .mcp.json               # auto-generated — Claude Code reads this
+├── bin/sandbox.js          # npm entry shim (execs the bundled sb)
+├── package.json            # npm package (@wpdeveloper/sandbox)
+├── packaging/              # Homebrew formula + packaging notes
 ├── docker-compose.yml      # managed by the CLI
 ├── runtime/
-│   ├── wp/                 # WordPress install (bind-mounted into the container)
-│   ├── seeds/              # demo content / Elementor JSON / WXR imports
-│   └── snapshots/          # gitignored — DB + uploads snapshots from ./sb snapshot
+│   ├── wp-<instance>/      # each instance's WordPress install (bind-mounted)
+│   ├── registry.json       # project-root → instance mapping
+│   ├── test-suite/         # cached wordpress-develop phpunit suite
+│   ├── test-tools/         # phpunit + composer phars + polyfills + wp-tests-config
+│   └── seeds/              # demo content / WXR imports
 ├── plugins/                # default home for cloned plugin repos (gitignored)
 ├── mcp/wp-server/          # the Python MCP server + its venv
-├── tools/visit/            # headless-browser runner invoked by the visit MCP tool
-├── skills/
-│   ├── fix/SKILL.md            # one-pass bug-fix loop
-│   ├── bug-repro/SKILL.md      # canonical live reproduction loop
-│   ├── snapshot/SKILL.md       # snapshot/restore guidance
-│   ├── wp-debug/SKILL.md       # diagnosing WP/plugin errors
-│   ├── wp-pilot/SKILL.md       # headless wp-admin authoring
-│   └── fluentboards/SKILL.md   # FluentBoards REST integration
-├── workflows/
-│   └── build-feature/WORKFLOW.md   # three-phase feature build (establish → plan → build)
-├── memory/
-│   ├── plugin-behavior/    # tracked — cross-plugin runtime findings
-│   ├── feature-history/    # tracked — retros from shipped features
-│   └── repros/             # gitignored — per-bug repro state
-└── .claude/
-    └── skills/             # symlink → ../skills (Claude Code's native skill discovery)
+├── skills/<name>/SKILL.md  # role packs
+└── workflows/<name>/WORKFLOW.md
 ```
 
-The only state outside this folder: Docker's named volume `db_data` (cleared by
-`./sb clean`).
+The only state outside this folder: Docker's named volumes (cleared by
+`./sb clean` / `./sb instance delete`).
 
 ---
 
 ## Troubleshooting
 
 ```bash
-./sb doctor       # checks containers, WP, REST auth, MCP venv, symlinks, focus
+./sb doctor       # checks containers, WP, REST auth, MCP venv, symlinks, project, focus
 ```
 
-Every failure prints a `→ hint` next to it. Common ones:
-
-- **REST auth fails** — re-run `./sb setup` (regenerates the app password)
-- **MCP server not connected in Claude Code** — run `claude mcp list` and
-  confirm `sandbox` (+ any `sandbox-<instance>`) is `✓ Connected`. If
-  missing, re-run `./sb setup` (it re-registers every instance's user-scope
-  server). For project-local fallback, `cat .mcp.json` and verify
-  `./mcp/wp-server/.venv/bin/python` is the Python path it references
-- **A session keeps landing on the wrong instance** — you're calling the
-  wrong tool namespace. `mcp__sandbox__*` = `main`; use `mcp__sandbox-<name>__*`
-  for instance `<name>`. `./sb instances` shows the mapping. A freshly
-  created instance's server may need a `claude` restart to appear
-- **Sandbox prompt / reflexes not engaging** — the 2KB summary ships via
-  the MCP `instructions` field on every session. If the model isn't
-  picking up sandbox behavior, verify the server is connected (see
-  above) and try invoking `/mcp__sandbox__activate` to explicitly load
-  the full CLAUDE.md
-- **Container won't start** — `./sb down && ./sb setup`
-- **Want a fresh start** — `./sb clean && ./sb setup`
+- **REST auth fails** — re-run `./sb ensure` (regenerates the app password).
+- **MCP server not connected** — `claude mcp list` should show `sandbox` as
+  `✓ Connected`. If missing, re-run `./sb setup`. For the project-local
+  fallback, `cat .mcp.json` (it points at `./sb mcp`).
+- **A plugin "isn't found"** — make sure you've run `sandbox init` (or `ensure`)
+  in its directory so it has a `sandbox.config.json` + a registered instance.
+- **Container won't start** — `./sb ensure` resumes a stopped/half-booted
+  instance in place; if Docker itself restarted (e.g. an auto-update), relaunch
+  Docker and re-run `ensure`.
+- **Fresh start** — `./sb instance delete <name>` then `sandbox init` again.
 
 For everything else, ask Claude — it has `tail_log`, `wp_exec`, and `db_query`
 and can usually diagnose itself.
@@ -503,20 +363,13 @@ and can usually diagnose itself.
 
 ## Roadmap
 
-- **Shipped** — Docker WP stack + the `sandbox` MCP server with 20 tools,
-  auto-registered at user scope; headless Chromium with auto-login (`visit`);
-  size-scaled feature workflow (`build-feature`); one-pass bug-fix skill
-  (`fix`) with provision-the-repro branch and cross-surface guidance;
-  FluentBoards integration; focus auto-link (`./sb focus <plugin>` switches
-  the active project to one that contains the plugin); 2KB MCP instructions
-  field so the operating prompt + reflexes ship to every Claude session
-  without launch-flag rituals.
-- **In progress** — workflow sharpening as it gets stress-tested on real
-  features and bugs; per-plugin scaffolding skills (`add-block`,
-  `add-shortcode`, etc.) maturing in the plugin repos themselves.
-- **Next** — remote API surface so the sandbox can be triggered from outside
-  the dev's machine (phone, Slack, FluentBoards webhook); `figma-mcp` so
-  designers can pull from Figma straight into a WordPress page.
+- **Shipped** — Docker WP stack; the single `sandbox` MCP server routing by
+  `project_dir`; per-project `sandbox.config.*` + on-disk registry;
+  externally-provisioned phpunit harness (`sandbox test` / `run_tests`);
+  `sandbox init`; server-aware version pins; headless Chromium with auto-login
+  (`visit`); size-scaled `build-feature` workflow; one-pass `fix` skill;
+  FluentBoards integration; npm + Homebrew + curl distribution.
+- **Next** — remote API surface (trigger from phone / Slack / FluentBoards
+  webhook); `figma-mcp` so designers pull from Figma straight into a page.
 
-Everything plugs into the same `sandbox.yml`. Re-run `./sb setup` after any
-config change — it's idempotent.
+Re-run `./sb setup` after a global config change — it's idempotent.

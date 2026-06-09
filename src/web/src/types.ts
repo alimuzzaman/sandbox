@@ -6,6 +6,8 @@ export interface Instance {
   pending?: boolean;
   server: string;
   url: string;
+  admin_url?: string;
+  login_url?: string;
   mcp_server: string;
   project: string;
   focus: string;

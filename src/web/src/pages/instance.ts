@@ -84,7 +84,7 @@ export function instanceView(r: Instance | null): string {
         ${r.url} · <code>${esc(r.mcp_server)}</code></div>
     </div>
     <div class="ml-auto flex items-center gap-2">
-      ${pillLink(r.url + "/wp-admin", "Admin", r.running)}
+      ${r.login_url ? pillLink(r.login_url, "Login", r.running) : pillLink(r.url + "/wp-admin", "Admin", r.running)}
       ${pillLink(r.url, "View site", r.running)}
     </div>
   </div>

@@ -4124,18 +4124,23 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
     """
     sc = _core()
     rows = []
+    local_cfg = _local_yaml()
     for name, inst_cfg in resolve_instances(cfg).items():
         ff = focus_file(name)
         # Per-project model: the project is the registry root this instance
         # serves (its dir basename), not the vestigial .active-project file.
         owner = sc.registry_find_instance(name)
         project = Path(owner["root"]).name if owner and owner.get("root") else "—"
+        _base = site_url(inst_cfg)
+        _token = local_cfg.get("instances", {}).get(name, {}).get("autologin_token", "")
         rows.append({
             "name": name,
             "running": _instance_running(name),
             "wordpress_port": inst_cfg["wordpress_port"],
             "mailpit_port": inst_cfg["mailpit_port"],
-            "url": site_url(inst_cfg),
+            "url": _base,
+            "admin_url": f"{_base}/wp-admin/",
+            "login_url": f"{_base}/?sandbox_autologin={_token}" if _token else "",
             "domain": inst_cfg.get("domain"),
             "server": inst_cfg.get("server", "apache"),
             "mcp_server": mcp_server_name(name),

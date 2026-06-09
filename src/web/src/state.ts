@@ -10,7 +10,7 @@ export const store: {
   paused: boolean;                // pause the refresh tick while a job streams
 } = {
   data: {
-    instances: [], plugins: [], projects: [], seeds: [],
+    instances: [], plugins: [], seeds: [],
     servers: ["apache", "nginx", "litespeed"], domains_ready: false,
   },
   busy: {},

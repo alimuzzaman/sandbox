@@ -17,7 +17,7 @@ import {
   act, op, doFocus, doServer, doDelete, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter, copyText, loadUsageThenRender, setActionDeps,
 } from "./actions";
-import { doCreate, submitCreate, syncDomainFromName, domainEdited } from "./pages/create";
+import { doCreate } from "./pages/create";
 import type { SbApi } from "./types";
 
 // ---- data refresh tick ----
@@ -49,21 +49,20 @@ function showHelp(): void {
       "browser, read/edit your plugin's code, and tail logs. Say \"focus <plugin>\" " +
       "or \"work on <plugin>\" in chat — Claude picks the matching environment, " +
       "symlinks the plugin in, loads its code + context, and can build, reproduce, " +
-      "and fix end-to-end. Each environment also has its own tool namespace " +
-      "(mcp__sandbox__* = main, mcp__sandbox-<name>__* = that one) so parallel " +
-      "sessions never collide. Open an environment on the left for its exact " +
-      "snippet. It's real WordPress — break it freely, snapshot or delete anytime.",
+      "and fix end-to-end. One MCP server (mcp__sandbox__*) serves every project — " +
+      "each tool takes the project directory and resolves the right environment from " +
+      "the registry. Open an environment on the left for its exact snippet. It's " +
+      "real WordPress — break it freely, snapshot or delete anytime.",
   });
 }
 
 // ---- expose the inline-handler surface ----
 const sb: SbApi & { copyText: (t: string, b: HTMLElement) => void } = {
   navigate, goHome, selectInstance, showUsage, showHelp, openTerminal,
-  doCreate, submitCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
+  doCreate, doDelete, doFocus, doServer, doSnapshot, doRestore, doSeed, doWp, doInstall,
   plugFilter: () => plugFilter(activeInstanceName()),
   loadUsageThenRender,
   act, op,
-  syncDomainFromName, domainEdited,
   cselToggle, cselPick, cselFilter,
   rowMenuToggle, rowMenuClose,
   consoleClose,

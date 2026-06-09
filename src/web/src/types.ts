@@ -14,16 +14,9 @@ export interface Instance {
   mailpit_port: number | string;
 }
 
-export interface Project {
-  name: string;
-  description: string;
-  plugins: string[];
-}
-
 export interface AppData {
   instances: Instance[];
   plugins: string[];
-  projects: Project[];
   seeds: string[];
   servers: string[];
   domains_ready?: boolean;
@@ -86,7 +79,6 @@ export interface SbApi {
   showHelp(): void;
   openTerminal(name: string): void;
   doCreate(): void;
-  submitCreate(): void;
   doDelete(name: string): void;
   doFocus(name: string, slug: string): void;
   doServer(name: string, server: string): void;
@@ -99,8 +91,6 @@ export interface SbApi {
   loadUsageThenRender(): void;
   act(instance: string, action: string, extra?: Record<string, unknown>): void;
   op(name: string, action: string, extra?: Record<string, unknown>): void;
-  syncDomainFromName(el: HTMLInputElement): void;
-  domainEdited(): void;
   cselToggle(id: string): void;
   cselPick(id: string, v: string): void;
   cselFilter(id: string): void;

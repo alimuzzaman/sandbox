@@ -1,0 +1,25 @@
+# The `files` allowlist in package.json restricts the pack to runtime paths;
+# these rules prune dev-only / generated / secret content that lives *inside*
+# those allowlisted dirs. (npm uses .npmignore instead of .gitignore once this
+# file exists, so it must be self-contained for anything under a files: entry.)
+
+# Python bytecode + virtualenvs (sb builds .cli-venv + mcp/.venv on first run)
+mcp/wp-server/__pycache__/
+mcp/wp-server/.venv/
+.cli-venv/
+__pycache__/
+*.pyc
+
+# Maintainer-only release flow (mirrors scripts/make-release.sh prune list)
+skills/sandbox-release/
+
+# Per-machine config + secrets (never publish)
+sandbox.local.yml
+*.local.yml
+.env
+.env.*
+
+# Generated runtime state + build artifacts
+runtime/
+dist/
+.mcp.json

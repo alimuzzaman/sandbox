@@ -13,12 +13,11 @@ Tools:
 
 Designed to be launched over stdio by an LLM client. See README.md.
 
-Multi-instance: the CLI registers ONE server per sandbox instance, baking
-SANDBOX_INSTANCE (+ that instance's WP_URL / WP_APP_PASSWORD / MAILPIT_URL)
-into each registration's env. So every tool defaults to THIS server's
-instance (SESSION_INSTANCE) instead of always `main`, and concurrent Claude
-sessions on different instances never collide on focus/active-project state.
-Pass `instance=` explicitly to override per call.
+MCP-first model: the CLI registers ONE `sandbox` server (no per-instance env
+binding). Every tool takes `project_dir` and resolves the target instance from
+the on-disk registry (sandbox_core) per call, so a single registration serves
+every project from any directory. Pass `instance=` to override the resolved
+instance for a single call.
 """
 
 from __future__ import annotations
@@ -162,13 +161,9 @@ def _load_sandbox_yml() -> dict:
 
 
 def _resolve_instance(instance: str) -> dict:
-    """Return per-instance ports/admin/app_password.
-
-    Falls back to env vars (set by the CLI when registering the MCP
-    server) for the instance THIS server is bound to (SESSION_INSTANCE) —
-    each per-instance registration bakes that instance's WP_URL /
-    WP_APP_PASSWORD into env, so the env-priming path below applies to
-    whichever instance owns this process, not just `main`.
+    """Return per-instance ports/admin/app_password, resolved from sandbox.yml
+    (+ sandbox.local.yml). `main` reads the legacy mcp.wp.application_password
+    key; other instances read instances.<name>.app_password.
     """
     cfg = _load_sandbox_yml()
     runtime = cfg.get("runtime", {}) or {}

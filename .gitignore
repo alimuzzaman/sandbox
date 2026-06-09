@@ -54,6 +54,12 @@ runtime/.venv-tools/
 src/web/node_modules/
 src/web/dist/
 
+# npm/pnpm artifacts from the root package.json (the `sandbox` bin shim has no
+# JS deps — these regenerate on any npm/pnpm invocation and aren't committed).
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+
 # Release tarballs from scripts/make-release.sh (built artifacts — upload to the
 # public host, don't commit).
 dist/

@@ -264,6 +264,23 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
         # doesn't require restating user/password/email.
         rt_admin = (runtime.get("admin") or {})
         inst_admin = (inst.get("admin") or {})
+        # Version pins (per-project knobs). The web image is resolved
+        # server-aware at render time from these; the wpcli image follows the
+        # PHP pin so test runs (composer/phpunit in wpcli) match. Coerce to str
+        # — PyYAML parses an unquoted `php_version: 8.1` as a float and `8` as
+        # an int, which would crash the litespeed `.replace('.', '')` and yield
+        # malformed tags on apache/nginx.
+        def _ver(v):
+            return str(v) if v not in (None, "") else None
+        php_version = _ver(inst.get("php_version", runtime.get("php_version")))
+        wp_version = _ver(inst.get("wp_version", runtime.get("wp_version")))
+        # The bare "wordpress:cli" is the default sentinel → derive from the PHP
+        # pin so tests (composer + phpunit run in the wpcli container) execute
+        # under the project's PHP. A non-default explicit image always wins.
+        wpcli_explicit = inst.get("wpcli_image", runtime.get("wpcli_image"))
+        wpcli_image = (wpcli_explicit
+                       if wpcli_explicit and wpcli_explicit != "wordpress:cli"
+                       else _cli_image(php_version))
         return {
             "wordpress_port": inst.get("wordpress_port",
                                        runtime.get("wordpress_port", 8088)),
@@ -277,9 +294,9 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             "mariadb_image": inst.get("mariadb_image",
                                       runtime.get("mariadb_image",
                                                   "mariadb:latest")),
-            "wpcli_image": inst.get("wpcli_image",
-                                    runtime.get("wpcli_image",
-                                                "wordpress:cli")),
+            "wpcli_image": wpcli_image,
+            "php_version": php_version,
+            "wp_version": wp_version,
             "admin": {**rt_admin, **inst_admin},
             "project": inst.get("project"),
             # Web server stack: apache (default) | nginx | litespeed.
@@ -333,14 +350,15 @@ def project_name(instance: str) -> str:
     return f"sandbox-{instance}"
 
 
-def mcp_server_name(instance: str) -> str:
-    """Claude MCP registration name for an instance's server.
+MCP_SERVER_NAME = "sandbox"
 
-    `main` keeps the bare `sandbox` name so every existing skill/workflow/doc
-    that references `mcp__sandbox__*` keeps working untouched. Additional
-    instances get `sandbox-<name>`, exposing tools as `mcp__sandbox-<name>__*`.
-    """
-    return "sandbox" if instance == DEFAULT_INSTANCE else f"sandbox-{instance}"
+
+def mcp_server_name(instance: str = "") -> str:
+    """The Claude MCP server name. Per-project rewrite: ONE 'sandbox' server
+    routes every project by `project_dir`, so this is a constant now — the old
+    per-instance `sandbox-<name>` scheme is gone. Kept as a function so the
+    existing call sites don't all need editing."""
+    return MCP_SERVER_NAME
 
 
 # --------------------------- custom domains --------------------------
@@ -773,8 +791,10 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
     Kept byte-identical to the pre-multi-server template so existing
     instances regenerate unchanged."""
+    image = _web_image("apache", inst_cfg.get("php_version"),
+                       inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
-    image: {inst_cfg["wordpress_image"]}
+    image: {image}
     depends_on:
       db:
         condition: service_healthy
@@ -802,7 +822,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
       # Bind-mount plugin sources at the same absolute host path so the
-      # symlinks `./sb add` creates under wp-content/plugins/ resolve
+      # symlinks ensure_instance creates under wp-content/plugins/ resolve
       # inside the container.
       - {plugins_host}:{plugins_host}
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
@@ -816,9 +836,8 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     reverse-proxies .php to wp:9000. nginx-sandbox.conf carries the WP
     front-controller rewrite (permalinks + /wp-json/ both fall through to
     index.php). Default image is Apache-specific, so pin the fpm flavor here."""
-    fpm_image = inst_cfg["wordpress_image"]
-    if fpm_image in ("wordpress:latest", "wordpress"):
-        fpm_image = "wordpress:php8.3-fpm"
+    fpm_image = _web_image("nginx", inst_cfg.get("php_version"),
+                           inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
     image: {fpm_image}
     depends_on:
@@ -871,9 +890,8 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     (WP itself won't, under OLS). That drives permalinks + REST."""
     rt = _server_runtime("litespeed")
     docroot = rt["docroot"]
-    ls_image = inst_cfg.get("wordpress_image")
-    if not ls_image or ls_image in ("wordpress:latest", "wordpress"):
-        ls_image = "litespeedtech/openlitespeed:1.8.2-lsphp83"
+    ls_image = _web_image("litespeed", inst_cfg.get("php_version"),
+                          inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
     image: {ls_image}
     depends_on:
@@ -1218,40 +1236,20 @@ def cmd_status(cfg, args) -> None:
     srv = mcp_server_name(inst)
     ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
     ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'apache')}")
-    if apf.exists():
-        ok(f"Active project: {apf.read_text().strip()}")
+    owner = _core().registry_find_instance(inst)
+    if owner and owner.get("root"):
+        ok(f"Project: {owner['root']}")
     else:
-        info("No active project (run: ./sb use <name>)")
+        info("No project registered (cd into a plugin repo and run ./sb ensure)")
     if ff.exists():
         ok(f"Focused plugin: {ff.read_text().strip()}")
     else:
         info("No focused plugin (run: ./sb focus <slug>)")
 
 
-def _project_for_plugin(cfg: dict, slug: str) -> str | None:
-    """Return the best-fit project name that contains `slug`, or None.
-
-    Prefer a project whose name matches the plugin slug (the common
-    convention: `embedpress` project contains `embedpress`). Otherwise
-    return the first project that lists the plugin.
-    """
-    projs = cfg.get("projects", {}) or {}
-    candidates = []
-    for name, p in projs.items():
-        plugin_slugs = [(pl or {}).get("slug") for pl in (p.get("plugins") or [])]
-        if slug in plugin_slugs:
-            candidates.append(name)
-    if not candidates:
-        return None
-    if slug in candidates:
-        return slug
-    return candidates[0]
-
-
 def cmd_focus(cfg, args) -> None:
     inst = args.resolved_instance
     ff = focus_file(inst)
-    apf = active_project_file(inst)
     if args.clear:
         if ff.exists():
             ff.unlink()
@@ -1289,40 +1287,6 @@ def cmd_focus(cfg, args) -> None:
     ff.write_text(args.slug)
     ok(f"Focused plugin: {args.slug}")
 
-    # Auto-link: if the focused plugin isn't already in the active
-    # project's plugin list, switch the active project to one that
-    # contains it. Keeps focus + active_project consistent so users
-    # don't have to think about both concepts.
-    active = apf.read_text().strip() if apf.exists() else None
-    projs = cfg.get("projects", {}) or {}
-    active_slugs = []
-    if active and active in projs:
-        active_slugs = [(pl or {}).get("slug")
-                        for pl in (projs[active].get("plugins") or [])]
-    if args.slug in active_slugs:
-        # Already aligned — nothing to do.
-        print(f"  Active project: {active} (contains {args.slug})")
-        return
-
-    target = _project_for_plugin(cfg, args.slug)
-    if not target:
-        info(f"plugin '{args.slug}' isn't in any defined project — add "
-             f"it to sandbox.yml or sandbox.local.yml to enable "
-             f"auto-provisioning. Focus set; active project unchanged.")
-        return
-
-    if active == target:
-        # Active project IS the right one but doesn't list this plugin
-        # — config drift; bail rather than re-provision.
-        info(f"active project '{active}' is the best match for "
-             f"'{args.slug}' but doesn't list it. Check sandbox.yml.")
-        return
-
-    info(f"switching active project: {active or '(none)'} → {target} "
-         f"(contains '{args.slug}')")
-    import types
-    cmd_use(cfg, types.SimpleNamespace(name=target, resolved_instance=inst))
-
 
 def cmd_logs(cfg, args) -> None:
     compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
@@ -1348,8 +1312,12 @@ def cmd_install(cfg, args) -> None:
     # `wp core install`. Both checks are no-ops when the image already did it.
     ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
     if ver.returncode != 0:
-        info("downloading WordPress core…")
-        wpcli(["core", "download", "--force"], instance=inst, check=False)
+        wp_v = inst_cfg.get("wp_version")
+        info(f"downloading WordPress core{f' {wp_v}' if wp_v else ''}…")
+        dl = ["core", "download", "--force"]
+        if wp_v:
+            dl.append(f"--version={wp_v}")
+        wpcli(dl, instance=inst, check=False)
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:
         info("generating wp-config.php…")
@@ -1435,112 +1403,6 @@ def save_local_app_password(app_pw: str, instance: str = DEFAULT_INSTANCE) -> No
         yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
 
 
-def cmd_projects(cfg, args) -> None:
-    projs = cfg.get("projects", {}) or {}
-    if not projs:
-        info("No projects defined in sandbox.yml")
-        return
-    print()
-    for name, p in projs.items():
-        desc = p.get("description", "").strip()
-        print(f"  {name:<22} {desc}")
-    print()
-
-
-SANDBOX_CLAUDE_BEGIN = "<!-- sandbox:auto-generated — regenerated by ./sb -->"
-SANDBOX_CLAUDE_END = "<!-- /sandbox:auto-generated -->"
-
-
-def _drop_sandbox_claude_md(plugin_src: Path, slug: str, cfg: dict) -> None:
-    """Write a `CLAUDE.local.md` into the plugin's source repo so that Claude
-    Code, when opened with the plugin as cwd, can discover the sandbox.
-
-    Without this, every new Claude session is blind to the running stack —
-    no idea which URL to visit, which container to wp-cli into, or that
-    `./sb visit` even exists. The file is keyed on the WP plugin slug, lives
-    at the plugin repo root, and is *idempotent*: each run regenerates the
-    file inside sentinel markers so manual additions outside the block
-    survive. We also exclude it from the plugin's git via .git/info/exclude
-    so the WPDev / partner repo's own history stays clean.
-    """
-    if not plugin_src or not plugin_src.exists() or not plugin_src.is_dir():
-        return
-
-    rt = cfg.get("runtime", {}) or {}
-    wp_port = rt.get("wordpress_port", 8088)
-    admin = (rt.get("admin") or {})
-    admin_user = admin.get("user", "admin")
-    admin_pass = admin.get("password", "admin")
-    active = ACTIVE.read_text().strip() if ACTIVE.exists() else "(none)"
-    focus = FOCUS.read_text().strip() if FOCUS.exists() else "(none)"
-
-    block = f"""{SANDBOX_CLAUDE_BEGIN}
-# Sandbox context
-
-This plugin (`{slug}`) is symlinked into a WPDeveloper Sandbox running on
-this machine.
-
-- Sandbox repo:     `{ROOT}`
-- WordPress URL:    http://localhost:{wp_port}/  (admin: {admin_user}/{admin_pass})
-- Mailpit:          http://localhost:{rt.get('mailpit_port', 8025)}/
-- Active project:   `{active}`
-- Focused plugin:   `{focus}`
-
-## Common commands (run from `{ROOT}`)
-
-```
-./sb visit <url>                    headless-browser inspector — returns JSON
-./sb visit <url> --check-iframes    also probes each iframe loaded
-./sb visit <url> --screenshot PATH  save a PNG
-./sb wp <wp-cli args>               run wp-cli inside the container
-./sb status                         container + project + focus state
-./sb focus <plugin>                 switch which plugin is "in focus"
-./sb open admin | site | mail       open in browser
-./sb logs                           tail WP + DB logs
-```
-
-## Conventions when working on this plugin
-
-- For UI / rendering / iframe / editor work, prefer `./sb visit` over `curl`.
-  curl is blind to runtime DOM, iframes, and JS console errors.
-- Don't edit files inside `vendor/` — patch from plugin code or send an
-  upstream PR. Vendor edits are wiped on `composer install`.
-- The plugin's source lives here (`{plugin_src}`) and is bind-mounted into
-  the WP container, so changes are live without restart.
-
-{SANDBOX_CLAUDE_END}
-"""
-
-    target = plugin_src / "CLAUDE.local.md"
-    existing = target.read_text() if target.exists() else ""
-
-    if SANDBOX_CLAUDE_BEGIN in existing and SANDBOX_CLAUDE_END in existing:
-        head, _, rest = existing.partition(SANDBOX_CLAUDE_BEGIN)
-        _, _, tail = rest.partition(SANDBOX_CLAUDE_END)
-        new = head + block + tail
-    elif existing.strip():
-        new = existing.rstrip() + "\n\n" + block
-    else:
-        new = block
-    target.write_text(new)
-
-    # Keep CLAUDE.local.md out of the plugin's git index without modifying
-    # the tracked .gitignore (which may be owned by the plugin's repo). Use
-    # .git/info/exclude — local to this clone, never committed.
-    git_dir = plugin_src / ".git"
-    if git_dir.is_dir():
-        exclude = git_dir / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        line = "CLAUDE.local.md"
-        body = exclude.read_text() if exclude.exists() else ""
-        if line not in body.splitlines():
-            with exclude.open("a") as f:
-                if body and not body.endswith("\n"):
-                    f.write("\n")
-                f.write("# Added by ./sb — local-only, not for the plugin's tree\n"
-                        f"{line}\n")
-
-
 def _force_symlink(link: Path, src: Path) -> None:
     """Replace whatever is at `link` with a symlink to `src`.
 
@@ -1559,363 +1421,9 @@ def _force_symlink(link: Path, src: Path) -> None:
     link.symlink_to(src)
 
 
-def _parse_pick_input(raw: str, name_to_idx: dict[str, int],
-                      idx_to_name: dict[int, str]) -> list[str]:
-    """Parse a picker selection string into an ordered list of project names.
-
-    Accepts space- or comma-separated mix of numbers, ranges (1-3), 'all',
-    and slug names. Unknown tokens are silently dropped — the caller shows
-    the final confirm-list so typos are obvious.
-    """
-    raw = (raw or "").strip().lower()
-    if not raw or raw == "none":
-        return []
-    if raw == "all":
-        return [idx_to_name[i] for i in sorted(idx_to_name)]
-    seen: set[str] = set()
-    chosen: list[str] = []
-
-    def take(name: str):
-        if name and name not in seen:
-            seen.add(name)
-            chosen.append(name)
-
-    for token in re.split(r"[\s,]+", raw):
-        if not token:
-            continue
-        if "-" in token and all(p.isdigit() for p in token.split("-")):
-            lo, hi = (int(x) for x in token.split("-"))
-            for i in range(lo, hi + 1):
-                if i in idx_to_name:
-                    take(idx_to_name[i])
-        elif token.isdigit():
-            i = int(token)
-            if i in idx_to_name:
-                take(idx_to_name[i])
-        elif token in name_to_idx:
-            take(token)
-    return chosen
-
-
-def _resolve_plugin_github(plug: dict, project_org: str, default_org: str) -> str | None:
-    """Pick the GitHub <org>/<repo> to clone for a plugin entry.
-
-    Resolution order:
-      1. explicit `github: "<org>/<repo>"` on the plugin
-      2. explicit `github_repo: "<repo>"` on the plugin combined with the
-         project- or defaults-level `github_org`
-      3. fallback: <project_org or default_org>/<slug>
-
-    Returns None when nothing usable can be assembled, so the caller can
-    print a precise error instead of falling through to a 404.
-    """
-    explicit = (plug.get("github") or "").strip()
-    if explicit and "/" in explicit:
-        return explicit
-    repo_name = (plug.get("github_repo") or plug.get("slug") or "").strip()
-    org = (project_org or default_org or "").strip()
-    if not (org and repo_name):
-        return None
-    return f"{org}/{repo_name}"
-
-
-def _install_picked_project(cfg: dict, name: str, report: dict,
-                            instance: str = DEFAULT_INSTANCE) -> None:
-    """Materialize a project from sandbox.yml.
-
-    Clone source plugins (when not already on disk), symlink them into the
-    runtime, install any wp.org runtime deps, activate everything. Per-plugin
-    failures are collected into `report` so the picker can summarize them at
-    the end — one wrong slug shouldn't abort the whole batch.
-    """
-    projects = cfg.get("projects", {}) or {}
-    proj = projects.get(name)
-    if not proj:
-        report["skipped"].append((name, "not in sandbox.yml"))
-        return
-
-    defaults = cfg.get("defaults", {}) or {}
-    plugins_home = _plugins_home(cfg)
-    default_org = (defaults.get("github_org") or "").strip()
-    project_org = (proj.get("github_org") or "").strip()
-
-    plug_dir = plugins_dir(instance)
-    plug_dir.mkdir(parents=True, exist_ok=True)
-
-    for plug in proj.get("plugins", []) or []:
-        slug = plug["slug"]
-        src = Path(plug.get("source") or (plugins_home / slug))
-        src = src.expanduser()
-        if not src.is_absolute():
-            src = (ROOT / src).resolve()
-
-        if not src.exists():
-            target = _resolve_plugin_github(plug, project_org, default_org)
-            if not target:
-                report["failed"].append((slug,
-                    "no github_org set and no explicit `github:` field — "
-                    "run `./sb connect gh` or add `github: <org>/<repo>` "
-                    "to the plugin entry in sandbox.yml"))
-                continue
-            url = f"https://github.com/{target}.git"
-            info(f"cloning {url} → {src}")
-            res = subprocess.run(["git", "clone", url, str(src)],
-                                 capture_output=True, text=True)
-            if res.returncode != 0:
-                stderr = (res.stderr or "").strip().lower()
-                if "repository not found" in stderr or "not found" in stderr:
-                    hint = (
-                        f"github.com/{target} is 404 — most likely wrong org "
-                        f"name or wrong repo name. If the actual repo lives "
-                        f"elsewhere set `github: <org>/<repo>` on the plugin "
-                        f"in sandbox.yml. If it's private, ensure `gh auth` "
-                        f"can read it."
-                    )
-                elif "authentication" in stderr or "denied" in stderr or "403" in stderr:
-                    hint = (
-                        f"clone of {target} was denied — likely private/Pro. "
-                        f"Run `gh auth refresh -s repo,read:org` or skip."
-                    )
-                else:
-                    hint = res.stderr.strip() or "git clone failed"
-                report["failed"].append((slug, hint))
-                continue
-
-        link = plug_dir / slug
-        _force_symlink(link, src)
-        ok(f"linked {slug} → {src}")
-        report["linked"].append(slug)
-        _drop_sandbox_claude_md(src, slug, cfg)
-
-    for slug in proj.get("install_from_wporg", []) or []:
-        info(f"installing {slug} from wp.org (if missing)…")
-        wpcli(["plugin", "install", slug, "--activate"],
-              instance=instance, check=False)
-        report["wporg"].append(slug)
-
-    for plug in proj.get("plugins", []) or []:
-        slug = plug["slug"]
-        if (plug_dir / slug).exists():
-            wpcli(["plugin", "activate", slug], instance=instance, check=False)
-
-
-def cmd_pick(cfg, args) -> None:
-    """Interactive multi-select for the project catalog defined in sandbox.yml.
-
-    Replaces the manual `./sb use <x>` + `./sb add <r>` * N loop with one
-    pass: read the catalog, show a numbered checklist split by source-dev
-    vs designer-only, parse the selection, clone + symlink + activate.
-    """
-    projects = cfg.get("projects", {}) or {}
-    if not projects:
-        die("no projects defined in sandbox.yml")
-
-    src_dev = {n: p for n, p in projects.items() if p.get("plugins")}
-    designer = {n: p for n, p in projects.items() if not p.get("plugins")}
-
-    name_to_idx: dict[str, int] = {}
-    idx_to_name: dict[int, str] = {}
-
-    print()
-    print("  Pick projects to set up.")
-    i = 1
-    if src_dev:
-        print()
-        print("  Source dev (clones repos into plugins_home):")
-        for n, p in src_dev.items():
-            desc = (p.get("description") or "").strip()
-            print(f"   {i:>2})  [ ]  {n:<22} {desc}")
-            name_to_idx[n] = i
-            idx_to_name[i] = n
-            i += 1
-    if designer:
-        print()
-        print("  Designer / QA (wp.org plugins only):")
-        for n, p in designer.items():
-            desc = (p.get("description") or "").strip()
-            print(f"   {i:>2})  [ ]  {n:<22} {desc}")
-            name_to_idx[n] = i
-            idx_to_name[i] = n
-            i += 1
-
-    print()
-    print("  Enter numbers (e.g. '1 3 5'), ranges ('1-3'), 'all', 'none',")
-    print("  or slug names ('embedpress notificationx'):")
-    try:
-        raw = input("  > ")
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return
-
-    chosen = _parse_pick_input(raw, name_to_idx, idx_to_name)
-    if not chosen:
-        info("nothing selected")
-        return
-
-    print()
-    print(f"  Will set up: {', '.join(chosen)}")
-    try:
-        confirm = input("  Proceed? [Y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return
-    if confirm and confirm not in ("y", "yes"):
-        info("cancelled")
-        return
-
-    inst = args.resolved_instance
-    report = {"linked": [], "failed": [], "wporg": [], "skipped": []}
-    print()
-    for name in chosen:
-        print(f"▸ {name}")
-        _install_picked_project(cfg, name, report, instance=inst)
-        print()
-
-    # Summary — make failures impossible to miss after a long run.
-    print()
-    if report["linked"]:
-        ok(f"Linked: {', '.join(report['linked'])}")
-    if report["wporg"]:
-        info(f"wp.org plugins installed: {', '.join(sorted(set(report['wporg'])))}")
-    if report["failed"]:
-        print()
-        print("  ✗ Could not set up these plugins:")
-        for slug, why in report["failed"]:
-            print(f"      {slug}")
-            for line in (why or "").splitlines() or [""]:
-                print(f"        {line}")
-        print()
-        print("  Hints:")
-        print("    • Wrong default org?       ./sb connect gh")
-        print("    • Explicit repo per plug?  add `github: <org>/<repo>` in sandbox.yml")
-        print("    • Already cloned locally?  add `source: <abs-path>` to point at it")
-
-    # If exactly one was picked AND no prior active, activate it.
-    apf = active_project_file(inst)
-    cur_active = apf.read_text().strip() if apf.exists() else None
-    if len(chosen) == 1 and not cur_active:
-        apf.write_text(chosen[0])
-        ok(f"Active project: {chosen[0]}")
-    elif cur_active and cur_active in chosen:
-        info(f"Active project unchanged: {cur_active}  (switch with `./sb use <name>`)")
-    else:
-        info(f"Set active with:  ./sb use <one of: {', '.join(chosen)}>")
-
-
-def cmd_use(cfg, args) -> None:
-    name = args.name
-    inst = args.resolved_instance
-    projs = cfg.get("projects", {}) or {}
-    if name not in projs:
-        die(f"unknown project '{name}'. Run: ./sb projects")
-    proj = projs[name]
-
-    plug_dir = plugins_dir(inst)
-    # Step 1: symlink local plugin sources
-    plug_dir.mkdir(parents=True, exist_ok=True)
-    for plug in proj.get("plugins", []) or []:
-        slug = plug["slug"]
-        src = Path(plug["source"])
-        link = plug_dir / slug
-        if not src.exists():
-            info(f"skip {slug}: source not found at {src}")
-            continue
-        _force_symlink(link, src)
-        ok(f"linked {slug} → {src}")
-        _drop_sandbox_claude_md(src, slug, cfg)
-
-    # Step 2: install wp.org dependencies
-    for slug in proj.get("install_from_wporg", []) or []:
-        info(f"installing {slug} from wp.org (if missing)…")
-        wpcli(["plugin", "install", slug, "--activate"],
-              instance=inst, check=False)
-
-    # Step 3: activate plugins in order
-    for plug in proj.get("plugins", []) or []:
-        slug = plug["slug"]
-        if not (plug_dir / slug).exists():
-            continue
-        wpcli(["plugin", "activate", slug], instance=inst, check=False)
-
-    active_project_file(inst).write_text(name)
-    print()
-    ok(f"Active project: {name}")
-    print(f"  Tell your LLM:  \"I'm working on the '{name}' project.\"")
-
-
-def parse_repo(spec: str, default_org: str | None) -> tuple[str, str]:
-    """Return (clone_url, slug) for an input like 'org/repo', a full URL,
-    or a bare 'repo' (which uses default_org)."""
-    spec = spec.strip()
-    if spec.startswith("git@") or spec.startswith("http"):
-        url = spec
-        slug = re.sub(r"\.git$", "", url.rstrip("/").split("/")[-1])
-        return url, slug
-    if "/" in spec:
-        org, repo = spec.split("/", 1)
-    else:
-        if not default_org:
-            die(f"no org for '{spec}'. Pass org/repo, or set "
-                "defaults.github_org in sandbox.yml")
-        org, repo = default_org, spec
-    repo = re.sub(r"\.git$", "", repo)
-    return f"https://github.com/{org}/{repo}.git", repo
-
-
-def cmd_add(cfg, args) -> None:
-    """Clone a plugin repo and wire it into the active project locally."""
-    inst = args.resolved_instance
-    defaults = cfg.get("defaults", {}) or {}
-    plugins_home = _plugins_home(cfg)
-
-    url, slug = parse_repo(args.repo, defaults.get("github_org"))
-    dest = plugins_home / slug
-
-    if dest.exists():
-        info(f"{slug} already at {dest} — reusing")
-    else:
-        info(f"Cloning {url} → {dest}")
-        run(["git", "clone", url, str(dest)])
-        ok(f"Cloned {slug}")
-
-    # Symlink + activate in the live runtime
-    plug_dir = plugins_dir(inst)
-    plug_dir.mkdir(parents=True, exist_ok=True)
-    link = plug_dir / slug
-    _force_symlink(link, dest)
-    ok(f"Linked {slug} → {dest}")
-    _drop_sandbox_claude_md(dest, slug, cfg)
-
-    wpcli(["plugin", "activate", slug], instance=inst, check=False)
-
-    # Persist into sandbox.local.yml so `./sb use <active>` re-applies it
-    persist_local_plugin(args.project or _active_project_name(inst),
-                         slug, str(dest))
-
-
 def _active_project_name(instance: str = DEFAULT_INSTANCE) -> str | None:
     apf = active_project_file(instance)
     return apf.read_text().strip() if apf.exists() else None
-
-
-def persist_local_plugin(project: str | None, slug: str, source: str) -> None:
-    if not project:
-        info("(no active project — added to runtime only; "
-             "run `./sb use <name>` first to make it sticky)")
-        return
-    ensure_pyyaml()
-    import yaml
-    local = {}
-    if CONFIG_LOCAL.exists():
-        with CONFIG_LOCAL.open() as f:
-            local = yaml.safe_load(f) or {}
-    proj = local.setdefault("projects", {}).setdefault(project, {})
-    plugins = proj.setdefault("plugins", [])
-    if not any(p.get("slug") == slug for p in plugins):
-        plugins.append({"slug": slug, "source": source})
-        with CONFIG_LOCAL.open("w") as f:
-            yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
-        ok(f"Persisted '{slug}' under projects.{project} in sandbox.local.yml")
 
 
 def cmd_doctor(cfg, args) -> None:
@@ -2015,9 +1523,11 @@ def cmd_doctor(cfg, args) -> None:
           hint="./sb mcp-install")
 
     print("\nState:")
-    active = _active_project_name(inst)
-    check(f"active project: {active or '—'}", bool(active),
-          hint=f"./sb use <name> --instance {inst}")
+    # Per-project model: the instance maps to a project root in the registry.
+    owner = _core().registry_find_instance(inst)
+    proj_root = owner.get("root") if owner else None
+    check(f"project: {proj_root or '—'}", True,
+          hint="cd into a plugin repo and run `./sb ensure` to register one")
     ff = focus_file(inst)
     focus = ff.read_text().strip() if ff.exists() else None
     check(f"focused plugin: {focus or '—'}", True,
@@ -2025,27 +1535,16 @@ def cmd_doctor(cfg, args) -> None:
 
     print("\nLinked plugins:")
     plug_dir = plugins_dir(inst)
-    expected = []
-    if active:
-        proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
-        expected = [p.get("slug") for p in (proj.get("plugins") or [])]
-    if not plug_dir.exists() and expected:
-        check("wp-content/plugins/ exists", False,
-              hint=f"./sb use <name> --instance {inst}")
-    elif plug_dir.exists():
+    if plug_dir.exists():
         linked = []
         for entry in sorted(plug_dir.iterdir()):
             if entry.is_symlink():
                 linked.append(entry.name)
                 tgt = entry.resolve()
                 check(f"{entry.name} → {tgt}", tgt.exists(),
-                      hint=f"source missing — ./sb add {entry.name}")
-        for slug in expected:
-            if slug not in linked:
-                check(f"{slug} linked", False,
-                      hint=f"./sb add {slug}   (project expects it)")
-        if not linked and not expected:
-            info("  (no source-symlinked plugins — project uses install_from_wporg only)")
+                      hint="source missing — re-run `./sb ensure` for the project")
+        if not linked:
+            info("  (no source-symlinked plugins)")
 
     print()
     if problems:
@@ -2237,7 +1736,7 @@ def cmd_claude(cfg, args) -> None:
                 add_dirs.append(plugin_src)
             info(f"focus: {slug}  ({plugin_src})")
         else:
-            info(f"focus: {slug}  (not linked — run `./sb use <project>`)")
+            info(f"focus: {slug}  (not linked in this instance)")
     else:
         info("focus: (none — set with `./sb focus <slug>`)")
 
@@ -2249,118 +1748,67 @@ def cmd_claude(cfg, args) -> None:
 PROJECT_MCP_JSON = ROOT / ".mcp.json"   # Claude Code auto-loads this when run from ROOT
 
 
-def _build_mcp_entry(cfg: dict, instance: str = DEFAULT_INSTANCE) -> dict:
-    """Build the Claude MCP registration entry for one instance's server.
-
-    Every per-instance server runs the SAME server.py but with the
-    instance-correct ports/creds baked into its env, plus SANDBOX_INSTANCE
-    so the server defaults all its tools to that instance. That env binding
-    is what keeps concurrent sessions on different instances isolated.
-    """
-    inst_cfg = resolve_instances(cfg)[instance]
-    adm = inst_cfg["admin"]
-    port = inst_cfg["wordpress_port"]
-    mailpit_port = inst_cfg["mailpit_port"]
-    # App password: per-instance under instances.<name>.app_password; for
-    # main, fall back to the legacy mcp.wp.application_password key. (Read
-    # from the raw block — resolve_instances() doesn't carry app_password.)
-    raw_inst = (cfg.get("instances") or {}).get(instance, {}) or {}
-    app_pw = raw_inst.get("app_password") or ""
-    if instance == DEFAULT_INSTANCE and not app_pw:
-        app_pw = (cfg.get("mcp", {}) or {}).get("wp", {}).get(
-            "application_password", "")
-    return {
-        "command": str(MCP_VENV / "bin" / "python"),
-        "args": [str(MCP_DIR / "server.py")],
-        "env": {
-            # Binds this server (and all its tools' defaults) to one instance.
-            "SANDBOX_INSTANCE": instance,
-            "WP_URL": f"http://localhost:{port}",
-            "WP_ADMIN_USER": adm.get("user", "admin"),
-            # Browser-login password — `visit` uses this to authenticate
-            # against wp-login.php so the agent can load wp-admin URLs
-            # autonomously. Separate from WP_APP_PASSWORD (REST-only).
-            "WP_ADMIN_PASSWORD": adm.get("password", "admin"),
-            "WP_APP_PASSWORD": app_pw,
-            "MAILPIT_URL": f"http://localhost:{mailpit_port}",
-            # Path to the sandbox root so the MCP server can invoke
-            # tools/visit/visit.py via the tools venv.
-            "SANDBOX_ROOT": str(ROOT),
-        },
-    }
+def _build_mcp_entry(cfg: dict | None = None) -> dict:
+    """The SINGLE 'sandbox' MCP server registration entry. One server for all
+    projects: it takes NO per-instance env — every tool routes by `project_dir`
+    and resolves the instance from the on-disk registry per call. Launched via
+    `<sb> mcp` (the stdio entrypoint), which execs the venv server.py."""
+    return {"command": str(ROOT / "sb"), "args": ["mcp"]}
 
 
-def _register_one_mcp_server(claude_bin: str, cfg: dict, instance: str) -> bool:
-    """(Re)register a single instance's MCP server at user scope. Idempotent
-    wipe-then-add so re-running setup picks up rotated creds / ports."""
-    name = mcp_server_name(instance)
-    entry = _build_mcp_entry(cfg, instance)
-    subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", name],
-                   capture_output=True, text=True)
-    env_args = []
-    for k, v in (entry.get("env") or {}).items():
-        env_args += ["-e", f"{k}={v}"]
-    # NB: server name MUST precede -e flags — commander.js treats -e as
-    # variadic and otherwise consumes the name as an env-var value.
-    cmd = [
-        claude_bin, "mcp", "add", "--scope", "user",
-        name, *env_args, "--",
-        entry["command"], *entry.get("args", []),
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        info(f"  {name}: registration failed: {res.stderr.strip()}")
-        return False
-    return True
+def _stale_mcp_servers(claude_bin: str) -> list[str]:
+    """Per-instance server names (`sandbox-<name>`) left by pre-rewrite
+    registrations, so the single-server migration can clean them up."""
+    res = subprocess.run([claude_bin, "mcp", "list"],
+                         capture_output=True, text=True)
+    out = []
+    for line in (res.stdout or "").splitlines():
+        tok = line.split(":")[0].strip()
+        if tok.startswith("sandbox-"):
+            out.append(tok)
+    return out
 
 
 def register_claude_user_scope(cfg: dict) -> None:
-    """Register ONE MCP server per sandbox instance at user scope, so every
-    `claude` session on the machine can reach every instance regardless of cwd.
+    """Register the SINGLE 'sandbox' MCP server at user scope so every `claude`
+    session reaches it from any directory. The server routes by `project_dir`,
+    so one registration serves every project — no per-instance servers.
 
-    Each instance's server bakes SANDBOX_INSTANCE (+ that instance's
-    WP_URL/creds) into its env, so a session that calls `mcp__sandbox-<name>__*`
-    defaults all its tools to that instance and never collides with another
-    session's focus/active-project state. `main` keeps the bare `sandbox` name.
-
-    Idempotent: each server is wiped and re-added so re-running setup updates
-    env vars (e.g. after a password rotation). The legacy `wp-sandbox` name
-    (pre-rename) is also removed once.
+    Idempotent (wipe-then-add). Also removes legacy registrations: the
+    pre-rename `wp-sandbox`, and any `sandbox-<name>` per-instance servers from
+    the pre-rewrite multi-instance model.
     """
     claude_bin = shutil.which("claude")
     if not claude_bin:
         info("claude CLI not in PATH — skipping user-scope MCP registration.")
         return
 
-    # One-time cleanup of the pre-rename name.
-    subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", "wp-sandbox"],
+    # Clean up legacy / stale registrations (pre-rename + per-instance).
+    for stale in ["wp-sandbox", *_stale_mcp_servers(claude_bin)]:
+        subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", stale],
+                       capture_output=True, text=True)
+
+    entry = _build_mcp_entry(cfg)
+    subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", MCP_SERVER_NAME],
                    capture_output=True, text=True)
-
-    registered = []
-    for instance in resolve_instances(cfg):
-        if _register_one_mcp_server(claude_bin, cfg, instance):
-            registered.append((instance, mcp_server_name(instance)))
-
-    if registered:
-        ok("Registered per-instance MCP servers at user scope:")
-        for instance, name in registered:
-            print(f"    {name:24s} → instance '{instance}'  "
-                  f"(tools: mcp__{name}__*)")
+    cmd = [claude_bin, "mcp", "add", "--scope", "user", MCP_SERVER_NAME, "--",
+           entry["command"], *entry.get("args", [])]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        ok(f"Registered MCP server '{MCP_SERVER_NAME}' at user scope "
+           f"(tools: mcp__{MCP_SERVER_NAME}__*; routes by project_dir).")
     else:
-        info("No MCP servers registered.")
+        info(f"MCP registration failed: {res.stderr.strip()}")
         info("Project-local .mcp.json still works when cwd is the sandbox.")
 
 
 def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
-    """Write the project-local .mcp.json inside the sandbox folder.
+    """Write the project-local .mcp.json with the SINGLE 'sandbox' server.
 
-    Claude Code (and other MCP clients) auto-load .mcp.json from the working
-    directory. The user-scope registration (see register_claude_user_scope)
-    is what makes the servers available outside the sandbox folder.
-
-    Writes one server entry per instance (`sandbox` for main,
-    `sandbox-<name>` for others) — mirrors register_claude_user_scope so
-    cwd-local sessions get the same per-instance isolation.
+    Claude Code auto-loads .mcp.json from the working directory; the user-scope
+    registration (register_claude_user_scope) is what makes it reachable outside
+    the sandbox folder. Drops any stale `sandbox-<name>` entries from the old
+    per-instance model.
     """
     existing = {}
     created = not PROJECT_MCP_JSON.exists()
@@ -2374,14 +1822,11 @@ def write_claude_mcp_config(cfg: dict) -> tuple[Path, bool]:
             existing = {}
             created = True
     servers = existing.setdefault("mcpServers", {})
-    # Drop stale per-instance entries we own so deleted instances don't linger.
-    current = {mcp_server_name(i) for i in resolve_instances(cfg)}
+    # Drop stale per-instance entries from the pre-rewrite model.
     for name in list(servers):
-        if (name == "sandbox" or name.startswith("sandbox-")) \
-                and name not in current:
+        if name.startswith("sandbox-"):
             del servers[name]
-    for instance in resolve_instances(cfg):
-        servers[mcp_server_name(instance)] = _build_mcp_entry(cfg, instance)
+    servers[MCP_SERVER_NAME] = _build_mcp_entry(cfg)
     PROJECT_MCP_JSON.write_text(json.dumps(existing, indent=2) + "\n")
     return PROJECT_MCP_JSON, created
 
@@ -2656,8 +2101,8 @@ def _connect_github(cfg) -> None:
            or (cfg.get("defaults", {}) or {}).get("github_org") or "")
 
     print("\nGitHub")
-    print("  Used by `./sb add <repo>` and `./sb pick` to resolve plugin repos")
-    print("  as github.com/<org>/<slug> when no explicit `github:` field is set.")
+    print("  Sets defaults.github_org + ensures the `gh` CLI can read private")
+    print("  repos (Pro plugins, private mappings) during git/composer operations.")
     print()
 
     gh_user = _gh_cli_user()
@@ -2730,7 +2175,7 @@ def cmd_connect(cfg, args) -> None:
         print("\nUsage: ./sb connect <target>")
         print("\nAvailable targets:")
         print("  fb, fluentboards   FluentBoards URL + email + app password")
-        print("  gh, github         GitHub org/user (for ./sb add <bare-repo>)")
+        print("  gh, github         GitHub org/user + gh CLI auth (private repos)")
         print()
         return
 
@@ -2789,8 +2234,8 @@ def cmd_setup(cfg, args) -> None:
     cfg = _resolve_port_conflicts(cfg)
 
     # --no-instances: just prepare the CLI + MCP venv + Claude wiring. No
-    # WordPress is booted — the user creates their first site afterwards (from
-    # the web UI or `./sb add`). Keeps a fresh install fast and empty-start.
+    # WordPress is booted — the user creates their first site afterwards by
+    # running `./sb init` in a plugin repo. Keeps a fresh install fast.
     no_instances = getattr(args, "no_instances", False)
 
     instances = {} if no_instances else resolve_instances(cfg)
@@ -2875,19 +2320,11 @@ def cmd_setup(cfg, args) -> None:
         print("    ./sb web                      # or open the dashboard")
         return
 
-    # Offer the plugin picker as the natural next step. Skip on --no-pick
-    # (CI / re-runs) or if no projects are defined.
-    skip_pick = getattr(args, "no_pick", False)
-    projs = (cfg.get("projects", {}) or {})
-    if projs and not skip_pick and sys.stdin.isatty():
-        try:
-            ans = input("  Pick plugins to install now? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = "n"
-            print()
-        if ans in ("", "y", "yes"):
-            cmd_pick(cfg, args)
-            print()
+    # Per-project model: set up a plugin by cd-ing into its repo and running
+    # `./sb init` (scaffolds sandbox.config.json + boots its own instance).
+    if not getattr(args, "no_pick", False) and not server:
+        print("  Next: cd into a plugin repo and run `./sb init` "
+              "(or `./sb ensure`) to boot + test it.")
 
     if server:
         # Headless: tell the user how to reach it over an SSH tunnel from their
@@ -2908,11 +2345,9 @@ def cmd_setup(cfg, args) -> None:
         return
 
     print("  Next:")
-    print(f"    ./sb web            # open the dashboard (manage instances in the browser)")
-    if projs:
-        print(f"    ./sb pick           # interactive checklist of plugins")
-        print(f"    ./sb focus <slug>   # tell Claude which plugin you're on")
-    print(f"    cd {ROOT} && claude   # run Claude Code here — .mcp.json auto-loads")
+    print(f"    ./sb web                       # dashboard (manage instances in the browser)")
+    print(f"    cd <plugin-repo> && ./sb init  # boot + test a plugin (per-project)")
+    print(f"    cd {ROOT} && claude            # run Claude Code here — .mcp.json auto-loads")
     print()
     print("  Optional — connect external integrations on demand:")
     print("    ./sb connect fb     # FluentBoards (standup/report skills)")
@@ -3013,24 +2448,24 @@ def cmd_snapshots(cfg, args) -> None:
 
 
 def cmd_update(cfg, args) -> None:
-    """`git pull` every plugin source referenced by the active project."""
+    """`git pull --ff-only` the project repo this instance tracks (per-project
+    model: the registry maps the instance to a project root, which IS the
+    plugin's git checkout)."""
     inst = args.resolved_instance
-    active = _active_project_name(inst)
-    if not active:
-        die(f"no active project for instance '{inst}' — "
-            f"run ./sb use <name> --instance {inst} first")
-    proj = (cfg.get("projects", {}) or {}).get(active, {}) or {}
-    plugins = proj.get("plugins") or []
-    if not plugins:
-        info(f"project '{active}' has no source plugins to update")
+    owner = _core().registry_find_instance(inst)
+    root = owner.get("root") if owner else None
+    if not root:
+        # Graceful (like cmd_status/cmd_doctor) — `main` is never registered,
+        # and bare `./sb update` resolves to main.
+        info(f"no project registered for instance '{inst}' — cd into a plugin "
+             f"repo and run `./sb ensure` first, or pass --instance <project>.")
         return
-    for plug in plugins:
-        src = Path(plug["source"])
-        if not (src / ".git").exists():
-            info(f"skip {plug['slug']}: not a git repo at {src}")
-            continue
-        print(f"\n▸ {plug['slug']}  ({src})")
-        run(["git", "-C", str(src), "pull", "--ff-only"], check=False)
+    src = Path(root)
+    if not (src / ".git").exists():
+        info(f"{src} is not a git repo — nothing to pull")
+        return
+    print(f"▸ {src.name}  ({src})")
+    run(["git", "-C", str(src), "pull", "--ff-only"], check=False)
     ok("Done.")
 
 
@@ -3364,12 +2799,13 @@ def cmd_uninstall(cfg, args) -> None:
         except Exception as e:
             info(f"proxy teardown had issues (continuing): {e}")
 
-    # 3. Deregister MCP servers from Claude (user scope).
+    # 3. Deregister the MCP server from Claude (user scope). One 'sandbox'
+    #    server now, plus any stale per-instance (`sandbox-<name>`) + legacy
+    #    `wp-sandbox` registrations from older versions.
     claude_bin = shutil.which("claude")
     if claude_bin:
-        print("\n▸ Deregistering MCP servers from Claude…")
-        for name in instances:
-            srv = mcp_server_name(name)
+        print("\n▸ Deregistering MCP server from Claude…")
+        for srv in [MCP_SERVER_NAME, "wp-sandbox", *_stale_mcp_servers(claude_bin)]:
             subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", srv],
                            capture_output=True, text=True)
             info(f"removed {srv}")
@@ -3669,9 +3105,6 @@ def _onboard_instance(cfg: dict, name: str, args) -> None:
 
     # ---- collect choices (from flags, else prompt) ----
     slugs = list(getattr(args, "plugins", None) or [])
-    proj = getattr(args, "project", None)
-    if proj:
-        slugs.insert(0, proj)
     seed = getattr(args, "seed", None)
     theme = getattr(args, "theme", None)
     wp_debug = bool(getattr(args, "wp_debug", False))
@@ -3679,23 +3112,15 @@ def _onboard_instance(cfg: dict, name: str, args) -> None:
                        or getattr(args, "site_title", None))
 
     if interactive and not flags_given:
-        projects = cfg.get("projects", {}) or {}
-        if projects:
-            print()
-            names = list(projects.keys())
-            print("  Set up plugins now? Pick projects (numbers/slugs, or blank to skip):")
-            for i, pn in enumerate(names, 1):
-                desc = (projects[pn].get("description") or "").strip()
-                print(f"   {i:>2}) {pn:<22} {desc}")
-            try:
-                raw = input("  > ").strip()
-            except (EOFError, KeyboardInterrupt):
-                raw = ""
-            for tok in raw.replace(",", " ").split():
-                if tok.isdigit() and 1 <= int(tok) <= len(names):
-                    slugs.append(names[int(tok) - 1])
-                elif tok in projects:
-                    slugs.append(tok)
+        # Per-project model: there's no catalog to pick from. Install wp.org
+        # plugins by slug below (or pass --plugin), and set up dev plugins by
+        # cd-ing into their repo and running `./sb init`.
+        try:
+            raw = input("  Install wp.org plugins now? (space-separated slugs, "
+                        "blank to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raw = ""
+        slugs.extend(tok for tok in raw.replace(",", " ").split() if tok)
         seeds = _web_list_seeds()
         if seeds:
             print(f"\n  Seed demo content? [{', '.join(seeds)}] (blank to skip):")
@@ -3713,22 +3138,17 @@ def _onboard_instance(cfg: dict, name: str, args) -> None:
 
     # ---- apply ----
     if slugs:
-        report = {"linked": [], "failed": [], "wporg": [], "skipped": []}
-        print(f"\n▸ Setting up plugins on '{name}': {', '.join(slugs)}")
-        for slug in slugs:
-            _install_picked_project(cfg, slug, report, instance=name)
-        if report["linked"]:
-            ok(f"Linked: {', '.join(report['linked'])}")
-            # Default Claude's focus to the first linked plugin.
-            try:
-                cmd_focus(cfg, _t.SimpleNamespace(
-                    resolved_instance=name, slug=report["linked"][0], clear=False))
-            except Exception:
-                pass
-        if report["failed"]:
-            print("  ✗ Could not set up:")
-            for slug, why in report["failed"]:
-                print(f"      {slug}: {(why or '').splitlines()[0] if why else ''}")
+        # Per-project model: slugs are wp.org plugins installed into this
+        # instance. Dev plugins live in their own repos (cd in + `./sb init`).
+        print(f"\n▸ Installing wp.org plugins on '{name}': {', '.join(slugs)}")
+        wpcli(["plugin", "install", *slugs, "--activate"],
+              instance=name, check=False)
+        # Default Claude's focus to the first plugin.
+        try:
+            cmd_focus(cfg, _t.SimpleNamespace(
+                resolved_instance=name, slug=slugs[0], clear=False))
+        except Exception:
+            pass
 
     if wp_debug:
         info("enabling WP_DEBUG")
@@ -3781,15 +3201,51 @@ def _derive_instance_name(root: str, taken: set) -> str:
     return name
 
 
-def _image_for_versions(php, wp):
-    """Per-project wordpress image tag. None → the runtime default (latest)."""
+def _web_image(server: str, php=None, wp=None, explicit=None) -> str:
+    """Resolve the web-tier container image for a server stack + version pins.
+
+    The version tag scheme differs per stack: apache uses the mod_php
+    `wordpress:*` images, nginx the matching `-fpm` flavor, and litespeed an
+    OpenLiteSpeed `lsphp` image (its WP core is downloaded by `wp core
+    download`, not baked into the image). An explicit, non-default
+    `wordpress_image` from sandbox.yml always wins. No pins → the per-server
+    default (latest)."""
+    if explicit and explicit not in ("wordpress:latest", "wordpress"):
+        return explicit
+    if server == "litespeed":
+        return f"litespeedtech/openlitespeed:1.8.2-lsphp{(php or '8.3').replace('.', '')}"
+    fpm = "-fpm" if server == "nginx" else ""
     if wp and php:
-        return f"wordpress:{wp}-php{php}"
-    if wp:
-        return f"wordpress:{wp}"
+        return f"wordpress:{wp}-php{php}{fpm}"
     if php:
-        return f"wordpress:php{php}"
-    return None
+        return f"wordpress:php{php}{fpm}"
+    if wp:
+        return f"wordpress:{wp}{fpm}"
+    return "wordpress:php8.3-fpm" if server == "nginx" else "wordpress:latest"
+
+
+def _cli_image(php=None) -> str:
+    """The wp-cli helper image. Matches the pinned PHP so composer + phpunit
+    (which run in the wpcli container) execute under the project's PHP."""
+    return f"wordpress:cli-php{php}" if php else "wordpress:cli"
+
+
+def _warn_version_drift(cfg: dict, instance_name, pconf: dict) -> None:
+    """Warn when a project's config version pins no longer match the running
+    instance's image. ensure_instance returns the live instance unchanged, so
+    without this the skew is silent (tests can run against a different WP/PHP
+    than the live site)."""
+    if not instance_name:
+        return
+    inst = resolve_instances(cfg).get(instance_name, {})
+    norm = lambda v: str(v) if v not in (None, "") else None
+    cur = (norm(inst.get("php_version")), norm(inst.get("wp_version")))
+    want = (norm(pconf.get("phpVersion")), norm(pconf.get("wpVersion")))
+    if cur == want:
+        return
+    info(f"⚠ '{instance_name}' is running php={cur[0] or 'latest'}/wp={cur[1] or 'latest'} "
+         f"but config now pins php={want[0] or 'latest'}/wp={want[1] or 'latest'}. "
+         f"Recreate to apply: ./sb instance delete {instance_name}, then re-run.")
 
 
 def _wait_http(port: int, timeout: int = 30) -> bool:
@@ -3869,18 +3325,38 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         existing = sc.registry_get(root)
         if existing and existing.get("status") == "ready" \
                 and _instance_reachable(existing):
+            # Already up. If the config's version pins no longer match the
+            # running instance's image, say so loudly — silently returning the
+            # stale record would let tests run against a different WP/PHP than
+            # the live site. Re-versioning in place is a tracked follow-up; for
+            # now the instance must be recreated to apply a changed pin.
+            _warn_version_drift(cfg, existing.get("instance"), pconf)
             return existing
 
-        taken = set(resolve_instances(cfg).keys())
-        taken |= {e.get("instance") for e in sc.registry_all().values()
-                  if e.get("instance")}
-        name = _derive_instance_name(root, taken)
+        # Resume a prior record for this root (a partial/failed boot, or a
+        # stopped instance) by REUSING its name + ports rather than deriving a
+        # fresh `<name>-2` and orphaning the half-built stack. Only when there's
+        # no record at all do we allocate a new name + ports.
+        if existing and existing.get("instance"):
+            name = existing["instance"]
+            ports = {
+                "wordpress_port": existing["wordpress_port"],
+                "db_port": existing["db_port"],
+                "mailpit_port": existing["mailpit_port"],
+            }
+        else:
+            taken = set(resolve_instances(cfg).keys())
+            taken |= {e.get("instance") for e in sc.registry_all().values()
+                      if e.get("instance")}
+            name = _derive_instance_name(root, taken)
+            ports = _pick_instance_ports(cfg)
 
-        ports = _pick_instance_ports(cfg)
         server = _valid_server(pconf.get("server") or "apache")
-        image = _image_for_versions(pconf.get("phpVersion"), pconf.get("wpVersion"))
+        php_v = pconf.get("phpVersion")
+        wp_v = pconf.get("wpVersion")
         info(f"ensure_instance: {root} → instance '{name}' "
-             f"(WP={ports['wordpress_port']} server={server})")
+             f"(WP={ports['wordpress_port']} server={server}"
+             f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
 
         block = {
             "wordpress_port": ports["wordpress_port"],
@@ -3889,11 +3365,24 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             "server": server,
             "admin": {"site_title": f"Sandbox {name}"},
         }
-        if image:
-            block["wordpress_image"] = image
+        # Store version pins (not a baked image) so the image resolves
+        # server-aware at compose time and `wp core download` honors wpVersion.
+        if php_v:
+            block["php_version"] = str(php_v)
+        if wp_v:
+            block["wp_version"] = str(wp_v)
         local = _local_yaml()
         local.setdefault("instances", {})[name] = block
         _write_local_yaml(local)
+
+        # Record a 'pending' mapping BEFORE booting so a mid-boot crash leaves a
+        # resumable record (the reuse branch above finds it) instead of an
+        # orphan that forces the next run to a duplicate `<name>-2`.
+        sc.registry_put(root, instance=name, status="pending",
+                        wordpress_port=ports["wordpress_port"],
+                        db_port=ports["db_port"],
+                        mailpit_port=ports["mailpit_port"],
+                        server=server)
 
         cfg = load_config()
         write_compose_files(cfg)
@@ -4081,6 +3570,20 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
     return getattr(r, "returncode", 1)
 
 
+def _provision_test_harness(inst: str, pconf: dict) -> dict:
+    """Provision (cached) the external WP test harness for `inst`: the WP suite
+    at the project's wpVersion, phpunit + composer phars + polyfills, the
+    isolated wp_tests DB, and the sandbox wp-tests-config.php (copied alongside
+    the suite so the WP bootstrap auto-discovers it). Idempotent. Returns
+    {suite, tools, config}."""
+    suite = _ensure_wp_test_suite(pconf.get("wpVersion"))
+    tools = _ensure_test_tools()
+    _ensure_tests_db(inst)
+    config = _write_wp_tests_config()
+    shutil.copy(config, suite / "wp-tests-config.php")
+    return {"suite": suite, "tools": tools, "config": config}
+
+
 def cmd_test(cfg, args) -> None:
     """`./sb test [--project-dir DIR] [--provision-only] [-- <phpunit args>]` —
     provision the (cached) external WP test harness (suite + phpunit + polyfills
@@ -4098,13 +3601,8 @@ def cmd_test(cfg, args) -> None:
     inst = entry["instance"]
 
     info("Provisioning test harness (cached)…")
-    suite = _ensure_wp_test_suite(pconf.get("wpVersion"))
-    tools = _ensure_test_tools()
-    _ensure_tests_db(inst)
-    config = _write_wp_tests_config()
-    # The WP suite bootstrap auto-discovers wp-tests-config.php at the suite dir
-    # (mounted as /wordpress-phpunit), so drop a copy in alongside it.
-    shutil.copy(config, suite / "wp-tests-config.php")
+    h = _provision_test_harness(inst, pconf)
+    suite, tools, config = h["suite"], h["tools"], h["config"]
     ok("Test harness ready:")
     print(f"  instance:   {inst}")
     print(f"  WP suite:   {suite}")
@@ -4165,161 +3663,86 @@ def cmd_ensure(cfg, args) -> None:
         print(f"  server:  {entry['server']}  (source: {entry.get('source')})")
 
 
+def cmd_init(cfg, args) -> None:
+    """`./sb init [--project-dir DIR] [--force] [--no-test-harness]` — turn a
+    plugin checkout into a sandbox project in one command: write a native config
+    (scaffold sandbox.config.json, or convert an existing .wp-env.json; --force
+    regenerates the same native file), boot its per-directory instance
+    (create-if-missing), and provision the phpunit test harness. From a bare
+    checkout to a running, testable stack."""
+    sc = _core()
+    pd = getattr(args, "project_dir", None) or os.getcwd()
+    try:
+        pconf = sc.load_project_config(pd)
+    except sc.ConfigError as e:
+        die(str(e))
+    root = Path(pconf["root"])
+    base_source = pconf["source"].split("+")[0]   # drop any "+override" suffix
+    has_native = base_source in sc.CONFIG_BASENAMES
+    force = getattr(args, "force", False)
+
+    # 1. Ensure a native config exists (don't clobber unless --force).
+    if has_native and not force:
+        info(f"config exists: {base_source} (use --force to regenerate)")
+    else:
+        # The resolved pconf already carries the canonical schema (defaults
+        # merged, .wp-env.json mapped). Persist exactly the schema keys.
+        data = {k: pconf.get(k, v) for k, v in sc.DEFAULTS.items()}
+        # Regenerate the SAME native file (preserving an existing .yml/.yaml);
+        # scaffold/convert to sandbox.config.json. Writing a fresh .json beside
+        # an existing .yml would shadow it (json wins load order) and silently
+        # orphan the user's edit surface.
+        dest = root / (base_source if has_native else "sandbox.config.json")
+        if dest.suffix in (".yml", ".yaml"):
+            ensure_pyyaml()
+            import yaml
+            dest.write_text(yaml.safe_dump(data, default_flow_style=False,
+                                           sort_keys=False))
+        else:
+            dest.write_text(json.dumps(data, indent=2) + "\n")
+        note = ("converted from .wp-env.json" if base_source == ".wp-env.json"
+                else "regenerated" if has_native else "scaffolded")
+        ok(f"wrote {dest.name} ({note})")
+
+    # 2. Boot the instance for this project (idempotent).
+    try:
+        entry = ensure_instance(cfg, str(root))
+    except sc.ConfigError as e:
+        die(str(e))
+    inst = entry["instance"]
+    ok(f"instance '{inst}' ready at {entry['url']}")
+
+    # 3. Provision the test harness so `./sb test` runs immediately.
+    if not getattr(args, "no_test_harness", False):
+        info("Provisioning test harness (cached)…")
+        _provision_test_harness(inst, sc.load_project_config(str(root)))
+        ok("test harness ready")
+
+    print()
+    ok(f"{root.name} is a sandbox project.")
+    print(f"  admin:  {entry['url']}/wp-admin")
+    print(f"  test:   ./sb test --project-dir {root}")
+
+
 def cmd_instance(cfg, args) -> None:
-    """Create / delete a sandbox instance end-to-end.
+    """Delete a sandbox instance end-to-end.
 
-    `./sb instance create <name>` picks free ports, writes the block to
-    sandbox.local.yml, boots the stack, installs WordPress, and prints
-    the admin URL. Idempotent: re-running on an existing instance just
-    re-applies (compose regen + ensures it's up).
+    `./sb instance delete <name>` stops the stack, removes the volume, deletes
+    runtime/wp-<name>/, removes the block from sandbox.local.yml, drops the
+    registry mapping, and removes per-instance state. Refuses to delete `main`.
 
-    `./sb instance delete <name>` stops the stack, removes the volume,
-    deletes runtime/wp-<name>/, removes the block from sandbox.local.yml,
-    and removes the per-instance state files. Refuses to delete `main`
-    (use ./sb clean for that).
+    Per-project model: instances are CREATED by `./sb init` / `./sb ensure` in a
+    plugin dir (keyed to the project root) — not by name here.
     """
     action = args.action
     name = args.name
 
-    if action not in ("create", "delete"):
-        die("usage: ./sb instance create|delete <name>")
+    if action != "delete":
+        die("`./sb instance` only supports `delete` now. Create an instance by "
+            "cd-ing into a plugin repo and running `./sb init` (or `./sb ensure`).")
     if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name or ""):
         die("instance name must be lowercase, start with [a-z0-9], "
             "and contain only [a-z0-9_-] (max 31 chars)")
-
-    server = _valid_server(getattr(args, "server", None) or "apache")
-    # Default: a clean http://<name>.sb URL (mapped to 127.0.0.1 in /etc/hosts,
-    # served on the instance's port). Plain HTTP → no certificate, no CA trust
-    # step, no "Not Secure" warning ever; works on every machine. Upgrading to
-    # trusted HTTPS (https://<name>.sb, no port) is OPT-IN: run `./sb secure
-    # <name>`. Use --no-domain for plain localhost:<port>.
-    domain = getattr(args, "domain", None)
-    if getattr(args, "no_domain", False):
-        domain = None
-    elif not domain and action == "create":
-        domain = f"{name}.{PROXY_TLD}"
-    if domain:
-        domain = _valid_domain(domain)
-
-    if action == "create":
-        existing = resolve_instances(cfg)
-        if name in existing and name != DEFAULT_INSTANCE:
-            info(f"instance '{name}' already defined — re-applying "
-                 f"(regenerating compose, ensuring stack is up)")
-            args.resolved_instance = name
-            cmd_up(cfg, args)
-            return
-
-        ports = _pick_instance_ports(cfg)
-        info(f"picked ports: WP={ports['wordpress_port']} "
-             f"DB={ports['db_port']} mailpit={ports['mailpit_port']}")
-        info(f"web server: {server}")
-
-        # Decide how this domain is served. Preferred path is the sandbox HTTPS
-        # proxy (handled AFTER the instance block is written, since the Caddyfile
-        # is regenerated from config).
-        #
-        # Default: serve a clean no-port http://<name>.sb via the URL proxy.
-        # Plain HTTP → no cert, no browser warning. The proxy infra is brought
-        # up here (one-time password the first time; password-free after). If it
-        # can't be set up (no Docker / non-interactive), we fall back to plain
-        # localhost:<port>. HTTPS is the separate opt-in `./sb secure <name>`.
-        use_proxy = False
-        if domain:
-            up, cfg = _ensure_url_proxy(cfg)
-            if up:
-                use_proxy = True  # caddy route added after the block is written
-            else:
-                domain = None     # fall back to localhost:<port>
-
-        site_title = (getattr(args, "site_title", None) or "").strip() \
-            or f"Sandbox {name}"
-        block = {
-            "wordpress_port": ports["wordpress_port"],
-            "db_port": ports["db_port"],
-            "mailpit_port": ports["mailpit_port"],
-            "server": server,
-            "admin": {"site_title": site_title},
-        }
-        if domain:
-            block["domain"] = domain
-        local = _local_yaml()
-        local.setdefault("instances", {})[name] = block
-        _write_local_yaml(local)
-        ok(f"Wrote instances.{name} to {CONFIG_LOCAL.name}")
-
-        # Reload cfg now that the new block is on disk, then regenerate
-        # compose files (the legacy main() flow already ran with the
-        # *previous* cfg before we knew this instance existed).
-        cfg = load_config()
-        write_compose_files(cfg)
-
-        # URL-proxy path: add the http://<name>.sb Caddy route + reload. Plain
-        # HTTP — no cert, no mu-plugin, no redirect-loop concerns. Done after the
-        # instance block is on disk so regen_caddyfile sees it.
-        if use_proxy:
-            regen_caddyfile(cfg)
-            if reload_proxy():
-                ok(f"published clean URL http://{domain} (no port)")
-            else:
-                info("proxy reload failed (is Docker running?) — the instance "
-                     "still serves on its port.")
-
-        # Boot + install in one shot. Cmd_up + cmd_install both read
-        # args.resolved_instance, so set it.
-        args.resolved_instance = name
-        print(f"\n▸ Booting docker stack for '{name}'…")
-        cmd_up(cfg, args)
-
-        # Wait for WP to be reachable before wp core install.
-        import urllib.request, time
-        port = ports["wordpress_port"]
-        for _ in range(30):
-            try:
-                urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
-                break
-            except Exception:
-                time.sleep(1)
-
-        print(f"\n▸ Installing WordPress on '{name}'…")
-        cmd_install(cfg, args)
-
-        # Register this instance's own MCP server so Claude can reach it.
-        # Reload cfg first — cmd_install just wrote the app password into
-        # sandbox.local.yml, and registration bakes it into the server's env.
-        cfg = load_config()
-        print(f"\n▸ Registering MCP server for '{name}'…")
-        register_claude_user_scope(cfg)
-
-        # Onboarding: plugins / seed content / WP_DEBUG / theme. Flags drive it
-        # non-interactively; on a terminal with no flags, prompt (like setup).
-        _onboard_instance(cfg, name, args)
-
-        srv = mcp_server_name(name)
-        base = site_url(resolve_instances(cfg)[name]) if domain \
-            else f"http://localhost:{port}"
-        print()
-        ok(f"Instance '{name}' ready at {base}/wp-admin/")
-        secured = base.startswith("https://")
-        if domain:
-            how = ("trusted https, no port" if secured
-                   else "clean URL, no port" if base == f"http://{domain}"
-                   else "via /etc/hosts")
-            print(f"  Domain: {domain} ({how})")
-        print(f"  Server: {server}")
-        print(f"  Admin: admin / admin")
-        print(f"  MCP server: {srv}  (Claude tools: mcp__{srv}__*)")
-        # Notice: how to upgrade to trusted HTTPS (only when on plain http .sb).
-        if domain and domain.endswith(f".{PROXY_TLD}") and not secured:
-            print()
-            print(f"  🔒 Want HTTPS? Run:  ./sb secure {name}")
-            print(f"     (one-time — trusts a local cert → https://{domain})")
-        print()
-        print(f"  Next:")
-        print(f"    ./sb use <project> --instance {name}     # link + activate plugins")
-        print(f"    ./sb wp --instance {name} plugin list")
-        print(f"    ./sb instances                           # see all")
-        return
 
     # delete
     if name == DEFAULT_INSTANCE:
@@ -4376,14 +3799,15 @@ def cmd_instance(cfg, args) -> None:
         _write_local_yaml(local)
         info(f"removed instances.{name} from {CONFIG_LOCAL.name}")
 
-    # 6. Deregister this instance's MCP server (never the bare `sandbox` =
-    #    main — that's only removed by wiping main, not here).
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        srv = mcp_server_name(name)
-        subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", srv],
-                       capture_output=True, text=True)
-        info(f"deregistered MCP server {srv}")
+    # 5b. Drop the project→instance mapping from the registry (the source of
+    #     truth for per-directory instances), else `ensure_instance` for that
+    #     project would later find a stale "ready" record pointing at a
+    #     now-deleted stack.
+    sc = _core()
+    owner = sc.registry_find_instance(name)
+    if owner and owner.get("root"):
+        sc.registry_remove(owner["root"])
+        info(f"deregistered '{name}' from the instance registry")
 
     # 7. Tear down its custom domain. Primary: drop its route from the HTTPS
     #    proxy (regenerate the Caddyfile from the now-reduced config + reload).
@@ -4425,12 +3849,16 @@ def _instance_running(name: str) -> bool:
 def collect_instance_rows(cfg: dict) -> list[dict]:
     """Per-instance view-model shared by `cmd_instances` (static print) and the
     `dashboard` TUI, so the two never drift. One dict per instance with status,
-    URLs, server, MCP server name, active project, and focus.
+    URLs, server, MCP server name, project, and focus.
     """
+    sc = _core()
     rows = []
     for name, inst_cfg in resolve_instances(cfg).items():
-        apf = active_project_file(name)
         ff = focus_file(name)
+        # Per-project model: the project is the registry root this instance
+        # serves (its dir basename), not the vestigial .active-project file.
+        owner = sc.registry_find_instance(name)
+        project = Path(owner["root"]).name if owner and owner.get("root") else "—"
         rows.append({
             "name": name,
             "running": _instance_running(name),
@@ -4440,7 +3868,7 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
             "domain": inst_cfg.get("domain"),
             "server": inst_cfg.get("server", "apache"),
             "mcp_server": mcp_server_name(name),
-            "project": apf.read_text().strip() if apf.exists() else "—",
+            "project": project,
             "focus": ff.read_text().strip() if ff.exists() else "—",
         })
     return rows
@@ -5000,20 +4428,10 @@ def _dash_run(stdscr, cfg):
 
         sel = rows[selected] if rows else None
 
-        if c == ord("n"):                 # new instance
-            with _curses_suspended(stdscr):
-                name = input("New instance name: ").strip()
-                if name:
-                    print("Server: [a]pache  [n]ginx  [l]itespeed")
-                    pick = input("Server (default apache): ").strip().lower()
-                    server = {"n": "nginx", "l": "litespeed",
-                              "nginx": "nginx", "litespeed": "litespeed"}.get(
-                                  pick, "apache")
-                    cmd_instance(load_config(), _types.SimpleNamespace(
-                        action="create", name=name, server=server, yes=True,
-                        resolved_instance=name))
-                    input("\n[enter] to return to dashboard…")
-            reload_rows()
+        if c == ord("n"):                 # new instance → per-project model
+            _dash_flash(stdscr, "Create instances with `./sb init` inside a "
+                                "plugin repo (per-project). Press a key…")
+            stdscr.getch()
             continue
 
         if not sel:
@@ -5055,7 +4473,7 @@ def _dash_run(stdscr, cfg):
             if typed == name:
                 with _curses_suspended(stdscr):
                     cmd_instance(load_config(), _types.SimpleNamespace(
-                        action="delete", name=name, server="apache", yes=True,
+                        action="delete", name=name, yes=True,
                         resolved_instance=name))
                     input("\n[enter] to return…")
                 selected = 0
@@ -5197,9 +4615,10 @@ def _web_list_seeds() -> list[str]:
 # Claude Code writes per-session transcripts (JSONL) under
 # ~/.claude/projects/<encoded-cwd>/. Each assistant turn records token usage.
 # We aggregate tokens + estimated cost across sandbox-related sessions, and
-# best-effort attribute each session to instance(s) by which
-# mcp__sandbox-<name>__* tools it called. Cost is ESTIMATED from a public
-# price table (Anthropic doesn't put $ in the transcript).
+# best-effort attribute each session to instance(s) by the `project_dir` arg of
+# the mcp__sandbox__* tools it called (mapped to an instance via the registry),
+# since the single-server model no longer encodes the instance in the tool name.
+# Cost is ESTIMATED from a public price table (no $ in the transcript).
 
 # USD per 1M tokens — input / output / cache-write / cache-read. Update here.
 _CLAUDE_PRICES = {
@@ -5228,26 +4647,43 @@ def _claude_projects_dir() -> Path:
 
 def claude_usage(known_instances: list[str]) -> dict:
     """Aggregate Claude token usage + estimated cost across all session
-    transcripts, with a best-effort per-instance breakdown (by MCP namespace).
+    transcripts, with a best-effort per-instance breakdown.
+
+    Per-project model: there's ONE `sandbox` MCP server, so the tool NAMESPACE
+    no longer encodes the instance — attribution is by each sandbox tool call's
+    `project_dir` argument, mapped to an instance via the registry.
 
     Returns {total, by_model, per_instance, sessions:[...recent...], generated}.
     Resilient: skips unreadable lines/files; never raises."""
-    import re as _re
     pdir = _claude_projects_dir()
-    inst_by_ns = {mcp_server_name(i): i for i in known_instances}
     blank = lambda: {"in": 0, "out": 0, "cw": 0, "cr": 0}
+    # project root (canonical) -> instance, for mapping a tool's project_dir.
+    sc = _core()
+    root_to_inst = {r: e.get("instance")
+                    for r, e in sc.registry_all().items() if e.get("instance")}
+
+    def _pd_to_inst(pd):
+        if not pd:
+            return None
+        try:
+            root = str(sc.find_project_root(pd))
+        except Exception:
+            try:
+                root = str(Path(pd).expanduser().resolve())
+            except Exception:
+                return None
+        return root_to_inst.get(root)
 
     total = blank(); by_model = {}; per_instance = {}; sessions = []
     if not pdir.exists():
         return {"total": total, "tokens": 0, "cost": 0.0, "by_model": {},
                 "per_instance": {}, "sessions": [], "available": False}
 
-    ns_re = _re.compile(r"mcp__(sandbox[a-z0-9-]*)__")
     for proj in pdir.iterdir():
         if not proj.is_dir():
             continue
         for tf in proj.glob("*.jsonl"):
-            su = blank(); s_models = set(); s_ns = set()
+            su = blank(); s_models = set(); s_dirs = set(); s_used = False
             s_mtime = tf.stat().st_mtime
             try:
                 for line in tf.open(errors="ignore"):
@@ -5265,17 +4701,19 @@ def claude_usage(known_instances: list[str]) -> dict:
                         if msg.get("model"):
                             s_models.add(msg["model"])
                     for blk in (msg.get("content") or []):
-                        if isinstance(blk, dict) and blk.get("type") == "tool_use":
-                            m = ns_re.match(blk.get("name", ""))
-                            if m:
-                                s_ns.add(m.group(1))
+                        if isinstance(blk, dict) and blk.get("type") == "tool_use" \
+                                and str(blk.get("name", "")).startswith("mcp__sandbox"):
+                            s_used = True
+                            pd = (blk.get("input") or {}).get("project_dir")
+                            if pd:
+                                s_dirs.add(pd)
             except OSError:
                 continue
             if not any(su.values()):
                 continue
-            # Only count sessions that touched the sandbox at all (any
-            # sandbox* namespace) OR that ran from a sandbox project dir.
-            touched_sandbox = bool(s_ns) or "sandbox" in proj.name.lower()
+            # Only count sessions that touched a sandbox tool OR ran from a
+            # sandbox project dir (transcript dir name encodes the cwd).
+            touched_sandbox = s_used or "sandbox" in proj.name.lower()
             if not touched_sandbox:
                 continue
 
@@ -5284,9 +4722,11 @@ def claude_usage(known_instances: list[str]) -> dict:
             for k in total: total[k] += su[k]
             bm = by_model.setdefault(tier, blank())
             for k in bm: bm[k] += su[k]
-            # attribute to each instance namespace the session used
-            targets = [inst_by_ns[n] for n in s_ns if n in inst_by_ns] \
-                or (["main"] if "sandbox" in s_ns else ["unattributed"])
+            # Attribute to each instance whose project_dir this session drove;
+            # sandbox-touching sessions with no resolvable project go to
+            # 'unattributed' rather than silently onto one instance.
+            insts = sorted({i for i in (_pd_to_inst(d) for d in s_dirs) if i})
+            targets = insts or ["unattributed"]
             for inst in targets:
                 pi = per_instance.setdefault(inst, {**blank(), "cost": 0.0})
                 for k in su: pi[k] += su[k]
@@ -5294,8 +4734,7 @@ def claude_usage(known_instances: list[str]) -> dict:
             sessions.append({
                 "id": tf.stem[:8], "model": tier, "mtime": s_mtime,
                 "tokens": sum(su.values()), "cost": round(cost, 4),
-                "instances": [inst_by_ns[n] for n in s_ns if n in inst_by_ns]
-                             or (["main"] if "sandbox" in s_ns else []),
+                "instances": insts,
             })
 
     total_tokens = sum(total.values())
@@ -5311,32 +4750,6 @@ def claude_usage(known_instances: list[str]) -> dict:
         "by_model": by_model_out, "per_instance": per_instance_out,
         "sessions": sessions[:25],
     }
-
-
-def _web_available_plugins(cfg: dict) -> list[str]:
-    """Plugin slugs the focus dropdown offers — sourced from the projects:
-    block in sandbox.yml (clean, curated) rather than the noisy plugins_home
-    directory listing."""
-    slugs = set()
-    for proj in (cfg.get("projects", {}) or {}).values():
-        for pl in (proj.get("plugins") or []):
-            s = (pl or {}).get("slug")
-            if s:
-                slugs.add(s)
-    return sorted(slugs)
-
-
-def _web_projects(cfg: dict) -> list[dict]:
-    """Projects for the create wizard: name + description + plugin slugs."""
-    out = []
-    for n, p in (cfg.get("projects", {}) or {}).items():
-        out.append({
-            "name": n,
-            "description": (p.get("description") or "").strip(),
-            "plugins": [pl.get("slug") for pl in (p.get("plugins") or [])
-                        if (pl or {}).get("slug")],
-        })
-    return sorted(out, key=lambda d: d["name"])
 
 
 def _web_do_action(payload: dict) -> dict:
@@ -5508,36 +4921,25 @@ def _web_do_action(payload: dict) -> dict:
                     name=name, server_type=target, resolved_instance=name))
         return {"ok": True, "job_id": _start_job(label, do_server)}
 
-    if action in ("create", "delete"):
-        if action == "delete" and name == DEFAULT_INSTANCE:
+    if action == "create":
+        # Per-project model: instances are created by `./sb init` / `./sb ensure`
+        # inside a plugin repo (keyed to the project dir), not by name here.
+        return {"ok": False, "output":
+                "Create an instance by running `./sb init` (or `./sb ensure`) "
+                "inside a plugin repo — not from the dashboard."}
+
+    if action == "delete":
+        if name == DEFAULT_INSTANCE:
             return {"ok": False, "output": "refusing to delete 'main'"}
-        if action == "delete" and payload.get("confirm") != name:
+        if payload.get("confirm") != name:
             return {"ok": False,
                     "output": "delete requires confirm == instance name"}
-        if action == "create":
-            name = (payload.get("name") or "").strip()
-            if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name):
-                return {"ok": False, "output": "invalid instance name"}
-        server = _valid_server(payload.get("server") or "apache")
-        domain = (payload.get("domain") or "").strip().lower() or None
-        # Onboarding fields (create only). Empty/missing → bare instance.
-        plugins = [s for s in (payload.get("plugins") or []) if s] or None
-        seed = (payload.get("seed") or "").strip() or None
-        site_title = (payload.get("site_title") or "").strip() or None
-        theme = (payload.get("theme") or "").strip() or None
-        wp_debug = bool(payload.get("wp_debug"))
-        verb = "Creating" if action == "create" else "Deleting"
-        label = f"{verb} {name}"
 
         def do_inst():
             with _web_lock:
                 cmd_instance(load_config(), _types.SimpleNamespace(
-                    action=action, name=name, server=server, domain=domain,
-                    yes=True, resolved_instance=name,
-                    plugins=plugins, project=None, seed=seed,
-                    site_title=site_title, theme=theme, wp_debug=wp_debug,
-                    minimal=False))
-        return {"ok": True, "job_id": _start_job(label, do_inst)}
+                    action="delete", name=name, yes=True, resolved_instance=name))
+        return {"ok": True, "job_id": _start_job(f"Deleting {name}", do_inst)}
 
     return {"ok": False, "output": f"unknown action '{action}'"}
 
@@ -5758,10 +5160,16 @@ def cmd_web(cfg, args) -> None:
 
             if path == "/api/instances":
                 cfg = load_config()
+                # Per-project model: the "plugins" list is the set of projects
+                # the registry tracks (each project dir = its plugin), not a
+                # central catalog. "projects" is gone entirely.
+                reg_plugins = sorted({
+                    Path(e["root"]).name
+                    for e in _core().registry_all().values() if e.get("root")
+                })
                 return self._send(200, json.dumps({
                     "instances": collect_instance_rows(cfg),
-                    "plugins": _web_available_plugins(cfg),
-                    "projects": _web_projects(cfg),
+                    "plugins": reg_plugins,
                     "servers": list(SERVERS),
                     "seeds": _web_list_seeds(),
                     "domains_ready": domains_ready(),
@@ -5838,14 +5246,15 @@ def main():
         description="WPDeveloper Sandbox — real WP runtime for designers, devs, QA.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
-Quick start (one command does everything):
-  ./sb setup               boot docker, install WP, build MCP, wire Claude
+Quick start:
+  ./sb setup               boot docker, install WP, build MCP, register the
+                           single `sandbox` MCP server with Claude
 
-Then pick a project and a plugin:
-  ./sb use embedpress      activate a pre-defined profile from sandbox.yml
-  ./sb add wpdeveloper/embedpress
-                                   clone + link + activate any GitHub plugin
-  ./sb focus embedpress    tell Claude which plugin you're working on
+Per-project (each plugin carries its own sandbox.config.json):
+  cd <plugin-repo>
+  ./sb init                scaffold config + boot a per-dir instance + harness
+  ./sb test                run the plugin's phpunit tests
+  ./sb ensure              just boot/refresh this project's instance
   ./sb doctor              audit everything is healthy
 """,
     )
@@ -5876,11 +5285,6 @@ Then pick a project and a plugin:
     sub.add_parser("logs", help="Tail WP + DB logs")
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
-    sub.add_parser("projects", help="List defined projects")
-    sub.add_parser("pick", help="Interactive checklist to set up WPDeveloper plugins")
-
-    u = sub.add_parser("use", help="Switch active project")
-    u.add_argument("name")
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
     w.add_argument("passthrough", nargs=argparse.REMAINDER)
@@ -5893,12 +5297,6 @@ Then pick a project and a plugin:
     v.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="<url> [--check-iframes] [--screenshot PATH] [--full-page] "
              "[--width N] [--height N] [--timeout S] [--wait-until COND]")
-
-    a = sub.add_parser("add",
-        help="Clone a plugin from GitHub, link it in, activate it")
-    a.add_argument("repo",
-        help="org/repo, full URL, or bare repo (uses defaults.github_org)")
-    a.add_argument("--project", help="persist under this project (default: active)")
 
     sub.add_parser("doctor", help="Audit the stack and report problems")
 
@@ -5926,7 +5324,7 @@ Then pick a project and a plugin:
     re_.add_argument("name")
 
     sub.add_parser("snapshots", help="List saved snapshots")
-    sub.add_parser("update", help="git pull every plugin in the active project")
+    sub.add_parser("update", help="git pull the project repo this instance tracks")
 
     op = sub.add_parser("open", help="Open admin / site / mailpit in browser")
     op.add_argument("what", nargs="?", default="admin",
@@ -5976,33 +5374,21 @@ Then pick a project and a plugin:
     en.add_argument("--json", action="store_true",
         help="print the instance record as JSON (for the MCP server)")
 
+    ini = sub.add_parser("init",
+        help="Make a plugin dir a sandbox project (config + instance + test harness)")
+    ini.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)")
+    ini.add_argument("--force", action="store_true",
+        help="regenerate sandbox.config.json even if one already exists")
+    ini.add_argument("--no-test-harness", dest="no_test_harness", action="store_true",
+        help="skip provisioning the phpunit test harness")
+
     ins = sub.add_parser("instance",
-        help="Create or delete a sandbox instance (auto-picks ports)")
-    ins.add_argument("action", choices=["create", "delete"])
+        help="Delete a sandbox instance (create via `./sb init` in a plugin dir)")
+    ins.add_argument("action", choices=["delete"])
     ins.add_argument("name")
-    ins.add_argument("--server", choices=list(SERVERS), default="apache",
-        help="web server stack for `create` (default: apache)")
-    ins.add_argument("--domain", default=None,
-        help="custom local domain for `create` (default: <name>.sb)")
-    ins.add_argument("--no-domain", action="store_true",
-        help="don't assign a custom domain (use plain localhost:<port>)")
     ins.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on delete")
-    # Onboarding (create): set up plugins/content/options in one pass.
-    ins.add_argument("--project", default=None,
-        help="project from sandbox.yml to install on create (e.g. embedpress)")
-    ins.add_argument("--plugin", dest="plugins", action="append", default=None,
-        help="plugin/project slug to set up (repeatable)")
-    ins.add_argument("--seed", default=None,
-        help="WXR file in runtime/seeds/ to import after install")
-    ins.add_argument("--title", dest="site_title", default=None,
-        help="site title (default: 'Sandbox <name>')")
-    ins.add_argument("--theme", default=None,
-        help="theme slug to activate (installs from wp.org if absent)")
-    ins.add_argument("--wp-debug", dest="wp_debug", action="store_true",
-        help="enable WP_DEBUG on the new instance")
-    ins.add_argument("--minimal", action="store_true",
-        help="skip onboarding prompts (bare instance — CI-friendly)")
 
     sec = sub.add_parser("secure",
         help="Upgrade an instance to trusted https://<name>.sb (opt-in)")
@@ -6018,10 +5404,8 @@ Then pick a project and a plugin:
 
     ob = sub.add_parser("onboard",
         help="Guided setup for an existing instance (plugins, https, focus)")
-    ob.add_argument("--project", default=None,
-        help="project from sandbox.yml to install")
     ob.add_argument("--plugin", dest="plugins", action="append", default=None,
-        help="plugin/project slug to set up (repeatable)")
+        help="wp.org plugin slug to install (repeatable)")
     ob.add_argument("--seed", default=None, help="WXR file in runtime/seeds/")
     ob.add_argument("--theme", default=None, help="theme slug to activate")
     ob.add_argument("--wp-debug", dest="wp_debug", action="store_true",
@@ -6077,10 +5461,18 @@ Then pick a project and a plugin:
     # Resolve which instance this invocation targets.
     instances = resolve_instances(cfg)
     chosen = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE") or DEFAULT_INSTANCE
+    # Project-dir-routed commands derive their instance from the project root
+    # (registry / ensure_instance), not this global gate — so a stale
+    # SANDBOX_INSTANCE in the shell env or an --instance naming a not-yet-created
+    # instance must NOT abort them.
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp"}
     if chosen not in instances:
-        die(f"unknown instance '{chosen}'. Defined: "
-            f"{', '.join(instances.keys())}.\n"
-            f"Add it under `instances:` in sandbox.yml, or pick one above.")
+        if args.cmd in PROJECT_ROUTED:
+            chosen = DEFAULT_INSTANCE   # unused by these handlers; keep it valid
+        else:
+            die(f"unknown instance '{chosen}'. Defined: "
+                f"{', '.join(instances.keys())}.\n"
+                f"Add it under `instances:` in sandbox.yml, or pick one above.")
     args.resolved_instance = chosen
 
     # One-time migration of pre-multi-instance layout into the 'main' slot,
@@ -6097,8 +5489,7 @@ Then pick a project and a plugin:
         "setup": cmd_setup, "apply": cmd_setup,
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
         "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
-        "projects": cmd_projects, "pick": cmd_pick, "use": cmd_use, "wp": cmd_wp,
-        "seed": cmd_seed, "focus": cmd_focus, "add": cmd_add,
+        "wp": cmd_wp, "seed": cmd_seed, "focus": cmd_focus,
         "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
         "connect": cmd_connect,
         "claude": cmd_claude, "clean": cmd_clean,
@@ -6110,6 +5501,7 @@ Then pick a project and a plugin:
         "instances": cmd_instances,
         "instance": cmd_instance,
         "ensure": cmd_ensure,
+        "init": cmd_init,
         "mcp": cmd_mcp,
         "test": cmd_test,
         "onboard": cmd_onboard,

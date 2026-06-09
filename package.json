@@ -1,0 +1,55 @@
+{
+  "name": "@wpdeveloper/sandbox",
+  "version": "0.1.0",
+  "description": "MCP-first, per-project WordPress dev/test stack — cd into a plugin, boot an instance, and run its phpunit tests with zero composer pollution.",
+  "keywords": [
+    "wordpress",
+    "wp-env",
+    "mcp",
+    "claude",
+    "phpunit",
+    "docker",
+    "sandbox",
+    "wpdeveloper"
+  ],
+  "homepage": "https://sandbox.xc1.app/",
+  "bugs": {
+    "url": "https://github.com/WPDeveloper/sandbox/issues"
+  },
+  "license": "GPL-2.0-or-later",
+  "bin": {
+    "sandbox": "bin/sandbox.js",
+    "sb": "bin/sandbox.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "files": [
+    "bin/",
+    "sb",
+    "sandbox_core.py",
+    "sandbox.yml",
+    "docker-compose.yml",
+    "config/",
+    "mcp/",
+    "tools/",
+    "skills/",
+    "!skills/sandbox-release/**",
+    "workflows/",
+    "scripts/web-install.sh",
+    "install.sh",
+    "uninstall.sh",
+    "Makefile",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "scripts": {
+    "prepack": "find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null; true",
+    "postinstall": "node -e \"process.stdout.write('\\n  sandbox installed. Run `sandbox setup` once, then `cd` into a plugin and `sandbox init`.\\n  (Needs Python 3 + Docker.)\\n\\n')\""
+  }
+}

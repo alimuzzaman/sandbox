@@ -197,35 +197,116 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## Phase 2 — wp-env-grade ergonomics + catalog removal
 
-### [ ] T2.1 — `sandbox init`
-- **Files:** `sb` (`cmd_init`).
+### [x] T2.1 — `sandbox init`
+- **Done:** `./sb init [--project-dir DIR] [--force] [--no-test-harness]` (`cmd_init`).
+  Writes a native config — scaffolding the canonical schema (`sandbox.config.json`) for a
+  bare dir, or **converting** an existing `.wp-env.json` (the resolved `pconf` already carries
+  the mapped schema via `load_project_config`, so the DEFAULTS-key projection drops the private
+  import-bookkeeping keys) — then `ensure_instance` + provisions the phpunit harness (extracted
+  shared helper `_provision_test_harness`, reused by `cmd_test`). `--force` regenerates the
+  **same** native file (preserves an existing `.yml`/`.yaml` rather than writing a shadowing
+  `.json`). Idempotent: an existing native config is kept unless `--force`. Verified live on a
+  bare fixture: scaffold → boot (`sbinit` @ :8192)
+  → `./sb test` green (`OK (2 tests, 3 assertions)`, PHPUnit 9.6.34, zero composer deps in
+  the plugin). The `.wp-env.json` convert mapping verified deterministically
+  (`core`→`wpVersion`, privates dropped, `testsPort` ignored).
+- **Note:** `init` boots, so it relies on `find_project_root` stopping at the plugin (its
+  `.git` / config / `.wp-env.json`). A bare dir nested inside a parent git repo resolves to
+  the parent — real plugin checkouts are their own repos, so this is the expected behavior.
+- **Files:** `sb` (`cmd_init`, reusing `load_project_config`'s `.wp-env.json` mapping).
 - **Do:** in a plugin dir, scaffold `sandbox.config.json` (or convert an existing
   `.wp-env.json`), then `ensure_instance` + `ensure_test_harness`. One command: bare checkout
   → running, testable stack.
 - **Verify:** `cd a-fresh-plugin && sandbox init && sandbox test` works end to end.
 
-### [ ] T2.2 — Version knobs
-- **Files:** config loader + `ensure_instance`.
+### [x] T2.2 — Version knobs
+- **Done:** version pins now resolve **server-aware** at compose time. `ensure_instance`
+  stores `php_version`/`wp_version` on the instance block (not a pre-baked apache image);
+  `resolve_instances` surfaces them; the new `_web_image(server, php, wp, explicit)` picks the
+  right tag per stack — apache `wordpress:<wp>-php<php>`, nginx the `-fpm` flavor, litespeed
+  `litespeedtech/openlitespeed:1.8.2-lsphp<php>` — and an explicit non-default `wordpress_image`
+  still wins. The wpcli image follows the PHP pin too (`wordpress:cli-php<php>`) so phpunit runs
+  on the project's PHP; the bare `wordpress:cli`/`wordpress:latest` defaults act as derive
+  sentinels (no churn for unpinned instances — verified identical regen). `cmd_install` passes
+  `--version=<wp>` to `wp core download` (the litespeed path, where core isn't baked in). The
+  cloned test suite already matches `wpVersion` (T1.1).
+- **Verified live:** `phpVersion: "8.1"` booted instance `sbphp81` with web image
+  `wordpress:php8.1` → `php -v` = **PHP 8.1.34**, cli image `wordpress:cli-php8.1`, HTTP 200;
+  unpinned `disable-comments` regenerated to identical `wordpress:latest`/`wordpress:cli`.
+- **Bonus fix landed here:** `instance delete` now also drops the project→instance registry
+  entry (`registry_remove`) — previously a stale "ready" record survived a delete.
+- **Still open:** booting nginx/litespeed pinned instances was verified only via deterministic
+  image-string generation (the apache acceptance path booted for real); a no-WP Brain/Monkey
+  fast path for `tests` is still TODO (carried from T1.3/T1.4).
+- **Files:** `sb` (`resolve_instances`, `_web_image`/`_cli_image`, the `_web_*` builders,
+  `ensure_instance`, `cmd_install`, `cmd_instance` delete).
 - **Do:** `phpVersion`/`wpVersion`/`core` resolve to the image tag
   (`wordpress:<wp>-php<php>`) / `wp core download --version` / lsphp version. Absent → stays
   `wordpress:latest`. The cloned test suite (T1.1) matches the resolved WP version.
 - **Verify:** a config pinning `phpVersion: 8.1` boots an 8.1 container (`wp_exec php -v`).
 
-### [ ] T2.3 — Distribution: npm package + `sandbox` bin + brew
-- **Files:** new `package.json` + JS `bin/sandbox` shim; brew formula; rename docs to `sandbox`.
+### [x] T2.3 — Distribution: npm package + `sandbox` bin + brew
+- **Done:** `package.json` (`@wpdeveloper/sandbox`, bins `sandbox`+`sb`) + `bin/sandbox.js`
+  (Node shim: finds python3, fails fast with an install hint, else execs the bundled `sb` —
+  which is a polyglot shell+python file, so `python3 sb …` runs cross-platform incl. Windows).
+  `files` is a secret-safe **allowlist** (so `*.local.yml`/`.env*`/`runtime/`/`.venv`s never
+  ship even though `.npmignore` can't prune inside `files`-listed dirs); a `prepack` strips
+  `__pycache__` and `!skills/sandbox-release/**` drops the maintainer skill. Homebrew formula
+  at `packaging/homebrew/sandbox.rb` (depends `python@3.12`, `--HEAD` installable; tagged
+  release fills `url`/`sha256` from `make-release.sh`). `packaging/README.md` documents all
+  three channels. `./sb` and `install.sh` kept.
+- **Verified:** `npm pack` → 80 files, zero secret/`.pyc`/`sandbox-release` leaks; installed to
+  a throwaway prefix (`npm i -g <tgz> --prefix …`) → both `sandbox` + `sb` bins symlinked,
+  `sandbox --help` and `sandbox init --help` run from outside the repo.
+- **Still open:** brew `sha256` is a placeholder until a versioned tarball is published; the
+  Phase 3 doc rewrite (T3.1) is where READMEs switch to the `sandbox` name everywhere.
+- **Files:** `package.json`, `bin/sandbox.js`, `.npmignore`, `packaging/homebrew/sandbox.rb`,
+  `packaging/README.md`.
 - **Do:** npm bin execs the bundled Python `sb` via `python3` (fail fast if missing). Keep
   `./sb` as an alias. Keep `install.sh`.
 - **Verify:** `npm pack` → install the tarball globally → `sandbox --help` runs.
 
-### [ ] T2.4 — Remove the central catalog + migrate
-- **Files:** `sb` (`cmd_projects`/`cmd_pick`/`cmd_use`/catalog half of `cmd_focus`),
-  `sandbox.yml`, dashboards (`cmd_dashboard`/`cmd_web` focus dropdowns).
-- **Do:** delete `projects[]` from `sandbox.yml`; retire/repurpose the catalog commands to
-  operate on the current dir's project; point dashboards at the registry. Provide a one-time
-  migration that writes a `sandbox.config.*` into each previously-cataloged plugin repo
-  (embedpress, xspeed, …, templately, disable-comments).
-- **Verify:** `sandbox.yml` has no `projects:`; `sandbox start` in each migrated repo still
-  boots; no command references the deleted catalog.
+### [x] T2.4 — Remove the central catalog + collapse to one MCP server
+- **Scope (per the user):** NO migration into other repos. Remove the projects catalog AND
+  the multi-instance *management* surface that doesn't fit the per-project model; keep the
+  registry/`resolve_instances`/`instance=` routing (the new-model engine) and the dashboards
+  (re-pointed at the registry). Net: `cd` into any WP plugin, point the MCP at it → it works;
+  no catalog, nothing to pre-register.
+- **Old code reference (user request — for revisiting):** the full pre-removal catalog +
+  multi-instance code lives at commit **`25fc4094280f66ad78600548c003e7b7aea46dea`**
+  (`git show 25fc409:sb`). Noted inline in `sandbox.yml` where `projects:` used to be.
+- **Done:**
+  - **Catalog removed:** deleted `cmd_projects`/`cmd_pick`/`cmd_use`/`cmd_add` + their helpers
+    (`_install_picked_project`/`_resolve_plugin_github`/`_parse_pick_input`/`_project_for_plugin`/
+    `parse_repo`/`persist_local_plugin`/`_drop_sandbox_claude_md`/`_web_projects`/
+    `_web_available_plugins`, ~506 lines via an AST-boundary script) + their subparsers/handlers;
+    removed `projects:` from `sandbox.yml`. Stripped every `cfg["projects"]` read.
+  - **Re-pointed at the registry:** `cmd_doctor`/`cmd_update`/`cmd_status`/`collect_instance_rows`
+    now read `registry_find_instance` (the project root) instead of the catalog/`.active-project`;
+    `cmd_focus` dropped its catalog auto-link; `_onboard_instance`/`cmd_setup` install wp.org slugs.
+  - **One MCP server:** `mcp_server_name()`→constant `sandbox`; `_build_mcp_entry()` is env-free
+    (`<sb> mcp`, routes by `project_dir`); `register_claude_user_scope`/`write_claude_mcp_config`
+    register/write ONE `sandbox` entry + clean stale `sandbox-<name>`/`wp-sandbox` (new
+    `_stale_mcp_servers`); `cmd_uninstall` deregisters once + stale.
+  - **`instance create` removed:** `cmd_instance` is delete-only (CLI rejects `create`, points to
+    `./sb init`); subparser delete-only; the curses `n` key + web create action print a
+    per-project pointer; `instance delete` no longer deregisters a per-instance MCP server.
+- **Verified live:** `./sb --help` lists no `projects`/`pick`/`use`/`add` (has `init`); zero
+  dangling refs; `./sb instances`/`doctor`/`status` show registry-backed project + a single
+  `sandbox` MCP server; **fresh `./sb init` + `./sb test` → `OK` green** (core flow intact);
+  `./sb instance delete` cleans containers/volume/dir/block/registry (no MCP deregister);
+  `./sb instance create` is rejected.
+- **Adversarial review (6 real findings, fixed):** `cmd_update` hard-died on `main` (never in
+  the registry) → now graceful info+return like `status`/`doctor`; `claude_usage` per-instance
+  attribution had collapsed onto `main` (MCP namespace is constant now) → re-pointed to attribute
+  by each sandbox tool call's `project_dir` via the registry; stale `server.py` docstrings (old
+  per-instance env-binding model) → rewritten to the single-server `project_dir` model.
+- **Known follow-up (env-blocked):** the web dashboard's "New instance" form still references the
+  removed `projects` payload (renders an empty plugin checklist) and POSTs to the now-rejected
+  create action — it fails *gracefully* with a "run `./sb init`" pointer. Fully removing the form
+  needs a `src/web` TS edit + bundle rebuild (`cd src/web && npm i && ../../scripts/build-web-js.sh`);
+  `node_modules` isn't present in this environment, so it's deferred.
+- **Files:** `sb`, `sandbox.yml`, `mcp/wp-server/server.py`.
 
 ---
 

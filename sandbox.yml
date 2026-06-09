@@ -52,160 +52,23 @@ runtime:
     site_title: Sandbox
 
 # ---------------------------------------------------------------------------
-# Instances — optional. Lets you run multiple isolated WordPress stacks
-# from one sandbox checkout (different ports + DB volumes + WP install
-# dirs). Target one with `./sb --instance <name> <cmd>` or via the
-# `instance` arg on every MCP tool. Without this block, a single `main`
-# instance is synthesized automatically from the `runtime:` block above.
-#
-# instances:
-#   qa:
-#     wordpress_port: 8288
-#     db_port: 3328
-#     mailpit_port: 8225
-#     server: nginx               # apache (default) | nginx | litespeed
-#     project: xspeed              # which projects entry to wire on `./sb use`
-#     admin:
-#       site_title: Sandbox QA
+# Instances. In the per-project model you don't hand-author these: `./sb init`
+# / `./sb ensure` inside a plugin repo create one instance per project dir and
+# record it (ports, server, version pins) under `instances:` in
+# sandbox.local.yml, tracked in the registry. Without any instance, a single
+# `main` is synthesized from the `runtime:` block above. CLI commands can still
+# target a specific instance with `./sb --instance <name> <cmd>`; MCP tools
+# route by `project_dir` instead.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Projects — choose one with `./sb use <name>`.
-#
-# A project bundles:
-#   - which plugins to activate, in which order
-#   - where each plugin's source repo lives on disk (symlinked in)
-#   - any wp.org plugins to auto-install as runtime dependencies
-#
-# Per-plugin fields:
-#   slug:     WordPress plugin slug (matches the folder name in wp-content/plugins).
-#   source:   absolute path to the git checkout on disk (symlinked into the stack).
-#   github:   <org>/<repo> on GitHub. Used by `./sb pick` / `./sb add` to clone
-#             when `source` doesn't exist yet. Falls back to `${github_org}/${slug}`
-#             when omitted — set this whenever the GitHub repo name differs from
-#             the WP slug (e.g. wowstore vs productx, eael-pro vs essential-addons-elementor).
-#
-# Ship one project per plugin (or per workflow). Add more freely.
+# No central project catalog. (Removed in the MCP-first per-project rewrite,
+# T2.4.) Each plugin repo now carries its own sandbox.config.json; `cd` into
+# it and run `./sb init` (or `./sb ensure`) — the registry tracks one instance
+# per project dir. The old `projects:` catalog + `./sb projects|pick|use|add`
+# live at commit 25fc4094280f66ad78600548c003e7b7aea46dea (`git show 25fc409:sb`).
 # ---------------------------------------------------------------------------
-projects:
 
-  embedpress:
-    description: EmbedPress free + Pro.
-    plugins:
-      - slug: embedpress
-        github: "WPDevelopers/embedpress"
-        source: "${plugins_home}/embedpress"
-      - slug: embedpress-pro
-        github: "WPDevelopers/embedpress-pro"
-        source: "${plugins_home}/embedpress-pro"
-    install_from_wporg:
-      - elementor
-      - safe-svg          # sanitize SVG uploads — required for any design work
-
-  essential-blocks:
-    description: Essential Blocks for Gutenberg free + Pro.
-    plugins:
-      - slug: essential-blocks
-        github: "WPDevelopers/essential-blocks"
-        source: "${plugins_home}/essential-blocks"
-      - slug: essential-blocks-pro
-        github: "WPDevelopers/essential-blocks-pro"
-        source: "${plugins_home}/essential-blocks-pro"
-
-  essential-addons:
-    description: Essential Addons for Elementor — Lite + Pro.
-    plugins:
-      - slug: essential-addons-for-elementor-lite
-        github: "WPDevelopers/essential-addons-for-elementor-lite"
-        source: "${plugins_home}/essential-addons-for-elementor-lite"
-      - slug: essential-addons-elementor
-        github: "WPDevelopers/essential-addons-elementor"
-        source: "${plugins_home}/essential-addons-elementor"
-    install_from_wporg:
-      - elementor
-      - safe-svg
-
-  betterdocs:
-    description: BetterDocs core + Pro + AI Chatbot + OAuth.
-    plugins:
-      - slug: betterdocs
-        github: "WPDevelopers/betterdocs"
-        source: "${plugins_home}/betterdocs"
-      - slug: betterdocs-pro
-        github: "WPDevelopers/betterdocs-pro"
-        source: "${plugins_home}/betterdocs-pro"
-      - slug: betterdocs-ai-chatbot
-        github: "WPDevelopers/betterdocs-ai-chatbot"
-        source: "${plugins_home}/betterdocs-ai-chatbot"
-      - slug: betterdocs-oauth
-        github: "WPDevelopers/betterdocs-oauth"
-        source: "${plugins_home}/betterdocs-oauth"
-
-  betterlinks:
-    description: BetterLinks free + Pro.
-    plugins:
-      - slug: betterlinks
-        github: "WPDevelopers/betterlinks"
-        source: "${plugins_home}/betterlinks"
-      - slug: betterlinks-pro
-        github: "WPDevelopers/betterlinks-pro"
-        source: "${plugins_home}/betterlinks-pro"
-
-  notificationx:
-    description: NotificationX free + Pro.
-    plugins:
-      - slug: notificationx
-        github: "WPDevelopers/notificationx"
-        source: "${plugins_home}/notificationx"
-      - slug: notificationx-pro
-        github: "WPDevelopers/notificationx-pro"
-        source: "${plugins_home}/notificationx-pro"
-
-  schedulepress:
-    description: SchedulePress / WP Scheduled Posts (free only).
-    plugins:
-      - slug: wp-scheduled-posts
-        github: "WPDevelopers/wp-scheduled-posts"
-        source: "${plugins_home}/wp-scheduled-posts"
-
-  disable-comments:
-    description: Disable Comments + MU + Disable Feeds (free only).
-    plugins:
-      - slug: disable-comments
-        github: "WPDevelopers/disable-comments"
-        source: "${plugins_home}/disable-comments"
-      - slug: disable-comments-mu
-        github: "WPDevelopers/disable-comments-mu"
-        source: "${plugins_home}/disable-comments-mu"
-      - slug: disable-feeds
-        github: "WPDevelopers/disable-feeds"
-        source: "${plugins_home}/disable-feeds"
-
-  xspeed:
-    description: XSpeed caching plugin.
-    plugins:
-      - slug: xspeed
-        github: "WPDevelopers/xspeed"
-        source: "${plugins_home}/xspeed"
-      - slug: xspeed-pro
-        github: "WPDevelopers/xspeed-pro"
-        source: "${plugins_home}/xspeed-pro"
-
-  # standalone:
-  #   description: Misc standalone WPDeveloper plugins (SEO / redirects / meta).
-  #   plugins:
-  #     - slug: simple-301-redirects
-  #       github: "WPDevelopers/simple-301-redirects"
-  #       source: "${plugins_home}/simple-301-redirects"
-  #     - slug: instant-answer
-  #       github: "WPDevelopers/instant-answer"
-  #       source: "${plugins_home}/instant-answer"
-  #     - slug: secret-meta
-  #       github: "WPDevelopers/secret-meta"
-  #       source: "${plugins_home}/secret-meta"
-  #     - slug: twitter-cards-meta
-  #       github: "WPDevelopers/twitter-cards-meta"
-  #       source: "${plugins_home}/twitter-cards-meta"
 
 
 # ---------------------------------------------------------------------------

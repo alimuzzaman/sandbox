@@ -426,16 +426,29 @@ def destroy_instance(project_dir: str) -> dict:
 def recreate_instance(project_dir: str) -> dict:
     """Destroy and immediately recreate the sandbox instance for `project_dir`.
 
-    Equivalent to destroy_instance followed by ensure_instance — useful when
-    you want a clean WP install (fresh DB, fresh uploads) without manually
-    running two steps. The new instance boots from the current sandbox.config.*
-    and installs the same plugin(s).
+    Equivalent to destroy_instance followed by ensure_instance — gives a clean
+    WP install (fresh DB, fresh uploads) from the current sandbox.config.*
+    without a manual two-step. The recreated instance keeps the SAME port as
+    before so bookmarks and tool configs don't change.
 
     project_dir: the plugin project to recreate.
     """
-    inst, err = _project_instance(project_dir)
-    if err:
-        return err
+    sc = _core()
+    try:
+        root = str(sc.find_project_root(project_dir))
+    except Exception as e:
+        return {"ok": False, "error": f"invalid project_dir {project_dir!r}: {e}"}
+    existing = sc.registry_get(root)
+    if not existing or not existing.get("instance"):
+        return {"ok": False,
+                "error": f"no sandbox instance for project '{root}'. "
+                         f"Call ensure_instance(project_dir={project_dir!r}) first."}
+    inst = existing["instance"]
+    # Snapshot the ports + server so ensure reuses them after destroy.
+    saved_ports = {k: existing[k]
+                   for k in ("wordpress_port", "db_port", "mailpit_port", "server")
+                   if k in existing}
+
     sb = SANDBOX_ROOT / "sb"
     # destroy
     try:
@@ -447,6 +460,19 @@ def recreate_instance(project_dir: str) -> dict:
         return {"ok": False, "error": "recreate_instance: destroy timed out after 120s"}
     if res.returncode != 0:
         return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
+
+    # Re-insert a pending registry entry with the same ports so ensure_instance
+    # picks them up (skipping _pick_instance_ports) and the URL stays the same.
+    sc.registry_put(
+        root,
+        instance=inst,
+        status="pending",
+        wordpress_port=saved_ports.get("wordpress_port"),
+        db_port=saved_ports.get("db_port"),
+        mailpit_port=saved_ports.get("mailpit_port"),
+        server=saved_ports.get("server", "apache"),
+    )
+
     # recreate
     try:
         res2 = subprocess.run(

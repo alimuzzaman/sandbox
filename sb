@@ -1546,11 +1546,129 @@ def cmd_doctor(cfg, args) -> None:
         if not linked:
             info("  (no source-symlinked plugins)")
 
+    print("\nCredentials:")
+    local = _local_yaml()
+    # FluentBoards — optional but warn if URL saved but unreachable.
+    fb = local.get("fluentboards", {}) or {}
+    fb_url = fb.get("url", "").rstrip("/")
+    if fb_url:
+        import urllib.request as _ur, urllib.error as _ue, ssl as _ssl
+        _ctx = _ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode = _ssl.CERT_NONE
+        try:
+            req = _ur.Request(fb_url, method="HEAD")
+            with _ur.urlopen(req, timeout=5, context=_ctx):
+                fb_ok = True
+        except Exception:
+            fb_ok = False
+        check(f"FluentBoards reachable ({fb_url})", fb_ok,
+              hint="check the URL in sandbox.local.yml or re-run `./sb connect fb`")
+    else:
+        info("  FluentBoards not configured (optional — ./sb connect fb)")
+
+    # GitHub org
+    gh_org = (local.get("defaults", {}) or {}).get("github_org", "").strip()
+    check("github_org set", bool(gh_org),
+          hint="run `./sb connect gh` to pick your org (WPDevelopers for team members)")
+
+    # .env.local exists and is chmod 600
+    if SECRETS_ENV.exists():
+        mode = oct(SECRETS_ENV.stat().st_mode)[-3:]
+        check(f".env.local permissions ({mode})", mode == "600",
+              hint=f"run: chmod 600 {SECRETS_ENV}")
+    else:
+        info("  .env.local not yet created (run `./sb connect` to populate)")
+
     print()
     if problems:
         info(f"{problems} issue(s) — see → hints above")
         sys.exit(1)
     ok("All checks passed.")
+
+
+def cmd_smoke(cfg, args) -> None:
+    """Self-test: boot a temporary instance, verify WP + REST, tear down.
+
+    Validates the full create-install-probe cycle without touching any
+    project instance. Takes ~60s on a cold Docker image, ~20s warm.
+    """
+    import tempfile, time as _t, urllib.request as _ur, urllib.error as _ue
+
+    print("\nSandbox smoke test")
+    print("══════════════════")
+    problems = 0
+
+    def _check(label: str, ok_: bool, hint: str = "") -> None:
+        nonlocal problems
+        mark = "✓" if ok_ else "✗"
+        line = f"  {mark} {label}"
+        if not ok_:
+            problems += 1
+            if hint:
+                line += f"\n      → {hint}"
+        print(line)
+
+    # 1. Boot a fresh instance from a throw-away project dir.
+    tmpdir = Path(tempfile.mkdtemp(prefix="sb-smoke-"))
+    import json as _json
+    (tmpdir / "sandbox.config.json").write_text(
+        _json.dumps({"slug": "smoke-test", "plugins": []}))
+
+    print(f"\nTemp project dir: {tmpdir}")
+    print("\nBoot:")
+    t0 = _t.time()
+    try:
+        entry = ensure_instance(cfg, str(tmpdir))
+        inst = entry["instance"]
+        port = entry["wordpress_port"]
+        elapsed = _t.time() - t0
+        _check(f"instance '{inst}' booted ({elapsed:.0f}s)", True)
+    except Exception as exc:
+        _check("boot", False, str(exc))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        sys.exit(1)
+
+    print("\nWordPress:")
+    r = wpcli(["core", "is-installed"], instance=inst, check=False, capture=True)
+    _check("WP installed", r.returncode == 0,
+           hint="check `./sb logs` for install errors")
+
+    print("\nREST:")
+    rest_url = f"http://localhost:{port}/wp-json/"
+    try:
+        with _ur.urlopen(rest_url, timeout=8) as resp:
+            rest_ok = resp.status == 200
+    except Exception:
+        rest_ok = False
+    _check(f"GET {rest_url}", rest_ok,
+           hint="check pretty-permalinks / AllowOverride in the container")
+
+    print("\nTeardown:")
+    try:
+        compose("down", "-v", instance=inst, check=False)
+        for path in (wp_dir(inst), snapshots_dir(inst)):
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+        for path in (focus_file(inst), active_project_file(inst), compose_file(inst)):
+            if path.exists():
+                path.unlink()
+        local = _local_yaml()
+        if inst in (local.get("instances") or {}):
+            del local["instances"][inst]
+            if not local["instances"]:
+                del local["instances"]
+            _write_local_yaml(local)
+        _core().registry_remove(str(tmpdir))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        _check(f"instance '{inst}' deleted", True)
+    except Exception as exc:
+        _check("cleanup", False, str(exc))
+
+    print()
+    if problems:
+        die(f"{problems} check(s) failed — smoke test red")
+    ok("Smoke test green.")
 
 
 def cmd_wp(cfg, args) -> None:
@@ -5299,6 +5417,7 @@ Per-project (each plugin carries its own sandbox.config.json):
              "[--width N] [--height N] [--timeout S] [--wait-until COND]")
 
     sub.add_parser("doctor", help="Audit the stack and report problems")
+    sub.add_parser("smoke",  help="Self-test: boot a fresh instance, REST probe, tear down")
 
     f = sub.add_parser("focus",
         help="Set/show which plugin Claude defaults to working on")
@@ -5465,7 +5584,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # (registry / ensure_instance), not this global gate — so a stale
     # SANDBOX_INSTANCE in the shell env or an --instance naming a not-yet-created
     # instance must NOT abort them.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke"}
     if chosen not in instances:
         if args.cmd in PROJECT_ROUTED:
             chosen = DEFAULT_INSTANCE   # unused by these handlers; keep it valid
@@ -5490,7 +5609,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
         "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
         "wp": cmd_wp, "seed": cmd_seed, "focus": cmd_focus,
-        "doctor": cmd_doctor, "mcp-install": cmd_mcp_install,
+        "doctor": cmd_doctor, "smoke": cmd_smoke, "mcp-install": cmd_mcp_install,
         "connect": cmd_connect,
         "claude": cmd_claude, "clean": cmd_clean,
         "snapshot": cmd_snapshot, "restore": cmd_restore,

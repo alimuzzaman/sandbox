@@ -82,9 +82,9 @@ mcp:
     application_password: ""
 
   browser:
-    enabled: false           # Phase 2 — Playwright-driven
+    enabled: false           # not implemented yet
   figma:
-    enabled: false           # Phase 3 — official Figma MCP
+    enabled: false           # not implemented yet
 
 # ---------------------------------------------------------------------------
 # Personal secrets — populated by `./sb onboard`.

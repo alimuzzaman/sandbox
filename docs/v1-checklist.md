@@ -14,27 +14,19 @@ from their reports, then cut `v1`.
       `git clone && ./sb setup` on at least one un-customized
       macOS box and one un-customized Ubuntu box. Capture any failure as
       a follow-up issue.
-- [ ] **Smoke test exists.** Either a `./sb smoke` subcommand
-      (boots stack → installs WP → activates a known plugin → REST ping →
-      tears down) or a GitHub Action that runs setup on every PR.
-- [ ] **`gh` org detection is correct.** Today `connect gh` saves
-      `gh api user .login` as `defaults.github_org`, which is the personal
-      handle. Most devs need `wpdeveloper` instead. Fix: list orgs from
-      `gh api user/orgs`, prompt to pick (default = first), fall back to
+- [x] **Smoke test exists.** `./sb smoke` boots a fresh instance, checks
+      WP installed + REST probe, tears down.
+- [x] **`gh` org detection is correct.** `connect gh` now lists all orgs,
+      prioritises WPDevelopers, and prompts to pick — never silently saves
       the personal handle.
-- [ ] **Phase 2/3 toggles labelled honestly.** `mcp.browser.enabled` and
-      `mcp.figma.enabled` in `sandbox.yml` look usable but aren't wired.
-      Either gate them behind an explicit `# not implemented yet` comment
-      or rip them out until Phase 2 lands.
-- [ ] **`apply` vs `setup` disambiguated.** README mentions both; they're
-      the same handler. Keep `setup` as primary, label `apply` as `(alias
-      of setup)` in `--help` and remove the duplicate README mention.
-- [ ] **`doctor` covers `connect` state.** Add checks for: FluentBoards
-      URL reachable (HEAD request, optional), GitHub org set if any
-      `add` is used, `.env.local` exists + chmod 600.
-- [ ] **Version + CHANGELOG.** Add a top-level `VERSION` file (or read
-      from `sandbox.yml`'s `version:` key), a `CHANGELOG.md` with v1
-      notes, and a `git tag v1.0.0` once everything below is green.
+- [x] **Phase 2/3 toggles labelled honestly.** `mcp.browser.enabled` and
+      `mcp.figma.enabled` now carry `# not implemented yet` comments.
+- [x] **`apply` vs `setup` disambiguated.** `apply` is labelled
+      `Alias for setup` in `--help`; README mentions only `setup`.
+- [x] **`doctor` covers `connect` state.** Checks FluentBoards reachability
+      (if configured), `github_org` set, `.env.local` chmod 600.
+- [x] **Version + CHANGELOG.** `VERSION` file + `CHANGELOG.md` added;
+      `git tag v1.0.0` happens once the remaining blocker is green.
 
 ## Nice-to-have (won't block v1)
 

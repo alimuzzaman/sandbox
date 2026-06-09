@@ -1304,20 +1304,23 @@ def cmd_install(cfg, args) -> None:
     server = inst_cfg.get("server", "apache")
 
     # WordPress bootstrap, made robust for EVERY server:
-    #  - apache/fpm images ship WP core + (usually) generate wp-config.php from
-    #    WORDPRESS_DB_* on first boot — but that can race the install, leaving
-    #    'wp-config.php not found'. The OpenLiteSpeed image ships neither.
-    # So: ensure core is present (download if missing), then ensure
-    # wp-config.php exists (create if missing) — regardless of server — before
-    # `wp core install`. Both checks are no-ops when the image already did it.
-    ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
-    if ver.returncode != 0:
-        wp_v = inst_cfg.get("wp_version")
-        info(f"downloading WordPress core{f' {wp_v}' if wp_v else ''}…")
-        dl = ["core", "download", "--force"]
-        if wp_v:
-            dl.append(f"--version={wp_v}")
-        wpcli(dl, instance=inst, check=False)
+    #  - The image is PHP-only (wordpress:php8.1) — WP core is downloaded here,
+    #    following @wordpress/env's approach. This avoids 'manifest unknown'
+    #    errors from non-existent patch-level image tags (e.g. 6.9.4-php8.1).
+    #  - When a wp_version is pinned, always force-download it so the container
+    #    runs the exact requested version, not whatever ships in the base image.
+    #  - Without a pin, skip the download if WP is already present (the base
+    #    image ships WP latest, which is fine for unpinned instances).
+    wp_v = inst_cfg.get("wp_version")
+    if wp_v:
+        info(f"downloading WordPress {wp_v}…")
+        wpcli(["core", "download", "--force", f"--version={wp_v}"],
+              instance=inst, check=False)
+    else:
+        ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
+        if ver.returncode != 0:
+            info("downloading WordPress core (latest)…")
+            wpcli(["core", "download", "--force"], instance=inst, check=False)
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:
         info("generating wp-config.php…")
@@ -3359,41 +3362,25 @@ def _derive_instance_name(root: str, taken: set) -> str:
     return name
 
 
-def _wp_docker_tag(wp_version) -> str | None:
-    """Reduce a full WP version string to major.minor for Docker image tags.
-
-    Docker Hub publishes wordpress:X.Y-phpA.B reliably (and updates it in place
-    for patch releases), but wordpress:X.Y.Z-phpA.B is NOT always published —
-    new patch releases often lag by days or are never tagged at the patch level.
-    Using X.Y avoids 'manifest unknown' errors while still pinning the minor."""
-    if not wp_version:
-        return None
-    parts = str(wp_version).split(".")
-    return f"{parts[0]}.{parts[1]}" if len(parts) >= 2 else str(wp_version)
-
-
 def _web_image(server: str, php=None, wp=None, explicit=None) -> str:
     """Resolve the web-tier container image for a server stack + version pins.
 
-    The version tag scheme differs per stack: apache uses the mod_php
-    `wordpress:*` images, nginx the matching `-fpm` flavor, and litespeed an
-    OpenLiteSpeed `lsphp` image (its WP core is downloaded by `wp core
-    download`, not baked into the image). An explicit, non-default
-    `wordpress_image` from sandbox.yml always wins. No pins → the per-server
-    default (latest)."""
+    WordPress version is intentionally excluded from the image tag — following
+    @wordpress/env's approach: use a PHP-only base image and download the exact
+    WP version inside the container via `wp core download --version=X.Y.Z`.
+    This avoids 'manifest unknown' errors when Docker Hub hasn't published a
+    patch-level tag yet (e.g. wordpress:6.9.4-php8.1 may not exist, but
+    wordpress:php8.1 always does).
+
+    An explicit, non-default `wordpress_image` from sandbox.yml always wins.
+    No pins → the per-server default (latest)."""
     if explicit and explicit not in ("wordpress:latest", "wordpress"):
         return explicit
     if server == "litespeed":
         return f"litespeedtech/openlitespeed:1.8.2-lsphp{(php or '8.3').replace('.', '')}"
     fpm = "-fpm" if server == "nginx" else ""
-    # Docker Hub only reliably publishes major.minor PHP-variant tags, not patch.
-    wp_tag = _wp_docker_tag(wp)
-    if wp_tag and php:
-        return f"wordpress:{wp_tag}-php{php}{fpm}"
     if php:
         return f"wordpress:php{php}{fpm}"
-    if wp_tag:
-        return f"wordpress:{wp_tag}{fpm}"
     return "wordpress:php8.3-fpm" if server == "nginx" else "wordpress:latest"
 
 

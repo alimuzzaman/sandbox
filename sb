@@ -307,6 +307,10 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             # Optional custom local domain (e.g. xspeed.sb) mapped to
             # 127.0.0.1 via /etc/hosts. None → plain localhost:<port>.
             "domain": inst.get("domain"),
+            # Extra bind-mount sources for plugin repos / mappings outside
+            # plugins_home. Written by ensure_instance; injected into compose.
+            "extra_mounts": inst.get("extra_mounts",
+                                     runtime.get("extra_mounts", [])) or [],
         }
 
     if not instances:

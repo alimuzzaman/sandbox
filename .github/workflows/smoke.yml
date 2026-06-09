@@ -1,0 +1,29 @@
+name: Smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: Clean-room install + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check prerequisites
+        run: |
+          python3 --version
+          python3 -m venv --help > /dev/null
+          docker --version
+          docker compose version
+
+      # Docker is already running on ubuntu-latest runners.
+      # PyYAML and other runtime deps are fetched on demand by `sb`.
+      - name: Run smoke test
+        run: ./sb smoke

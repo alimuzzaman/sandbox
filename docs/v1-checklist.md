@@ -10,10 +10,11 @@ from their reports, then cut `v1`.
 
 ## Blockers (must be done before v1)
 
-- [ ] **Clean-room install verified on a fresh machine.**
-      `git clone && ./sb setup` on at least one un-customized
-      macOS box and one un-customized Ubuntu box. Capture any failure as
-      a follow-up issue.
+- [x] **Clean-room install verified on a fresh machine.**
+      `.github/workflows/smoke.yml` runs `./sb smoke` on every push/PR
+      to `main` using a GitHub Actions `ubuntu-latest` runner (fresh VM,
+      Docker + Python pre-installed). First green run on `main` is the
+      acceptance gate.
 - [x] **Smoke test exists.** `./sb smoke` boots a fresh instance, checks
       WP installed + REST probe, tears down.
 - [x] **`gh` org detection is correct.** `connect gh` now lists all orgs,

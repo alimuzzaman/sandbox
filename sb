@@ -1609,8 +1609,11 @@ def cmd_smoke(cfg, args) -> None:
                 line += f"\n      → {hint}"
         print(line)
 
-    # 1. Boot a fresh instance from a throw-away project dir.
-    tmpdir = Path(tempfile.mkdtemp(prefix="sb-smoke-"))
+    # 1. Boot a fresh instance from a throw-away project dir under $HOME
+    #    (the project-root allowlist rejects system temp dirs like /var/folders).
+    smoke_base = Path.home() / ".sandbox" / "smoke"
+    smoke_base.mkdir(parents=True, exist_ok=True)
+    tmpdir = Path(tempfile.mkdtemp(prefix="sb-smoke-", dir=smoke_base))
     import json as _json
     (tmpdir / "sandbox.config.json").write_text(
         _json.dumps({"slug": "smoke-test", "plugins": []}))

@@ -315,7 +315,8 @@ else your cwd. Pass `instance=` only to deliberately override the resolved one.
 |---|---|
 | `ensure_instance` | Boot (create-if-missing) the project's instance; returns instance + URL. Call FIRST when you need a live URL. |
 | `destroy_instance` | Permanently delete an instance — containers, DB volume, wp dir, registry entry. Irreversible. |
-| `recreate_instance` | Destroy + immediately recreate — gives a clean WP install from the current config. |
+| `recreate_instance` | Destroy + immediately recreate — gives a clean WP install from the current config (wipes DB + uploads). |
+| `apply_config` | Reconcile a running instance with its current config IN PLACE — re-render compose, recreate web tier, re-sync plugins/themes, convert multisite if newly enabled. No DB drop. Prefer over `recreate_instance` for config edits. |
 | `run_tests` | Run the plugin's phpunit tests on the external WP harness → `{ok, passed, summary}` |
 | `wp_cli` | Run any `wp` command |
 | `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
@@ -553,7 +554,32 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     them too. Multisite constants are gated on the
     `runtime/wp-<instance>/.sandbox-multisite` marker (written after
     `multisite-convert`); litespeed instead gets literal `wp config set` pins
-    (lsphp can't read container env). Config changes apply on recreate.
+    (lsphp can't read container env). Config changes apply **in place** via
+    `./sb apply --project-dir <DIR>` / MCP `apply_config` (force-recreates the
+    web tier, no DB drop) — prefer it over `recreate_instance` (which wipes
+    data). A changed `wpVersion` is NOT applied by `apply` (needs a recreate).
+
+11. **Captured mail needs the mail mu-plugin.** The official `wordpress` image
+    has no working `sendmail`, so `wp_mail()` returns `false` and Mailpit stays
+    empty unless `00-sandbox-mail.php` routes PHP mail to `mailpit:1025` on
+    `phpmailer_init`. It also fixes WP's default `wordpress@localhost` sender
+    (PHPMailer rejects it as invalid — no TLD) via `wp_mail_from`. Written by
+    `_write_mail_muplugin` on every `sb up` + `sb install`; lives in the shared
+    bind-mount so BOTH web and wpcli mail is captured. Don't remove it.
+
+12. **`restore` resets the DB first.** `cmd_restore` runs `wp db reset --yes`
+    before `wp db import`, so it's a true point-in-time replacement: tables
+    created after the snapshot (e.g. multisite `wp_2_*`) are dropped, not
+    merged. `--add-drop-table` in the export only drops tables IN the dump.
+
+13. **Subdomain multisite needs a wildcard Caddy block + cert SAN.** When an
+    instance is `multisite: "subdomain"` and has a `.sb` domain, `regen_caddyfile`
+    emits a `*.<name>.sb` block (via `_caddy_block(..., wildcard=True)`) next to
+    the apex, and `_mint_cert` adds a `*.<name>.sb` SAN (gated on
+    `_multisite_mode(...) == "subdomain"`). Wildcards directly under `.sb` are
+    browser-rejected; `*.<name>.sb` (one level deeper) is valid. dnsmasq already
+    wildcards `.sb`. Subdomain multisite on bare `localhost:<port>` still has no
+    per-sub-site host — assign a `.sb` domain.
 
 ---
 

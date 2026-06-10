@@ -105,8 +105,14 @@ Two special cases:
 Every define is `defined()`-guarded, so a literal constant already present in
 `wp-config.php` never double-defines.
 
-Config changes apply on the next instance **recreate** (like version pins) —
-`recreate_instance` / `./sb instance delete` + `ensure`.
+Config changes apply **in place** with `./sb apply --project-dir <DIR>` (MCP:
+`apply_config`) — it re-renders compose and recreates only the web tier, so the
+new constants take effect **without dropping the DB or uploads**. This is the
+non-destructive alternative to `recreate_instance` / `./sb instance delete` +
+`ensure`. A changed `wpVersion` is reported but not applied by `apply`
+(swapping core under a live DB needs an explicit recreate); a `phpVersion`
+change *does* apply because the web tier is force-recreated against the new
+image. See **In-place reconcile (`sb apply`)** below.
 
 ## Multisite
 
@@ -125,9 +131,18 @@ runs `wp core multisite-convert` after the single-site install, then:
 
 `true` means **subdirectory** — the baseline that works on
 `localhost:<port>` with no wildcard DNS; sub-sites land at `/<slug>/`.
-`"subdomain"` passes `--subdomains` and sets `SUBDOMAIN_INSTALL`, but
-sub-site hosts (`<slug>.localhost` or a wildcard `.sb` domain) are NOT
-resolved/proxied automatically yet — treat subdomain as a follow-up.
+
+`"subdomain"` passes `--subdomains` and sets `SUBDOMAIN_INSTALL`. Sub-site
+hosts are now **proxied** when the instance has a `.sb` domain: the generated
+Caddyfile emits a wildcard site block `*.<name>.sb` alongside the apex
+`<name>.sb` (both reverse-proxy the same instance port), so `sub1.<name>.sb`
+serves the right sub-site. dnsmasq already wildcards `.sb`, so resolution needs
+no extra step. When you `./sb secure` a subdomain-multisite instance, the cert
+is minted with a `*.<name>.sb` SAN in addition to `<name>.sb`, so every
+sub-site host is HTTPS-trusted by one cert. (Wildcards directly under `.sb` are
+browser-rejected, but `*.<name>.sb` — one level deeper — is a valid SAN.)
+Plain `localhost:<port>` subdomain multisite still has no per-sub-site hostname;
+assign a `.sb` domain to host sub-sites.
 
 ## `.wp-env.json` import mapping
 
@@ -149,10 +164,64 @@ When only a `.wp-env.json` exists, it's mapped onto the native schema:
 one native source of truth (with `--force` it regenerates the same native file,
 preserving an existing `.yml`).
 
+## In-place reconcile (`sb apply` / `apply_config`)
+
+`./sb apply --project-dir <DIR>` (MCP tool `apply_config`) reconciles a
+**running** instance with its current `sandbox.config.*` **without dropping the
+database or uploads**. Use it after editing config — toggling a constant
+(`TEMPLATELY_DEV_API`, `WP_DEBUG`), adding a plugin/theme, or enabling
+multisite. It:
+
+1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
+   current project config (constants, multisite flag, version pins, extra
+   bind-mounts).
+2. Regenerates the compose file and `compose up -d --force-recreate`s only the
+   web tier. Constants survive via `WORDPRESS_CONFIG_EXTRA`; the DB volume is
+   untouched, so **no data loss**. A `phpVersion` change takes effect (the web
+   image is recreated); a `wpVersion` change is **reported but not applied**
+   (core swaps under a live DB are left to an explicit `recreate_instance`).
+3. Re-syncs plugin/theme symlinks + installs (idempotent).
+4. Runs `wp core multisite-convert` if multisite was **newly** enabled
+   (idempotent — skips an already-converted network). Switching an existing
+   multisite between subdirectory↔subdomain is **not** applied in place; that
+   needs a recreate.
+
+Contrast with `recreate_instance` (destroy + re-boot — wipes DB + uploads) and
+bare `./sb apply` with no `--project-dir` (the legacy alias for `./sb setup`,
+which re-applies the sandbox's own `sandbox.yml`).
+
+## Captured mail (Mailpit)
+
+Every instance runs a Mailpit container (SMTP `1025` internally, web UI on the
+instance's `mailpit_port`). A generated mu-plugin
+(`runtime/wp-<instance>/wp-content/mu-plugins/00-sandbox-mail.php`) routes **all**
+PHP mail there: on `phpmailer_init` it switches PHPMailer to SMTP at
+`mailpit:1025`, and via `wp_mail_from` it replaces WordPress's default
+`wordpress@localhost` sender (which PHPMailer rejects as an invalid address — no
+TLD) with `wordpress@sandbox.test`. The mu-plugin lives in the shared
+`runtime/wp-<instance>` bind-mount, so it captures mail from **both** the web
+tier and the wp-cli tier (CLI / cron / tests). It is (re)written on every
+`sb up` and on `sb install`, so it survives `sb down` / `sb up`. Read captured
+mail with the MCP `mail_list` / `mail_get` tools, or the Mailpit web UI.
+
+Without it the official `wordpress` image's `sendmail` is absent, so
+`wp_mail()` silently returns `false` and nothing reaches Mailpit.
+
+## Snapshot / restore
+
+`./sb snapshot <name>` exports the DB (`wp db export --add-drop-table`) and
+tars uploads. `./sb restore <name>` runs **`wp db reset --yes` before the
+import**, so restore is a true point-in-time replacement: tables created
+*after* the snapshot (e.g. multisite sub-site `wp_2_*` tables from an FSI run)
+are dropped, not merged. `--add-drop-table` alone only drops tables present in
+the dump, so without the pre-reset those newer tables would survive.
+
 ## Where it's consumed
 
 - `ensure_instance(project_dir)` / `sandbox init` / `sandbox ensure` — boot the
   instance using `plugins`/`mappings`/`server`/version pins/`config`.
+- `apply_config(project_dir)` / `sandbox apply --project-dir` — reconcile a
+  running instance with its config in place (no data loss).
 - `run_tests(project_dir)` / `sandbox test` — provision the external WP harness
   at `wpVersion` and run phpunit in the wp-cli container at `phpVersion`.
 - `focus_get(project_dir)` — returns the project's plugin + its `CLAUDE.md`.

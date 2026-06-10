@@ -492,6 +492,43 @@ def recreate_instance(project_dir: str) -> dict:
 
 
 @mcp.tool()
+def apply_config(project_dir: str) -> dict:
+    """Reconcile a RUNNING instance with its current project config WITHOUT
+    dropping the database or uploads — the non-destructive alternative to
+    recreate_instance.
+
+    Use this after editing sandbox.config.* (e.g. toggling TEMPLATELY_DEV_API /
+    WP_DEBUG, adding a plugin or theme, enabling multisite). It re-renders the
+    compose file, recreates only the web tier (constants survive via
+    WORDPRESS_CONFIG_EXTRA), re-syncs plugin/theme symlinks + installs, and runs
+    multisite-convert if multisite was newly enabled. The DB volume is untouched,
+    so all data is preserved.
+
+    Caveats: a changed wp_version is reported but NOT applied (core swaps under a
+    live DB are left to an explicit recreate_instance); switching an existing
+    multisite between subdirectory and subdomain also needs a recreate.
+
+    project_dir: the plugin project to reconcile (call ensure_instance first).
+    """
+    sb = SANDBOX_ROOT / "sb"
+    try:
+        res = subprocess.run(
+            [str(sb), "apply", "--project-dir", project_dir, "--json"],
+            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "apply_config timed out after 600s"}
+    lines = (res.stdout or "").strip().splitlines()
+    entry = _safe_json(lines[-1]) if lines else None
+    if isinstance(entry, dict) and "instance" in entry:
+        entry.setdefault("ok", True)
+        entry["reconciled"] = True
+        return entry
+    return {"ok": False, "code": res.returncode,
+            "error": (res.stderr or res.stdout or "apply failed").strip()[:1000]}
+
+
+@mcp.tool()
 def wp_cli(command: str, timeout: int = 60, *, project_dir: str) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 

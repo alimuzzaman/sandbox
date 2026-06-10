@@ -612,15 +612,27 @@ def _ca_trusted_macos() -> bool:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _mint_cert(domain: str) -> bool:
-    """Mint an explicit cert for <domain> (and its www. alias) signed by the
-    already-trusted mkcert CA. No sudo. Idempotent — overwrites. Returns ok."""
+def _mint_cert(domain: str, extra_sans: list[str] | None = None) -> bool:
+    """Mint an explicit cert for <domain> signed by the already-trusted mkcert
+    CA. No sudo. Idempotent — overwrites. Returns ok.
+
+    `extra_sans` adds additional Subject Alternative Names to the SAME cert
+    file (keyed by <domain> via _cert_paths). Used for subdomain multisite:
+    a wildcard SAN `*.<domain>.sb` so every sub-site host (sub1.<name>.sb)
+    is covered by one cert. Wildcards directly under `.sb` are browser-
+    rejected, but `*.<name>.sb` (a level deeper) is a valid SAN."""
     PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
     cert, key = _cert_paths(domain)
+    names = [domain, *(extra_sans or [])]
     res = subprocess.run(
-        ["mkcert", "-cert-file", str(cert), "-key-file", str(key), domain],
+        ["mkcert", "-cert-file", str(cert), "-key-file", str(key), *names],
         capture_output=True, text=True)
     return res.returncode == 0 and cert.exists() and key.exists()
+
+
+def _wildcard_san(domain: str) -> str:
+    """The wildcard SAN that covers an instance's sub-sites: `*.<domain>`."""
+    return f"*.{domain}"
 
 
 def render_proxy_compose() -> str:
@@ -651,17 +663,24 @@ volumes:
 """
 
 
-def _caddy_block(domain: str, port: int) -> str:
+def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
     """One Caddy site block. Default is plain http://<domain> (no port, no cert
     — zero CA-trust fragility, browsers never warn on http). If this domain has
-    been secured (a mkcert cert exists), serve https + bounce http→https."""
+    been secured (a mkcert cert exists), serve https + bounce http→https.
+
+    When `wildcard` is set (subdomain multisite), the site address list also
+    includes `*.<domain>` so every sub-site host (sub1.<domain>) reverse-
+    proxies to the same instance port. dnsmasq already wildcards `.sb`, and
+    the secured cert carries a matching `*.<domain>` SAN (see _mint_cert)."""
     cert, key = _cert_paths(domain)
+    # Space-separated address list — Caddy serves all of them from one block.
+    hosts = f"{domain} {_wildcard_san(domain)}" if wildcard else domain
     if cert.exists() and key.exists():
-        return f"""http://{domain} {{
+        return f"""http://{hosts} {{
     redir https://{{host}}{{uri}} 308
 }}
 
-{domain} {{
+{hosts} {{
     tls /certs/{cert.name} /certs/{key.name}
     reverse_proxy host.docker.internal:{port} {{
         header_up X-Forwarded-Proto https
@@ -669,7 +688,7 @@ def _caddy_block(domain: str, port: int) -> str:
     }}
 }}
 """
-    return f"""http://{domain} {{
+    return f"""http://{hosts} {{
     reverse_proxy host.docker.internal:{port} {{
         header_up Host {{host}}
     }}
@@ -702,7 +721,10 @@ def regen_caddyfile(cfg: dict) -> None:
             continue
         # No cert minting here — default is plain http. _caddy_block emits an
         # https block only if a cert already exists (i.e. `./sb secure` ran).
-        blocks.append(_caddy_block(dom, ic["wordpress_port"]))
+        # Subdomain multisite also needs a wildcard `*.<name>.sb` block so each
+        # sub-site host proxies to the same port.
+        wildcard = _multisite_mode(ic) == "subdomain"
+        blocks.append(_caddy_block(dom, ic["wordpress_port"], wildcard=wildcard))
     PROXY_CADDYFILE.write_text("\n".join(blocks))
 
 
@@ -760,6 +782,43 @@ def _write_ssl_muplugin(instance: str) -> None:
         "if ( ! empty( $_SERVER['HTTP_X_FORWARDED_HOST'] ) ) {\n"
         "    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];\n"
         "}\n"
+    )
+
+
+def _write_mail_muplugin(instance: str) -> None:
+    """Drop a mu-plugin so PHP mail is captured by the Mailpit container instead
+    of being dropped on the floor. The official wordpress image has no working
+    sendmail binary (sendmail_path points at /usr/sbin/sendmail, which is
+    absent), so wp_mail() returns false and the captured-mail feature
+    (mail_list/mail_get) never sees anything. On phpmailer_init we switch
+    PHPMailer to SMTP and point it at the shared `mailpit` service on :1025.
+
+    Lives in the shared runtime/wp-<instance> bind-mount, so it is visible to
+    BOTH the web (`wp`) and the `wpcli` tiers — CLI-triggered mail
+    (e.g. `./sb wp eval`, cron, tests) is captured too. mu-plugins auto-load
+    with no activation and survive container restarts (unlike `wp config set`,
+    which the entrypoint wipes). Image-agnostic; mirrors _write_ssl_muplugin."""
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    (mu_dir / "00-sandbox-mail.php").write_text(
+        "<?php\n"
+        "/* Sandbox: route all PHP mail to the Mailpit container so it can be\n"
+        "   inspected via mail_list / mail_get. Generated by ./sb. */\n"
+        "add_action( 'phpmailer_init', function ( $phpmailer ) {\n"
+        "    $phpmailer->isSMTP();\n"
+        "    $phpmailer->Host       = 'mailpit';\n"
+        "    $phpmailer->Port       = 1025;\n"
+        "    $phpmailer->SMTPAuth   = false;\n"
+        "    $phpmailer->SMTPSecure = '';\n"
+        "    $phpmailer->SMTPAutoTLS = false;\n"
+        "} );\n"
+        "// WP's default From is wordpress@localhost; PHPMailer rejects it as an\n"
+        "// invalid address (no TLD), so wp_mail() fails before it ever reaches\n"
+        "// SMTP. Give it a valid sandbox sender unless the caller set one.\n"
+        "add_filter( 'wp_mail_from', function ( $from ) {\n"
+        "    return ( $from && 'wordpress@localhost' !== $from )\n"
+        "        ? $from : 'wordpress@sandbox.test';\n"
+        "}, 1 );\n"
     )
 
 
@@ -1426,6 +1485,11 @@ def cmd_up(cfg: dict, args) -> None:
         _ensure_proxy_up(cfg)
     compose("up", "-d", *_web_services(inst_cfg.get("server", "apache")),
             instance=inst)
+    # Re-assert the mail-capture mu-plugin on every up so it survives
+    # down/up and any wp-content reset. Cheap + idempotent; only touches the
+    # shared runtime bind-mount, which exists for any provisioned instance.
+    if wp_dir(inst).exists():
+        _write_mail_muplugin(inst)
     ok(f"WordPress: {site_url(inst_cfg)}")
     ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
 
@@ -1614,6 +1678,11 @@ def cmd_install(cfg, args) -> None:
     mu_dir.mkdir(parents=True, exist_ok=True)
     (mu_dir / "00-sandbox-autologin.php").write_text(_autologin_mu_plugin(autologin_token))
     save_local_autologin_token(autologin_token, instance=inst)
+
+    # Capture all PHP mail in the Mailpit container (the image has no working
+    # sendmail; without this wp_mail() silently fails). Visible to web + wpcli
+    # tiers via the shared bind-mount.
+    _write_mail_muplugin(inst)
 
     ok(f"Admin: http://localhost:{port}/wp-admin"
        f"  •  Login: http://localhost:{port}/?sandbox_autologin={autologin_token}")
@@ -2858,6 +2927,13 @@ def cmd_restore(cfg, args) -> None:
     sql = target / "db.sql"
     if not sql.exists():
         die(f"snapshot is missing db.sql: {sql}")
+    # Drop ALL tables before importing so restore is a true point-in-time
+    # replacement, not a merge. `wp db export` uses --add-drop-table, which only
+    # drops tables that exist IN the dump — tables created AFTER the snapshot
+    # (e.g. FSI sub-site wp_2_* tables) would otherwise survive the restore and
+    # pollute cleanup. `db reset --yes` drops+recreates the empty schema first.
+    info("Resetting DB (drop all tables) before import…")
+    wpcli(["db", "reset", "--yes"], instance=inst)
     info(f"Importing DB ← {sql}")
     compose("run", "--rm",
             "-v", f"{snap_root}:/snapshots",
@@ -3399,7 +3475,10 @@ def cmd_secure(cfg, args) -> None:
     if not proxy_setup(cfg):   # ensures proxy + mkcert CA trusted + mints certs
         die("could not enable HTTPS (see messages above).")
     cfg = load_config()
-    _mint_cert(dom)
+    # Subdomain multisite: add a `*.<name>.sb` SAN so every sub-site host is
+    # covered by this one cert.
+    sans = [_wildcard_san(dom)] if _multisite_mode(inst) == "subdomain" else None
+    _mint_cert(dom, extra_sans=sans)
     _write_ssl_muplugin(name)
     regen_caddyfile(cfg)
     reload_proxy()
@@ -3806,6 +3885,67 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
           instance=name, check=False)
 
 
+def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
+                          ports: dict, server: str) -> dict:
+    """Construct the sandbox.local.yml `instances.<name>` block from a project's
+    resolved config. Captures ports, server, version pins, wp-config constants,
+    the multisite flag, and any extra bind-mounts. Shared by ensure_instance
+    (first boot) and cmd_apply_config (in-place reconcile) so both render the
+    SAME block — the single source of truth for what compose generates."""
+    php_v = pconf.get("phpVersion")
+    wp_v = pconf.get("wpVersion")
+    block = {
+        "wordpress_port": ports["wordpress_port"],
+        "db_port": ports["db_port"],
+        "mailpit_port": ports["mailpit_port"],
+        "server": server,
+        "admin": {"site_title": f"Sandbox {name}"},
+    }
+    # Store version pins (not a baked image) so the image resolves
+    # server-aware at compose time and `wp core download` honors wpVersion.
+    if php_v:
+        block["php_version"] = str(php_v)
+    if wp_v:
+        block["wp_version"] = str(wp_v)
+    # Project wp-config constants + multisite flag live in the instance
+    # block so compose regeneration (every `sb` invocation) keeps rendering
+    # them into WORDPRESS_CONFIG_EXTRA — that's what survives down/up.
+    if pconf.get("config"):
+        block["wp_config"] = pconf["config"]
+    if pconf.get("multisite"):
+        block["multisite"] = pconf["multisite"]
+
+    # Collect source paths that need extra Docker bind-mounts — any mapping
+    # source or local plugin path outside plugins_home won't be visible
+    # inside the container, so symlinks there are dangling and WP skips them.
+    plugins_home_p = _plugins_home(cfg).resolve()
+    root_p = Path(root)
+    _extra: list[str] = []
+    for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
+        if _entry == ".":
+            _src = root_p
+        elif isinstance(_entry, str) and ("/" in _entry or _entry.startswith((".", "~"))):
+            _src = Path(_entry).expanduser()
+            if not _src.is_absolute():
+                _src = (root_p / _entry).resolve()
+            _src = _src.resolve()
+        else:
+            continue
+        if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
+            _extra.append(str(_src))
+    for _src_raw in (pconf.get("mappings") or {}).values():
+        _src = Path(str(_src_raw)).expanduser()
+        if not _src.is_absolute():
+            _src = (root_p / _src).resolve()
+        _src = _src.resolve()
+        if _src.exists() and not _src.is_relative_to(plugins_home_p):
+            _extra.append(str(_src))
+    extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
+    if extra_mounts:
+        block["extra_mounts"] = extra_mounts
+    return block
+
+
 def ensure_instance(cfg: dict, project_dir: str) -> dict:
     """Create-if-missing: boot a per-directory instance for the project at
     `project_dir`, keyed by its canonical root in the registry. Idempotent — a
@@ -3852,55 +3992,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
              f"(WP={ports['wordpress_port']} server={server}"
              f"{f' php={php_v}' if php_v else ''}{f' wp={wp_v}' if wp_v else ''})")
 
-        block = {
-            "wordpress_port": ports["wordpress_port"],
-            "db_port": ports["db_port"],
-            "mailpit_port": ports["mailpit_port"],
-            "server": server,
-            "admin": {"site_title": f"Sandbox {name}"},
-        }
-        # Store version pins (not a baked image) so the image resolves
-        # server-aware at compose time and `wp core download` honors wpVersion.
-        if php_v:
-            block["php_version"] = str(php_v)
-        if wp_v:
-            block["wp_version"] = str(wp_v)
-        # Project wp-config constants + multisite flag live in the instance
-        # block so compose regeneration (every `sb` invocation) keeps rendering
-        # them into WORDPRESS_CONFIG_EXTRA — that's what survives down/up.
-        if pconf.get("config"):
-            block["wp_config"] = pconf["config"]
-        if pconf.get("multisite"):
-            block["multisite"] = pconf["multisite"]
-
-        # Collect source paths that need extra Docker bind-mounts — any mapping
-        # source or local plugin path outside plugins_home won't be visible
-        # inside the container, so symlinks there are dangling and WP skips them.
-        plugins_home_p = _plugins_home(cfg).resolve()
-        root_p = Path(root)
-        _extra: list[str] = []
-        for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
-            if _entry == ".":
-                _src = root_p
-            elif isinstance(_entry, str) and ("/" in _entry or _entry.startswith((".", "~"))):
-                _src = Path(_entry).expanduser()
-                if not _src.is_absolute():
-                    _src = (root_p / _entry).resolve()
-                _src = _src.resolve()
-            else:
-                continue
-            if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
-                _extra.append(str(_src))
-        for _src_raw in (pconf.get("mappings") or {}).values():
-            _src = Path(str(_src_raw)).expanduser()
-            if not _src.is_absolute():
-                _src = (root_p / _src).resolve()
-            _src = _src.resolve()
-            if _src.exists() and not _src.is_relative_to(plugins_home_p):
-                _extra.append(str(_src))
-        extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
-        if extra_mounts:
-            block["extra_mounts"] = extra_mounts
+        block = _build_instance_block(cfg, name, root, pconf, ports, server)
 
         local = _local_yaml()
         local.setdefault("instances", {})[name] = block
@@ -3947,6 +4039,121 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             source=pconf.get("source"),
             status="ready",
         )
+
+
+def apply_config(cfg: dict, project_dir: str) -> dict:
+    """Reconcile a RUNNING instance with its project config — WITHOUT dropping
+    the DB or uploads. This is the in-place counterpart to recreate_instance
+    (which wipes data). Use it after editing sandbox.config.json (toggling
+    TEMPLATELY_DEV_API / WP_DEBUG, adding a plugin/theme, enabling multisite).
+
+    Steps:
+      1. Rebuild the instance block from the current project config and persist
+         it to sandbox.local.yml (constants land in WORDPRESS_CONFIG_EXTRA).
+      2. Regenerate compose + `compose up -d --force-recreate` the web tier so
+         the new env/mounts take effect. The DB volume is untouched, so no data
+         loss; the WP entrypoint re-renders wp-config.php from the new env.
+      3. Re-sync plugin/theme symlinks + installs (idempotent).
+      4. Run multisite-convert if multisite was newly enabled (idempotent —
+         _convert_multisite skips an already-converted network).
+
+    Version pins (php/wp) that change are reflected in compose, but an ALREADY
+    BOOTED container keeps its image until recreated; --force-recreate here
+    re-pulls/recreates the web tier, so a new php_version pin DOES take effect.
+    A changed wp_version needs `wp core download --force` (not done here to
+    avoid surprising core swaps); we warn instead.
+
+    Returns the updated registry record. Errors if the project has no instance
+    yet (caller should ensure_instance first)."""
+    import types
+    sc = _core()
+    pconf = sc.load_project_config(project_dir)
+    root = pconf["root"]
+
+    with sc.project_lock(root):
+        existing = sc.registry_get(root)
+        if not (existing and existing.get("instance")):
+            raise sc.ConfigError(
+                f"no instance for {root} yet — run ensure_instance first.")
+        name = existing["instance"]
+        ports = {
+            "wordpress_port": existing["wordpress_port"],
+            "db_port": existing["db_port"],
+            "mailpit_port": existing["mailpit_port"],
+        }
+        server = _valid_server(pconf.get("server") or existing.get("server")
+                               or "apache")
+
+        # Detect whether multisite is being turned on now (was off in the live
+        # block) so we can run the convert after the recreate.
+        prev_block = (_local_yaml().get("instances", {}).get(name, {}))
+        prev_ms = _multisite_mode(prev_block)
+
+        # 1. Rewrite the instance block from the current config.
+        block = _build_instance_block(cfg, name, root, pconf, ports, server)
+        local = _local_yaml()
+        local.setdefault("instances", {})[name] = block
+        _write_local_yaml(local)
+
+        # 2. Regenerate compose + recreate the web tier in place (no DB drop).
+        cfg = load_config()
+        write_compose_files(cfg)
+        inst_cfg = resolve_instances(cfg)[name]
+        info(f"apply_config: reconciling '{name}' in place (no data loss)…")
+        compose("up", "-d", "--force-recreate",
+                *_web_services(inst_cfg.get("server", "apache")),
+                instance=name, check=False)
+        _wait_http(ports["wordpress_port"])
+        # Re-assert the SSL + mail mu-plugins (recreate may have reset nothing,
+        # but keep them guaranteed-present like cmd_up does).
+        if wp_dir(name).exists():
+            _write_mail_muplugin(name)
+
+        # 3. Re-sync plugins + themes (idempotent symlinks + installs).
+        _wire_project_plugins(name, root, pconf)
+        _wire_project_themes(name, root, pconf)
+
+        # 4. Multisite: convert if newly enabled. Skip if it was already a
+        #    network (idempotent) or if the config still disables multisite.
+        cur_ms = _multisite_mode(inst_cfg)
+        if cur_ms and not prev_ms:
+            info(f"apply_config: multisite newly enabled ({cur_ms}) — converting…")
+            _convert_multisite(name, inst_cfg)
+        elif cur_ms and prev_ms and cur_ms != prev_ms:
+            info(f"⚠ multisite mode change {prev_ms}→{cur_ms} can't be applied "
+                 f"in place — recreate the instance to switch network type.")
+
+        # Warn (don't act) on a wp_version pin change — swapping core under a
+        # live DB is destructive-adjacent; leave it to an explicit recreate.
+        _warn_version_drift(cfg, name, pconf)
+
+        base_url = existing.get("url") or f"http://localhost:{ports['wordpress_port']}"
+        return sc.registry_put(
+            root,
+            instance=name,
+            url=base_url,
+            status="ready",
+            server=server,
+            wp_version=pconf.get("wpVersion"),
+            source=pconf.get("source"),
+        )
+
+
+def cmd_apply_config(cfg, args) -> None:
+    """`./sb apply --project-dir DIR` — reconcile a running instance with its
+    project config in place (no DB/uploads loss). The MCP server's apply_config
+    tool wraps this."""
+    sc = _core()
+    pd = getattr(args, "project_dir", None) or os.getcwd()
+    try:
+        entry = apply_config(cfg, pd)
+    except sc.ConfigError as e:
+        die(str(e))
+    if getattr(args, "json", False):
+        print(json.dumps(entry))
+    else:
+        ok(f"instance '{entry['instance']}' reconciled in place "
+           f"(no data loss) at {entry.get('url', '')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -4575,7 +4782,8 @@ def proxy_setup(cfg) -> bool:
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
         if dom and dom.endswith(f".{PROXY_TLD}"):
-            _mint_cert(dom)
+            sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
+            _mint_cert(dom, extra_sans=sans)
     regen_caddyfile(cfg)
     if not reload_proxy():
         info("proxy reload failed (is Docker running?).")
@@ -4778,7 +4986,8 @@ def cmd_domains(cfg, args) -> None:
             if dom and dom.endswith(f".{PROXY_TLD}"):
                 for p in _cert_paths(dom):
                     p.unlink(missing_ok=True)
-                if _mint_cert(dom):
+                sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
+                if _mint_cert(dom, extra_sans=sans):
                     n += 1
         regen_caddyfile(cfg)
         reload_proxy()
@@ -5819,8 +6028,15 @@ Per-project (each plugin carries its own sandbox.config.json):
                     help="don't boot/install any WordPress instance — just "
                          "prepare the CLI + MCP. Create sites later from the "
                          "web UI or with ./sb instance create <name>.")
-    ap = sub.add_parser("apply", help="Alias for setup — re-apply sandbox.yml")
+    ap = sub.add_parser("apply",
+        help="With --project-dir: reconcile a project instance in place "
+             "(no data loss). Without: alias for setup — re-apply sandbox.yml")
     ap.add_argument("--no-pick", action="store_true")
+    ap.add_argument("--project-dir", dest="project_dir", default=None,
+        help="reconcile this project's running instance with its current "
+             "config (constants/plugins/themes/multisite) without dropping the DB")
+    ap.add_argument("--json", action="store_true",
+        help="print the reconciled instance record as JSON (for the MCP server)")
 
     cn = sub.add_parser("connect",
         help="Save credentials for an integration (fb/fluentboards/gh/github)")
@@ -6017,6 +6233,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     # SANDBOX_INSTANCE in the shell env or an --instance naming a not-yet-created
     # instance must NOT abort them.
     PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke"}
+    # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
+    # sandbox.yml setup alias and stays instance-gated.
+    if args.cmd == "apply" and getattr(args, "project_dir", None):
+        PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
     if chosen not in instances:
         if args.cmd in PROJECT_ROUTED:
             chosen = DEFAULT_INSTANCE   # unused by these handlers; keep it valid
@@ -6037,7 +6257,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     write_env_for_compose(cfg)
 
     handlers = {
-        "setup": cmd_setup, "apply": cmd_setup,
+        "setup": cmd_setup,
+        # `apply --project-dir` → in-place reconcile; bare `apply` → setup alias.
+        "apply": (cmd_apply_config if getattr(args, "project_dir", None)
+                  else cmd_setup),
         "up": cmd_up, "down": cmd_down, "status": cmd_status,
         "logs": cmd_logs, "shell": cmd_shell, "install": cmd_install,
         "wp": cmd_wp, "seed": cmd_seed, "focus": cmd_focus,

@@ -66,6 +66,18 @@ def _do_login(page, target_url: str, user: str, password: str) -> str | None:
 
 
 def run(args: argparse.Namespace) -> int:
+    # Default the navigation wait condition. We deliberately keep
+    # `domcontentloaded` even for editor URLs: live testing showed the
+    # Gutenberg editor holds the network open (heartbeat / autosave), so
+    # `networkidle` never settles and forces a navigation timeout — yet the
+    # canvas iframe and its console errors are already captured by the
+    # post-navigation `--iframe-settle` wait + the page-level console/pageerror
+    # listeners. So `--iframe-settle` (default 2s, bump it for heavy editors) is
+    # the right knob for canvas readiness, not the navigation wait condition.
+    # An explicit --wait-until always wins.
+    if args.wait_until is None:
+        args.wait_until = "domcontentloaded"
+
     report: dict = {
         "url": args.url,
         "status": None,
@@ -167,6 +179,7 @@ def run(args: argparse.Namespace) -> int:
                     const r = e.getBoundingClientRect();
                     return {
                         src: e.getAttribute('src'),
+                        name: e.getAttribute('name'),
                         cls: e.getAttribute('class'),
                         title: e.getAttribute('title'),
                         width: r.width,
@@ -183,19 +196,47 @@ def run(args: argparse.Namespace) -> int:
             entry = dict(raw)
             entry["loaded"] = None
             entry["frame_title"] = None
-            if args.check_iframes and raw.get("src"):
-                frame = next(
-                    (f for f in page.frames if f.url and f.url == raw["src"]),
-                    None,
-                )
-                if frame is None:
-                    # Fallback: match by hostname (some embeds redirect / mutate src).
-                    src_host = raw["src"].split("/")[2] if "://" in raw["src"] else None
-                    if src_host:
+            if args.check_iframes:
+                frame = None
+                if raw.get("src"):
+                    frame = next(
+                        (f for f in page.frames if f.url and f.url == raw["src"]),
+                        None,
+                    )
+                    if frame is None:
+                        # Fallback: match by hostname (some embeds redirect / mutate src).
+                        src_host = raw["src"].split("/")[2] if "://" in raw["src"] else None
+                        if src_host:
+                            frame = next(
+                                (f for f in page.frames if src_host in (f.url or "")),
+                                None,
+                            )
+                else:
+                    # Editor-canvas iframes (Gutenberg `name="editor-canvas"`,
+                    # Elementor preview) are srcdoc/about:blank — they have no
+                    # `src` to match on. These are exactly the frames where
+                    # Templately injects templates, so probe them: match by the
+                    # iframe's `name` attribute (Playwright exposes it as
+                    # frame.name), falling back to `title`. Their same-origin JS
+                    # errors already bubble to page.on("console")/pageerror.
+                    target = raw.get("name") or raw.get("title")
+                    if target:
                         frame = next(
-                            (f for f in page.frames if src_host in (f.url or "")),
+                            (f for f in page.frames
+                             if f.name == target or (f.name and target in f.name)),
                             None,
                         )
+                    # Last resort: the lone non-main, src-less frame on the page
+                    # (typical for a single editor canvas).
+                    if frame is None:
+                        candidates = [
+                            f for f in page.frames
+                            if f is not page.main_frame
+                            and (not f.url or f.url == "about:blank"
+                                 or f.url.startswith("about:srcdoc"))
+                        ]
+                        if len(candidates) == 1:
+                            frame = candidates[0]
                 if frame is not None:
                     try:
                         entry["frame_title"] = frame.title()
@@ -261,8 +302,11 @@ def main() -> int:
                    help="seconds to wait for iframes to load before probing (default: 2)")
     p.add_argument("--wait-until",
                    choices=["load", "domcontentloaded", "networkidle", "commit"],
-                   default="domcontentloaded",
-                   help="navigation wait condition (default: domcontentloaded)")
+                   default=None,
+                   help="navigation wait condition (default: domcontentloaded; "
+                        "for editor canvases use --iframe-settle to wait for the "
+                        "iframe rather than networkidle, which never settles "
+                        "while the editor holds the network open)")
     p.add_argument("--login", action="store_true",
         help="Force a wp-login.php form submission before navigation.")
     p.add_argument("--auto-login", action="store_true",

@@ -386,6 +386,17 @@ a different docroot + uid).
 | `apache` (default) | `wordpress:*` mod_php | `.htaccess` |
 | `nginx` | `wordpress:*-fpm` + `nginx:alpine` sidecar | nginx `try_files … /index.php` |
 | `litespeed` | OpenLiteSpeed (lsphp, single container) | OLS vhost, `.htaccess` autoload |
+| `herd` | HOST-native: Laravel Herd + host MySQL (no docker) | Herd's nginx (valet driver) |
+
+`server: "herd"` is the host driver: the WP install stays at
+`runtime/wp-<instance>/` but is served by `herd link` at
+`https://<instance>.test`, DB on host MySQL (`sandbox_<instance>`), constants
+pinned literal (host wp-config is stable). `wpcli()`/MCP tools route to host
+`wp --path` transparently; `sb test` runs phpunit on host PHP. Per-machine
+choice — put it in `sandbox.config.override.json`. NOT on herd (v1):
+snapshots, xdebug, Mailpit capture, `./sb server` switching (docker↔herd =
+re-provision), `.sb` domains. See docs/sandbox-config-reference.md §"Host
+driver".
 
 **Switch an existing instance's server in place** — same URL/port/DB/content:
 

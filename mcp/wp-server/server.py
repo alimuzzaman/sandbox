@@ -332,15 +332,64 @@ def _compose(*args: str, instance: str = DEFAULT_INSTANCE,
     }
 
 
+def _instance_server(instance: str) -> str:
+    """The instance's web server (apache|nginx|litespeed|herd). Read from the
+    registry (written by ensure_instance); falls back to the sandbox.local.yml
+    instance block. 'herd' means HOST-served (Herd + host MySQL, no docker)."""
+    try:
+        reg = json.loads(
+            (SANDBOX_ROOT / "runtime" / "registry.json").read_text())
+        for e in reg.get("instances", {}).values():
+            if e.get("instance") == instance:
+                return e.get("server") or "apache"
+    except (OSError, json.JSONDecodeError):
+        pass
+    blk = (_load_sandbox_yml().get("instances", {}) or {}).get(instance, {}) or {}
+    return blk.get("server", "apache")
+
+
+def _is_herd(instance: str) -> bool:
+    return _instance_server(instance) == "herd"
+
+
+def _host_run(cmd: list[str], timeout: int = 60, cwd: Path | None = None) -> dict:
+    """Run a host command (herd instances) with the same result shape as
+    _compose, so every caller is runtime-agnostic."""
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            cwd=str(cwd) if cwd else str(SANDBOX_ROOT))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"timeout after {timeout}s", "cmd": cmd}
+    except FileNotFoundError as e:
+        return {"ok": False, "error": f"host command not found: {e}"}
+    return {"ok": res.returncode == 0, "code": res.returncode,
+            "stdout": res.stdout, "stderr": res.stderr}
+
+
+def _host_wp_bin() -> str:
+    import shutil as _shutil
+    return _shutil.which("wp") or "/usr/local/bin/wp"
+
+
 def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
            timeout: int = 60) -> dict:
+    if _is_herd(instance):
+        return _host_run(
+            [_host_wp_bin(), f"--path={_wp_root(instance)}", *args],
+            timeout=timeout)
     return _compose("run", "--rm", "wpcli", *args,
                     instance=instance, timeout=timeout)
 
 
 def _wpcli_shell(shell_cmd: str, instance: str = DEFAULT_INSTANCE,
                  timeout: int = 60) -> dict:
-    """Run a wp-cli command through sh -c so $(...) / pipes work."""
+    """Run a wp-cli command through sh -c so $(...) / pipes work. For herd
+    instances the shell runs on the host with cwd at the WP root, so a bare
+    `wp …` inside the command auto-resolves the right site."""
+    if _is_herd(instance):
+        return _host_run(["sh", "-c", shell_cmd], timeout=timeout,
+                         cwd=_wp_root(instance))
     return _compose(
         "run", "--rm", "--entrypoint", "sh", "wpcli", "-c", shell_cmd,
         instance=instance, timeout=timeout,
@@ -559,6 +608,11 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     inst, err = _project_instance(project_dir)
     if err:
         return err
+    if _is_herd(inst):
+        # Host-served instance: there are no containers — run on the host,
+        # defaulting cwd to the WP root (the `container` param is ignored).
+        cwd = Path(workdir) if workdir else _wp_root(inst)
+        return _host_run(["sh", "-c", command], timeout=timeout, cwd=cwd)
     args = ["exec"]
     if workdir:
         args += ["-w", workdir]
@@ -951,8 +1005,11 @@ def import_content(seed_file: str, authors: str = "create",
     inst, err = _project_instance(project_dir)
     if err:
         return err
-    return _wpcli(["import", f"/seeds/{seed_file}",
-                   f"--authors={authors}"], instance=inst, timeout=180)
+    # Containers mount runtime/seeds at /seeds; herd reads the host path.
+    seed = (str(SANDBOX_ROOT / "runtime" / "seeds" / seed_file)
+            if _is_herd(inst) else f"/seeds/{seed_file}")
+    return _wpcli(["import", seed, f"--authors={authors}"],
+                  instance=inst, timeout=180)
 
 
 # ----------------------------- headless browser ------------------------

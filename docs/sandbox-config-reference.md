@@ -49,8 +49,9 @@ The project root is found by walking up from the directory to the nearest
   // baseline that works on localhost:<port>). See "Multisite" below.
   "multisite": false,
 
-  // Web stack. Only the compose web tier differs; DB/mailpit/wp-cli adapt.
-  "server": "apache",   // apache | nginx | litespeed
+  // Web stack. apache/nginx/litespeed are docker (only the compose web tier
+  // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
+  "server": "apache",   // apache | nginx | litespeed | herd
 
   // wp-config.php constants, applied with their JSON types (bool/int/string/
   // null). See "wp-config constants" below.
@@ -75,10 +76,46 @@ All fields are optional; omitted fields take the defaults above.
 | `apache` | `wordpress:php<php>` | `wordpress:<wp>-php<php>` |
 | `nginx` | `wordpress:php<php>-fpm` | `wordpress:<wp>-php<php>-fpm` |
 | `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | (WP via `wp core download`) |
+| `herd` | host PHP via `herd isolate php@<php>` (web tier only) | WP via host `wp core download` |
 
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The
-cloned WP test suite also matches `wpVersion` (trunk when unpinned).
+cloned WP test suite also matches `wpVersion` (trunk when unpinned). On `herd`,
+CLI commands and phpunit run on Herd's default host PHP — `herd isolate` pins
+the web tier only.
+
+## Host driver (`server: "herd"`)
+
+`server: "herd"` provisions the instance on **host PHP via Laravel Herd + host
+MySQL (DBngin)** instead of Docker — same `sandbox.config.json`, same `sb`/MCP
+toolchain. It's a per-machine choice, so it belongs in the gitignored
+`sandbox.config.override.json` rather than the shared config. Docker stays
+canonical; macOS/Windows only (wherever Herd runs).
+
+What provisioning does: the WP install lives at the usual
+`runtime/wp-<instance>/`, served by `herd link` at `https://<instance>.test`
+(`herd secure` runs automatically; `herd isolate php@<v>` applies a
+`phpVersion` pin to the web tier). The database is `sandbox_<instance>` on host
+MySQL (`127.0.0.1:3306`, `root`, no password — override via
+`SANDBOX_HERD_DB_HOST/PORT/USER/PASSWORD`; Herd CLI path via
+`SANDBOX_HERD_CLI`). Because the WP dir is the canonical `runtime/wp-<i>`,
+`tail_log` / `fs_*` / plugin+mapping symlinks work unchanged.
+
+Same end-state as docker: `config` constants (pinned literal via
+`wp config set` — the host wp-config is stable, nothing regenerates it),
+`multisite` (`multisite-convert`, constants written literally), `themes`,
+`plugins`, `mappings`, app password, autologin. `sb test` runs the SAME cached
+WP suite + phpunit.phar on host PHP against a per-instance tests DB
+(`sandbox_<instance>_tests`). The MCP tools (`wp_cli`, `db_query`, `wp_exec`,
+`tail_log`, …) route to the host transparently. `sb apply --project-dir`
+reconciles in place (re-pins constants instead of recreating a web tier).
+
+Not supported on herd (v1): snapshots/restore, Xdebug toggling, Mailpit
+capture (`mail_list` stays empty — no mailpit host), `./sb server` hot
+switching (docker↔herd is a re-provision: change `server` + `./sb instance
+delete` + `./sb ensure`), `.sb` domains/`sb secure` (Herd owns `.test` TLS),
+and subdomain-multisite sub-hosts. `./sb instance delete` tears down fully:
+drops both host DBs, `herd unsecure` + `unlink`, removes the WP dir.
 
 ## wp-config constants (`config`)
 

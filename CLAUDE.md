@@ -392,7 +392,11 @@ a different docroot + uid).
 `runtime/wp-<instance>/` but is served by `herd link` at
 `https://<instance>.test`, DB on host MySQL (`sandbox_<instance>`), constants
 pinned literal (host wp-config is stable). `wpcli()`/MCP tools route to host
-`wp --path` transparently; `sb test` runs phpunit on host PHP. Per-machine
+`wp --path` transparently; `sb test` runs phpunit on host PHP. **`phpVersion`
+is authoritative on herd for BOTH tiers**: web via `herd isolate php@<v>
+--site <instance>` (run after secure, verified+retried), CLI/phpunit via the
+version-specific Herd binary `php<MM>` (`8.1`→`php81`) — NOT the generic `php`
+(Herd's default) nor `herd which-php` (also reports default). Per-machine
 choice — put it in `sandbox.config.override.json`. NOT on herd (v1):
 snapshots, xdebug, Mailpit capture, `./sb server` switching (docker↔herd =
 re-provision), `.sb` domains. See docs/sandbox-config-reference.md §"Host
@@ -591,6 +595,19 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     browser-rejected; `*.<name>.sb` (one level deeper) is valid. dnsmasq already
     wildcards `.sb`. Subdomain multisite on bare `localhost:<port>` still has no
     per-sub-site host — assign a `.sb` domain.
+
+14. **On herd, `phpVersion` is enforced via the `php<MM>` binary, not the
+    generic `php`.** Herd's `php` symlink and `herd which-php <site>` both report
+    Herd's *default* version even for an isolated site — so CLI/phpunit resolve
+    the version-specific binary directly (`8.1`→`<Herd bin>/php81`, see
+    `_herd_php_bin` in `sb` and `mcp/wp-server/server.py`). The web tier is pinned
+    with `herd isolate php@<v> --site <instance>` run AFTER `herd secure` (a fresh
+    `link` isn't in Herd's site list yet, so a pre-secure isolate fails with
+    "site could not be found"), then verified against `herd isolated` and retried
+    once. `wp_exec` gets the pin via per-instance PATH shims under
+    `runtime/herd-shims/<instance>/`. `WP_PHP_BINARY` in the herd tests-config is
+    **shell-quoted** (`_php_squote`) because the Herd php path has spaces and the
+    WP suite splices it unescaped into `system()`.
 
 ---
 

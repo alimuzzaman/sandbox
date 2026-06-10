@@ -76,13 +76,19 @@ All fields are optional; omitted fields take the defaults above.
 | `apache` | `wordpress:php<php>` | `wordpress:<wp>-php<php>` |
 | `nginx` | `wordpress:php<php>-fpm` | `wordpress:<wp>-php<php>-fpm` |
 | `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | (WP via `wp core download`) |
-| `herd` | host PHP via `herd isolate php@<php>` (web tier only) | WP via host `wp core download` |
+| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | WP via host `wp core download` |
 
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The
 cloned WP test suite also matches `wpVersion` (trunk when unpinned). On `herd`,
-CLI commands and phpunit run on Herd's default host PHP — `herd isolate` pins
-the web tier only.
+`phpVersion` is **authoritative for both tiers**: the web tier is pinned via
+`herd isolate php@<v> --site <instance>` (run after `herd secure`, then verified
+against `herd isolated` and retried once), and CLI + phpunit run the
+version-specific Herd binary (`8.1` → `<Herd bin>/php81`). The generic host
+`php` and `herd which-php` report Herd's *default* version, not the isolated
+one, so resolving the `php<MM>` binary from the pin is what makes `sb wp …`,
+`sb test`, and the MCP `wp_cli`/`wp_exec` honor `phpVersion`. Unpinned (or a PHP
+Herd doesn't ship) falls back to the default host `php` rather than aborting.
 
 ## Host driver (`server: "herd"`)
 
@@ -94,8 +100,9 @@ canonical; macOS/Windows only (wherever Herd runs).
 
 What provisioning does: the WP install lives at the usual
 `runtime/wp-<instance>/`, served by `herd link` at `https://<instance>.test`
-(`herd secure` runs automatically; `herd isolate php@<v>` applies a
-`phpVersion` pin to the web tier). The database is `sandbox_<instance>` on host
+(`herd secure` runs automatically; `herd isolate php@<v> --site <instance>`
+applies the `phpVersion` pin to the web tier — run AFTER secure so the site is
+registered, then verified+retried). The database is `sandbox_<instance>` on host
 MySQL (`127.0.0.1:3306`, `root`, no password — override via
 `SANDBOX_HERD_DB_HOST/PORT/USER/PASSWORD`; Herd CLI path via
 `SANDBOX_HERD_CLI`). Because the WP dir is the canonical `runtime/wp-<i>`,
@@ -105,17 +112,21 @@ Same end-state as docker: `config` constants (pinned literal via
 `wp config set` — the host wp-config is stable, nothing regenerates it),
 `multisite` (`multisite-convert`, constants written literally), `themes`,
 `plugins`, `mappings`, app password, autologin. `sb test` runs the SAME cached
-WP suite + phpunit.phar on host PHP against a per-instance tests DB
-(`sandbox_<instance>_tests`). The MCP tools (`wp_cli`, `db_query`, `wp_exec`,
-`tail_log`, …) route to the host transparently. `sb apply --project-dir`
-reconciles in place (re-pins constants instead of recreating a web tier).
+WP suite + phpunit.phar on the **pinned** host PHP against a per-instance tests
+DB (`sandbox_<instance>_tests`). The MCP tools (`wp_cli`, `db_query`, `wp_exec`,
+`tail_log`, …) route to the host transparently and also honor the pin —
+`wp_cli` runs `<php<MM>> <wp.phar>`, and `wp_exec` prepends a per-instance shim
+dir (`runtime/herd-shims/<instance>/`) to PATH so bare `php`/`wp`/composer
+resolve to the pinned version. `sb apply --project-dir` reconciles in place
+(re-pins constants instead of recreating a web tier).
 
 Not supported on herd (v1): snapshots/restore, Xdebug toggling, Mailpit
 capture (`mail_list` stays empty — no mailpit host), `./sb server` hot
 switching (docker↔herd is a re-provision: change `server` + `./sb instance
 delete` + `./sb ensure`), `.sb` domains/`sb secure` (Herd owns `.test` TLS),
 and subdomain-multisite sub-hosts. `./sb instance delete` tears down fully:
-drops both host DBs, `herd unsecure` + `unlink`, removes the WP dir.
+drops both host DBs, `herd unisolate` + `unsecure` + `unlink`, removes the WP
+dir and the `runtime/herd-shims/<instance>/` shims.
 
 ## wp-config constants (`config`)
 

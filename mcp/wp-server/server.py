@@ -352,13 +352,15 @@ def _is_herd(instance: str) -> bool:
     return _instance_server(instance) == "herd"
 
 
-def _host_run(cmd: list[str], timeout: int = 60, cwd: Path | None = None) -> dict:
+def _host_run(cmd: list[str], timeout: int = 60, cwd: Path | None = None,
+              env: dict | None = None) -> dict:
     """Run a host command (herd instances) with the same result shape as
     _compose, so every caller is runtime-agnostic."""
     try:
         res = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
-            cwd=str(cwd) if cwd else str(SANDBOX_ROOT))
+            cwd=str(cwd) if cwd else str(SANDBOX_ROOT),
+            env=env)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"timeout after {timeout}s", "cmd": cmd}
     except FileNotFoundError as e:
@@ -372,11 +374,80 @@ def _host_wp_bin() -> str:
     return _shutil.which("wp") or "/usr/local/bin/wp"
 
 
+# Herd ships per-version PHP CLI binaries (php74, php80, php81, …). Resolving
+# the version-specific binary from the instance's pinned php_version is what
+# makes the MCP wp_cli/wp_exec tools honor phpVersion — the generic `php` is
+# Herd's default, not the project's pinned PHP. Mirrors sb's _herd_php_bin.
+import re as _re
+_HERD_BIN_DIR = Path(os.environ.get(
+    "SANDBOX_HERD_BIN_DIR",
+    str(Path.home() / "Library" / "Application Support" / "Herd" / "bin")))
+
+
+def _host_php_bin() -> str:
+    import shutil as _shutil
+    return _shutil.which("php") or "/usr/bin/php"
+
+
+def _instance_php_version(instance: str):
+    """The pinned php_version for an instance (from registry/sandbox.local.yml),
+    or None when unpinned."""
+    try:
+        reg = json.loads(
+            (SANDBOX_ROOT / "runtime" / "registry.json").read_text())
+        for e in reg.get("instances", {}).values():
+            if e.get("instance") == instance and e.get("php_version"):
+                return e["php_version"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    blk = (_load_sandbox_yml().get("instances", {}) or {}).get(instance, {}) or {}
+    return blk.get("php_version")
+
+
+def _herd_php_bin(instance: str) -> str:
+    """The PHP binary a herd instance should run CLI under: its pinned
+    php_version resolved to Herd's version-specific binary (8.1 → php81).
+    Falls back to host php when unpinned or the binary isn't installed."""
+    php_v = _instance_php_version(instance)
+    if php_v in (None, ""):
+        return _host_php_bin()
+    digits = _re.sub(r"[^0-9]", "", str(php_v).strip())  # "8.1" → "81"
+    if digits:
+        cand = _HERD_BIN_DIR / f"php{digits}"
+        if cand.exists():
+            return str(cand)
+    return _host_php_bin()
+
+
+def _herd_host_env(instance: str) -> dict:
+    """Env for arbitrary host shell commands (wp_exec / _wpcli_shell) on a herd
+    instance: a per-instance shim dir is prepended to PATH so bare `php` and
+    `wp` resolve to the instance's PINNED PHP. Without this, a `php …` typed in
+    wp_exec would hit Herd's default php. Idempotent; shims live under runtime/."""
+    php = _herd_php_bin(instance)
+    env = dict(os.environ)
+    if php == _host_php_bin():
+        return env  # unpinned — nothing to override
+    shim = SANDBOX_ROOT / "runtime" / "herd-shims" / instance
+    shim.mkdir(parents=True, exist_ok=True)
+    php_shim = shim / "php"
+    php_shim.write_text(f'#!/bin/sh\nexec "{php}" "$@"\n')
+    php_shim.chmod(0o755)
+    wp_shim = shim / "wp"
+    wp_shim.write_text(f'#!/bin/sh\nexec "{php}" "{_host_wp_bin()}" "$@"\n')
+    wp_shim.chmod(0o755)
+    env["PATH"] = f"{shim}:{env.get('PATH', '')}"
+    return env
+
+
 def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
            timeout: int = 60) -> dict:
     if _is_herd(instance):
+        # Run wp-cli (a phar) under the instance's PINNED PHP, not the phar's
+        # default `php`, so wp_cli executes on the project's PHP version.
         return _host_run(
-            [_host_wp_bin(), f"--path={_wp_root(instance)}", *args],
+            [_herd_php_bin(instance), _host_wp_bin(),
+             f"--path={_wp_root(instance)}", *args],
             timeout=timeout)
     return _compose("run", "--rm", "wpcli", *args,
                     instance=instance, timeout=timeout)
@@ -385,11 +456,13 @@ def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
 def _wpcli_shell(shell_cmd: str, instance: str = DEFAULT_INSTANCE,
                  timeout: int = 60) -> dict:
     """Run a wp-cli command through sh -c so $(...) / pipes work. For herd
-    instances the shell runs on the host with cwd at the WP root, so a bare
-    `wp …` inside the command auto-resolves the right site."""
+    instances the shell runs on the host with cwd at the WP root; PATH is
+    prepended with a shim dir exposing `php`/`wp` bound to the pinned PHP so a
+    bare `wp …`/`php …` inside the command resolves the project's version."""
     if _is_herd(instance):
         return _host_run(["sh", "-c", shell_cmd], timeout=timeout,
-                         cwd=_wp_root(instance))
+                         cwd=_wp_root(instance),
+                         env=_herd_host_env(instance))
     return _compose(
         "run", "--rm", "--entrypoint", "sh", "wpcli", "-c", shell_cmd,
         instance=instance, timeout=timeout,
@@ -611,8 +684,11 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     if _is_herd(inst):
         # Host-served instance: there are no containers — run on the host,
         # defaulting cwd to the WP root (the `container` param is ignored).
+        # PATH carries the pinned-PHP shims so bare `php`/`wp`/composer run on
+        # the project's PHP version, not Herd's default.
         cwd = Path(workdir) if workdir else _wp_root(inst)
-        return _host_run(["sh", "-c", command], timeout=timeout, cwd=cwd)
+        return _host_run(["sh", "-c", command], timeout=timeout, cwd=cwd,
+                         env=_herd_host_env(inst))
     args = ["exec"]
     if workdir:
         args += ["-w", workdir]

@@ -311,6 +311,14 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             # plugins_home. Written by ensure_instance; injected into compose.
             "extra_mounts": inst.get("extra_mounts",
                                      runtime.get("extra_mounts", [])) or [],
+            # Project wp-config constants (sandbox.config.json `config`) and
+            # multisite flag (False | True | "subdirectory" | "subdomain").
+            # Written by ensure_instance; rendered into WORDPRESS_CONFIG_EXTRA
+            # and acted on at install time (multisite-convert).
+            "wp_config": inst.get("wp_config",
+                                  runtime.get("wp_config", {})) or {},
+            "multisite": inst.get("multisite",
+                                  runtime.get("multisite", False)),
         }
 
     if not instances:
@@ -806,6 +814,112 @@ def _extra_vol_lines(inst_cfg: dict, indent: int = 6, ro: bool = False) -> str:
     return "\n" + "\n".join(f"{pad}- {m}:{m}{suffix}" for m in mounts)
 
 
+# Sandbox-default wp-config constants. A project's `config` dict (from
+# sandbox.config.json / imported .wp-env.json) overrides these key-by-key.
+_BASE_WP_CONFIG = {
+    "WP_DEBUG_LOG": True,
+    "WP_DEBUG_DISPLAY": False,
+    "SCRIPT_DEBUG": True,
+    "WP_ENVIRONMENT_TYPE": "local",
+}
+
+# Marker file (in the instance's WP docroot) that gates the MULTISITE
+# constants in WORDPRESS_CONFIG_EXTRA. Written by _convert_multisite AFTER
+# `wp core multisite-convert` succeeds — the constants must stay off until
+# the network tables exist, and must come back after every container restart.
+MULTISITE_MARKER = ".sandbox-multisite"
+
+
+def _php_literal(v) -> str:
+    """Render a config scalar as a PHP literal for a define()."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if v is None:
+        return "null"
+    s = str(v).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{s}'"
+
+
+def _merged_wp_config(inst_cfg: dict) -> dict:
+    """Sandbox defaults overlaid with the project's `config` dict (project
+    wins). WP_DEBUG is excluded: the official image defines it from the
+    WORDPRESS_DEBUG env var BEFORE the WORDPRESS_CONFIG_EXTRA eval, so a
+    define() here would collide — see _wp_debug_env."""
+    merged = {**_BASE_WP_CONFIG, **(inst_cfg.get("wp_config") or {})}
+    merged.pop("WP_DEBUG", None)
+    return merged
+
+
+def _wp_debug_env(inst_cfg: dict) -> str:
+    """WORDPRESS_DEBUG env value: WP_DEBUG defaults to true in the sandbox;
+    only an explicit `"WP_DEBUG": false` in the project config turns it off."""
+    return "" if (inst_cfg.get("wp_config") or {}).get("WP_DEBUG") is False else "1"
+
+
+def _multisite_mode(inst_cfg: dict):
+    """None (single site) | 'subdirectory' | 'subdomain'. `true` means
+    subdirectory — the baseline that works on localhost:<port> with no
+    wildcard DNS."""
+    ms = inst_cfg.get("multisite")
+    if not ms:
+        return None
+    return "subdomain" if str(ms).lower() == "subdomain" else "subdirectory"
+
+
+def _site_host(inst_cfg: dict) -> str:
+    """Host[:port] of the instance's URL — DOMAIN_CURRENT_SITE must match
+    wp_site.domain byte-for-byte, and `wp core multisite-convert` stores the
+    siteurl's full netloc INCLUDING the port (e.g. 'localhost:8191')."""
+    from urllib.parse import urlparse
+    return urlparse(site_url(inst_cfg)).netloc or "localhost"
+
+
+def _config_extra_php(inst_cfg: dict, docroot: str = "/var/www/html") -> str:
+    """The WORDPRESS_CONFIG_EXTRA PHP block: typed define()s for the merged
+    sandbox + project constants, plus (when multisite is configured) the
+    network constants gated on the conversion marker file. Every define is
+    defined()-guarded so literal constants that wp-cli wrote into
+    wp-config.php (multisite-convert, litespeed pinning) never double-define.
+    Living in the compose env is what makes the constants survive container
+    restarts — the official entrypoint regenerates wp-config.php from env on
+    start, wiping anything written via `wp config set`."""
+    lines = [f"defined('{k}') || define('{k}', {_php_literal(v)});"
+             for k, v in _merged_wp_config(inst_cfg).items()]
+    mode = _multisite_mode(inst_cfg)
+    if mode:
+        sub = "true" if mode == "subdomain" else "false"
+        lines += [
+            f"if (file_exists('{docroot}/{MULTISITE_MARKER}')) {{",
+            "    defined('WP_ALLOW_MULTISITE') || define('WP_ALLOW_MULTISITE', true);",
+            "    defined('MULTISITE') || define('MULTISITE', true);",
+            f"    defined('SUBDOMAIN_INSTALL') || define('SUBDOMAIN_INSTALL', {sub});",
+            f"    defined('DOMAIN_CURRENT_SITE') || define('DOMAIN_CURRENT_SITE', '{_site_host(inst_cfg)}');",
+            "    defined('PATH_CURRENT_SITE') || define('PATH_CURRENT_SITE', '/');",
+            "    defined('SITE_ID_CURRENT_SITE') || define('SITE_ID_CURRENT_SITE', 1);",
+            "    defined('BLOG_ID_CURRENT_SITE') || define('BLOG_ID_CURRENT_SITE', 1);",
+            "    $base = '/';",
+            "}",
+        ]
+    return "\n".join(lines)
+
+
+def _env_config_lines(inst_cfg: dict, docroot: str = "/var/www/html",
+                      indent: int = 6) -> str:
+    """WORDPRESS_DEBUG + WORDPRESS_CONFIG_EXTRA env entries for a compose
+    service. Set on BOTH the web tier and wpcli so `wp eval`/tests see the
+    same constants the site runs with (the generated wp-config.php reads both
+    from the env of whichever container is executing)."""
+    pad = " " * indent
+    # Compose interpolates $vars inside the YAML — a PHP `$base` would warn
+    # "variable is not set" and land as an empty string. `$$` escapes it.
+    php = _config_extra_php(inst_cfg, docroot).replace("$", "$$")
+    body = "\n".join(f"{pad}  {ln}" for ln in php.splitlines())
+    return (f"{pad}WORDPRESS_DEBUG: \"{_wp_debug_env(inst_cfg)}\"\n"
+            f"{pad}WORDPRESS_CONFIG_EXTRA: |\n{body}")
+
+
 def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
     Kept byte-identical to the pre-multi-server template so existing
@@ -831,12 +945,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
-      WORDPRESS_DEBUG: "1"
-      WORDPRESS_CONFIG_EXTRA: |
-        define('WP_DEBUG_LOG', true);
-        define('WP_DEBUG_DISPLAY', false);
-        define('SCRIPT_DEBUG', true);
-        define('WP_ENVIRONMENT_TYPE', 'local');
+{_env_config_lines(inst_cfg)}
     volumes:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
@@ -869,12 +978,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
-      WORDPRESS_DEBUG: "1"
-      WORDPRESS_CONFIG_EXTRA: |
-        define('WP_DEBUG_LOG', true);
-        define('WP_DEBUG_DISPLAY', false);
-        define('SCRIPT_DEBUG', true);
-        define('WP_ENVIRONMENT_TYPE', 'local');
+{_env_config_lines(inst_cfg)}
     volumes:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
@@ -945,6 +1049,7 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
+{_env_config_lines(inst_cfg, docroot)}
     volumes:
       - ./runtime/wp-{instance}:{docroot}
       - ./runtime/seeds:/seeds
@@ -1217,6 +1322,99 @@ def _pin_db_creds_in_config(inst: str) -> None:
         wpcli(["config", "set", const, val], instance=inst, check=False)
 
 
+def _pin_wp_constants_in_config(inst: str, inst_cfg: dict) -> None:
+    """litespeed: write the merged wp-config constants as LITERALS via
+    `wp config set` — same rationale as _pin_db_creds_in_config: lsphp can't
+    see the container env, so the WORDPRESS_CONFIG_EXTRA mechanism that
+    apache/nginx use is invisible to it. The OLS image doesn't regenerate
+    wp-config.php on start, so the literals persist there."""
+    constants = {"WP_DEBUG": _wp_debug_env(inst_cfg) == "1",
+                 **_merged_wp_config(inst_cfg)}
+    # An already-converted multisite needs its network constants literal too
+    # (the marker-gated block in WORDPRESS_CONFIG_EXTRA never runs under OLS).
+    # On a fresh install the marker doesn't exist yet — multisite-convert
+    # writes the constants into wp-config.php itself, which persists under OLS.
+    mode = _multisite_mode(inst_cfg)
+    if mode and (wp_dir(inst) / MULTISITE_MARKER).exists():
+        constants.update({
+            "WP_ALLOW_MULTISITE": True,
+            "MULTISITE": True,
+            "SUBDOMAIN_INSTALL": mode == "subdomain",
+            "DOMAIN_CURRENT_SITE": _site_host(inst_cfg),
+            "PATH_CURRENT_SITE": "/",
+            "SITE_ID_CURRENT_SITE": 1,
+            "BLOG_ID_CURRENT_SITE": 1,
+        })
+    info("pinning wp-config constants into wp-config.php (litespeed)…")
+    for k, v in constants.items():
+        if isinstance(v, str):
+            wpcli(["config", "set", k, v], instance=inst, check=False)
+        else:
+            wpcli(["config", "set", k, _php_literal(v), "--raw"],
+                  instance=inst, check=False)
+
+
+def _write_multisite_htaccess(inst: str, mode: str) -> None:
+    """The WP network .htaccess. WordPress never writes it itself (network
+    setup only DISPLAYS the rules to paste), so without this /site2/wp-admin/
+    and core assets under a subdirectory site 404. The same rules serve
+    apache and OpenLiteSpeed (autoLoadHtaccess); nginx carries its equivalent
+    in config/nginx-sandbox.conf."""
+    strip = "" if mode == "subdomain" else "([_0-9a-zA-Z-]+/)?"
+    ref = "$1" if mode == "subdomain" else "$2"
+    (wp_dir(inst) / ".htaccess").write_text(
+        "# BEGIN WordPress Multisite — generated by ./sb\n"
+        "RewriteEngine On\n"
+        "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
+        "RewriteBase /\n"
+        "RewriteRule ^index\\.php$ - [L]\n"
+        f"RewriteRule ^{strip}wp-admin$ {'$1' if strip else ''}wp-admin/ [R=301,L]\n"
+        "RewriteCond %{REQUEST_FILENAME} -f [OR]\n"
+        "RewriteCond %{REQUEST_FILENAME} -d\n"
+        "RewriteRule ^ - [L]\n"
+        f"RewriteRule ^{strip}(wp-(content|admin|includes).*) {ref} [L]\n"
+        f"RewriteRule ^{strip}(.*\\.php)$ {ref} [L]\n"
+        "RewriteRule . index.php [L]\n"
+        "# END WordPress Multisite\n"
+    )
+
+
+def _convert_multisite(inst: str, inst_cfg: dict) -> None:
+    """Convert a freshly installed single site to multisite, per the project's
+    `multisite` config. Idempotent: skips the convert when the network tables
+    already exist. The marker file written here is what turns on the MULTISITE
+    constants in WORDPRESS_CONFIG_EXTRA (see _config_extra_php) — wp-cli also
+    writes them into wp-config.php, but the official entrypoint wipes that on
+    the next container start."""
+    mode = _multisite_mode(inst_cfg)
+    if not mode:
+        return
+    chk = wpcli(["core", "is-installed", "--network"],
+                instance=inst, check=False, capture=True)
+    if chk.returncode != 0:
+        info(f"converting to multisite ({mode})…")
+        cmd = ["core", "multisite-convert"]
+        if mode == "subdomain":
+            cmd.append("--subdomains")
+        # apache/nginx get the constants from WORDPRESS_CONFIG_EXTRA (marker-
+        # gated) — letting wp-cli ALSO write them into wp-config.php would
+        # double-define ("already defined" warnings on every request until the
+        # next restart wipes the file). litespeed is the opposite: lsphp never
+        # sees the env, so the literal constants are the only ones that work.
+        if inst_cfg.get("server") != "litespeed":
+            cmd.append("--skip-config")
+        wpcli(cmd, instance=inst)
+    (wp_dir(inst) / MULTISITE_MARKER).write_text(
+        "Generated by ./sb after `wp core multisite-convert`. Gates the\n"
+        "MULTISITE constants in WORDPRESS_CONFIG_EXTRA — delete only if you\n"
+        "want the instance to fall back to single-site mode.\n")
+    _write_multisite_htaccess(inst, mode)
+    if inst_cfg.get("server") == "litespeed":
+        # OLS only re-reads the .htaccess on reload.
+        compose("exec", "-T", "wp", "/usr/local/lsws/bin/lswsctrl", "restart",
+                instance=inst, check=False)
+
+
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
     inst_cfg = resolve_instances(cfg)[inst]
@@ -1367,6 +1565,15 @@ def cmd_install(cfg, args) -> None:
     # WP rewrite .htaccess into the docroot so OLS's autoload picks it up.
     if server == "litespeed":
         _ensure_litespeed_htaccess(inst)
+        # lsphp can't read the WORDPRESS_CONFIG_EXTRA env apache/nginx use —
+        # the project's wp-config constants must be literal under OLS.
+        _pin_wp_constants_in_config(inst, inst_cfg)
+
+    # Multisite (sandbox.config.json `multisite`): convert the fresh install,
+    # write the marker that activates the network constants, and lay down the
+    # network rewrite rules. Must run before plugin/theme wiring so those
+    # activate against the converted site.
+    _convert_multisite(inst, inst_cfg)
 
     # Auto-provision an Application Password for the MCP server so wp_rest
     # works out of the box. Idempotent: deletes any prior 'wp-mcp' password
@@ -3292,6 +3499,7 @@ def cmd_server(cfg, args) -> None:
     #    and an OLS reload. Apache/nginx derive both natively from the image.
     if target == "litespeed":
         _pin_db_creds_in_config(name)
+        _pin_wp_constants_in_config(name, inst)
         _ensure_litespeed_htaccess(name)
 
     # 5. Re-assert permalinks so /wp-json/ + pretty URLs work on the new stack.
@@ -3558,6 +3766,46 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
         wpcli(["plugin", "activate", *map_activate], instance=name, check=False)
 
 
+def _theme_slug(entry: str) -> str:
+    """Best-effort slug from a theme entry: wp.org slug as-is; zip URL by
+    basename minus the version tail (twentytwentyfour.1.5.zip →
+    twentytwentyfour); local path by directory name."""
+    if entry.startswith("http"):
+        base = entry.rstrip("/").rsplit("/", 1)[-1]
+        base = base[:-4] if base.endswith(".zip") else base
+        return re.sub(r"\.\d[\d.]*$", "", base)
+    if "/" in entry or entry.startswith((".", "~")):
+        return Path(entry).expanduser().name
+    return entry
+
+
+def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
+    """Install the project's `themes` and activate the FIRST one. Same entry
+    forms as plugins: wp.org slug, zip URL, or local path (symlinked in —
+    needs an extra_mounts bind like plugin paths do). Activation is a
+    separate explicit step: `theme install --activate` is silently ignored
+    on multisite installs."""
+    themes = [t for t in (pconf.get("themes") or []) if t and isinstance(t, str)]
+    if not themes:
+        return
+    tdir = wp_dir(name) / "wp-content" / "themes"
+    tdir.mkdir(parents=True, exist_ok=True)
+    root_path = Path(root)
+    for entry in themes:
+        if entry.startswith("http") and entry.endswith(".zip"):
+            wpcli(["theme", "install", entry], instance=name, check=False)
+        elif "/" in entry or entry.startswith((".", "~")):
+            src = Path(entry).expanduser()
+            if not src.is_absolute():
+                src = (root_path / entry).resolve()
+            if src.exists():
+                _force_symlink(tdir / src.name, src)
+        else:
+            wpcli(["theme", "install", entry], instance=name, check=False)
+    wpcli(["theme", "activate", _theme_slug(themes[0])],
+          instance=name, check=False)
+
+
 def ensure_instance(cfg: dict, project_dir: str) -> dict:
     """Create-if-missing: boot a per-directory instance for the project at
     `project_dir`, keyed by its canonical root in the registry. Idempotent — a
@@ -3617,6 +3865,13 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             block["php_version"] = str(php_v)
         if wp_v:
             block["wp_version"] = str(wp_v)
+        # Project wp-config constants + multisite flag live in the instance
+        # block so compose regeneration (every `sb` invocation) keeps rendering
+        # them into WORDPRESS_CONFIG_EXTRA — that's what survives down/up.
+        if pconf.get("config"):
+            block["wp_config"] = pconf["config"]
+        if pconf.get("multisite"):
+            block["multisite"] = pconf["multisite"]
 
         # Collect source paths that need extra Docker bind-mounts — any mapping
         # source or local plugin path outside plugins_home won't be visible
@@ -3624,7 +3879,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         plugins_home_p = _plugins_home(cfg).resolve()
         root_p = Path(root)
         _extra: list[str] = []
-        for _entry in pconf.get("plugins") or []:
+        for _entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
             if _entry == ".":
                 _src = root_p
             elif isinstance(_entry, str) and ("/" in _entry or _entry.startswith((".", "~"))):
@@ -3668,6 +3923,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         _wait_http(ports["wordpress_port"])
         cmd_install(cfg, ns)
         _wire_project_plugins(name, root, pconf)
+        _wire_project_themes(name, root, pconf)
 
         # Read the autologin token that cmd_install just generated so we can
         # include login_url in the return value for the agent / human.

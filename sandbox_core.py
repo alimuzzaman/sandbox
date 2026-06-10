@@ -162,7 +162,9 @@ def _from_wp_env(raw: dict) -> dict:
         "mappings": raw.get("mappings", {}) or {},
         "phpVersion": raw.get("phpVersion"),
         "wpVersion": _wp_version_from_core(raw.get("core")),
-        "multisite": bool(raw.get("multisite", False)),
+        # Pass through as-is: false | true | "subdirectory" | "subdomain"
+        # (a bool() coercion would flatten "subdomain" to plain true).
+        "multisite": raw.get("multisite", False),
         "config": raw.get("config", {}) or {},
         "port": raw.get("port"),
         "_imported_from": ".wp-env.json",

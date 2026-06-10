@@ -32,7 +32,8 @@ The project root is found by walking up from the directory to the nearest
   //   "https://…zip" → a zip URL (installed + activated)
   "plugins": ["."],
 
-  // Theme slugs to install + (the first) activate.
+  // Themes to install; the FIRST entry is activated. Same entry forms as
+  // plugins: a wp.org slug, a zip URL, or a local path (symlinked in).
   "themes": [],
 
   // Extra bind-mounts: wp-content path → absolute host path. Mounted (NOT
@@ -44,12 +45,15 @@ The project root is found by walking up from the directory to the nearest
   "phpVersion": null,   // e.g. "8.1" — resolves server-aware (see below)
   "wpVersion":  null,   // e.g. "6.4"
 
+  // false | true | "subdirectory" | "subdomain". true = subdirectory (the
+  // baseline that works on localhost:<port>). See "Multisite" below.
   "multisite": false,
 
   // Web stack. Only the compose web tier differs; DB/mailpit/wp-cli adapt.
   "server": "apache",   // apache | nginx | litespeed
 
-  // wp-config.php constants → WORDPRESS_CONFIG_EXTRA.
+  // wp-config.php constants, applied with their JSON types (bool/int/string/
+  // null). See "wp-config constants" below.
   "config": { "WP_DEBUG": true },
 
   // Preferred WordPress port. null → auto-assigned from the free range.
@@ -75,6 +79,55 @@ All fields are optional; omitted fields take the defaults above.
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The
 cloned WP test suite also matches `wpVersion` (trunk when unpinned).
+
+## wp-config constants (`config`)
+
+Each `config` entry becomes a typed PHP `define()` rendered into the
+instance's `WORDPRESS_CONFIG_EXTRA` compose env — on **both** the web tier and
+the wp-cli service, so `wp eval`/tests see the same constants the site runs
+with. Because the constants live in the generated compose file (not in
+`wp-config.php`, which the official image's entrypoint regenerates from env on
+every container start), they survive `sb down` / `sb up`. Sandbox defaults
+(`WP_DEBUG_LOG`, `WP_DEBUG_DISPLAY`, `SCRIPT_DEBUG`, `WP_ENVIRONMENT_TYPE:
+"local"`) apply first; project entries override them key-by-key.
+
+Two special cases:
+
+- `WP_DEBUG` maps to the `WORDPRESS_DEBUG` env var (the image defines the
+  constant from it before the extra block runs). It defaults to **true** in
+  the sandbox; set `"WP_DEBUG": false` to turn it off.
+- On a **litespeed** instance the constants are additionally written as
+  literals via `wp config set` (lsphp runs via suExec and can't read the
+  container env; the OLS image doesn't regenerate `wp-config.php`, so the
+  literals persist). This happens on install and on `./sb server <name>
+  litespeed`.
+
+Every define is `defined()`-guarded, so a literal constant already present in
+`wp-config.php` never double-defines.
+
+Config changes apply on the next instance **recreate** (like version pins) —
+`recreate_instance` / `./sb instance delete` + `ensure`.
+
+## Multisite
+
+With `multisite: true` (or `"subdirectory"` / `"subdomain"`), provisioning
+runs `wp core multisite-convert` after the single-site install, then:
+
+- writes a marker file (`runtime/wp-<instance>/.sandbox-multisite`) that gates
+  the network constants (`MULTISITE`, `SUBDOMAIN_INSTALL`,
+  `DOMAIN_CURRENT_SITE` = the URL's host:port, …) inside
+  `WORDPRESS_CONFIG_EXTRA`. The gate keeps the constants off until the network
+  tables exist, and brings them back after every container restart. Deleting
+  the marker drops the instance back to single-site mode.
+- writes the WP network `.htaccess` (apache / litespeed; WordPress itself
+  never writes it). nginx carries equivalent always-on rules in
+  `config/nginx-sandbox.conf` (inert for single-site instances).
+
+`true` means **subdirectory** — the baseline that works on
+`localhost:<port>` with no wildcard DNS; sub-sites land at `/<slug>/`.
+`"subdomain"` passes `--subdomains` and sets `SUBDOMAIN_INSTALL`, but
+sub-site hosts (`<slug>.localhost` or a wildcard `.sb` domain) are NOT
+resolved/proxied automatically yet — treat subdomain as a follow-up.
 
 ## `.wp-env.json` import mapping
 

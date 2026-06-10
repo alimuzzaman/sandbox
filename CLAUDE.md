@@ -545,6 +545,16 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
    shareable fixtures use WXR in `runtime/seeds/` or a `wp_cli` seed
    script checked into the plugin repo.
 
+10. **wp-config constants live in compose env, not wp-config.php.** The
+    official image's entrypoint regenerates `wp-config.php` from env on every
+    start, wiping `wp config set` values. The project's `config` dict (and the
+    multisite network constants) are rendered into `WORDPRESS_CONFIG_EXTRA` in
+    the generated compose file — on the web tier AND wpcli, so `wp eval` sees
+    them too. Multisite constants are gated on the
+    `runtime/wp-<instance>/.sandbox-multisite` marker (written after
+    `multisite-convert`); litespeed instead gets literal `wp config set` pins
+    (lsphp can't read container env). Config changes apply on recreate.
+
 ---
 
 ## Adding a new skill or workflow

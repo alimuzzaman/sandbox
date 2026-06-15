@@ -12,9 +12,8 @@ phpunit tests** — no central catalog, nothing to pre-register.
 
 ## Get started
 
-> **Note:** This is the `alim-dev` branch — a major rewrite to the
-> per-project model. The curl/npm/Homebrew installers and `main` still
-> ship the previous version. Install from this branch directly:
+> **Note:** This is a major rewrite to the per-project model hosted at
+> [`templately/sandbox`](https://github.com/templately/sandbox). Install:
 
 **Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any
 MCP client). On a fresh machine, run the OS bootstrap script first:
@@ -30,7 +29,7 @@ bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE
 **Clone and set up:**
 
 ```bash
-git clone -b alim-dev https://github.com/WPDevelopers/sandbox.git
+git clone -b main https://github.com/templately/sandbox.git
 cd sandbox
 ./sb global           # puts `sb` on your PATH (do this first)
 ./sb mcp-install      # builds the MCP server's Python venv
@@ -328,7 +327,7 @@ sandbox/
 ├── sandbox.yml             # machine/global defaults
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
 ├── bin/sandbox.js          # npm entry shim (execs the bundled sb)
-├── package.json            # npm package (@wpdeveloper/sandbox)
+├── package.json            # npm package (@templately/sandbox)
 ├── packaging/              # Homebrew formula + packaging notes
 ├── docker-compose.yml      # managed by the CLI
 ├── runtime/

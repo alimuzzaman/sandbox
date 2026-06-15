@@ -17,9 +17,9 @@ defaults:
   # cloned elsewhere — e.g.  plugins_home: "$HOME/dev"
   plugins_home: "./plugins"
   # GitHub org used as the fallback when a plugin entry doesn't specify its own
-  # `github:` field. For the WPDeveloper team this is "WPDevelopers" (capital W,
-  # plural). For external users / forks: your own org/user. `./sb connect gh`
-  # writes this into sandbox.local.yml.
+  # `github:` field. For the Templately team this is "templately". For external
+  # users / forks: your own org/user. `./sb connect gh` writes this into
+  # sandbox.local.yml.
   github_org: ""
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from their reports, then cut `v1`.
 - [x] **Smoke test exists.** `./sb smoke` boots a fresh instance, checks
       WP installed + REST probe, tears down.
 - [x] **`gh` org detection is correct.** `connect gh` now lists all orgs,
-      prioritises WPDevelopers, and prompts to pick — never silently saves
+      prioritises Templately, and prompts to pick — never silently saves
       the personal handle.
 - [x] **Phase 2/3 toggles labelled honestly.** `mcp.browser.enabled` and
       `mcp.figma.enabled` now carry `# not implemented yet` comments.

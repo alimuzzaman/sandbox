@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Sandbox installer — run this once after cloning the alim-dev branch:
 #
-#   git clone -b alim-dev https://github.com/WPDevelopers/sandbox.git
+#   git clone https://github.com/templately/sandbox.git
 #   cd sandbox && ./install.sh
 #
 # It walks you through setup step by step: makes sure python3 is present (the

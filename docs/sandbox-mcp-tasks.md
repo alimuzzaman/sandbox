@@ -246,7 +246,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Verify:** a config pinning `phpVersion: 8.1` boots an 8.1 container (`wp_exec php -v`).
 
 ### [x] T2.3 — Distribution: npm package + `sandbox` bin + brew
-- **Done:** `package.json` (`@wpdeveloper/sandbox`, bins `sandbox`+`sb`) + `bin/sandbox.js`
+- **Done:** `package.json` (`@templately/sandbox`, bins `sandbox`+`sb`) + `bin/sandbox.js`
   (Node shim: finds python3, fails fast with an install hint, else execs the bundled `sb` —
   which is a polyglot shell+python file, so `python3 sb …` runs cross-platform incl. Windows).
   `files` is a secret-safe **allowlist** (so `*.local.yml`/`.env*`/`runtime/`/`.venv`s never

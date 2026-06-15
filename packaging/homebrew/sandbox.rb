@@ -1,10 +1,10 @@
 # Homebrew formula for the Sandbox CLI.
 #
-# Ship this from a tap repo (e.g. WPDeveloper/homebrew-sandbox as Formula/sandbox.rb):
-#     brew tap wpdeveloper/sandbox
+# Ship this from a tap repo (e.g. templately/homebrew-sandbox as Formula/sandbox.rb):
+#     brew tap templately/sandbox
 #     brew install sandbox
 # Or install bleeding-edge straight from git:
-#     brew install --HEAD wpdeveloper/sandbox/sandbox
+#     brew install --HEAD templately/sandbox/sandbox
 #
 # Release flow: scripts/make-release.sh builds dist/sandbox-<ver>.tar.gz; upload it
 # to the BASE_URL (sandbox.xc1.app), then set `url`/`sha256` below to that exact
@@ -15,7 +15,7 @@ class Sandbox < Formula
   url "https://sandbox.xc1.app/sandbox-0.1.0.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
   license "GPL-2.0-or-later"
-  head "https://github.com/WPDeveloper/sandbox.git", branch: "main"
+  head "https://github.com/templately/sandbox.git", branch: "main"
 
   depends_on "python@3.12"
 

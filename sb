@@ -1920,7 +1920,7 @@ def cmd_install(cfg, args) -> None:
     if server != "herd":
         _write_mail_muplugin(inst)
 
-    base = site_url(inst_cfg) if server == "herd" else f"http://localhost:{port}"
+    base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
     ok(f"Admin: {base}/wp-admin"
        f"  •  Login: {base}/?sandbox_autologin={autologin_token}")
 
@@ -4293,6 +4293,16 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     # MCP server + every `sb` invocation match a domain against its own TLD.
     block["tld"] = pconf.get("tld") or PROXY_TLD
 
+    # Preserve a domain already assigned to this instance (by `domains setup` or
+    # secure-at-create) so a re-ensure/apply doesn't drop it — otherwise the
+    # proxy route + WP's https URL silently revert to localhost on the next run.
+    if server != "herd":
+        _prev = _local_yaml().get("instances", {}).get(name, {})
+        if _prev.get("domain"):
+            block["domain"] = _prev["domain"]
+            if _prev.get("tld"):
+                block["tld"] = _prev["tld"]
+
     # Collect source paths that need extra Docker bind-mounts — any mapping
     # source or local plugin path outside plugins_home won't be visible
     # inside the container, so symlinks there are dangling and WP skips them.
@@ -4395,6 +4405,12 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         else:
             cmd_up(cfg, ns)
             _wait_http(ports["wordpress_port"])
+            # Secure-at-create: when the clean-URL proxy is already set up, give
+            # the instance its https://<name>.<tld> BEFORE install so WP never
+            # stores an http localhost URL (whose port leaks into redirects).
+            # Single-site only; falls back to localhost otherwise.
+            if _proxy_sudoers_installed() and _secure_at_create(cfg, name):
+                cfg = load_config()
         cmd_install(cfg, ns)
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
@@ -4404,8 +4420,9 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         _local_data = _local_yaml()
         _autologin = (_local_data.get("instances", {}).get(name, {})
                       .get("autologin_token", ""))
-        _base_url = (site_url(resolve_instances(cfg)[name]) if server == "herd"
-                     else f"http://localhost:{ports['wordpress_port']}")
+        # Report the instance's real browser URL: its clean https://<name>.<tld>
+        # when secured (herd, or secure-at-create above), else localhost:<port>.
+        _base_url = site_url(resolve_instances(cfg)[name])
         _login_url = f"{_base_url}/?sandbox_autologin={_autologin}" if _autologin else ""
 
         return sc.registry_put(
@@ -5132,9 +5149,16 @@ def domains_ready() -> bool:
 
 def _proxy_sudoers_installed() -> bool:
     """True if the passwordless rule for proxy-helper.sh is installed."""
+    if not PROXY_SUDOERS.exists():
+        return False
     try:
-        return PROXY_SUDOERS.exists() and \
-            str(PROXY_HELPER) in PROXY_SUDOERS.read_text()
+        return str(PROXY_HELPER) in PROXY_SUDOERS.read_text()
+    except PermissionError:
+        # The rule lands as 0440 root:wheel, so a non-root process can't read
+        # its contents — but only our setup creates this exact file, so its
+        # mere existence means the rule is installed. (Without this, every
+        # non-root `sb` run thinks setup never happened and demands a TTY.)
+        return True
     except OSError:
         return False
 
@@ -5289,6 +5313,47 @@ def proxy_setup(cfg, tld=None) -> bool:
     if not reload_proxy():
         info("proxy reload failed (is Docker running?).")
         return False
+    return True
+
+
+def _secure_at_create(cfg: dict, name: str) -> bool:
+    """Give a FRESH single-site instance its clean https://<name>.<tld> BEFORE
+    `core install`, so WP's siteurl/home are never http (no localhost:<port>
+    leaking into redirects). Assigns the domain, ensures the proxy + DNS, mints
+    the trusted cert, and wires the Caddy TLS route. Returns True when the
+    instance can now be installed at its https URL; False (caller falls back to
+    localhost) if mkcert/CA/proxy aren't ready. Non-interactive — only meant to
+    run when the one-time `./sb domains setup` already happened.
+
+    Multisite is intentionally skipped here: its network domain + DOMAIN_CURRENT_
+    SITE need a recreate pass, so it stays on localhost at create (secure later)."""
+    ic = resolve_instances(cfg).get(name, {})
+    if ic.get("server") == "herd" or _multisite_mode(ic):
+        return False
+    ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
+    if not (shutil.which("mkcert") and ca_ok):
+        return False
+    tld = _tld(ic)
+    domain = f"{name}.{tld}"
+    # 1. Persist the domain so site_url() resolves to it for the install URL.
+    local = _local_yaml()
+    blk = local.setdefault("instances", {}).setdefault(name, {})
+    blk["domain"] = domain
+    blk["tld"] = tld
+    _write_local_yaml(local)
+    cfg = load_config()
+    # 2. Proxy + DNS for this tld (passwordless once the sudoers rule exists).
+    up, cfg = _ensure_url_proxy(cfg, quiet=True, tld=tld)
+    if not up:
+        # Roll the domain back so the instance installs cleanly at localhost.
+        local = _local_yaml()
+        local.get("instances", {}).get(name, {}).pop("domain", None)
+        _write_local_yaml(local)
+        return False
+    # 3. Mint the trusted cert + wire the route so https://<name>.<tld> serves.
+    _mint_cert(domain)
+    regen_caddyfile(cfg)
+    reload_proxy()
     return True
 
 

@@ -5429,23 +5429,21 @@ def cmd_domains(cfg, args) -> None:
 
     if action == "setup":
         tld = _resolve_setup_tld(args)   # CLI arg, else prompt (default tst)
-        if proxy_available() and _proxy_container_running():
-            # Already set up — still (re)assign domains so any instance still on
-            # localhost (e.g. main, or one created before setup) gets its <name>.
-            # <tld> domain + https. Idempotent; no password.
-            cfg = _assign_domains_to_all(cfg, tld)
-            _ensure_url_proxy(cfg, quiet=True, tld=tld)  # resolver for a new TLD
-            regen_caddyfile(load_config())
-            reload_proxy()
-            ok(f"All set — every instance serves https://<name>.{tld or PROXY_TLD} (no port).")
-            return
-        if not sys.stdin.isatty():
-            die("`./sb domains setup` needs an interactive terminal (it trusts "
-                "a local CA via sudo). Run it directly in your shell.")
+        # `domains setup` always delivers trusted HTTPS out of the box: it mints
+        # a per-instance cert and points WP at https://<name>.<tld>. The only
+        # interactive bits are first-time (install the sudoers rule + trust the
+        # local CA); once those exist, re-running is non-interactive — so it also
+        # secures instances created after the initial setup.
+        ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
+        first_time = not (_proxy_sudoers_installed() and ca_ok and shutil.which("mkcert"))
+        if first_time and not sys.stdin.isatty():
+            die("`./sb domains setup` needs an interactive terminal the first time "
+                "(installs a sudoers rule + trusts a local HTTPS CA). Run it "
+                "directly in your shell.")
         if proxy_setup(cfg, tld):
             _HTTPS_OFFER_MARKER.unlink(missing_ok=True)  # they opted in after all
-            ok(f"Done. Every instance serves https://<name>.{tld or PROXY_TLD} — no "
-               f"port, trusted, no further sudo.")
+            ok(f"Done. Every instance serves https://<name>.{tld or PROXY_TLD} — "
+               "no port, trusted HTTPS, no further sudo.")
         else:
             info("HTTPS proxy setup did not complete — instances will fall back "
                  "to http://localhost:<port> until it does.")

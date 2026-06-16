@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Sandbox uninstaller — removes everything this sandbox set up:
 #   • containers + DB volumes for every instance
-#   • the HTTPS proxy + *.sb domain config (mkcert CA, dnsmasq, loopback alias)
+#   • the HTTPS proxy + *.tst domain config (mkcert CA, dnsmasq, loopback alias)
 #   • the MCP servers registered with Claude
 #   • optionally, this install directory
 #

@@ -46,6 +46,7 @@ DEFAULTS: dict = {
     "wpVersion": None,
     "multisite": False,
     "server": "apache",        # apache | nginx | litespeed  (herd: backlog)
+    "tld": "tst",              # local domain TLD for the proxy: <name>.<tld>
     "config": {},              # wp-config constants -> WORDPRESS_CONFIG_EXTRA
     "port": None,              # preferred port; None = auto-assign
     "tests": {"suite": "auto"},  # auto | unit | integration

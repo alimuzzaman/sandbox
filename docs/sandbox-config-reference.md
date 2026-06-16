@@ -53,6 +53,11 @@ The project root is found by walking up from the directory to the nearest
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
   "server": "apache",   // apache | nginx | litespeed | herd
 
+  // Local domain TLD for the `./sb domains` proxy: instances serve at
+  // <name>.<tld> (e.g. https://myplugin.tst). Default "tst". Avoid "sb"
+  // (a real ccTLD) and "test" (owned by Herd/Valet).
+  "tld": "tst",
+
   // wp-config.php constants, applied with their JSON types (bool/int/string/
   // null). See "wp-config constants" below.
   "config": { "WP_DEBUG": true },
@@ -123,7 +128,7 @@ resolve to the pinned version. `sb apply --project-dir` reconciles in place
 Not supported on herd (v1): snapshots/restore, Xdebug toggling, Mailpit
 capture (`mail_list` stays empty — no mailpit host), `./sb server` hot
 switching (docker↔herd is a re-provision: change `server` + `./sb instance
-delete` + `./sb ensure`), `.sb` domains/`sb secure` (Herd owns `.test` TLS),
+delete` + `./sb ensure`), `.tst` domains/`sb secure` (Herd owns `.test` TLS),
 and subdomain-multisite sub-hosts. `./sb instance delete` tears down fully:
 drops both host DBs, `herd unisolate` + `unsecure` + `unlink`, removes the WP
 dir and the `runtime/herd-shims/<instance>/` shims.
@@ -181,16 +186,16 @@ runs `wp core multisite-convert` after the single-site install, then:
 `localhost:<port>` with no wildcard DNS; sub-sites land at `/<slug>/`.
 
 `"subdomain"` passes `--subdomains` and sets `SUBDOMAIN_INSTALL`. Sub-site
-hosts are now **proxied** when the instance has a `.sb` domain: the generated
-Caddyfile emits a wildcard site block `*.<name>.sb` alongside the apex
-`<name>.sb` (both reverse-proxy the same instance port), so `sub1.<name>.sb`
-serves the right sub-site. dnsmasq already wildcards `.sb`, so resolution needs
+hosts are now **proxied** when the instance has a `.tst` domain: the generated
+Caddyfile emits a wildcard site block `*.<name>.tst` alongside the apex
+`<name>.tst` (both reverse-proxy the same instance port), so `sub1.<name>.tst`
+serves the right sub-site. dnsmasq already wildcards `.tst`, so resolution needs
 no extra step. When you `./sb secure` a subdomain-multisite instance, the cert
-is minted with a `*.<name>.sb` SAN in addition to `<name>.sb`, so every
-sub-site host is HTTPS-trusted by one cert. (Wildcards directly under `.sb` are
-browser-rejected, but `*.<name>.sb` — one level deeper — is a valid SAN.)
+is minted with a `*.<name>.tst` SAN in addition to `<name>.tst`, so every
+sub-site host is HTTPS-trusted by one cert. (Wildcards directly under `.tst` are
+browser-rejected, but `*.<name>.tst` — one level deeper — is a valid SAN.)
 Plain `localhost:<port>` subdomain multisite still has no per-sub-site hostname;
-assign a `.sb` domain to host sub-sites.
+assign a `.tst` domain to host sub-sites.
 
 ## `.wp-env.json` import mapping
 

@@ -97,7 +97,7 @@
       anytime; nothing here is precious.</p>
 
     ${e?`<p class="mt-6 text-[13px] text-neutral-400">${e} environment${e===1?"":"s"} ready — pick one on the left, or hand one to Claude.</p>`:'<button onclick="sb.doCreate()" class="mt-6 px-4 py-2 rounded-full bg-accent text-white text-[13px] font-medium hover:bg-blue-700">Create your first environment</button>'}
-  </div>`}function Ie(e){const t=e.domain||"",n=e.url.startsWith("https://"),a=t.endsWith(".sb");if(n)return`<span class="text-neutral-700 dark:text-neutral-200">${i(t)}</span>
+  </div>`}function Ie(e){const t=e.domain||"",n=e.url.startsWith("https://"),a=t.endsWith(".tst");if(n)return`<span class="text-neutral-700 dark:text-neutral-200">${i(t)}</span>
       <span class="inline-flex items-center gap-1 ml-1 text-[11px] text-emerald-600 dark:text-emerald-400">
         <span>🔒</span> https (trusted)</span>`;const s=a?`<div class="mt-1.5">
          <div class="text-[11.5px] text-neutral-500 dark:text-neutral-400 mb-1">

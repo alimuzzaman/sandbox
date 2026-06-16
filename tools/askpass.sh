@@ -15,7 +15,7 @@ reason="${1:-}"
 case "$reason" in
   ""|"Password:"|*"password for "*)
     reason="Sandbox would like to set up clean local URLs so your sites open at
-http://<name>.sb instead of localhost:8188.
+http://<name>.tst instead of localhost:8188.
 
 macOS asks for your password for this one-time change. It's all local, and you
 can undo it anytime with  ./sb uninstall." ;;

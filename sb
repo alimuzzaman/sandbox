@@ -439,7 +439,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             # render_compose); db/mailpit are server-agnostic.
             "server": _valid_server(inst.get("server",
                                              runtime.get("server", "apache"))),
-            # Optional custom local domain (e.g. xspeed.sb) mapped to
+            # Optional custom local domain (e.g. xspeed.tst) mapped to
             # 127.0.0.1 via /etc/hosts. None → plain localhost:<port>.
             "domain": inst.get("domain"),
             # Extra bind-mount sources for plugin repos / mappings outside
@@ -510,7 +510,7 @@ def mcp_server_name(instance: str = "") -> str:
 
 # --------------------------- custom domains --------------------------
 #
-# An instance can have a custom local domain (e.g. xspeed.sb) mapped to
+# An instance can have a custom local domain (e.g. xspeed.tst) mapped to
 # 127.0.0.1 in /etc/hosts. The site still listens on its port, so the URL is
 # http://<domain>:<port>. /etc/hosts edits go through tools/hosts-helper.sh —
 # the only thing that touches /etc/hosts — run via sudo. `./sb domains setup`
@@ -525,9 +525,9 @@ DOMAIN_RE = re.compile(
 # --------------------------- HTTPS proxy -----------------------------
 #
 # A single Caddy container gives every instance a trusted no-port HTTPS URL
-# (https://<name>.sb). It binds a dedicated loopback IP (127.0.0.77:443) so it
+# (https://<name>.tst). It binds a dedicated loopback IP (127.0.0.77:443) so it
 # coexists with anything already on 127.0.0.1:443 (e.g. Laravel Valet). One
-# mkcert wildcard cert (*.sb) + one dnsmasq wildcard rule (*.sb → 127.0.0.77)
+# mkcert wildcard cert (*.tst) + one dnsmasq wildcard rule (*.tst → 127.0.0.77)
 # cover every instance, so creating an instance needs NO host privilege — just
 # a Caddyfile regen + `caddy reload`. All sudo is paid once at `domains setup`.
 PROXY_DIR       = ROOT / "runtime" / "proxy"
@@ -539,21 +539,60 @@ ASKPASS_HELPER  = TOOLS_DIR / "askpass.sh"
 PROXY_SUDOERS   = Path("/etc/sudoers.d/sandbox-proxy")
 PROXY_PROJECT   = "sandbox-proxy"
 PROXY_BIND_IP   = "127.0.0.77"
-PROXY_TLD       = "sb"
+PROXY_TLD       = "tst"   # DEFAULT local TLD; per-project override via sandbox.config.json "tld"
 LAUNCHD_PLIST   = Path("/Library/LaunchDaemons/com.sandbox.lo0alias.plist")
-# Per-instance certs: a single wildcard *.sb is rejected by browsers (wildcards
-# directly under a TLD aren't allowed), so each <name>.sb gets its own explicit
+# Per-instance certs: a single wildcard *.<tld> is rejected by browsers (wildcards
+# directly under a TLD aren't allowed), so each <name>.<tld> gets its own explicit
 # cert minted by mkcert (the CA is trusted once at setup). Cert files live in
 # PROXY_CERTS_DIR as <domain>.pem / <domain>-key.pem.
+
+
+def _tld(ic: dict | None = None) -> str:
+    """Local domain TLD for an instance — from its `tld` (sandbox.config.json),
+    defaulting to PROXY_TLD ('tst'). The proxy is global, but each instance's
+    domain is built from — and matched against — its own configured TLD, so a
+    custom `tld` in one project never breaks another's domain detection."""
+    return (ic or {}).get("tld") or PROXY_TLD
+
+
+def _distinct_tlds(cfg: dict) -> set:
+    """Every TLD in use across instances (for DNS setup); at least {PROXY_TLD}."""
+    return {_tld(ic) for ic in resolve_instances(cfg).values()} or {PROXY_TLD}
+
+
+def _norm_tld(s) -> str:
+    """Normalise a user-supplied TLD: strip leading dots + lowercase. Empty → ''.
+    Rejects anything that isn't a single DNS label (letters/digits/hyphens)."""
+    t = (s or "").strip().lstrip(".").lower()
+    if t and not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", t):
+        die(f"invalid TLD {s!r}. Use a single label like 'tst' (letters, digits, hyphens).")
+    return t
+
+
+def _resolve_setup_tld(args):
+    """The TLD EXPLICITLY chosen for `domains setup`: the CLI arg, else an
+    interactive prompt. Returns None when the user accepts the default (empty
+    input) or there's no TTY — so a per-project `tld` config (else PROXY_TLD)
+    still wins. A non-None return overrides per-project for the assignment."""
+    if getattr(args, "tld", None):
+        return _norm_tld(args.tld) or None
+    if sys.stdin.isatty():
+        try:
+            ans = input(f"Local TLD for clean URLs — avoid .sb (a real ccTLD) "
+                        f"and .test (Herd/Valet) [{PROXY_TLD}]: ")
+        except EOFError:
+            ans = ""
+        return _norm_tld(ans) or None
+    return None
 
 
 def _valid_domain(domain: str) -> str:
     d = (domain or "").strip().lower()
     if not DOMAIN_RE.match(d) or len(d) > 253:
-        die(f"invalid domain '{domain}'. Use a hostname like myapp.sb")
+        die(f"invalid domain '{domain}'. Use a hostname like myapp.tst")
     if d.endswith(".dev"):
         info("note: browsers force HTTPS on all .dev domains — http won't work. "
-             "Prefer .sb / .test / .local.")
+             "Prefer .tst / .test / .local.")
     return d
 
 
@@ -679,7 +718,7 @@ def _set_https_offer_declined() -> None:
     _HTTPS_OFFER_MARKER.parent.mkdir(parents=True, exist_ok=True)
     _HTTPS_OFFER_MARKER.write_text(
         "User declined the trusted-HTTPS offer at instance create. Delete this "
-        "file (or run `./sb domains setup`) to enable https://<name>.sb.\n")
+        "file (or run `./sb domains setup`) to enable https://<name>.tst.\n")
 
 
 def _proxy_container_running() -> bool:
@@ -735,7 +774,7 @@ def _ca_trusted_macos() -> bool:
     try:
         g = subprocess.run(
             ["mkcert", "-cert-file", str(cert), "-key-file", str(key),
-             "sb-trust-probe.sb"], capture_output=True, text=True)
+             "sb-trust-probe.tst"], capture_output=True, text=True)
         if g.returncode != 0 or not cert.exists():
             return False
         v = subprocess.run(["security", "verify-cert", "-c", str(cert)],
@@ -753,9 +792,9 @@ def _mint_cert(domain: str, extra_sans: list[str] | None = None) -> bool:
 
     `extra_sans` adds additional Subject Alternative Names to the SAME cert
     file (keyed by <domain> via _cert_paths). Used for subdomain multisite:
-    a wildcard SAN `*.<domain>.sb` so every sub-site host (sub1.<name>.sb)
-    is covered by one cert. Wildcards directly under `.sb` are browser-
-    rejected, but `*.<name>.sb` (a level deeper) is a valid SAN."""
+    a wildcard SAN `*.<domain>.tst` so every sub-site host (sub1.<name>.tst)
+    is covered by one cert. Wildcards directly under `.tst` are browser-
+    rejected, but `*.<name>.tst` (a level deeper) is a valid SAN."""
     PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
     cert, key = _cert_paths(domain)
     names = [domain, *(extra_sans or [])]
@@ -805,7 +844,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
 
     When `wildcard` is set (subdomain multisite), the site address list also
     includes `*.<domain>` so every sub-site host (sub1.<domain>) reverse-
-    proxies to the same instance port. dnsmasq already wildcards `.sb`, and
+    proxies to the same instance port. dnsmasq already wildcards `.tst`, and
     the secured cert carries a matching `*.<domain>` SAN (see _mint_cert)."""
     cert, key = _cert_paths(domain)
     # Space-separated address list — Caddy serves all of them from one block.
@@ -833,7 +872,7 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
 
 def regen_caddyfile(cfg: dict) -> None:
     """Rewrite the Caddyfile from current config: a global block + one site
-    block per instance whose domain is a .sb name. Mirrors write_compose_files
+    block per instance whose domain is a .tst name. Mirrors write_compose_files
     — always reflects sandbox.local.yml, so create/delete just call this."""
     PROXY_DIR.mkdir(parents=True, exist_ok=True)
     blocks = [f"""# Generated by ./sb — do not edit by hand. Regenerated on
@@ -852,11 +891,11 @@ def regen_caddyfile(cfg: dict) -> None:
 """]
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
-        if not (dom and dom.endswith(f".{PROXY_TLD}")):
+        if not (dom and dom.endswith(f".{_tld(ic)}")):
             continue
         # No cert minting here — default is plain http. _caddy_block emits an
         # https block only if a cert already exists (i.e. `./sb secure` ran).
-        # Subdomain multisite also needs a wildcard `*.<name>.sb` block so each
+        # Subdomain multisite also needs a wildcard `*.<name>.tst` block so each
         # sub-site host proxies to the same port.
         wildcard = _multisite_mode(ic) == "subdomain"
         blocks.append(_caddy_block(dom, ic["wordpress_port"], wildcard=wildcard))
@@ -865,7 +904,7 @@ def regen_caddyfile(cfg: dict) -> None:
 
 def _dns_flush() -> None:
     """Self-heal DNS so the user NEVER runs a terminal command: reload the live
-    dnsmasq (drops stale cached *.sb records that would shadow the wildcard) and
+    dnsmasq (drops stale cached *.tst records that would shadow the wildcard) and
     flush macOS's resolver cache. Passwordless via the proxy-helper sudoers rule;
     silent no-op if that rule isn't installed. Called after every domain change."""
     if _proxy_sudoers_installed():
@@ -877,7 +916,7 @@ def reload_proxy() -> bool:
     """Apply the current proxy config. Always rewrite the compose from the
     template; if it changed (e.g. ports) recreate the container, else just
     hot-reload Caddy with the regenerated Caddyfile. Then self-heal DNS (clear
-    stale *.sb cache) so a new/changed domain resolves immediately — no manual
+    stale *.tst cache) so a new/changed domain resolves immediately — no manual
     flush. Non-interactive, never hangs. Returns success of the proxy step."""
     desired = render_proxy_compose()
     changed = (not PROXY_COMPOSE.exists()) or PROXY_COMPOSE.read_text() != desired
@@ -960,11 +999,11 @@ def _write_mail_muplugin(instance: str) -> None:
 def site_url(inst_cfg: dict) -> str:
     """Browser URL for an instance. Precedence:
       • https://<domain>        — proxy serves it AND it's been secured (cert)
-      • http://<domain>         — proxy serves this .sb domain (clean, no port)
+      • http://<domain>         — proxy serves this .tst domain (clean, no port)
       • http://<domain>         — legacy Valet proxy (no port)
       • http://localhost:<port> — domain set but proxy NOT serving it, or no domain
 
-    Critical: a `.sb` domain only resolves while the proxy + its *.sb DNS are
+    Critical: a `.tst` domain only resolves while the proxy + its *.tst DNS are
     up. If a domain is set but the proxy isn't actually serving it (proxy down,
     DNS not installed, or the lo0 alias dropped after a reboot), we must fall
     back to http://localhost:<port> — NOT http://<domain>:<port>. The latter is
@@ -975,10 +1014,10 @@ def site_url(inst_cfg: dict) -> str:
     port = inst_cfg["wordpress_port"]
     dom = inst_cfg.get("domain")
     # herd (host) instances are served by Herd at https://<name>.test — no
-    # docker port, no .sb proxy. `herd secure` runs during provisioning.
+    # docker port, no .tst proxy. `herd secure` runs during provisioning.
     if inst_cfg.get("server") == "herd" and dom:
         return f"https://{dom}"
-    if dom and dom.endswith(f".{PROXY_TLD}") and _sandbox_proxy_active(dom):
+    if dom and dom.endswith(f".{_tld(inst_cfg)}") and _sandbox_proxy_active(dom):
         cert, _ = _cert_paths(dom)
         return (f"https://{dom}" if cert.exists() else f"http://{dom}")
     if dom and _valet_proxy_active(dom):
@@ -1642,7 +1681,7 @@ def cmd_up(cfg: dict, args) -> None:
     # present (it's dropped on reboot) and the proxy is running before we report
     # the https URL. Cheap + silent; passwordless via the sudoers rule.
     dom = inst_cfg.get("domain")
-    if dom and dom.endswith(f".{PROXY_TLD}") and proxy_available():
+    if dom and dom.endswith(f".{_tld(inst_cfg)}") and proxy_available():
         _ensure_proxy_up(cfg)
     compose("up", "-d", *_web_services(inst_cfg.get("server", "apache")),
             instance=inst)
@@ -2974,25 +3013,25 @@ def cmd_setup(cfg, args) -> None:
         print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
         cmd_install(cfg, sub_args)
 
-    # Clean URLs: give every instance a http://<name>.sb (no port) via the URL
+    # Clean URLs: give every instance a http://<name>.tst (no port) via the URL
     # proxy. Local + interactive + Docker only. Skipped in server mode (the box
-    # is reached over an SSH tunnel to localhost:<port>, so a .sb proxy is moot).
+    # is reached over an SSH tunnel to localhost:<port>, so a .tst proxy is moot).
     #
     # We set the proxy up even with --no-instances (no site booted yet): the
     # one-time sudo password can ONLY be collected here, while setup still has a
     # TTY. If we waited until the first instance, that's often created from the
     # web dashboard (no TTY) — _ensure_url_proxy can't prompt there, silently
     # falls back to localhost:<port>, and the user gets a port (or, with a stale
-    # domain, a hang) instead of the clean http://<name>.sb they wanted. Setting
+    # domain, a hang) instead of the clean http://<name>.tst they wanted. Setting
     # it up now means every later instance — CLI or dashboard — gets a clean URL.
     if not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
-        print("\n▸ Setting up clean URLs (http://<name>.sb, no port)…")
+        print("\n▸ Setting up clean URLs (http://<name>.tst, no port)…")
         up, cfg = _ensure_url_proxy(cfg)
         if up:
             cfg = _assign_domains_to_all(cfg)
             regen_caddyfile(cfg)
             reload_proxy()
-            ok("clean URLs ready — instances serve http://<name>.sb")
+            ok("clean URLs ready — instances serve http://<name>.tst")
         else:
             info("staying on http://localhost:<port> (clean URLs are optional).")
 
@@ -3511,7 +3550,7 @@ def cmd_uninstall(cfg, args) -> None:
     print()
     print("  This will REMOVE the entire sandbox:")
     print(f"    • containers + DB volumes for: {', '.join(instances)}")
-    print(f"    • the HTTPS proxy + *.sb domain config (if set up)")
+    print(f"    • the HTTPS proxy + *.tst domain config (if set up)")
     print(f"    • the MCP servers registered with Claude")
     print(f"    • optionally, this folder: {ROOT}")
     if not getattr(args, "yes", False):
@@ -3674,7 +3713,7 @@ def _resolve_port_conflicts(cfg: dict) -> dict:
 
 
 def cmd_secure(cfg, args) -> None:
-    """Upgrade an instance from http://<name>.sb to trusted https://<name>.sb.
+    """Upgrade an instance from http://<name>.tst to trusted https://<name>.tst.
     OPT-IN: installs + trusts the mkcert CA (one password), mints a cert for the
     domain, switches WP's siteurl to https, and reloads the proxy. The default
     install never does this — plain http needs no cert + never warns."""
@@ -3684,8 +3723,8 @@ def cmd_secure(cfg, args) -> None:
     if not inst:
         die(f"unknown instance '{name}'. Run: ./sb instances")
     dom = inst.get("domain")
-    if not (dom and dom.endswith(f".{PROXY_TLD}")):
-        die(f"'{name}' has no .{PROXY_TLD} domain to secure. Create it with a "
+    if not (dom and dom.endswith(f".{_tld(inst)}")):
+        die(f"'{name}' has no .{_tld(inst)} domain to secure. Create it with a "
             f"domain first (e.g. ./sb instance create {name}).")
     if not sys.stdin.isatty():
         die("`./sb secure` needs an interactive terminal (it trusts a local CA "
@@ -3694,7 +3733,7 @@ def cmd_secure(cfg, args) -> None:
     if not proxy_setup(cfg):   # ensures proxy + mkcert CA trusted + mints certs
         die("could not enable HTTPS (see messages above).")
     cfg = load_config()
-    # Subdomain multisite: add a `*.<name>.sb` SAN so every sub-site host is
+    # Subdomain multisite: add a `*.<name>.tst` SAN so every sub-site host is
     # covered by this one cert.
     sans = [_wildcard_san(dom)] if _multisite_mode(inst) == "subdomain" else None
     _mint_cert(dom, extra_sans=sans)
@@ -3824,11 +3863,11 @@ def cmd_onboard(cfg, args) -> None:
     print(f"\n▸ Onboarding '{name}' — set up plugins, a custom domain, and focus.")
     _onboard_instance(cfg, name, args)
 
-    # The instance already serves a clean http://<name>.sb (no port, no cert).
+    # The instance already serves a clean http://<name>.tst (no port, no cert).
     # HTTPS is optional — just mention it, don't run the cert flow here.
     inst = resolve_instances(cfg)[name]
     dom = inst.get("domain")
-    if dom and dom.endswith(f".{PROXY_TLD}"):
+    if dom and dom.endswith(f".{_tld(inst)}"):
         cert, _ = _cert_paths(dom)
         if not cert.exists():
             info(f"want https? run:  ./sb secure {name}   "
@@ -4250,6 +4289,9 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         block["wp_config"] = pconf["config"]
     if pconf.get("multisite"):
         block["multisite"] = pconf["multisite"]
+    # Local proxy TLD (sandbox.config.json `tld`, default tst). Persisted so the
+    # MCP server + every `sb` invocation match a domain against its own TLD.
+    block["tld"] = pconf.get("tld") or PROXY_TLD
 
     # Collect source paths that need extra Docker bind-mounts — any mapping
     # source or local plugin path outside plugins_home won't be visible
@@ -5121,11 +5163,11 @@ def _sudo(cmd, reason=None, **kw):
     return subprocess.run(["sudo", *flag, *prompt, *cmd], env=_sudo_env(), **kw)
 
 
-def _ensure_url_proxy(cfg, *, quiet: bool = False):
+def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
     """Ensure the clean-URL HTTP proxy infra is up (no certs): the passwordless
-    sudoers rule, the lo0 alias, dnsmasq/resolver for *.sb, the boot LaunchDaemon,
+    sudoers rule, the lo0 alias, dnsmasq/resolver for *.tst, the boot LaunchDaemon,
     and the running Caddy container. This is the DEFAULT path — plain http://
-    <name>.sb, no mkcert, no 'Not Secure'. One-time sudo for the sudoers rule;
+    <name>.tst, no mkcert, no 'Not Secure'. One-time sudo for the sudoers rule;
     after that it's password-free. Returns (ok, cfg). Requires an interactive
     terminal the first time (sudoers install)."""
     if shutil.which("docker") is None:
@@ -5146,14 +5188,14 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
         rule = (f"# Installed by the sandbox — lets it manage the lo0 alias and "
                 f"dnsmasq/resolver for *.{PROXY_TLD} without a password.\n"
                 f"{user} ALL=(root) NOPASSWD: {PROXY_HELPER}\n")
-        info("One-time setup for clean http://<name>.sb URLs — your password "
+        info("One-time setup for clean http://<name>.tst URLs — your password "
              "ONCE (no certificate, no browser warning).")
         tmp = ROOT / "runtime" / "sandbox-proxy.sudoers"
         tmp.write_text(rule)
         _SUDOERS_REASON = (
             "Sandbox would like to set up clean local URLs so your sites open at "
-            "http://<name>.sb instead of localhost:8188. This one-time step lets "
-            "it manage local DNS for *.sb without asking again — all local, and "
+            "http://<name>.tst instead of localhost:8188. This one-time step lets "
+            "it manage local DNS for *.tst without asking again — all local, and "
             "undoable anytime with ./sb uninstall.")
         chk = _sudo(["visudo", "-cf", str(tmp)], reason=_SUDOERS_REASON,
                     capture_output=True, text=True)
@@ -5172,13 +5214,18 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
             return False, cfg
         ok("clean-URL host actions are now password-free.")
 
-    # 2. lo0 alias + dnsmasq/resolver for *.sb (passwordless now).
+    # 2. lo0 alias + dnsmasq/resolver for each configured TLD (passwordless now).
     a = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
                        capture_output=True, text=True)
-    d = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-up"],
-                       capture_output=True, text=True)
-    if a.returncode != 0 or d.returncode != 0:
-        info("could not set up *.sb resolution — using localhost for now.")
+    dns_ok = True
+    tlds = _distinct_tlds(cfg) | ({tld} if tld else set())
+    for t in tlds:
+        d = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-up", t],
+                           capture_output=True, text=True)
+        dns_ok = dns_ok and d.returncode == 0
+    if a.returncode != 0 or not dns_ok:
+        info(f"could not set up *.{'/'.join(sorted(tlds))} "
+             "resolution — using localhost for now.")
         return False, cfg
     PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -5192,14 +5239,15 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False):
     return True, cfg
 
 
-def proxy_setup(cfg) -> bool:
-    """OPT-IN: upgrade clean URLs to trusted HTTPS (https://<name>.sb). This is
+def proxy_setup(cfg, tld=None) -> bool:
+    """OPT-IN: upgrade clean URLs to trusted HTTPS (https://<name>.<tld>). This is
     `./sb secure` / `./sb domains setup`. It first ensures the HTTP URL proxy is
     up (_ensure_url_proxy), then installs + trusts the mkcert CA and mints a cert
-    per .sb instance, switching them to https. Interactive (password once for the
-    CA). The DEFAULT install path does NOT call this — plain http needs no cert."""
+    per proxy instance, switching them to https. Interactive (password once for the
+    CA). `tld` overrides the per-project default for newly-assigned domains.
+    The DEFAULT install path does NOT call this — plain http needs no cert."""
     # 1. Ensure the base HTTP proxy infra (sudoers, alias, dnsmasq, container).
-    up, cfg = _ensure_url_proxy(cfg)
+    up, cfg = _ensure_url_proxy(cfg, tld=tld)
     if not up:
         return False
     if shutil.which("brew") is None:
@@ -5230,11 +5278,11 @@ def proxy_setup(cfg) -> bool:
     ok("mkcert local CA is trusted (verified).")
     PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 3. Mint a cert per .sb instance + point WP at https, then reload.
-    cfg = _assign_domains_to_all(cfg)
+    # 3. Mint a cert per proxy instance + point WP at https, then reload.
+    cfg = _assign_domains_to_all(cfg, tld)
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
-        if dom and dom.endswith(f".{PROXY_TLD}"):
+        if dom and dom.endswith(f".{_tld(ic)}"):
             sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
             _mint_cert(dom, extra_sans=sans)
     regen_caddyfile(cfg)
@@ -5244,14 +5292,17 @@ def proxy_setup(cfg) -> bool:
     return True
 
 
-def _assign_domains_to_all(cfg: dict):
-    """Assign <name>.sb to every instance lacking a domain (including the
+def _assign_domains_to_all(cfg: dict, tld=None):
+    """Assign <name>.<tld> to every instance lacking a domain (including the
     implicit `main`), persist it to config, and point each running instance's WP
-    siteurl/home at https://<name>.sb. Returns the reloaded cfg. Idempotent."""
+    siteurl/home at the clean URL. Returns the reloaded cfg. Idempotent.
+
+    `tld` (from `./sb domains setup <tld>`) overrides the per-project default for
+    this assignment; when None, each instance uses its own `_tld(ic)`."""
     local = _local_yaml()
     insts = local.setdefault("instances", {})
     changed = []
-    for name in resolve_instances(cfg).keys():
+    for name, ic in resolve_instances(cfg).items():
         block = insts.get(name)
         if block is None:
             # `main` (and any synthesized instance) has no explicit block yet —
@@ -5260,19 +5311,21 @@ def _assign_domains_to_all(cfg: dict):
             block = {}
             insts[name] = block
         if not block.get("domain"):
-            block["domain"] = f"{name}.{PROXY_TLD}"
-            changed.append(name)
+            chosen = tld or _tld(ic)
+            block["domain"] = f"{name}.{chosen}"
+            block["tld"] = chosen
+            changed.append(block["domain"])
     if changed:
         _write_local_yaml(local)
-        ok(f"assigned domains: {', '.join(f'{n}.{PROXY_TLD}' for n in changed)}")
+        ok(f"assigned domains: {', '.join(changed)}")
     cfg = load_config()
 
     # Point each running instance's WP siteurl/home at its clean URL. Uses
-    # site_url() so it's http://<name>.sb by default, or https when secured.
+    # site_url() so it's http://<name>.tst by default, or https when secured.
     # Skip stopped ones — they get it on next up/install.
     for name, ic in resolve_instances(cfg).items():
         dom = ic.get("domain")
-        if not (dom and dom.endswith(f".{PROXY_TLD}")):
+        if not (dom and dom.endswith(f".{_tld(ic)}")):
             continue
         if not _instance_running(name):
             continue
@@ -5312,7 +5365,7 @@ def _install_alias_launchd() -> None:
     tmp.write_text(plist)
     _LAUNCHD_REASON = (
         "Sandbox would like to keep your clean URLs working after a reboot. It "
-        "adds a small startup item that re-enables local *.sb sites. You can "
+        "adds a small startup item that re-enables local *.tst sites. You can "
         "remove it anytime with ./sb uninstall.")
     res = _sudo(
         ["install", "-m", "0644", "-o", "root", "-g",
@@ -5337,8 +5390,9 @@ def proxy_teardown(cfg) -> None:
                     str(PROXY_COMPOSE), "--project-directory", str(ROOT),
                     "down"], capture_output=True, text=True)
     if _proxy_sudoers_installed():
-        subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-down"],
-                       capture_output=True, text=True)
+        for tld in _distinct_tlds(cfg):
+            subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-down", tld],
+                           capture_output=True, text=True)
         subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-down"],
                        capture_output=True, text=True)
     if shutil.which("mkcert"):
@@ -5359,11 +5413,13 @@ def cmd_domains(cfg, args) -> None:
     """Manage custom local domains + the HTTPS proxy.
 
     Primary: a sandbox-managed Caddy proxy serves every instance at a trusted
-    no-port URL — https://<name>.sb — bound to a dedicated loopback IP so it
+    no-port URL — https://<name>.tst — bound to a dedicated loopback IP so it
     coexists with Valet/anything on 127.0.0.1:443. Setup is one-time (one sudo).
-    Fallbacks (no proxy): Valet (http://<name>.<tld>) or <name>.sb:<port>.
+    Fallbacks (no proxy): Valet (http://<name>.<tld>) or <name>.tst:<port>.
 
-    `./sb domains setup`    — one-time: mkcert CA + *.sb cert + dnsmasq + proxy.
+    `./sb domains setup [tld]` — one-time: mkcert CA + *.<tld> cert + dnsmasq +
+                              proxy. Uses <tld> if given, else prompts (default
+                              tst); a project's own `tld` config still wins.
     `./sb domains up`       — (re)start the proxy + restore the loopback alias.
     `./sb domains down`     — stop the proxy container.
     `./sb domains teardown` — undo setup (untrust CA, remove dnsmasq/alias).
@@ -5372,25 +5428,27 @@ def cmd_domains(cfg, args) -> None:
     action = getattr(args, "action", None) or "list"
 
     if action == "setup":
+        tld = _resolve_setup_tld(args)   # CLI arg, else prompt (default tst)
         if proxy_available() and _proxy_container_running():
             # Already set up — still (re)assign domains so any instance still on
-            # localhost (e.g. main, or one created before setup) gets its .sb
-            # domain + https. Idempotent; no password.
-            _assign_domains_to_all(cfg)
+            # localhost (e.g. main, or one created before setup) gets its <name>.
+            # <tld> domain + https. Idempotent; no password.
+            cfg = _assign_domains_to_all(cfg, tld)
+            _ensure_url_proxy(cfg, quiet=True, tld=tld)  # resolver for a new TLD
             regen_caddyfile(load_config())
             reload_proxy()
-            ok("All set — every instance serves https://<name>.sb (no port).")
+            ok(f"All set — every instance serves https://<name>.{tld or PROXY_TLD} (no port).")
             return
         if not sys.stdin.isatty():
             die("`./sb domains setup` needs an interactive terminal (it trusts "
                 "a local CA via sudo). Run it directly in your shell.")
-        if proxy_setup(cfg):
+        if proxy_setup(cfg, tld):
             _HTTPS_OFFER_MARKER.unlink(missing_ok=True)  # they opted in after all
-            ok(f"Done. Every instance serves https://<name>.{PROXY_TLD} — no "
+            ok(f"Done. Every instance serves https://<name>.{tld or PROXY_TLD} — no "
                f"port, trusted, no further sudo.")
         else:
             info("HTTPS proxy setup did not complete — instances will fall back "
-                 "to http://<name>.sb:<port> until it does.")
+                 "to http://localhost:<port> until it does.")
         return
 
     if action == "up":
@@ -5436,7 +5494,7 @@ def cmd_domains(cfg, args) -> None:
         n = 0
         for name, ic in resolve_instances(cfg).items():
             dom = ic.get("domain")
-            if dom and dom.endswith(f".{PROXY_TLD}"):
+            if dom and dom.endswith(f".{_tld(ic)}"):
                 for p in _cert_paths(dom):
                     p.unlink(missing_ok=True)
                 sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
@@ -5462,7 +5520,7 @@ def cmd_domains(cfg, args) -> None:
         # can be None (key present but empty in sandbox.local.yml), so coerce to
         # "" before .endswith — the bare default doesn't cover an explicit None.
         http_doms = [ic["domain"] for ic in resolve_instances(cfg).values()
-                     if (ic.get("domain") or "").endswith(f".{PROXY_TLD}")
+                     if (ic.get("domain") or "").endswith(f".{_tld(ic)}")
                      and not _cert_paths(ic["domain"])[0].exists()]
         running = _proxy_container_running()
         print(f"  Proxy: {'✓ running' if running else '○ not running'} on "
@@ -6611,7 +6669,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="skip the confirmation prompt on delete")
 
     sec = sub.add_parser("secure",
-        help="Upgrade an instance to trusted https://<name>.sb (opt-in)")
+        help="Upgrade an instance to trusted https://<name>.tst (opt-in)")
     sec.add_argument("name", nargs="?",
         help="instance to secure (default: the targeted/main instance)")
 
@@ -6650,6 +6708,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     dm.add_argument("action", nargs="?",
         choices=["setup", "up", "down", "teardown", "repair-ca", "list"],
         default="list")
+    dm.add_argument("tld", nargs="?",
+        help="Local TLD for clean URLs (e.g. tst). On `setup`, prompted if omitted.")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

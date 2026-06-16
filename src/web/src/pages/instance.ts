@@ -8,14 +8,14 @@ import { usageTokenSum } from "./usage";
 import { welcome } from "./welcome";
 import type { Instance } from "../types";
 
-// Domain row: shows the .sb domain + whether it's plain http or secured https.
+// Domain row: shows the .tst domain + whether it's plain http or secured https.
 // On plain http it surfaces how to upgrade — `./sb secure <name>` — because the
 // CA-trust step needs an interactive sudo password and so can't run from a UI
 // button (it would hang headless); we show the exact command to run instead.
 function domainCell(r: Instance): string {
   const dom = r.domain || "";
   const secured = r.url.startsWith("https://");
-  const isSb = dom.endsWith(".sb");
+  const isSb = dom.endsWith(".tst");
   if (secured) {
     return `<span class="text-neutral-700 dark:text-neutral-200">${esc(dom)}</span>
       <span class="inline-flex items-center gap-1 ml-1 text-[11px] text-emerald-600 dark:text-emerald-400">

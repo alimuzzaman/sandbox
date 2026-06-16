@@ -34,10 +34,27 @@ cd sandbox
 ./sb global           # puts `sb` on your PATH (do this first)
 ./sb mcp-install      # builds the MCP server's Python venv
 ./sb setup            # registers the MCP server with Claude + wires everything
+./sb domains setup    # optional: clean no-port URLs → https://<name>.<tld>
 ```
 
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
+
+**`domains setup` asks which local TLD to use** (or pass it directly:
+`./sb domains setup tst`), defaulting to **`tst`**. Instances then serve at
+`<name>.<tld>` (e.g. `https://myplugin.tst`). Avoid `.sb` (a real ccTLD) and
+`.test` (owned by Herd/Valet).
+
+A project can pin its own TLD with `"tld": "<your-tld>"` in its
+`sandbox.config.json` (overrides the prompt for that project):
+
+```jsonc
+// sandbox.config.json
+{ "tld": "tst" }   // ← omit for the tst default
+```
+
+`domains setup` is optional — without it, instances still work at
+`http://localhost:<port>`.
 
 Running `./sb global` first means the MCP registration uses `sb` (PATH-based,
 like `@wordpress/env`) rather than a hardcoded absolute path — so the
@@ -239,14 +256,14 @@ without re-importing content:
 ./sb server <name> apache       # → back to apache
 ```
 
-### Clean URLs — `https://<name>.sb`
+### Clean URLs — `https://<name>.tst`
 
 By default instances serve at `http://localhost:<port>`. Upgrade to a trusted,
 no-port HTTPS URL with one optional setup:
 
 ```bash
 ./sb domains setup     # one-time, asks your password ONCE (installs a local CA)
-./sb secure <name>     # mint a trusted cert for one instance → https://<name>.sb
+./sb secure <name>     # mint a trusted cert for one instance → https://<name>.tst
 ```
 
 It coexists with Laravel Valet (separate loopback IP). Undo with

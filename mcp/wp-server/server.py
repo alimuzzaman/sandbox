@@ -35,9 +35,9 @@ SANDBOX_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_DIR = SANDBOX_ROOT / "runtime" / "compose"
 
 # Sandbox HTTPS proxy — mirrors the constants in `sb` so _site_url() can
-# resolve the clean no-port browser URL (https://<inst>.sb) instead of a
+# resolve the clean no-port browser URL (https://<inst>.tst) instead of a
 # bare localhost:<port>. Keep in sync with sb's PROXY_* block.
-PROXY_TLD = "sb"
+PROXY_TLD = "tst"
 PROXY_DIR = SANDBOX_ROOT / "runtime" / "proxy"
 PROXY_CERTS_DIR = PROXY_DIR / "certs"
 PROXY_CADDYFILE = PROXY_DIR / "Caddyfile"
@@ -177,9 +177,12 @@ def _resolve_instance(instance: str) -> dict:
         "mailpit_port": inst.get("mailpit_port",
                                  runtime.get("mailpit_port", 8025)),
         "admin": {**rt_admin, **inst_admin},
-        # Optional custom local domain (e.g. xx.sb) served by the sandbox
+        # Optional custom local domain (e.g. xx.tst) served by the sandbox
         # proxy. _site_url() turns this into the clean no-port browser URL.
         "domain": inst.get("domain"),
+        # Local proxy TLD (sandbox.config.json `tld`, persisted into the block by
+        # sb's _build_instance_block). Default tst. Used to detect proxy domains.
+        "tld": inst.get("tld", PROXY_TLD),
     }
 
     # App password file fallback: for `main` the legacy
@@ -236,11 +239,11 @@ def _site_url(inst_cfg: dict) -> str:
     so MCP-reported URLs match `./sb instances`.
 
       • https://<domain>        — proxy serves it AND it's secured (cert)
-      • http://<domain>         — proxy serves this .sb domain (clean, no port)
+      • http://<domain>         — proxy serves this .tst domain (clean, no port)
       • http://<domain>         — legacy Valet proxy (no port)
       • http://localhost:<port> — domain set but proxy NOT serving it, or no domain
 
-    A .sb domain only resolves while the proxy + its *.sb DNS are up. When a
+    A .tst domain only resolves while the proxy + its *.tst DNS are up. When a
     domain is set but the proxy isn't serving it (down / DNS missing / lo0 alias
     dropped after reboot), fall back to localhost:<port> — NOT <domain>:<port>,
     which never resolves on a clean box and hangs the browser ("loading
@@ -248,7 +251,8 @@ def _site_url(inst_cfg: dict) -> str:
     """
     port = inst_cfg["wordpress_port"]
     dom = inst_cfg.get("domain")
-    if dom and dom.endswith(f".{PROXY_TLD}") and _sandbox_proxy_active(dom):
+    tld = inst_cfg.get("tld") or PROXY_TLD
+    if dom and dom.endswith(f".{tld}") and _sandbox_proxy_active(dom):
         cert = PROXY_CERTS_DIR / f"{dom}.pem"
         return f"https://{dom}" if cert.exists() else f"http://{dom}"
     if dom and _valet_proxy_active(dom):

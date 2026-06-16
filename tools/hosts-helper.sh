@@ -5,8 +5,8 @@
 # sudoers rule (see `./sb domains setup`). It manages a single marked block:
 #
 #   # >>> sandbox domains >>>
-#   127.0.0.1   xspeed.sb
-#   127.0.0.1   embedpress.sb
+#   127.0.0.1   xspeed.tst
+#   127.0.0.1   embedpress.tst
 #   # <<< sandbox domains <<<
 #
 # Usage:

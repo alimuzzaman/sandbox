@@ -399,7 +399,7 @@ version-specific Herd binary `php<MM>` (`8.1`→`php81`) — NOT the generic `ph
 (Herd's default) nor `herd which-php` (also reports default). Per-machine
 choice — put it in `sandbox.config.override.json`. NOT on herd (v1):
 snapshots, xdebug, Mailpit capture, `./sb server` switching (docker↔herd =
-re-provision), `.sb` domains. See docs/sandbox-config-reference.md §"Host
+re-provision), `.tst` domains. See docs/sandbox-config-reference.md §"Host
 driver".
 
 **Switch an existing instance's server in place** — same URL/port/DB/content:
@@ -588,13 +588,13 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     merged. `--add-drop-table` in the export only drops tables IN the dump.
 
 13. **Subdomain multisite needs a wildcard Caddy block + cert SAN.** When an
-    instance is `multisite: "subdomain"` and has a `.sb` domain, `regen_caddyfile`
-    emits a `*.<name>.sb` block (via `_caddy_block(..., wildcard=True)`) next to
-    the apex, and `_mint_cert` adds a `*.<name>.sb` SAN (gated on
-    `_multisite_mode(...) == "subdomain"`). Wildcards directly under `.sb` are
-    browser-rejected; `*.<name>.sb` (one level deeper) is valid. dnsmasq already
-    wildcards `.sb`. Subdomain multisite on bare `localhost:<port>` still has no
-    per-sub-site host — assign a `.sb` domain.
+    instance is `multisite: "subdomain"` and has a `.tst` domain, `regen_caddyfile`
+    emits a `*.<name>.tst` block (via `_caddy_block(..., wildcard=True)`) next to
+    the apex, and `_mint_cert` adds a `*.<name>.tst` SAN (gated on
+    `_multisite_mode(...) == "subdomain"`). Wildcards directly under `.tst` are
+    browser-rejected; `*.<name>.tst` (one level deeper) is valid. dnsmasq already
+    wildcards `.tst`. Subdomain multisite on bare `localhost:<port>` still has no
+    per-sub-site host — assign a `.tst` domain.
 
 14. **On herd, `phpVersion` is enforced via the `php<MM>` binary, not the
     generic `php`.** Herd's `php` symlink and `herd which-php <site>` both report

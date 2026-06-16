@@ -3978,7 +3978,10 @@ def _core():
 
 def _derive_instance_name(root: str, taken: set) -> str:
     """A valid, unique instance name from a project dir basename."""
-    base = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower()).strip("-")[:24] or "proj"
+    # Truncate to 24 first, THEN strip dashes, so a cut that lands on a hyphen
+    # (e.g. "templately-nav-menu-url-replace"[:24] → "templately-nav-menu-url-")
+    # doesn't leave an invalid trailing hyphen in the instance name / domain.
+    base = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower())[:24].strip("-") or "proj"
     if not re.match(r"^[a-z0-9]", base):
         base = "p-" + base
     name, i = base, 2
@@ -5454,6 +5457,12 @@ def _install_alias_launchd() -> None:
     """Install a LaunchDaemon that re-adds the lo0 alias on boot (the alias is
     not persistent). Best-effort — failure just means `./sb domains up` (or the
     lazy alias-up in cmd_up) restores it after a reboot."""
+    # Idempotent: this install needs an INTERACTIVE sudo (it's not covered by the
+    # passwordless proxy-helper rule), so skip it once the plist exists —
+    # otherwise every `ensure` (now secured at create) re-prompts for the Mac
+    # password. .exists() needs no read permission on the root-owned file.
+    if LAUNCHD_PLIST.exists():
+        return
     plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

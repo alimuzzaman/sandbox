@@ -1247,6 +1247,8 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
+      HOME: /tmp
+      WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
 {_env_config_lines(inst_cfg, docroot)}
     volumes:
       - ./runtime/wp-{instance}:{docroot}
@@ -3387,6 +3389,14 @@ def cmd_clean(cfg, args) -> None:
         if ans != "y":
             return
     compose("down", "-v", instance=inst)
+    # The DB volume is gone, so any multisite network it held is gone too. The
+    # marker lives in the host-bind-mounted wp-dir (which `down -v` does NOT
+    # wipe), so without this a later `ensure` would boot with the MULTISITE
+    # constants active against a freshly-empty network → "Site not found" / 500.
+    # Drop it: the next install re-converts and re-writes it from scratch.
+    marker = wp_dir(inst) / MULTISITE_MARKER
+    if marker.exists():
+        marker.unlink()
     ok(f"Stopped and wiped DB volume for instance '{inst}'")
 
 
@@ -4065,8 +4075,17 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             parts = wp_path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "wp-content" and parts[1] == "plugins":
                 map_activate.append(parts[2])
-    if zips or slugs:
-        wpcli(["plugin", "install", *zips, *slugs, "--activate"],
+    # Install only what isn't already present; reinstalling an existing plugin
+    # just emits "Plugin already installed." noise. Already-present ones still
+    # get activated (install --activate only activates the freshly installed).
+    install, reactivate = [], []
+    for entry in zips + slugs:
+        (reactivate if (pdir / _pkg_slug(entry)).exists() else install).append(entry)
+    if install:
+        wpcli(["plugin", "install", *install, "--activate"],
+              instance=name, check=False)
+    if reactivate:
+        wpcli(["plugin", "activate", *[_pkg_slug(e) for e in reactivate]],
               instance=name, check=False)
     if activate:
         wpcli(["plugin", "activate", *activate], instance=name, check=False)
@@ -4074,8 +4093,8 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
         wpcli(["plugin", "activate", *map_activate], instance=name, check=False)
 
 
-def _theme_slug(entry: str) -> str:
-    """Best-effort slug from a theme entry: wp.org slug as-is; zip URL by
+def _pkg_slug(entry: str) -> str:
+    """Best-effort slug from a plugin/theme entry: wp.org slug as-is; zip URL by
     basename minus the version tail (twentytwentyfour.1.5.zip →
     twentytwentyfour); local path by directory name."""
     if entry.startswith("http"):
@@ -4101,6 +4120,8 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
     root_path = Path(root)
     for entry in themes:
         if entry.startswith("http") and entry.endswith(".zip"):
+            if (tdir / _pkg_slug(entry)).exists():
+                continue  # already present (bundled / prior provision) — skip noisy reinstall
             wpcli(["theme", "install", entry], instance=name, check=False)
         elif "/" in entry or entry.startswith((".", "~")):
             src = Path(entry).expanduser()
@@ -4108,9 +4129,14 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
                 src = (root_path / entry).resolve()
             if src.exists():
                 _force_symlink(tdir / src.name, src)
+        elif (tdir / _pkg_slug(entry)).exists():
+            # Already present (e.g. a default theme bundled with WP core, or a
+            # prior provision). Reinstalling only emits "Destination folder
+            # already exists" + "Error: No themes installed." noise — skip it.
+            continue
         else:
             wpcli(["theme", "install", entry], instance=name, check=False)
-    wpcli(["theme", "activate", _theme_slug(themes[0])],
+    wpcli(["theme", "activate", _pkg_slug(themes[0])],
           instance=name, check=False)
 
 

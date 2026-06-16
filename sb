@@ -4045,29 +4045,53 @@ def _wait_http(port: int, timeout: int = 30) -> bool:
     return False
 
 
-def _instance_reachable(entry: dict) -> bool:
-    """Probe the instance's URL. Docker instances answer on localhost:<port>;
-    herd instances only answer on their https://<name>.test URL (no docker
-    port), and the mkcert CA isn't in Python's bundle — skip verification,
-    we're only asking 'does anything serve here'."""
+def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
+    """Wait until WP resolves a site at its REAL URL — the proxy
+    https://<name>.<tld> when secured, else localhost:<port>. Unlike _wait_http
+    (port-only), this is correct for a secured multisite, whose
+    DOMAIN_CURRENT_SITE is the .tld host so localhost:<port> 500s 'Site not
+    found'. A 4xx (login redirect) counts as up; 5xx keeps waiting."""
     import ssl
+    import time
+    import urllib.error
     import urllib.request
-    if entry.get("server") == "herd":
-        url = entry.get("url")
-        if not url:
-            return False
+    url = site_url(inst_cfg)
+    ctx = ssl._create_unverified_context()
+    for _ in range(timeout):
         try:
-            urllib.request.urlopen(
-                url, timeout=3, context=ssl._create_unverified_context())
+            urllib.request.urlopen(url, timeout=2, context=ctx)
             return True
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                return True
         except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _instance_reachable(entry: dict) -> bool:
+    """Probe the instance's canonical URL — localhost:<port> for a plain docker
+    instance, or its https://<name>.<tld> proxy URL when secured. A secured
+    MULTISITE 500s on localhost (its DOMAIN_CURRENT_SITE is the .tld host), so we
+    must probe the real URL, not the port. The mkcert CA may be OS-trusted but
+    isn't in Python's bundle, so skip cert verification; we only ask 'does WP
+    resolve a site here'. A 4xx (e.g. a login redirect) still counts as up."""
+    import ssl
+    import urllib.error
+    import urllib.request
+    url = entry.get("url")
+    if not url:
+        port = entry.get("wordpress_port")
+        if not port:
             return False
-    port = entry.get("wordpress_port")
-    if not port:
-        return False
+        url = f"http://localhost:{port}"
     try:
-        urllib.request.urlopen(f"http://localhost:{port}", timeout=3)
+        urllib.request.urlopen(
+            url, timeout=3, context=ssl._create_unverified_context())
         return True
+    except urllib.error.HTTPError as e:
+        return e.code < 500
     except Exception:
         return False
 
@@ -4412,6 +4436,19 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             if _proxy_sudoers_installed() and _secure_at_create(cfg, name):
                 cfg = load_config()
         cmd_install(cfg, ns)
+        # Multisite goes live only when the web tier reboots WITH the MULTISITE
+        # constants that multisite-convert's marker (written inside cmd_install)
+        # just enabled — and, when secured, with DOMAIN_CURRENT_SITE = <name>.
+        # <tld> matching the network domain convert stored. Re-render compose +
+        # recreate the web tier so multisite resolves in THIS pass (otherwise
+        # wp-cli + HTTP 500 'Site not found' until the next boot). Plugin/theme
+        # wiring below then runs against a working network.
+        if server != "herd" and _multisite_mode(resolve_instances(cfg)[name]):
+            write_compose_files(cfg)
+            compose("up", "-d", "--force-recreate", "wp",
+                    *(["nginx"] if server == "nginx" else []),
+                    instance=name, check=False)
+            _wait_reachable(resolve_instances(cfg)[name])
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
 
@@ -5317,18 +5354,20 @@ def proxy_setup(cfg, tld=None) -> bool:
 
 
 def _secure_at_create(cfg: dict, name: str) -> bool:
-    """Give a FRESH single-site instance its clean https://<name>.<tld> BEFORE
-    `core install`, so WP's siteurl/home are never http (no localhost:<port>
-    leaking into redirects). Assigns the domain, ensures the proxy + DNS, mints
-    the trusted cert, and wires the Caddy TLS route. Returns True when the
-    instance can now be installed at its https URL; False (caller falls back to
-    localhost) if mkcert/CA/proxy aren't ready. Non-interactive — only meant to
-    run when the one-time `./sb domains setup` already happened.
+    """Give a FRESH instance its clean https://<name>.<tld> BEFORE `core install`,
+    so WP's siteurl/home are never http (no localhost:<port> leaking into
+    redirects). Assigns the domain, ensures the proxy + DNS, mints the trusted
+    cert, and wires the Caddy TLS route. Returns True when the instance can now
+    be installed at its https URL; False (caller falls back to localhost) if
+    mkcert/CA/proxy aren't ready. Non-interactive — only meant to run when the
+    one-time `./sb domains setup` already happened.
 
-    Multisite is intentionally skipped here: its network domain + DOMAIN_CURRENT_
-    SITE need a recreate pass, so it stays on localhost at create (secure later)."""
+    Works for multisite too: it secures the apex (subdomain mode also gets a
+    wildcard *.<name>.<tld> SAN). The caller must, after multisite-convert,
+    re-render compose + recreate the web tier so DOMAIN_CURRENT_SITE matches the
+    network domain convert stored (see ensure_instance)."""
     ic = resolve_instances(cfg).get(name, {})
-    if ic.get("server") == "herd" or _multisite_mode(ic):
+    if ic.get("server") == "herd":
         return False
     ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
     if not (shutil.which("mkcert") and ca_ok):
@@ -5351,7 +5390,11 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
         _write_local_yaml(local)
         return False
     # 3. Mint the trusted cert + wire the route so https://<name>.<tld> serves.
-    _mint_cert(domain)
+    #    Subdomain multisite needs a wildcard SAN so every sub-site host is
+    #    covered by the one cert.
+    ic = resolve_instances(cfg)[name]
+    sans = [_wildcard_san(domain)] if _multisite_mode(ic) == "subdomain" else None
+    _mint_cert(domain, extra_sans=sans)
     regen_caddyfile(cfg)
     reload_proxy()
     return True

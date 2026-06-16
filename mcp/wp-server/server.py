@@ -503,6 +503,11 @@ def ensure_instance(project_dir: str) -> dict:
     **Call this FIRST** — other tools error until an instance exists. Idempotent:
     a ready project returns instantly; a cold boot pulls images + installs WP and
     can take ~1 minute.
+
+    When the clean-URL proxy is already set up (see setup_domains), a fresh
+    single-site instance is SECURED AT CREATE — installed directly at its trusted
+    https://<name>.<tld> URL (no http-first), and `url` reflects that. Otherwise
+    it falls back to http://localhost:<port>.
     """
     sb = SANDBOX_ROOT / "sb"
     try:
@@ -615,6 +620,61 @@ def recreate_instance(project_dir: str) -> dict:
         return entry
     return {"ok": False, "code": res2.returncode,
             "error": (res2.stderr or res2.stdout or "ensure failed after destroy").strip()[:1000]}
+
+
+@mcp.tool()
+def setup_domains(tld: str = "") -> dict:
+    """Set up clean, trusted HTTPS for the sandbox: assign every instance a
+    <name>.<tld> domain, start the Caddy proxy, mint per-instance certs, and
+    switch WP to https://<name>.<tld>. Wraps `./sb domains setup [tld]`.
+
+    This is the global one-time bring-up of the clean-URL proxy. After it runs,
+    new instances are secured automatically at create (see ensure_instance).
+    `tld` defaults to the project default ("tst"); a project's own `tld` config
+    overrides it. NOTE: the FIRST run on a machine installs a sudoers rule + a
+    local CA and needs an interactive terminal + one sudo; once set up, repeat
+    runs are non-interactive. Returns {ok, code, output}.
+    """
+    sb = SANDBOX_ROOT / "sb"
+    args = [str(sb), "domains", "setup"]
+    if tld:
+        args.append(tld)
+    try:
+        res = subprocess.run(
+            args, capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "setup_domains timed out after 300s"}
+    out = ((res.stdout or "") + (res.stderr or "")).strip()
+    return {"ok": res.returncode == 0, "code": res.returncode, "output": out[:2000]}
+
+
+@mcp.tool()
+def secure_instance(project_dir: str) -> dict:
+    """Give the project's instance a trusted https://<name>.<tld> URL without a
+    recreate — assigns its domain (if missing), mints the cert, wires the proxy
+    TLS route, and points WP at https. Use for an instance that came up on
+    localhost (e.g. created before the proxy was set up, or multisite). Wraps
+    `./sb domains setup` (idempotent; only the missing pieces are added) and
+    returns the instance's resulting URL.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    sb = SANDBOX_ROOT / "sb"
+    tld = (_load_sandbox_yml().get("instances", {}).get(inst, {}) or {}).get("tld") or PROXY_TLD
+    try:
+        res = subprocess.run(
+            [str(sb), "domains", "setup", tld],
+            capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "secure_instance timed out after 300s"}
+    out = ((res.stdout or "") + (res.stderr or "")).strip()[:2000]
+    if res.returncode != 0:
+        return {"ok": False, "code": res.returncode, "error": out}
+    return {"ok": True, "instance": inst, "url": _site_url(_resolve_instance(inst)),
+            "output": out}
 
 
 @mcp.tool()

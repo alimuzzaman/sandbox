@@ -560,6 +560,19 @@ def _distinct_tlds(cfg: dict) -> set:
     return {_tld(ic) for ic in resolve_instances(cfg).values()} or {PROXY_TLD}
 
 
+def _lo0_alias_present() -> bool:
+    """True if the proxy's loopback alias is already on lo0 — checkable WITHOUT
+    sudo, so we can skip an unnecessary `sudo alias-up`."""
+    r = subprocess.run(["ifconfig", "lo0"], capture_output=True, text=True)
+    return PROXY_BIND_IP in (r.stdout or "")
+
+
+def _resolver_present(tld: str) -> bool:
+    """True if /etc/resolver/<tld> exists (written by dns-up). Existence needs no
+    read permission, so this is checkable WITHOUT sudo."""
+    return Path(f"/etc/resolver/{tld}").exists()
+
+
 def _norm_tld(s) -> str:
     """Normalise a user-supplied TLD: strip leading dots + lowercase. Empty → ''.
     Rejects anything that isn't a single DNS label (letters/digits/hyphens)."""
@@ -5278,16 +5291,24 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
             return False, cfg
         ok("clean-URL host actions are now password-free.")
 
-    # 2. lo0 alias + dnsmasq/resolver for each configured TLD (passwordless now).
-    a = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
-                       capture_output=True, text=True)
-    dns_ok = True
+    # 2. lo0 alias + dnsmasq/resolver for each configured TLD. Only sudo for what
+    #    is MISSING: the alias + resolver persist (the LaunchDaemon re-adds the
+    #    alias on boot, the resolver/dnsmasq files stay), so once the one-time
+    #    `domains setup` ran, securing needs NO sudo per ensure. That's what lets
+    #    secure-at-create work from the MCP server's subprocess, which can't
+    #    `sudo -n` (no controlling tty/session) — the cause of MCP-created
+    #    instances falling back to localhost.
+    ok_all = True
+    if not _lo0_alias_present():
+        ok_all = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
+                                capture_output=True, text=True).returncode == 0
     tlds = _distinct_tlds(cfg) | ({tld} if tld else set())
     for t in tlds:
-        d = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-up", t],
-                           capture_output=True, text=True)
-        dns_ok = dns_ok and d.returncode == 0
-    if a.returncode != 0 or not dns_ok:
+        if not _resolver_present(t):
+            r = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-up", t],
+                               capture_output=True, text=True)
+            ok_all = ok_all and r.returncode == 0
+    if not ok_all:
         info(f"could not set up *.{'/'.join(sorted(tlds))} "
              "resolution — using localhost for now.")
         return False, cfg

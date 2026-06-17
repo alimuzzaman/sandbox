@@ -925,21 +925,77 @@ def _dns_flush() -> None:
                        capture_output=True, text=True)
 
 
+def _proxy_started_at() -> float | None:
+    """UNIX timestamp of when the sandbox-proxy container last (re)started, or
+    None if it isn't running / can't be read."""
+    res = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.StartedAt}}", PROXY_PROJECT],
+        capture_output=True, text=True)
+    raw = (res.stdout or "").strip()
+    if res.returncode != 0 or not raw:
+        return None
+    try:
+        from datetime import datetime
+        s = raw.replace("Z", "+00:00")
+        # Docker emits RFC3339 nanoseconds; trim the fraction to 6 digits so
+        # datetime.fromisoformat (which maxes at microseconds) can parse it.
+        if "." in s:
+            base, rest = s.split(".", 1)
+            i = 0
+            while i < len(rest) and rest[i].isdigit():
+                i += 1
+            s = f"{base}.{rest[:min(i, 6)]}{rest[i:]}"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _certs_changed_since_proxy_start() -> bool:
+    """True if any mkcert cert was (re)minted after the proxy container started.
+
+    `caddy reload` does NOT re-read an explicit `tls <cert> <key>` whose path is
+    unchanged but whose bytes changed — and `_mint_cert` overwrites certs in
+    place (same path per domain). So after an instance recreate/secure re-mints
+    a cert, a hot reload silently keeps serving the stale cert and TLS
+    handshakes reset; only a container restart re-reads the file."""
+    started = _proxy_started_at()
+    if started is None or not PROXY_CERTS_DIR.is_dir():
+        return False
+    for pem in PROXY_CERTS_DIR.glob("*.pem"):
+        try:
+            if pem.stat().st_mtime > started + 1:  # 1s slack for clock skew
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def reload_proxy() -> bool:
     """Apply the current proxy config. Always rewrite the compose from the
-    template; if it changed (e.g. ports) recreate the container, else just
-    hot-reload Caddy with the regenerated Caddyfile. Then self-heal DNS (clear
-    stale *.tst cache) so a new/changed domain resolves immediately — no manual
-    flush. Non-interactive, never hangs. Returns success of the proxy step."""
+    template; if it changed (e.g. ports) recreate the container. Otherwise
+    hot-reload Caddy with the regenerated Caddyfile — UNLESS a cert was re-minted
+    since the proxy started, in which case restart the container so Caddy re-reads
+    the changed cert files (a plain `caddy reload` won't). Then self-heal DNS
+    (clear stale *.tst cache) so a new/changed domain resolves immediately — no
+    manual flush. Non-interactive, never hangs. Returns success of the proxy step."""
     desired = render_proxy_compose()
     changed = (not PROXY_COMPOSE.exists()) or PROXY_COMPOSE.read_text() != desired
     if changed:
         PROXY_COMPOSE.write_text(desired)
     if _proxy_container_running() and not changed:
-        res = subprocess.run(
-            ["docker", "exec", PROXY_PROJECT, "caddy", "reload",
-             "--config", "/etc/caddy/Caddyfile"],
-            capture_output=True, text=True)
+        if _certs_changed_since_proxy_start():
+            # Certs re-minted at an unchanged path (e.g. an instance recreate):
+            # `caddy reload` keeps the stale cert and TLS resets — restart so the
+            # cert files are re-read from the mounted /certs volume.
+            res = subprocess.run(
+                ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
+                 "--project-directory", str(ROOT), "restart", "proxy"],
+                capture_output=True, text=True)
+        else:
+            res = subprocess.run(
+                ["docker", "exec", PROXY_PROJECT, "caddy", "reload",
+                 "--config", "/etc/caddy/Caddyfile"],
+                capture_output=True, text=True)
     else:
         # First boot, or the compose changed (ports/image) → (re)create so the
         # new spec takes effect; `up -d` recreates only what differs.

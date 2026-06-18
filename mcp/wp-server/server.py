@@ -294,6 +294,7 @@ CONFIG KEYS (sandbox.config.json / sandbox.config.override.json):
 - plugins: install + activate (slugs, zip URLs, or "." for project root)
 - mappings: mount as symlink + activate (wp-path → host path; "." resolved relative to project root)
 - mappings_inactive: mount as symlink but do NOT activate — use for pro plugins that FSI/imports should activate on demand
+- user-global layer: ~/.config/sandbox/config.json applies to EVERY project (under the project: project wins scalars, lists/dicts union). Declare a shared Pro plugin once as mappings_inactive there; absolute/~ host paths only.
 
 ANTI-PATTERNS — catch yourself:
 - "FIXED" from code reading. Only live MCP calls count as evidence.

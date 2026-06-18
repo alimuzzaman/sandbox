@@ -361,6 +361,8 @@ sources are bind-mounted into the container, edits are live with no rebuild.
 | `mappings` | Symlink into WP **and activate**. `{ "wp-content/plugins/<slug>": "<host-path>" }`. Relative host paths resolved from project root. |
 | `mappings_inactive` | Symlink into WP but **do NOT activate**. Same format as `mappings`. Use for Pro plugins that FSI/imports should activate on demand. |
 
+> **User-global layer:** `~/.config/sandbox/config.json` (honors `$XDG_CONFIG_HOME`) is a machine-wide config applied to **every** project. It sits *under* the project — the project wins scalar conflicts, while lists (`plugins`/`themes`) and dicts (`mappings`/`mappings_inactive`/`config`) **union**. Declare a shared Pro plugin once there (typically as `mappings_inactive`, absolute/`~` host paths only) instead of copying it into each repo's override. Both `sb` and the MCP server read the merged result via `sandbox_core.load_project_config`. See `docs/sandbox-config-reference.md`.
+
 > **Worktree tip:** `"."` in `plugins` uses the directory name as the slug — breaks on worktrees with non-slug names. Use `mappings: { "wp-content/plugins/<correct-slug>": "." }` instead so the slug is always correct.
 
 ## Instances — one per project directory

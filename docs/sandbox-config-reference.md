@@ -9,17 +9,57 @@ There is **no central catalog**; each plugin self-describes here.
 
 ## Resolution order
 
-For any project directory, the effective config is resolved as:
+For any project directory, the effective config is resolved as (highest
+priority last):
 
-1. `sandbox.config.json` **or** `sandbox.config.yml` / `.yaml` (canonical, native)
+1. built-in defaults (below)
+2. **user-global** — `~/.config/sandbox/config.json` (machine-wide; see below)
+3. `sandbox.config.json` **or** `sandbox.config.yml` / `.yaml` (canonical, native)
    - `+ sandbox.config.override.{json,yml,yaml}` — gitignored, **deep-merged on top**
-2. `.wp-env.json` — **import/fallback only** (mapped field-by-field; see below).
+4. `.wp-env.json` — **import/fallback only** (mapped field-by-field; see below).
    `sandbox init` converts it to a native `sandbox.config.json`.
-3. built-in defaults (below)
 
 The project root is found by walking up from the directory to the nearest
 `sandbox.config.*` / `.wp-env.json` / `.git`. Paths must live under `$HOME` (or a
 `SANDBOX_PROJECT_ROOTS` entry) — `project_dir=/etc` is rejected.
+
+### User-global config (`~/.config/sandbox/config.json`)
+
+A machine-wide layer that applies to **every** project on this machine — declare
+a shared dependency once instead of copying it into each repo's
+`sandbox.config.override.json`. Same schema as a project config. Honors
+`$XDG_CONFIG_HOME` (falls back to `~/.config`); `config.yml` / `.yaml` also work.
+
+It sits **under** the project in priority:
+
+- **Scalars** (`phpVersion`, `server`, `port`, …): the project wins; the
+  user-global value applies only where the project is silent.
+- **Lists** (`plugins`, `themes`) and **dicts** (`mappings`,
+  `mappings_inactive`, `config`): **UNIONED** — the project's entries are kept
+  and the user-global entries are added (project wins on a dict-key clash).
+
+The canonical use is a Pro plugin you always want available but **not** force-
+activated — declare it once as `mappings_inactive` so any workspace's FSI /
+imports can activate it on demand:
+
+```jsonc
+// ~/.config/sandbox/config.json
+{
+  "mappings_inactive": {
+    "wp-content/plugins/elementor-pro": "~/dev/elementor-pro"
+  }
+}
+```
+
+> **Host paths must be absolute or `~`-anchored.** Relative paths in a
+> project config resolve against that project's root; in the user-global file
+> there is no single project root, so a relative path would resolve
+> per-project and is almost never what you want.
+
+Both the `sb` CLI and the MCP server read the merged config (via
+`sandbox_core.load_project_config`), so the layer is picked up everywhere with
+no per-tool wiring. Test override: point `SANDBOX_USER_CONFIG` at an explicit
+file path.
 
 ## Schema
 

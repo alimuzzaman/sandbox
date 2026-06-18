@@ -6,12 +6,21 @@ project's config identically. Currently provides per-project config loading
 later tasks and belong here too.
 
 A "project" is a plugin checkout that carries its own config. Resolution order
-for a directory:
+for a directory (highest priority last):
 
+    built-in defaults
+    ~/.config/sandbox/config.json               (user-global, machine-wide)
     sandbox.config.json | sandbox.config.yml   (canonical, native)
       + sandbox.config.override.{json,yml}      (gitignored, deep-merged on top)
     .wp-env.json                                (import/fallback only)
-    built-in defaults
+
+The user-global layer sits UNDER the project: the project wins scalar
+conflicts, while list fields (`plugins`, `themes`) and dict fields (`mappings`,
+`mappings_inactive`, `config`) are UNIONED — so a Pro plugin declared once in
+~/.config/sandbox/config.json (typically as `mappings_inactive`) becomes
+available to every workspace without editing each project's config. Host paths
+in the user-global file must be absolute or `~`-anchored (relative paths there
+would resolve against each project's root, which is meaningless globally).
 
 No central catalog is consulted — the project file is authoritative.
 """
@@ -35,6 +44,10 @@ OVERRIDE_BASENAMES = (
 )
 WPENV_BASENAMES = (".wp-env.json",)
 ROOT_MARKERS = CONFIG_BASENAMES + WPENV_BASENAMES + (".git",)
+
+# User-global config: applies to every project on this machine. Honors
+# XDG_CONFIG_HOME; overridable for tests via SANDBOX_USER_CONFIG (a file path).
+USER_CONFIG_BASENAMES = ("config.json", "config.yml", "config.yaml")
 
 # Normalised schema returned by load_project_config(). `null` version fields mean
 # "use the wordpress:latest default" — no implicit pinning.
@@ -138,6 +151,51 @@ def _deep_merge(a: dict, b: dict) -> dict:
     return out
 
 
+def _merge_layers(base: dict, top: dict) -> dict:
+    """Stack `top` over `base`, additively. `top` wins scalar conflicts; dicts
+    deep-merge; lists UNION (base entries first, then top's new entries, order
+    preserved, de-duplicated). Used to fold the user-global layer (`base`)
+    under a project's config (`top`) so the project keeps priority while the
+    user layer only ADDS plugins/mappings."""
+    out = dict(base)
+    for k, v in (top or {}).items():
+        bv = out.get(k)
+        if isinstance(v, dict) and isinstance(bv, dict):
+            out[k] = _merge_layers(bv, v)
+        elif isinstance(v, list) and isinstance(bv, list):
+            merged = list(bv)
+            for item in v:
+                if item not in merged:
+                    merged.append(item)
+            out[k] = merged
+        else:
+            out[k] = v
+    return out
+
+
+def _user_config_path() -> Path | None:
+    """The user-global config file, if present. Explicit override via
+    SANDBOX_USER_CONFIG (a full path) wins; else
+    $XDG_CONFIG_HOME/sandbox/config.{json,yml} (default ~/.config/sandbox/)."""
+    explicit = os.environ.get("SANDBOX_USER_CONFIG")
+    if explicit:
+        p = Path(explicit).expanduser()
+        return p if p.is_file() else None
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    sandbox_dir = Path(base).expanduser() / "sandbox"
+    return _first_existing(sandbox_dir, USER_CONFIG_BASENAMES)
+
+
+def _load_user_global() -> dict:
+    """Load the user-global config doc (raw, un-defaulted), or {} if none."""
+    path = _user_config_path()
+    if not path:
+        return {}
+    data = _load_doc(path)
+    data.pop("root", None)  # never let the global file forge a project root
+    return data
+
+
 def _first_existing(root: Path, names) -> Path | None:
     return next((root / n for n in names if (root / n).exists()), None)
 
@@ -200,6 +258,15 @@ def load_project_config(project_dir) -> dict:
     if override:
         data = _deep_merge(data, _load_doc(override))
         source = f"{source}+{override.name}"
+
+    # Fold the user-global layer UNDER the project (project wins scalars; lists
+    # and dicts union). Merge on the raw docs — before DEFAULTS — so the user's
+    # scalars apply only where the project is silent, not where a DEFAULTS fill
+    # would otherwise mask them.
+    user = _load_user_global()
+    if user:
+        data = _merge_layers(user, data)
+        source = f"user+{source}"
 
     merged = _deep_merge(DEFAULTS, data)
     merged["root"] = str(root)

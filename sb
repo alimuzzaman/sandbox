@@ -4210,6 +4210,15 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             parts = wp_path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "wp-content" and parts[1] == "plugins":
                 map_activate.append(parts[2])
+    # mappings_inactive: mount the symlink but do NOT activate.
+    for wp_path, src in (pconf.get("mappings_inactive") or {}).items():
+        src_p = Path(str(src)).expanduser()
+        if not src_p.is_absolute():
+            src_p = (root_path / src_p).resolve()
+        if src_p.exists():
+            dest = wp_root / wp_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            _force_symlink(dest, src_p)
     # Install only what isn't already present; reinstalling an existing plugin
     # just emits "Plugin already installed." noise. Already-present ones still
     # get activated (install --activate only activates the freshly installed).
@@ -4418,6 +4427,13 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         if _src.exists() and not _src.resolve().is_relative_to(plugins_home_p):
             _extra.append(str(_src))
     for _src_raw in (pconf.get("mappings") or {}).values():
+        _src = Path(str(_src_raw)).expanduser()
+        if not _src.is_absolute():
+            _src = (root_p / _src).resolve()
+        _src = _src.resolve()
+        if _src.exists() and not _src.is_relative_to(plugins_home_p):
+            _extra.append(str(_src))
+    for _src_raw in (pconf.get("mappings_inactive") or {}).values():
         _src = Path(str(_src_raw)).expanduser()
         if not _src.is_absolute():
             _src = (root_p / _src).resolve()

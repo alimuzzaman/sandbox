@@ -41,7 +41,8 @@ ROOT_MARKERS = CONFIG_BASENAMES + WPENV_BASENAMES + (".git",)
 DEFAULTS: dict = {
     "plugins": ["."],          # "." = this repo; others are slugs/paths/zip URLs
     "themes": [],
-    "mappings": {},            # wp-path -> host path, bind-mounted (not activated)
+    "mappings": {},            # wp-path -> host path, bind-mounted AND activated
+    "mappings_inactive": {},   # wp-path -> host path, bind-mounted but NOT activated
     "phpVersion": None,
     "wpVersion": None,
     "multisite": False,
@@ -161,6 +162,7 @@ def _from_wp_env(raw: dict) -> dict:
         "plugins": raw.get("plugins", []),
         "themes": raw.get("themes", []),
         "mappings": raw.get("mappings", {}) or {},
+        "mappings_inactive": raw.get("mappings_inactive", {}) or {},
         "phpVersion": raw.get("phpVersion"),
         "wpVersion": _wp_version_from_core(raw.get("core")),
         # Pass through as-is: false | true | "subdirectory" | "subdomain"

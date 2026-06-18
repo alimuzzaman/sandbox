@@ -290,6 +290,11 @@ REFLEXES when engaged:
 
 DEEPER CONTEXT: load_context (full guide); load_skill(name) for fix/bug-repro/snapshot/wp-debug/wp-pilot; load_workflow('build-feature') for new features.
 
+CONFIG KEYS (sandbox.config.json / sandbox.config.override.json):
+- plugins: install + activate (slugs, zip URLs, or "." for project root)
+- mappings: mount as symlink + activate (wp-path → host path; "." resolved relative to project root)
+- mappings_inactive: mount as symlink but do NOT activate — use for pro plugins that FSI/imports should activate on demand
+
 ANTI-PATTERNS — catch yourself:
 - "FIXED" from code reading. Only live MCP calls count as evidence.
 - Bug-fix slicing (edit, test, edit, test) — use load_skill('fix'): read all, batch edits, verify once.

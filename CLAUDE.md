@@ -353,6 +353,16 @@ sources are bind-mounted into the container, edits are live with no rebuild.
 
 ---
 
+## sandbox.config.json — key plugin/mapping fields
+
+| Key | Behaviour |
+|-----|-----------|
+| `plugins` | Install **and activate**. Accepts: `"."` (project root, slug = dir name), zip URLs, wp.org slugs, local paths. |
+| `mappings` | Symlink into WP **and activate**. `{ "wp-content/plugins/<slug>": "<host-path>" }`. Relative host paths resolved from project root. |
+| `mappings_inactive` | Symlink into WP but **do NOT activate**. Same format as `mappings`. Use for Pro plugins that FSI/imports should activate on demand. |
+
+> **Worktree tip:** `"."` in `plugins` uses the directory name as the slug — breaks on worktrees with non-slug names. Use `mappings: { "wp-content/plugins/<correct-slug>": "." }` instead so the slug is always correct.
+
 ## Instances — one per project directory
 
 Each project (a plugin checkout) gets **one** instance, created on demand by

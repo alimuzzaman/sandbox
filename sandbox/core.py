@@ -3418,19 +3418,34 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
         # --no-plugins: skip composer/installers etc. (not needed to build the
         #   test vendor, and they trip composer 2.2's allow-plugins gate).
         # COMPOSER_ALLOW_SUPERUSER: the container runs composer as root.
-        base = ["run", "--rm",
+        # The wordpress:cli image ships no `git`, so composer can't fetch
+        # git-sourced deps (github vcs repos) → vendor/ never builds → phpunit
+        # fatals on the missing autoload. Install git first (alpine apk or
+        # debian apt, whichever the image is) via a shell entrypoint.
+        flags = "--no-interaction --no-progress --no-plugins"
+        # Install git (as root — the wordpress:cli image runs as non-root, so apk
+        # would be permission-denied) and rewrite git@github SSH URLs to HTTPS so
+        # PUBLIC git-sourced deps clone without SSH keys. (Private deps still need
+        # the plugin's own composer auth — out of the sandbox's scope.)
+        ensure_git = (
+            "command -v git >/dev/null 2>&1 || "
+            "apk add --no-cache git >/dev/null 2>&1 || "
+            "{ apt-get update && apt-get install -y git; } >/dev/null 2>&1 || true; "
+            'git config --global url."https://github.com/".insteadOf "git@github.com:" '
+            ">/dev/null 2>&1 || true")
+        base = ["run", "--rm", "-u", "0:0",
                 "-e", "COMPOSER_HOME=/tmp/composer",
                 "-e", "COMPOSER_ALLOW_SUPERUSER=1",
                 "-v", f"{tools['composer']}:/composer.phar:ro",
-                "-w", plug, "--entrypoint", "php", "wpcli", "/composer.phar"]
-        flags = ["--no-interaction", "--no-progress", "--no-plugins"]
-        r = compose(*base, "install", *flags,
+                "-w", plug, "--entrypoint", "sh", "wpcli", "-c"]
+        r = compose(*base, f"{ensure_git}; php /composer.phar install {flags}",
                     instance=inst, check=False, capture=True)
         if getattr(r, "returncode", 1) != 0:
             # Stale/incompatible composer.lock (common: a lock pinned for PHP 7
             # against a PHP 8.x container) — regenerate it for the live PHP.
             info("locked install failed (stale lock) — running composer update…")
-            compose(*base, "update", *flags, instance=inst, check=False)
+            compose(*base, f"{ensure_git}; php /composer.phar update {flags}",
+                    instance=inst, check=False)
     info("running phpunit…")
     r = compose("run", "--rm",
                 "-v", f"{suite}:/wordpress-phpunit",

@@ -1,6 +1,6 @@
 # Feature Specification: Per-Project-First Instance Model & Modular `sb`
 
-**Feature Branch**: `001-per-project-modular`
+**Feature Branch**: `001-per-project-modular` (feature directory; developed on the shared worktree branch `cwd-instance-resolution`)
 
 **Created**: 2026-06-21
 

@@ -13,9 +13,17 @@ services:
     # Patch the conf on every start, then hand off to the image's entrypoint.
     # (PHP memory / upload bumps live in config/php-sandbox.ini, mounted into
     # /usr/local/etc/php/conf.d/ — that's also picked up by the wpcli container.)
+    # Permissions reconciler: on this bind mount wp-content/upgrade and
+    # wp-content/uploads can end up root-owned, which the Apache worker
+    # (www-data) cannot write — breaking plugin/theme installs and FSI
+    # ("Directory listing failed." / "Destination folder already exists.").
+    # Once WP core is copied, a short background loop keeps those dirs owned
+    # by www-data through the provisioning window (they persist for the session).
     command: >
       bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
-      && docker-entrypoint.sh apache2-foreground"
+      ; ( while [ ! -f /var/www/html/wp-load.php ]; do sleep 1; done
+      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown -R www-data:www-data /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
+      docker-entrypoint.sh apache2-foreground"
     environment:
       WORDPRESS_DB_HOST: db:3306
       WORDPRESS_DB_USER: wp

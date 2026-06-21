@@ -208,6 +208,13 @@ def cmd_install(cfg, args) -> None:
     (mu_dir / "00-sandbox-autologin.php").write_text(_autologin_mu_plugin(autologin_token))
     save_local_autologin_token(autologin_token, instance=inst)
 
+    # Dashboard snapshots mu-plugin (Tools → Sandbox Snapshots) — calls the host
+    # `sb web` bridge. Docker only; snapshots aren't supported on herd yet.
+    if server != "herd":
+        bridge_token = _secrets.token_hex(16)
+        _write_snapshot_muplugin(inst, bridge_token)
+        save_local_bridge_token(bridge_token, instance=inst)
+
     # Capture all PHP mail in the Mailpit container (the image has no working
     # sendmail; without this wp_mail() silently fails). Visible to web + wpcli
     # tiers via the shared bind-mount. NOT on herd — there is no `mailpit`

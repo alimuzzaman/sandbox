@@ -55,6 +55,21 @@ def cmd_web(cfg, args) -> None:
                     .replace("__SANDBOX_WEB_JS__", _web_js()))
             return self._send(200, page, "text/html; charset=utf-8")
 
+        def _bridge(self, method, body=None):
+            # Token-authed snapshot bridge for the wp-admin mu-plugin (spec 002):
+            #   /api/instance/<inst>/{snapshots,snapshot,restore,snapshot/<name>,job/<id>}
+            from urllib.parse import urlparse, unquote
+            rest = urlparse(self.path).path[len("/api/instance/"):]
+            inst, _, sub = rest.partition("/")
+            code, data = _bridge_handle(method, unquote(inst), "/" + sub,
+                                        body or {}, self.headers.get("Authorization", ""))
+            return self._send(code, json.dumps(data))
+
+        def do_DELETE(self):
+            if self.path.startswith("/api/instance/"):
+                return self._bridge("DELETE")
+            return self._send(404, json.dumps({"error": "not found"}))
+
         def do_GET(self):
             # Split path + query.
             from urllib.parse import urlparse, parse_qs
@@ -88,6 +103,8 @@ def cmd_web(cfg, args) -> None:
                 inst = path.rsplit("/", 1)[-1]
                 return self._send(200, json.dumps(
                     {"snapshots": _web_list_snapshots(inst)}))
+            if path.startswith("/api/instance/"):
+                return self._bridge("GET")
             if path == "/api/usage":
                 cfg = load_config()
                 insts = list(resolve_instances(cfg).keys())
@@ -100,6 +117,13 @@ def cmd_web(cfg, args) -> None:
             return self._serve_page()
 
         def do_POST(self):
+            if self.path.startswith("/api/instance/"):
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                except ValueError:
+                    return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}))
+                return self._bridge("POST", body)
             if self.path != "/api/action":
                 return self._send(404, json.dumps({"error": "not found"}))
             length = int(self.headers.get("Content-Length", 0))

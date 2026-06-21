@@ -16,6 +16,9 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 __all__ = ['ACTIVE', 'ASKPASS_HELPER', 'CLI_VENV', 'COMPOSE', 'COMPOSE_DIR', 'CONFIG', 'CONFIG_LOCAL', 'CONNECT_TARGETS', 'DOMAIN_RE', 'ENTRY', 'FOCUS', 'HERD_BIN_DIR', 'HERD_CLI_DEFAULT', 'HERD_DB_HOST', 'HERD_DB_PASSWORD', 'HERD_DB_PORT', 'HERD_DB_USER', 'HOSTS_HELPER', 'INTROSPECT_PHP', 'LAUNCHD_PLIST', 'MCP_DIR', 'MCP_SERVER_NAME', 'MCP_VENV', 'MULTISITE_MARKER', 'PLUGINS_DIR', 'PROJECT_MCP_JSON', 'PROXY_BIND_IP', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_HELPER', 'PROXY_PROJECT', 'PROXY_SUDOERS', 'PROXY_TLD', 'ROOT', 'SECRETS_ENV', 'SEEDS_DIR', 'SERVERS', 'SNAPSHOTS_DIR', 'SUDOERS_FILE', 'TESTS_DB_NAME', 'TEST_SUITE_DIR', 'TEST_TOOLS_DIR', 'TOOLS_DIR', 'TOOLS_VENV', 'WP_DIR', '_BASE_WP_CONFIG', '_CLAUDE_PRICES', '_COMPOSER_PHAR_URL', '_HTTPS_OFFER_MARKER', '_JobStream', '_PHPUNIT_PHAR_URL', '_POLYFILLS_REPO', '_POLYFILLS_TAG', '_RunResult', '_WEB_BUILDERS', '_WEB_CSS_CACHE', '_WEB_JS_CACHE', '_WEB_PAGE', '_WEB_STREAM', '_WPDEVELOP_REPO', '_active_project_name', '_assign_domains_to_all', '_autologin_mu_plugin', '_build_instance_block', '_build_mcp_entry', '_ca_installed', '_ca_trusted_macos', '_caddy_block', '_cert_paths', '_certs_changed_since_proxy_start', '_claude_projects_dir', '_cli_image', '_compose_no_follow_logs', '_config_extra_php', '_connect_fluentboards', '_connect_github', '_convert_multisite', '_core', '_cost_for', '_curses_suspended', '_cwd_instance', '_dash_draw', '_dash_flash', '_dash_pick', '_dash_prompt', '_dash_run', '_derive_instance_name', '_distinct_tlds', '_dns_flush', '_docker_preflight', '_download', '_ensure_litespeed_htaccess', '_ensure_proxy_up', '_ensure_test_tools', '_ensure_tests_db', '_ensure_url_proxy', '_ensure_wp_test_suite', '_env_config_lines', '_extra_vol_lines', '_force_symlink', '_gh_cli_orgs', '_gh_cli_user', '_git_q', '_global_link_dir', '_herd', '_herd_cli', '_herd_db_name', '_herd_domain', '_herd_isolate', '_herd_isolated_php', '_herd_php', '_herd_php_bin', '_herd_tests_db', '_herd_wp_cmd', '_host_php', '_host_wp', '_hosts_edit', '_hosts_passwordless', '_https_offer_declined', '_install_alias_launchd', '_instance_reachable', '_instance_running', '_is_herd_instance', '_is_server', '_job_snapshot', '_lo0_alias_present', '_local_yaml', '_make_venv', '_merged_wp_config', '_mint_cert', '_multisite_mode', '_next_free_port', '_norm_tld', '_offer_install', '_onboard_instance', '_php_literal', '_php_squote', '_pick_instance_ports', '_pin_db_creds_in_config', '_pin_wp_constants_in_config', '_pkg_manager', '_pkg_slug', '_plugins_home', '_port_busy_by_other', '_price_tier', '_prompt', '_provision_herd', '_provision_test_harness', '_proxy_container_running', '_proxy_started_at', '_proxy_sudoers_installed', '_refresh_env_local', '_relax_perms_for_uid_switch', '_resolve_port_conflicts', '_resolve_setup_tld', '_resolver_present', '_run_cmd_capture', '_run_tests', '_run_tests_herd', '_sandbox_proxy_active', '_secure_at_create', '_server_runtime', '_set_https_offer_declined', '_site_host', '_stale_mcp_servers', '_start_job', '_sudo', '_sudo_env', '_tld', '_valet_available', '_valet_proxy_active', '_valet_tld', '_valid_domain', '_valid_server', '_wait_http', '_wait_reachable', '_warn_version_drift', '_web_apache', '_web_css', '_web_do_action', '_web_image', '_web_job_seq', '_web_jobs_lock', '_web_js', '_web_list_seeds', '_web_list_snapshots', '_web_litespeed', '_web_lock', '_web_nginx', '_web_services', '_wildcard_san', '_wire_project_plugins', '_wire_project_themes', '_wp_debug_env', '_wpcli_service', '_write_env_local', '_write_local_yaml', '_write_mail_muplugin', '_write_multisite_htaccess', '_write_ssl_muplugin', '_write_wp_tests_config', '_write_wp_tests_config_herd', 'active_project_file', 'apply_config', 'claude_usage', 'collect_instance_rows', 'compose', 'compose_file', 'deep_merge', 'die', 'domains_ready', 'ensure_instance', 'ensure_pyyaml', 'ensure_tools_venv', 'expand', 'find_modern_python', 'focus_file', 'info', 'load_config', 'mcp_server_name', 'ok', 'plugins_dir', 'project_name', 'proxy_available', 'proxy_setup', 'proxy_teardown', 'regen_caddyfile', 'register_claude_user_scope', 'reload_proxy', 'render_compose', 'render_proxy_compose', 'resolve_instances', 'run', 'save_local_app_password', 'save_local_autologin_token', 'site_url', 'snapshots_dir', 'valet_proxy_add', 'valet_proxy_remove', 'wp_dir', 'wpcli', 'write_claude_mcp_config', 'write_compose_files', 'write_env_for_compose']
+__all__ += ['BRIDGE_PORT', 'save_local_bridge_token', '_write_snapshot_muplugin',
+            '_bridge_handle', '_bridge_token_for']
+BRIDGE_PORT = 8765  # fixed host port the `sb web` snapshot bridge listens on
 
 
 
@@ -1521,6 +1524,146 @@ def save_local_autologin_token(token: str, instance: str) -> None:
     local.setdefault("instances", {}).setdefault(instance, {})["autologin_token"] = token
     with CONFIG_LOCAL.open("w") as f:
         yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+
+def save_local_bridge_token(token: str, instance: str) -> None:
+    """Persist the per-instance snapshot-bridge token in sandbox.local.yml.
+    The sb web bridge authenticates dashboard snapshot calls against it."""
+    ensure_pyyaml()
+    import yaml
+    local = {}
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+    local.setdefault("instances", {}).setdefault(instance, {})["bridge_token"] = token
+    with CONFIG_LOCAL.open("w") as f:
+        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+
+
+def _write_snapshot_muplugin(instance: str, token: str) -> None:
+    """Drop 00-sandbox-snapshots.php into the instance — a sandbox-only wp-admin
+    screen (Tools → Sandbox Snapshots) that takes/restores/lists/deletes snapshots
+    by calling the host `sb web` bridge. PHP admin-ajax handlers enforce nonce +
+    manage_options, then call the bridge over host.docker.internal with the
+    per-instance Bearer token (the bridge runs the host-level sb snapshot/restore
+    out-of-band). Regenerated on every install/recreate."""
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    url = f"http://host.docker.internal:{BRIDGE_PORT}"
+    php = _SNAPSHOT_MU_TEMPLATE.replace("%URL%", url) \
+                               .replace("%TOKEN%", token) \
+                               .replace("%INSTANCE%", instance)
+    (mu_dir / "00-sandbox-snapshots.php").write_text(php)
+
+
+_SNAPSHOT_MU_TEMPLATE = r'''<?php
+/**
+ * Sandbox Snapshots - local dev only. Generated by ./sb; regenerated on recreate.
+ * Tools -> Sandbox Snapshots: take/restore/list/delete instance snapshots via the
+ * host `sb web` bridge. Never ships to / affects a real site (sandbox-only guard).
+ */
+if ( ! defined( 'ABSPATH' ) ) { return; }
+define( 'SANDBOX_BRIDGE_URL', '%URL%' );
+define( 'SANDBOX_BRIDGE_TOKEN', '%TOKEN%' );
+define( 'SANDBOX_INSTANCE', '%INSTANCE%' );
+
+add_action( 'admin_menu', function () {
+	add_management_page(
+		'Sandbox Snapshots', 'Sandbox Snapshots',
+		'manage_options', 'sandbox-snapshots', 'sandbox_snapshots_render'
+	);
+} );
+
+/** Server-side proxy to the host bridge (nonce + capability enforced here). */
+function sandbox_snapshots_bridge( $method, $path, $body = null ) {
+	$args = array(
+		'method'  => $method,
+		'timeout' => 30,
+		'headers' => array(
+			'Authorization' => 'Bearer ' . SANDBOX_BRIDGE_TOKEN,
+			'Content-Type'  => 'application/json',
+		),
+	);
+	if ( null !== $body ) { $args['body'] = wp_json_encode( $body ); }
+	$url = SANDBOX_BRIDGE_URL . '/api/instance/' . rawurlencode( SANDBOX_INSTANCE ) . $path;
+	$res = wp_remote_request( $url, $args );
+	if ( is_wp_error( $res ) ) {
+		return array( 'ok' => false, 'error' => $res->get_error_message() );
+	}
+	$code = wp_remote_retrieve_response_code( $res );
+	$data = json_decode( wp_remote_retrieve_body( $res ), true );
+	if ( ! is_array( $data ) ) { $data = array( 'ok' => false, 'error' => 'bad bridge response' ); }
+	$data['_status'] = $code;
+	return $data;
+}
+
+add_action( 'wp_ajax_sandbox_snap', function () {
+	if ( ! current_user_can( 'manage_options' )
+		|| ! check_ajax_referer( 'sandbox_snapshots', 'nonce', false ) ) {
+		wp_send_json( array( 'ok' => false, 'error' => 'unauthorized' ), 403 );
+	}
+	$op = isset( $_POST['op'] ) ? sanitize_text_field( wp_unslash( $_POST['op'] ) ) : '';
+	$name = isset( $_POST['name'] ) ? sanitize_text_field( wp_unslash( $_POST['name'] ) ) : '';
+	if ( $name !== '' && ! preg_match( '/^[A-Za-z0-9._-]+$/', $name ) ) {
+		wp_send_json( array( 'ok' => false, 'error' => 'invalid snapshot name' ), 400 );
+	}
+	if ( 'list' === $op ) {
+		wp_send_json( sandbox_snapshots_bridge( 'GET', '/snapshots' ) );
+	} elseif ( 'take' === $op ) {
+		wp_send_json( sandbox_snapshots_bridge( 'POST', '/snapshot', array( 'name' => $name, 'force' => ! empty( $_POST['force'] ) ) ) );
+	} elseif ( 'restore' === $op ) {
+		wp_send_json( sandbox_snapshots_bridge( 'POST', '/restore', array( 'name' => $name ) ) );
+	} elseif ( 'delete' === $op ) {
+		wp_send_json( sandbox_snapshots_bridge( 'DELETE', '/snapshot/' . rawurlencode( $name ) ) );
+	} elseif ( 'job' === $op ) {
+		$jid = isset( $_POST['job_id'] ) ? sanitize_text_field( wp_unslash( $_POST['job_id'] ) ) : '';
+		wp_send_json( sandbox_snapshots_bridge( 'GET', '/job/' . rawurlencode( $jid ) ) );
+	}
+	wp_send_json( array( 'ok' => false, 'error' => 'unknown op' ), 400 );
+} );
+
+function sandbox_snapshots_render() {
+	if ( ! current_user_can( 'manage_options' ) ) { wp_die( 'Forbidden' ); }
+	$nonce = wp_create_nonce( 'sandbox_snapshots' );
+	echo '<div class="wrap"><h1>Sandbox Snapshots &mdash; <code>' . esc_html( SANDBOX_INSTANCE ) . '</code></h1>';
+	echo '<p>Capture or roll back this instance\'s database + uploads (runs on the sandbox host).</p>';
+	echo '<p><input type="text" id="sbx-name" class="regular-text" placeholder="snapshot name (optional)"> ';
+	echo '<button class="button button-primary" id="sbx-take">Take snapshot</button> ';
+	echo '<label><input type="checkbox" id="sbx-force"> overwrite</label></p>';
+	echo '<div id="sbx-msg" style="margin:8px 0"></div>';
+	echo '<table class="widefat striped" id="sbx-table"><thead><tr><th>Name</th><th>Size</th><th>Meta</th><th></th></tr></thead><tbody></tbody></table>';
+	echo '</div>';
+	$ajax = esc_url( admin_url( 'admin-ajax.php' ) );
+	?>
+<script>
+(function(){
+  var AJAX=<?php echo wp_json_encode( $ajax ); ?>, NONCE=<?php echo wp_json_encode( $nonce ); ?>;
+  var msg=document.getElementById('sbx-msg'), tb=document.querySelector('#sbx-table tbody');
+  function call(op, extra){ var d=new URLSearchParams(Object.assign({action:'sandbox_snap',nonce:NONCE,op:op},extra||{}));
+    return fetch(AJAX,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d}).then(function(r){return r.json();}); }
+  function say(t,err){ msg.textContent=t; msg.style.color=err?'#b32d2e':'#2271b1'; }
+  function poll(jid){ return call('job',{job_id:jid}).then(function(j){
+    if(j.status==='succeeded'){say('Done.');return refresh();}
+    if(j.status==='failed'){say('Failed: '+(j.detail||''),true);return;}
+    say('Working… ('+(j.status||'running')+')'); return new Promise(function(res){setTimeout(res,1500);}).then(function(){return poll(jid);}); }); }
+  function refresh(){ return call('list').then(function(r){ tb.innerHTML='';
+    (r.snapshots||[]).forEach(function(s){ var tr=document.createElement('tr');
+      tr.innerHTML='<td>'+s.name+'</td><td>'+(s.size_kb||0)+' KB</td><td>'+(s.meta||'')+'</td>'+
+        '<td><button class="button" data-r="'+s.name+'">Restore</button> <button class="button" data-d="'+s.name+'">Delete</button></td>';
+      tb.appendChild(tr); }); }); }
+  document.getElementById('sbx-take').onclick=function(){ var n=document.getElementById('sbx-name').value;
+    say('Taking snapshot…'); call('take',{name:n,force:document.getElementById('sbx-force').checked?1:''}).then(function(r){
+      if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
+  tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
+    if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');
+      call('restore',{name:r}).then(function(x){ if(x.job_id){return poll(x.job_id);} say(x.error||'error',true); }); }
+    if(d&&confirm('Delete snapshot '+d+'?')){ call('delete',{name:d}).then(function(){refresh();}); } });
+  refresh();
+})();
+</script>
+	<?php
+}
+'''
+
 
 def _autologin_mu_plugin(token: str) -> str:
     """Render the autologin mu-plugin with the token embedded directly in the
@@ -4091,6 +4234,80 @@ def claude_usage(known_instances: list[str]) -> dict:
         "by_model": by_model_out, "per_instance": per_instance_out,
         "sessions": sessions[:25],
     }
+
+def _bridge_token_for(instance: str) -> str | None:
+    return ((_local_yaml().get("instances") or {}).get(instance) or {}).get("bridge_token")
+
+
+def _bridge_handle(method: str, instance: str, subpath: str,
+                   body: dict, auth: str) -> tuple[int, dict]:
+    """Token-authed snapshot bridge for the wp-admin mu-plugin (spec 002).
+
+    Only these verbs, only for `instance`, only with the matching Bearer token:
+      GET /snapshots · POST /snapshot {name,force} · POST /restore {name}
+      DELETE /snapshot/<name> · GET /job/<id>
+    Snapshot/restore run out-of-band via the existing job machinery so a restore
+    never severs the caller's request. NO arbitrary host commands (FR-010)."""
+    import time, shutil as _sh, types as _types
+    tok = _bridge_token_for(instance)
+    if not tok:
+        return 404, {"ok": False, "error": "unknown instance"}
+    presented = (auth or "").removeprefix("Bearer ").strip()
+    if not presented or presented != tok:
+        return 403, {"ok": False, "error": "unauthorized"}
+    if _is_herd_instance(instance):
+        return 409, {"ok": False, "error": "unsupported", "reason": "herd"}
+    from sandbox.commands.data import cmd_snapshot, cmd_restore  # late: avoid cycle
+    cfg = load_config()
+
+    if method == "GET" and subpath == "/snapshots":
+        root = snapshots_dir(instance)
+        snaps = []
+        if root.exists():
+            for e in sorted(root.iterdir()):
+                if not e.is_dir():
+                    continue
+                meta = ((e / "META").read_text().strip().replace("\n", " ")
+                        if (e / "META").exists() else "")
+                size = sum(f.stat().st_size for f in e.rglob("*") if f.is_file())
+                snaps.append({"name": e.name, "size_kb": size // 1024, "meta": meta})
+        return 200, {"ok": True, "snapshots": snaps}
+
+    if method == "POST" and subpath == "/snapshot":
+        name = (body.get("name") or "").strip() or time.strftime("snap-%Y%m%d-%H%M%S")
+        if not re.match(r"^[\w.-]+$", name):
+            return 400, {"ok": False, "error": "invalid snapshot name"}
+        ns = _types.SimpleNamespace(resolved_instance=instance, name=name,
+                                    force=bool(body.get("force")))
+        jid = _start_job(f"snapshot {name}", lambda: cmd_snapshot(cfg, ns))
+        return 202, {"ok": True, "job_id": jid, "name": name}
+
+    if method == "POST" and subpath == "/restore":
+        name = (body.get("name") or "").strip()
+        if not name or not (snapshots_dir(instance) / name).exists():
+            return 404, {"ok": False, "error": "no such snapshot"}
+        ns = _types.SimpleNamespace(resolved_instance=instance, name=name)
+        jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
+        return 202, {"ok": True, "job_id": jid, "name": name}
+
+    if method == "DELETE" and subpath.startswith("/snapshot/"):
+        name = subpath[len("/snapshot/"):]
+        d = snapshots_dir(instance) / name
+        if not name or not d.exists():
+            return 404, {"ok": False, "error": "no such snapshot"}
+        _sh.rmtree(d)
+        return 200, {"ok": True}
+
+    if method == "GET" and subpath.startswith("/job/"):
+        snap = _job_snapshot(subpath[len("/job/"):])
+        if snap is None:
+            return 404, {"ok": False, "error": "no such job"}
+        status = ("running" if not snap["done"]
+                  else ("succeeded" if snap["ok"] else "failed"))
+        return 200, {"ok": True, "status": status, "detail": snap["status"]}
+
+    return 404, {"ok": False, "error": "not found"}
+
 
 def _web_do_action(payload: dict) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor

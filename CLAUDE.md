@@ -223,7 +223,12 @@ summary.
 
 ```
 sandbox/
-├── sb                      # the CLI (Python script — invoke as ./sb or `sandbox`)
+├── sb                      # thin polyglot entry (~60 lines) — imports sandbox.cli:main
+├── sandbox/                # the CLI package (every feature is a module)
+│   ├── cli.py              # argparse + resolution gate + dispatch via the registry
+│   ├── registry.py         # COMMANDS registry (command modules self-register)
+│   ├── core.py             # shared helpers + constants (used by all command modules)
+│   └── commands/<group>.py # one module per feature group (lifecycle, data, net, …)
 ├── sandbox_core.py         # shared core: per-project config loader + registry
 ├── sandbox.yml             # machine/global defaults (ports base, admin, images)
 ├── sandbox.local.yml       # per-machine overrides + per-project instance blocks (gitignored)
@@ -237,7 +242,7 @@ sandbox/
 │   ├── test-tools/         # phpunit/composer phars + polyfills + wp-tests-config
 │   └── seeds/              # demo content / Elementor JSON / WXR imports
 ├── plugins/                # default home for cloned plugin repos (gitignored)
-├── mcp/wp-server/          # the Python MCP server + its venv
+├── mcp/wp-server/          # the MCP server: thin server.py + app.py + tools/<group>.py + venv
 ├── bin/sandbox.js          # npm entry shim · package.json · packaging/  (distribution)
 ├── skills/<name>/SKILL.md  # role packs (always foldered, uppercase entry)
 ├── workflows/<name>/WORKFLOW.md  # playbooks (always foldered, uppercase entry)

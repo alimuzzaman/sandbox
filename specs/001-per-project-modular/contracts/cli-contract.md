@@ -14,8 +14,9 @@ resolved = --instance | $SANDBOX_INSTANCE | registry_instance(cwd_project) | ERR
 
 - **Precedence** (first match wins): explicit `--instance <name>` → `$SANDBOX_INSTANCE` →
   the registry instance owning the cwd's project → **error**.
-- **Validation**: a chosen name MUST be a known instance (registry ∪ sandbox.yml `instances:`);
-  unknown → exit non-zero, message lists valid instances.
+- **Validation**: a chosen name MUST be a known instance (registry ∪ the merged config's
+  `instances:`, which is sourced from `sandbox.local.yml` — `sandbox.yml` holds no instance
+  blocks); unknown → exit non-zero, message lists valid instances.
 - **No-project error**: from a dir that is not a registered project, a non-project-routed
   command MUST exit non-zero with guidance ("cd into a registered project, or run `sb init` /
   `sb ensure`") and perform NO side effects. It MUST NOT boot or target any fallback.

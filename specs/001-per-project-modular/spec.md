@@ -185,8 +185,9 @@ CLI and the release tarball still work.
   after the change for a registered instance (zero regressions in the verification matrix).
 - **SC-004**: The installed CLI (global symlink AND tarball/npm) runs identically from an
   arbitrary directory after modularization.
-- **SC-005**: No single source file in the CLI exceeds a maintainable size threshold; each
-  feature is locatable in its own module.
+- **SC-005**: The CLI is modular and locatable: the `sb` entry file is ≤ ~200 lines (bootstrap
+  + dispatch only) and no `sandbox/` module exceeds ~1500 lines; each feature group is in its
+  own module. (Thresholds are guidance for "maintainable + locatable", testable via line count.)
 
 ## Assumptions
 

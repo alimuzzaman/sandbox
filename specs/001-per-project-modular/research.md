@@ -32,8 +32,8 @@ Decisions resolving the technical-context choices. Grounded in the three explora
 - **Rationale**: The registry is already the source of truth (constitution II); the synthesis
   existed only for the single-instance legacy model. Per-project blocks written by
   `ensure_instance` provide all config the synthesized `main` used to default.
-- **Alternatives**: keep synthesis (reintroduces `main`); read only sandbox.yml `instances:`
-  (drops registry-only instances).
+- **Alternatives**: keep synthesis (reintroduces `main`); read only the config `instances:`
+  block (`sandbox.local.yml`) without the registry (drops registry-only instances).
 
 ## R4 — Resolution when no project resolves
 

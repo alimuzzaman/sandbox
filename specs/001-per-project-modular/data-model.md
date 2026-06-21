@@ -40,8 +40,8 @@ The result of instance resolution for a CLI invocation.
 - **inputs**: `--instance`, `$SANDBOX_INSTANCE`, cwd→project (registry), command name.
 - **outcome**: a resolved instance name OR an **error** (no project + non-project-routed).
 - **states**: explicit → env → cwd-registry → error. No `main` state exists post-Stage-B.
-- **validation**: a resolved name must be a known instance (registry ∪ sandbox.yml
-  `instances:`); unknown → die listing valid instances.
+- **validation**: a resolved name must be a known instance (registry ∪ the merged config's
+  `instances:`, sourced from `sandbox.local.yml`); unknown → die listing valid instances.
 
 ## Feature module (Stage C)
 

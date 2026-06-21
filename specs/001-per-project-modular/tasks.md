@@ -76,7 +76,7 @@ any instance needs no special-case; an unregistered cwd errors helpfully.
 - [ ] T016 [US2] Remove the legacy migration: delete `migrate_legacy_layout` (`sb` ~L1476-1557), `_legacy_stack_running` (~L1462-1473), the call + comment (~L7033-7036), and the now-moot `runtime/.legacy-migrated` `.gitignore` line.
 - [ ] T017 [US2] Delete `DEFAULT_INSTANCE` from `sb` (L72) and `mcp/wp-server/server.py` (L46); make `instance` a required parameter on `compose`/`wpcli`/`save_local_app_password`/`_active_project_name` (+ `server.py` `_compose`/`_wpcli`/etc.) per the T003/T006 audit (research R6).
 - [ ] T018 [US2] Docs-with-code: update `CLAUDE.md` (remove "implicit main"; state the per-project-only model + resolution precedence) and any `docs/*` describing `--instance` defaulting to `main` (constitution V).
-- [ ] T019 [US2] **Live-verify Stage B** (quickstart Stage B): per-project routing; unregistered-dir error (no `main` boot); `--instance`/`$SANDBOX_INSTANCE` overrides; `sb instances` shows no `main`; delete works without a guard; `grep -n 'DEFAULT_INSTANCE\|migrate_legacy' sb mcp/wp-server/server.py` zero load-bearing hits (SC-002); `python3 sandbox_core.py --selftest-registry` passes.
+- [ ] T019 [US2] **Live-verify Stage B** (quickstart Stage B): per-project routing; unregistered-dir error (no `main` boot); `--instance`/`$SANDBOX_INSTANCE` overrides; `sb instances` shows no `main`; CLI delete works without a guard AND the **web + TUI dashboards show delete enabled for every instance** (no `main` guard) — verify the rebuilt bundle here, not deferred to Stage C (U1); `grep -n 'DEFAULT_INSTANCE\|migrate_legacy' sb mcp/wp-server/server.py` zero load-bearing hits (SC-002); `python3 sandbox_core.py --selftest-registry` passes.
 
 **Checkpoint**: `main` is gone everywhere; behavior verified live.
 
@@ -109,7 +109,7 @@ becomes the thin entry (contract C4/C5). Pure refactor — behavior identical.
 - [ ] T024 [US4] Move each command group into `sandbox/commands/<group>.py` exposing `register(subparsers)` + `run(cfg, args)` (lifecycle, instances_cmd, config_setup, data, wp, net, debug, integ, ui_dash, uninstall); replace the `handlers = {...}` dict with registry self-registration in `cli.py` (contract C4).
 - [ ] T025 [US4] Reduce `sb` to the thin polyglot entry (bootstrap + `ROOT` + `sys.path.insert` + call `sandbox.cli:main`); no feature logic remains in `sb` (contract C5).
 - [ ] T026 [P] [US4] Update `package.json` `files` to include `sandbox/`; confirm `bin/sandbox.js` + `scripts/make-release.sh` resolve the package (no change expected).
-- [ ] T027 [US4] **Live-verify Stage C** (quickstart Stage C): `ast.parse` `sb`; `import sandbox.cli`; full parity matrix from a project dir AND via the global `sb` symlink; release tarball dry-run contains `sandbox/` while `.specify/`+`skills/speckit-*` are pruned; `scripts/build-web-js.sh` then `sb web` lists instances with delete enabled for all.
+- [ ] T027 [US4] **Live-verify Stage C** (quickstart Stage C): `ast.parse` `sb`; `import sandbox.cli`; full parity matrix from a project dir AND via the global `sb` symlink AND via the npm bin shim (`node bin/sandbox.js status` — C1) to exercise all three install paths (SC-004); release tarball dry-run contains `sandbox/` while `.specify/`+`skills/speckit-*` are pruned; **line-count check**: `sb` ≤ ~200 lines, no `sandbox/` module > ~1500 lines (SC-005); `scripts/build-web-js.sh` then `sb web` lists instances with delete enabled for all.
 
 **Checkpoint**: Modular package shipped; CLI behavior identical via all install paths.
 

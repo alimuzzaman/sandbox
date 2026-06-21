@@ -1653,10 +1653,12 @@ function sandbox_snapshots_render() {
     if(j.status==='succeeded'){say('Done.');return refresh();}
     if(j.status==='failed'){say('Failed: '+(j.detail||''),true);return;}
     say('Working… ('+(j.status||'running')+')'); return new Promise(function(res){setTimeout(res,1500);}).then(function(){return poll(jid);}); }); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function refresh(){ return call('list').then(function(r){ tb.innerHTML='';
-    (r.snapshots||[]).forEach(function(s){ var tr=document.createElement('tr');
-      tr.innerHTML='<td>'+s.name+'</td><td>'+(s.size_kb||0)+' KB</td><td>'+(s.meta||'')+'</td>'+
-        '<td><button class="button" data-r="'+s.name+'">Restore</button> <button class="button" data-d="'+s.name+'">Delete</button></td>';
+    (r.snapshots||[]).forEach(function(s){ var tr=document.createElement('tr'); var n=esc(s.name);
+      tr.innerHTML='<td>'+n+'</td><td>'+(parseInt(s.size_kb)||0)+' KB</td><td>'+esc(s.meta)+'</td>'+
+        '<td><button class="button" data-r="'+n+'">Restore</button> <button class="button" data-d="'+n+'">Delete</button></td>';
       tb.appendChild(tr); }); }); }
   document.getElementById('sbx-take').onclick=function(){ var n=document.getElementById('sbx-name').value;
     say('Taking snapshot…'); call('take',{name:n,force:document.getElementById('sbx-force').checked?1:''}).then(function(r){
@@ -4276,15 +4278,20 @@ def _bridge_handle(method: str, instance: str, subpath: str,
       DELETE /snapshot/<name> · GET /job/<id>
     Snapshot/restore run out-of-band via the existing job machinery so a restore
     never severs the caller's request. NO arbitrary host commands (FR-010)."""
-    import time, shutil as _sh, types as _types
+    import time, shutil as _sh, types as _types, hmac
     tok = _bridge_token_for(instance)
     if not tok:
         return 404, {"ok": False, "error": "unknown instance"}
     presented = (auth or "").removeprefix("Bearer ").strip()
-    if not presented or presented != tok:
+    if not presented or not hmac.compare_digest(presented, tok):
         return 403, {"ok": False, "error": "unauthorized"}
     if _is_herd_instance(instance):
         return 409, {"ok": False, "error": "unsupported", "reason": "herd"}
+    # Snapshot name guard — must be an isolated, alnum-led token (no `.`/`..`/`/`
+    # path traversal). Applied to EVERY name the bridge turns into a filesystem
+    # path, since the bridge — not the mu-plugin — is the trust boundary.
+    def _ok_name(n):
+        return bool(re.fullmatch(r"[A-Za-z0-9][\w.-]*", n or "")) and ".." not in (n or "")
     from sandbox.commands.data import cmd_snapshot, cmd_restore  # late: avoid cycle
     cfg = load_config()
 
@@ -4303,7 +4310,7 @@ def _bridge_handle(method: str, instance: str, subpath: str,
 
     if method == "POST" and subpath == "/snapshot":
         name = (body.get("name") or "").strip() or time.strftime("snap-%Y%m%d-%H%M%S")
-        if not re.match(r"^[\w.-]+$", name):
+        if not _ok_name(name):
             return 400, {"ok": False, "error": "invalid snapshot name"}
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name,
                                     force=bool(body.get("force")))
@@ -4312,16 +4319,21 @@ def _bridge_handle(method: str, instance: str, subpath: str,
 
     if method == "POST" and subpath == "/restore":
         name = (body.get("name") or "").strip()
-        if not name or not (snapshots_dir(instance) / name).exists():
+        if not _ok_name(name):
+            return 400, {"ok": False, "error": "invalid snapshot name"}
+        if not (snapshots_dir(instance) / name).exists():
             return 404, {"ok": False, "error": "no such snapshot"}
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name)
         jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
         return 202, {"ok": True, "job_id": jid, "name": name}
 
     if method == "DELETE" and subpath.startswith("/snapshot/"):
-        name = subpath[len("/snapshot/"):]
+        from urllib.parse import unquote
+        name = unquote(subpath[len("/snapshot/"):])
+        if not _ok_name(name):
+            return 400, {"ok": False, "error": "invalid snapshot name"}
         d = snapshots_dir(instance) / name
-        if not name or not d.exists():
+        if not d.exists():
             return 404, {"ok": False, "error": "no such snapshot"}
         _sh.rmtree(d)
         return 200, {"ok": True}

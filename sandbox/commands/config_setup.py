@@ -148,10 +148,15 @@ def cmd_setup(cfg, args) -> None:
     # Verify the running stack — but only if we actually booted instances.
     # With --no-instances there's nothing to check yet (doctor would just print
     # a wall of "not running" noise for a site the user hasn't created).
-    if not no_instances:
+    if not no_instances and instances:
+        # Doctor the first booted instance. (Per-project model: there's no
+        # implicit `main`, so args.resolved_instance is None here — pass an
+        # explicit instance or resolve_instances(cfg)[None] would KeyError.)
+        first = next(iter(instances))
+        doctor_args = types.SimpleNamespace(**{**vars(args), "resolved_instance": first})
         print("\n▸ Verifying…")
         try:
-            cmd_doctor(cfg, args)
+            cmd_doctor(cfg, doctor_args)
         except SystemExit:
             pass  # doctor exits 1 on problems; keep going to print next steps
 

@@ -373,12 +373,24 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
     # `instances:` block (sandbox.local.yml, written by ensure_instance); a stale
     # block with no registry entry (e.g. a legacy `main`) is ignored. There is no
     # synthesized/implicit instance.
+    # The registry entry caches each instance's ports/server/domain; overlay the
+    # sandbox.local.yml block on top so an instance whose block was lost still
+    # resolves to its REAL ports (not the shared hardcoded defaults → collision).
+    _RKEYS = ("wordpress_port", "db_port", "mailpit_port", "server", "domain")
     try:
-        reg_names = {e.get("instance") for e in _core().registry_all().values()
-                     if e.get("instance")}
+        reg = {e["instance"]: e for e in _core().registry_all().values()
+               if e.get("instance")}
     except Exception:
-        reg_names = set(instances or {})
-    return {name: merged((instances or {}).get(name) or {}) for name in sorted(reg_names)}
+        reg = {}
+    reg_names = set(reg) or set(instances or {})
+
+    def _cfg_for(name):
+        entry = reg.get(name) or {}
+        base = {k: entry[k] for k in _RKEYS if entry.get(k) is not None}
+        base.update((instances or {}).get(name) or {})  # local.yml block wins
+        return base
+
+    return {name: merged(_cfg_for(name)) for name in sorted(reg_names)}
 
 def compose_file(instance: str) -> Path:
     """Per-instance generated compose file path."""
@@ -2384,16 +2396,17 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     used: set[int] = set()
     for inst in instances.values():
         used.update({inst["wordpress_port"], inst["db_port"], inst["mailpit_port"]})
-    # Base ports for the instance neighborhood (8188 → 8189 …); overridable via
-    # the top-level runtime: block. No dependency on a `main` instance.
+    # Base ports for the instance neighborhood (8188, 8189, …); overridable via
+    # the top-level runtime: block. The base itself is assignable now that there
+    # is no `main` instance occupying it (start AT the base, not base+1).
     runtime = cfg.get("runtime", {}) or {}
     base_wp = runtime.get("wordpress_port", 8188)
     base_db = runtime.get("db_port", 3318)
     base_mp = runtime.get("mailpit_port", 8125)
     return {
-        "wordpress_port": _next_free_port(base_wp + 1, used),
-        "db_port": _next_free_port(base_db + 1, used),
-        "mailpit_port": _next_free_port(base_mp + 1, used),
+        "wordpress_port": _next_free_port(base_wp, used),
+        "db_port": _next_free_port(base_db, used),
+        "mailpit_port": _next_free_port(base_mp, used),
     }
 
 def _port_busy_by_other(port: int, own_project: str) -> bool:
@@ -4245,24 +4258,51 @@ def claude_usage(known_instances: list[str]) -> dict:
         "sessions": sessions[:25],
     }
 
-def _ensure_bridge_server() -> None:
-    """Start the `sb web` snapshot bridge on BRIDGE_PORT in the background if
-    nothing is already listening there (idempotent). The wp-admin snapshot
-    mu-plugin calls it; FR-014."""
+def _bridge_port_up() -> bool:
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(0.3)
     try:
-        if s.connect_ex(("127.0.0.1", BRIDGE_PORT)) == 0:
-            return  # already serving
+        return s.connect_ex(("127.0.0.1", BRIDGE_PORT)) == 0
     finally:
         s.close()
+
+
+def _ensure_bridge_server() -> None:
+    """Start the `sb web` snapshot bridge on BRIDGE_PORT if it isn't already
+    running (idempotent, FR-014). Verifies any existing listener is actually our
+    bridge (not a foreign service squatting the port — in which case we leave it
+    alone rather than spawn over it / trust it), and serializes startup with a
+    stale-aware lock so two concurrent `sb up`s don't double-spawn."""
+    import time, urllib.request, json as _json
+    if _bridge_port_up():
+        try:  # confirm it's OUR bridge (dashboard route returns {"instances":…})
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{BRIDGE_PORT}/api/instances", timeout=0.5) as r:
+                _json.loads(r.read() or b"{}")
+        except Exception:
+            pass
+        return  # something is serving the port — don't spawn a competing one
+    lock = ROOT / "runtime" / "locks" / "bridge-web.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.Popen([str(ENTRY), "web", "--port", str(BRIDGE_PORT)],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
-    except Exception:
-        pass
+        if lock.exists() and (time.time() - lock.stat().st_mtime) > 30:
+            lock.unlink(missing_ok=True)  # stale (a previous start crashed)
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        return  # another start is already in flight
+    try:
+        subprocess.Popen(
+            [str(ENTRY), "web", "--port", str(BRIDGE_PORT), "--exact-port"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        for _ in range(20):           # hold the lock until it's accepting (≤~6s)
+            time.sleep(0.3)
+            if _bridge_port_up():
+                break
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def _bridge_token_for(instance: str) -> str | None:

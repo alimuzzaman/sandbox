@@ -65,6 +65,13 @@ def cmd_web(cfg, args) -> None:
                                         body or {}, self.headers.get("Authorization", ""))
             return self._send(code, json.dumps(data))
 
+        def _local(self):
+            # The dashboard routes are unauthenticated, so they're restricted to
+            # loopback clients. The /api/instance/ bridge routes are token-gated
+            # (see _bridge_handle) and may be reached from a container via the
+            # docker host-gateway, so they are NOT loopback-restricted.
+            return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
         def do_DELETE(self):
             if self.path.startswith("/api/instance/"):
                 return self._bridge("DELETE")
@@ -75,6 +82,9 @@ def cmd_web(cfg, args) -> None:
             from urllib.parse import urlparse, parse_qs
             u = urlparse(self.path)
             path, qs = u.path, parse_qs(u.query)
+
+            if not path.startswith("/api/instance/") and not self._local():
+                return self._send(403, json.dumps({"error": "forbidden"}))
 
             if path == "/api/instances":
                 cfg = load_config()
@@ -124,6 +134,8 @@ def cmd_web(cfg, args) -> None:
                 except ValueError:
                     return self._send(400, json.dumps({"ok": False, "error": "bad JSON"}))
                 return self._bridge("POST", body)
+            if not self._local():
+                return self._send(403, json.dumps({"error": "forbidden"}))
             if self.path != "/api/action":
                 return self._send(404, json.dumps({"error": "not found"}))
             length = int(self.headers.get("Content-Length", 0))
@@ -139,22 +151,30 @@ def cmd_web(cfg, args) -> None:
     # Bind the requested port; if it's busy (a previous `./sb web` still up, or
     # anything else), auto-pick the next free one instead of crashing.
     requested = port
+    # Bind 0.0.0.0 so the snapshot bridge is reachable from a container via the
+    # docker host-gateway (Linux as well as Docker Desktop). Safe: dashboard
+    # routes are loopback-gated (_local), and the /api/instance/ bridge routes
+    # are per-instance-token-gated. `--exact-port` (used by the bridge auto-start)
+    # binds only the requested port instead of scanning, so the bridge never
+    # lands on a different port than the mu-plugin expects.
+    exact = getattr(args, "exact_port", False)
     httpd = None
-    for cand in range(requested, requested + 20):
+    for cand in range(requested, requested + (1 if exact else 20)):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", cand), Handler)
+            httpd = ThreadingHTTPServer(("0.0.0.0", cand), Handler)
             port = cand
             break
         except OSError:
             continue
     if httpd is None:
-        die(f"couldn't bind a port in {requested}–{requested+19}. "
-            f"Something may be stuck — try: lsof -iTCP:{requested} -sTCP:LISTEN")
+        die(f"couldn't bind port {requested}"
+            + ("" if exact else f"–{requested+19}")
+            + f". Something may be stuck — try: lsof -iTCP:{requested} -sTCP:LISTEN")
     if port != requested:
         info(f"port {requested} was busy — using {port} instead "
              f"(another `./sb web` may already be running).")
     url = f"http://127.0.0.1:{port}"
-    ok(f"Sandbox web UI: {url}  (localhost only — Ctrl-C to stop)")
+    ok(f"Sandbox web UI: {url}  (dashboard: localhost only — Ctrl-C to stop)")
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if getattr(args, "open", False):
         run([opener, url], check=False)

@@ -157,6 +157,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Serve a local browser dashboard (localhost)")
     web.add_argument("--port", type=int, default=8765,
         help="port to listen on (default 8765)")
+    web.add_argument("--exact-port", action="store_true",
+        help="bind only --port (no scan); used by the snapshot-bridge auto-start")
     web.add_argument("--open", action="store_true",
         help="open the dashboard in your browser on start")
 

@@ -1991,7 +1991,7 @@ def cmd_install(cfg, args) -> None:
         ok("Application Password saved to sandbox.local.yml")
     else:
         info("(Could not auto-create Application Password — set it manually "
-             "in sandbox.local.yml under mcp.wp.application_password)")
+             f"in sandbox.local.yml under instances.{inst}.app_password)")
 
     # The OpenLiteSpeed image pre-installs the LiteSpeed Cache plugin (LSCWP)
     # + server-level lscache. That competes with xSpeed, so leaving it active
@@ -2025,14 +2025,12 @@ def cmd_install(cfg, args) -> None:
        f"  •  Login: {base}/?sandbox_autologin={autologin_token}")
 
 
-def save_local_app_password(app_pw: str, instance: str = DEFAULT_INSTANCE) -> None:
+def save_local_app_password(app_pw: str, instance: str) -> None:
     """Persist the WP Application Password into sandbox.local.yml so the
     MCP server picks it up on next launch.
 
-    For the default `main` instance, writes to the legacy
-    `mcp.wp.application_password` key for backwards compatibility.
-    For other instances, writes to `instances.<name>.app_password` so
-    each instance has its own secret without colliding.
+    Written to `instances.<name>.app_password` so each instance has its own
+    secret without colliding. (Per-project model — there is no global key.)
     """
     ensure_pyyaml()
     import yaml
@@ -2040,10 +2038,7 @@ def save_local_app_password(app_pw: str, instance: str = DEFAULT_INSTANCE) -> No
     if CONFIG_LOCAL.exists():
         with CONFIG_LOCAL.open() as f:
             local = yaml.safe_load(f) or {}
-    if instance == DEFAULT_INSTANCE:
-        local.setdefault("mcp", {}).setdefault("wp", {})["application_password"] = app_pw
-    else:
-        local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
+    local.setdefault("instances", {}).setdefault(instance, {})["app_password"] = app_pw
     with CONFIG_LOCAL.open("w") as f:
         yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
 
@@ -2158,12 +2153,8 @@ def cmd_doctor(cfg, args) -> None:
           hint=f"./sb install --instance {inst}")
 
     print("\nMCP wiring:")
-    if inst == DEFAULT_INSTANCE:
-        mcp_cfg = (cfg.get("mcp", {}) or {}).get("wp", {}) or {}
-        app_pw = mcp_cfg.get("application_password", "")
-    else:
-        app_pw = ((cfg.get("instances", {}) or {}).get(inst, {}) or {}
-                  ).get("app_password", "")
+    app_pw = ((cfg.get("instances", {}) or {}).get(inst, {}) or {}
+              ).get("app_password", "")
     check("application_password set", bool(app_pw),
           hint=f"./sb install --instance {inst}   (auto-provisions)")
     if app_pw:

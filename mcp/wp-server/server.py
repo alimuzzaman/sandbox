@@ -162,8 +162,8 @@ def _load_sandbox_yml() -> dict:
 
 def _resolve_instance(instance: str) -> dict:
     """Return per-instance ports/admin/app_password, resolved from sandbox.yml
-    (+ sandbox.local.yml). `main` reads the legacy mcp.wp.application_password
-    key; other instances read instances.<name>.app_password.
+    (+ sandbox.local.yml). The app password is read from the per-instance
+    instances.<name>.app_password key (per-project model — no global key).
     """
     cfg = _load_sandbox_yml()
     runtime = cfg.get("runtime", {}) or {}
@@ -185,17 +185,8 @@ def _resolve_instance(instance: str) -> dict:
         "tld": inst.get("tld", PROXY_TLD),
     }
 
-    # App password file fallback: for `main` the legacy
-    # mcp.wp.application_password key; for any other instance, that
-    # instance's own instances.<name>.app_password.
-    if instance == DEFAULT_INSTANCE:
-        file_app_pw = ((cfg.get("mcp") or {}).get("wp") or {}).get(
-            "application_password", ""
-        )
-    else:
-        file_app_pw = inst.get("app_password", "")
-
-    out["app_password"] = file_app_pw
+    # App password: the instance's own instances.<name>.app_password.
+    out["app_password"] = inst.get("app_password", "")
     return out
 
 

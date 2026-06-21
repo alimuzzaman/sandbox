@@ -1486,7 +1486,16 @@ def migrate_legacy_layout() -> None:
     to migrate while a docker stack is running under the old project
     name `sandbox` — moving runtime/wp/ to runtime/wp-main/ would yank
     the bind-mount target out from under live containers.
+
+    Runs at most ONCE (guarded by runtime/.legacy-migrated). In the
+    multi-instance layout there is nothing to migrate, so on a fresh setup
+    this is a single no-op that then never scans runtime/snapshots/ again —
+    avoiding any per-invocation churn over per-instance snapshot dirs.
     """
+    marker = ROOT / "runtime" / ".legacy-migrated"
+    if marker.exists():
+        return
+
     # State files: .active-project → .active-project.main, etc.
     # Always safe to migrate (small files, no container reads them).
     legacy_state = [
@@ -1527,13 +1536,25 @@ def migrate_legacy_layout() -> None:
     if snap_root.exists():
         for entry in list(snap_root.iterdir()):
             # Skip the per-instance dirs themselves.
-            if entry.name == DEFAULT_INSTANCE or entry.is_symlink():
+            if entry.name == DEFAULT_INSTANCE or entry.is_symlink() or not entry.is_dir():
                 continue
-            if entry.is_dir():
-                main_snap.mkdir(parents=True, exist_ok=True)
-                target = main_snap / entry.name
-                if not target.exists():
-                    entry.rename(target)
+            # Only OLD-layout snapshots (stored directly as runtime/snapshots/<name>/
+            # with a db.sql inside) belong in the default instance's slot. A per-instance
+            # dir (runtime/snapshots/<instance>/) holds snapshot SUBDIRS, not a db.sql —
+            # moving it relocates that instance's snapshots under main/<instance>/, where
+            # cmd_snapshot/cmd_restore (which use snapshots_dir(<instance>)) can't find
+            # them. The db.sql check distinguishes the two layouts.
+            if not (entry / "db.sql").exists():
+                continue
+            main_snap.mkdir(parents=True, exist_ok=True)
+            target = main_snap / entry.name
+            if not target.exists():
+                entry.rename(target)
+
+    # Migration complete (or nothing to migrate) — never run again. Reached only when
+    # not deferred by the running-legacy-stack early return above.
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
 
 
 def compose(*args: str, instance: str = DEFAULT_INSTANCE,

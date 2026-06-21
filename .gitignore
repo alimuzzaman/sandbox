@@ -21,6 +21,7 @@ runtime/proxy/
 runtime/registry.json
 runtime/registry.lock
 runtime/locks/
+runtime/.legacy-migrated
 runtime/test-suite/
 runtime/test-tools/
 

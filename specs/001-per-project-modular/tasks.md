@@ -1,0 +1,145 @@
+---
+description: "Task list — Per-Project-First Instance Model & Modular sb"
+---
+
+# Tasks: Per-Project-First Instance Model & Modular `sb`
+
+**Input**: Design documents from `specs/001-per-project-modular/`
+
+**Prerequisites**: plan.md ✅, spec.md ✅, research.md ✅, data-model.md ✅,
+contracts/cli-contract.md ✅, quickstart.md ✅ (constitution at `.specify/memory/constitution.md`)
+
+**Tests**: No unit/contract test tasks — constitution Principle IV mandates **live-stack
+verification** (CLI/MCP against a running instance). Each phase ends with live checks from
+[quickstart.md](./quickstart.md) instead.
+
+**Organization**: by user story. Stage labels (A/B/C from plan.md) map to stories: Stage A →
+US3 foundation (parity), Stage B → US2 (remove `main`), Stage C → US4 (modular). US1 (cwd
+routing) is already delivered (commits `dc0b276`, `37509c7`).
+
+**Branch**: feature `001-per-project-modular`; developed on the shared worktree branch
+`cwd-instance-resolution`.
+
+## Format: `[ID] [P?] [Story] Description`
+
+- **[P]**: parallelizable (different files, no dependency on an incomplete task)
+- **[Story]**: US1..US4 from spec.md
+
+## Path Conventions
+
+`sb`, `sandbox_core.py`, `mcp/wp-server/server.py`, `src/web/src/*.ts`,
+`config/sandbox-web.js`, `package.json`, `scripts/make-release.sh`. Target package (Stage C):
+`sandbox/core/*`, `sandbox/commands/*`, `sandbox/cli.py`. Contracts: [cli-contract.md](./contracts/cli-contract.md).
+
+---
+
+## Phase 1: Setup
+
+- [ ] T001 Capture a pre-change baseline live-smoke transcript from a registered instance (`sb status`, `sb wp plugin list`, `sb doctor`, `sb snapshots` against a running instance) and append it to `specs/001-per-project-modular/quickstart.md` notes as the parity baseline.
+- [ ] T002 [P] Exclude spec-kit dev tooling from the shipped product: add `!.specify/**` + `!skills/speckit-*/**` negations to `package.json` `files`, and add `.specify` + `skills/speckit-*` to the prune list in `scripts/make-release.sh` (FR-009, C5).
+
+**Checkpoint**: Baseline recorded; spec-kit will not ship.
+
+---
+
+## Phase 2: Foundational — Stage A (Feature parity before removal) ⚠️ BLOCKING
+
+**Purpose**: Make every feature work on the per-instance model so removing `main` loses
+nothing (constitution VI; research R2/R6). MUST complete before Phase 3.
+
+- [ ] T003 [US3] Audit every call site of `compose`, `wpcli`, `save_local_app_password`, `_active_project_name` in `sb` and record any relying on the `DEFAULT_INSTANCE` default (must pass an explicit `instance` before Stage B deletes the default) — research R6.
+- [ ] T004 [US3] Unify app-password WRITE on the per-instance key: in `sb` `save_local_app_password` (~L2028) always write `instances.<name>.app_password`; remove the `instance == DEFAULT_INSTANCE` → `mcp.wp.application_password` branch (~L2043) — contract C3.
+- [ ] T005 [US3] Unify app-password READ in `sb` `cmd_doctor` (~L2161-2166) to the per-instance key for every instance (drop the `main` legacy-key branch).
+- [ ] T006 [P] [US3] Unify app-password READ in `mcp/wp-server/server.py` `_resolve_instance` (~L191-198) to the per-instance key for every instance (drop the `DEFAULT_INSTANCE` legacy branch) — contract C3.
+- [ ] T007 [US3] Audit `_build_instance_block`/`ensure_instance`/`apply_config` and confirm the written `sandbox.local.yml` instance block is complete (ports, server, domain, wp_config, multisite, app_password) so nothing relied on the synthesized `main` runtime defaults (data-model: Instance config).
+- [ ] T008 [US3] **Live-verify Stage A** (quickstart Stage A): `sb doctor` shows app-password OK for each registered instance; an MCP password-needing tool authenticates per-instance — with `main` still present.
+
+**Checkpoint**: Parity proven on the per-instance model — safe to remove `main`.
+
+---
+
+## Phase 3: User Story 2 — No phantom `main` anywhere (Priority: P1) — Stage B 🎯
+
+**Goal**: Remove the synthesized `main` + `DEFAULT_INSTANCE` from every surface; an unresolved
+command errors with guidance instead of a fallback (contract C1/C2).
+
+**Independent Test**: `sb instances`, dashboards, MCP list only registered projects; deleting
+any instance needs no special-case; an unregistered cwd errors helpfully.
+
+- [ ] T009 [US2] Resolution gate (`sb` ~L7005-7027): drop the `→ DEFAULT_INSTANCE` fallback; no instance resolved + non-PROJECT_ROUTED command → `die()` with guidance; keep PROJECT_ROUTED commands working without an instance (contract C1).
+- [ ] T010 [US2] `resolve_instances` (`sb` ~L385-466): source from the registry + `sandbox.local.yml` blocks; remove the `if not instances: return {DEFAULT_INSTANCE: …}` (~L459) and `out.setdefault(DEFAULT_INSTANCE, …)` (~L465); update the header comment (~L217-223) — contract C2.
+- [ ] T011 [P] [US2] Remove the `main` delete-guard in `cmd_instance` delete (`sb` ~L5168-5169).
+- [ ] T012 [P] [US2] Remove the `main` delete-guard in the TUI dashboard (`sb` ~L5991-5992).
+- [ ] T013 [P] [US2] Remove the `main` delete-guard in the web handler (`sb` ~L6455-6456).
+- [ ] T014 [P] [US2] Remove the `main` name reservation in `_derive_instance_name` (`sb` ~L4105).
+- [ ] T015 [P] [US2] Remove the web-UI `main` delete-guard in `src/web/src/render.ts` (L49) + `src/web/src/instance.ts` (L53); rebuild via `scripts/build-web-js.sh` → `config/sandbox-web.js` (research R8).
+- [ ] T016 [US2] Remove the legacy migration: delete `migrate_legacy_layout` (`sb` ~L1476-1557), `_legacy_stack_running` (~L1462-1473), the call + comment (~L7033-7036), and the now-moot `runtime/.legacy-migrated` `.gitignore` line.
+- [ ] T017 [US2] Delete `DEFAULT_INSTANCE` from `sb` (L72) and `mcp/wp-server/server.py` (L46); make `instance` a required parameter on `compose`/`wpcli`/`save_local_app_password`/`_active_project_name` (+ `server.py` `_compose`/`_wpcli`/etc.) per the T003/T006 audit (research R6).
+- [ ] T018 [US2] Docs-with-code: update `CLAUDE.md` (remove "implicit main"; state the per-project-only model + resolution precedence) and any `docs/*` describing `--instance` defaulting to `main` (constitution V).
+- [ ] T019 [US2] **Live-verify Stage B** (quickstart Stage B): per-project routing; unregistered-dir error (no `main` boot); `--instance`/`$SANDBOX_INSTANCE` overrides; `sb instances` shows no `main`; delete works without a guard; `grep -n 'DEFAULT_INSTANCE\|migrate_legacy' sb mcp/wp-server/server.py` zero load-bearing hits (SC-002); `python3 sandbox_core.py --selftest-registry` passes.
+
+**Checkpoint**: `main` is gone everywhere; behavior verified live.
+
+---
+
+## Phase 4: User Story 3 — Feature parity preserved (Priority: P1)
+
+**Goal**: Confirm zero regressions for registered instances across the full surface.
+
+**Independent Test**: Run the command matrix before/after; outputs equivalent modulo the
+intended `main`-removal behavior.
+
+- [ ] T020 [US3] **Parity matrix** against a running instance (+ one apache instance): `sb status`, `sb wp plugin list`, `sb doctor`, `sb snapshot t1`/`sb snapshots`/`sb restore t1`, `sb domains`/`secure` status — compare to the T001 baseline; record in quickstart notes (SC-003).
+- [ ] T021 [P] [US3] MCP `ensure_instance` + `wp_cli` + a password-needing tool succeed against a real project; `python3 sandbox_core.py --selftest-registry` passes.
+
+**Checkpoint**: No regressions — old model fully retired with parity proven.
+
+---
+
+## Phase 5: User Story 4 — Modular feature package (Priority: P2) — Stage C
+
+**Goal**: Split `sb` into a `sandbox/` package (10 groups) with a command registry; `sb`
+becomes the thin entry (contract C4/C5). Pure refactor — behavior identical.
+
+**Independent Test**: Each feature in its own module; CLI builds from a registry; installed
+`sb` (symlink + tarball) runs identically from any directory.
+
+- [ ] T022 [US4] Create the package skeleton: `sandbox/__init__.py`, `sandbox/cli.py` (COMMAND registry + argparse build + C1 resolution gate + dispatch), empty `sandbox/core/` + `sandbox/commands/` per plan.md's tree.
+- [ ] T023 [US4] Move shared infrastructure into `sandbox/core/`: `paths.py`, `ui.py`, `config.py`, `instances.py` (resolve_instances + path helpers + ports), `docker.py`, `domains.py`, `provision.py`, `herd.py` — behavior identical.
+- [ ] T024 [US4] Move each command group into `sandbox/commands/<group>.py` exposing `register(subparsers)` + `run(cfg, args)` (lifecycle, instances_cmd, config_setup, data, wp, net, debug, integ, ui_dash, uninstall); replace the `handlers = {...}` dict with registry self-registration in `cli.py` (contract C4).
+- [ ] T025 [US4] Reduce `sb` to the thin polyglot entry (bootstrap + `ROOT` + `sys.path.insert` + call `sandbox.cli:main`); no feature logic remains in `sb` (contract C5).
+- [ ] T026 [P] [US4] Update `package.json` `files` to include `sandbox/`; confirm `bin/sandbox.js` + `scripts/make-release.sh` resolve the package (no change expected).
+- [ ] T027 [US4] **Live-verify Stage C** (quickstart Stage C): `ast.parse` `sb`; `import sandbox.cli`; full parity matrix from a project dir AND via the global `sb` symlink; release tarball dry-run contains `sandbox/` while `.specify/`+`skills/speckit-*` are pruned; `scripts/build-web-js.sh` then `sb web` lists instances with delete enabled for all.
+
+**Checkpoint**: Modular package shipped; CLI behavior identical via all install paths.
+
+---
+
+## Phase 6: Polish & Cross-Cutting
+
+- [ ] T028 [P] Final docs sweep: `CLAUDE.md` folder-layout section reflects the `sandbox/` package; `README.md` updated if it documents the file layout or `--instance` default.
+- [ ] T029 Final acceptance: re-run SC-001..SC-005 (quickstart Acceptance) and record evidence; confirm no `main`/`DEFAULT_INSTANCE` reintroduced.
+
+---
+
+## Dependencies & Execution Order
+
+- **Phase 1 → Phase 2 (Stage A, blocking) → Phase 3 (Stage B) → Phase 4 (parity gate) → Phase 5 (Stage C) → Phase 6**.
+- Stage A MUST precede Stage B (parity before removal, constitution VI).
+- Stage C (refactor) MUST follow Stage B so the package is extracted from already-correct code.
+- Within Phase 3: T011-T015 parallel ([P], different files); T009-T010 and T016-T017 touch core `sb` regions and stay sequential.
+
+## Parallel Opportunities
+
+- T002 (Setup) standalone.
+- T006 (server.py) ∥ T004/T005 (sb) in Stage A.
+- T011-T015 (independent `main`-guard removals) in parallel in Stage B.
+- T026 ∥ T025 finalization in Stage C.
+
+## Implementation Strategy
+
+- **MVP increment = Stage A + Stage B** (US3 foundation + US2): every command per-project, no
+  phantom `main` — without the larger refactor.
+- **Stage C (US4)** is a separable follow-on (pure refactor) landing after the behavior change
+  is proven, reducing risk on critical shared tooling.
+- Each phase ends with a live-verification checkpoint; do not proceed past a failing one.

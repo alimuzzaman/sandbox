@@ -142,6 +142,13 @@ CLI and the release tarball still work.
   excluded from the shipped product.
 - **FR-010**: Each removal of old-model code MUST be a separately verifiable change, gated
   on live-stack proof of the per-project replacement (per constitution Principle VI).
+- **FR-011**: The MCP server (`mcp/wp-server/server.py`) MUST also be modularized — its ~21
+  tools grouped into modules that reuse the shared `sandbox/core/*` helpers (config, registry,
+  docker, herd) instead of duplicating them — while remaining a separate process with the
+  same MCP tool surface (no tool added/removed/renamed). `server.py` becomes a thin entry that
+  registers the tool groups, mirroring `sb`'s thin-entry pattern.
+- **FR-012**: Every CLI command MUST belong to exactly one feature module (including
+  `open`/browser helpers); no command may be left out of the module mapping.
 
 ## Clarifications
 
@@ -161,6 +168,15 @@ CLI and the release tarball still work.
   shipped product.** Keep `.specify/`, `specs/`, and `skills/speckit-*` in the repo for
   the team, but exclude `.specify/` and `skills/speckit-*` from `package.json` `files`
   and the `scripts/make-release.sh` prune so they never ship to end users (FR-009).
+- Q: Is the MCP server in scope for modularization? → A: **Yes — modularize `server.py` too.**
+  Group its ~21 tools into modules that reuse `sandbox/core/*` (config/registry/docker/herd)
+  rather than duplicating helpers; keep it a separate process with the identical tool surface
+  (FR-011).
+- Q: Where is the implementation done? → A: **Directly in the main checkout
+  (`/Users/alim/Sites/git/sandbox`).** All worktree spec-kit work is merged into `main` first,
+  then implementation proceeds there so the edited code runs against the real `runtime/`
+  (registry + 6 instances) and the global `sb`/MCP server (`sb mcp`) exercise it. The
+  per-project-modular worktree is then retired.
 
 ### Key Entities
 
@@ -185,9 +201,10 @@ CLI and the release tarball still work.
   after the change for a registered instance (zero regressions in the verification matrix).
 - **SC-004**: The installed CLI (global symlink AND tarball/npm) runs identically from an
   arbitrary directory after modularization.
-- **SC-005**: The CLI is modular and locatable: the `sb` entry file is ≤ ~200 lines (bootstrap
-  + dispatch only) and no `sandbox/` module exceeds ~1500 lines; each feature group is in its
-  own module. (Thresholds are guidance for "maintainable + locatable", testable via line count.)
+- **SC-005**: The CLI and MCP server are modular and locatable: the `sb` entry file is ≤ ~200
+  lines and `server.py` is a thin entry, with no module under `sandbox/` or `mcp/wp-server/`
+  exceeding ~1500 lines; each CLI command and each MCP tool group lives in its own module.
+  (Thresholds are guidance for "maintainable + locatable", testable via line count.)
 
 ## Assumptions
 

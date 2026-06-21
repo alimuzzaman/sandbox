@@ -106,7 +106,7 @@ becomes the thin entry (contract C4/C5). Pure refactor — behavior identical.
 
 - [ ] T022 [US4] Create the package skeleton: `sandbox/__init__.py`, `sandbox/cli.py` (COMMAND registry + argparse build + C1 resolution gate + dispatch), empty `sandbox/core/` + `sandbox/commands/` per plan.md's tree.
 - [ ] T023 [US4] Move shared infrastructure into `sandbox/core/`: `paths.py`, `ui.py`, `config.py`, `instances.py` (resolve_instances + path helpers + ports), `docker.py`, `domains.py`, `provision.py`, `herd.py` — behavior identical.
-- [ ] T024 [US4] Move each command group into `sandbox/commands/<group>.py` exposing `register(subparsers)` + `run(cfg, args)` (lifecycle, instances_cmd, config_setup, data, wp, net, debug, integ, ui_dash, uninstall); replace the `handlers = {...}` dict with registry self-registration in `cli.py` (contract C4).
+- [ ] T024 [US4] Move each command group into `sandbox/commands/<group>.py` exposing `register(subparsers)` + `run(cfg, args)` (lifecycle [**incl. `open`** — FR-012], instances_cmd, config_setup, data, wp, net, debug, integ, ui_dash, uninstall); replace the `handlers = {...}` dict with registry self-registration in `cli.py` (contract C4). Verify EVERY command in the old `handlers` dict (39 + `ui` alias) has a module home — none dropped.
 - [ ] T025 [US4] Reduce `sb` to the thin polyglot entry (bootstrap + `ROOT` + `sys.path.insert` + call `sandbox.cli:main`); no feature logic remains in `sb` (contract C5).
 - [ ] T026 [P] [US4] Update `package.json` `files` to include `sandbox/`; confirm `bin/sandbox.js` + `scripts/make-release.sh` resolve the package (no change expected).
 - [ ] T027 [US4] **Live-verify Stage C** (quickstart Stage C): `ast.parse` `sb`; `import sandbox.cli`; full parity matrix from a project dir AND via the global `sb` symlink AND via the npm bin shim (`node bin/sandbox.js status` — C1) to exercise all three install paths (SC-004); release tarball dry-run contains `sandbox/` while `.specify/`+`skills/speckit-*` are pruned; **line-count check**: `sb` ≤ ~200 lines, no `sandbox/` module > ~1500 lines (SC-005); `scripts/build-web-js.sh` then `sb web` lists instances with delete enabled for all.
@@ -115,31 +115,52 @@ becomes the thin entry (contract C4/C5). Pure refactor — behavior identical.
 
 ---
 
-## Phase 6: Polish & Cross-Cutting
+## Phase 6: User Story 4 (cont.) — Modularize the MCP server (Priority: P2) — Stage D
 
-- [ ] T028 [P] Final docs sweep: `CLAUDE.md` folder-layout section reflects the `sandbox/` package; `README.md` updated if it documents the file layout or `--instance` default.
-- [ ] T029 Final acceptance: re-run SC-001..SC-005 (quickstart Acceptance) and record evidence; confirm no `main`/`DEFAULT_INSTANCE` reintroduced.
+**Goal**: Split `mcp/wp-server/server.py` into a thin entry + grouped tool modules reusing
+`sandbox/core/*` (FR-011). Identical MCP tool surface — pure refactor on a second process.
+
+**Independent Test**: Every `mcp__sandbox__*` tool behaves identically against a real instance
+after the split; `server.py` is a thin entry.
+
+- [ ] T028 [US4] Create `mcp/wp-server/tools/` and move the ~21 tools into grouped modules (e.g. `stack.py`, `wp.py`, `db.py`, `fs.py`, `mail.py`, `instances.py`, `context.py`), each registering its tools; reduce `server.py` to a thin entry that imports the groups.
+- [ ] T029 [US4] Replace `server.py`'s private helpers (config/registry/docker/herd resolution, the duplicated `DEFAULT_INSTANCE`-era code) with imports from `sandbox/core/*` so the CLI and MCP share one implementation; ensure the per-instance app-password path (Stage A) is the shared one.
+- [ ] T030 [US4] **Live-verify Stage D**: restart Claude Code (gotcha #4) so the re-registered MCP server loads; exercise every tool group against a real instance (`ensure_instance`, `wp_cli`, `wp_rest`, `db_query`, `fs_read`, `tail_log`, `mail_list`, `focus_get`, …); confirm identical behavior and the per-instance app-password resolution; line-count check `server.py` thin + no `tools/` module > ~1500 lines (SC-005).
+
+**Checkpoint**: Both critical processes (CLI + MCP server) modular and sharing `sandbox/core`.
+
+---
+
+## Phase 7: Polish & Cross-Cutting
+
+- [ ] T031 [P] Final docs sweep: `CLAUDE.md` folder-layout + MCP-surface sections reflect the `sandbox/` package and `mcp/wp-server/tools/`; `README.md` updated if it documents the file layout or `--instance` default.
+- [ ] T032 Final acceptance: re-run SC-001..SC-005 (quickstart Acceptance) and record evidence; confirm no `main`/`DEFAULT_INSTANCE` reintroduced in `sb` OR `server.py`.
 
 ---
 
 ## Dependencies & Execution Order
 
-- **Phase 1 → Phase 2 (Stage A, blocking) → Phase 3 (Stage B) → Phase 4 (parity gate) → Phase 5 (Stage C) → Phase 6**.
+- **Phase 1 → Phase 2 (Stage A, blocking) → Phase 3 (Stage B) → Phase 4 (parity gate) → Phase 5 (Stage C) → Phase 6 (Stage D) → Phase 7 (polish)**.
 - Stage A MUST precede Stage B (parity before removal, constitution VI).
-- Stage C (refactor) MUST follow Stage B so the package is extracted from already-correct code.
+- Stage C (CLI refactor) MUST follow Stage B so the package is extracted from already-correct code.
+- Stage D (MCP refactor) MUST follow Stage C so `server.py` can import the finished `sandbox/core/*`.
 - Within Phase 3: T011-T015 parallel ([P], different files); T009-T010 and T016-T017 touch core `sb` regions and stay sequential.
+- **All implementation happens in the main checkout** (`/Users/alim/Sites/git/sandbox`) after the worktree branch is merged to `main` — so edited code runs against the real `runtime/` and the global `sb`/MCP server.
 
 ## Parallel Opportunities
 
 - T002 (Setup) standalone.
-- T006 (server.py) ∥ T004/T005 (sb) in Stage A.
+- T006 (server.py app-pw) ∥ T004/T005 (sb) in Stage A.
 - T011-T015 (independent `main`-guard removals) in parallel in Stage B.
 - T026 ∥ T025 finalization in Stage C.
+- T028 ∥ T029 partly (tool grouping vs core-helper imports) in Stage D.
 
 ## Implementation Strategy
 
 - **MVP increment = Stage A + Stage B** (US3 foundation + US2): every command per-project, no
   phantom `main` — without the larger refactor.
-- **Stage C (US4)** is a separable follow-on (pure refactor) landing after the behavior change
-  is proven, reducing risk on critical shared tooling.
-- Each phase ends with a live-verification checkpoint; do not proceed past a failing one.
+- **Stage C (CLI package)** then **Stage D (MCP server)** are separable refactor follow-ons
+  (behavior-preserving) landing after the behavior change is proven; Stage D builds on Stage C's
+  `sandbox/core/*`. Each reduces risk on a critical shared process.
+- Each phase ends with a live-verification checkpoint; do not proceed past a failing one. Stage
+  D's checkpoint requires a Claude Code restart (gotcha #4) for the re-registered MCP tools.

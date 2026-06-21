@@ -53,7 +53,18 @@ A self-contained CLI feature unit.
   (handler). Self-registers into the `COMMANDS` registry consumed by `cli.py`.
 - Replaces the hand-maintained `handlers = {...}` dict + scattered `cmd_*` functions.
 
+## MCP tool group (Stage D)
+
+A module under `mcp/wp-server/tools/` registering a related set of MCP tools.
+
+- **name**: tool group (stack, wp, db, fs, mail, instances, context, …).
+- **interface**: registers its tools with the server; resolves instances/config via shared
+  `sandbox/core/*` (no duplicated helpers).
+- `server.py` becomes a thin entry importing the groups; the tool surface is unchanged.
+
 ## Relationships
 
 - Project_root 1—1 Instance (via Registry entry) 1—1 Instance config.
 - `cli.py` 1—* Feature module (registry); each Feature module owns ≥1 command name.
+- `server.py` 1—* MCP tool group; both `cli.py` and `server.py` depend on `sandbox/core/*`
+  (one shared implementation of resolution + app-password).

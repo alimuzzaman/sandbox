@@ -50,6 +50,16 @@ def run(cfg, args) -> None:         # handle the dispatched command
   resolution, then dispatches to the matching `run(...)`.
 - Adding/removing a feature is adding/removing a module — NO edit to a central hand-maintained
   dispatch dict.
+- EVERY CLI command (all 39 + the `ui` alias, including `open`) MUST map to exactly one
+  `commands/*` module — no command left unmapped (FR-012).
+
+## C4b — MCP tool-group interface (Stage D)
+
+Each `mcp/wp-server/tools/<group>.py` registers its tools and reuses `sandbox/core/*` for
+config/registry/docker/herd resolution (no duplicated helpers). `server.py` is a thin entry
+that imports the groups. The MCP tool surface (names, params, behavior) is UNCHANGED — pure
+refactor. The CLI and MCP server share one implementation of instance resolution and
+per-instance app-password.
 
 ## C5 — Packaging invariants
 

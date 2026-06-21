@@ -101,7 +101,14 @@ sandbox/
   commands/              # one module per feature group; each: register(sub) + run(cfg,args)
     lifecycle.py · instances_cmd.py · config_setup.py · data.py · wp.py ·
     net.py · debug.py · integ.py · ui_dash.py · uninstall.py
+                         # lifecycle.py also owns `open` (browser open admin/site/mail)
+mcp/wp-server/
+  server.py              # thin entry: registers tool groups; reuses sandbox/core/*
+  tools/                 # ~21 tools grouped (e.g. stack.py, wp.py, db.py, fs.py, mail.py, …)
 ```
+
+Every CLI command maps to exactly one `commands/*` group (FR-012); the full mapping of the 39
+commands + `ui` alias is covered, with `open` in `lifecycle.py`.
 
 **Structure Decision**: 10-group package (clarified). `commands/*` self-register into a
 `COMMANDS` registry in `cli.py`, replacing the hand-maintained `handlers = {...}` dict.
@@ -141,10 +148,19 @@ remove legacy migration (~L1462-1557, call ~L7036); delete `DEFAULT_INSTANCE` fr
 `server.py` and make `instance` a required arg on `compose`/`wpcli`/`save_local_app_password`/
 `_active_project_name`. Update docs. Live-verify the matrix + grep-clean (SC-002).
 
-### Stage C — Extract the `sandbox/` package
-Move helpers/handlers into `sandbox/core/*` + `sandbox/commands/*`; introduce the `COMMANDS`
-registry; reduce `sb` to the thin entry. Update `package.json` `files`. Live-verify identical
-behavior from a project dir AND the global symlink; import-smoke; rebuild + run `sb web`.
+### Stage C — Extract the `sandbox/` package (CLI)
+Move helpers/handlers into `sandbox/core/*` + `sandbox/commands/*` (every command incl.
+`open`); introduce the `COMMANDS` registry; reduce `sb` to the thin entry. Update
+`package.json` `files`. Live-verify identical behavior from a project dir AND the global
+symlink AND the npm bin shim; import-smoke; rebuild + run `sb web`.
+
+### Stage D — Modularize the MCP server (`server.py`)
+Split `mcp/wp-server/server.py` into a thin entry that registers tool groups under
+`mcp/wp-server/tools/*`, each reusing `sandbox/core/*` (config/registry/docker/herd) instead
+of its own copies. Keep the MCP tool surface identical (no tool added/removed/renamed). This
+is the second refactor on a second critical process — done after Stage C so it builds on the
+shared `sandbox/core` helpers. Live-verify every MCP tool against a real instance + restart
+Claude Code so the re-registered tools load.
 
 ## Complexity Tracking
 

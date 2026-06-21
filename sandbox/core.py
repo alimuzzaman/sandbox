@@ -17,7 +17,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 __all__ = ['ACTIVE', 'ASKPASS_HELPER', 'CLI_VENV', 'COMPOSE', 'COMPOSE_DIR', 'CONFIG', 'CONFIG_LOCAL', 'CONNECT_TARGETS', 'DOMAIN_RE', 'ENTRY', 'FOCUS', 'HERD_BIN_DIR', 'HERD_CLI_DEFAULT', 'HERD_DB_HOST', 'HERD_DB_PASSWORD', 'HERD_DB_PORT', 'HERD_DB_USER', 'HOSTS_HELPER', 'INTROSPECT_PHP', 'LAUNCHD_PLIST', 'MCP_DIR', 'MCP_SERVER_NAME', 'MCP_VENV', 'MULTISITE_MARKER', 'PLUGINS_DIR', 'PROJECT_MCP_JSON', 'PROXY_BIND_IP', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_HELPER', 'PROXY_PROJECT', 'PROXY_SUDOERS', 'PROXY_TLD', 'ROOT', 'SECRETS_ENV', 'SEEDS_DIR', 'SERVERS', 'SNAPSHOTS_DIR', 'SUDOERS_FILE', 'TESTS_DB_NAME', 'TEST_SUITE_DIR', 'TEST_TOOLS_DIR', 'TOOLS_DIR', 'TOOLS_VENV', 'WP_DIR', '_BASE_WP_CONFIG', '_CLAUDE_PRICES', '_COMPOSER_PHAR_URL', '_HTTPS_OFFER_MARKER', '_JobStream', '_PHPUNIT_PHAR_URL', '_POLYFILLS_REPO', '_POLYFILLS_TAG', '_RunResult', '_WEB_BUILDERS', '_WEB_CSS_CACHE', '_WEB_JS_CACHE', '_WEB_PAGE', '_WEB_STREAM', '_WPDEVELOP_REPO', '_active_project_name', '_assign_domains_to_all', '_autologin_mu_plugin', '_build_instance_block', '_build_mcp_entry', '_ca_installed', '_ca_trusted_macos', '_caddy_block', '_cert_paths', '_certs_changed_since_proxy_start', '_claude_projects_dir', '_cli_image', '_compose_no_follow_logs', '_config_extra_php', '_connect_fluentboards', '_connect_github', '_convert_multisite', '_core', '_cost_for', '_curses_suspended', '_cwd_instance', '_dash_draw', '_dash_flash', '_dash_pick', '_dash_prompt', '_dash_run', '_derive_instance_name', '_distinct_tlds', '_dns_flush', '_docker_preflight', '_download', '_ensure_litespeed_htaccess', '_ensure_proxy_up', '_ensure_test_tools', '_ensure_tests_db', '_ensure_url_proxy', '_ensure_wp_test_suite', '_env_config_lines', '_extra_vol_lines', '_force_symlink', '_gh_cli_orgs', '_gh_cli_user', '_git_q', '_global_link_dir', '_herd', '_herd_cli', '_herd_db_name', '_herd_domain', '_herd_isolate', '_herd_isolated_php', '_herd_php', '_herd_php_bin', '_herd_tests_db', '_herd_wp_cmd', '_host_php', '_host_wp', '_hosts_edit', '_hosts_passwordless', '_https_offer_declined', '_install_alias_launchd', '_instance_reachable', '_instance_running', '_is_herd_instance', '_is_server', '_job_snapshot', '_lo0_alias_present', '_local_yaml', '_make_venv', '_merged_wp_config', '_mint_cert', '_multisite_mode', '_next_free_port', '_norm_tld', '_offer_install', '_onboard_instance', '_php_literal', '_php_squote', '_pick_instance_ports', '_pin_db_creds_in_config', '_pin_wp_constants_in_config', '_pkg_manager', '_pkg_slug', '_plugins_home', '_port_busy_by_other', '_price_tier', '_prompt', '_provision_herd', '_provision_test_harness', '_proxy_container_running', '_proxy_started_at', '_proxy_sudoers_installed', '_refresh_env_local', '_relax_perms_for_uid_switch', '_resolve_port_conflicts', '_resolve_setup_tld', '_resolver_present', '_run_cmd_capture', '_run_tests', '_run_tests_herd', '_sandbox_proxy_active', '_secure_at_create', '_server_runtime', '_set_https_offer_declined', '_site_host', '_stale_mcp_servers', '_start_job', '_sudo', '_sudo_env', '_tld', '_valet_available', '_valet_proxy_active', '_valet_tld', '_valid_domain', '_valid_server', '_wait_http', '_wait_reachable', '_warn_version_drift', '_web_apache', '_web_css', '_web_do_action', '_web_image', '_web_job_seq', '_web_jobs_lock', '_web_js', '_web_list_seeds', '_web_list_snapshots', '_web_litespeed', '_web_lock', '_web_nginx', '_web_services', '_wildcard_san', '_wire_project_plugins', '_wire_project_themes', '_wp_debug_env', '_wpcli_service', '_write_env_local', '_write_local_yaml', '_write_mail_muplugin', '_write_multisite_htaccess', '_write_ssl_muplugin', '_write_wp_tests_config', '_write_wp_tests_config_herd', 'active_project_file', 'apply_config', 'claude_usage', 'collect_instance_rows', 'compose', 'compose_file', 'deep_merge', 'die', 'domains_ready', 'ensure_instance', 'ensure_pyyaml', 'ensure_tools_venv', 'expand', 'find_modern_python', 'focus_file', 'info', 'load_config', 'mcp_server_name', 'ok', 'plugins_dir', 'project_name', 'proxy_available', 'proxy_setup', 'proxy_teardown', 'regen_caddyfile', 'register_claude_user_scope', 'reload_proxy', 'render_compose', 'render_proxy_compose', 'resolve_instances', 'run', 'save_local_app_password', 'save_local_autologin_token', 'site_url', 'snapshots_dir', 'valet_proxy_add', 'valet_proxy_remove', 'wp_dir', 'wpcli', 'write_claude_mcp_config', 'write_compose_files', 'write_env_for_compose']
 __all__ += ['BRIDGE_PORT', 'save_local_bridge_token', '_write_snapshot_muplugin',
-            '_bridge_handle', '_bridge_token_for']
+            '_bridge_handle', '_bridge_token_for', '_ensure_bridge_server']
 BRIDGE_PORT = 8765  # fixed host port the `sb web` snapshot bridge listens on
 
 
@@ -1066,6 +1066,10 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
                        inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
     image: {image}
+    # Reach the host `sb web` snapshot bridge from in-container PHP
+    # (auto on Docker Desktop; explicit for Linux/Docker Engine).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -1115,6 +1119,8 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
                            inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
     image: {fpm_image}
+    extra_hosts:                       # reach the host `sb web` snapshot bridge
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -1163,6 +1169,8 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
                           inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
     return f"""  wp:
     image: {ls_image}
+    extra_hosts:                       # reach the host `sb web` snapshot bridge
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -4234,6 +4242,26 @@ def claude_usage(known_instances: list[str]) -> dict:
         "by_model": by_model_out, "per_instance": per_instance_out,
         "sessions": sessions[:25],
     }
+
+def _ensure_bridge_server() -> None:
+    """Start the `sb web` snapshot bridge on BRIDGE_PORT in the background if
+    nothing is already listening there (idempotent). The wp-admin snapshot
+    mu-plugin calls it; FR-014."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.3)
+    try:
+        if s.connect_ex(("127.0.0.1", BRIDGE_PORT)) == 0:
+            return  # already serving
+    finally:
+        s.close()
+    try:
+        subprocess.Popen([str(ENTRY), "web", "--port", str(BRIDGE_PORT)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        pass
+
 
 def _bridge_token_for(instance: str) -> str | None:
     return ((_local_yaml().get("instances") or {}).get(instance) or {}).get("bridge_token")

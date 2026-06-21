@@ -42,6 +42,12 @@ def cmd_up(cfg: dict, args) -> None:
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
         _write_mail_muplugin(inst)
+        # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
+        # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
+        _tok = _bridge_token_for(inst)
+        if _tok:
+            _write_snapshot_muplugin(inst, _tok)
+            _ensure_bridge_server()
     ok(f"WordPress: {site_url(inst_cfg)}")
     ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
 

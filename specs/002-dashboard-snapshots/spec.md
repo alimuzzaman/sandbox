@@ -122,6 +122,18 @@ snapshots`; deleting one removes it from both views.
 - **FR-010**: The host-bridge mechanism MUST NOT expose a way to execute arbitrary host
   commands from the browser; only the defined snapshot/restore/list/delete operations for
   the current instance are permitted.
+- **FR-011**: The bridge MUST be served by the `sb web` dashboard server as scoped routes
+  under `/api/instance/<inst>/…` (snapshot, restore, snapshots, snapshot/<name>), reusing
+  its existing per-instance routing.
+- **FR-012**: Every bridge call MUST be authenticated with a per-instance secret token
+  (provisioned like the autologin token); the server MUST reject any call whose token does
+  not match the resolved instance, and MUST bind only to localhost/host-gateway.
+- **FR-013**: Provisioning MUST inject `SANDBOX_BRIDGE_URL`, `SANDBOX_BRIDGE_TOKEN`, and
+  `SANDBOX_INSTANCE` into the mu-plugin (regenerated on recreate); the mu-plugin MUST NOT
+  perform host/port discovery at runtime.
+- **FR-014**: `sb up`/`ensure` MUST start/refresh the `sb web` server idempotently so the
+  bridge is reachable whenever the instance is running; if the bridge is unreachable the
+  dashboard MUST surface that clearly (FR-007).
 
 ### Key Entities
 
@@ -129,8 +141,11 @@ snapshots`; deleting one removes it from both views.
   metadata), stored in that instance's host-side snapshot store.
 - **Snapshot mu-plugin**: a prefixed sandbox-only must-use plugin that renders the admin UI
   and initiates snapshot operations for the current instance.
-- **Host bridge**: the trusted channel by which the in-WordPress UI causes the host-level
-  snapshot/restore to run (mechanism TBD — see Open Questions).
+- **Host bridge**: scoped snapshot routes on the `sb web` server, authenticated by a
+  per-instance `bridge_token`, that run the host-level `sb snapshot/restore` for the
+  resolved instance (restore out-of-band).
+- **Bridge token**: a random per-instance secret (stored in `sandbox.local.yml`
+  `instances.<name>.bridge_token`, injected into the mu-plugin) that authorizes bridge calls.
 
 ## Success Criteria *(mandatory)*
 
@@ -177,6 +192,23 @@ snapshots`; deleting one removes it from both views.
   no host FS access to the snapshot store; mounting the Docker socket to enable it would
   grant the container host-root. Direct exec is only possible on Herd (host) instances,
   where snapshots aren't supported yet — so a host bridge is required for the real case.
+- Q: Which existing host server hosts the bridge endpoints? → A: **The `sb web` dashboard
+  server** (already a localhost HTTP server that routes by instance and shells `sb`). Add
+  scoped `POST snapshot`, `POST restore`, `GET snapshots`, `DELETE snapshot/<name>` routes
+  under `/api/instance/<inst>/…`. (Not the MCP server — only up during a Claude session.)
+- Q: How does the host endpoint authenticate the mu-plugin's call? → A: **Per-instance
+  shared secret.** Provision a random `bridge_token` per instance (like the autologin
+  token); the mu-plugin sends it (`Authorization: Bearer <token>`) and the server accepts
+  only the token matching that instance, else 403. The listener binds to
+  localhost/host-gateway only; the token — not network isolation alone — is the auth gate
+  (the bind may need to be reachable from the container, so it can't rely on loopback-only).
+- Q: How does the mu-plugin learn the host server URL/port? → A: **Injected at provision.**
+  Write `SANDBOX_BRIDGE_URL` (host gateway + port), `SANDBOX_BRIDGE_TOKEN`, and
+  `SANDBOX_INSTANCE` as constants into the mu-plugin when the instance is provisioned (same
+  mechanism as the mail/ssl/autologin mu-plugins); regenerated on recreate. No discovery.
+- Q: What guarantees the host server is running when the dashboard is used? → A:
+  **Auto-start with the instance.** `sb up`/`ensure` starts/refreshes the `sb web` server
+  idempotently so the bridge is reachable whenever the instance is running.
 
 ### Resolved scope (v1)
 

@@ -65,11 +65,9 @@ CONFIG_LOCAL = ROOT / "sandbox.local.yml"
 COMPOSE = ROOT / "docker-compose.yml"
 COMPOSE_DIR = ROOT / "runtime" / "compose"
 
-# Multi-instance constants. The "main" instance preserves the
-# pre-multi-instance behavior; additional instances live in
-# sandbox.yml under `instances:` and get their own compose project,
-# DB volume, WP dir, ports, and state files.
-DEFAULT_INSTANCE = "main"
+# Per-project model: every instance is owned by a project root in the on-disk
+# registry and gets its own compose project, DB volume, WP dir, ports, and state
+# files. There is no implicit/global instance.
 
 # Legacy state files (pre-multi-instance) — these are the *main* instance's
 # state on disk after the one-time migration in `cmd_apply`. New code reads
@@ -216,11 +214,12 @@ def deep_merge(a: dict, b: dict) -> dict:
 
 # --------------------- multi-instance plumbing -----------------------
 #
-# Resolution model: `instances:` is an optional top-level block in
-# sandbox.yml. Each instance inherits unset fields (ports, admin,
-# images) from the top-level `runtime:` block. If `instances:` is
-# absent entirely, we synthesize {"main": {}} so existing single-
-# instance configs keep working with zero edits.
+# Resolution model: the on-disk registry (project root -> instance) is the
+# authoritative list of instances. Per-instance config lives in the
+# `instances:` block of sandbox.local.yml (written by ensure_instance); each
+# instance inherits unset fields (ports, admin, images) from the top-level
+# `runtime:` block. There is no implicit/global instance — a registry entry is
+# required for an instance to exist.
 
 # Per-instance web server. Only the compose web tier differs; db/mailpit
 # are identical across all three.
@@ -456,14 +455,17 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
                                   runtime.get("multisite", False)),
         }
 
-    if not instances:
-        return {DEFAULT_INSTANCE: merged({})}
-    out = {name: merged(inst or {}) for name, inst in instances.items()}
-    # `main` is always implicitly available even when instances: lists
-    # only additional instances — otherwise existing scripts that don't
-    # pass --instance would suddenly fail when a `qa` block is added.
-    out.setdefault(DEFAULT_INSTANCE, merged({}))
-    return out
+    # Per-project model: the authoritative instance list is the on-disk registry
+    # (project root -> instance). Per-instance config is pulled from the merged
+    # `instances:` block (sandbox.local.yml, written by ensure_instance); a stale
+    # block with no registry entry (e.g. a legacy `main`) is ignored. There is no
+    # synthesized/implicit instance.
+    try:
+        reg_names = {e.get("instance") for e in _core().registry_all().values()
+                     if e.get("instance")}
+    except Exception:
+        reg_names = set(instances or {})
+    return {name: merged((instances or {}).get(name) or {}) for name in sorted(reg_names)}
 
 
 def compose_file(instance: str) -> Path:
@@ -1459,105 +1461,7 @@ def write_compose_files(cfg: dict) -> None:
             existing.unlink()
 
 
-def _legacy_stack_running() -> bool:
-    """True if a docker-compose stack is up under the old (pre-multi-instance)
-    project name `sandbox`, indicating an in-flight install we shouldn't
-    blindly migrate underneath of."""
-    try:
-        res = subprocess.run(
-            ["docker", "compose", "-p", "sandbox", "ps", "-q"],
-            capture_output=True, text=True, cwd=str(ROOT), timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    return bool((res.stdout or "").strip())
-
-
-def migrate_legacy_layout() -> None:
-    """One-time migration of pre-multi-instance state into the `main` slot.
-
-    Moves runtime/wp/ → runtime/wp-main/, runtime/snapshots/* into
-    runtime/snapshots/main/, and .active-project / .focus into their
-    per-instance equivalents. Leaves compat symlinks at the old paths so
-    callers that still hardcode `runtime/wp/` etc. keep working for one
-    release.
-
-    Idempotent: no-op when the new layout is already in place. Refuses
-    to migrate while a docker stack is running under the old project
-    name `sandbox` — moving runtime/wp/ to runtime/wp-main/ would yank
-    the bind-mount target out from under live containers.
-
-    Runs at most ONCE (guarded by runtime/.legacy-migrated). In the
-    multi-instance layout there is nothing to migrate, so on a fresh setup
-    this is a single no-op that then never scans runtime/snapshots/ again —
-    avoiding any per-invocation churn over per-instance snapshot dirs.
-    """
-    marker = ROOT / "runtime" / ".legacy-migrated"
-    if marker.exists():
-        return
-
-    # State files: .active-project → .active-project.main, etc.
-    # Always safe to migrate (small files, no container reads them).
-    legacy_state = [
-        (ROOT / ".active-project", active_project_file(DEFAULT_INSTANCE)),
-        (ROOT / ".focus",          focus_file(DEFAULT_INSTANCE)),
-    ]
-    for old, new in legacy_state:
-        if old.exists() and not old.is_symlink() and not new.exists():
-            old.rename(new)
-        if new.exists() and not old.exists():
-            old.symlink_to(new.name)
-
-    # WP dir + snapshots — only migrate when no legacy stack is running.
-    old_wp = ROOT / "runtime" / "wp"
-    new_wp = wp_dir(DEFAULT_INSTANCE)
-    needs_wp_migration = (old_wp.exists() and not old_wp.is_symlink()
-                          and not new_wp.exists())
-
-    if needs_wp_migration and _legacy_stack_running():
-        info(
-            "skipping runtime/wp/ → runtime/wp-main/ migration: a docker "
-            "stack is running under the old project name `sandbox`. Stop "
-            "it first: `docker compose -p sandbox down` (NOT `./sb down`, "
-            "which targets sandbox-main)."
-        )
-        return
-
-    if needs_wp_migration:
-        info(f"migrating runtime/wp/ → runtime/wp-{DEFAULT_INSTANCE}/ (one-time)")
-        old_wp.rename(new_wp)
-    if new_wp.exists() and not old_wp.exists():
-        # Compat symlink so old hardcoded refs (`./runtime/wp/...`) keep working.
-        old_wp.symlink_to(new_wp.name)
-
-    # runtime/snapshots/<name>/ → runtime/snapshots/main/<name>/
-    snap_root = ROOT / "runtime" / "snapshots"
-    main_snap = snapshots_dir(DEFAULT_INSTANCE)
-    if snap_root.exists():
-        for entry in list(snap_root.iterdir()):
-            # Skip the per-instance dirs themselves.
-            if entry.name == DEFAULT_INSTANCE or entry.is_symlink() or not entry.is_dir():
-                continue
-            # Only OLD-layout snapshots (stored directly as runtime/snapshots/<name>/
-            # with a db.sql inside) belong in the default instance's slot. A per-instance
-            # dir (runtime/snapshots/<instance>/) holds snapshot SUBDIRS, not a db.sql —
-            # moving it relocates that instance's snapshots under main/<instance>/, where
-            # cmd_snapshot/cmd_restore (which use snapshots_dir(<instance>)) can't find
-            # them. The db.sql check distinguishes the two layouts.
-            if not (entry / "db.sql").exists():
-                continue
-            main_snap.mkdir(parents=True, exist_ok=True)
-            target = main_snap / entry.name
-            if not target.exists():
-                entry.rename(target)
-
-    # Migration complete (or nothing to migrate) — never run again. Reached only when
-    # not deferred by the running-legacy-stack early return above.
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.touch()
-
-
-def compose(*args: str, instance: str = DEFAULT_INSTANCE,
+def compose(*args: str, instance: str,
             check: bool = True, capture: bool = False):
     """Run `docker compose` against one instance's stack.
 
@@ -1580,7 +1484,7 @@ def compose(*args: str, instance: str = DEFAULT_INSTANCE,
     )
 
 
-def wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
+def wpcli(args: list[str], instance: str,
           check: bool = True, capture: bool = False):
     """Run wp-cli against an instance. Docker instances exec in the wpcli
     container; herd instances run the HOST wp with --path at the same WP dir —
@@ -2107,7 +2011,7 @@ def _force_symlink(link: Path, src: Path) -> None:
     link.symlink_to(src)
 
 
-def _active_project_name(instance: str = DEFAULT_INSTANCE) -> str | None:
+def _active_project_name(instance: str) -> str | None:
     apf = active_project_file(instance)
     return apf.read_text().strip() if apf.exists() else None
 
@@ -3733,14 +3637,19 @@ def _pick_instance_ports(cfg: dict) -> dict[str, int]:
     same numeric neighborhood (8188 → 8189 → 8190 …).
     """
     instances = resolve_instances(cfg)
-    main = instances.get(DEFAULT_INSTANCE, {})
     used: set[int] = set()
     for inst in instances.values():
         used.update({inst["wordpress_port"], inst["db_port"], inst["mailpit_port"]})
+    # Base ports for the instance neighborhood (8188 → 8189 …); overridable via
+    # the top-level runtime: block. No dependency on a `main` instance.
+    runtime = cfg.get("runtime", {}) or {}
+    base_wp = runtime.get("wordpress_port", 8188)
+    base_db = runtime.get("db_port", 3318)
+    base_mp = runtime.get("mailpit_port", 8125)
     return {
-        "wordpress_port": _next_free_port(main.get("wordpress_port", 8188) + 1, used),
-        "db_port": _next_free_port(main.get("db_port", 3318) + 1, used),
-        "mailpit_port": _next_free_port(main.get("mailpit_port", 8125) + 1, used),
+        "wordpress_port": _next_free_port(base_wp + 1, used),
+        "db_port": _next_free_port(base_db + 1, used),
+        "mailpit_port": _next_free_port(base_mp + 1, used),
     }
 
 
@@ -4070,11 +3979,10 @@ def _core():
 def _cwd_instance() -> str | None:
     """Resolve the instance owning the current working directory's project via
     the on-disk registry. Returns the instance name, or None when cwd isn't a
-    registered project (caller then falls back to DEFAULT_INSTANCE).
+    registered project (the caller then errors — there is no fallback instance).
 
     This is what lets `sb <cmd>` (no --instance) target the project you're
-    standing in instead of the implicit 'main' — mirroring how the MCP tools
-    route by project_dir."""
+    standing in — mirroring how the MCP tools route by project_dir."""
     sc = _core()
     try:
         root = sc.find_project_root(Path.cwd())
@@ -4093,7 +4001,7 @@ def _derive_instance_name(root: str, taken: set) -> str:
     if not re.match(r"^[a-z0-9]", base):
         base = "p-" + base
     name, i = base, 2
-    while name in taken or name == DEFAULT_INSTANCE:
+    while name in taken:
         name, i = f"{base}-{i}", i + 1
     return name
 
@@ -5156,11 +5064,6 @@ def cmd_instance(cfg, args) -> None:
             "and contain only [a-z0-9_-] (max 31 chars)")
 
     # delete
-    if name == DEFAULT_INSTANCE:
-        die(f"refusing to delete the '{DEFAULT_INSTANCE}' instance — "
-            f"it's the implicit default. Use `./sb clean` to wipe its "
-            f"data, or remove the runtime: block from sandbox.yml.")
-
     instances = resolve_instances(cfg)
     if name not in instances:
         die(f"unknown instance '{name}'. Defined: "
@@ -5979,10 +5882,6 @@ def _dash_run(stdscr, cfg):
                     input("\n[enter] to return…")
                 reload_rows()
         elif c == ord("d"):               # delete (confirm)
-            if name == DEFAULT_INSTANCE:
-                _dash_flash(stdscr, "refusing to delete 'main' — use ./sb clean")
-                stdscr.getch()
-                continue
             typed = _dash_prompt(stdscr, f"type '{name}' to delete: ")
             if typed == name:
                 with _curses_suspended(stdscr):
@@ -6443,8 +6342,6 @@ def _web_do_action(payload: dict) -> dict:
                 "inside a plugin repo — not from the dashboard."}
 
     if action == "delete":
-        if name == DEFAULT_INSTANCE:
-            return {"ok": False, "output": "refusing to delete 'main'"}
         if payload.get("confirm") != name:
             return {"ok": False,
                     "output": "delete requires confirm == instance name"}
@@ -6961,13 +6858,12 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
     # we register it on the top-level parser AND inject the same flag onto
-    # every subparser. Default is None so we can distinguish "user
-    # explicitly chose main" from "user didn't say"; resolved below to
-    # honor $SANDBOX_INSTANCE if set.
+    # every subparser. Default is None so we can distinguish "user chose an
+    # instance" from "user didn't say"; resolved below.
     p.add_argument("--instance", default=None,
         help="Which sandbox instance to target (default: $SANDBOX_INSTANCE, "
-             "else the instance registered for the current project dir, "
-             "else 'main')")
+             "else the instance registered for the current project dir; "
+             "errors if neither resolves)")
     for sp_name, sp_parser in (sub.choices or {}).items():
         # Don't double-add when a subparser already has --instance
         # (none currently do; future-proof).
@@ -6987,44 +6883,43 @@ Per-project (each plugin carries its own sandbox.config.json):
     cfg = load_config()
 
     # Resolve which instance this invocation targets. Precedence:
-    #   1. explicit --instance        2. $SANDBOX_INSTANCE
-    #   3. the registry instance for the cwd's project   4. 'main' fallback
-    # Step 3 is what makes `sb <cmd>` in a plugin dir target THAT project's
-    # instance — so the common case never has to pass --instance and never
-    # silently hits 'main'. 'main' remains only as a last resort for a cwd that
-    # isn't a registered project.
+    #   1. explicit --instance   2. $SANDBOX_INSTANCE
+    #   3. the registry instance for the cwd's project   4. error
+    # There is no implicit/global instance: `sb <cmd>` in a project dir targets
+    # THAT project's instance; run outside any registered project (and not
+    # project-routed) it aborts with guidance rather than targeting a fallback.
     instances = resolve_instances(cfg)
     explicit = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE")
-    chosen = explicit or _cwd_instance() or DEFAULT_INSTANCE
-    # Registry-resolved (per-project) instances are valid by construction even
-    # though they don't appear in sandbox.yml's `instances:` block, so the
-    # unknown-instance gate below must accept them too.
-    registry_instances = {
-        e.get("instance") for e in _core().registry_all().values() if e.get("instance")
-    }
-    known = set(instances) | registry_instances
+    chosen = explicit or _cwd_instance()
     # Project-dir-routed commands derive their instance from the project root
-    # (registry / ensure_instance), not this global gate — so a stale
-    # SANDBOX_INSTANCE in the shell env or an --instance naming a not-yet-created
-    # instance must NOT abort them.
+    # (registry / ensure_instance), not this global gate.
     PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke"}
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
-    # sandbox.yml setup alias and stays instance-gated.
+    # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
-    if chosen not in known:
-        if args.cmd in PROJECT_ROUTED:
-            chosen = DEFAULT_INSTANCE   # unused by these handlers; keep it valid
-        else:
-            die(f"unknown instance '{chosen}'. Defined: "
-                f"{', '.join(sorted(known))}.\n"
-                f"Add it under `instances:` in sandbox.yml, or pick one above.")
+    # Instance-scoped commands operate on ONE instance and require resolution.
+    # Everything else is registry-wide/global (instances, dashboard, web, setup,
+    # global, uninstall, domains, …) or takes its own name/project arg, so an
+    # unresolved instance is fine for them.
+    INSTANCE_SCOPED = {
+        "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
+        "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
+        "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
+    }
+    if chosen is None:
+        if args.cmd in INSTANCE_SCOPED:
+            _known = ", ".join(sorted(instances))
+            die("no sandbox instance for this directory. cd into a registered "
+                "project, or run `sb init` / `sb ensure` to create one."
+                + (f"\nKnown instances: {_known}" if _known else ""))
+    elif chosen not in instances and args.cmd not in PROJECT_ROUTED:
+        die(f"unknown instance '{chosen}'. "
+            f"Known: {', '.join(sorted(instances)) or '(none)'}.")
     args.resolved_instance = chosen
 
-    # One-time migration of pre-multi-instance layout into the 'main' slot,
-    # then (re)generate per-instance compose files so they're always in sync
-    # with sandbox.yml. Both are cheap + idempotent.
-    migrate_legacy_layout()
+    # (Re)generate per-instance compose files so they're always in sync with the
+    # registered instances. Cheap + idempotent.
     write_compose_files(cfg)
     # Keep the legacy `.env` populated so anyone still invoking the
     # checked-in docker-compose.yml directly (out-of-tree scripts, older

@@ -43,7 +43,6 @@ PROXY_CERTS_DIR = PROXY_DIR / "certs"
 PROXY_CADDYFILE = PROXY_DIR / "Caddyfile"
 PROXY_COMPOSE = PROXY_DIR / "proxy.yml"
 PROXY_PROJECT = "sandbox-proxy"
-DEFAULT_INSTANCE = "main"
 
 
 # MCP-first model: ONE server. Every tool takes `project_dir` and resolves the
@@ -301,7 +300,7 @@ mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)
 
 # ----------------------------- helpers -------------------------------
 
-def _compose(*args: str, instance: str = DEFAULT_INSTANCE,
+def _compose(*args: str, instance: str,
              capture: bool = True, timeout: int = 60) -> dict:
     cf = _compose_file(instance)
     if not cf.exists():
@@ -441,7 +440,7 @@ def _herd_host_env(instance: str) -> dict:
     return env
 
 
-def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
+def _wpcli(args: list[str], instance: str,
            timeout: int = 60) -> dict:
     if _is_herd(instance):
         # Run wp-cli (a phar) under the instance's PINNED PHP, not the phar's
@@ -454,7 +453,7 @@ def _wpcli(args: list[str], instance: str = DEFAULT_INSTANCE,
                     instance=instance, timeout=timeout)
 
 
-def _wpcli_shell(shell_cmd: str, instance: str = DEFAULT_INSTANCE,
+def _wpcli_shell(shell_cmd: str, instance: str,
                  timeout: int = 60) -> dict:
     """Run a wp-cli command through sh -c so $(...) / pipes work. For herd
     instances the shell runs on the host with cwd at the WP root; PATH is

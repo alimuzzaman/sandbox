@@ -30,7 +30,7 @@ const I = {
   trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>`,
 };
 
-// The action menu for one instance row, gated by running state + the main guard.
+// The action menu for one instance row, gated by running state.
 function rowMenuItems(r: Instance): RowMenuItem[] {
   const n = JSON.stringify(r.name);
   const items: RowMenuItem[] = [
@@ -45,9 +45,8 @@ function rowMenuItems(r: Instance): RowMenuItem[] {
     { label: "Snapshot", icon: I.snapshot, js: `sb.doSnapshot(${n})` },
     { label: "Restore…", icon: I.restore, js: `sb.doRestore(${n})` },
   ];
-  // `main` can't be deleted (matches the instance page + backend guard).
-  if (r.name !== "main")
-    items.push({ label: "Delete", icon: I.trash, js: `sb.doDelete(${n})`, danger: true });
+  // Every instance is a per-project instance and can be deleted.
+  items.push({ label: "Delete", icon: I.trash, js: `sb.doDelete(${n})`, danger: true });
   return items;
 }
 

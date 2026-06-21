@@ -104,6 +104,7 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     sub.add_parser("doctor", help="Audit the stack and report problems")
     sub.add_parser("smoke",  help="Self-test: boot a fresh instance, REST probe, tear down")
+    sub.add_parser("selftest", help="Run the sandbox tooling's own unit tests (tests/)")
 
     f = sub.add_parser("focus",
         help="Set/show which plugin Claude defaults to working on")

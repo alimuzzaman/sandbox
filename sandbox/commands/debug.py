@@ -158,8 +158,24 @@ def cmd_test(cfg, args) -> None:
     else:
         die(f"tests failed (phpunit exit {code})")
 
+def cmd_selftest(cfg, args) -> None:
+    """Run the sandbox tooling's OWN unit tests (tests/) — the CLI/package, not a
+    plugin. Uses the .cli-venv python (PyYAML available); falls back to the
+    current interpreter."""
+    import subprocess
+    py = CLI_VENV / "bin" / "python"
+    py = str(py) if py.exists() else sys.executable
+    rc = subprocess.run(
+        [py, "-m", "unittest", "discover", "-s", str(ROOT / "tests"), "-v"],
+        cwd=str(ROOT)).returncode
+    if rc != 0:
+        die("selftest: FAILED")
+    ok("selftest: passed")
+
+
 register({
     'xdebug': cmd_xdebug,
     'introspect': cmd_introspect,
     'test': cmd_test,
+    'selftest': cmd_selftest,
 })

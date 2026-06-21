@@ -56,7 +56,11 @@ rm -rf \
   "$STAGE/sandbox/skills/sandbox-release" \
   "$STAGE/sandbox/deploy" \
   "$STAGE/sandbox/docs" \
+  "$STAGE/sandbox/.specify" \
+  "$STAGE/sandbox/specs" \
   "$STAGE/sandbox/.github" 2>/dev/null || true
+# spec-kit dev tooling never ships (FR-009): the speckit-* skills + .specify/.
+rm -rf "$STAGE"/sandbox/skills/speckit-* 2>/dev/null || true
 
 # Sanity: the built web bundle MUST be present (it's what `./sb web` serves).
 if [ ! -f "$STAGE/sandbox/config/sandbox-web.js" ]; then

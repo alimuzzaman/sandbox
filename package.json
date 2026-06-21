@@ -32,6 +32,7 @@
   "files": [
     "bin/",
     "sb",
+    "sandbox/",
     "sandbox_core.py",
     "sandbox.yml",
     "docker-compose.yml",
@@ -40,6 +41,7 @@
     "tools/",
     "skills/",
     "!skills/sandbox-release/**",
+    "!skills/speckit-*/**",
     "workflows/",
     "scripts/web-install.sh",
     "install.sh",

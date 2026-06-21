@@ -143,6 +143,25 @@ CLI and the release tarball still work.
 - **FR-010**: Each removal of old-model code MUST be a separately verifiable change, gated
   on live-stack proof of the per-project replacement (per constitution Principle VI).
 
+## Clarifications
+
+### Session 2026-06-21
+
+- Q: How fine-grained should "every feature is a module" be? → A: **A 10-group `sandbox/`
+  Python package** — `core/` (config, registry, docker, domains, provision, ui shared
+  helpers) + `commands/` grouped by feature area (lifecycle, instances, data, wp, net,
+  debug, integ, ui_dash, uninstall). `sb` stays a thin entry file. Not per-command
+  modules (too fragmented) and not a pluggable entry-point system (no external feature
+  plugins needed).
+- Q: Is the legacy `main` instance disposable, or do we need a migrator before removal?
+  → A: **Disposable — no migrator.** No machine is assumed to hold irreplaceable content
+  only in a `main` instance; `main` is removed directly. Anyone wanting that content as a
+  project re-runs `sb init` in the relevant directory.
+- Q: Where do the spec-kit dev artifacts live? → A: **Committed but excluded from the
+  shipped product.** Keep `.specify/`, `specs/`, and `skills/speckit-*` in the repo for
+  the team, but exclude `.specify/` and `skills/speckit-*` from `package.json` `files`
+  and the `scripts/make-release.sh` prune so they never ship to end users (FR-009).
+
 ### Key Entities
 
 - **Instance**: a per-project WordPress stack (containers/host, DB, WP dir, ports),

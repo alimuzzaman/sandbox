@@ -158,16 +158,28 @@ snapshots`; deleting one removes it from both views.
 - This feature depends on the per-project instance model (spec 001) for correctly
   identifying the current instance.
 
-## Open Questions (for `/speckit-clarify`)
+## Clarifications
 
-1. **Host-bridge mechanism**: how does the in-WordPress UI trigger the host-level
-   snapshot/restore? Candidate approaches to decide between: (a) a small localhost-bound
-   host agent/daemon that runs `sb snapshot/restore`; (b) a request-file dropped in a
-   bind-mounted control dir that a host watcher executes; (c) exposing the operations
-   through the existing MCP server / a REST endpoint the mu-plugin calls; (d) an
-   in-container approximation writing to a bind-mounted path picked up host-side. This is
-   the load-bearing architectural decision and gates the plan.
-2. **Restore-while-serving**: run the restore out-of-band (host) so the serving request
-   doesn't sever its own DB, vs. a guarded in-request flow — confirm the approach.
-3. **Scope of v1**: take + restore + list only, or also delete and rename? Include herd or
-   defer?
+### Session 2026-06-21
+
+- Q: How does the in-WordPress UI trigger the host-level snapshot/restore, given the
+  container boundary? → A: **Reuse the existing host server.** Add scoped
+  snapshot/restore/list/delete endpoints to the host process that already exists and
+  already shells `sb` per-instance (the `sb web` dashboard server / MCP server). The
+  mu-plugin (inside the container) calls it over the host gateway
+  (`host.docker.internal`). No new standing daemon. The endpoints accept ONLY the four
+  snapshot verbs for the resolved instance — never arbitrary `sb` subcommands.
+- Q: How is the restore-while-serving hazard handled? → A: The host server runs the
+  restore **out-of-band** (a separate `sb restore` process on the host), so the serving
+  HTTP request never resets its own DB connection. The mu-plugin polls for completion.
+- Q: Why not have the mu-plugin call `./sb` directly? → A: In Docker mode (default) the
+  mu-plugin's PHP runs inside the WP container, which has no `sb`, no Docker socket, and
+  no host FS access to the snapshot store; mounting the Docker socket to enable it would
+  grant the container host-root. Direct exec is only possible on Herd (host) instances,
+  where snapshots aren't supported yet — so a host bridge is required for the real case.
+
+### Resolved scope (v1)
+
+- v1 targets **Docker-backed instances**; Herd is deferred until CLI snapshot support for
+  Herd lands (the dashboard surfaces the unsupported state per FR-007/SC-005).
+- v1 operations: **take, restore, list, delete** (per the user stories above).

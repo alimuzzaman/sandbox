@@ -1,6 +1,6 @@
 # Implementation Plan: Snapshot & Restore from the WordPress Dashboard
 
-**Branch**: `cwd-instance-resolution` (worktree) | **Date**: 2026-06-21 | **Spec**: [spec.md](./spec.md)
+**Feature**: `002-dashboard-snapshots` | **Branch**: `cwd-instance-resolution` (shared worktree branch) | **Date**: 2026-06-21 | **Spec**: [spec.md](./spec.md)
 
 **Input**: Feature specification from `specs/002-dashboard-snapshots/spec.md`
 

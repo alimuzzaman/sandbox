@@ -1,6 +1,6 @@
 # Feature Specification: Snapshot & Restore from the WordPress Dashboard
 
-**Feature Branch**: `002-dashboard-snapshots`
+**Feature Branch**: `002-dashboard-snapshots` (feature directory; developed on the shared worktree branch `cwd-instance-resolution`)
 
 **Created**: 2026-06-21
 

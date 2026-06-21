@@ -650,3 +650,8 @@ Cross-reference with the full path:
 Anything that mutates state on disk or in Docker should be safe to re-run.
 `./sb setup` is idempotent — re-run it after editing `sandbox.yml`
 to apply changes. New commands should follow the same shape.
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+<!-- SPECKIT END -->

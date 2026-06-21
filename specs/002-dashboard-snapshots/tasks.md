@@ -141,3 +141,36 @@ doesn't error mid-restore.
   complexity, so land it right after the MVP proves the bridge.
 - **US3 (list/delete)** is thin once the bridge + job model exist.
 - Each phase ends at a live-verification checkpoint; do not proceed past a failing one.
+
+---
+
+## Implementation status — 2026-06-21 (branch `impl/dashboard-snapshots`, on top of 001)
+
+Host side **implemented + verified**; the bridge reuses the existing `sb web`
+job/snapshot machinery (so the spec's host-bridge largely pre-existed).
+
+- **Foundational** (`92e694c`): per-instance `bridge_token` (minted in `cmd_install`,
+  docker only) · `_write_snapshot_muplugin` generates `00-sandbox-snapshots.php`
+  (Tools → Sandbox Snapshots; admin-ajax handlers enforce nonce + `manage_options`,
+  proxy to the bridge with the Bearer token) · `_bridge_handle` token-authed routes
+  on `sb web`: `GET /snapshots`, `POST /snapshot`, `POST /restore`,
+  `DELETE /snapshot/<name>`, `GET /job/<id>` (out-of-band via `_start_job`). ✅
+- **Reachability + lifecycle** (`a68ffdb`): `extra_hosts host.docker.internal` on
+  the web services; `_ensure_bridge_server()` auto-starts `sb web` on BRIDGE_PORT
+  (idempotent); `cmd_up` re-asserts the mu-plugin + bridge. ✅
+
+**Verified (host side):** `_bridge_handle` auth + routing (403/200/404/400) directly
+AND over HTTP through a live `sb web`; generated mu-plugin passes `php -l` in the
+container; compose renders `extra_hosts`; bridge auto-start up in ~2s, idempotent.
+
+**Architecture note:** the mu-plugin uses the **server-side** path (PHP admin-ajax,
+nonce+cap, → bridge over `host.docker.internal` with the Bearer token), keeping
+FR-004's nonce. This matches the clarified container→host design.
+
+**Remaining — manual browser verification (needs wp-admin):** re-provision an
+instance so the mu-plugin + token land (`sb install`/`sb ensure --recreate` or
+`sb apply` then `sb up`), then in **Tools → Sandbox Snapshots**: take `t1` (→
+appears in `sb snapshots`), mutate state, restore `t1`, list, delete — i.e.
+quickstart S1–S6. On herd instances the feature is intentionally absent (v1).
+Note: `extra_hosts` changes mean existing instances need a `sb apply`/recreate to
+pick up container→host reachability.

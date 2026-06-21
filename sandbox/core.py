@@ -3685,6 +3685,7 @@ def proxy_teardown(cfg) -> None:
     ok("HTTPS proxy torn down (certs left in runtime/proxy/certs — delete "
        "manually if desired).")
 
+@contextmanager
 def _curses_suspended(stdscr):
     """Drop out of curses to run normal terminal I/O (a cmd_* with its prints,
     or an input() prompt), then restore the full-screen UI."""

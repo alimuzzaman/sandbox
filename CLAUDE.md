@@ -383,9 +383,14 @@ sandbox ensure                        # boot/refresh (create-if-missing)
 ./sb instance delete <name>           # tear one down (containers, volume, dir, registry)
 ```
 
-CLI commands still accept `--instance <name>` to target a specific one;
-`ensure`/`test`/`init` take `--project-dir`. The MCP tools route by
-`project_dir` (no `instance=` needed; pass it only to override).
+CLI commands resolve their target instance by this precedence: explicit
+`--instance <name>` → `$SANDBOX_INSTANCE` → **the instance registered for the
+current working directory's project** (via the registry) → `main` as a last
+resort. So `cd` into a plugin checkout and bare `./sb status` / `./sb wp …`
+target that project's instance with no flag — `main` is only hit from a dir
+that isn't a registered project. `ensure`/`test`/`init` take `--project-dir`.
+The MCP tools route by `project_dir` (no `instance=` needed; pass it only to
+override).
 
 ### Web server per project (apache / nginx / litespeed)
 

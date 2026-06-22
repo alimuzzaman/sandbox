@@ -28,6 +28,7 @@ import sandbox.commands.data  # noqa: F401  (registers commands)
 import sandbox.commands.wp  # noqa: F401  (registers commands)
 import sandbox.commands.net  # noqa: F401  (registers commands)
 import sandbox.commands.debug  # noqa: F401  (registers commands)
+import sandbox.commands.abilities  # noqa: F401  (registers commands)
 import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
@@ -139,6 +140,9 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     xd = sub.add_parser("xdebug", help="Toggle Xdebug in the WP container")
     xd.add_argument("state", choices=["on", "off", "status"])
+
+    ab = sub.add_parser("abilities", help="Toggle the in-instance WP Abilities layer (spec 003)")
+    ab.add_argument("state", choices=["on", "off", "status"])
 
     isp = sub.add_parser("introspect",
         help="Dump live block/widget/shortcode registries to runtime/cache/*.json")
@@ -302,6 +306,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
+        "abilities",
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:

@@ -42,7 +42,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: the layer toggles per instance and every ability enforces auth + capability.
 **Independent test**: disable → endpoint empty/403; enable → under-privileged caller refused.
 
-- [ ] T010 [US5] Implement `./sb abilities on|off|status` in `sandbox/commands/abilities.py` (instance-resolved; sets option + mirrors to `sandbox.local.yml`; `status` prints endpoint + WP-support + the "dev/staging only" banner per FR-006), self-registered in `sandbox/registry.py`.
+- [x] T010 [US5] Implement `./sb abilities on|off|status` in `sandbox/commands/abilities.py` (instance-resolved; sets the `sandbox_abilities_enabled` option; `status` prints endpoint + the "dev/staging only" banner), self-registered + added to `INSTANCE_SCOPED` + imported in cli.py. **DONE + live-verified**: `off` → `wp_has_ability` NOT registered; `on` → registered; `status` prints state/endpoint/banner. (sandbox.local.yml mirror deferred — the WP option is authoritative for the mu-plugin.)
 - [ ] T011 [US5] Live verification (quickstart §6): disabled → no abilities exposed + calls 403; enabled → call without valid app password / without `manage_options` is refused.
 
 ## Phase 5: User Story 2 — Any MCP client connects directly (P1)

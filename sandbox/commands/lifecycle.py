@@ -82,6 +82,11 @@ def cmd_status(cfg, args) -> None:
         ok(f"Focused plugin: {ff.read_text().strip()}")
     else:
         info("No focused plugin (run: ./sb focus <slug>)")
+    # Keep the wp-admin snapshot bridge reachable for running instances (it only
+    # auto-starts on `sb up`, so an already-running instance would otherwise have
+    # no bridge — Tools → Sandbox Snapshots would fail to connect).
+    if not _is_herd_instance(inst) and _bridge_token_for(inst):
+        _ensure_bridge_server()
 
 def cmd_logs(cfg, args) -> None:
     if _is_herd_instance(args.resolved_instance):

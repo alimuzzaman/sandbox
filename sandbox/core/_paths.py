@@ -195,7 +195,10 @@ function sandbox_snapshots_bridge( $method, $path, $body = null ) {
 	$url = SANDBOX_BRIDGE_URL . '/api/instance/' . rawurlencode( SANDBOX_INSTANCE ) . $path;
 	$res = wp_remote_request( $url, $args );
 	if ( is_wp_error( $res ) ) {
-		return array( 'ok' => false, 'error' => $res->get_error_message() );
+		return array( 'ok' => false, 'error' =>
+			'Sandbox bridge not reachable (' . $res->get_error_message() .
+			'). Start it on the host: run `./sb up ' . SANDBOX_INSTANCE .
+			'` (or `./sb web`).' );
 	}
 	$code = wp_remote_retrieve_response_code( $res );
 	$data = json_decode( wp_remote_retrieve_body( $res ), true );

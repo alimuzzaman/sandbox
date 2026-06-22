@@ -3437,6 +3437,10 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
                 "-e", "COMPOSER_HOME=/tmp/composer",
                 "-e", "COMPOSER_ALLOW_SUPERUSER=1",
                 "-v", f"{tools['composer']}:/composer.phar:ro",
+                # Mount the project root at its own path so composer (and phpunit
+                # below) see it even when the project lives OUTSIDE plugins_home
+                # (the base compose only bind-mounts plugins_home).
+                "-v", f"{plug}:{plug}",
                 "-w", plug, "--entrypoint", "sh", "wpcli", "-c"]
         r = compose(*base, f"{ensure_git}; php /composer.phar install {flags}",
                     instance=inst, check=False, capture=True)
@@ -3451,6 +3455,9 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
                 "-v", f"{suite}:/wordpress-phpunit",
                 "-v", f"{tools['polyfills']}:/wp-phpunit-polyfills:ro",
                 "-v", f"{tools['phpunit']}:/phpunit.phar:ro",
+                # The project root (phpunit.xml + tests/) — mounted explicitly so
+                # `sb test` works for projects outside plugins_home too.
+                "-v", f"{plug}:{plug}",
                 "-e", "WP_TESTS_DIR=/wordpress-phpunit",
                 "-e", "WP_TESTS_PHPUNIT_POLYFILLS_PATH=/wp-phpunit-polyfills",
                 "-w", plug, "--entrypoint", "php", "wpcli",

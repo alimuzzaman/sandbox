@@ -61,6 +61,12 @@ SNAPSHOTS_DIR = ROOT / "runtime" / "snapshots"
 SEEDS_DIR = ROOT / "runtime" / "seeds"
 
 
+# Shared plugin/theme/core download cache (one dir for ALL instances — see the
+# `wp-cli` / `wp-http` subdirs). Bind-mounted into every instance's tiers.
+DL_CACHE_DIR = ROOT / "runtime" / "dl-cache"
+__all__ += ['DL_CACHE_DIR']
+
+
 MCP_DIR = ROOT / "mcp" / "wp-server"
 
 

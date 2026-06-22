@@ -30,6 +30,7 @@ import sandbox.commands.net  # noqa: F401  (registers commands)
 import sandbox.commands.debug  # noqa: F401  (registers commands)
 import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
+import sandbox.commands.cache  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 
 
@@ -240,6 +241,15 @@ Per-project (each plugin carries its own sandbox.config.json):
         default="list")
     dm.add_argument("tld", nargs="?",
         help="Local TLD for clean URLs (e.g. tst). On `setup`, prompted if omitted.")
+
+    ca = sub.add_parser("cache",
+        help="Inspect or clear the shared plugin/theme/core download cache")
+    ca.add_argument("action", nargs="?", choices=["info", "clear"], default="info",
+        help="info (default) shows size/counts; clear empties it")
+    ca.add_argument("layer", nargs="?", choices=["wp-cli", "wp-http"],
+        help="limit `clear` to one layer (default: both)")
+    ca.add_argument("--yes", action="store_true",
+        help="skip the confirmation prompt on `clear`")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

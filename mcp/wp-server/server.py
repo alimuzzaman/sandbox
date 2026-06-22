@@ -21,6 +21,7 @@ import tools.data  # noqa: F401
 import tools.fs  # noqa: F401
 import tools.mail  # noqa: F401
 import tools.context  # noqa: F401
+import tools.cache  # noqa: F401
 
 
 

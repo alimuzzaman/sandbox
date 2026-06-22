@@ -307,7 +307,7 @@ traps, and minimum verification rules by changed area.
 
 ---
 
-## MCP surface (one `sandbox` server, ~21 tools)
+## MCP surface (one `sandbox` server, ~23 tools)
 
 There is **one** MCP server, `sandbox` (`mcp__sandbox__*`). Every tool takes a
 **required `project_dir`** and resolves the target instance from the on-disk
@@ -335,6 +335,7 @@ else your cwd. Pass `instance=` only to deliberately override the resolved one.
 | `focus_get` | The project's focused plugin + its `CLAUDE.md` |
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | WXR import from `runtime/seeds/` |
+| `cache_info` / `cache_clear` | Inspect / empty the shared plugin/theme/core download cache (global; no `project_dir`). CLI equiv: `./sb cache [info\|clear]` |
 | `load_context` / `load_skill` / `load_workflow` | Pull the deep guide / a skill / a workflow on demand |
 
 ### The project handshake (this is mandatory)
@@ -650,8 +651,9 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     elapsed; within the window it serves with no upstream call. It ALWAYS hands
     WP a throwaway temp copy because `WP_Upgrader` deletes the package it
     returns — returning the cache file directly would delete it after one use.
-    The cache dir is shared across instances; clear it with
-    `rm -rf runtime/dl-cache/*` (gitignored). Not on herd.
+    The cache dir is shared across instances; inspect/clear it with
+    `./sb cache [info|clear]` (or the `cache_info`/`cache_clear` MCP tools) —
+    gitignored. Not on herd.
 
 16. **Install-time secrets must survive a block rebuild.** `bridge_token`,
     `app_password`, and `autologin_token` live in the `sandbox.local.yml`

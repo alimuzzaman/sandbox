@@ -320,6 +320,67 @@ volumes:
 """
 
 
+# The shared download cache's layers, in display order. wp-cli holds wp-cli's
+# own versioned cache (plugin/theme/core installs); wp-http holds the runtime
+# HTTP cache the dl-cache mu-plugin populates (Templately FSI etc.).
+_DL_CACHE_LAYERS = {
+    "wp-cli": "wp-cli install cache (plugins/themes/core)",
+    "wp-http": "WP runtime cache (Templately FSI etc.)",
+}
+
+
+def _human_bytes(n: int) -> str:
+    """Compact human-readable size, e.g. 1.4 MB."""
+    f = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if f < 1024 or unit == "TB":
+            return f"{f:.0f} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+        f /= 1024
+    return f"{n} B"
+
+
+def dl_cache_info() -> dict:
+    """File count + byte size of the shared download cache, per layer. Pure
+    read — used by `./sb cache` and the MCP cache_info tool."""
+    layers = []
+    for sub, label in _DL_CACHE_LAYERS.items():
+        d = DL_CACHE_DIR / sub
+        files = [f for f in d.rglob("*") if f.is_file()] if d.is_dir() else []
+        layers.append({
+            "name": sub, "label": label, "path": str(d),
+            "files": len(files),
+            "bytes": sum(f.stat().st_size for f in files),
+        })
+    return {
+        "dir": str(DL_CACHE_DIR),
+        "layers": layers,
+        "total_files": sum(l["files"] for l in layers),
+        "total_bytes": sum(l["bytes"] for l in layers),
+    }
+
+
+def dl_cache_clear(layer: str | None = None) -> dict:
+    """Empty the shared download cache (optionally a single layer: wp-cli |
+    wp-http). Re-creates the now-empty dirs 0777 so the next compose run finds
+    them ready to bind-mount. Returns the freed byte count."""
+    if layer and layer not in _DL_CACHE_LAYERS:
+        raise ValueError(f"unknown cache layer '{layer}' "
+                         f"(expected one of {', '.join(_DL_CACHE_LAYERS)})")
+    subs = [layer] if layer else list(_DL_CACHE_LAYERS)
+    freed = 0
+    for sub in subs:
+        d = DL_CACHE_DIR / sub
+        if d.is_dir():
+            freed += sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            d.chmod(0o777)
+        except OSError:
+            pass
+    return {"cleared": subs, "freed_bytes": freed}
+
+
 def write_compose_files(cfg: dict) -> None:
     """Regenerate one compose file per instance under runtime/compose/.
 
@@ -332,8 +393,8 @@ def write_compose_files(cfg: dict) -> None:
     # + wpcli tiers. Pre-create them 0777 so the bind mount isn't created
     # root-owned by Docker (the container uids — www-data 33 / lsphp 1000 —
     # must be able to write cached zips).
-    for sub in ("wp-cli", "wp-http"):
-        d = ROOT / "runtime" / "dl-cache" / sub
+    for sub in _DL_CACHE_LAYERS:
+        d = DL_CACHE_DIR / sub
         d.mkdir(parents=True, exist_ok=True)
         try:
             d.chmod(0o777)

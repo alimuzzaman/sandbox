@@ -11,6 +11,7 @@ live instance (doctor/wp/bridge over HTTP) is exercised separately.
 """
 import os
 import sys
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -302,6 +303,50 @@ class TestSmallHelpers(unittest.TestCase):
         self.assertEqual(core._extra_vol_lines({"extra_mounts": []}), "")
         self.assertIn("/host/path",
                       core._extra_vol_lines({"extra_mounts": ["/host/path"]}))
+
+
+class TestDownloadCache(unittest.TestCase):
+    """The shared download cache helpers (`./sb cache` + cache_* MCP tools)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="sb-dlcache-"))
+        # The helpers read DL_CACHE_DIR from the _docker module namespace.
+        self._orig = core._docker.DL_CACHE_DIR
+        core._docker.DL_CACHE_DIR = self.tmp
+
+    def tearDown(self):
+        core._docker.DL_CACHE_DIR = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cache_command_registered(self):
+        self.assertIn("cache", COMMANDS)
+
+    def test_info_empty(self):
+        nfo = core.dl_cache_info()
+        self.assertEqual(nfo["total_files"], 0)
+        self.assertEqual(nfo["total_bytes"], 0)
+        self.assertEqual([l["name"] for l in nfo["layers"]], ["wp-cli", "wp-http"])
+
+    def test_info_counts_then_clear(self):
+        (self.tmp / "wp-cli" / "plugin").mkdir(parents=True)
+        (self.tmp / "wp-cli" / "plugin" / "foo-1.0.zip").write_bytes(b"x" * 100)
+        (self.tmp / "wp-http").mkdir(parents=True)
+        (self.tmp / "wp-http" / "abc.zip").write_bytes(b"y" * 50)
+        nfo = core.dl_cache_info()
+        self.assertEqual(nfo["total_files"], 2)
+        self.assertEqual(nfo["total_bytes"], 150)
+        # Clearing one layer leaves the other intact and recreates the empty dir.
+        res = core.dl_cache_clear("wp-http")
+        self.assertEqual(res["freed_bytes"], 50)
+        self.assertTrue((self.tmp / "wp-http").is_dir())
+        self.assertEqual(core.dl_cache_info()["total_files"], 1)
+        # Clearing all empties everything.
+        core.dl_cache_clear()
+        self.assertEqual(core.dl_cache_info()["total_files"], 0)
+
+    def test_clear_rejects_unknown_layer(self):
+        with self.assertRaises(ValueError):
+            core.dl_cache_clear("nope")
 
 
 if __name__ == "__main__":

@@ -184,12 +184,15 @@ All stages implemented and live-verified against the real registry (6 instances)
 Acceptance: SC-001 (no `main`) ✅ · SC-002 (zero legacy refs) ✅ · SC-003 (parity, REST 200)
 ✅ · SC-004 (runs via `./sb` AND `node bin/sandbox.js`) ✅.
 
-**Known deviation — SC-005 (core line count):** every CLI *feature* module and the MCP tool
-groups are <1500 lines, but the shared `sandbox/core.py` is ~4.5k lines (one module).
-Sub-splitting it is safe (its def-graph is a verified clean DAG, 0 cycles) but a thematic
-split tangles the *module* graph under naming heuristics; doing it by hand is a low-risk
-follow-up refinement and was deferred to avoid breaking the live tooling. The spec's primary
-goal — "every feature is a module" (FR-007/FR-012) — is fully met.
+**SC-005 (module line count) — fully met.** The shared core was sub-split from one
+~4.8k-line `sandbox/core.py` into the `sandbox/core/` package — 13 thematic submodules
+(`_paths`, `_ui`, `_config`, `_docker`, `_domains`, `_provision`, `_herd`, `_instances`,
+`_dash`, `_integ`, `_tests`, `_bridge`, `_misc`), each < 1500 lines (largest ~785). The
+`core/__init__` back-fills the full shared namespace into every submodule, so cross-module
+calls resolve at call time with zero import-cycle risk and `from sandbox.core import *`
+keeps working for the command modules unchanged. Verified: all 66 tests + live CLI/MCP.
+(One white-box test patches on the owning submodule rather than the package, since back-fill
+copies references per submodule.)
 
 **Post-implementation:** the MCP server changes (Stages A/B/D) require a **Claude Code
 restart** (gotcha #4) before the live `mcp__sandbox__*` tools run the new code.

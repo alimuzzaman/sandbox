@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import sandbox.core as core  # noqa: E402
+import sandbox.core._bridge as bridge  # noqa: E402  (_bridge_handle lives here)
 import sandbox_core  # noqa: E402
 
 TOK = "secrettoken123"
@@ -24,13 +25,14 @@ TOK = "secrettoken123"
 class TestBridgeHandle(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="sb-bridge-"))
-        # patch the bridge's external touchpoints
+        # _bridge_handle resolves its helpers from the _bridge submodule's own
+        # namespace (back-filled by sandbox.core/__init__), so patch there.
         self.p = [
-            mock.patch.object(core, "_bridge_token_for", lambda inst: TOK),
-            mock.patch.object(core, "_is_herd_instance", lambda inst: False),
-            mock.patch.object(core, "snapshots_dir", lambda inst: self.tmp),
-            mock.patch.object(core, "load_config", lambda: {}),
-            mock.patch.object(core, "_start_job", lambda label, fn: "job-1"),
+            mock.patch.object(bridge, "_bridge_token_for", lambda inst: TOK),
+            mock.patch.object(bridge, "_is_herd_instance", lambda inst: False),
+            mock.patch.object(bridge, "snapshots_dir", lambda inst: self.tmp),
+            mock.patch.object(bridge, "load_config", lambda: {}),
+            mock.patch.object(bridge, "_start_job", lambda label, fn: "job-1"),
         ]
         for p in self.p:
             p.start()
@@ -58,11 +60,11 @@ class TestBridgeHandle(unittest.TestCase):
         self.assertEqual(self.call("GET", "/snapshots", auth="Bearer nope")[0], 403)
 
     def test_unknown_instance_404(self):
-        with mock.patch.object(core, "_bridge_token_for", lambda inst: None):
+        with mock.patch.object(bridge, "_bridge_token_for", lambda inst: None):
             self.assertEqual(self.call("GET", "/snapshots")[0], 404)
 
     def test_herd_409(self):
-        with mock.patch.object(core, "_is_herd_instance", lambda inst: True):
+        with mock.patch.object(bridge, "_is_herd_instance", lambda inst: True):
             self.assertEqual(self.call("GET", "/snapshots")[0], 409)
 
     # --- list ---

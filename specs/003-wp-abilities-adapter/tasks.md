@@ -18,7 +18,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Create the mu-plugin payload skeleton: `00-sandbox-abilities.php` loader + `sandbox-abilities/` dir (callbacks + vendored adapter) authored under a host template dir in `sandbox/` (e.g. `sandbox/assets/abilities/`), the source the writer copies from.
+- [x] T001 Create the mu-plugin payload skeleton: `00-sandbox-abilities.php` loader authored at `sandbox/assets/abilities/00-sandbox-abilities.php` (the source the writer copies from). DONE — includes the WP-version gate + enable flag + permission callback. (mcp-adapter vendoring into `sandbox-abilities/` still pending — T002.)
 - [ ] T002 Vendor `wordpress/mcp-adapter` (^0.5.x) into the payload `sandbox-abilities/vendor/` (isolated from the focused plugin and repo `vendor/`).
 - [ ] T003 Add the enable-flag plumbing: option `sandbox_abilities_enabled` (default on) + mirror key `instances.<name>.abilities_enabled` read/written via the existing `sandbox.local.yml` helpers.
 
@@ -33,7 +33,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: `execute-php` returns a structured result from the live WP runtime.
 **Independent test**: call the ability for `return get_option('siteurl');` and get a structured result.
 
-- [ ] T007 [US1] Implement the `sandbox/execute-php` ability (eval + output-buffer + error-handler capture + `set_time_limit` cap + `\Throwable` catch + JSON-safe return) per contracts/abilities.md, annotated destructive.
+- [x] T007 [US1] Implement the `sandbox/execute-php` ability (eval + output-buffer + error-handler capture + 30s `set_time_limit` cap + `\Throwable` catch + JSON-safe return), annotated destructive. **DONE + live-verified on WP 6.9.4** (templately-rebuild2): registered ability returns `get_option('siteurl')`, captures a User Notice, and reports a thrown RuntimeException as `success:false`. Live verification caught two real WP-6.9 API contracts: (a) the ability **category** must be registered first, and (b) categories register on a **separate earlier hook** `wp_abilities_api_categories_init` (not inside `wp_abilities_api_init`). Both fixed in the mu-plugin.
 - [ ] T008 [P] [US1] Add the `wp_eval_live` proxy MCP tool in `mcp/wp-server/tools/abilities.py` (resolves instance, POSTs to the endpoint with app-password auth).
 - [ ] T009 [US1] Live verification (quickstart §2): execute-php round-trip via proxy + direct; notice captured in `errors[]`; thrown error returns `success:false` and the site stays up; time-limit cap holds.
 

@@ -41,6 +41,15 @@
 - **Decision**: The mu-plugin is host-file-based, so it works unchanged on herd; the endpoint is the herd `https://<instance>.test/wp-json/...` URL; `connect` emits that URL for herd instances.
 - **Rationale**: No container indirection needed; the bind-mount/host file layout is identical.
 
+## Live findings (WP 6.9.4, verified 2026-06-22)
+
+Probed on a running instance (`templately-rebuild2`): `function_exists('wp_register_ability')` = **yes** — the Abilities API ships in core 6.9.4, so 003 is fully live-verifiable now. `mcp-adapter` is **not** bundled in core (we vendor it). Two non-obvious API contracts caught by live verification while building the execute-php slice:
+
+1. An ability's **category must be registered before** the ability that uses it, or `wp_register_ability` is rejected (`WP_Abilities_Registry::register was called incorrectly`).
+2. Categories must be registered on a **separate, earlier action** — `wp_abilities_api_categories_init` — NOT inside `wp_abilities_api_init`. Registering a category from the abilities hook is rejected.
+
+So the mu-plugin uses two hooks: `wp_abilities_api_categories_init` → `wp_register_ability_category('sandbox', …)`, then `wp_abilities_api_init` → `wp_register_ability('sandbox/<name>', …)`. Available API surface: `wp_register_ability`, `wp_get_ability`, `wp_has_ability`, `wp_get_abilities`, `wp_register_ability_category`, `wp_has_ability_category`, `wp_get_ability_categories`.
+
 ## Open questions
 
 None — all spec clarifications resolved (surface = hybrid both-surfaces; enabled default on).

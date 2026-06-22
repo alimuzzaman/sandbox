@@ -85,12 +85,21 @@ def _write_abilities_muplugin(instance: str) -> None:
     rather than an inline string. Host-file based, so it works on Docker AND herd.
     Idempotent; the mu-plugin self-gates on the Abilities API + an enable flag, so
     it no-ops on older WP. Mirrors _write_mail_muplugin."""
-    src = Path(__file__).resolve().parent.parent / "assets" / "abilities" / "00-sandbox-abilities.php"
+    asset_dir = Path(__file__).resolve().parent.parent / "assets" / "abilities"
+    src = asset_dir / "00-sandbox-abilities.php"
     if not src.exists():
         return
     mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
     mu_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, mu_dir / "00-sandbox-abilities.php")
+    # Copy the payload dir (vendored wordpress/mcp-adapter) that the loader
+    # require_once's for the MCP-server exposure. Refresh in place each call.
+    payload = asset_dir / "sandbox-abilities"
+    if payload.is_dir():
+        dest = mu_dir / "sandbox-abilities"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(payload, dest)
 
 
 _DL_CACHE_MU_TEMPLATE = r'''<?php

@@ -19,13 +19,13 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 ## Phase 1: Setup (Shared Infrastructure)
 
 - [x] T001 Create the mu-plugin payload skeleton: `00-sandbox-abilities.php` loader authored at `sandbox/assets/abilities/00-sandbox-abilities.php` (the source the writer copies from). DONE — includes the WP-version gate + enable flag + permission callback. (mcp-adapter vendoring into `sandbox-abilities/` still pending — T002.)
-- [ ] T002 Vendor `wordpress/mcp-adapter` (^0.5.x) into the payload `sandbox-abilities/vendor/` (isolated from the focused plugin and repo `vendor/`).
+- [x] T002 Vendor `wordpress/mcp-adapter` (v0.5.0) + `wordpress/php-mcp-schema` into `sandbox/assets/abilities/sandbox-abilities/vendor/` (pruned of tests/docs, ~2.3M; isolated from the focused plugin + repo `vendor/`). DONE — the provisioning writer copies the whole payload into the instance.
 - [ ] T003 Add the enable-flag plumbing: option `sandbox_abilities_enabled` (default on) + mirror key `instances.<name>.abilities_enabled` read/written via the existing `sandbox.local.yml` helpers.
 
 ## Phase 2: Foundational (blocking prerequisites)
 
 - [x] T004 Implement the idempotent mu-plugin writer `_write_abilities_muplugin` in `sandbox/core/_provision.py` (copies the asset into `runtime/wp-<instance>/wp-content/mu-plugins/`); hooked into `cmd_up` ([lifecycle.py](../../sandbox/commands/lifecycle.py)) + the apply/recreate path ([_instances.py](../../sandbox/core/_instances.py)), not herd-gated. **DONE + live-verified**: removed the hand-deployed copy, ran `./sb up`, the writer recreated it and `wp_has_ability('sandbox/execute-php')` returns true.
-- [ ] T005 In `00-sandbox-abilities.php`: bootstrap the bundled mcp-adapter, register the MCP server exposing only abilities with `meta.mcp.public=true`, gated on `sandbox_abilities_enabled` AND WP Abilities-API presence (no-op + logged notice otherwise).
+- [x] T005 In `00-sandbox-abilities.php`: bootstrap `McpAdapter::instance()` + register the `sandbox` MCP server (route `/wp-json/sandbox/mcp`, HttpTransport) on `mcp_adapter_init`, exposing the 5 abilities; gated on `sandbox_abilities_enabled` + Abilities-API presence + the vendored autoload. **DONE + live-verified**: `/sandbox/mcp` route registered; unauth POST `tools/list` → `401` (auth-gated); bogus route → `404`.
 - [ ] T006 Implement the shared `permission_callback` (logged-in user AND `manage_options`) and the `resolve_path` ABSPATH jail (rejects symlink final-path escape) in the payload.
 
 ## Phase 3: User Story 1 — Run code in the live runtime (P1)

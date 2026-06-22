@@ -92,6 +92,42 @@ function sandbox_abilities_check_php_sandbox(string $resolved, bool $is_new)
 add_action('wp_abilities_api_categories_init', 'sandbox_abilities_register_category');
 add_action('wp_abilities_api_init', 'sandbox_abilities_register');
 
+// Expose the abilities over MCP via the bundled wordpress/mcp-adapter (if vendored).
+$sandbox_mcp_autoload = __DIR__ . '/sandbox-abilities/vendor/autoload.php';
+if (sandbox_abilities_enabled() && is_readable($sandbox_mcp_autoload)) {
+    require_once $sandbox_mcp_autoload;
+    if (class_exists('WP\\MCP\\Core\\McpAdapter')) {
+        \WP\MCP\Core\McpAdapter::instance();
+        add_action('mcp_adapter_init', 'sandbox_abilities_register_mcp_server');
+    }
+}
+
+/** Register the Sandbox MCP server (route /wp-json/sandbox/mcp) exposing our abilities. */
+function sandbox_abilities_register_mcp_server($adapter): void
+{
+    if (!is_object($adapter) || !method_exists($adapter, 'create_server')) {
+        return;
+    }
+    $adapter->create_server(
+        'sandbox',                 // server id
+        'sandbox',                 // REST namespace
+        'mcp',                     // REST route  → /wp-json/sandbox/mcp
+        'WPDeveloper Sandbox',     // server name
+        'In-instance WordPress abilities for AI agents (dev/staging only).',
+        '1.0.0',
+        [\WP\MCP\Transport\HttpTransport::class],
+        null,                      // error handler → adapter default
+        null,                      // observability → adapter default
+        [
+            'sandbox/execute-php',
+            'sandbox/read-file',
+            'sandbox/write-file',
+            'sandbox/edit-file',
+            'sandbox/list-directory',
+        ]
+    );
+}
+
 function sandbox_abilities_register_category(): void
 {
     if (!sandbox_abilities_enabled() || wp_has_ability_category('sandbox')) {

@@ -28,7 +28,7 @@ is deferred to `plan.md`.
 
 ### Session 2026-06-22
 
-- Q: What does "reset" restore to? → A: The **post-install baseline** (state right after install finishes: admin, default content, activated plugins), **not** an empty database. Captured automatically as a reserved DB-only snapshot at install time.
+- Q: What does "reset" restore to? → A: The **post-provision baseline** (admin, default content, activated plugins), **not** an empty database. Captured automatically as a reserved DB-only snapshot **after plugin/theme wiring + seed import complete** (in the `ensure_instance`/onboard flow — NOT inside `cmd_install`, which runs before wiring/seed). [analysis F1]
 - Q: Snapshot scope for this feature? → A: **DB-only** is the focus and the default for the baseline and reset. Full snapshots (DB + uploads) remain available; DB-only is a new mode, not a replacement.
 - Q: Where is it surfaced? → A: CLI + the agent tool surface **and** the dashboard snapshot mu-plugin (a DB-only toggle + a "Reset to fresh install" action).
 
@@ -129,8 +129,10 @@ baseline can't be overwritten or deleted by ordinary snapshot operations.
 - **FR-002**: Restore MUST correctly restore a DB-only snapshot (point-in-time DB
   replacement) without deleting or altering existing uploads.
 - **FR-003**: Snapshot listings MUST report each snapshot's mode.
-- **FR-004**: The system MUST automatically capture a reserved DB-only **baseline** at
-  the end of install, representing the post-install state.
+- **FR-004**: The system MUST automatically capture a reserved DB-only **baseline**
+  representing the post-provision state, hooked **after** plugin/theme wiring and seed
+  import in the `ensure_instance`/onboard flow (not inside `cmd_install`, which runs
+  before those). [analysis F1]
 - **FR-005**: The system MUST provide a **reset** that restores the baseline, and a
   **re-baseline** that re-captures it from the current database.
 - **FR-006**: Reset MUST be gated as destructive (CLI confirmation / agent confirm

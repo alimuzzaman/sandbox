@@ -121,5 +121,44 @@ class TestRegistrySourcedResolution(unittest.TestCase):
         sandbox_core._selftest_registry()
 
 
+class TestImageResolution(unittest.TestCase):
+    """Pure version-pin → container-image mapping (server-aware)."""
+
+    def test_web_image_defaults(self):
+        self.assertEqual(core._web_image("apache"), "wordpress:latest")
+        self.assertEqual(core._web_image("nginx"), "wordpress:php8.3-fpm")
+
+    def test_web_image_php_pin(self):
+        self.assertEqual(core._web_image("apache", "8.1"), "wordpress:php8.1")
+        self.assertEqual(core._web_image("nginx", "8.2"), "wordpress:php8.2-fpm")
+        self.assertEqual(core._web_image("litespeed", "8.1"),
+                         "litespeedtech/openlitespeed:1.8.2-lsphp81")
+
+    def test_web_image_explicit_wins_but_not_default_sentinel(self):
+        self.assertEqual(core._web_image("apache", explicit="my/img:1"), "my/img:1")
+        self.assertEqual(core._web_image("apache", explicit="wordpress:latest"),
+                         "wordpress:latest")
+
+    def test_cli_image_follows_php(self):
+        self.assertEqual(core._cli_image(), "wordpress:cli")
+        self.assertEqual(core._cli_image("8.1"), "wordpress:cli-php8.1")
+
+
+class TestTldValidation(unittest.TestCase):
+    def test_norm_tld_valid(self):
+        self.assertEqual(core._norm_tld("tst"), "tst")
+        self.assertEqual(core._norm_tld(".TST"), "tst")
+        self.assertEqual(core._norm_tld("  test "), "test")
+        self.assertEqual(core._norm_tld(""), "")
+
+    def test_norm_tld_invalid_exits(self):
+        import contextlib
+        import io
+        for bad in ("bad/tld", "a_b", "has space"):
+            with self.assertRaises(SystemExit), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                core._norm_tld(bad)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

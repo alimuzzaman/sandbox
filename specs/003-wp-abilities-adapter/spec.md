@@ -160,10 +160,13 @@ caller is still refused.
   standards-compliant MCP client.
 - **FR-002**: The layer MUST provide a **code-execution** ability that runs PHP in
   the live WordPress runtime and returns a structured result: success flag, return
-  value, captured output, captured warnings/notices, error message/class on failure,
-  and execution time. It MUST capture notices without fataling and survive thrown
-  errors.
-- **FR-003**: Code execution MUST be bounded by a hard execution-time limit.
+  value, captured output, captured non-fatal diagnostics, error message/class on
+  failure, and execution time. It MUST capture warnings, notices, and deprecations
+  (E_WARNING/E_NOTICE/E_DEPRECATED and their user-triggered equivalents) without
+  fataling, and survive thrown `Throwable`s. (Genuine fatals — parse errors,
+  `exit()`/`die()`, OOM — are not catchable; the ability instructs against them.)
+- **FR-003**: Code execution MUST be bounded by a hard execution-time limit,
+  **default 30 seconds**.
 - **FR-004**: The layer MUST provide **file abilities** (read, write, edit, list)
   jailed to the WordPress install root, rejecting path escapes including via
   symlink, so the direct endpoint is self-sufficient for clients lacking the Python
@@ -175,10 +178,13 @@ caller is still refused.
 - **FR-007**: New persistent PHP written through the layer MUST be confined to a
   dedicated sandbox-code folder, loaded with crash recovery: a fatal MUST trigger a
   safe mode that skips all sandbox files, with an admin notice naming the file and a
-  manual safe-mode override.
+  manual safe-mode override. The sandbox-code **loader runs independently of the
+  enable flag** (existing sandbox files keep loading even when the layer is disabled);
+  only the write ability — which the enable flag gates — can create them.
 - **FR-008**: Every ability MUST enforce authentication (application password) **and**
-  a capability check per call; destructive abilities MUST be flagged destructive and
-  read-only abilities flagged read-only.
+  a capability check per call; **all v1 abilities require `manage_options`**.
+  Destructive abilities MUST be flagged destructive and read-only abilities flagged
+  read-only.
 - **FR-009**: A connection helper MUST emit, for any instance, the endpoint URL, an
   application password, and a ready-to-paste per-client configuration; the dashboard
   MUST surface the same.
@@ -231,3 +237,7 @@ caller is still refused.
 - Spec 005 (editor authoring) depends on this layer and is a primary consumer of it.
 - Application-password REST auth is available per the Sandbox's local-environment
   configuration.
+- The enable flag is a site-scoped option; multisite network-wide option scope is
+  out of scope for v1 (single-site assumption). [analysis U3]
+- The dashboard "connect" surface (FR-009) reuses the existing web-dashboard "Use
+  with Claude" block; no new dashboard page is built in v1. [analysis U2]

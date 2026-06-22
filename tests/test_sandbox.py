@@ -190,5 +190,39 @@ class TestDomainValidation(unittest.TestCase):
                 core._valid_domain(bad)
 
 
+class TestNamingAndLiterals(unittest.TestCase):
+    def test_derive_instance_name_basic(self):
+        self.assertEqual(core._derive_instance_name("/a/templately", set()), "templately")
+
+    def test_derive_instance_name_truncate_strip(self):
+        # 24-char truncate must not leave a trailing hyphen.
+        out = core._derive_instance_name("/a/templately-nav-menu-url-replace", set())
+        self.assertEqual(out, "templately-nav-menu-url")
+        self.assertFalse(out.endswith("-"))
+
+    def test_derive_instance_name_dedup(self):
+        self.assertEqual(core._derive_instance_name("/a/foo", {"foo"}), "foo-2")
+        self.assertEqual(core._derive_instance_name("/a/foo", {"foo", "foo-2"}), "foo-3")
+
+    def test_php_literal(self):
+        self.assertEqual(core._php_literal(True), "true")
+        self.assertEqual(core._php_literal(False), "false")
+        self.assertEqual(core._php_literal(5), "5")
+        self.assertEqual(core._php_literal(None), "null")
+        self.assertEqual(core._php_literal("x"), "'x'")
+        self.assertEqual(core._php_literal("a'b"), "'a\\'b'")  # single-quote escaped
+
+    def test_pkg_slug_zip_url(self):
+        self.assertEqual(
+            core._pkg_slug("https://x.org/twentytwentyfour.1.5.zip"),
+            "twentytwentyfour")
+
+    def test_valid_server_invalid_exits(self):
+        import contextlib
+        import io
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            core._valid_server("bogusserver")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

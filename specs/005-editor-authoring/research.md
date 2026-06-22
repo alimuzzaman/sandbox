@@ -119,6 +119,51 @@ The canonical in-editor command API (for the optional headless-browser path) is
 in-browser with a human present); driving `$e.run` only works inside a live
 editor. An out-of-process agent edits the *stored document*, not the live editor.
 
+## In-house prior art — the `original-reference` branch
+
+The Sandbox **already had** editor-authoring recipes under `skills/wp-pilot/`
+(present on the `original-reference` branch, dropped in the spec-001 rewrite).
+These are battle-tested starting points; spec 005 should migrate/build on them
+rather than start from scratch.
+
+- `skills/wp-pilot/recipes/elementor-page.js` — the same **dual path** spec 005
+  specs: (A) fast REST `_elementor_data` write for settings-driven widgets, (B)
+  editor path driving `$e.run('document/elements/create', …)` then
+  `$e.run('document/save/default')` / `elementor.documents.save()`. **Correction
+  to fold in:** this recipe assigns **8-hex** IDs
+  (`Math.random().toString(16).slice(2,10)`); the deep-dive + msrbuilds confirm
+  the canonical Elementor format is **7-hex** (`getUniqueId()` =
+  `Math.random().toString(16).substr(2,7)`). Use 7.
+- `skills/wp-pilot/recipes/gutenberg-page.js` — real-editor
+  `wp.blocks.createBlock` → `wp.blocks.serialize()` driven on a live editor URL so
+  plugin block bundles load (the finalizer insight, already implemented as a
+  recipe). Fetches `embedHTML` for dynamic blocks (e.g. EmbedPress) before
+  serializing.
+- `skills/wp-pilot/recipes/figma-to-page.js` — composes an Elementor tree and
+  auto-patches every `image`/`background_image` to fill `url` from
+  `wp_get_attachment_url($id)`.
+- `skills/wp-pilot/recipes/pro-gating.js` — verifies Pro-gating (deactivate Pro,
+  click each Pro control, assert upsell modal + server-side enforcement). Reusable
+  for EA/EB Pro verification.
+- `skills/wp-pilot/gotchas.md` — curated traps. The load-bearing ones for spec 005:
+  - **`_wp_page_template = elementor_canvas`** is required for a true full-width
+    Elementor page; setting `_elementor_data` alone still renders inside the
+    theme container. Must be set via wp-cli / `update_post_meta` (REST `meta:`
+    only works if the key is `show_in_rest`-registered).
+    `elementor_header_footer` = full-width content keeping theme header/footer.
+  - Image / section `background_image` controls need **both** `{id, url}` — `id`
+    alone renders empty (the frontend reads `url`; `id` is editor-only).
+  - SVG uploads → use the **Safe SVG** plugin (sanitizes), never a raw
+    `upload_mimes` filter; `wp media import` of SVG needs `--user=admin`.
+
+`original-reference` also carries the old `sandbox.yml` **`projects:` catalog** —
+every WPDeveloper plugin with slug + GitHub repo + source path (embedpress,
+essential-blocks, essential-addons, betterdocs, betterlinks, notificationx,
+schedulepress/wp-scheduled-posts, xspeed, disable-comments, …). It was removed by
+the per-project rewrite (spec 001), but is a useful reference for building
+per-plugin skills/schemas later. Note the GitHub-vs-slug mismatches it documents
+(e.g. `eael-pro` repo → `essential-addons-elementor` slug; `wowstore` → `productx`).
+
 ## Local source notes
 
 - Essential Blocks uses a git **submodule** for controls (`src/controls`,

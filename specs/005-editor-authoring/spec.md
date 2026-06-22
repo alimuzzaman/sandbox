@@ -182,6 +182,13 @@ generated CSS.
   `update_post_meta($id,'_elementor_data', wp_slash(wp_json_encode($tree)))` +
   `_elementor_edit_mode='builder'` + `_elementor_version` +
   `delete_post_meta($id,'_elementor_css')`. `wp_slash` + CSS-delete are mandatory.
+- **FR-5d** Page template: for full-width pages set `_wp_page_template =
+  elementor_canvas` (or `elementor_header_footer`) via wp-cli/`update_post_meta` —
+  `_elementor_data` alone renders inside the theme container (wp-pilot gotcha).
+  REST `meta:` only works if the key is `show_in_rest`-registered.
+- **FR-5e** Media fields: `image` / `background_image` settings need **both**
+  `{id, url}`; auto-fill `url` from `wp_get_attachment_url($id)` when only `id` is
+  given (the `figma-to-page.js` patch). `id`-only renders empty.
 
 ### Gutenberg / EB engine
 - **FR-6** `gutenberg_get(post_id)` → compact parsed-block tree (via
@@ -270,6 +277,12 @@ hex IDs, EA widget enablement, and CSS regeneration.
   pre-generated for known versions and refresh live. **EB controls are a git
   submodule** (`src/controls`); run `git -C …/essential-blocks submodule update
   --init --recursive` for complete attribute-source introspection.
+- **Migrate the existing in-house recipes**: `original-reference` has
+  `skills/wp-pilot/recipes/{elementor-page,gutenberg-page,figma-to-page,pro-gating}.js`
+  + `gotchas.md` — the dual-path Elementor write, the real-editor
+  `wp.blocks.serialize()` Gutenberg path, image-url patching, and Pro-gating
+  verification already exist. Port these as the engine's starting point (fixing
+  the 8-hex→7-hex ID bug). See [research.md](./research.md#in-house-prior-art-the-original-reference-branch).
 - Reference implementation to study while building the Elementor engine:
   `msrbuilds/elementor-mcp` (same `Document::save` + element-factory + 7-hex-ID
   approach). Optional: Elementor core's hidden `e_wp_abilities_api` experiment can

@@ -704,5 +704,5 @@ to apply changes. New commands should follow the same shape.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/008-db-snapshots-reset/plan.md
+at specs/005-editor-authoring/plan.md
 <!-- SPECKIT END -->

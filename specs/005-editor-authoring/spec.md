@@ -194,10 +194,16 @@ and confirm accurate names/attributes are returned.
 - **FR-010**: Authoring operations MUST be exposed as abilities on the in-instance
   Abilities layer (spec 003), reachable by external clients and in-session via the
   host-side proxy.
-- **FR-011**: Every operation MUST enforce a capability check; destructive operations
-  MUST be flagged destructive (eligible for confirmation) and read operations
-  read-only.
+- **FR-011**: Every operation MUST enforce a capability check **inline in each
+  ability** (Application Password + `permission_callback`; nonces are N/A for
+  external-client REST/MCP — same model as spec 003), not as a trailing step;
+  destructive operations MUST be flagged destructive (eligible for confirmation) and
+  read operations read-only. [analysis C1]
 - **FR-012**: Delivery MUST sequence Gutenberg/EB first, then Elementor/EA.
+- **FR-013**: When the spec-003 layer is disabled or WordPress is below the
+  Abilities-API minimum, the editor abilities MUST simply not register (inheriting
+  003's no-op), and the proxy/skills MUST surface an actionable message rather than an
+  opaque failure. [analysis U1]
 
 ### Key Entities
 
@@ -215,12 +221,16 @@ and confirm accurate names/attributes are returned.
 
 ### Measurable Outcomes
 
-- **SC-001**: An inserted EA widget renders, is styled, and opens in the editor with
-  zero validation errors.
+- **SC-001**: An inserted EA widget renders and opens in the editor with zero
+  validation errors, and is **styled** — verified concretely: `_elementor_css` is
+  regenerated and a `.elementor-element-<id>` rule is present for the new node
+  (analysis A1).
 - **SC-002**: A modified widget setting persists and re-renders without disturbing any
   other element on the page.
 - **SC-003**: An inserted EB block produces zero "invalid/recovery" prompts in the
-  editor and is visibly styled on the frontend.
+  editor and is styled on the frontend — verified concretely:
+  `uploads/eb-style/eb-style-<postId>.min.css` exists and is non-empty for the
+  inserted `blockId` (analysis A1).
 - **SC-004**: A static/third-party block authored via the finalizer round-trips to
   valid, styled content with no human step.
 - **SC-005**: A schema request returns accurate settings/attributes for a chosen
@@ -233,9 +243,10 @@ and confirm accurate names/attributes are returned.
 - **Depends on spec 003** (the in-instance Abilities layer) — the engine registers as
   abilities there.
 - The target builders are WPDeveloper's own (Essential Addons, Essential Blocks) plus
-  Elementor/Gutenberg core; Elementor Pro/EA/EB do not expose the WP Abilities API
-  (only Elementor core does, behind a hidden experiment that can't write the element
-  tree — see [research.md](./research.md)).
+  Elementor/Gutenberg core. Of these, **only Elementor core** exposes the WP Abilities
+  API, behind a hidden experiment, and even then it **cannot write the element tree**
+  (EA, EB, Elementor Pro expose nothing) — so we own the engine. See
+  [research.md](./research.md). [analysis A2]
 - The existing in-house `skills/wp-pilot/recipes/` (already on this branch) are the
   starting point and are re-architected into the ability engine; their element-ID
   generation is corrected to the canonical format.

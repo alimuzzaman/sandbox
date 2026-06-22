@@ -160,5 +160,35 @@ class TestTldValidation(unittest.TestCase):
                 core._norm_tld(bad)
 
 
+class TestSiteUrl(unittest.TestCase):
+    """site_url's deterministic paths (no proxy/valet probe involved)."""
+
+    def test_no_domain_is_localhost_port(self):
+        self.assertEqual(core.site_url({"wordpress_port": 8195}),
+                         "http://localhost:8195")
+        self.assertEqual(core.site_url({"domain": None, "wordpress_port": 9001}),
+                         "http://localhost:9001")
+
+    def test_herd_with_domain_is_https(self):
+        self.assertEqual(
+            core.site_url({"server": "herd", "domain": "x.test",
+                           "wordpress_port": 8080}),
+            "https://x.test")
+
+
+class TestDomainValidation(unittest.TestCase):
+    def test_valid_domain_passthrough(self):
+        self.assertEqual(core._valid_domain("myapp.tst"), "myapp.tst")
+        self.assertEqual(core._valid_domain("MyApp.TST"), "myapp.tst")  # lowercased
+
+    def test_invalid_domain_exits(self):
+        import contextlib
+        import io
+        for bad in ("bad domain", "no_tld", "-leading.tst"):
+            with self.assertRaises(SystemExit), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                core._valid_domain(bad)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

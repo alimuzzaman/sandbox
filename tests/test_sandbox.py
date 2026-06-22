@@ -280,5 +280,29 @@ class TestSiteHost(unittest.TestCase):
             "x.test")
 
 
+class TestSmallHelpers(unittest.TestCase):
+    def test_server_runtime(self):
+        self.assertEqual(core._server_runtime("apache")["docroot"], "/var/www/html")
+        self.assertEqual(core._server_runtime("nginx")["docroot"], "/var/www/html")
+        ls = core._server_runtime("litespeed")
+        self.assertEqual(ls["docroot"], "/var/www/vhosts/localhost/html")
+        self.assertEqual(ls["uid"], "1000:1000")
+
+    def test_tld_default_and_override(self):
+        self.assertEqual(core._tld({"tld": "foo"}), "foo")
+        self.assertEqual(core._tld({}), core.PROXY_TLD)
+        self.assertEqual(core._tld(None), core.PROXY_TLD)
+
+    def test_herd_domain_and_db_name(self):
+        self.assertEqual(core._herd_domain("myinst"), "myinst.test")
+        self.assertEqual(core._herd_db_name("My-Inst"), "sandbox_my_inst")
+
+    def test_extra_vol_lines(self):
+        self.assertEqual(core._extra_vol_lines({}), "")
+        self.assertEqual(core._extra_vol_lines({"extra_mounts": []}), "")
+        self.assertIn("/host/path",
+                      core._extra_vol_lines({"extra_mounts": ["/host/path"]}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

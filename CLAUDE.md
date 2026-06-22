@@ -702,8 +702,7 @@ Anything that mutates state on disk or in Docker should be safe to re-run.
 to apply changes. New commands should follow the same shape.
 
 <!-- SPECKIT START -->
-Active spec-driven work (spec-kit) for the per-project/modular rewrite:
-- `specs/001-per-project-modular/` — spec, plan, tasks (the rewrite)
-- `specs/002-dashboard-snapshots/plan.md` — WP-dashboard snapshot/restore mu-plugin
-Read the relevant plan for technical context, structure, and commands.
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan
+at specs/002-dashboard-snapshots/plan.md
 <!-- SPECKIT END -->

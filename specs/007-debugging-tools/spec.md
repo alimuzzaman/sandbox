@@ -119,14 +119,18 @@ surface and confirm the reported state.
 - **FR-003**: The agent MUST be able to read the dump log through the existing log-tail
   surface (via a file selector) and via the CLI.
 - **FR-004**: The system MUST capture Query Monitor's collected data for a real page or
-  REST request and return it as JSON, with a selectable subset and the largest
-  collector trimmed by default.
+  REST request and return it as JSON, with a selectable subset and the **`hooks`
+  collector dropped by default** (it is by far the largest). [analysis M3]
 - **FR-005**: QM capture MUST work for anonymous requests (no admin/capability gate)
   and MUST provision QM installed-but-inactive, auto-activating it on first capture.
 - **FR-006**: The system MUST document a zero-config REST path for REST-scoped QM data.
-- **FR-007**: Xdebug MUST be toggleable on host-served (herd) instances (or fail with a
-  clear, actionable message) and from the agent tool surface, with the trigger
-  requirement documented.
+- **FR-007**: Xdebug MUST be toggleable from the agent tool surface and the CLI on
+  **Docker** instances, with the trigger requirement documented. On **herd** (a shared
+  host PHP install where toggling the global ini would affect every Herd site and need
+  a restart the sandbox can't do per-instance), the tool/CLI MUST report status and
+  emit a clear, actionable message that per-instance toggling is unsupported — not a
+  silent abort. [analysis C1: per-instance herd toggle is infeasible; scoped to
+  status+guidance on herd.]
 - **FR-008**: Dump and QM output MUST be runtime/gitignored and truncatable on demand.
 
 ### Key Entities
@@ -148,8 +152,9 @@ surface and confirm the reported state.
 - **SC-003**: QM capture succeeds on an anonymous request (no login).
 - **SC-004**: Normal (non-capture) requests incur no QM overhead because QM stays
   inactive until first capture.
-- **SC-005**: Xdebug status/toggle works on both a container-backed and a host-served
-  instance (or returns an actionable message on host-served).
+- **SC-005**: Xdebug toggle works on a container-backed instance; on a host-served
+  (herd) instance, status is reported and toggle returns a clear actionable message
+  (per-instance herd toggle is out of scope — analysis C1).
 
 ## Assumptions
 
@@ -158,4 +163,15 @@ surface and confirm the reported state.
 - "Development" gating uses the Sandbox's local-environment configuration.
 - Xdebug already exists for container instances; this feature extends reach and adds a
   toggle, it does not rebuild it.
-- Dump/QM output files live under the instance's runtime area and are gitignored.
+- Dump/QM output files live under the instance's runtime area (`runtime/wp-<instance>/…`)
+  which is already gitignored — no gitignore change needed. [analysis H2]
+- The dump + QM mu-plugin writers run on **herd too** (host-filesystem based, no Docker
+  mount dependency), unlike the existing mail/dl-cache/snapshot writers which are
+  herd-gated. [analysis C2]
+- `symfony/var-dumper` (+ its required polyfills) is committed as a self-contained
+  bundle under a feature asset path and copied into the instance by the provisioner —
+  never into the repo `vendor/` (constitution boundary). [analysis H3]
+- FR-006 (the `?_envelope` REST path) is satisfied by documentation; it has no separate
+  build-verified success criterion. [analysis M2]
+- `tail_log(file="qm")` returns raw JSONL lines (for debugging the capture file);
+  `qm_capture` is the parsed-data path — distinct surfaces. [analysis M1]

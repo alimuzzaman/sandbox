@@ -541,8 +541,8 @@ def _web_do_action(payload: dict) -> dict:
                     print("invalid xdebug state"); return False
                 cmd_xdebug(cfg, _types.SimpleNamespace(state=state, **ns_base))
             elif action == "snapshot":
-                snap = (payload.get("name") or "").strip()
-                if not re.match(r"^[a-z0-9][a-z0-9_-]{0,40}$", snap):
+                snap = _slug_snapshot_name(payload.get("name") or "")
+                if not snap:
                     print("invalid snapshot name"); return False
                 cmd_snapshot(cfg, _types.SimpleNamespace(
                     name=snap, force=bool(payload.get("force")), **ns_base))

@@ -99,6 +99,15 @@ def _valid_snapshot_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][\w.-]*", name or "")) and ".." not in (name or "")
 
 
+def _slug_snapshot_name(raw: str) -> str:
+    """Turn free-form user input into a safe snapshot slug (post-slug style):
+    lowercased, every run of non-alphanumerics collapsed to a single hyphen,
+    ends trimmed — so `snapshot 2` becomes `snapshot-2`. Returns '' when nothing
+    usable survives (e.g. '..' or '/'). The result always satisfies
+    _valid_snapshot_name, so a slugified name can never escape the tree."""
+    return re.sub(r"[^a-z0-9]+", "-", (raw or "").strip().lower()).strip("-")
+
+
 def _bridge_token_for(instance: str) -> str | None:
     return ((_local_yaml().get("instances") or {}).get(instance) or {}).get("bridge_token")
 
@@ -139,9 +148,14 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         return 200, {"ok": True, "snapshots": snaps}
 
     if method == "POST" and subpath == "/snapshot":
-        name = (body.get("name") or "").strip() or time.strftime("snap-%Y%m%d-%H%M%S")
-        if not _ok_name(name):
-            return 400, {"ok": False, "error": "invalid snapshot name"}
+        raw = (body.get("name") or "").strip()
+        # Slugify free-form input instead of rejecting it: "snapshot 2" → the
+        # snapshot "snapshot-2". Empty input → a timestamped default.
+        name = _slug_snapshot_name(raw) if raw else time.strftime("snap-%Y%m%d-%H%M%S")
+        if not name or not _ok_name(name):
+            return 400, {"ok": False, "error":
+                         f"could not derive a snapshot name from '{raw}' — use "
+                         "letters, numbers, spaces or hyphens"}
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name,
                                     force=bool(body.get("force")))
         jid = _start_job(f"snapshot {name}", lambda: cmd_snapshot(cfg, ns))

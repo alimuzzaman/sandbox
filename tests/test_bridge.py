@@ -81,8 +81,26 @@ class TestBridgeHandle(unittest.TestCase):
         self.assertEqual(data["job_id"], "job-1")
 
     def test_take_invalid_name_400(self):
-        for bad in ("..", "../x", ".", "a/b"):
+        # Non-empty input that slugifies to nothing is rejected. (Blank/whitespace
+        # is treated as "no name" → a timestamped default, covered separately.)
+        for bad in ("..", ".", "...", "/", "!!!"):
             self.assertEqual(self.call("POST", "/snapshot", {"name": bad})[0], 400, bad)
+
+    def test_take_blank_uses_timestamp_default(self):
+        for blank in ("", "   "):
+            code, data = self.call("POST", "/snapshot", {"name": blank})
+            self.assertEqual(code, 202, repr(blank))
+            self.assertTrue(data["name"].startswith("snap-"), data["name"])
+
+    def test_take_slugifies_freeform(self):
+        # Free-form names are slugified (post-slug style), not rejected — and a
+        # traversal attempt is neutralised into a harmless in-tree slug.
+        cases = {"snapshot 2": "snapshot-2", "My Snap!": "my-snap",
+                 "../x": "x", "a/b": "a-b", "  Hello World  ": "hello-world"}
+        for raw, slug in cases.items():
+            code, data = self.call("POST", "/snapshot", {"name": raw})
+            self.assertEqual(code, 202, raw)
+            self.assertEqual(data["name"], slug, raw)
 
     # --- restore (traversal is the high-severity finding) ---
     def test_restore_traversal_400(self):
@@ -144,6 +162,29 @@ class TestRegistryOverlay(unittest.TestCase):
         self.assertEqual(out["inst-a"]["wordpress_port"], 8201)  # not 8088 default
         self.assertEqual(out["inst-a"]["db_port"], 3401)
         self.assertEqual(out["inst-a"]["server"], "nginx")
+
+
+class TestSlugSnapshotName(unittest.TestCase):
+    """Free-form snapshot names are slugified, and the slug is always safe."""
+
+    def test_slugifies_freeform(self):
+        f = bridge._slug_snapshot_name
+        self.assertEqual(f("snapshot 2"), "snapshot-2")
+        self.assertEqual(f("  My Snap!  "), "my-snap")
+        self.assertEqual(f("v1.2"), "v1-2")
+
+    def test_empty_when_nothing_usable(self):
+        for bad in ("..", ".", "...", "/", "   ", "!!!", ""):
+            self.assertEqual(bridge._slug_snapshot_name(bad), "", repr(bad))
+
+    def test_result_is_always_traversal_safe(self):
+        # Even traversal-shaped input collapses to a harmless in-tree token.
+        for raw in ("snapshot 2", "../x", "a/b/c", "../../etc", "x" * 200):
+            s = bridge._slug_snapshot_name(raw)
+            if s:
+                self.assertTrue(core._valid_snapshot_name(s), raw)
+                self.assertNotIn("..", s)
+                self.assertNotIn("/", s)
 
 
 if __name__ == "__main__":

@@ -28,12 +28,15 @@ def cmd_snapshot(cfg, args) -> None:
     Restore with `./sb restore <name>`.
     """
     inst = args.resolved_instance
-    name = args.name
+    name = _slug_snapshot_name(args.name)
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "
             "use `./sb wp db export` / `db import` directly")
-    if not re.match(r"^[\w.-]+$", name or ""):
-        die("snapshot name must be [A-Za-z0-9._-]+")
+    if not name:
+        die(f"could not derive a snapshot name from '{args.name}' — use "
+            "letters, numbers, spaces or hyphens")
+    if name != (args.name or "").strip():
+        info(f"Snapshot name slugified to '{name}'")
     snap_root = snapshots_dir(inst)
     snap_root.mkdir(parents=True, exist_ok=True)
     target = snap_root / name
@@ -63,14 +66,18 @@ def cmd_snapshot(cfg, args) -> None:
 
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance
-    name = args.name
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "
             "use `./sb wp db export` / `db import` directly")
     snap_root = snapshots_dir(inst)
+    # Accept the name as stored OR its slug, so `restore "snapshot 2"` resolves
+    # the snapshot saved as "snapshot-2" (legacy exact names still match too).
+    name = next((c for c in (args.name, _slug_snapshot_name(args.name))
+                 if c and _valid_snapshot_name(c) and (snap_root / c).is_dir()),
+                None)
+    if name is None:
+        die(f"no snapshot '{args.name}' under {snap_root}")
     target = snap_root / name
-    if not target.exists():
-        die(f"no snapshot '{name}' under {snap_root}")
     sql = target / "db.sql"
     if not sql.exists():
         die(f"snapshot is missing db.sql: {sql}")

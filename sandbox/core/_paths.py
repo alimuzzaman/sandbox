@@ -220,9 +220,10 @@ add_action( 'wp_ajax_sandbox_snap', function () {
 	}
 	$op = isset( $_POST['op'] ) ? sanitize_text_field( wp_unslash( $_POST['op'] ) ) : '';
 	$name = isset( $_POST['name'] ) ? sanitize_text_field( wp_unslash( $_POST['name'] ) ) : '';
-	if ( $name !== '' && ! preg_match( '/^[A-Za-z0-9._-]+$/', $name ) ) {
-		wp_send_json( array( 'ok' => false, 'error' => 'invalid snapshot name' ), 400 );
-	}
+	// No client-side name validation: the host bridge is the trust boundary —
+	// it slugifies free-form names on create ("snapshot 2" -> "snapshot-2") and
+	// validates them on restore/delete. A blanket reject here would block names
+	// the bridge would happily accept.
 	if ( 'list' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'GET', '/snapshots' ) );
 	} elseif ( 'take' === $op ) {

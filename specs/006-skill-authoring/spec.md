@@ -125,9 +125,14 @@ metadata, description-as-trigger, foldered layout, and the write→load→verify
 - **FR-002**: The agent MUST be able to edit and delete an existing skill.
 - **FR-003**: Saving MUST handle slug collisions with explicit rename / replace / fail
   behavior, and MUST NOT let an authored skill silently shadow a built-in slug.
-- **FR-004**: The system MUST list all skills across sources with their source and
-  one-line description; on a slug collision, precedence MUST be **project > personal >
-  sandbox**, and the body MUST load only on demand by slug.
+- **FR-004**: The system MUST expose a catalog of all enabled skills across sources —
+  each as `{slug, description, source}` — via a `list_skills` tool the agent can call,
+  and MUST include a startup catalog snapshot in the MCP server instructions; the full
+  body MUST load only on demand by slug (`load_skill`). On a slug collision, precedence
+  MUST be **project > personal > sandbox**. [Mechanism note (analysis C3): the
+  server-instructions snapshot is built once at process start; the *live* catalog is
+  `list_skills`/`focus_get`, which re-glob per call — so skills authored mid-session are
+  discoverable live even though the instructions snapshot only refreshes on restart.]
 - **FR-005**: New skills MUST be written as a folder with an uppercase entry file
   (never a flat single file), confined to the chosen scope root (path-jailed),
   defaulting to the focused plugin when one is in focus, else the sandbox set.
@@ -135,8 +140,12 @@ metadata, description-as-trigger, foldered layout, and the write→load→verify
   session.
 - **FR-007**: The system MUST ship a built-in skill-creator skill that teaches the
   authoring conventions.
-- **FR-008**: The CLI MUST offer parity for list/create/edit/delete/show.
-- **FR-009**: Disabled skills MUST be excluded from the matchable catalog.
+- **FR-008**: The CLI MUST offer parity for list/write/edit/delete/show (the create
+  verb is `write`, matching the `skill_write` tool). [analysis C7]
+- **FR-009**: Disabled skills (`enable: false`) MUST be excluded from the matchable
+  catalog. This requires the shared frontmatter parser to recognize an `enable` key
+  (default true) — the current parser reads only `name`/`description` and MUST be
+  extended. [analysis C1]
 
 ### Key Entities
 
@@ -168,3 +177,13 @@ metadata, description-as-trigger, foldered layout, and the write→load→verify
 - Workflows authoring (a parallel write path for workflows) is out of scope for v1.
 - The existing on-demand skill/workflow loading + per-plugin/personal discovery is
   reused; this feature adds the write half and the precedence rule.
+- Existing built-in `skills/*/SKILL.md` files currently start with an `# H1` and have
+  **no frontmatter**, so they list with empty descriptions today; a task retrofits
+  them with `name`/`description` frontmatter so the catalog is populated. [analysis C5]
+- The MCP *tools themselves* require a one-time Claude Code restart to register
+  (gotcha #4); thereafter skills authored/edited via them are discoverable with **no
+  restart** (sources re-globbed per call). [analysis C4]
+- Scope/root detection uses the project root + focus file directly (not the
+  instance-gated `focus_get`), so authoring works without a running stack. [analysis C10]
+- MVP = create (`write`) + `list_skills`; `edit`/`delete` are intentionally in the P2
+  scope story. [analysis C8]

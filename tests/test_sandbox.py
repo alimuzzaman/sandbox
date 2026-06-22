@@ -224,5 +224,31 @@ class TestNamingAndLiterals(unittest.TestCase):
             core._valid_server("bogusserver")
 
 
+class TestWpConfigRendering(unittest.TestCase):
+    def test_merged_wp_config_project_wins_and_drops_wp_debug(self):
+        m = core._merged_wp_config({"wp_config": {"WP_DEBUG": True, "MY_CONST": "v"}})
+        self.assertEqual(m.get("MY_CONST"), "v")
+        # WP_DEBUG is set via the WORDPRESS_DEBUG env, never as a define() here.
+        self.assertNotIn("WP_DEBUG", m)
+
+    def test_merged_wp_config_base_has_no_wp_debug(self):
+        base = core._merged_wp_config({})
+        self.assertIsInstance(base, dict)
+        self.assertNotIn("WP_DEBUG", base)
+
+    def test_wp_debug_env(self):
+        self.assertEqual(core._wp_debug_env({}), "1")                       # default on
+        self.assertEqual(core._wp_debug_env({"wp_config": {"WP_DEBUG": True}}), "1")
+        self.assertEqual(core._wp_debug_env({"wp_config": {"WP_DEBUG": False}}), "")  # off
+
+    def test_multisite_mode(self):
+        self.assertIsNone(core._multisite_mode({}))
+        self.assertIsNone(core._multisite_mode({"multisite": False}))
+        self.assertEqual(core._multisite_mode({"multisite": True}), "subdirectory")
+        self.assertEqual(core._multisite_mode({"multisite": "subdomain"}), "subdomain")
+        self.assertEqual(core._multisite_mode({"multisite": "subdirectory"}),
+                         "subdirectory")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -250,5 +250,35 @@ class TestWpConfigRendering(unittest.TestCase):
                          "subdirectory")
 
 
+class TestConfigExtraPhp(unittest.TestCase):
+    def test_single_site_has_guarded_defines_no_multisite(self):
+        php = core._config_extra_php({"wp_config": {"MY_CONST": "v"}})
+        # every constant is defined()-guarded (never double-defines)
+        self.assertIn("defined('MY_CONST') || define('MY_CONST', 'v');", php)
+        self.assertNotIn("WP_ALLOW_MULTISITE", php)
+
+    def test_subdirectory_multisite_block(self):
+        php = core._config_extra_php({"multisite": True, "wordpress_port": 8195})
+        self.assertIn("WP_ALLOW_MULTISITE", php)
+        self.assertIn("define('MULTISITE', true)", php)
+        self.assertIn("SUBDOMAIN_INSTALL", php)
+
+    def test_subdomain_multisite_block(self):
+        php = core._config_extra_php({"multisite": "subdomain", "wordpress_port": 8195})
+        self.assertIn("WP_ALLOW_MULTISITE", php)
+        self.assertIn("SUBDOMAIN_INSTALL", php)
+
+
+class TestSiteHost(unittest.TestCase):
+    def test_no_domain_includes_port(self):
+        self.assertEqual(core._site_host({"wordpress_port": 8195}), "localhost:8195")
+
+    def test_herd_domain_no_port(self):
+        self.assertEqual(
+            core._site_host({"server": "herd", "domain": "x.test",
+                             "wordpress_port": 8080}),
+            "x.test")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

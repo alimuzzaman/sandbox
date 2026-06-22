@@ -646,6 +646,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
             if wp_dir(name).exists():
                 _write_mail_muplugin(name)
                 _write_dl_cache_muplugin(name)
+                _write_abilities_muplugin(name)  # spec 003 — in-instance WP Abilities
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
         _wire_project_plugins(name, root, pconf)

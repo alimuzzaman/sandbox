@@ -43,6 +43,7 @@ def cmd_up(cfg: dict, args) -> None:
     if wp_dir(inst).exists():
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
+        _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
         # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
         # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
         # Mint the token if it's missing so `up` self-heals an instance whose

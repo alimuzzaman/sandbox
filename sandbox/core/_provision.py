@@ -76,6 +76,23 @@ def _write_mail_muplugin(instance: str) -> None:
     )
 
 
+def _write_abilities_muplugin(instance: str) -> None:
+    """Drop the Sandbox Abilities mu-plugin (spec 003) into the instance.
+
+    Registers `sandbox/*` abilities on the WP 6.9+ Abilities API so AI agents can
+    run code / manage files in the live runtime. Copied from the maintained asset
+    `sandbox/assets/abilities/00-sandbox-abilities.php` (a real, lintable PHP file)
+    rather than an inline string. Host-file based, so it works on Docker AND herd.
+    Idempotent; the mu-plugin self-gates on the Abilities API + an enable flag, so
+    it no-ops on older WP. Mirrors _write_mail_muplugin."""
+    src = Path(__file__).resolve().parent.parent / "assets" / "abilities" / "00-sandbox-abilities.php"
+    if not src.exists():
+        return
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, mu_dir / "00-sandbox-abilities.php")
+
+
 _DL_CACHE_MU_TEMPLATE = r'''<?php
 /* Sandbox: cache plugin/theme zip downloads (Templately Full Site Import
    especially) so WP-runtime installs reuse a cached zip instead of

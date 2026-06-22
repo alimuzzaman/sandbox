@@ -171,6 +171,17 @@ together, not later. For non-obvious cross-plugin runtime findings
 discovered while debugging, drop a short note in
 `memory/plugin-behavior/` — it's shared with the team.
 
+**Specs go through spec-kit, never by hand.** This repo is spec-driven
+(`.specify/` + the `speckit-*` skills). To create or evolve a spec you
+MUST invoke the skills — `speckit-specify` to create, then
+`speckit-clarify` / `speckit-plan` / `speckit-tasks` — so each spec gets
+the spec template, the `checklists/requirements.md` quality gate, the
+constitution check, and proper feature-dir scaffolding. NEVER hand-author
+`specs/<n>/spec.md` (or plan/tasks) as plain markdown by copying the shape
+of an existing spec — that skips every gate and produces non-conformant
+specs `speckit-plan`/`speckit-tasks` can't consume. If you find a
+hand-written spec, regenerate it through `speckit-specify`.
+
 ---
 
 ## Non-negotiables when writing plugin code

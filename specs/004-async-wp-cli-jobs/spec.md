@@ -6,174 +6,176 @@
 
 **Status**: Draft
 
-**Input**: Novamira parity #2 — "Async/background WP-CLI jobs (`job_id` + offset/limit
-log polling). Our `wp_cli` is sync-only — long migrations/imports block."
+**Input**: User description: "Steal from Novamira #2 — WP-CLI runs synchronously today and
+long migrations/imports time out or block the agent; add background jobs with a job id and
+incremental log polling."
 
-## Summary
+## Context
 
-Today both `./sb wp …` and the `wp_cli` MCP tool run synchronously: the caller
-blocks until the command exits, and the MCP tool hard-caps at `timeout=60`s
-(`wp_cli` in [tools/wp.py](../../mcp/wp-server/tools/wp.py)). Long operations —
-`wp media regenerate`, `wp search-replace`, large `wp import`, bulk
-`wp post generate`, plugin/DB migrations — either time out or wedge the agent.
+Both the `sb wp` CLI and the `wp_cli` MCP tool run synchronously: the caller blocks
+until the command exits, and the MCP tool hard-caps its wait. Long operations —
+media regeneration, large search-replace, bulk imports, plugin/DB migrations —
+either time out or wedge the agent. This feature adds fire-and-forget background
+jobs: a command starts, returns a job identifier immediately, runs detached, and the
+agent polls for incremental output, completion status, and (if needed) cancels it.
 
-Add fire-and-forget background jobs: a command starts, returns a `job_id`
-immediately, runs detached, and the agent polls for incremental output + exit
-status. This mirrors Novamira's `run-wp-cli (async)` + `get-wp-cli-job` pattern
-([includes/abilities/run-wp-cli.php:872](file:///tmp/novamira-review/includes/abilities/run-wp-cli.php#L872))
-but implemented on the Sandbox side (Docker `exec -d` / Herd host process)
-rather than inside WP.
-
-## User Scenarios & Testing *(mandatory)*
-
-### User Story 1 — Long command doesn't block the agent (Priority: P1)
-
-An agent runs `wp media regenerate --yes` (minutes) without blocking the MCP
-call or hitting the 60s timeout.
-
-**Acceptance**:
-1. **Given** a running instance, **When** the agent calls `wp_cli(command="media
-   regenerate --yes", async=true)`, **Then** it returns `{ok, job_id, pid}` in
-   under ~1s and the command keeps running after the call returns.
-2. **When** the agent calls `wp_cli_job(job_id)` repeatedly, **Then** it returns
-   `status: "running"` with the output captured so far, then `status:
-   "completed"` with the final `exit_code` once finished.
-3. **Given** a finished job, **When** polled again, **Then** the status/exit_code
-   persist (re-readable) until the job is reaped.
-
-### User Story 2 — Incremental log streaming (Priority: P2)
-
-The agent fetches only new output each poll via a byte offset, so a multi-MB log
-isn't re-sent every call.
-
-**Acceptance**:
-1. `wp_cli_job(job_id, offset=N, limit=M)` returns `{stdout, bytes_read,
-   truncated}` for the slice `[N, N+M)`; the agent advances `offset` by
-   `bytes_read`. (Matches Novamira's `novamira_read_log_slice`.)
-
-### User Story 3 — CLI parity (Priority: P2)
-
-A developer runs `./sb wp --async media regenerate --yes` → prints a `job_id`;
-`./sb job <id>` tails it; `./sb jobs` lists active/recent jobs.
-
-### User Story 4 — Works on every server driver (Priority: P1)
-
-Async jobs work on apache / nginx / litespeed (Docker) **and** herd (host).
+Implementation detail (detached container exec vs host nohup, the PID self-report,
+log-slice mechanics) is deferred to `plan.md`.
 
 ## Clarifications
 
 ### Session 2026-06-22
 
-- Q: Include background-job cancellation/kill in v1? → A: Yes — track the PID and support `--kill`. Because detached `docker compose exec -d` doesn't cleanly surface the inner PID, the launched wrapper writes its **own** PID to `job_<id>.pid` (`echo $$ > …pid` before exec'ing `wp`); cancellation reads that file and kills the process group (`kill -TERM -<pid>`), in-container via `docker compose exec` / on the host directly for herd.
+- Q: Include background-job cancellation in v1? → A: Yes — support cancel/kill. The launched job self-reports its process id so a later call can terminate it; killing a finished/unknown job is a safe no-op.
 
-## Requirements
+## User Scenarios & Testing *(mandatory)*
 
-- **FR-1** `wp_cli` MCP tool gains `async: bool = False`. When true: returns
-  `{ok, job_id, pid, status:"running"}`; never blocks beyond process spawn.
-- **FR-2** New MCP tool `wp_cli_job(job_id, offset=0, limit=1048576, *,
-  project_dir)` → `{ok, job_id, status, exit_code?, stdout, bytes_read,
-  truncated}`. `status ∈ {running, completed, not_found}`.
-- **FR-3** `job_id` is a 16-hex token (`bin2hex(random_bytes(8))` equivalent;
-  validated against `^[a-f0-9]{16}$` before any path use — Novamira does this to
-  prevent traversal).
-- **FR-4** CLI: `./sb wp --async <args>`, `./sb job <id> [--follow] [--kill]`,
-  `./sb jobs`.
-- **FR-4a** Cancellation (v1): `wp_cli_job_kill(job_id, *, project_dir)` MCP tool
-  + `./sb job <id> --kill`. The async wrapper writes `echo $$ > job_<id>.pid`
-  before running `wp`; kill reads it and sends `SIGTERM` to the process group
-  (in-container via `docker compose exec`, on host for herd), then writes `143` to
-  `job_<id>.status`. Killing a finished/unknown job is a no-op with a clear result.
-- **FR-5** Job artifacts (log + status) live in a host-visible, instance-scoped
-  dir so both the container/host process and the reader can reach them:
-  `runtime/wp-<instance>/.sb-jobs/job_<id>.{log,status}` (already bind-mounted).
-- **FR-6** A completed job writes its exit code to `job_<id>.status`; absence of
-  that file ⇒ still running. (Lock-free, file-based — same as Novamira.)
-- **FR-7** Reaping: `./sb jobs --prune` and an age-based auto-prune (default 24h)
-  remove old `.log`/`.status`. Document that logs are gitignored runtime state.
-- **FR-8** Safety: async is **only** an execution mode for `wp` — it does not
-  widen what commands are allowed. Same instance resolution + `project_dir`
-  handshake as `wp_cli`.
+### User Story 1 — Long command doesn't block the agent (Priority: P1)
 
-## Design
+An agent starts a multi-minute WP-CLI command and immediately gets a job identifier
+back, without blocking or timing out; the command keeps running.
 
-### Launch — Docker drivers
+**Why this priority**: This is the entire reason for the feature — unblocking the
+agent on long operations.
 
-`docker compose exec` returns when the inner process exits, so use **detached**
-exec and redirect into the bind-mounted job dir:
+**Independent Test**: Start a known-long command in async mode and confirm the call
+returns a job identifier near-instantly while the command continues running.
 
-```
-docker compose -p <proj> exec -d -w <ABSPATH> wpcli \
-  sh -c 'echo $$ > /var/www/html/.sb-jobs/job_<id>.pid; \
-         wp <args...> > /var/www/html/.sb-jobs/job_<id>.log 2>&1; \
-         echo $? > /var/www/html/.sb-jobs/job_<id>.status'
-```
+**Acceptance Scenarios**:
 
-`exec -d` (detached) backgrounds inside the container and returns immediately.
-The wrapper writes its **own** PID (`$$`) to `job_<id>.pid` first — detached exec
-doesn't surface the inner PID cleanly, so this self-report is what enables
-`--kill` (FR-4a). The `.status` file remains the source of truth for completion.
-Args are shell-quoted host-side (`shlex.quote` per token), mirroring Novamira's
-`escapeshellarg` of each arg.
+1. **Given** a running instance, **When** the agent starts a long command in async
+   mode, **Then** it receives a job identifier within ~1 second and the command keeps
+   running after the call returns.
+2. **When** the agent polls the job, **Then** it reports "running" with output so far,
+   then "completed" with a final exit code once finished.
+3. **Given** a finished job, **When** polled again, **Then** the status and exit code
+   persist (re-readable) until the job is reaped.
 
-### Launch — Herd (host)
+### User Story 2 — Incremental output polling (Priority: P2)
 
-No container: spawn on the host with `nohup … &`, exactly Novamira's
-`novamira_run_wp_cli_async` shape, using the instance's pinned `php<MM>` + `wp`
-shims (`runtime/herd-shims/<instance>/`, see CLAUDE.md gotcha #14):
+The agent fetches only new output each poll, so a large log isn't re-sent every call.
 
-```
-cd <wp_root> && nohup sh -c 'echo $$ > .sb-jobs/job_<id>.pid; \
-  wp <args> > .sb-jobs/job_<id>.log 2>&1; \
-  echo $? > .sb-jobs/job_<id>.status' >/dev/null 2>&1 & echo $!
-```
+**Why this priority**: Keeps polling cheap for big logs; valuable but secondary to
+the core unblock.
 
-### Status read
+**Independent Test**: Poll a job with a byte offset and confirm only the new slice is
+returned with a truncation indicator.
 
-`wp_cli_job` reads `.sb-jobs/job_<id>.{log,status}` directly from the host path
-(both Docker and Herd put them under `runtime/wp-<instance>/.sb-jobs/`). Slice
-logic = Novamira's `novamira_read_log_slice` (fseek to `offset`, read `limit`,
-`truncated = offset+bytes_read < filesize`). `limit=-1` ⇒ whole file.
+**Acceptance Scenarios**:
 
-### Data model
+1. **Given** a running job, **When** the agent polls with an offset, **Then** it gets
+   the output slice from that offset plus how many bytes were read and whether more
+   remains, and can advance the offset accordingly.
 
-| File | Meaning |
-|------|---------|
-| `.sb-jobs/job_<id>.log` | combined stdout+stderr, append-as-it-runs |
-| `.sb-jobs/job_<id>.status` | exists ⇒ done; contents = integer exit code (`143` if killed) |
-| `.sb-jobs/job_<id>.pid` | the wrapper's PID, self-reported at launch; used by `--kill` |
+### User Story 3 — Cancel a running job (Priority: P1)
 
-No DB, no registry entry — file presence is the state machine (running →
-log + pid; completed → log + status). `./sb jobs` globs the dir.
+The agent (or developer) stops a long-running job it no longer needs.
 
-## Integration points
+**Why this priority**: Without cancellation a runaway/slow job can only be waited out;
+explicitly requested for v1.
 
-- **MCP**: edit `wp_cli` and add `wp_cli_job` in
-  [mcp/wp-server/tools/wp.py](../../mcp/wp-server/tools/wp.py) (reuse
-  `_project_instance`, `_compose`, `_is_herd`, `_wp_root`, `_host_run`,
-  `_herd_host_env`). New tool requires a Claude Code restart (CLAUDE.md gotcha #4).
-- **CLI**: extend the `wp` command module and add a `jobs` command module under
-  [sandbox/commands/](../../sandbox/commands/), self-registering via
-  `sandbox/registry.py`.
-- **Docs**: update the MCP-surface table in `CLAUDE.md` (add `wp_cli_job`), the
-  MCP server `instructions`, and `docs/sandbox-config-reference.md`.
+**Independent Test**: Start a long job, cancel it, and confirm the process is gone and
+the job reports a cancelled status.
 
-## Out of scope (v1)
+**Acceptance Scenarios**:
 
-- Concurrency limits / a job queue. Jobs run immediately; the OS schedules them.
-- Streaming push (SSE) — polling only.
+1. **Given** a running job, **When** the agent cancels it, **Then** the process is
+   terminated and the job records a cancelled outcome.
+2. **Given** a finished or unknown job, **When** cancel is called, **Then** it is a
+   no-op with a clear result (no error).
 
-(Cancellation/`--kill` is now **in** v1 — see FR-4a / Clarifications.)
+### User Story 4 — CLI parity (Priority: P2)
 
-## Tasks
+A developer drives the same async lifecycle from the CLI.
 
-1. `wp_cli_job` slice reader + job-dir helper (host-path resolver for both drivers).
-2. `wp_cli(async=…)` launch: Docker `exec -d`, Herd `nohup`; wrapper self-reports
-   PID to `job_<id>.pid`.
-3. `wp_cli_job_kill` MCP + `./sb wp --async`, `./sb job [--follow|--kill]`,
-   `./sb jobs [--prune]` CLI.
-4. Auto-prune (24h) on `jobs` / on instance up.
-5. Live verification: start `wp media regenerate` async on a Docker instance and
-   a Herd instance, poll to completion, assert exit_code 0 and non-empty log;
-   start a long job and `--kill` it, assert status `143` and process gone.
-6. Docs: CLAUDE.md MCP table (`wp_cli_job`, `wp_cli_job_kill`) + instructions +
-   config reference.
+**Why this priority**: Keeps the CLI and MCP surfaces at parity; convenience, not
+core capability.
+
+**Independent Test**: Start an async job, follow it, list jobs, and kill one — all
+from the CLI.
+
+**Acceptance Scenarios**:
+
+1. **Given** the CLI, **When** the developer starts a job async, **Then** they get a
+   job identifier; they can follow it, list active/recent jobs, and kill one.
+
+### User Story 5 — Works on every server driver (Priority: P1)
+
+Async jobs behave identically whether the instance is container-backed or
+host-served (herd).
+
+**Why this priority**: A capability that only works on some drivers is a trap;
+parity is required.
+
+**Independent Test**: Run the same async job on a container-backed and a host-served
+instance and confirm both poll to completion.
+
+**Acceptance Scenarios**:
+
+1. **Given** either driver, **When** an async job runs, **Then** start, poll,
+   completion, and cancel all work the same way.
+
+### Edge Cases
+
+- Malformed/forged job identifiers MUST be rejected before any filesystem access
+  (no path traversal).
+- A job whose process dies without recording completion → polling reflects this
+  rather than reporting "running" forever (reaped by age).
+- Old job artifacts are pruned automatically so they don't accumulate.
+- Async mode does not widen what commands may run — it is only an execution mode for
+  the same `wp` surface.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: The WP-CLI surface MUST support an async mode that starts a command,
+  returns a job identifier immediately, and never blocks beyond process spawn.
+- **FR-002**: The system MUST provide a job-status query returning state
+  (running/completed/not-found), exit code when finished, and the captured output.
+- **FR-003**: Output retrieval MUST support an offset + limit so callers fetch only
+  new output, reporting bytes read and whether more remains.
+- **FR-004**: Job identifiers MUST be validated against a strict format before any
+  filesystem access.
+- **FR-005**: The system MUST support cancelling a running job; cancelling a
+  finished/unknown job MUST be a safe no-op.
+- **FR-006**: Completion MUST be durably recorded (state survives re-query) until the
+  job is reaped.
+- **FR-007**: Job artifacts MUST be reapable on demand and auto-pruned by age.
+- **FR-008**: Async MUST be only an execution mode for the existing `wp` surface — it
+  MUST NOT broaden which commands are allowed, and MUST use the same instance
+  resolution/handshake as the synchronous path.
+- **FR-009**: Async jobs MUST work identically on container-backed and host-served
+  (herd) instances.
+- **FR-010**: The CLI MUST offer parity: start async, follow, list, and kill jobs.
+
+### Key Entities
+
+- **Job**: a single background WP-CLI run, identified by a validated token, with
+  output, a terminal status + exit code, and a process handle for cancellation.
+- **Job artifacts**: the host-visible per-job records (output, status, process id)
+  that encode the running→completed/cancelled state machine.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: Starting a multi-minute command in async mode returns control to the
+  agent in under ~2 seconds.
+- **SC-002**: An agent can poll a job to completion and read its full output and exit
+  code without ever blocking on the command's duration.
+- **SC-003**: A cancelled job's process is gone and its status reflects cancellation
+  100% of the time in test.
+- **SC-004**: The same async job completes successfully on both a container-backed
+  and a host-served instance.
+- **SC-005**: No job artifact persists beyond the configured retention window
+  (default ~24h).
+
+## Assumptions
+
+- State is file-based (no database/registry entry); presence/absence of the status
+  record is the completion signal.
+- Polling, not server push, is the delivery model for output.
+- There is no concurrency cap or queue in v1 — jobs start immediately and the OS
+  schedules them.
+- Job artifacts are gitignored runtime state.

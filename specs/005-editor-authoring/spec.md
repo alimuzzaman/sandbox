@@ -6,331 +6,239 @@
 
 **Status**: Draft
 
-**Input**: Novamira parity #3 (the Gutenberg "pending batch → finalizer" flow that makes
-third-party blocks valid from first save) + the user ask: "create skill/schema for
-Elementor (Essential Addons free+pro) widgets and Gutenberg (Essential Blocks free+pro)
-blocks. How do they handle widget/block inserts? How do they modify settings?" + a
-follow-up to learn from Elementor's Angie SDK, Elementor core's own MCP, and comparable
-GitHub projects (`msrbuilds/elementor-mcp` et al.), and to determine whether EL/EA/EB
-provide the WP Abilities API.
+**Input**: User description: "Let the agent programmatically insert and modify page-builder
+content — Elementor (with Essential Addons widgets) and Gutenberg (with Essential Blocks) —
+producing valid, correctly-styled output; create the skills/schemas for EA and EB; learn
+from Elementor's Angie SDK / editor-mcp and comparable projects; determine whether EL/EA/EB
+expose the WP Abilities API."
 
-**See also**: [research.md](./research.md) — the consolidated four-source prior-art study
-this design is built on.
+## Context
 
-## Summary
+Agents can edit core blocks by hand-authoring markup, but page-builder content
+breaks: Elementor needs a structured element tree + CSS regeneration, and Gutenberg
+re-validates static/third-party blocks against their own save logic, flagging
+hand-written markup as "invalid/recovery". This feature gives agents reliable
+insert/modify operations for **Elementor (incl. Essential Addons)** and **Gutenberg
+(incl. Essential Blocks)** that produce content which renders correctly, is styled,
+and stays editable in the real editor — plus machine-readable schemas of EA widgets
+and EB blocks, and skill packs teaching the recipes.
 
-Let an agent programmatically **insert** and **modify** page-builder content on a
-real instance — both Elementor (with Essential Addons widgets) and Gutenberg
-(with Essential Blocks) — producing content that is valid and correctly styled,
-not "recovery"-flagged or unstyled. Ship three things:
-
-1. **An authoring engine** per builder (insert/modify primitives) exposed as MCP
-   tools + CLI.
-2. **Machine-readable schemas** of EA widgets and EB blocks (name → settings/
-   attributes, types, defaults) introspected from the live registries.
-3. **Skill packs** (`skills/elementor-ea/SKILL.md`, `skills/gutenberg-eb/SKILL.md`)
-   teaching the agent the exact recipes + gotchas below.
-
-The two builders need **fundamentally different strategies** — that's the core
-finding:
-
-| | Elementor / EA | Gutenberg / EB |
-|---|---|---|
-| Storage | `_elementor_data` postmeta = JSON element tree | `post_content` = block markup with `<!-- wp:… {attrs} -->` |
-| Validity model | Elementor **parses JSON** — no byte-match validation | WP **re-validates** static blocks against JS `save()` output → mismatch = "invalid/recovery" |
-| Safe write path | `Document::save(['elements'=>$tree])` via `wp eval` | depends on block type (see below) |
-| Styling | per-element CSS regenerated from settings on save | per-block CSS must already be embedded (`blockMeta`) — server never recomputes |
-| Browser needed? | **No** | **Yes for static blocks** (Novamira finalizer) |
-
-## Prior art & architecture decision
-
-The four deep-dives ([research.md](./research.md)) converge on one architecture,
-which this spec adopts:
-
-- **Elementor's own design validates the plan.** Elementor core ships a hidden,
-  WP-7.0-gated WP-Abilities MCP server (`/wp-json/elementor/mcp`) that can read
-  structure and write *settings*, but **deliberately has no element-tree write
-  ability** — widget insertion is delegated to its in-browser `editor-mcp`/Angie
-  (which calls `$e.run('document/elements/create')`). The recommended *server-side*
-  write path is `Document::save(['elements'=>$tree])`. The leading third-party
-  project `msrbuilds/elementor-mcp` independently uses the exact same path. So our
-  Elementor engine = **build the tree server-side from schema → `Document::save`**,
-  the now-converged standard.
-- **No widget-aware MCP exists for EA or EB.** This is a gap and a first-mover
-  opportunity for WPDeveloper — we'd ship the first EA/EB-aware authoring tools.
-- **Gutenberg has two proven mitigations** for the block-validation problem:
-  parse→mutate→serialize with a real-parser/`save()` pre-validator
-  (`GravityKit/block-mcp`, `pluginslab/wp-blockmarkup-mcp`) for safe cases, and a
-  real-editor finalizer (Novamira) for static/stateful/third-party blocks. We use
-  both, routed by block type.
-- **Borrow Angie's contract layer, not its transport.** Adopt tool annotations
-  (`readOnlyHint`/`destructiveHint` + `confirmationMessage`), `requiredResources`
-  "read-before-write", resource URI schemes, and per-server instructions. Skip its
-  postMessage/iframe + OIDC plumbing (in-browser, human-present — not our case).
-
-**Relationship to spec 003 (decided):** the editor engine is implemented **as WP
-abilities** on spec 003's in-instance Abilities layer (msrbuilds-style), reachable
-by any external MCP client and, via 003's proxy, in-session. **Spec 005 depends on
-003.** The `*_insert/*_update/*_get/*_delete` and `editor_schema` surfaces named
-below as "MCP tools" are realized as these abilities (plus optional Python-MCP
-proxies); the engine logic is identical regardless of surface.
+The supporting research (data models, how comparable projects do it, the
+WP-Abilities determination, in-house prior art) lives in
+[research.md](./research.md). Implementation detail (concrete ability/tool names,
+the finalizer mechanics, CSS-regen calls, file paths) is deferred to `plan.md`.
 
 ## Clarifications
 
 ### Session 2026-06-22
 
-- Q: Which page-builder engine ships first, and do we commit to both? → A: Both — **Gutenberg/EB first** (our own blocks; the finalizer is the hardest, highest-value piece and the biggest ecosystem gap), then Elementor/EA.
-- Q: How is the editor authoring engine exposed to agents? → A: As **WP abilities** (msrbuilds-style), on the spec 003 in-instance Abilities layer. **Spec 005 therefore depends on spec 003.** The same ability surface is reachable by external MCP clients and (via 003's proxy) in-session.
+- Q: Which page-builder engine ships first, and do we commit to both? → A: Both — **Gutenberg/EB first** (our own blocks; the real-editor finalizer is the hardest, highest-value piece and the biggest ecosystem gap), then Elementor/EA.
+- Q: How is the editor authoring engine exposed to agents? → A: As **WP abilities** on the spec 003 in-instance Abilities layer; **spec 005 depends on spec 003**. Reachable by external MCP clients and, via the host-side proxy, in-session.
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 — Insert an EA widget (Priority: P1)
+### User Story 1 — Insert an Essential Addons widget (Priority: P1)
 
-**Acceptance**:
-1. **When** the agent calls `elementor_insert(post_id, widget="eael-counter",
-   settings={ending_number:250}, parent=…)`, **Then** the widget appears on the
-   rendered page, styled, and is editable in the Elementor editor (no errors).
-2. The tool generates a unique **7-char lowercase hex** `id` per node (Elementor
-   does **not** generate IDs server-side — omitting it breaks the
-   `.elementor-element-{id}` CSS selector).
-3. If `eael-counter` isn't enabled in EA settings, the tool **enables it first**
-   (else the node is silently dropped on save), then **verifies** the node
-   survived by re-reading `get_elements_data()`.
-4. CSS is regenerated (the `Document::save()` path does this; raw-meta path must
-   call `Post_CSS::create($id)->delete()`).
+An agent adds an EA widget to an Elementor page; it renders, is styled, and opens
+cleanly in the Elementor editor.
 
-### User Story 2 — Modify an EA widget setting (Priority: P1)
+**Why this priority**: Inserting a widget correctly is the core Elementor capability;
+everything else (modify, schema) supports it.
 
-**Acceptance**:
-1. **When** the agent calls `elementor_update(post_id, element_id, settings={…})`,
-   **Then** the node is located by `id` in the tree, `settings[control_id]` is
-   merged, the tree re-saved, CSS regenerated.
-2. Complex controls round-trip correctly: responsive (`key`/`key_tablet`/
-   `key_mobile`), media (`{id,url}`), typography group (`{prefix}_typography:
-   "custom"` + `{prefix}_font_*`), dimensions, URL (`{url,is_external:"on"}`),
-   repeater (rows with 7-hex `_id`).
+**Independent Test**: Insert one EA widget into a page and confirm it renders on the
+frontend, is styled, and the editor opens it without errors.
 
-### User Story 3 — Insert an EB block (dynamic) (Priority: P1)
+**Acceptance Scenarios**:
 
-**Acceptance**:
-1. **When** the agent inserts a **dynamic** EB block (PHP `render_callback`), **Then**
-   writing the `<!-- wp:essential-blocks/… {attrs} /-->` markup to `post_content`
-   renders correctly via `do_blocks()` with no validation error (dynamic blocks
-   have no static HTML to byte-match).
-2. A unique `blockId` is set per block (duplicate/missing `blockId` → skipped
-   block or CSS bleed).
+1. **Given** a page and a chosen EA widget with settings, **When** the agent inserts
+   it, **Then** the widget appears on the rendered page, styled, and editable in the
+   editor with no errors.
+2. **Given** a widget that is not currently enabled in the builder, **When** insert
+   is requested, **Then** the system enables it first and verifies the inserted node
+   survived (it is not silently dropped).
+3. **Given** a full-width layout is intended, **When** the page is authored, **Then**
+   the page renders full-width (not constrained inside the theme container).
 
-### User Story 4 — Insert an EB block (static) with correct styling (Priority: P1)
+### User Story 2 — Modify a widget's settings (Priority: P1)
 
-**Acceptance**:
-1. **When** the agent inserts a **static** EB block, **Then** the saved markup
-   matches what the block's JS `save()` would produce (no "this block contains
-   unexpected or invalid content"), **and** the block's `blockMeta` (blockId-
-   scoped minified desktop/tab/mobile CSS) is populated so the block is styled.
-2. The robust path uses the **browser finalizer** (US-5); a fast path may write
-   markup directly only when validity + `blockMeta` can be guaranteed.
+An agent changes settings on an existing widget without corrupting the rest of the
+page.
 
-### User Story 5 — Browser finalizer for valid-from-first-save (Priority: P1)
+**Why this priority**: Iterative editing is as important as insertion; multi-turn
+edits must not break the page.
 
-Port Novamira's pending-batch → finalizer so static/third-party Gutenberg blocks
-are serialized by the **real editor JS runtime**, guaranteeing validity + correct
-generated CSS.
+**Independent Test**: Locate an existing widget by its identity, change a setting, and
+confirm the change renders and the page is otherwise intact.
 
-**Acceptance**:
-1. The agent queues an **attribute-level spec** (`{name, attributes,
-   innerBlocks}`), not raw markup.
-2. A headless browser (`visit`) opens the target's real edit screen, runs
-   `wp.blocks.createBlock → serialize → parse → validateBlock`, and writes back
-   valid `post_content`; EB's per-block CSS is generated as a side effect of the
-   real save.
-3. The agent observes completion headlessly (poll/marker) — no human step.
+**Acceptance Scenarios**:
 
-### User Story 6 — Live schemas (Priority: P2)
+1. **Given** an existing widget, **When** the agent updates a setting, **Then** the
+   change is applied (located by identity, not position) and re-rendered, with styling
+   regenerated.
+2. **Given** complex settings (responsive, typography, media, repeaters), **When**
+   updated, **Then** they round-trip correctly and media references resolve (not blank).
 
-**Acceptance**:
-1. `editor_schema(builder="elementor", name="eael-counter")` returns that
-   widget's control IDs, types, defaults (introspected from the live
-   `widgets_manager`). `editor_schema(builder="gutenberg",
-   name="essential-blocks/button")` returns the block.json `attributes`.
-2. `editor_schema(builder=…)` with no name lists all registered EA widgets / EB
+### User Story 3 — Insert an Essential Blocks block (Priority: P1)
+
+An agent adds an EB block to a post; it renders correctly with no editor validation
+error.
+
+**Why this priority**: EB is WPDeveloper's own Gutenberg product and the primary
+target; getting a block in validly is the core Gutenberg capability.
+
+**Independent Test**: Insert an EB block into a post and confirm it renders and the
+editor shows no "invalid/recovery" warning.
+
+**Acceptance Scenarios**:
+
+1. **Given** a post and a chosen EB block with attributes, **When** the agent inserts
+   it, **Then** it renders correctly and carries a unique block identity (no
+   duplicate-id styling bleed).
+2. **Given** the block, **When** opened in the editor, **Then** it is valid (no
+   "unexpected/invalid content" recovery prompt).
+
+### User Story 4 — Inserted blocks are correctly styled (Priority: P1)
+
+EB blocks an agent inserts come out styled, not bare HTML.
+
+**Why this priority**: EB stores per-block CSS that the server never recomputes from
+raw style attributes; an unstyled block is a broken result.
+
+**Independent Test**: Insert a styled EB block and confirm the frontend shows its
+styling, not just structural markup.
+
+**Acceptance Scenarios**:
+
+1. **Given** a block with styling, **When** inserted, **Then** the rendered page shows
+   the block styled.
+2. **Given** a static/third-party block, **When** inserted, **Then** the saved content
+   matches what the block's own save logic would produce (valid from first save).
+
+### User Story 5 — Real-editor finalization for stateful blocks (Priority: P1)
+
+For blocks whose validity/styling can only be produced by the real editor runtime,
+the system finalizes them through a real (headless) editor with no human step.
+
+**Why this priority**: This is the only robust way to make static/third-party blocks
+valid-and-styled from first save; it's the hardest, highest-value piece.
+
+**Independent Test**: Queue an attribute-level block spec, let the finalizer process
+it headlessly, and confirm the post ends up with valid, styled content.
+
+**Acceptance Scenarios**:
+
+1. **Given** an attribute-level block spec (not raw markup), **When** the agent
+   submits it, **Then** a headless editor serializes and validates it and writes back
+   valid content, generating the block's styling as a side effect.
+2. **Given** finalization is in progress, **When** the agent checks, **Then** it can
+   observe completion headlessly (no human action required).
+
+### User Story 6 — Discover available widgets/blocks and their settings (Priority: P2)
+
+An agent looks up which EA widgets / EB blocks exist on the instance and their
+settings/attributes (names, types, defaults).
+
+**Why this priority**: Enables correct authoring without guessing; supports the insert/
+modify stories.
+
+**Independent Test**: Request the schema for one widget/block and for the full set,
+and confirm accurate names/attributes are returned.
+
+**Acceptance Scenarios**:
+
+1. **Given** a running instance, **When** the agent requests a widget/block schema,
+   **Then** it gets that item's settings/attributes with types and defaults,
+   introspected live.
+2. **When** requested without a name, **Then** it lists all registered EA widgets / EB
    blocks present on the instance.
 
-## Requirements
+### Edge Cases
 
-### Elementor / EA engine
-- **FR-1** `elementor_insert` / `elementor_update` / `elementor_get` /
-  `elementor_delete` MCP tools (+ `./sb elementor …`), all driving
-  `\Elementor\Plugin::$instance->documents->get($id)->save(['elements'=>$tree])`
-  via `wp eval` — the same path the editor's `save_builder` AJAX uses.
-- **FR-2** Generate 7-char lowercase hex IDs (matching JS `getUniqueId()`) for
-  every section/column/container/widget/repeater-row created.
-- **FR-3** Ensure `_elementor_edit_mode='builder'` on the target; stamp
-  `_elementor_version`. Support both section→column→widget and container layouts.
-- **FR-4** Enable required EA widgets before save (EA's enabled-widgets option) +
-  post-save verification that the `widgetType` node survived (catches the silent-
-  drop on unregistered widget).
-- **FR-5** Run in an admin context (`wp --user=admin eval`) so
-  `is_editable_by_current_user()` passes and `unfiltered_html` doesn't strip
-  widget HTML via `wp_kses_post`.
-- **FR-5a** Read-before-write: `elementor_update`/`elementor_insert` first read the
-  current tree via `get_elements_data()` and address nodes by `id` (never index),
-  so multi-turn edits don't corrupt the page (msrbuilds/block-mcp lesson).
-- **FR-5b** Containers require Elementor ≥ 3.20; **V4 atomic widgets** use the
-  atomic-prop settings schema — the engine reads an example node via
-  `get_elements_data()` / `editor_schema` before authoring atomic settings.
-- **FR-5c** Raw-meta fallback path (only when `Document::save` is unavailable):
-  `update_post_meta($id,'_elementor_data', wp_slash(wp_json_encode($tree)))` +
-  `_elementor_edit_mode='builder'` + `_elementor_version` +
-  `delete_post_meta($id,'_elementor_css')`. `wp_slash` + CSS-delete are mandatory.
-- **FR-5d** Page template: for full-width pages set `_wp_page_template =
-  elementor_canvas` (or `elementor_header_footer`) via wp-cli/`update_post_meta` —
-  `_elementor_data` alone renders inside the theme container (wp-pilot gotcha).
-  REST `meta:` only works if the key is `show_in_rest`-registered.
-- **FR-5e** Media fields: `image` / `background_image` settings need **both**
-  `{id, url}`; auto-fill `url` from `wp_get_attachment_url($id)` when only `id` is
-  given (the `figma-to-page.js` patch). `id`-only renders empty.
+- All-raw-HTML content is refused — the agent is steered to registered blocks/widgets.
+- Deprecated/legacy widgets or blocks are refused with a suggested current replacement.
+- Parent/child blocks (e.g. accordion → item) carry the correct parent linkage when
+  authored.
+- Destructive operations (delete widget/block, reset settings) are flagged and gated;
+  read/list operations are read-only.
+- Concurrent edits to the same post are detected (base-state check) rather than
+  silently overwriting.
 
-### Gutenberg / EB engine
-- **FR-6** `gutenberg_get(post_id)` → compact parsed-block tree (via
-  `parse_blocks`). `gutenberg_update` modifies attrs in place
-  (`parse_blocks` → edit `attrs` by name/order/`blockId` → `serialize_blocks`).
-- **FR-7** Block-type classification: detect dynamic (has `render_callback`) vs
-  static from the block registry; **dynamic** blocks → direct markup write is
-  safe; **static** blocks → route to the finalizer (FR-8) unless a guaranteed
-  fast path applies.
-- **FR-8** **Finalizer** (Novamira pattern, re-implemented): a Sandbox mu-plugin
-  CPT/queue holding attribute-level specs + a finalizer admin page that the
-  `visit` tool drives to serialize via real `wp.blocks` JS and write back valid
-  content. Reuse the batch/item + lease + stage-then-commit + base-content-hash
-  concurrency model. Agent observes via a poll marker.
-- **FR-9** Per-block `blockId` uniqueness enforced; for static direct-writes,
-  `blockMeta` (blockId-scoped minified CSS) must be embedded — document that the
-  finalizer path produces it naturally and the direct path must precompute it
-  (EB assembles stored `blockMeta` lazily into
-  `uploads/eb-style/eb-style-<postId>.min.css` and **never** recomputes from raw
-  style attrs).
-- **FR-10** Honor parent/child blocks (accordion → accordion-item) via
-  `providesContext`/`usesContext`: set child `parentBlockId` + mirrored
-  `inherited*` attrs when writing nested blocks statically.
-- **FR-11** Refuse all-raw-HTML content (push the agent to registered blocks),
-  mirroring Novamira's `blocks_are_raw_html_only` guard.
-- **FR-11a** Direct-write pre-validator: before writing static-block markup,
-  validate it with WP's real parser (`@wordpress/block-serialization-default-parser`
-  equivalent) + the block's `save()` output, refusing on mismatch (the
-  `wp-blockmarkup-mcp` pattern) — the fast path's safety net before falling back to
-  the finalizer.
+## Requirements *(mandatory)*
 
-### Cross-cutting (both engines)
-- **FR-14** Tool annotations (Angie contract layer): every tool carries
-  `readOnlyHint`/`destructiveHint`; destructive ops (delete widget/block, reset
-  settings) require an LLM-authored `confirmationMessage` and are gated.
-- **FR-15** Read-before-write contract surfaced as MCP resources / `requiredResources`:
-  expose page structure + the widget/block catalog (`elementor://page-context`,
-  `eb://catalog`, …) so the agent enumerates what's editable and reads current
-  state before mutating.
-- **FR-16** Deprecation tiers: refuse inserting deprecated/legacy EA widgets and EB
-  blocks and suggest the current replacement (block-mcp preference-tier lesson).
-- **FR-17** Auth on every tool: app-password/in-container exec **and** a WP
-  capability check (`edit_post` on the target) per operation.
+### Functional Requirements
 
-### Schemas + skills
-- **FR-12** `editor_schema(builder, name?)` MCP tool introspecting the live
-  registries (Elementor `widgets_manager->get_widget_types()` controls; WP
-  `WP_Block_Type_Registry->get_all_registered()` attributes). Cache to
-  `runtime/schemas/<instance>/{elementor,gutenberg}.json`.
-- **FR-13** Ship `skills/elementor-ea/SKILL.md` and `skills/gutenberg-eb/SKILL.md`
-  with the recipes, node/markup shapes, complex-control formats, and the
-  gotchas below. (Also discoverable as focused-plugin skills when EA/EB is the
-  focus.)
+- **FR-001**: The system MUST insert, modify, read, and delete Elementor elements
+  (including Essential Addons widgets) such that results render on the frontend, are
+  styled, and remain valid/editable in the Elementor editor.
+- **FR-002**: Elementor authoring MUST generate canonical element identities, enable a
+  required widget before use and verify the node survived, regenerate per-element
+  styling, set the page template when full-width is intended, and resolve media
+  references fully.
+- **FR-003**: Elementor edits MUST locate elements by identity (not position) and read
+  current state before writing, so multi-turn edits don't corrupt the page.
+- **FR-004**: The system MUST insert, modify, read, and delete Gutenberg blocks
+  (including Essential Blocks) via structured parse → mutate → re-serialize, addressing
+  blocks by identity, never by raw string concatenation.
+- **FR-005**: For static/third-party Gutenberg blocks, the system MUST produce content
+  that is valid from first save and correctly styled — using a real-editor finalizer
+  when needed — and MUST observe finalization completion headlessly.
+- **FR-006**: Gutenberg authoring MUST enforce unique per-block identity, carry the
+  per-block styling EB requires, and preserve parent/child linkage for nested blocks.
+- **FR-007**: The system MUST refuse all-raw-HTML content and refuse deprecated
+  widgets/blocks with a suggested replacement.
+- **FR-008**: The system MUST expose live schemas of EA widgets and EB blocks (names,
+  settings/attributes, types, defaults), both per-item and as a full listing.
+- **FR-009**: The system MUST ship skill packs teaching the Elementor/EA and
+  Gutenberg/EB authoring recipes and gotchas, discoverable when EA/EB is the focused
+  plugin.
+- **FR-010**: Authoring operations MUST be exposed as abilities on the in-instance
+  Abilities layer (spec 003), reachable by external clients and in-session via the
+  host-side proxy.
+- **FR-011**: Every operation MUST enforce a capability check; destructive operations
+  MUST be flagged destructive (eligible for confirmation) and read operations
+  read-only.
+- **FR-012**: Delivery MUST sequence Gutenberg/EB first, then Elementor/EA.
 
-## Design notes — how inserts & settings actually work (answering the ask)
+### Key Entities
 
-**Novamira does Gutenberg only** (no Elementor). Its insight, which we adopt for
-EB static blocks: never hand-serialize static blocks server-side — queue
-`{name, attributes, innerBlocks}` and let the block's **own JS `save()`** produce
-the markup in a real (hidden) editor iframe, then `validateBlock` it. That's why
-it's "valid from first save." Dynamic (`save: null`) blocks bypass the browser.
-(Full mechanism: spec 005 research / the agent writeup — CPT `*_gb_change`,
-batch+item meta state machine, UUID lease, stage→commit with SHA-256 base hash,
-token-gated SSE so a headless agent can watch the browser.)
+- **Element/Widget node**: an Elementor tree node (section/column/container/widget)
+  with identity and settings; the unit of insert/modify.
+- **Block**: a Gutenberg block with name, attributes, identity, per-block styling, and
+  optional parent linkage.
+- **Block spec**: an attribute-level description of intended blocks submitted to the
+  finalizer (not raw markup).
+- **Schema**: the introspected catalog of a widget/block's settings/attributes.
+- **Finalization job**: a queued request the headless editor processes to produce
+  valid/styled block content.
 
-**Elementor needs none of that** — it stores a JSON tree in `_elementor_data` and
-renders by parsing it (no byte-match validation), so the agent can build the tree
-in PHP and `Document::save()` it. The catches are different: caller-supplied
-hex IDs, EA widget enablement, and CSS regeneration.
+## Success Criteria *(mandatory)*
 
-**Settings modification** is symmetric in concept, different in storage:
-- Elementor: locate node by `id`, set `settings[control_id]` (control_id = the
-  first arg of `add_control`; sections are organizational, not nested).
-- Gutenberg/EB: `parse_blocks`, find by name/`blockId`, edit `attrs`,
-  `serialize_blocks`; remember `blockMeta` CSS + `blockId`.
+### Measurable Outcomes
 
-## Integration points
+- **SC-001**: An inserted EA widget renders, is styled, and opens in the editor with
+  zero validation errors.
+- **SC-002**: A modified widget setting persists and re-renders without disturbing any
+  other element on the page.
+- **SC-003**: An inserted EB block produces zero "invalid/recovery" prompts in the
+  editor and is visibly styled on the frontend.
+- **SC-004**: A static/third-party block authored via the finalizer round-trips to
+  valid, styled content with no human step.
+- **SC-005**: A schema request returns accurate settings/attributes for a chosen
+  widget/block and a complete list for the instance.
+- **SC-006**: Multi-turn edits to the same page never corrupt unrelated elements in
+  test (address-by-identity + read-before-write).
 
-- MCP: `elementor_*`, `gutenberg_*`, `editor_schema` tools in a new
-  `tools/editor.py`; reuse `wp_exec`/`wp eval`, `visit` (finalizer), `fs_*`.
-- mu-plugin: the EB finalizer queue + admin page (provisioned like other
-  mu-plugins). Composes with spec 003's Abilities layer if present.
-- Builders are WPDeveloper's own (EA: `/Users/alim/Sites/git/essential-addons-elementor`,
-  EA Pro: `/Users/alim/Sites/plugins-pro/essential-addons-elementor`; EB:
-  `/Users/alim/Sites/git/essential-blocks` + `-pro`) — schemas can ship
-  pre-generated for known versions and refresh live. **EB controls are a git
-  submodule** (`src/controls`); run `git -C …/essential-blocks submodule update
-  --init --recursive` for complete attribute-source introspection.
-- **Re-architect the existing on-branch recipes**: `skills/wp-pilot/recipes/`
-  already ships (on this branch) `elementor-page.js`, `gutenberg-page.js`,
-  `figma-to-page.js`, `pro-gating.js`, `inspect-editor.js`, `dashboard-flow.js`,
-  `screenshot.js`, `verify-and-fix.js` + `gotchas.md` — the dual-path Elementor
-  write, the real-editor `wp.blocks.serialize()` Gutenberg path, image-url
-  patching, and Pro-gating verification. These are Playwright recipes invoked
-  ad-hoc; spec 005 **re-architects** their proven logic into the WP-ability engine
-  (spec 003) + the EB finalizer mu-plugin, keeping the recipes as the
-  `visit`-driven verification/escape-hatch layer. Fix the 8-hex→7-hex element-ID
-  bug during the port. See
-  [research.md](./research.md#in-house-prior-art--the-existing-skillswp-pilot-recipes-on-this-branch).
-- Reference implementation to study while building the Elementor engine:
-  `msrbuilds/elementor-mcp` (same `Document::save` + element-factory + 7-hex-ID
-  approach). Optional: Elementor core's hidden `e_wp_abilities_api` experiment can
-  serve the read/settings/create-shell abilities at `/wp-json/elementor/mcp`
-  (WP 7.0+), but never the tree-write — we own that.
-- Docs: CLAUDE.md (editor-authoring loop + the "hand-authored PHP only works for
-  core blocks" limitation this lifts), MCP table, the two new skills.
+## Assumptions
 
-## Out of scope (v1)
-
-- Builders beyond Elementor + Gutenberg (Bricks/Divi/Oxygen) — same engine shape,
-  later.
-- Visual/design correctness review (that's a `visit`-screenshot follow-up).
-- Full EB `blockMeta` precomputation in PHP for the direct static path — prefer
-  the finalizer; document direct-write as advanced/at-risk.
-
-## Tasks
-
-Ordered **Gutenberg/EB first**, then Elementor/EA (per Clarifications). All engine
-surfaces register as WP abilities on spec 003 (build/verify 003 first).
-
-1. `editor_schema` introspection + cache for Gutenberg (block registry attrs); EB
-   `src/controls` submodule init.
-2. Gutenberg/EB engine: parse/modify/serialize; dynamic-vs-static classification;
-   markup pre-validator; `blockId`/`blockMeta`/parent-context handling; raw-HTML
-   guard; deprecation tiers. Registered as abilities.
-3. EB finalizer mu-plugin (batch/item queue, lease, stage→commit) + `visit`-driven
-   finalizer page + headless completion marker.
-4. `skills/gutenberg-eb/SKILL.md`.
-5. EB live verification: insert + restyle an EB accordion (parent+child); confirm
-   rendered + editor-valid + styled; finalizer round-trip on a static third-party
-   block.
-6. Elementor/EA `editor_schema` + engine: read-before-write tree
-   read/insert/update/delete via `Document::save()` (admin context), hex-ID gen,
-   widget-enable + survive-verify, CSS regen, address-by-id, raw-meta fallback.
-7. `skills/elementor-ea/SKILL.md` + EA live verification (insert + restyle an
-   `eael-counter`).
-8. Cross-cutting contract layer: tool annotations (`readOnly`/`destructive` +
-   `confirmationMessage`), read-before-write resources (`elementor://`, `eb://`),
-   per-op capability checks.
-9. Re-architect `skills/wp-pilot/recipes/` into the ability engine: port the
-   proven editor/`$e.run` + `wp.blocks.serialize()` + image-url-patch + pro-gating
-   logic; fix the 8-hex→7-hex ID bug; keep the recipes as the `visit`-driven
-   verify/escape-hatch layer.
-10. Docs (incl. [docs/plugin-catalog.md](../../docs/plugin-catalog.md) for EA/EB
-    slugs/repos).
+- **Depends on spec 003** (the in-instance Abilities layer) — the engine registers as
+  abilities there.
+- The target builders are WPDeveloper's own (Essential Addons, Essential Blocks) plus
+  Elementor/Gutenberg core; Elementor Pro/EA/EB do not expose the WP Abilities API
+  (only Elementor core does, behind a hidden experiment that can't write the element
+  tree — see [research.md](./research.md)).
+- The existing in-house `skills/wp-pilot/recipes/` (already on this branch) are the
+  starting point and are re-architected into the ability engine; their element-ID
+  generation is corrected to the canonical format.
+- Essential Blocks' control sources are a git submodule that must be checked out for
+  complete schema introspection.
+- Builders beyond Elementor + Gutenberg (Bricks/Divi/Oxygen) are out of scope for v1.

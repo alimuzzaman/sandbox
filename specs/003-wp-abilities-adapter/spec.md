@@ -6,189 +6,228 @@
 
 **Status**: Draft
 
-**Input**: Novamira parity #1 — "Ride the official WP Abilities API + `wordpress/mcp-adapter`.
-Our 23 tools are hand-rolled custom MCP. Their abilities are discoverable WP-natively,
-work with *any* MCP client, and the ecosystem standard is forming around exactly this."
-Plus parity #5 — the crash-recovery sandbox-loader pattern.
+**Input**: User description: "Steal from Novamira #1 — ride the official WP Abilities API +
+`wordpress/mcp-adapter` so abilities are discoverable WP-natively and work with any MCP
+client; plus the crash-recovery sandbox-loader pattern."
 
-## Summary
+## Context
 
-Add a **second, optional MCP surface that lives inside each provisioned
-instance**: a Sandbox mu-plugin that registers WordPress **Abilities** (the core
-`wp_register_ability` API, WP 6.9+) and exposes them over MCP via the official
-`wordpress/mcp-adapter` Composer package. This is exactly Novamira's architecture
-([CLAUDE.md](file:///tmp/novamira-review/CLAUDE.md): "Abilities API + MCP Adapter").
+The Sandbox exposes WordPress to agents through a host-side Python MCP server
+(`mcp__sandbox__*`) whose ~23 tools are hand-rolled and reachable only by clients
+the Sandbox wires up. Agents using other MCP clients (Cursor, Windsurf, Cline,
+Claude Desktop) can't reach a Sandbox instance, and the most powerful capability —
+running code inside the live WordPress runtime — isn't offered at all. This feature
+adds a **second, optional MCP surface that lives inside each provisioned instance**,
+built on the WordPress-native Abilities API so any standards-compliant client can
+connect directly. It does not replace the Python MCP, which keeps owning
+provisioning, lifecycle, snapshots, and multi-instance routing.
 
-This does **not** replace the Python MCP server (`mcp__sandbox__*`). The two have
-distinct jobs:
-
-| Surface | Owns | Lives |
-|---------|------|-------|
-| Python MCP (`mcp__sandbox__*`) | Provisioning, lifecycle, snapshots, multi-instance routing, `visit`, mail, cache | Host process, routes by `project_dir` |
-| In-instance Abilities (new) | Things best done *inside* WP: `execute-php` with the full runtime, native ability discovery | The instance's own `/wp-json` MCP endpoint |
-
-**Ecosystem signal (added after the spec-005 deep-dive):** this bet is now
-corroborated by Elementor itself — Elementor core's `composer.json` pins
-`wordpress/mcp-adapter ^0.5.0` and `modules/mcp/module.php` registers real WP
-abilities served at `/wp-json/elementor/mcp` (behind a hidden WP-7.0 experiment).
-The reference third-party project `msrbuilds/elementor-mcp` and Novamira both ride
-the same Abilities-API + mcp-adapter stack. The WordPress ecosystem is
-consolidating on exactly this path (Abilities API landed in Core 6.9;
-`Automattic/wordpress-mcp` is deprecated in favor of `WordPress/mcp-adapter`).
-Note: of WPDeveloper's own plugins, **none** (EA, EB, Elementor Pro is 3rd-party)
-expose abilities yet — see [005 research](../005-editor-authoring/research.md).
-
-**Why add it:** (1) MCP-client portability — Cursor, Windsurf, Cline, Claude
-Desktop can connect *directly* to an instance's MCP endpoint with zero Sandbox-
-specific glue, because the endpoint is standards-based. (2) `execute-php` (eval in
-the live WP process, with `$wpdb` and every loaded plugin API) is strictly more
-powerful than `wp eval-file` for interactive inspection and is the foundation
-specs 005/006 build on. (3) We ride the forming ecosystem standard instead of a
-bespoke tool list.
+Implementation detail (mu-plugin layout, adapter vendoring, CLI wiring, the AGPL
+boundary) is deferred to `plan.md` per the spec-kit split.
 
 ## Clarifications
 
 ### Session 2026-06-22
 
-- Q: What should the in-instance Abilities layer expose in v1, and how is it reached? → A: Hybrid — `execute-php` (core) **plus** file-CRUD abilities, exposed on **both** surfaces (direct instance endpoint + a Python-MCP proxy tool). Rationale: external MCP clients (Cursor/Windsurf/Cline) connecting straight to the instance endpoint do **not** have the Python MCP's `fs_*`/Read/Write, so the endpoint must carry file abilities to be self-sufficient; the proxy gives in-session convenience for existing `mcp__sandbox__*` users.
-- Q: Default state of the Abilities layer on a newly provisioned instance? → A: On by default (instances are disposable/local), with a "dev/staging only" banner; toggle via `./sb abilities off`.
+- Q: What should the in-instance Abilities layer expose in v1, and how is it reached? → A: Hybrid — code-execution **plus** file-CRUD abilities, exposed on **both** surfaces (the direct instance endpoint + a host-side proxy). External clients connecting straight to the instance lack the Python MCP's file tools, so the endpoint must be self-sufficient; the proxy gives in-session convenience for existing `mcp__sandbox__*` users.
+- Q: Default state of the Abilities layer on a newly provisioned instance? → A: On by default (instances are disposable/local), with a "dev/staging only" banner; toggleable off.
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 — Run PHP in the live WP runtime (Priority: P1)
+### User Story 1 — Run code in the live WordPress runtime (Priority: P1)
 
-An agent executes arbitrary PHP against a running instance and gets back the
-return value, echoed output, captured warnings/notices, and timing — without
-writing a file.
+An agent executes arbitrary PHP against a running instance and gets back the return
+value, echoed output, captured warnings/notices, and timing — without writing a
+file or rebuilding anything.
 
-**Acceptance**:
-1. **Given** a running instance with abilities enabled, **When** the agent calls
-   the `execute-php` ability with `return get_option('siteurl');`, **Then** it
-   returns `{success:true, return_value:"http://…", output:"", errors:[],
-   execution_time_ms:…}`.
-2. **When** the code emits a notice, **Then** it appears in `errors[]` (type,
-   message, file, line) — captured, not fatal.
-3. **When** the code throws, **Then** `{success:false, error_message, error_class}`
-   — the request survives.
-4. **When** the code runs >30s, **Then** it is cut by the `set_time_limit` cap.
+**Why this priority**: Live-runtime execution is the irreplaceable capability this
+layer exists to add; everything else (file abilities, the editor engine in spec
+005) builds on it, and it is the single most-used agent affordance.
+
+**Independent Test**: With one instance running and the layer enabled, call the
+code-execution ability and confirm it returns a structured result for a simple
+expression — fully testable on its own.
+
+**Acceptance Scenarios**:
+
+1. **Given** a running instance with the layer enabled, **When** the agent runs
+   `return get_option('siteurl');`, **Then** it gets back a structured result with
+   the value, empty output, no errors, and an execution-time measurement.
+2. **Given** code that emits a notice, **When** it runs, **Then** the notice is
+   captured in a structured errors list (type, message, file, line) and the request
+   still completes.
+3. **Given** code that throws, **When** it runs, **Then** the result reports failure
+   with the error message and class, and the request survives (no white screen).
+4. **Given** code that would run too long, **When** it runs, **Then** it is cut by a
+   hard execution-time limit.
 
 ### User Story 2 — Any MCP client connects directly (Priority: P1)
 
-A developer points Cursor/Windsurf/Cline/Claude Desktop at an instance's MCP
-endpoint and the abilities show up as tools.
+A developer points any standards-compliant MCP client at an instance's endpoint and
+the abilities appear as usable tools, with no Sandbox-specific glue.
 
-**Acceptance**:
-1. `./sb connect <instance>` (or the web dashboard "Use with Claude" block)
-   prints the endpoint URL + an Application Password and a ready-to-paste client
-   config. The client lists the abilities and can call `execute-php`.
-2. Discovery returns the ability list **plus** Sandbox environment instructions
-   (Novamira overrides `mcp-adapter/discover-abilities` for exactly this —
-   [discover-abilities.php](file:///tmp/novamira-review/includes/abilities/discover-abilities.php)).
+**Why this priority**: Client portability is the core reason to adopt the WP-native
+standard over the bespoke Python tool list; without it this layer adds little over
+what exists.
 
-### User Story 3 — Persistent AI-written PHP with crash recovery (Priority: P2)
+**Independent Test**: Run the connection helper, paste the emitted config into a
+fresh MCP client, and confirm the client lists the abilities and can invoke
+code-execution.
 
-An agent writes a persistent mu-style PHP file into a sandbox folder; if it
-fatals, the site auto-recovers into safe mode instead of white-screening.
+**Acceptance Scenarios**:
 
-**Acceptance**:
-1. New `.php` written via the write ability lands only in
-   `wp-content/sandbox-code/` (path-jailed).
-2. A fatal in a sandbox file writes a `.crashed` marker; subsequent requests skip
-   **all** sandbox files (safe mode) and wp-admin shows a dismissable-blocked
-   notice naming the file. `?sb_safe_mode=1` forces safe mode manually. (Direct
-   port of [sandbox-loader.php](file:///tmp/novamira-review/includes/sandbox-loader.php).)
+1. **Given** a running instance, **When** the developer runs the connection helper
+   (or opens the dashboard "connect" block), **Then** they get the endpoint URL, an
+   application password, and a ready-to-paste client config.
+2. **Given** a connected client, **When** it requests ability discovery, **Then** it
+   receives the ability list **plus** Sandbox environment guidance (focused plugin,
+   instance URL, snapshot reminder).
 
-### User Story 4 — Off by default, gated (Priority: P1)
+### User Story 3 — Self-sufficient file access for external clients (Priority: P2)
 
-The ability layer is inert until explicitly enabled, and every ability requires
-auth + capability.
+An agent on an external client (without the Sandbox Python tools) reads, writes, and
+edits files under the instance through abilities on the same endpoint.
 
-**Acceptance**:
-1. With the layer disabled, the MCP endpoint exposes nothing and abilities 403.
-2. Every ability's `permission_callback` requires a logged-in user **and**
-   `manage_options` (Novamira's `novamira_permission_callback`), over an
-   Application Password on HTTPS-or-`WP_ENVIRONMENT_TYPE=local` (our gotcha #1).
+**Why this priority**: Makes the direct endpoint useful on its own for external
+clients; lower than code-execution because Sandbox-native users already have file
+tools.
 
-## Requirements
+**Independent Test**: From a directly-connected external client, list a directory,
+write a file, read it back, and confirm path-jailing rejects an out-of-bounds path.
 
-- **FR-1** Ship a Sandbox mu-plugin (`00-sandbox-abilities.php` + `sandbox-abilities/`
-  payload) written into every instance's shared bind-mount during provisioning,
-  alongside the existing mail/dl-cache/autologin mu-plugins
-  (`_write_*_muplugin` pattern in the CLI).
-- **FR-2** Bundle `wordpress/mcp-adapter` (vendored into the mu-plugin payload,
-  not the user's plugin) and register an MCP server exposing only abilities with
-  `meta.mcp.public = true`.
-- **FR-3** Register abilities: `sandbox/execute-php` (eval + capture, the
-  Novamira `novamira_execute_php` implementation in spirit) **and** the file-CRUD
-  set `sandbox/read-file` / `write-file` / `edit-file` / `list-directory`
-  (ABSPATH-jailed via a `resolve_path` that rejects symlink escape — Novamira's
-  `novamira_resolve_path`). File abilities ship in v1 **so the direct instance
-  endpoint is self-sufficient for external MCP clients** that lack the Python
-  MCP's `fs_*` tools — they are not meant to replace `fs_*` for Sandbox users.
-  WP-CLI abilities remain **deferred** — the Python MCP `wp_cli` + spec 004 cover
-  that surface from the host.
-- **FR-4** Override `mcp-adapter/discover-abilities` to append Sandbox
-  environment instructions (focused plugin, instance URL, snapshot reminder).
-- **FR-5** Master enable flag, default **on for Sandbox instances** (they're
-  disposable + local) but instance-scoped and toggleable: `./sb abilities
-  on|off|status <instance>`. Requires WP 6.9+; on older WP the layer no-ops with
-  a logged notice.
-- **FR-6** Crash-recovery sandbox loader for persistent AI PHP, jailed to
-  `wp-content/sandbox-code/`, with `.crashed` safe-mode + `?sb_safe_mode=1`.
-- **FR-7** `execute-php` annotated `destructive:true, readonly:false,
-  idempotent:false`; file/list reads annotated `readonly:true`.
-- **FR-8** Connection helper: `./sb connect <instance>` + web-dashboard block
-  emit the endpoint + app-password + per-client config (npx-mcp-remote / direct
-  HTTP), like Novamira's Connect page.
-- **FR-9** Both surfaces ship in v1: (a) the **direct** instance MCP endpoint for
-  any external client, and (b) a thin Python-MCP **proxy** tool (`wp_eval_live`,
-  and file-ability proxies if needed) that POSTs to the instance abilities so
-  existing `mcp__sandbox__*` users get them in-session.
+**Acceptance Scenarios**:
 
-## Design notes
+1. **Given** a connected client, **When** it writes then reads a file under the WP
+   install, **Then** the round-trip succeeds.
+2. **Given** a path that escapes the install root (including via symlink), **When**
+   a file ability is called, **Then** it is rejected.
 
-- **Prefix** everything `sandbox_*` / `sandbox/` (ability names, options,
-  hooks) per the plugin-code non-negotiables — never `novamira_*`.
-- **License**: `wordpress/mcp-adapter` is GPL-compatible; vendoring it in our
-  mu-plugin is fine. We are *not* copying Novamira's AGPL code — we re-implement
-  the (small, mechanical) ability callbacks against the same public WP APIs.
-- **Relationship to the Python MCP**: keep both, and ship both surfaces (FR-9).
-  The Python MCP proxies to the in-instance endpoint (`wp_eval_live` etc.) for
-  in-session convenience; the direct endpoint serves external clients. The Python
-  MCP's `fs_*` stay as the Sandbox-native file path.
-- **Consumer — spec 005**: the Elementor/EA + Gutenberg/EB editor engine
-  (spec 005) is implemented **as WP abilities on this layer** (msrbuilds-style),
-  so spec 005 depends on 003. This is the primary justification for shipping the
-  full ability set rather than `execute-php` alone.
-- **Herd**: the mu-plugin is host-file-based, so it works on herd unchanged; the
-  MCP endpoint is just the herd `https://<instance>.test/wp-json/...` URL.
+### User Story 4 — Persistent AI-written code with crash recovery (Priority: P2)
 
-## Integration points
+An agent saves persistent PHP into a dedicated sandbox folder; if that code fatals,
+the site auto-recovers into safe mode instead of white-screening.
 
-- CLI: new `abilities` + `connect` command modules
-  ([sandbox/commands/](../../sandbox/commands/)); mu-plugin writer alongside
-  `_write_mail_muplugin`.
-- Provisioning: hook the writer into `cmd_up` / `cmd_install` / `apply` so it's
-  idempotently (re)written, like the other mu-plugins.
-- Docs: CLAUDE.md (new gotcha: abilities layer + the AGPL boundary), MCP-surface
-  table, `docs/sandbox-config-reference.md`.
+**Why this priority**: Makes persistent experimentation safe on a real stack; without
+it one bad file bricks the instance, but it's secondary to the read/execute path.
 
-## Open questions
+**Independent Test**: Write a deliberately fatal file via the ability, load a page,
+and confirm the site stays up in safe mode with an admin notice naming the file.
 
-All resolved in [Clarifications](#clarifications) (2026-06-22): surface = hybrid
-(execute-php + file-CRUD, both direct + proxy); enable default = on. No open
-questions remain for v1.
+**Acceptance Scenarios**:
 
-## Tasks
+1. **Given** the write ability, **When** new PHP is written, **Then** it lands only
+   in the dedicated sandbox-code folder (path-jailed).
+2. **Given** a sandbox file that fatals, **When** any request runs, **Then** all
+   sandbox files are skipped (safe mode), an admin notice names the offending file,
+   and a manual safe-mode override is available.
 
-1. mu-plugin scaffold + `wordpress/mcp-adapter` vendoring + enable flag/option.
-2. `sandbox/execute-php` ability (eval + ob + error-handler + timeout + JSON-safe
-   return), permission callback, MCP meta.
-3. `discover-abilities` override with Sandbox instructions builder.
-4. Crash-recovery sandbox loader + safe-mode notice + `?sb_safe_mode=1`.
-5. `./sb abilities on|off|status`, `./sb connect`, provisioning hooks.
-6. Python MCP `wp_eval_live` proxy tool (+ file-ability proxies as needed) — both
-   surfaces (FR-9).
-7. Live verification: connect Claude Desktop + Cursor to one instance; run
-   `execute-php`; trip a fatal in a sandbox file and confirm safe-mode recovery.
-8. Docs.
+### User Story 5 — Off-switch and per-call authorization (Priority: P1)
+
+The layer can be disabled per instance, and every ability independently enforces
+authentication and capability.
+
+**Why this priority**: This is powerful, destructive capability on a real stack;
+gating is non-negotiable for safe operation.
+
+**Independent Test**: Disable the layer and confirm the endpoint exposes nothing and
+abilities are refused; re-enable and confirm an unauthenticated/under-privileged
+caller is still refused.
+
+**Acceptance Scenarios**:
+
+1. **Given** the layer disabled, **When** the endpoint is queried, **Then** it
+   exposes no abilities and calls are refused.
+2. **Given** the layer enabled, **When** an ability is called without a valid
+   application password or without the required capability, **Then** it is refused.
+
+### Edge Cases
+
+- WordPress version below the Abilities-API minimum → the layer no-ops with a logged
+  notice rather than erroring.
+- Destructive abilities (code-execution, write/edit/delete) are flagged as such so a
+  client/agent can require confirmation; read/list abilities are flagged read-only.
+- A stale `.crashed` marker → safe mode persists until the marker is cleared, with
+  the admin notice explaining how to resume.
+- Herd (host-served) instances → the layer works unchanged because it is host-file
+  based; the endpoint is the herd URL.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: Each provisioned instance MUST host an MCP endpoint that exposes
+  WordPress abilities registered via the WP-native Abilities API, reachable by any
+  standards-compliant MCP client.
+- **FR-002**: The layer MUST provide a **code-execution** ability that runs PHP in
+  the live WordPress runtime and returns a structured result: success flag, return
+  value, captured output, captured warnings/notices, error message/class on failure,
+  and execution time. It MUST capture notices without fataling and survive thrown
+  errors.
+- **FR-003**: Code execution MUST be bounded by a hard execution-time limit.
+- **FR-004**: The layer MUST provide **file abilities** (read, write, edit, list)
+  jailed to the WordPress install root, rejecting path escapes including via
+  symlink, so the direct endpoint is self-sufficient for clients lacking the Python
+  MCP's file tools.
+- **FR-005**: Ability discovery MUST return the ability list **plus** Sandbox
+  environment guidance (focused plugin, instance URL, snapshot reminder).
+- **FR-006**: The layer MUST be toggleable per instance and MUST default to **on**
+  for Sandbox instances, surfacing a "development/staging only" indication.
+- **FR-007**: New persistent PHP written through the layer MUST be confined to a
+  dedicated sandbox-code folder, loaded with crash recovery: a fatal MUST trigger a
+  safe mode that skips all sandbox files, with an admin notice naming the file and a
+  manual safe-mode override.
+- **FR-008**: Every ability MUST enforce authentication (application password) **and**
+  a capability check per call; destructive abilities MUST be flagged destructive and
+  read-only abilities flagged read-only.
+- **FR-009**: A connection helper MUST emit, for any instance, the endpoint URL, an
+  application password, and a ready-to-paste per-client configuration; the dashboard
+  MUST surface the same.
+- **FR-010**: The same abilities MUST also be reachable in-session through the
+  existing Sandbox tool namespace via a host-side proxy, so current users get them
+  without switching clients.
+- **FR-011**: On WordPress below the Abilities-API minimum the layer MUST no-op with
+  a logged notice rather than failing provisioning.
+- **FR-012**: The layer MUST be (re)provisioned idempotently as part of normal
+  instance bring-up/refresh, and MUST work on both container-backed and host-served
+  (herd) instances.
+
+### Key Entities
+
+- **Ability**: a named, discoverable WP capability with an input/output contract,
+  authorization rule, and destructive/read-only annotation (e.g. code-execution,
+  file read/write/edit/list).
+- **Instance MCP endpoint**: the per-instance WP-native MCP server URL exposing the
+  enabled abilities.
+- **Sandbox-code folder**: the jailed location for persistent AI-written PHP,
+  governed by the crash-recovery loader and its safe-mode marker.
+- **Enable flag**: per-instance state controlling whether the layer is active.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: From a freshly provisioned instance, an agent can run code in the live
+  runtime and receive a structured result with no manual setup steps.
+- **SC-002**: A developer can connect a previously-unconfigured external MCP client
+  to an instance and invoke an ability in under 5 minutes using only the helper's
+  output.
+- **SC-003**: A deliberately fatal sandbox file never takes the site down — the next
+  request returns a working page in safe mode 100% of the time.
+- **SC-004**: With the layer disabled, zero abilities are reachable; with it enabled,
+  zero abilities succeed without both a valid credential and the required capability.
+- **SC-005**: File abilities reject 100% of attempted path escapes (including
+  symlink) in test.
+- **SC-006**: The layer adds no manual step to instance provisioning and re-running
+  provisioning never duplicates or corrupts it (idempotent).
+
+## Assumptions
+
+- Instances are disposable, local development/staging stacks — hence on-by-default
+  and the "dev/staging only" posture; this layer is never intended for production.
+- The host-side Python MCP remains the owner of provisioning, lifecycle, snapshots,
+  and multi-instance routing; this layer is additive.
+- The WordPress-native Abilities API + MCP adapter are available on supported WP
+  versions; older versions degrade to a no-op.
+- Spec 005 (editor authoring) depends on this layer and is a primary consumer of it.
+- Application-password REST auth is available per the Sandbox's local-environment
+  configuration.

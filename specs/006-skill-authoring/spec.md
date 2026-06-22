@@ -6,154 +6,165 @@
 
 **Status**: Draft
 
-**Input**: Novamira parity #4 — "In-product skill authoring + a skill that teaches the
-agent to write skills. We have skills, but theirs are first-class, stored, and
-auto-matched by description."
+**Input**: User description: "Steal from Novamira #4 — skills are read-only today; add
+in-product skill authoring plus a skill that teaches the agent to write skills, with
+description-based auto-matching."
 
-## Summary
+## Context
 
-The Sandbox already has read-only skills: `skills/<name>/SKILL.md` and
-`workflows/<name>/WORKFLOW.md`, loaded on demand via the `load_skill` /
-`load_workflow` MCP tools, plus per-plugin packs discovered through `focus_get`.
-What's missing is the **write half**: the agent cannot *create or refine* a skill
-when it learns something reusable, so hard-won knowledge evaporates at end of
-session.
+The Sandbox can load skills/workflows on demand, but the agent cannot *create or
+refine* one when it learns something reusable, so hard-won knowledge evaporates at
+the end of a session. This feature adds the write half — the agent can persist,
+edit, and delete skills — keeps discovery cheap by matching on a one-line
+description and loading the full body only on a match, ships a skill that teaches the
+house style, and resolves the same slug appearing in multiple sources with a clear
+precedence. Skills stay file-based Markdown in the repo (reviewable, diffable,
+team-shared), not a database.
 
-Port Novamira's skills model (minus the parts we already have):
-
-1. **Agent-authored skills** — `skill_write` / `skill_edit` / `skill_delete` MCP
-   tools (+ `./sb skill …` CLI) so the agent can persist a playbook it just
-   validated, with conflict handling (fail / replace / rename).
-2. **Description-keyed lazy discovery** — keep only `slug + description (+ source)`
-   in baseline context; the agent loads the full body via `load_skill` **only when
-   a description matches the task**. (We already inject the skill list in the MCP
-   `instructions`; formalize it as the match key — Novamira's
-   `Catalog\inject()` on the discover-abilities instructions.)
-3. **A `skill-creator` skill** that teaches the agent how to author a good Sandbox
-   skill (frontmatter, description-as-trigger, the write→load→iterate loop).
-   Adapted from Anthropic's skill-creator, as Novamira did.
-4. **Multi-source, priority-ordered registry** — Sandbox `skills/` (built-in),
-   the focused plugin's `.claude/skills/` (project), and `~/.claude/skills/`
-   (personal), unioned and de-duplicated, mirroring Novamira's pluggable
-   `novamira_skill_lookup_sources` filter.
-
-**Key divergence from Novamira:** they store user skills in a WP CPT
-(`novamira_skill`). We stay **file-based** — skills are Markdown in a git repo, so
-they're reviewable, diffable, shippable, and team-shared (the whole point of our
-`skills/` + per-plugin `.claude/skills/` layout). Agent writes go to files, not a
-DB.
+Implementation detail (tool/CLI names, parser internals, exact directories) is
+deferred to `plan.md`.
 
 ## Clarifications
 
 ### Session 2026-06-22
 
-- Q: When the same skill slug exists in multiple sources, which wins? → A: **project > personal > sandbox** — most-specific wins: a focused-plugin skill (`<plugin>/.claude/skills`) overrides the dev's personal skill (`~/.claude/skills`), which overrides the generic sandbox built-in (`skills/`).
+- Q: When the same skill slug exists in multiple sources, which wins? → A: **project > personal > sandbox** — most-specific wins: a focused-plugin skill overrides the dev's personal skill, which overrides the generic sandbox built-in.
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — Agent persists a learned playbook (Priority: P1)
 
-After working out a non-obvious repro/fix sequence, the agent saves it as a skill
-so the next session starts from it.
+After working out a non-obvious repro/fix/build sequence, the agent saves it as a
+skill so the next session starts from it.
 
-**Acceptance**:
-1. **When** the agent calls `skill_write(title, description, body, scope,
-   on_conflict)`, **Then** a `skills/<slug>/SKILL.md` (or the chosen scope's dir)
-   is written with valid frontmatter (`name`, `description`) and the slug is
-   `sanitize_title(title)`.
-2. **Given** a slug collision, **When** `on_conflict="rename"`, **Then** it writes
-   `<slug>-2`; `"replace"` overwrites only a same-scope user/project skill;
-   `"fail"` returns the conflict + a suggested free slug. (Novamira
-   `resolve_conflict` / `find_free_suffix`.)
-3. A built-in Sandbox skill slug cannot be silently shadowed
-   (`exists_in_external_source` guard) — must rename.
+**Why this priority**: Capturing reusable knowledge is the whole point; without the
+write path nothing else matters.
+
+**Independent Test**: Have the agent author a skill and confirm it is saved with a
+valid title/description/body and a derived slug, then is discoverable.
+
+**Acceptance Scenarios**:
+
+1. **Given** a learned procedure, **When** the agent saves it as a skill (title,
+   description, body, scope), **Then** a foldered skill is written with valid
+   metadata and a slug derived from the title.
+2. **Given** a slug collision, **When** saving, **Then** the agent can choose to
+   rename (auto-suffixed), replace (same-scope user/project only), or fail with a
+   suggested free slug.
+3. **Given** a built-in sandbox skill slug, **When** an authored skill would shadow
+   it, **Then** it cannot silently overwrite — it must rename.
 
 ### User Story 2 — Description drives matching (Priority: P1)
 
-The agent loads a skill body only when its description matches the task, not
-eagerly.
+The agent loads a skill's full body only when its one-line description matches the
+task, not eagerly.
 
-**Acceptance**:
-1. The MCP `instructions` (and a `list_skills` tool) expose every skill as
-   `- <slug> (<source>) — <description>`; bodies are **not** in baseline context.
-2. The agent calls `load_skill(slug)` on a match and gets the full SKILL.md +
-   parsed frontmatter (existing behavior, now the documented contract).
+**Why this priority**: Keeps baseline context cheap and makes the catalog scale;
+core to the design.
 
-### User Story 3 — Scope selection (Priority: P2)
+**Independent Test**: Confirm only slug + description (not bodies) are present in
+baseline context, and the body loads on demand by slug.
 
-The agent (or dev) chooses where a new skill lives.
+**Acceptance Scenarios**:
 
-**Acceptance**:
-1. `scope ∈ {sandbox, project, personal}` → writes to `skills/`,
-   `<focused-plugin>/.claude/skills/`, or `~/.claude/skills/` respectively.
-   Default `project` when a plugin is focused, else `sandbox`.
-2. `focus_get` continues to enumerate project + personal skills; new ones appear
-   without restart (re-globbed each call).
+1. **Given** the skill catalog, **When** the agent is working, **Then** it sees each
+   skill as slug + source + one-line description, with bodies not loaded.
+2. **When** a description matches the task, **Then** the agent loads that skill's full
+   body by slug.
 
-### User Story 4 — skill-creator (Priority: P2)
+### User Story 3 — Choose where a new skill lives (Priority: P2)
 
-A built-in skill teaches the agent the house style.
+The agent or dev selects the scope of a new skill (the focused plugin, the dev's
+personal collection, or the shared sandbox set).
 
-**Acceptance**:
-1. `skills/skill-creator/SKILL.md` exists; `load_skill("skill-creator")` returns
-   guidance on frontmatter, description-as-trigger, foldered layout (CLAUDE.md
-   rule: never flat `skills/foo.md`), and the write→load→verify loop.
+**Why this priority**: Right home = right sharing/precedence; convenience over the
+core write capability.
 
-## Requirements
+**Independent Test**: Save the same skill to different scopes and confirm it lands in
+the corresponding location and is discovered.
 
-- **FR-1** `skill_write(title, description, body, *, scope="project|sandbox|personal",
-  enable=true, on_conflict="fail|replace|rename", project_dir)` MCP tool → writes
-  a foldered `SKILL.md`; returns `{ok, slug, path, action: created|updated|renamed}`.
-- **FR-2** `skill_edit(slug, *, description?, body?, project_dir)` and
-  `skill_delete(slug, scope, project_dir)`.
-- **FR-3** `list_skills(project_dir)` → `[{slug, description, source, path}]`
-  across all sources. On a slug collision, precedence is **project > personal >
-  sandbox** (most-specific wins): a focused-plugin skill overrides a personal
-  `~/.claude` skill, which overrides a generic sandbox built-in. The winning entry
-  is the one surfaced/loaded; `list_skills` may report shadowed duplicates with
-  their source for transparency.
-- **FR-4** Reuse the existing frontmatter parser path used by `load_skill`; if
-  none is exposed, factor Novamira-style lenient parsing (`---` fence, `key:
-  value`, recognizes `name|description|enable`; `stripcslashes` on body to undo
-  AI clients' double-escaped `\n`).
-- **FR-5** Foldered output only (`skills/<slug>/SKILL.md`) — enforce CLAUDE.md's
-  "never create flat `skills/foo.md`" rule in the writer.
-- **FR-6** CLI parity: `./sb skill list|write|edit|delete|show`.
-- **FR-7** Built-in `skill-creator` skill shipped in `skills/`.
-- **FR-8** Writer refuses to escape the chosen scope's root (path jail), never
-  writes outside `skills/`, the focused plugin's `.claude/skills/`, or
-  `~/.claude/skills/`.
+**Acceptance Scenarios**:
 
-## Design notes
+1. **Given** a scope choice, **When** the skill is saved, **Then** it is written to
+   the matching location (focused-plugin / personal / sandbox), defaulting to the
+   focused plugin when one is in focus, else sandbox.
+2. **Given** a new skill, **When** discovery runs, **Then** it appears without a
+   restart.
 
-- **Description-as-trigger** is the load-bearing idea: keep baseline context cheap
-  (slug + one-line description), pull the body only on match. We already do the
-  injection; this spec makes authoring + the match contract first-class.
-- **No CPT, no DB.** Files in git. This also means `enable` is advisory metadata
-  in frontmatter, not a stored flag — a disabled skill is simply omitted from the
-  injected catalog.
-- **Workflows too?** Same pattern could grow `workflow_write`; keep v1 to skills,
-  note workflows as a follow-up.
-- This composes with spec 003: if the in-instance Abilities layer ships, the same
-  skill registry can *also* be exposed as `skill-get` abilities to external MCP
-  clients. Not required for v1.
+### User Story 4 — A skill that teaches skill authoring (Priority: P2)
 
-## Integration points
+A built-in skill teaches the agent the house style for writing a good skill.
 
-- MCP: new tools in a `tools/skills.py` (or extend `tools/context.py` which hosts
-  `load_skill`); reuse `focus_get`'s source discovery.
-- CLI: `skill` command module under `sandbox/commands/`, self-registering.
-- Docs: CLAUDE.md "Adding a new skill or workflow" section (note agents can now do
-  it), MCP-surface table, MCP `instructions`.
+**Why this priority**: Raises quality/consistency of authored skills; supporting, not
+core.
 
-## Tasks
+**Independent Test**: Load the skill-creator skill and confirm it returns guidance on
+metadata, description-as-trigger, foldered layout, and the write→load→verify loop.
 
-1. Factor a shared skill-source resolver (sandbox / project / personal) + parser.
-2. `skill_write` / `skill_edit` / `skill_delete` / `list_skills` MCP tools with
-   slug/conflict/path-jail logic.
-3. `./sb skill …` CLI.
-4. Author the built-in `skill-creator` SKILL.md.
-5. Formalize the description-keyed catalog in the MCP `instructions`.
-6. Live verification: agent writes a skill, it appears in `list_skills` +
-   `focus_get`, loads by slug; rename + replace + fail conflict paths.
-7. Docs.
+**Acceptance Scenarios**:
+
+1. **Given** the skill-creator skill, **When** loaded, **Then** it explains the
+   required metadata, description-as-trigger, the foldered layout rule, and the
+   author→load→verify workflow.
+
+### Edge Cases
+
+- A disabled skill is omitted from the matchable catalog.
+- The writer refuses to write outside the allowed scope roots (path-jailed).
+- A skill must be a folder with an uppercase entry file — flat single-file skills are
+  rejected.
+- A collision across sources surfaces the winning source by precedence, optionally
+  reporting shadowed duplicates.
+
+## Requirements *(mandatory)*
+
+### Functional Requirements
+
+- **FR-001**: The agent MUST be able to create a skill from a title, description,
+  body, and scope; the slug MUST be derived from the title.
+- **FR-002**: The agent MUST be able to edit and delete an existing skill.
+- **FR-003**: Saving MUST handle slug collisions with explicit rename / replace / fail
+  behavior, and MUST NOT let an authored skill silently shadow a built-in slug.
+- **FR-004**: The system MUST list all skills across sources with their source and
+  one-line description; on a slug collision, precedence MUST be **project > personal >
+  sandbox**, and the body MUST load only on demand by slug.
+- **FR-005**: New skills MUST be written as a folder with an uppercase entry file
+  (never a flat single file), confined to the chosen scope root (path-jailed),
+  defaulting to the focused plugin when one is in focus, else the sandbox set.
+- **FR-006**: A new or edited skill MUST become discoverable without restarting the
+  session.
+- **FR-007**: The system MUST ship a built-in skill-creator skill that teaches the
+  authoring conventions.
+- **FR-008**: The CLI MUST offer parity for list/create/edit/delete/show.
+- **FR-009**: Disabled skills MUST be excluded from the matchable catalog.
+
+### Key Entities
+
+- **Skill**: a foldered Markdown playbook with metadata (slug, one-line description,
+  enabled flag) and a body; the unit of authoring and matching.
+- **Source**: a location skills come from — focused-plugin, personal, or sandbox —
+  ordered by precedence for collision resolution.
+- **Catalog**: the lightweight slug + description + source listing used for matching
+  without loading bodies.
+
+## Success Criteria *(mandatory)*
+
+### Measurable Outcomes
+
+- **SC-001**: An agent can save a learned procedure as a skill and load it back by
+  slug in the same session, with no restart.
+- **SC-002**: Baseline context carries only slug + description per skill (no bodies),
+  and a body is fetched only on a description match.
+- **SC-003**: A slug collision across sources resolves deterministically as project >
+  personal > sandbox 100% of the time.
+- **SC-004**: The writer rejects 100% of attempts to write outside an allowed scope
+  root or as a flat single file.
+- **SC-005**: A built-in skill-creator skill is present and loadable.
+
+## Assumptions
+
+- Skills are file-based Markdown in the repo / dotfiles (no database); the enabled
+  flag is metadata, and a disabled skill is simply omitted from the catalog.
+- Workflows authoring (a parallel write path for workflows) is out of scope for v1.
+- The existing on-demand skill/workflow loading + per-plugin/personal discovery is
+  reused; this feature adds the write half and the precedence rule.

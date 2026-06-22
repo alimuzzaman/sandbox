@@ -50,6 +50,16 @@ Probed on a running instance (`templately-rebuild2`): `function_exists('wp_regis
 
 So the mu-plugin uses two hooks: `wp_abilities_api_categories_init` → `wp_register_ability_category('sandbox', …)`, then `wp_abilities_api_init` → `wp_register_ability('sandbox/<name>', …)`. Available API surface: `wp_register_ability`, `wp_get_ability`, `wp_has_ability`, `wp_get_abilities`, `wp_register_ability_category`, `wp_has_ability_category`, `wp_get_ability_categories`.
 
+3. **Crash recovery can't rely on a shutdown handler alone.** WordPress registers
+   its own fatal-error handler (`wp_register_fatal_error_handler`) *before* mu-plugins
+   load, and it pre-empts our later-registered `register_shutdown_function` — so a
+   `.crashed` write from our shutdown callback never fired on a real fatal. The
+   reliable mechanism is a **`.loading` marker handshake**: write `.loading`
+   (naming the file) before each `require`, delete it after a clean load; on the next
+   request a surviving `.loading` is promoted to `.crashed` → safe mode. (Verified:
+   req1 fatals + leaves `.loading`; req2 recovers in safe mode and `.crashed` names
+   the culprit.) The shutdown handler is kept only as a best-effort fast path.
+
 ## Open questions
 
 None — all spec clarifications resolved (surface = hybrid both-surfaces; enabled default on).

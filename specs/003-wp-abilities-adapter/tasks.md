@@ -59,7 +59,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: read/write/edit/list files on the endpoint, jailed; new `.php` confined to sandbox-code/.
 **Independent test**: write+read a file; path escape (and symlink) rejected.
 
-- [ ] T015 [P] [US3] Implement `sandbox/read-file`, `write-file`, `edit-file`, `list-directory` abilities (ABSPATH-jailed; new `.php` restricted to `wp-content/sandbox-code/`) per contracts/abilities.md.
+- [x] T015 [P] [US3] Implement `sandbox/read-file`, `write-file`, `edit-file`, `list-directory` abilities (ABSPATH-jailed; new `.php` restricted to `wp-content/sandbox-code/`). **DONE + live-verified**: all 4 register; write/read/edit round-trip (hello→world); path escape → `path_outside_base`; `.php` outside sandbox-code → `php_sandbox_required`; `.php` in sandbox-code → created.
 - [ ] T016 [P] [US3] Add file-ability proxy MCP tools (`wp_file_read/write/list`) in `mcp/wp-server/tools/abilities.py`.
 - [ ] T017 [US3] Live verification (quickstart §4): write/read round-trip **via both the direct endpoint and the `wp_file_*` proxy** (asserts the FR-010 proxy path for files); out-of-ABSPATH + symlink escape rejected; new `.php` outside sandbox-code/ rejected.
 
@@ -68,8 +68,8 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: sandbox-code/ loads behind crash recovery; a fatal drops to safe mode.
 **Independent test**: write a fatal sandbox file; site stays up in safe mode with a naming notice.
 
-- [ ] T018 [US4] Implement the crash-recovery loader in the payload: require `wp-content/sandbox-code/*.php` behind a shutdown handler that writes `.crashed` on fatal; safe mode skips all sandbox files; admin notice names the file; `?sb_safe_mode=1` manual override.
-- [ ] T019 [US4] Live verification (quickstart §5): fatal sandbox file → site up in safe mode, `.crashed` present, notice shown; remove marker → normal load.
+- [x] T018 [US4] Implement the crash-recovery loader (require `wp-content/sandbox-code/*.php`; safe mode skips all on fatal; admin notice names the file; `?sb_safe_mode=1` override). **DONE — hardened beyond the spec**: a `.loading`→`.crashed` marker handshake (write-before-require, clear-after) is the reliable signal because **WP registers its own fatal handler before mu-plugins and pre-empts our shutdown callback** (caught by live verification). The shutdown handler is kept as a fast path.
+- [x] T019 [US4] Live verification (quickstart §5): planted a fatal sandbox file → req1 fatals + leaves `.loading`; req2 auto-promotes to `.crashed` and recovers (`alive+abilities`); `.crashed` correctly names `boom.php`; cleanup → normal load.
 
 ## Phase 8: Polish & Cross-Cutting
 

@@ -704,5 +704,5 @@ to apply changes. New commands should follow the same shape.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/003-wp-abilities-adapter/plan.md
+at specs/004-async-wp-cli-jobs/plan.md
 <!-- SPECKIT END -->

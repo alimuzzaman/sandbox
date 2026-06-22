@@ -119,12 +119,24 @@ The canonical in-editor command API (for the optional headless-browser path) is
 in-browser with a human present); driving `$e.run` only works inside a live
 editor. An out-of-process agent edits the *stored document*, not the live editor.
 
-## In-house prior art — the `original-reference` branch
+## In-house prior art — the existing `skills/wp-pilot/` recipes (ON THIS BRANCH)
 
-The Sandbox **already had** editor-authoring recipes under `skills/wp-pilot/`
-(present on the `original-reference` branch, dropped in the spec-001 rewrite).
-These are battle-tested starting points; spec 005 should migrate/build on them
-rather than start from scratch.
+The Sandbox **already ships** editor-authoring recipes under
+`skills/wp-pilot/recipes/` on the current branch (they were never dropped — they
+also exist on the older `original-reference` ancestor). These are battle-tested
+starting points; spec 005 **re-architects** them into the ability-based engine
+(spec 003) rather than starting from scratch. The full set on HEAD:
+
+- `dashboard-flow.js` — navigate→toggle→save→assert→reload dashboard testing.
+- `inspect-editor.js` — dump the editor's **parsed** blocks (which attribute keys
+  survived) — the debugging tool for "Attempt Block Recovery"/invalid-block cases.
+- `screenshot.js` — screenshot any frontend/admin URL.
+- `verify-and-fix.js` — per-section visual diff vs a reference image + patch slots.
+- `pro-gating.js` — verify Pro-gating (deactivate Pro, click each Pro control,
+  assert upsell modal + server-side enforcement). Reusable for EA/EB Pro.
+- `figma-to-page.js` — compose an Elementor tree, auto-patch image `url` from
+  `wp_get_attachment_url($id)`.
+- `gutenberg-page.js` / `elementor-page.js` — see below.
 
 - `skills/wp-pilot/recipes/elementor-page.js` — the same **dual path** spec 005
   specs: (A) fast REST `_elementor_data` write for settings-driven widgets, (B)
@@ -156,13 +168,13 @@ rather than start from scratch.
   - SVG uploads → use the **Safe SVG** plugin (sanitizes), never a raw
     `upload_mimes` filter; `wp media import` of SVG needs `--user=admin`.
 
-`original-reference` also carries the old `sandbox.yml` **`projects:` catalog** —
-every WPDeveloper plugin with slug + GitHub repo + source path (embedpress,
-essential-blocks, essential-addons, betterdocs, betterlinks, notificationx,
-schedulepress/wp-scheduled-posts, xspeed, disable-comments, …). It was removed by
-the per-project rewrite (spec 001), but is a useful reference for building
-per-plugin skills/schemas later. Note the GitHub-vs-slug mismatches it documents
-(e.g. `eael-pro` repo → `essential-addons-elementor` slug; `wowstore` → `productx`).
+The old `sandbox.yml` **`projects:` catalog** — every WPDeveloper plugin with slug
++ GitHub repo + source path — was removed by the per-project rewrite (spec 001,
+constitution Principle I) and is now captured as a reference at
+[docs/plugin-catalog.md](../../docs/plugin-catalog.md) (recoverable from git at
+`f3f3633:sandbox.yml`). Useful for building per-plugin skills/schemas later; note
+the GitHub-vs-slug mismatches (`essential-addons-elementor` repo a.k.a. `eael-pro`;
+`wowstore` → `productx`).
 
 ## Local source notes
 

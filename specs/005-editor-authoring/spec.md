@@ -277,12 +277,17 @@ hex IDs, EA widget enablement, and CSS regeneration.
   pre-generated for known versions and refresh live. **EB controls are a git
   submodule** (`src/controls`); run `git -C …/essential-blocks submodule update
   --init --recursive` for complete attribute-source introspection.
-- **Migrate the existing in-house recipes**: `original-reference` has
-  `skills/wp-pilot/recipes/{elementor-page,gutenberg-page,figma-to-page,pro-gating}.js`
-  + `gotchas.md` — the dual-path Elementor write, the real-editor
-  `wp.blocks.serialize()` Gutenberg path, image-url patching, and Pro-gating
-  verification already exist. Port these as the engine's starting point (fixing
-  the 8-hex→7-hex ID bug). See [research.md](./research.md#in-house-prior-art-the-original-reference-branch).
+- **Re-architect the existing on-branch recipes**: `skills/wp-pilot/recipes/`
+  already ships (on this branch) `elementor-page.js`, `gutenberg-page.js`,
+  `figma-to-page.js`, `pro-gating.js`, `inspect-editor.js`, `dashboard-flow.js`,
+  `screenshot.js`, `verify-and-fix.js` + `gotchas.md` — the dual-path Elementor
+  write, the real-editor `wp.blocks.serialize()` Gutenberg path, image-url
+  patching, and Pro-gating verification. These are Playwright recipes invoked
+  ad-hoc; spec 005 **re-architects** their proven logic into the WP-ability engine
+  (spec 003) + the EB finalizer mu-plugin, keeping the recipes as the
+  `visit`-driven verification/escape-hatch layer. Fix the 8-hex→7-hex element-ID
+  bug during the port. See
+  [research.md](./research.md#in-house-prior-art--the-existing-skillswp-pilot-recipes-on-this-branch).
 - Reference implementation to study while building the Elementor engine:
   `msrbuilds/elementor-mcp` (same `Document::save` + element-factory + 7-hex-ID
   approach). Optional: Elementor core's hidden `e_wp_abilities_api` experiment can
@@ -323,4 +328,9 @@ surfaces register as WP abilities on spec 003 (build/verify 003 first).
 8. Cross-cutting contract layer: tool annotations (`readOnly`/`destructive` +
    `confirmationMessage`), read-before-write resources (`elementor://`, `eb://`),
    per-op capability checks.
-9. Docs.
+9. Re-architect `skills/wp-pilot/recipes/` into the ability engine: port the
+   proven editor/`$e.run` + `wp.blocks.serialize()` + image-url-patch + pro-gating
+   logic; fix the 8-hex→7-hex ID bug; keep the recipes as the `visit`-driven
+   verify/escape-hatch layer.
+10. Docs (incl. [docs/plugin-catalog.md](../../docs/plugin-catalog.md) for EA/EB
+    slugs/repos).

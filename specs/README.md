@@ -13,6 +13,7 @@ spec (spec-kit shape: `spec.md` + `plan.md`, sometimes `research.md` /
 | 005 | AI editor authoring: Elementor/EA widgets + Gutenberg/EB blocks ([research](005-editor-authoring/research.md)) | Draft | Novamira parity #3 + EA/EB ask |
 | 006 | In-product skill authoring (auto-matched playbooks) | Draft | Novamira parity #4 |
 | 007 | Headless debugging tools: Query Monitor + dump/dd + Xdebug | Draft | Debugging ask |
+| 008 | DB-only snapshots & reset-to-fresh-install (extends 002) | Draft | Snapshot/reset ask |
 
 ## Background: the Novamira comparison (2026-06-22)
 

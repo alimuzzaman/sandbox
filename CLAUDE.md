@@ -635,6 +635,34 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     **shell-quoted** (`_php_squote`) because the Herd php path has spaces and the
     WP suite splices it unescaped into `system()`.
 
+15. **Plugin/theme downloads are cached in a shared, version-aware cache.**
+    Two layers, both keyed by version so a new release naturally misses the
+    cache: (a) the wpcli tier mounts a persistent host dir at `WP_CLI_CACHE_DIR`
+    (`runtime/dl-cache/wp-cli`), so `wp plugin/theme/core install` reuses
+    downloads across instances + runs — wp-cli already queries `plugins_api` for
+    the latest version every time, so it's check-then-serve-by-version for free;
+    (b) the `00-sandbox-dl-cache.php` mu-plugin (web tier) hooks WP's
+    `upgrader_pre_download` — the path **Templately FSI** installs through
+    (`Plugin_Upgrader->install($download_link)`) — caching zips in
+    `runtime/dl-cache/wp-http` (mounted at `/sandbox-dl-cache`). It revalidates
+    with a conditional GET (ETag/Last-Modified) only once the throttle window
+    `SANDBOX_DL_CACHE_TTL` (default 12h, override via a wp-config `define`) has
+    elapsed; within the window it serves with no upstream call. It ALWAYS hands
+    WP a throwaway temp copy because `WP_Upgrader` deletes the package it
+    returns — returning the cache file directly would delete it after one use.
+    The cache dir is shared across instances; clear it with
+    `rm -rf runtime/dl-cache/*` (gitignored). Not on herd.
+
+16. **Install-time secrets must survive a block rebuild.** `bridge_token`,
+    `app_password`, and `autologin_token` live in the `sandbox.local.yml`
+    instance block but are minted by `cmd_install` (via `save_local_*`), not by
+    `_build_instance_block` — which reconstructs the block from config on every
+    `ensure`/`apply`/onboard. `_build_instance_block` therefore explicitly
+    carries those three keys over from the previous block (like it does for
+    `domain`/`tld`); dropping them silently breaks the wp-admin snapshot bridge,
+    MCP REST auth, and the autologin link. `cmd_up` also mints a missing
+    `bridge_token` so a plain `up` self-heals an older, secret-less instance.
+
 ---
 
 ## Adding a new skill or workflow

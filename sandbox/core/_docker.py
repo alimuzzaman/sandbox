@@ -141,6 +141,10 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     volumes:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
+      # Shared plugin/theme download cache: the dl-cache mu-plugin serves &
+      # populates zips here so WP-runtime installs (Templately FSI especially)
+      # reuse a cached zip instead of re-downloading. Shared across instances.
+      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
       # Bind-mount plugin sources at the same absolute host path so the
       # symlinks ensure_instance creates under wp-content/plugins/ resolve
       # inside the container.
@@ -177,6 +181,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - ./runtime/wp-{instance}:/var/www/html
       - ./runtime/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
 
   nginx:
@@ -225,6 +230,7 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - ./runtime/wp-{instance}:{docroot}
       - ./runtime/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
 """
 
 
@@ -252,6 +258,10 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - ./runtime/wp-{instance}:{docroot}
       - ./runtime/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
+      # Persistent, shared wp-cli download cache (WP_CLI_CACHE_DIR points here):
+      # `wp plugin/theme/core install` reuse downloads across instances + runs
+      # instead of re-fetching into ephemeral /tmp every time.
+      - ./runtime/dl-cache/wp-cli:/tmp/.wp-cli/cache
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
     entrypoint: ["wp", "--allow-root"]
     command: ["--info"]
@@ -318,6 +328,17 @@ def write_compose_files(cfg: dict) -> None:
     don't linger.
     """
     COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
+    # Shared, persistent download caches bind-mounted into every instance's web
+    # + wpcli tiers. Pre-create them 0777 so the bind mount isn't created
+    # root-owned by Docker (the container uids — www-data 33 / lsphp 1000 —
+    # must be able to write cached zips).
+    for sub in ("wp-cli", "wp-http"):
+        d = ROOT / "runtime" / "dl-cache" / sub
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            d.chmod(0o777)
+        except OSError:
+            pass
     plugins_host = _plugins_home(cfg)
     instances = resolve_instances(cfg)
 

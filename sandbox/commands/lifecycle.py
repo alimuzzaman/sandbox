@@ -42,10 +42,18 @@ def cmd_up(cfg: dict, args) -> None:
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
         _write_mail_muplugin(inst)
+        _write_dl_cache_muplugin(inst)
         # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
         # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
-        _tok = _bridge_token_for(inst)
-        if _tok:
+        # Mint the token if it's missing so `up` self-heals an instance whose
+        # token was never created (or was dropped by an older apply, before the
+        # _build_instance_block preservation fix). Not on herd (no bridge yet).
+        if not _is_herd_instance(inst):
+            _tok = _bridge_token_for(inst)
+            if not _tok:
+                import secrets as _secrets
+                _tok = _secrets.token_hex(16)
+                save_local_bridge_token(_tok, instance=inst)
             _write_snapshot_muplugin(inst, _tok)
             _ensure_bridge_server()
     ok(f"WordPress: {site_url(inst_cfg)}")
@@ -232,6 +240,9 @@ def cmd_install(cfg, args) -> None:
     # host there, and the mu-plugin would break host mail instead.
     if server != "herd":
         _write_mail_muplugin(inst)
+        # Cache plugin/theme zip downloads (Templately FSI etc.) — the cache dir
+        # is only mounted on docker tiers, so the mu-plugin no-ops on herd anyway.
+        _write_dl_cache_muplugin(inst)
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
     ok(f"Admin: {base}/wp-admin"

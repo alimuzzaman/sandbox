@@ -438,6 +438,17 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
+
+    # Preserve secrets minted at install time. They live in the instance block
+    # (written by save_local_bridge_token / save_local_app_password /
+    # save_local_autologin_token), but this function rebuilds the block from
+    # config alone — so without carrying them over, every ensure/apply/onboard
+    # rewrite would drop them, breaking the wp-admin snapshot bridge
+    # (bridge_token), MCP REST auth (app_password), and the autologin link.
+    _prev = _local_yaml().get("instances", {}).get(name, {})
+    for _secret in ("bridge_token", "app_password", "autologin_token"):
+        if _prev.get(_secret) and not block.get(_secret):
+            block[_secret] = _prev[_secret]
     return block
 
 
@@ -634,6 +645,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
             # nothing, but keep them guaranteed-present like cmd_up does).
             if wp_dir(name).exists():
                 _write_mail_muplugin(name)
+                _write_dl_cache_muplugin(name)
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
         _wire_project_plugins(name, root, pconf)

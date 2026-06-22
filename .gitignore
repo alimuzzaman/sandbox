@@ -16,6 +16,7 @@ runtime/wp-*/
 runtime/plugins/*
 !runtime/plugins/.gitkeep
 runtime/snapshots/
+runtime/dl-cache/
 runtime/compose/
 runtime/proxy/
 runtime/registry.json

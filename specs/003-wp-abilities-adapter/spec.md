@@ -46,6 +46,13 @@ powerful than `wp eval-file` for interactive inspection and is the foundation
 specs 005/006 build on. (3) We ride the forming ecosystem standard instead of a
 bespoke tool list.
 
+## Clarifications
+
+### Session 2026-06-22
+
+- Q: What should the in-instance Abilities layer expose in v1, and how is it reached? → A: Hybrid — `execute-php` (core) **plus** file-CRUD abilities, exposed on **both** surfaces (direct instance endpoint + a Python-MCP proxy tool). Rationale: external MCP clients (Cursor/Windsurf/Cline) connecting straight to the instance endpoint do **not** have the Python MCP's `fs_*`/Read/Write, so the endpoint must carry file abilities to be self-sufficient; the proxy gives in-session convenience for existing `mcp__sandbox__*` users.
+- Q: Default state of the Abilities layer on a newly provisioned instance? → A: On by default (instances are disposable/local), with a "dev/staging only" banner; toggle via `./sb abilities off`.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — Run PHP in the live WP runtime (Priority: P1)
@@ -111,12 +118,15 @@ auth + capability.
 - **FR-2** Bundle `wordpress/mcp-adapter` (vendored into the mu-plugin payload,
   not the user's plugin) and register an MCP server exposing only abilities with
   `meta.mcp.public = true`.
-- **FR-3** Register core abilities: `sandbox/execute-php` (eval + capture, the
-  Novamira `novamira_execute_php` implementation verbatim in spirit),
-  `sandbox/read-file` / `write-file` / `edit-file` / `list-directory` (ABSPATH-
-  jailed via a `resolve_path` that rejects symlink escape — Novamira's
-  `novamira_resolve_path`). WP-CLI abilities are **deferred** — the Python MCP
-  `wp_cli` + spec 004 already cover that surface from the host.
+- **FR-3** Register abilities: `sandbox/execute-php` (eval + capture, the
+  Novamira `novamira_execute_php` implementation in spirit) **and** the file-CRUD
+  set `sandbox/read-file` / `write-file` / `edit-file` / `list-directory`
+  (ABSPATH-jailed via a `resolve_path` that rejects symlink escape — Novamira's
+  `novamira_resolve_path`). File abilities ship in v1 **so the direct instance
+  endpoint is self-sufficient for external MCP clients** that lack the Python
+  MCP's `fs_*` tools — they are not meant to replace `fs_*` for Sandbox users.
+  WP-CLI abilities remain **deferred** — the Python MCP `wp_cli` + spec 004 cover
+  that surface from the host.
 - **FR-4** Override `mcp-adapter/discover-abilities` to append Sandbox
   environment instructions (focused plugin, instance URL, snapshot reminder).
 - **FR-5** Master enable flag, default **on for Sandbox instances** (they're
@@ -130,6 +140,10 @@ auth + capability.
 - **FR-8** Connection helper: `./sb connect <instance>` + web-dashboard block
   emit the endpoint + app-password + per-client config (npx-mcp-remote / direct
   HTTP), like Novamira's Connect page.
+- **FR-9** Both surfaces ship in v1: (a) the **direct** instance MCP endpoint for
+  any external client, and (b) a thin Python-MCP **proxy** tool (`wp_eval_live`,
+  and file-ability proxies if needed) that POSTs to the instance abilities so
+  existing `mcp__sandbox__*` users get them in-session.
 
 ## Design notes
 
@@ -138,10 +152,14 @@ auth + capability.
 - **License**: `wordpress/mcp-adapter` is GPL-compatible; vendoring it in our
   mu-plugin is fine. We are *not* copying Novamira's AGPL code — we re-implement
   the (small, mechanical) ability callbacks against the same public WP APIs.
-- **Relationship to the Python MCP**: keep both. The Python MCP can even *proxy*
-  to the in-instance endpoint for `execute-php` so existing Sandbox users get it
-  through the familiar `mcp__sandbox__*` namespace (add a thin `wp_eval_live`
-  tool that POSTs to the instance ability). Decide proxy-vs-direct in `plan.md`.
+- **Relationship to the Python MCP**: keep both, and ship both surfaces (FR-9).
+  The Python MCP proxies to the in-instance endpoint (`wp_eval_live` etc.) for
+  in-session convenience; the direct endpoint serves external clients. The Python
+  MCP's `fs_*` stay as the Sandbox-native file path.
+- **Consumer — spec 005**: the Elementor/EA + Gutenberg/EB editor engine
+  (spec 005) is implemented **as WP abilities on this layer** (msrbuilds-style),
+  so spec 005 depends on 003. This is the primary justification for shipping the
+  full ability set rather than `execute-php` alone.
 - **Herd**: the mu-plugin is host-file-based, so it works on herd unchanged; the
   MCP endpoint is just the herd `https://<instance>.test/wp-json/...` URL.
 
@@ -155,16 +173,11 @@ auth + capability.
 - Docs: CLAUDE.md (new gotcha: abilities layer + the AGPL boundary), MCP-surface
   table, `docs/sandbox-config-reference.md`.
 
-## Open questions (resolve in plan.md / via clarify)
+## Open questions
 
-1. Proxy through the Python MCP, or expose the instance endpoint directly to
-   clients, or both? (Recommend: both — direct for portability, a proxy tool for
-   in-session convenience.)
-2. Do we want the file-CRUD abilities at all, given the Python MCP `fs_*` +
-   native Read/Write already cover files? (Recommend: ship only `execute-php`
-   first; add file abilities only if external-client parity demands it.)
-3. Enable default — on (disposable instances) vs off (safety). Recommend on, with
-   the flag + a clear "dev/staging only" banner.
+All resolved in [Clarifications](#clarifications) (2026-06-22): surface = hybrid
+(execute-php + file-CRUD, both direct + proxy); enable default = on. No open
+questions remain for v1.
 
 ## Tasks
 
@@ -174,7 +187,8 @@ auth + capability.
 3. `discover-abilities` override with Sandbox instructions builder.
 4. Crash-recovery sandbox loader + safe-mode notice + `?sb_safe_mode=1`.
 5. `./sb abilities on|off|status`, `./sb connect`, provisioning hooks.
-6. (Optional) Python MCP `wp_eval_live` proxy tool.
+6. Python MCP `wp_eval_live` proxy tool (+ file-ability proxies as needed) — both
+   surfaces (FR-9).
 7. Live verification: connect Claude Desktop + Cursor to one instance; run
    `execute-php`; trip a fatal in a sandbox file and confirm safe-mode recovery.
 8. Docs.

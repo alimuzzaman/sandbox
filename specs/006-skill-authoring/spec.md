@@ -43,6 +43,12 @@ they're reviewable, diffable, shippable, and team-shared (the whole point of our
 `skills/` + per-plugin `.claude/skills/` layout). Agent writes go to files, not a
 DB.
 
+## Clarifications
+
+### Session 2026-06-22
+
+- Q: When the same skill slug exists in multiple sources, which wins? → A: **project > personal > sandbox** — most-specific wins: a focused-plugin skill (`<plugin>/.claude/skills`) overrides the dev's personal skill (`~/.claude/skills`), which overrides the generic sandbox built-in (`skills/`).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — Agent persists a learned playbook (Priority: P1)
@@ -101,8 +107,11 @@ A built-in skill teaches the agent the house style.
 - **FR-2** `skill_edit(slug, *, description?, body?, project_dir)` and
   `skill_delete(slug, scope, project_dir)`.
 - **FR-3** `list_skills(project_dir)` → `[{slug, description, source, path}]`
-  across all sources, priority-ordered (personal < project < sandbox built-ins
-  by Novamira's model — but document and pick our precedence in plan.md).
+  across all sources. On a slug collision, precedence is **project > personal >
+  sandbox** (most-specific wins): a focused-plugin skill overrides a personal
+  `~/.claude` skill, which overrides a generic sandbox built-in. The winning entry
+  is the one surfaced/loaded; `list_skills` may report shadowed duplicates with
+  their source for transparency.
 - **FR-4** Reuse the existing frontmatter parser path used by `load_skill`; if
   none is exposed, factor Novamira-style lenient parsing (`---` fence, `key:
   value`, recognizes `name|description|enable`; `stripcslashes` on body to undo

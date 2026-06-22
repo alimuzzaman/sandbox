@@ -25,6 +25,13 @@ panel. Give it three headless debugging surfaces, in increasing weight:
 
 All three are local/dev-only and gitignored at runtime.
 
+## Clarifications
+
+### Session 2026-06-22
+
+- Q: How is Query Monitor activated on an instance? → A: Provision QM **installed-but-inactive** at instance-create time (the `mappings_inactive` pattern — present, not activated), and **auto-activate on first `qm_capture`** (idempotent). The `qm.jsonl` capture mu-plugin is always present regardless of QM's active state, so normal requests carry no QM overhead until a capture is requested.
+- Q: How does the agent read `dump()`/`dd()` output? → A: Add a **file selector to the existing `tail_log`** (`tail_log(file="dump")` → `debug-dump.log`); no new MCP tool. CLI: `./sb dump`.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — dump/dd to a tailable file (Priority: P1)
@@ -40,7 +47,7 @@ clean file — not buried in `debug.log`.
 2. `dd($var)` writes then `wp_die()`s with a pointer to the file.
 3. **Given** production / non-local, **When** the mu-plugin loads, **Then** it
    no-ops (hard return) and defines nothing.
-4. The agent reads it via `tail_dump` (MCP) / `./sb dump --follow` (CLI).
+4. The agent reads it via `tail_log(file="dump")` (MCP) / `./sb dump --follow` (CLI).
 5. `dump`/`dd` are `function_exists`-guarded so they never collide with Symfony's
    or another plugin's definitions.
 
@@ -82,8 +89,10 @@ An agent profiles a page/REST request and gets QM's data structured.
   append + `LOCK_EX`, each entry prefixed with timestamp + caller `file:line`.
 - **FR-3** Hard `return` unless `WP_DEBUG` or `wp_get_environment_type()==='local'`;
   `function_exists` guards; slug-prefixed internal helper.
-- **FR-4** MCP `tail_dump(lines=…, *, project_dir)` (or extend `tail_log` with a
-  `file="dump"` selector) + `./sb dump [--follow] [--clear]`.
+- **FR-4** Extend the existing `tail_log` MCP tool with a `file` selector
+  (`tail_log(file="dump", lines=…, *, project_dir)` → `debug-dump.log`; default
+  `file="debug"` keeps current behavior) + `./sb dump [--follow] [--clear]`. No
+  new MCP tool (avoids an extra registration/restart surface).
 
 ### Query Monitor
 - **FR-5** mu-plugin `00-sandbox-qm.php`: on `shutdown` priority `PHP_INT_MAX`,
@@ -92,13 +101,14 @@ An agent profiles a page/REST request and gets QM's data structured.
   `wp-content/qm.jsonl` with `{ts, url, is_ajax, data:{…}}`. Whitelist collector
   ids (drop `hooks` by default — it's huge). Never define `QM_DISABLED`; **do**
   define `QM_HIDE_SELF`.
-- **FR-6** Provisioning installs QM as a managed dev plugin (like other harness
-  tooling) so it's available without polluting the focused plugin's deps —
-  activate on demand. (Decide in plan.md: always-active vs `./sb qm on`.)
-- **FR-7** MCP `qm_capture(url, collectors=None, *, project_dir)` → fire
+- **FR-6** Provisioning installs QM at instance-create time **installed-but-inactive**
+  (the `mappings_inactive` pattern — present, not activated), so it doesn't pollute
+  the focused plugin's deps and adds no per-request overhead until used.
+- **FR-7** MCP `qm_capture(url, collectors=None, *, project_dir)`: if QM is
+  inactive, **auto-activate it on this first call** (idempotent), then fire
   `http_fetch(url)` (reuse the existing tool internals), read the **last**
   `qm.jsonl` line, return parsed + filtered JSON. CLI: `./sb qm <url>
-  [--collectors db_queries,timing,php_errors]`.
+  [--collectors db_queries,timing,php_errors]`; `./sb qm off` to deactivate.
 - **FR-8** Document the `?_envelope` REST path as the zero-config alternative for
   REST-scoped debugging.
 - **FR-9** `qm.jsonl` / `debug-dump.log` are runtime, gitignored; `./sb qm
@@ -137,7 +147,7 @@ An agent profiles a page/REST request and gets QM's data structured.
 
 - mu-plugin writers next to `_write_mail_muplugin` in the CLI; hook into
   `cmd_up`/`cmd_install`/`apply` (idempotent rewrite).
-- MCP: `qm_capture`, `tail_dump` (or `tail_log` selector), `xdebug` in
+- MCP: `qm_capture`, `tail_log` `file` selector, `xdebug` in
   `mcp/wp-server/tools/` (reuse `http_fetch` internals, `_project_instance`,
   `tail_log`). New tools ⇒ Claude Code restart (gotcha #4).
 - CLI: `qm` + `dump` command modules; extend `debug.py` (`cmd_xdebug`) for herd.
@@ -148,10 +158,10 @@ An agent profiles a page/REST request and gets QM's data structured.
 ## Tasks
 
 1. `00-sandbox-dump.php` + vendored var-dumper + writer; provisioning hook.
-2. `tail_dump` MCP + `./sb dump` CLI.
-3. `00-sandbox-qm.php` shutdown→`qm.jsonl` reader; QM install/activate management.
+2. `tail_log` `file="dump"` selector + `./sb dump` CLI.
+3. `00-sandbox-qm.php` shutdown→`qm.jsonl` reader; provision QM installed-inactive; `qm_capture` auto-activates on first use.
 4. `qm_capture` MCP + `./sb qm` CLI (+ document `?_envelope`).
 5. Xdebug: herd support in `cmd_xdebug` + `xdebug` MCP tool.
-6. Live verification: `dump()` from plugin code → read via `tail_dump`; `qm_capture`
+6. Live verification: `dump()` from plugin code → read via `tail_log(file="dump")`; `qm_capture`
    on a slow page shows queries+timing; xdebug status on docker + herd.
 7. Docs + `skills/wp-debug` escalation ladder.

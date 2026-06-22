@@ -68,10 +68,19 @@ which this spec adopts:
   "read-before-write", resource URI schemes, and per-server instructions. Skip its
   postMessage/iframe + OIDC plumbing (in-browser, human-present — not our case).
 
-**Relationship to spec 003:** these editor abilities are the strongest argument
-*for* the in-instance Abilities layer — if 003 ships, the Elementor/EB engines can
-register as WP abilities (msrbuilds-style) and be reachable by any MCP client; if
-not, they live as Python-MCP tools. Either way the engine logic is identical.
+**Relationship to spec 003 (decided):** the editor engine is implemented **as WP
+abilities** on spec 003's in-instance Abilities layer (msrbuilds-style), reachable
+by any external MCP client and, via 003's proxy, in-session. **Spec 005 depends on
+003.** The `*_insert/*_update/*_get/*_delete` and `editor_schema` surfaces named
+below as "MCP tools" are realized as these abilities (plus optional Python-MCP
+proxies); the engine logic is identical regardless of surface.
+
+## Clarifications
+
+### Session 2026-06-22
+
+- Q: Which page-builder engine ships first, and do we commit to both? → A: Both — **Gutenberg/EB first** (our own blocks; the finalizer is the hardest, highest-value piece and the biggest ecosystem gap), then Elementor/EA.
+- Q: How is the editor authoring engine exposed to agents? → A: As **WP abilities** (msrbuilds-style), on the spec 003 in-instance Abilities layer. **Spec 005 therefore depends on spec 003.** The same ability surface is reachable by external MCP clients and (via 003's proxy) in-session.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -279,19 +288,26 @@ hex IDs, EA widget enablement, and CSS regeneration.
 
 ## Tasks
 
-1. Elementor engine: read-before-write tree read/insert/update/delete via
-   `Document::save()` (admin context), hex-ID gen, widget-enable + survive-verify,
-   CSS regen, address-by-id, raw-meta fallback. MCP + CLI.
-2. `editor_schema` introspection + cache (both builders); EB submodule init.
-3. Gutenberg engine: parse/modify/serialize; dynamic-vs-static classification;
+Ordered **Gutenberg/EB first**, then Elementor/EA (per Clarifications). All engine
+surfaces register as WP abilities on spec 003 (build/verify 003 first).
+
+1. `editor_schema` introspection + cache for Gutenberg (block registry attrs); EB
+   `src/controls` submodule init.
+2. Gutenberg/EB engine: parse/modify/serialize; dynamic-vs-static classification;
    markup pre-validator; `blockId`/`blockMeta`/parent-context handling; raw-HTML
-   guard; deprecation tiers.
-4. EB finalizer mu-plugin (batch/item queue, lease, stage→commit) + `visit`-driven
+   guard; deprecation tiers. Registered as abilities.
+3. EB finalizer mu-plugin (batch/item queue, lease, stage→commit) + `visit`-driven
    finalizer page + headless completion marker.
-5. Contract layer: tool annotations (`readOnly`/`destructive` + `confirmationMessage`),
-   read-before-write resources (`elementor://`, `eb://`), per-op capability checks.
-6. Skills: `elementor-ea`, `gutenberg-eb`.
-7. Live verification: insert + restyle an `eael-counter` and an EB accordion
-   (parent+child); confirm rendered + editor-valid + styled; finalizer round-trip
-   on a static third-party block.
-8. Docs.
+4. `skills/gutenberg-eb/SKILL.md`.
+5. EB live verification: insert + restyle an EB accordion (parent+child); confirm
+   rendered + editor-valid + styled; finalizer round-trip on a static third-party
+   block.
+6. Elementor/EA `editor_schema` + engine: read-before-write tree
+   read/insert/update/delete via `Document::save()` (admin context), hex-ID gen,
+   widget-enable + survive-verify, CSS regen, address-by-id, raw-meta fallback.
+7. `skills/elementor-ea/SKILL.md` + EA live verification (insert + restyle an
+   `eael-counter`).
+8. Cross-cutting contract layer: tool annotations (`readOnly`/`destructive` +
+   `confirmationMessage`), read-before-write resources (`elementor://`, `eb://`),
+   per-op capability checks.
+9. Docs.

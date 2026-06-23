@@ -125,3 +125,63 @@ def run_tests(project_dir: str, phpunit_args: str = "") -> dict:
         "summary": m.group(1) if m else None,
         "output": out[-4000:],
     }
+
+
+@mcp.tool()
+def wp_cli_async(command: str, *, project_dir: str) -> dict:
+    """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
+    with {ok, job_id}; the command keeps running detached. Use for long ops
+    (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
+    with wp_cli_job_kill.
+
+    project_dir: the plugin project to target (call ensure_instance first).
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    cmd = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "wp", "--async",
+           *shlex.split(command)]
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
+    m = _re.search(r"started background job ([a-f0-9]{16})", res.stdout or "")
+    if not m:
+        return {"ok": False, "error": "failed to start job",
+                "output": ((res.stdout or "") + (res.stderr or ""))[-2000:]}
+    return {"ok": True, "job_id": m.group(1), "status": "running"}
+
+
+@mcp.tool()
+def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_dir: str) -> dict:
+    """Poll a background wp-cli job (spec 004): returns {ok, status
+    (running|completed|not_found), exit_code?, stdout, bytes_read, truncated}.
+    Advance `offset` by `bytes_read` to fetch only new output. limit=-1 = whole log.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    import sys as _sys
+    _sys.path.insert(0, str(SANDBOX_ROOT))
+    try:
+        from sandbox.commands.jobs import job_status, _valid_job_id
+    except Exception as e:  # pragma: no cover
+        return {"ok": False, "error": f"jobs module import failed: {e}"}
+    if not _valid_job_id(job_id):
+        return {"ok": False, "error": "invalid job id"}
+    return {"ok": True, **job_status(inst, job_id, offset=offset, limit=limit)}
+
+
+@mcp.tool()
+def wp_cli_job_kill(job_id: str, *, project_dir: str) -> dict:
+    """Cancel a running background wp-cli job (spec 004). No-op if already finished.
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    import sys as _sys
+    _sys.path.insert(0, str(SANDBOX_ROOT))
+    try:
+        from sandbox.commands.jobs import kill_job, _valid_job_id
+    except Exception as e:  # pragma: no cover
+        return {"ok": False, "error": f"jobs module import failed: {e}"}
+    if not _valid_job_id(job_id):
+        return {"ok": False, "error": "invalid job id"}
+    return {"ok": True, **kill_job(inst, job_id)}

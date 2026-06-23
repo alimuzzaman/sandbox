@@ -44,6 +44,11 @@ def cmd_up(cfg: dict, args) -> None:
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        try:  # spec 004 — reap old background-job artifacts (>24h)
+            from sandbox.commands.jobs import prune_jobs
+            prune_jobs(inst)
+        except Exception:
+            pass
         # Re-assert the snapshot bridge mu-plugin + ensure the host bridge server
         # is running so Tools → Sandbox Snapshots works after a plain `up` (FR-014).
         # Mint the token if it's missing so `up` self-heals an instance whose

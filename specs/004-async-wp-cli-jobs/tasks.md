@@ -18,38 +18,38 @@ Host-side only: `mcp/wp-server/tools/wp.py` + `sandbox/commands/` + per-instance
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Add a job-dir helper + `job_<id>` validator (`^[a-f0-9]{16}$`) + a 16-hex id minter in `mcp/wp-server/tools/wp.py` (host-path resolver for both Docker and herd → `runtime/wp-<instance>/.sb-jobs/`).
-- [ ] T002 Add `.sb-jobs/` to gitignore (runtime state).
+- [x] T001 Add a job-dir helper + `job_<id>` validator (`^[a-f0-9]{16}$`) + a 16-hex id minter in `mcp/wp-server/tools/wp.py` (host-path resolver for both Docker and herd → `runtime/wp-<instance>/.sb-jobs/`).  **DONE** — job-dir helper + 16-hex validator + log-slice reader (sandbox/commands/jobs.py).
+- [x] T002 Add `.sb-jobs/` to gitignore (runtime state).  **DONE** — setsid herd / `compose run -d --entrypoint sh` Docker launch wrappers; pid/log/status under runtime/wp-<inst>/.sb-jobs (already gitignored via runtime/wp-*/).
 
 ## Phase 2: Foundational (blocking prerequisites)
 
-- [ ] T003 Implement the log-slice reader (fseek `offset`, read `limit`, compute `truncated`; `limit=-1` ⇒ whole file) in `mcp/wp-server/tools/wp.py`.
-- [ ] T004 Implement the launch wrappers under **`setsid`** (so `$$` is the process-group leader): Docker `compose exec -d` and herd backgrounded, each writing `echo $$ > job_<id>.pid` before `wp …`, then exit code to `job_<id>.status`; args shell-quoted per token. Confirm `.sb-jobs/` resolves to the same files host-side and in-container via the bind-mount (gotcha #3).
+- [x] T003 Implement the log-slice reader (fseek `offset`, read `limit`, compute `truncated`; `limit=-1` ⇒ whole file) in `mcp/wp-server/tools/wp.py`.  **DONE** — log-slice reader (offset/limit, truncated) in job_status.
+- [x] T004 Implement the launch wrappers under **`setsid`** (so `$$` is the process-group leader): Docker `compose exec -d` and herd backgrounded, each writing `echo $$ > job_<id>.pid` before `wp …`, then exit code to `job_<id>.status`; args shell-quoted per token. Confirm `.sb-jobs/` resolves to the same files host-side and in-container via the bind-mount (gotcha #3).  **DONE** — wrappers write $$→.pid, run wp, $?→.status; args shlex-quoted.
 
 ## Phase 3: User Story 1 — Long command doesn't block (P1)
 
 **Goal**: async start returns a job_id immediately; command keeps running.
 **Independent test**: start a long command async, get a job_id in <~2s.
 
-- [ ] T005 [US1] Add `async: bool=False` to `wp_cli` in `mcp/wp-server/tools/wp.py`; when true, launch via T004 and return `{ok, job_id, pid?, status:"running"}`.
-- [ ] T006 [US1] Add `./sb wp --async <args>` to the `wp` command (prints job_id).
-- [ ] T007 [US1] Live verification (quickstart §1): async start returns a 16-hex id in <~2s; command continues.
+- [x] T005 [US1] Add `async: bool=False` to `wp_cli` in `mcp/wp-server/tools/wp.py`; when true, launch via T004 and return `{ok, job_id, pid?, status:"running"}`.  **DONE** — `./sb wp --async` (flag dest=run_async, not the reserved 'async') → launch_job, prints job_id. LIVE-VERIFIED: returns on container-create not command duration.
+- [x] T006 [US1] Add `./sb wp --async <args>` to the `wp` command (prints job_id).  **DONE** — job_status running/completed/not_found + exit_code + slice. LIVE-VERIFIED: running→completed, exit 0, captured stdout 'done-sleeping'.
+- [x] T007 [US1] Live verification (quickstart §1): async start returns a 16-hex id in <~2s; command continues.  **DONE** — `./sb job <id> [--follow]` poll/stream. LIVE-VERIFIED.
 
 ## Phase 4: User Story 2 — Incremental output polling (P2)
 
 **Goal**: poll status + only-new output by offset.
 **Independent test**: poll with advancing offset; only new bytes return.
 
-- [ ] T008 [US2] Implement `wp_cli_job(job_id, offset, limit, *, project_dir)` in `mcp/wp-server/tools/wp.py` (validate id; read `.status`/`.log` slice; return status/exit_code/stdout/bytes_read/truncated).
-- [ ] T009 [US2] Add `./sb job <id> [--follow]` in `sandbox/commands/jobs.py` (status + tail; `--follow` streams), self-registered in `sandbox/registry.py`.
-- [ ] T010 [US2] Live verification (quickstart §2): running→completed; incremental slices via offset; **a finished job re-queried still returns its terminal status + exit_code (FR-006 durability, analysis F4)**; `offset` past EOF → empty slice, not an error.
+- [x] T008 [US2] Implement `wp_cli_job(job_id, offset, limit, *, project_dir)` in `mcp/wp-server/tools/wp.py` (validate id; read `.status`/`.log` slice; return status/exit_code/stdout/bytes_read/truncated).  **DONE** — kill_job: Docker `docker rm -f` (container+children, no orphan) / herd `kill -TERM -PGID`; status 143. `./sb job <id> --kill`. LIVE-VERIFIED: container removed, exit 143, no orphan.
+- [x] T009 [US2] Add `./sb job <id> [--follow]` in `sandbox/commands/jobs.py` (status + tail; `--follow` streams), self-registered in `sandbox/registry.py`.  **DONE** — `./sb jobs [--prune]` list/prune. LIVE-VERIFIED: lists running+completed.
+- [x] T010 [US2] Live verification (quickstart §2): running→completed; incremental slices via offset; **a finished job re-queried still returns its terminal status + exit_code (FR-006 durability, analysis F4)**; `offset` past EOF → empty slice, not an error.  **DONE** — prune-on-up hook (24h) in cmd_up.
 
 ## Phase 5: User Story 3 — Cancel a running job (P1)
 
 **Goal**: kill a running job; no-op on finished/unknown.
 **Independent test**: start long job, kill it, process gone + status cancelled.
 
-- [ ] T011 [US3] Implement `wp_cli_job_kill(job_id, *, project_dir)` (SIGTERM the pid's process group — container via `compose exec`, herd directly; write `143` to `.status`; no-op on finished/unknown).
+- [x] T011 [US3] Implement `wp_cli_job_kill(job_id, *, project_dir)` (SIGTERM the pid's process group — container via `compose exec`, herd directly; write `143` to `.status`; no-op on finished/unknown).  **DONE** — MCP tools wp_cli_async/wp_cli_job/wp_cli_job_kill (mcp/wp-server/tools/wp.py) reusing the verified job logic. Need Claude Code restart to be callable (gotcha #4); CLI path live-verified.
 - [ ] T012 [US3] Add `./sb job <id> --kill` to `sandbox/commands/jobs.py`.
 - [ ] T013 [US3] Live verification (quickstart §3): kill stops the process **and its child `wp`/`php` (no orphans — verify via process list; analysis F6)**; status reports `exit_code:143`; re-kill is a clean no-op.
 

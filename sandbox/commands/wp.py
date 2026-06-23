@@ -24,7 +24,21 @@ from sandbox.registry import register
 def cmd_wp(cfg, args) -> None:
     if not args.passthrough:
         die("usage: ./sb wp <wp-cli args>")
-    wpcli(args.passthrough, instance=args.resolved_instance)
+    pt = list(args.passthrough)
+    # `./sb wp --async <args>` runs the command as a background job (spec 004).
+    if getattr(args, "run_async", False):
+        if pt and pt[0] == "--":
+            pt = pt[1:]
+        if not pt:
+            die("usage: ./sb wp --async <wp-cli args>")
+        from sandbox.commands.jobs import launch_job
+        jid = launch_job(args.resolved_instance, pt)
+        ok(f"started background job {jid}")
+        print(f"  poll:   ./sb job {jid}")
+        print(f"  follow: ./sb job {jid} --follow")
+        print(f"  kill:   ./sb job {jid} --kill")
+        return
+    wpcli(pt, instance=args.resolved_instance)
 
 def cmd_seed(cfg, args) -> None:
     if not args.file:

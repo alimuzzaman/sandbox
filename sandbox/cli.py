@@ -29,6 +29,7 @@ import sandbox.commands.wp  # noqa: F401  (registers commands)
 import sandbox.commands.net  # noqa: F401  (registers commands)
 import sandbox.commands.debug  # noqa: F401  (registers commands)
 import sandbox.commands.abilities  # noqa: F401  (registers commands)
+import sandbox.commands.jobs  # noqa: F401  (registers commands)
 import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
@@ -93,10 +94,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     sub.add_parser("install", help="Install WP + create admin user")
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
+    w.add_argument("--async", dest="run_async", action="store_true",
+                   help="run as a background job (spec 004) — prints a job id")
     w.add_argument("passthrough", nargs=argparse.REMAINDER)
 
     s = sub.add_parser("seed", help="Import a WXR from runtime/seeds/")
     s.add_argument("file")
+
+    jb = sub.add_parser("job", help="Inspect/kill a background wp job (spec 004)")
+    jb.add_argument("job_id")
+    jb.add_argument("--follow", action="store_true", help="stream output until done")
+    jb.add_argument("--kill", action="store_true", help="terminate the job")
+    jbs = sub.add_parser("jobs", help="List background wp jobs")
+    jbs.add_argument("--prune", action="store_true", help="remove old job artifacts")
 
     v = sub.add_parser("visit",
         help="Load a URL in headless Chromium and report DOM/console/iframes as JSON")
@@ -306,7 +316,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
-        "abilities",
+        "abilities", "job", "jobs",
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:

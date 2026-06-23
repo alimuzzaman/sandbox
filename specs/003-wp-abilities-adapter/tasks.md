@@ -26,7 +26,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 - [x] T004 Implement the idempotent mu-plugin writer `_write_abilities_muplugin` in `sandbox/core/_provision.py` (copies the asset into `runtime/wp-<instance>/wp-content/mu-plugins/`); hooked into `cmd_up` ([lifecycle.py](../../sandbox/commands/lifecycle.py)) + the apply/recreate path ([_instances.py](../../sandbox/core/_instances.py)), not herd-gated. **DONE + live-verified**: removed the hand-deployed copy, ran `./sb up`, the writer recreated it and `wp_has_ability('sandbox/execute-php')` returns true.
 - [x] T005 In `00-sandbox-abilities.php`: bootstrap `McpAdapter::instance()` + register the `sandbox` MCP server (route `/wp-json/sandbox/mcp`, HttpTransport) on `mcp_adapter_init`, exposing the 5 abilities; gated on `sandbox_abilities_enabled` + Abilities-API presence + the vendored autoload. **DONE + live-verified**: `/sandbox/mcp` route registered; unauth POST `tools/list` → `401` (auth-gated); bogus route → `404`.
-- [ ] T006 Implement the shared `permission_callback` (logged-in user AND `manage_options`) and the `resolve_path` ABSPATH jail (rejects symlink final-path escape) in the payload.
+- [x] T006 Implement the shared `permission_callback` (logged-in user AND `manage_options`) and the `resolve_path` ABSPATH jail (rejects symlink final-path escape) in the payload. **DONE + live-verified** (escape → path_outside_base).
 
 ## Phase 3: User Story 1 — Run code in the live runtime (P1)
 
@@ -34,7 +34,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Independent test**: call the ability for `return get_option('siteurl');` and get a structured result.
 
 - [x] T007 [US1] Implement the `sandbox/execute-php` ability (eval + output-buffer + error-handler capture + 30s `set_time_limit` cap + `\Throwable` catch + JSON-safe return), annotated destructive. **DONE + live-verified on WP 6.9.4** (templately-rebuild2): registered ability returns `get_option('siteurl')`, captures a User Notice, and reports a thrown RuntimeException as `success:false`. Live verification caught two real WP-6.9 API contracts: (a) the ability **category** must be registered first, and (b) categories register on a **separate earlier hook** `wp_abilities_api_categories_init` (not inside `wp_abilities_api_init`). Both fixed in the mu-plugin.
-- [ ] T008 [P] [US1] Add the `wp_eval_live` proxy MCP tool in `mcp/wp-server/tools/abilities.py` (resolves instance, POSTs to the endpoint with app-password auth).
+- [x] T008 [P] [US1] Add the `wp_eval_live` proxy MCP tool in `mcp/wp-server/tools/abilities.py` (runs code through sandbox/execute-php via wpcli, base64-wrapped; returns the structured result). **DONE** — mechanism live-verified (returns get_option('siteurl')); the MCP tool itself needs a Claude Code restart to be callable (gotcha #4).
 - [ ] T009 [US1] Live verification (quickstart §2): execute-php round-trip via proxy + direct; notice captured in `errors[]`; thrown error returns `success:false` and the site stays up; time-limit cap holds.
 
 ## Phase 4: User Story 5 — Off-switch & per-call authorization (P1)
@@ -50,8 +50,8 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: external clients connect to the instance endpoint; discovery includes Sandbox guidance.
 **Independent test**: run connect helper, paste config into a fresh client, list + call an ability.
 
-- [ ] T012 [US2] Override `mcp-adapter/discover-abilities` in the payload to append Sandbox environment instructions (focused plugin, instance URL, snapshot reminder) per contracts/abilities.md.
-- [ ] T013 [US2] Implement `./sb connect [--instance] [--client …]` in `sandbox/commands/connect.py` (emits endpoint URL + app password [interactive display only] + per-client config; herd → `.test` URL), self-registered.
+- [ ] T012 [US2] (DEFERRED) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. Deferred: the bundled adapter already provides discovery; this is a cosmetic enrichment, safe to add later.
+- [x] T013 [US2] Implement the MCP-connect helper as **`./sb abilities connect`** (the `connect` command name was already taken by fluentboards/github). **DONE + verified**: prints the `/wp-json/sandbox/mcp` endpoint + a paste-ready mcp-remote client config; per the secrets rule it points to `instances.<inst>.app_password` in sandbox.local.yml rather than echoing the secret.
 - [ ] T014 [US2] Live verification (quickstart §3): connect a fresh external MCP client; it lists abilities and calls execute-php; discovery shows the instructions block.
 
 ## Phase 6: User Story 3 — Self-sufficient file access (P2)

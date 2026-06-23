@@ -14,8 +14,32 @@ def cmd_abilities(cfg, args) -> None:
     """
     inst = args.resolved_instance
     state = args.state
-    if state not in ("on", "off", "status"):
-        die("usage: ./sb abilities on|off|status")
+    if state not in ("on", "off", "status", "connect"):
+        die("usage: ./sb abilities on|off|status|connect")
+
+    if state == "connect":
+        try:
+            url = site_url(resolve_instances(cfg)[inst])
+        except Exception:
+            url = "(unknown)"
+        endpoint = f"{url}/wp-json/sandbox/mcp"
+        print(f"Sandbox MCP endpoint for '{inst}':\n  {endpoint}\n")
+        print("Auth: HTTP Basic with an admin Application Password.")
+        print(f"  user:     admin")
+        print(f"  password: see `instances.{inst}.app_password` in sandbox.local.yml")
+        print("            (gitignored — not printed here per the secrets rule)\n")
+        print("Paste-ready MCP client config (fill the password from sandbox.local.yml):")
+        print(f'''  {{
+    "mcpServers": {{
+      "sandbox-{inst}": {{
+        "command": "npx",
+        "args": ["-y", "mcp-remote", "{endpoint}",
+                 "--header", "Authorization: Basic <base64(admin:APP_PASSWORD)>"]
+      }}
+    }}
+  }}''')
+        print("\nTip: `./sb abilities status` shows whether the layer is enabled.")
+        return
 
     if state == "status":
         r = wpcli(["option", "get", "sandbox_abilities_enabled"],

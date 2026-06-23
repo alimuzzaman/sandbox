@@ -142,7 +142,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     xd.add_argument("state", choices=["on", "off", "status"])
 
     ab = sub.add_parser("abilities", help="Toggle the in-instance WP Abilities layer (spec 003)")
-    ab.add_argument("state", choices=["on", "off", "status"])
+    ab.add_argument("state", choices=["on", "off", "status", "connect"])
 
     isp = sub.add_parser("introspect",
         help="Dump live block/widget/shortcode registries to runtime/cache/*.json")

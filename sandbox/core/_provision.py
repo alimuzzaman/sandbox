@@ -76,6 +76,21 @@ def _write_mail_muplugin(instance: str) -> None:
     )
 
 
+def _write_debug_muplugins(instance: str) -> None:
+    """Drop the dump()/dd() + Query Monitor capture mu-plugins (spec 007).
+
+    Host-file based (works on Docker AND herd). dump() writes to
+    wp-content/debug-dump.log; the QM capture writes wp-content/qm.jsonl on
+    shutdown. Copied from sandbox/assets/dump/. Idempotent; both self-gate."""
+    asset = Path(__file__).resolve().parent.parent / "assets" / "dump"
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    for fn in ("00-sandbox-dump.php", "00-sandbox-qm.php"):
+        src = asset / fn
+        if src.exists():
+            shutil.copyfile(src, mu_dir / fn)
+
+
 def _write_abilities_muplugin(instance: str) -> None:
     """Drop the Sandbox Abilities mu-plugin (spec 003) into the instance.
 

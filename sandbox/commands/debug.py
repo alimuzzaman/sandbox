@@ -31,8 +31,13 @@ def cmd_xdebug(cfg, args) -> None:
     if state not in ("on", "off", "status"):
         die("usage: ./sb xdebug on|off|status")
     if _is_herd_instance(inst):
-        die("xdebug toggling isn't wired for herd (host) instances — "
-            "use Herd's own PHP/Xdebug settings")
+        # Herd's PHP is a shared host install — toggling its global ini would
+        # affect every Herd site + needs a restart we can't do per-instance.
+        # Report status + actionable guidance rather than a hard abort (spec 007).
+        info(f"xdebug on herd ({inst}) is host-managed (shared PHP install).")
+        print("  Per-instance toggling is unsupported; manage Xdebug via Herd's")
+        print("  PHP settings (herd) or your php.ini, then set XDEBUG_TRIGGER on requests.")
+        return
 
     ini_path = "/usr/local/etc/php/conf.d/zz-sandbox-xdebug.ini"
     if state == "status":
@@ -173,8 +178,62 @@ def cmd_selftest(cfg, args) -> None:
     ok("selftest: passed")
 
 
+def cmd_dump(cfg, args) -> None:
+    """Tail or clear the dump()/dd() log (wp-content/debug-dump.log) — spec 007."""
+    inst = args.resolved_instance
+    log = wp_dir(inst) / "wp-content" / "debug-dump.log"
+    if getattr(args, "clear", False):
+        if log.exists():
+            log.write_text("")
+        ok("debug-dump.log cleared")
+        return
+    if not log.exists():
+        info("no debug-dump.log yet — add dump($x) to plugin/theme code and load it")
+        return
+    if getattr(args, "follow", False):
+        import subprocess
+        subprocess.run(["tail", "-f", str(log)])
+        return
+    print(log.read_text()[-20000:], end="")
+
+
+def cmd_qm(cfg, args) -> None:
+    """Capture Query Monitor data for a URL → JSON (spec 007).
+
+    Ensures QM is active, fires a real request (curl -k from the wp container so
+    the self-signed .tst cert is accepted), then prints the last qm.jsonl line.
+    """
+    inst = args.resolved_instance
+    if _is_herd_instance(inst):
+        die("qm capture isn't wired for herd instances yet")
+    if getattr(args, "clear", False):
+        f = wp_dir(inst) / "wp-content" / "qm.jsonl"
+        if f.exists():
+            f.write_text("")
+        ok("qm.jsonl cleared")
+        return
+    # ensure QM active (installs from wp.org on first use)
+    r = wpcli(["plugin", "is-active", "query-monitor"], instance=inst, check=False, capture=True)
+    if (getattr(r, "returncode", 1) != 0):
+        info("activating Query Monitor…")
+        wpcli(["plugin", "install", "query-monitor", "--activate"], instance=inst, check=False)
+    path = args.url or "/"
+    if path.startswith("http"):
+        from urllib.parse import urlparse
+        path = urlparse(path).path or "/"
+    compose("exec", "-T", "wp", "sh", "-c",
+            f"curl -s -k -o /dev/null 'http://localhost{path}'", instance=inst, check=False)
+    qm = wp_dir(inst) / "wp-content" / "qm.jsonl"
+    if not qm.exists():
+        die("no qm.jsonl produced — is Query Monitor active?")
+    last = qm.read_text().strip().splitlines()[-1:]
+    print(last[0] if last else "(empty)")
+
+
 register({
     'xdebug': cmd_xdebug,
+    'dump': cmd_dump,
+    'qm': cmd_qm,
     'introspect': cmd_introspect,
     'test': cmd_test,
     'selftest': cmd_selftest,

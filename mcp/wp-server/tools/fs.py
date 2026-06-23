@@ -15,14 +15,24 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def tail_log(lines: int = 100, *, project_dir: str) -> dict:
-    """Tail wp-content/debug.log for the project's instance."""
+def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str) -> dict:
+    """Tail a log for the project's instance.
+
+    file: 'debug' (default → wp-content/debug.log), 'dump' (dump()/dd() output →
+    wp-content/debug-dump.log, spec 007), or 'qm' (Query Monitor capture →
+    wp-content/qm.jsonl, spec 007).
+    """
     inst, err = _project_instance(project_dir)
     if err:
         return err
-    log_path = _log_path(inst)
+    if file == "dump":
+        log_path = _wp_root(inst) / "wp-content" / "debug-dump.log"
+    elif file == "qm":
+        log_path = _wp_root(inst) / "wp-content" / "qm.jsonl"
+    else:
+        log_path = _log_path(inst)
     if not log_path.exists():
-        return {"ok": True, "lines": [], "note": "debug.log not yet created",
+        return {"ok": True, "lines": [], "note": f"{log_path.name} not yet created",
                 "path": str(log_path)}
     try:
         data = log_path.read_bytes()

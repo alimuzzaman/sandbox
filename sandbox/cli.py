@@ -109,6 +109,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     jbs = sub.add_parser("jobs", help="List background wp jobs")
     jbs.add_argument("--prune", action="store_true", help="remove old job artifacts")
 
+    dp = sub.add_parser("dump", help="Tail/clear the dump()/dd() log (spec 007)")
+    dp.add_argument("--follow", action="store_true")
+    dp.add_argument("--clear", action="store_true")
+    qm = sub.add_parser("qm", help="Capture Query Monitor data for a URL (spec 007)")
+    qm.add_argument("url", nargs="?", default="/")
+    qm.add_argument("--clear", action="store_true")
+
     sk = sub.add_parser("skill", help="Author/list skills (spec 006)")
     sk.add_argument("action", choices=["list", "write", "edit", "delete", "show"])
     sk.add_argument("slug", nargs="?")
@@ -328,7 +335,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
-        "abilities", "job", "jobs",
+        "abilities", "job", "jobs", "dump", "qm",
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:

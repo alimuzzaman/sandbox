@@ -44,6 +44,7 @@ def cmd_up(cfg: dict, args) -> None:
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        _write_debug_muplugins(inst)     # spec 007 — dump()/dd() + QM capture (host-file, ok on herd)
         try:  # spec 004 — reap old background-job artifacts (>24h)
             from sandbox.commands.jobs import prune_jobs
             prune_jobs(inst)

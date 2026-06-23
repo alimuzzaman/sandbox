@@ -52,3 +52,26 @@ def import_content(seed_file: str, authors: str = "create",
             if _is_herd(inst) else f"/seeds/{seed_file}")
     return _wpcli(["import", seed, f"--authors={authors}"],
                   instance=inst, timeout=180)
+
+
+@mcp.tool()
+def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: str) -> dict:
+    """Reset the instance DB to the post-install @install baseline (spec 008) — a fast
+    in-place rollback (keeps uploads/containers/ports). Requires confirm=true (it
+    drops the current DB). rebaseline=true re-captures the baseline from the current
+    DB instead of restoring.
+
+    project_dir: the plugin project to target (call ensure_instance first).
+    """
+    inst, err = _project_instance(project_dir)
+    if err:
+        return err
+    if rebaseline:
+        res = subprocess.run([str(SANDBOX_ROOT / "sb"), "--instance", inst, "reset", "--rebaseline"],
+                             capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
+        return {"ok": res.returncode == 0, "output": ((res.stdout or "") + (res.stderr or "")).strip()}
+    if not confirm:
+        return {"ok": False, "error": "wp_reset drops the DB — pass confirm=true"}
+    res = subprocess.run([str(SANDBOX_ROOT / "sb"), "--instance", inst, "reset", "--yes"],
+                         capture_output=True, text=True, cwd=str(SANDBOX_ROOT))
+    return {"ok": res.returncode == 0, "output": ((res.stdout or "") + (res.stderr or "")).strip()}

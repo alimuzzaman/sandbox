@@ -652,6 +652,14 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
 
+        # spec 008: capture the post-provision @install baseline ONCE (no-op if it
+        # already exists), so `./sb reset` can roll the DB back to a clean install.
+        try:
+            from sandbox.commands.data import capture_install_baseline
+            capture_install_baseline(name)
+        except Exception:
+            pass
+
         # 4. Multisite: convert if newly enabled. Skip if it was already a
         #    network (idempotent) or if the config still disables multisite.
         cur_ms = _multisite_mode(inst_cfg)

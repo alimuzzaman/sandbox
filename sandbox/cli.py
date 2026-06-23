@@ -156,11 +156,17 @@ Per-project (each plugin carries its own sandbox.config.json):
     sn = sub.add_parser("snapshot", help="Save DB + uploads to runtime/snapshots/")
     sn.add_argument("name")
     sn.add_argument("--force", action="store_true", help="overwrite if exists")
+    sn.add_argument("--db-only", dest="db_only", action="store_true",
+                    help="capture only the DB (skip uploads) — spec 008")
 
     re_ = sub.add_parser("restore", help="Restore a saved snapshot")
     re_.add_argument("name")
 
     sub.add_parser("snapshots", help="List saved snapshots")
+
+    rs = sub.add_parser("reset", help="Reset DB to the post-install @install baseline (spec 008)")
+    rs.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    rs.add_argument("--rebaseline", action="store_true", help="re-capture the baseline from the current DB")
     sub.add_parser("update", help="git pull the project repo this instance tracks")
 
     op = sub.add_parser("open", help="Open admin / site / mailpit in browser")
@@ -335,7 +341,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
-        "abilities", "job", "jobs", "dump", "qm",
+        "abilities", "job", "jobs", "dump", "qm", "reset",
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:

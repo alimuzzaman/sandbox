@@ -35,6 +35,8 @@ def cmd_snapshot(cfg, args) -> None:
     if not name:
         die(f"could not derive a snapshot name from '{args.name}' — use "
             "letters, numbers, spaces or hyphens")
+    if name == _BASELINE_DIR:
+        die(f"'{name}' is reserved for the install baseline — use `./sb reset --rebaseline`")
     if name != (args.name or "").strip():
         info(f"Snapshot name slugified to '{name}'")
     snap_root = snapshots_dir(inst)
@@ -42,27 +44,52 @@ def cmd_snapshot(cfg, args) -> None:
     target = snap_root / name
     if target.exists() and not args.force:
         die(f"snapshot '{name}' exists — pass --force to overwrite")
+    db_only = bool(getattr(args, "db_only", False))
+    _capture_snapshot(inst, snap_root, name, db_only=db_only)
+    ok(f"Snapshot '{name}' saved ({'db-only' if db_only else 'full'}).")
+
+
+# Reserved dir for the post-install baseline (spec 008). Not a valid user snapshot
+# name (leading underscore), so it can never collide with `./sb snapshot <name>`.
+_BASELINE_DIR = "__install__"
+
+
+def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -> None:
+    """Export the DB (always) + uploads (unless db_only) into snap_root/<name>/,
+    recording mode in META. Shared by cmd_snapshot, the baseline, and reset."""
+    target = snap_root / name
     target.mkdir(parents=True, exist_ok=True)
-
-    # DB → snapshot.sql inside the container's view of the snapshot dir.
-    # `wp db export` writes from within the wpcli container, so we mount the
-    # snapshots dir as /snapshots for the duration of the call.
     info(f"Exporting DB → {target}/db.sql")
-    compose("run", "--rm",
-            "-v", f"{snap_root}:/snapshots",
-            "wpcli", "db", "export", f"/snapshots/{name}/db.sql",
-            "--add-drop-table",
+    compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
+            "wpcli", "db", "export", f"/snapshots/{name}/db.sql", "--add-drop-table",
             instance=inst)
-
-    # Uploads — preserve relative symlinks, skip if dir missing
-    uploads = wp_dir(inst) / "wp-content" / "uploads"
-    if uploads.exists():
-        info(f"Archiving uploads → {target}/uploads.tgz")
-        run(["tar", "-C", str(uploads.parent), "-czf",
-             str(target / "uploads.tgz"), "uploads"])
+    mode = "db-only"
+    if not db_only:
+        uploads = wp_dir(inst) / "wp-content" / "uploads"
+        if uploads.exists():
+            info(f"Archiving uploads → {target}/uploads.tgz")
+            run(["tar", "-C", str(uploads.parent), "-czf",
+                 str(target / "uploads.tgz"), "uploads"])
+            mode = "full"
     active = _active_project_name(inst) or ""
-    (target / "META").write_text(f"project={active}\ninstance={inst}\n")
-    ok(f"Snapshot '{name}' saved.")
+    (target / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+
+
+def capture_install_baseline(inst: str, force: bool = False) -> None:
+    """Capture the reserved db-only @install baseline (spec 008), representing the
+    post-provision state (after plugins/themes are wired). Captured ONCE — a no-op
+    if a baseline already exists unless `force` (so `up`/`ensure` never overwrite a
+    good baseline with later, dirtied state). Docker only."""
+    if _is_herd_instance(inst):
+        return
+    snap_root = snapshots_dir(inst)
+    snap_root.mkdir(parents=True, exist_ok=True)
+    if (snap_root / _BASELINE_DIR / "db.sql").exists() and not force:
+        return
+    try:
+        _capture_snapshot(inst, snap_root, _BASELINE_DIR, db_only=True)
+    except Exception:
+        pass  # never let baseline capture break provisioning
 
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance
@@ -77,27 +104,53 @@ def cmd_restore(cfg, args) -> None:
                 None)
     if name is None:
         die(f"no snapshot '{args.name}' under {snap_root}")
+    _restore_snapshot(inst, snap_root, name)
+    ok(f"Restored snapshot '{name}'.")
+
+
+def _restore_snapshot(inst: str, snap_root: Path, name: str) -> None:
+    """Drop+import the snapshot's DB (true point-in-time replacement) and restore
+    uploads if the snapshot has them (db-only snapshots leave uploads untouched)."""
     target = snap_root / name
     sql = target / "db.sql"
     if not sql.exists():
         die(f"snapshot is missing db.sql: {sql}")
-    # Drop ALL tables before importing so restore is a true point-in-time
-    # replacement, not a merge. `wp db export` uses --add-drop-table, which only
-    # drops tables that exist IN the dump — tables created AFTER the snapshot
-    # (e.g. FSI sub-site wp_2_* tables) would otherwise survive the restore and
-    # pollute cleanup. `db reset --yes` drops+recreates the empty schema first.
+    # `db reset --yes` drops+recreates the empty schema first so restore is a true
+    # replacement (tables created after the snapshot don't survive).
     info("Resetting DB (drop all tables) before import…")
     wpcli(["db", "reset", "--yes"], instance=inst)
     info(f"Importing DB ← {sql}")
-    compose("run", "--rm",
-            "-v", f"{snap_root}:/snapshots",
-            "wpcli", "db", "import", f"/snapshots/{name}/db.sql",
-            instance=inst)
+    compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
+            "wpcli", "db", "import", f"/snapshots/{name}/db.sql", instance=inst)
     tgz = target / "uploads.tgz"
     if tgz.exists():
         info(f"Restoring uploads ← {tgz}")
         run(["tar", "-C", str(wp_dir(inst) / "wp-content"), "-xzf", str(tgz)])
-    ok(f"Restored snapshot '{name}'.")
+
+
+def cmd_reset(cfg, args) -> None:
+    """Reset the DB to the post-install @install baseline (spec 008) — a fast
+    in-place DB rollback (keeps uploads, containers, ports). `--rebaseline`
+    re-captures the baseline from the current DB instead of restoring."""
+    inst = args.resolved_instance
+    if _is_herd_instance(inst):
+        die("reset isn't supported on herd instances yet")
+    snap_root = snapshots_dir(inst)
+    baseline = snap_root / _BASELINE_DIR
+    if getattr(args, "rebaseline", False):
+        capture_install_baseline(inst, force=True)
+        ok("Re-captured the @install baseline from the current DB.")
+        return
+    if not (baseline / "db.sql").exists():
+        die("no @install baseline for this instance. Create one with "
+            "`./sb reset --rebaseline` (captures the current DB as the baseline).")
+    if not getattr(args, "yes", False):
+        ans = input(f"This drops the current DB for '{inst}' and restores the "
+                    f"post-install baseline. Continue? [y/N] ").strip().lower()
+        if ans != "y":
+            return
+    _restore_snapshot(inst, snap_root, _BASELINE_DIR)
+    ok("Reset to the post-install baseline (uploads untouched).")
 
 def cmd_snapshots(cfg, args) -> None:
     inst = args.resolved_instance
@@ -110,12 +163,11 @@ def cmd_snapshots(cfg, args) -> None:
     for entry in sorted(snap_root.iterdir()):
         if not entry.is_dir():
             continue
-        meta = ""
         m = entry / "META"
-        if m.exists():
-            meta = m.read_text().strip().replace("\n", " ")
+        meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""
         size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
-        print(f"  {entry.name:<24} {size // 1024:>6} KB   {meta}")
+        label = "@install (baseline)" if entry.name == _BASELINE_DIR else entry.name
+        print(f"  {label:<24} {size // 1024:>6} KB   {meta}")
     print()
 
 def cmd_clean(cfg, args) -> None:
@@ -140,5 +192,6 @@ register({
     'snapshot': cmd_snapshot,
     'restore': cmd_restore,
     'snapshots': cmd_snapshots,
+    'reset': cmd_reset,
     'clean': cmd_clean,
 })

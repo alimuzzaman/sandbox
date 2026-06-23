@@ -450,11 +450,11 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
 
     Tolerant of missing/malformed frontmatter — returns empty strings then.
     """
-    name, description = "", ""
+    name, description, enable = "", "", True
     try:
         text = skill_md.read_text(errors="replace")
     except OSError:
-        return {"name": name, "description": description}
+        return {"name": name, "description": description, "enable": enable}
     if text.startswith("---"):
         end = text.find("\n---", 3)
         if end != -1:
@@ -463,7 +463,9 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
                     name = line.split(":", 1)[1].strip()
                 elif line.startswith("description:"):
                     description = line.split(":", 1)[1].strip()
-    return {"name": name, "description": description}
+                elif line.startswith("enable:"):
+                    enable = line.split(":", 1)[1].strip().lower() not in ("false", "0", "no")
+    return {"name": name, "description": description, "enable": enable}
 
 VISIT_SCRIPT = SANDBOX_ROOT / "tools" / "visit" / "visit.py"
 

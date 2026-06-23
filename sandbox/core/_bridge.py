@@ -69,7 +69,7 @@ def _ensure_bridge_server() -> None:
         except Exception:
             pass
         return  # something is serving the port — don't spawn a competing one
-    lock = ROOT / "runtime" / "locks" / "bridge-web.lock"
+    lock = RUNTIME_DIR / "locks" / "bridge-web.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     try:
         if lock.exists() and (time.time() - lock.stat().st_mtime) > 30:

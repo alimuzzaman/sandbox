@@ -28,19 +28,77 @@ BRIDGE_PORT = 8765
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+# --- Per-user base for ALL machine-state (spec 009) ------------------------- #
+# Single swappable base; every runtime/config/secret path derives from it. The
+# `sb` CLI, sandbox_core, and the MCP server resolve this identically (same env,
+# same default) so they never disagree about where state lives. Replicated here
+# (rather than imported from sandbox_core) to avoid import-order fragility at
+# module load — keep the three copies in lockstep.
+
+def _sandbox_base() -> Path:
+    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+
+
+def _resolve_runtime_dir() -> Path:
+    """$SANDBOX_HOME/runtime, with a backward-compat fallback to the pre-009
+    in-repo runtime until `sb migrate` runs (FR-015). SANDBOX_RUNTIME wins."""
+    explicit = os.environ.get("SANDBOX_RUNTIME")
+    if explicit:
+        return Path(explicit)
+    new = _sandbox_base() / "runtime"
+    legacy = ROOT / "runtime"
+    if not (new / "registry.json").exists() and (legacy / "registry.json").exists():
+        return legacy
+    return new
+
+
+BASE = _sandbox_base()
+
+
+RUNTIME_DIR = _resolve_runtime_dir()
+
+
+def ensure_base() -> Path:
+    """Create the base + runtime dir on demand (idempotent)."""
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    return BASE
+
+
 ENTRY = ROOT / "sb"
 
 
 CONFIG = ROOT / "sandbox.yml"
 
 
-CONFIG_LOCAL = ROOT / "sandbox.local.yml"
+def _base_file(name: str, legacy: Path) -> Path:
+    """Resolve a per-machine file under the base, falling back to its pre-009
+    legacy location until migration moves it (FR-015). Returns the base path for
+    fresh writes when neither exists, so reads and writes stay co-located."""
+    new = BASE / name
+    if new.exists():
+        return new
+    if legacy.exists():
+        return legacy
+    return new
+
+
+# Per-machine config + secrets, consolidated under the base (spec 009). Legacy
+# locations (repo root) are read as a fallback until `sb migrate` relocates them.
+CONFIG_LOCAL = _base_file("sandbox.local.yml", ROOT / "sandbox.local.yml")
+
+LOCAL_YML = CONFIG_LOCAL  # spec-009 canonical name (alias of CONFIG_LOCAL)
+
+CONFIG_FILE = _base_file(
+    "config.json", Path.home() / ".config" / "sandbox" / "config.json")
+
+__all__ += ['BASE', 'RUNTIME_DIR', 'ensure_base', 'LOCAL_YML', 'CONFIG_FILE',
+            'ENV_LOCAL']
 
 
 COMPOSE = ROOT / "docker-compose.yml"
 
 
-COMPOSE_DIR = ROOT / "runtime" / "compose"
+COMPOSE_DIR = RUNTIME_DIR / "compose"
 
 
 ACTIVE = ROOT / ".active-project"
@@ -49,21 +107,21 @@ ACTIVE = ROOT / ".active-project"
 FOCUS = ROOT / ".focus"
 
 
-WP_DIR = ROOT / "runtime" / "wp"
+WP_DIR = RUNTIME_DIR / "wp"
 
 
 PLUGINS_DIR = WP_DIR / "wp-content" / "plugins"
 
 
-SNAPSHOTS_DIR = ROOT / "runtime" / "snapshots"
+SNAPSHOTS_DIR = RUNTIME_DIR / "snapshots"
 
 
-SEEDS_DIR = ROOT / "runtime" / "seeds"
+SEEDS_DIR = RUNTIME_DIR / "seeds"
 
 
 # Shared plugin/theme/core download cache (one dir for ALL instances — see the
 # `wp-cli` / `wp-http` subdirs). Bind-mounted into every instance's tiers.
-DL_CACHE_DIR = ROOT / "runtime" / "dl-cache"
+DL_CACHE_DIR = RUNTIME_DIR / "dl-cache"
 __all__ += ['DL_CACHE_DIR']
 
 
@@ -79,7 +137,7 @@ CLI_VENV = ROOT / ".cli-venv"
 TOOLS_DIR = ROOT / "tools"
 
 
-TOOLS_VENV = ROOT / "runtime" / ".venv-tools"
+TOOLS_VENV = RUNTIME_DIR / ".venv-tools"
 
 
 _WEB_STREAM = [False]
@@ -122,7 +180,7 @@ DOMAIN_RE = re.compile(
     r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
-PROXY_DIR       = ROOT / "runtime" / "proxy"
+PROXY_DIR       = RUNTIME_DIR / "proxy"
 
 
 PROXY_CERTS_DIR = PROXY_DIR / "certs"
@@ -155,7 +213,7 @@ PROXY_TLD       = "tst"
 LAUNCHD_PLIST   = Path("/Library/LaunchDaemons/com.sandbox.lo0alias.plist")
 
 
-_HTTPS_OFFER_MARKER = ROOT / "runtime" / ".https-offer-declined"
+_HTTPS_OFFER_MARKER = RUNTIME_DIR / ".https-offer-declined"
 
 
 _BASE_WP_CONFIG = {
@@ -288,7 +346,9 @@ function sandbox_snapshots_render() {
 PROJECT_MCP_JSON = ROOT / ".mcp.json"
 
 
-SECRETS_ENV = ROOT / ".env.local"
+SECRETS_ENV = _base_file(".env.local", ROOT / ".env.local")
+
+ENV_LOCAL = SECRETS_ENV  # spec-009 canonical name (alias of SECRETS_ENV)
 
 
 CONNECT_TARGETS = {
@@ -365,10 +425,10 @@ echo wp_json_encode(['count' => count($out), 'shortcodes' => $out], JSON_UNESCAP
 }
 
 
-TEST_SUITE_DIR = ROOT / "runtime" / "test-suite"
+TEST_SUITE_DIR = RUNTIME_DIR / "test-suite"
 
 
-TEST_TOOLS_DIR = ROOT / "runtime" / "test-tools"
+TEST_TOOLS_DIR = RUNTIME_DIR / "test-tools"
 
 
 _WPDEVELOP_REPO = "https://github.com/WordPress/wordpress-develop.git"

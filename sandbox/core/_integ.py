@@ -34,7 +34,14 @@ def _build_mcp_entry(cfg: dict | None = None) -> dict:
     when `sb` isn't on PATH yet."""
     sb_on_path = shutil.which("sb")
     command = "sb" if sb_on_path else str(ROOT / "sb")
-    return {"command": command, "args": ["mcp"]}
+    entry = {"command": command, "args": ["mcp"]}
+    # Spec 009: if the base is explicitly overridden, bake it into the MCP
+    # registration so the (separate) server process resolves the SAME base as
+    # the CLI. When unset, both default to ~/sandbox — no env needed (FR-006/C4).
+    home = os.environ.get("SANDBOX_HOME")
+    if home:
+        entry["env"] = {"SANDBOX_HOME": str(Path(home).expanduser().resolve())}
+    return entry
 
 
 def _stale_mcp_servers(claude_bin: str) -> list[str]:
@@ -72,8 +79,11 @@ def register_claude_user_scope(cfg: dict) -> None:
     entry = _build_mcp_entry(cfg)
     subprocess.run([claude_bin, "mcp", "remove", "--scope", "user", MCP_SERVER_NAME],
                    capture_output=True, text=True)
-    cmd = [claude_bin, "mcp", "add", "--scope", "user", MCP_SERVER_NAME, "--",
-           entry["command"], *entry.get("args", [])]
+    env_flags = []
+    for k, v in (entry.get("env") or {}).items():
+        env_flags += ["-e", f"{k}={v}"]
+    cmd = [claude_bin, "mcp", "add", "--scope", "user", MCP_SERVER_NAME,
+           *env_flags, "--", entry["command"], *entry.get("args", [])]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode == 0:
         ok(f"Registered MCP server '{MCP_SERVER_NAME}' at user scope "
@@ -306,7 +316,7 @@ def _install_alias_launchd() -> None:
 </dict>
 </plist>
 """
-    tmp = ROOT / "runtime" / "com.sandbox.lo0alias.plist"
+    tmp = RUNTIME_DIR / "com.sandbox.lo0alias.plist"
     tmp.write_text(plist)
     _LAUNCHD_REASON = (
         "Sandbox would like to keep your clean URLs working after a reboot. It "

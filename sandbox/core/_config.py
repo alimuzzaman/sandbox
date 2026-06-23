@@ -90,6 +90,33 @@ def _plugins_home(cfg: dict) -> Path:
     return p
 
 
+def _venv_paths_match(venv: Path) -> bool:
+    """True if the venv's recorded home/prefix still points inside `venv` — i.e.
+    it has not been moved. A relocated venv has a stale absolute path baked into
+    pyvenv.cfg and must be recreated, not reused."""
+    cfg = venv / "pyvenv.cfg"
+    if not cfg.exists():
+        return False
+    try:
+        text = cfg.read_text()
+    except OSError:
+        return False
+    target = str(venv.resolve())
+    # pyvenv.cfg lines like `home = /path/bin` and (3.11+) `executable`/`command`
+    # embed the creating interpreter, not the venv dir — so we check the venv's
+    # own bin/python symlink resolves and the cfg's `command` (if present) names
+    # this venv. Simplest robust signal: bin/python exists AND a `command =`/
+    # `executable =` line, when present, contains this venv path.
+    vpy = venv / "bin" / "python"
+    if not vpy.exists():
+        return False
+    for line in text.splitlines():
+        low = line.strip().lower()
+        if low.startswith(("command", "executable")) and target not in line:
+            return False
+    return True
+
+
 def ensure_tools_venv() -> Path:
     """Build the headless-browser venv on first use and return its python path.
 
@@ -100,6 +127,14 @@ def ensure_tools_venv() -> Path:
     py = TOOLS_VENV / "bin" / "python"
     req = TOOLS_DIR / "visit" / "requirements.txt"
     stamp = TOOLS_VENV / ".installed"
+
+    # A venv bakes its absolute path into bin/python (shebangs) and pyvenv.cfg.
+    # If it was moved (e.g. relocating the base, spec 009), those point at the
+    # old location and `python` is broken — recreate rather than move (FR-009).
+    cfg = TOOLS_VENV / "pyvenv.cfg"
+    if TOOLS_VENV.exists() and not _venv_paths_match(TOOLS_VENV):
+        info("Tools venv path changed (base moved); recreating runtime/.venv-tools/…")
+        shutil.rmtree(TOOLS_VENV, ignore_errors=True)
 
     if py.exists() and stamp.exists() and stamp.read_text().strip() == req.read_text().strip():
         return py

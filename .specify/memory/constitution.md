@@ -1,6 +1,8 @@
 <!--
 Sync Impact Report
-- Version change: (none) → 1.0.0   (initial ratification)
+- Version change: 1.0.0 → 1.0.1   (PATCH: registry path is base-relative,
+    `$SANDBOX_HOME/runtime/registry.json` — spec 009 moved all machine-state
+    under a per-user base; the registry remains authoritative, location only)
 - Modified principles: n/a (first version; template placeholders replaced)
 - Added sections: Core Principles (6), Additional Constraints, Development Workflow, Governance
 - Removed sections: none
@@ -23,14 +25,14 @@ that tooling is built and changed.
 
 ### I. Per-Project Is the Only Instance Model
 Every WordPress instance MUST be owned by a project root recorded in
-`runtime/registry.json`. There is NO implicit, global, or `main` instance. A command
+`$SANDBOX_HOME/runtime/registry.json`. There is NO implicit, global, or `main` instance. A command
 run outside a registered project MUST fail with actionable guidance ("cd into a
 registered project, or run `sb init` / `sb ensure`") and MUST NOT silently boot or
 target a fallback instance. Rationale: the phantom `main` caused commands to act on
 the wrong stack; one project ↔ one instance is the entire mental model.
 
 ### II. The Registry Is the Single Source of Truth
-The on-disk registry (`runtime/registry.json`) is authoritative for project → instance
+The on-disk registry (`$SANDBOX_HOME/runtime/registry.json`) is authoritative for project → instance
 mapping. Per-instance config lives in `sandbox.local.yml` under `instances:`, written
 only by `ensure_instance` / `apply_config`. Instance resolution precedence MUST be:
 explicit `--instance` > `$SANDBOX_INSTANCE` > the registry instance for the current
@@ -99,4 +101,4 @@ Versioning policy (semantic): MAJOR = backward-incompatible governance/principle
 redefinition; MINOR = a new principle/section or materially expanded guidance; PATCH =
 clarifications and non-semantic refinements.
 
-**Version**: 1.0.0 | **Ratified**: 2026-06-21 | **Last Amended**: 2026-06-21
+**Version**: 1.0.1 | **Ratified**: 2026-06-21 | **Last Amended**: 2026-06-23

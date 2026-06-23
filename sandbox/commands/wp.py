@@ -44,7 +44,7 @@ def cmd_seed(cfg, args) -> None:
     if not args.file:
         die("usage: ./sb seed <file-in-runtime/seeds>")
     # Containers mount runtime/seeds at /seeds; herd reads the host path.
-    seed = (str(ROOT / "runtime" / "seeds" / args.file)
+    seed = (str(RUNTIME_DIR / "seeds" / args.file)
             if _is_herd_instance(args.resolved_instance)
             else f"/seeds/{args.file}")
     wpcli(["import", seed, "--authors=create"],

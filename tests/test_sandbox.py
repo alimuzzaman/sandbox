@@ -349,5 +349,142 @@ class TestDownloadCache(unittest.TestCase):
             core.dl_cache_clear("nope")
 
 
+class TestPluginConfigMap(unittest.TestCase):
+    """Spec 010: canonical slug-keyed plugin map — normalize + field-merge."""
+
+    def _resolve(self, *layer_docs, opted_layers=None):
+        """Run the spec-010 pipeline on raw docs (low->high precedence). By
+        default every layer counts as project-declared (opted-in); pass
+        opted_layers=[bool,...] to mark which layers are project/override vs
+        user-global catalog (matching load_project_config's opted_in logic)."""
+        layers = []
+        for d in layer_docs:
+            m, _legacy, _self = sandbox_core._normalize_plugins(d or {})
+            layers.append(m)
+        if opted_layers is None:
+            opted = set().union(*layers) if layers else set()
+        else:
+            opted = set()
+            for m, is_opted in zip(layers, opted_layers):
+                if is_opted:
+                    opted |= set(m)
+        merged = sandbox_core._merge_plugin_maps(*layers)
+        return {s: sandbox_core._resolve_plugin_entry(e, s in opted)
+                for s, e in merged.items()}
+
+    def test_shorthand_true_is_active_org(self):
+        r = self._resolve({"plugins": {"woo": True}})["woo"]
+        self.assertTrue(r["active"]); self.assertFalse(r["on_demand"])
+        self.assertEqual(r["source"], {"kind": "org", "value": None})
+
+    def test_shorthand_false_is_inactive_installed(self):
+        r = self._resolve({"plugins": {"qm": False}})["qm"]
+        self.assertFalse(r["active"]); self.assertFalse(r["on_demand"])
+
+    def test_project_path_defaults_active(self):
+        # a bare path in the PROJECT (opted-in) -> source set, state defaults ACTIVE
+        r = self._resolve({"plugins": {"my-addon": "."}})["my-addon"]
+        self.assertEqual(r["source"]["kind"], "path")
+        self.assertTrue(r["active"]); self.assertFalse(r["on_demand"])
+
+    def test_catalog_path_defaults_on_demand(self):
+        # the SAME bare path, but ONLY in the user-global catalog -> on-demand
+        r = self._resolve({"plugins": {"t": "~/src/t"}},
+                          opted_layers=[False])["t"]
+        self.assertEqual(r["source"]["kind"], "path")
+        self.assertTrue(r["on_demand"]); self.assertFalse(r["active"])
+
+    def test_zip_string_is_zip_source(self):
+        r = self._resolve({"plugins": {"t": "https://x/t.zip"}})["t"]
+        self.assertEqual(r["source"]["kind"], "zip")
+
+    def test_catalog_path_plus_project_active_keeps_both(self):
+        # SC-007: user-global path (source only) + project true (state only)
+        user = {"plugins": {"templately": "~/Sites/git/templately"}}
+        proj = {"plugins": {"templately": True}}
+        r = self._resolve(user, proj, opted_layers=[False, True])["templately"]
+        self.assertTrue(r["active"])                       # from project
+        self.assertEqual(r["source"]["kind"], "path")      # from catalog
+        self.assertEqual(r["source"]["value"], "~/Sites/git/templately")
+        self.assertFalse(r["on_demand"])                   # org fallback NOT applied
+
+    def test_catalog_only_defaults_on_demand(self):
+        # SC-008: a catalog path the project doesn't mention -> on-demand, not active
+        user = {"plugins": {"elementor-pro": "~/pro/elementor-pro"}}
+        proj = {"plugins": {"betterdocs": True}}
+        r = self._resolve(user, proj, opted_layers=[False, True])
+        self.assertTrue(r["elementor-pro"]["on_demand"])
+        self.assertFalse(r["elementor-pro"]["active"])
+        self.assertTrue(r["betterdocs"]["active"])         # project opted in
+
+    def test_override_resources_one_slug_others_kept(self):
+        # SC-002: override changes one source; the other plugin is NOT dropped
+        proj = {"plugins": {"my-addon": ".", "woo": True}}
+        override = {"plugins": {"woo": "~/src/woo"}}
+        r = self._resolve(proj, override)
+        self.assertIn("my-addon", r)                       # not dropped
+        self.assertEqual(r["woo"]["source"]["value"], "~/src/woo")
+
+    def test_explicit_project_source_beats_catalog(self):
+        user = {"plugins": {"t": "~/local/t"}}
+        proj = {"plugins": {"t": {"source": "org", "active": True}}}
+        r = self._resolve(user, proj, opted_layers=[False, True])["t"]
+        self.assertEqual(r["source"]["kind"], "org")       # explicit project wins
+
+    def test_force_active_everywhere_from_user_global(self):
+        # explicit active in the catalog -> active even though not project-declared
+        user = {"plugins": {"qm": {"active": True}}}
+        r = self._resolve(user, {"plugins": {"x": True}}, opted_layers=[False, True])
+        self.assertTrue(r["qm"]["active"])
+
+    def test_legacy_list_active_install(self):
+        m, legacy, self_e = sandbox_core._normalize_plugins({"plugins": [".", "woo"]})
+        self.assertTrue(legacy)
+        self.assertIsNotNone(self_e)                       # "." -> self entry
+        self.assertTrue(m["woo"]["active"])
+
+    def test_legacy_mappings_fold_in(self):
+        m, legacy, _ = sandbox_core._normalize_plugins(
+            {"mappings": {"wp-content/plugins/t": "/p"},
+             "mappings_inactive": {"wp-content/plugins/pro": "/q"}})
+        self.assertTrue(legacy)
+        self.assertEqual(sandbox_core._resolve_plugin_entry(m["t"])["active"], True)
+        self.assertEqual(sandbox_core._resolve_plugin_entry(m["pro"])["active"], False)
+
+    def test_non_plugin_mapping_not_folded(self):
+        m, _, _ = sandbox_core._normalize_plugins(
+            {"mappings": {"wp-content/mu-plugins/x": "/p"}})
+        self.assertEqual(m, {})                            # left for the old path
+
+    def test_map_wins_over_legacy_same_slug(self):
+        m, _, _ = sandbox_core._normalize_plugins(
+            {"plugins": {"t": False}, "mappings": {"wp-content/plugins/t": "/p"}})
+        # map entry (inactive, no source) wins; mapping's path is NOT applied
+        self.assertIs(m["t"]["source"], sandbox_core._UNSET)
+
+    def test_multiple_sources_rejected(self):
+        with self.assertRaises(sandbox_core.ConfigError):
+            sandbox_core._normalize_plugins(
+                {"plugins": {"t": {"path": "/p", "zip": "https://x/t.zip"}}})
+
+    def test_sc001_legacy_equivalence(self):
+        # SC-001: the canonical map expresses every legacy case identically.
+        def norm(doc):
+            m, _, _ = sandbox_core._normalize_plugins(doc)
+            return {s: sandbox_core._resolve_plugin_entry(e, True) for s, e in m.items()}
+        # active local: legacy mappings  ==  map {path}
+        self.assertEqual(
+            norm({"mappings": {"wp-content/plugins/x": "/p"}})["x"],
+            norm({"plugins": {"x": "/p"}})["x"])
+        # inactive local: legacy mappings_inactive == map {path, active:false}
+        self.assertEqual(
+            norm({"mappings_inactive": {"wp-content/plugins/x": "/p"}})["x"],
+            norm({"plugins": {"x": {"path": "/p", "active": False}}})["x"])
+        # active org: legacy list slug == map true
+        self.assertEqual(
+            norm({"plugins": ["x"]})["x"],
+            norm({"plugins": {"x": True}})["x"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -34,6 +34,7 @@ import sandbox.commands.skill  # noqa: F401  (registers commands)
 import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
+import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 
 
@@ -132,6 +133,16 @@ Per-project (each plugin carries its own sandbox.config.json):
     v.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="<url> [--check-iframes] [--screenshot PATH] [--full-page] "
              "[--width N] [--height N] [--timeout S] [--wait-until COND]")
+
+    mg = sub.add_parser("migrate",
+        help="Relocate all machine-state under the per-user base $SANDBOX_HOME (spec 009)")
+    mg.add_argument("--apply", action="store_true",
+        help="Perform the migration (default is a dry-run plan)")
+    mg.add_argument("--finalize", action="store_true",
+        help=argparse.SUPPRESS)  # internal: post-move re-exec pass
+    hm = sub.add_parser("home",
+        help="Show the $SANDBOX_HOME base, or relocate it: `./sb home <dir>`")
+    hm.add_argument("dir", nargs="?", help="new base directory to relocate to")
 
     sub.add_parser("doctor", help="Audit the stack and report problems")
     sub.add_parser("smoke",  help="Self-test: boot a fresh instance, REST probe, tear down")

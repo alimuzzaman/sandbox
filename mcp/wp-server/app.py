@@ -38,11 +38,43 @@ instance for a single call.
 
 SANDBOX_ROOT = Path(__file__).resolve().parents[2]
 
-COMPOSE_DIR = SANDBOX_ROOT / "runtime" / "compose"
+
+# Per-user base for ALL machine-state (spec 009). SANDBOX_ROOT stays = the repo
+# checkout (for CODE assets: skills, workflows, CLAUDE.md, visit.py, sandbox_core
+# import); STATE paths derive from SANDBOX_HOME instead. The CLI (_paths.py) and
+# sandbox_core resolve this identically — same env, same default — so the two
+# processes never disagree about where state lives.
+def _sandbox_base() -> Path:
+    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+
+
+def _runtime_dir() -> Path:
+    """$SANDBOX_HOME/runtime, with a backward-compat fallback to the pre-009
+    in-repo runtime until `sb migrate` runs. SANDBOX_RUNTIME (tests) wins."""
+    explicit = os.environ.get("SANDBOX_RUNTIME")
+    if explicit:
+        return Path(explicit)
+    new = _sandbox_base() / "runtime"
+    legacy = SANDBOX_ROOT / "runtime"
+    if not (new / "registry.json").exists() and (legacy / "registry.json").exists():
+        return legacy
+    return new
+
+
+RUNTIME_DIR = _runtime_dir()
+
+
+def _local_yml_path() -> Path:
+    """sandbox.local.yml under the base, falling back to the repo root (pre-009)."""
+    new = _sandbox_base() / "sandbox.local.yml"
+    return new if new.exists() else SANDBOX_ROOT / "sandbox.local.yml"
+
+
+COMPOSE_DIR = RUNTIME_DIR / "compose"
 
 PROXY_TLD = "tst"
 
-PROXY_DIR = SANDBOX_ROOT / "runtime" / "proxy"
+PROXY_DIR = RUNTIME_DIR / "proxy"
 
 PROXY_CERTS_DIR = PROXY_DIR / "certs"
 
@@ -83,7 +115,7 @@ def _project_instance(project_dir: str):
     return entry["instance"], None
 
 def _wp_root(instance: str) -> Path:
-    return SANDBOX_ROOT / "runtime" / f"wp-{instance}"
+    return RUNTIME_DIR / f"wp-{instance}"
 
 def _log_path(instance: str) -> Path:
     return _wp_root(instance) / "wp-content" / "debug.log"
@@ -122,7 +154,7 @@ def _load_sandbox_yml() -> dict:
     need per-instance config (ports, admin) call _resolve_instance(name).
     """
     cfg_path = SANDBOX_ROOT / "sandbox.yml"
-    local_path = SANDBOX_ROOT / "sandbox.local.yml"
+    local_path = _local_yml_path()
     if not cfg_path.exists():
         return {}
     mtime = max(
@@ -261,7 +293,9 @@ CONFIG KEYS (sandbox.config.json / sandbox.config.override.json):
 - plugins: install + activate (slugs, zip URLs, or "." for project root)
 - mappings: mount as symlink + activate (wp-path → host path; "." resolved relative to project root)
 - mappings_inactive: mount as symlink but do NOT activate — use for pro plugins that FSI/imports should activate on demand
-- user-global layer: ~/.config/sandbox/config.json applies to EVERY project (under the project: project wins scalars, lists/dicts union). Declare a shared Pro plugin once as mappings_inactive there; absolute/~ host paths only.
+- user-global layer: $SANDBOX_HOME/config.json (default ~/sandbox/config.json) applies to EVERY project (under the project: project wins scalars, lists/dicts union). Declare a shared Pro plugin once as mappings_inactive there; absolute/~ host paths only.
+
+MACHINE-STATE BASE (spec 009): all generated state + per-machine config/secrets live under one base $SANDBOX_HOME (default ~/sandbox), NOT in the repo. CLI + this server resolve the same base. `./sb migrate --apply` relocates a pre-009 in-repo setup; `./sb home <dir>` moves the base. Until migrated, a fallback reads the old in-repo locations so nothing breaks.
 
 ANTI-PATTERNS — catch yourself:
 - "FIXED" from code reading. Only live MCP calls count as evidence.
@@ -311,7 +345,7 @@ def _instance_server(instance: str) -> str:
     instance block. 'herd' means HOST-served (Herd + host MySQL, no docker)."""
     try:
         reg = json.loads(
-            (SANDBOX_ROOT / "runtime" / "registry.json").read_text())
+            (RUNTIME_DIR / "registry.json").read_text())
         for e in reg.get("instances", {}).values():
             if e.get("instance") == instance:
                 return e.get("server") or "apache"
@@ -356,7 +390,7 @@ def _instance_php_version(instance: str):
     or None when unpinned."""
     try:
         reg = json.loads(
-            (SANDBOX_ROOT / "runtime" / "registry.json").read_text())
+            (RUNTIME_DIR / "registry.json").read_text())
         for e in reg.get("instances", {}).values():
             if e.get("instance") == instance and e.get("php_version"):
                 return e["php_version"]
@@ -388,7 +422,7 @@ def _herd_host_env(instance: str) -> dict:
     env = dict(os.environ)
     if php == _host_php_bin():
         return env  # unpinned — nothing to override
-    shim = SANDBOX_ROOT / "runtime" / "herd-shims" / instance
+    shim = RUNTIME_DIR / "herd-shims" / instance
     shim.mkdir(parents=True, exist_ok=True)
     php_shim = shim / "php"
     php_shim.write_text(f'#!/bin/sh\nexec "{php}" "$@"\n')
@@ -493,7 +527,7 @@ def _parse_skill_metadata(skill_md: Path) -> dict:
 
 VISIT_SCRIPT = SANDBOX_ROOT / "tools" / "visit" / "visit.py"
 
-TOOLS_VENV_PY = SANDBOX_ROOT / "runtime" / ".venv-tools" / "bin" / "python"
+TOOLS_VENV_PY = RUNTIME_DIR / ".venv-tools" / "bin" / "python"
 
 SANDBOX_CLAUDE_MD = SANDBOX_ROOT / "CLAUDE.md"
 

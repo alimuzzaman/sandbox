@@ -43,6 +43,7 @@ def cmd_up(cfg: dict, args) -> None:
     if wp_dir(inst).exists():
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
+        _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
         _write_debug_muplugins(inst)     # spec 007 — dump()/dd() + QM capture (host-file, ok on herd)
         try:  # spec 004 — reap old background-job artifacts (>24h)
@@ -250,6 +251,7 @@ def cmd_install(cfg, args) -> None:
         # Cache plugin/theme zip downloads (Templately FSI etc.) — the cache dir
         # is only mounted on docker tiers, so the mu-plugin no-ops on herd anyway.
         _write_dl_cache_muplugin(inst)
+        _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
     ok(f"Admin: {base}/wp-admin"
@@ -262,6 +264,14 @@ def cmd_doctor(cfg, args) -> None:
     adm = inst_cfg["admin"]
     port = inst_cfg["wordpress_port"]
     problems = 0
+
+    # Spec 009: nudge (once, non-disruptive) if machine-state is still in the repo
+    # and a per-user base hasn't been adopted. Everything works via fallback until
+    # then; this is purely discoverability for `./sb migrate`.
+    if (ROOT / "runtime" / "registry.json").exists() and \
+            not (BASE / "runtime" / "registry.json").exists():
+        info(f"Machine-state is still in the repo. Relocate it under {BASE} with "
+             f"`./sb migrate --apply` (spec 009). Harmless to defer.")
 
     print(f"\nInstance: {inst}  (http://localhost:{port})")
 

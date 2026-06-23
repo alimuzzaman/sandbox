@@ -292,8 +292,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./runtime/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./runtime/proxy/certs:/certs:ro
+      - {PROXY_CADDYFILE}:/etc/caddy/Caddyfile:ro
+      - {PROXY_CERTS_DIR}:/certs:ro
       - proxy_data:/data
       - proxy_config:/config
 volumes:
@@ -550,7 +550,7 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
                 f"{user} ALL=(root) NOPASSWD: {PROXY_HELPER}\n")
         info("One-time setup for clean http://<name>.tst URLs — your password "
              "ONCE (no certificate, no browser warning).")
-        tmp = ROOT / "runtime" / "sandbox-proxy.sudoers"
+        tmp = RUNTIME_DIR / "sandbox-proxy.sudoers"
         tmp.write_text(rule)
         _SUDOERS_REASON = (
             "Sandbox would like to set up clean local URLs so your sites open at "

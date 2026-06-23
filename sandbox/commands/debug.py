@@ -77,7 +77,7 @@ def cmd_introspect(cfg, args) -> None:
     if target not in valid:
         die(f"unknown target '{target}' — choose from: {', '.join(valid)}")
 
-    cache_dir = ROOT / "runtime" / "cache"
+    cache_dir = RUNTIME_DIR / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     targets = ["blocks", "widgets", "shortcodes"] if target == "all" else [target]

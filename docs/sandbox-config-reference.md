@@ -23,12 +23,15 @@ The project root is found by walking up from the directory to the nearest
 `sandbox.config.*` / `.wp-env.json` / `.git`. Paths must live under `$HOME` (or a
 `SANDBOX_PROJECT_ROOTS` entry) — `project_dir=/etc` is rejected.
 
-### User-global config (`~/.config/sandbox/config.json`)
+### User-global config (`$SANDBOX_HOME/config.json`)
 
 A machine-wide layer that applies to **every** project on this machine — declare
 a shared dependency once instead of copying it into each repo's
-`sandbox.config.override.json`. Same schema as a project config. Honors
-`$XDG_CONFIG_HOME` (falls back to `~/.config`); `config.yml` / `.yaml` also work.
+`sandbox.config.override.json`. Same schema as a project config. Lives under the
+per-user base `$SANDBOX_HOME` (default `~/sandbox`, spec 009), consolidated with
+all other machine-state. `config.yml` / `.yaml` also work. Backward-compat: until
+`./sb migrate --apply` runs, the legacy `~/.config/sandbox/config.json`
+(honoring `$XDG_CONFIG_HOME`) is still read as a fallback.
 
 It sits **under** the project in priority:
 
@@ -65,20 +68,23 @@ file path.
 
 ```jsonc
 {
-  // Plugins to set up in the instance.
-  //   "."            → this repo (symlinked in + activated)
-  //   "elementor"    → a wp.org slug (installed from wp.org + activated)
-  //   "../addon"     → a path (symlinked in + activated)
-  //   "https://…zip" → a zip URL (installed + activated)
-  "plugins": ["."],
+  // Plugins — a slug-keyed MAP (the canonical form, spec 010). The KEY is the
+  // authoritative install slug (worktree-proof). The value sets SOURCE and/or
+  // STATE; see "Plugins (the slug-keyed map)" below for the full rules.
+  //   "<slug>": true            → org, install + activate
+  //   "<slug>": false           → org, install but inactive
+  //   "<slug>": "."|"~/x"|"/abs"→ local source, active
+  //   "<slug>": "https://…zip"  → zip source, active
+  //   "<slug>": { "path"|"zip"|"source", "active", "onDemand" }  → full control
+  "plugins": {
+    "my-addon":  ".",          // this repo, active (slug = the key, not the dir)
+    "elementor": true,         // wp.org, active
+    "elementor-pro": { "path": "~/dev/elementor-pro", "onDemand": true }
+  },
 
-  // Themes to install; the FIRST entry is activated. Same entry forms as
-  // plugins: a wp.org slug, a zip URL, or a local path (symlinked in).
+  // Themes to install; the FIRST entry is activated. A wp.org slug, a zip URL,
+  // or a local path (symlinked in). (Themes stay a separate list.)
   "themes": [],
-
-  // Extra bind-mounts: wp-content path → absolute host path. Mounted (NOT
-  // activated) — for private/Pro deps you don't want to install from wp.org.
-  "mappings": { "wp-content/plugins/elementor-pro": "/abs/path/elementor-pro" },
 
   // Version pins. null → wordpress:latest (no implicit pin). Quote them so
   // YAML/JSON don't coerce "8.1" to a float.
@@ -111,6 +117,91 @@ file path.
 ```
 
 All fields are optional; omitted fields take the defaults above.
+
+## Plugins (the slug-keyed map)
+
+`plugins` is a **map keyed by plugin slug** (spec 010). Each entry decouples two
+orthogonal axes:
+
+- **source** — where the code comes from: a wp.org/registry slug (default), a zip
+  URL, or a **local path** (overrides org with your checkout).
+- **state** — `active` · `inactive` · `on-demand` (lazy; not installed until
+  something requests the slug).
+
+The **key is the authoritative slug**, so a local source installs under the right
+slug even from a git worktree whose directory name differs.
+
+### Value shorthands
+
+| Value | Means |
+|-------|-------|
+| `true` | state: **active** (source unset → resolved) |
+| `false` | state: **inactive**, installed (source unset → resolved) |
+| `"."` / `"~/x"` / `"../x"` / `"/abs"` | source: **local path** (state unset) |
+| `"https://….zip"` | source: **zip** (state unset) |
+| `{ "path"\|"zip"\|"source", "active"?, "onDemand"? }` | full control (exactly one source) |
+
+A boolean sets **only state**; a string sets **only source**. "From org" is never
+stamped by a shorthand — it's the **final fallback** when no layer set a source.
+
+### Merge across layers (no clobbering)
+
+The map is resolved by **normalize-then-field-merge**, never whole-value replace.
+Each layer (user-global → project → `sandbox.config.override.json`) is normalized
+to `{source?, active?, onDemand?}` with unset fields left UNSET, then merged
+**per field** (a higher layer wins only on the fields it sets). So a machine
+override that changes one plugin's source keeps every other plugin and field
+intact — and `project: true` + `override/catalog: "<path>"` resolves to
+**active, from that path** (both kept; org fallback not applied).
+
+### User-global = source catalog
+
+The user-global `$SANDBOX_HOME/config.json` is a machine-wide **source catalog**:
+list every local checkout once.
+
+```jsonc
+// $SANDBOX_HOME/config.json
+"plugins": {
+  "templately":    "~/Sites/git/templately",      // source only → on-demand; NOT auto-enabled
+  "elementor-pro": "~/dev/elementor-pro",
+  "query-monitor": { "active": true }             // explicit active → force-on in EVERY instance
+}
+```
+
+A bare path in the catalog **never enables** a plugin on its own — it only says
+*where* the code is. A plugin is enabled for an instance only when the **project**
+declares its slug (then its source resolves from the catalog), it's pulled
+**on-demand**, or the catalog entry sets `active: true` explicitly.
+
+### On-demand (lazy local plugins)
+
+`{ "path": "…", "onDemand": true }` (or a catalog-only path) is **not installed**
+at provision. When Templately Full Site Import, `wp plugin install <slug>`, or the
+wp-admin "Add Plugin" flow requests that slug, the sandbox serves your **local
+copy** (no download) via a mu-plugin (`plugins_api` + `upgrader_pre_download`,
+zipping the local dir to a throwaway temp copy). A wp-admin screen — **Plugins →
+Sandbox On-Demand** — lists on-demand plugins with a one-click "Install from
+local" button.
+
+### Legacy keys (deprecated sugar)
+
+The pre-010 keys still work, translated into the map at load time, preserving
+their exact behavior — but emit a one-line deprecation hint:
+
+| Legacy | Equivalent map entry |
+|--------|----------------------|
+| `plugins: [".", "slug", "/path", "…zip"]` | array form → install + activate |
+| `mappings: { "wp-content/plugins/<slug>": "/p" }` | `"<slug>": { "path": "/p", "active": true }` |
+| `mappings_inactive: { "wp-content/plugins/<slug>": "/p" }` | `"<slug>": { "path": "/p", "active": false }` |
+
+Non-plugin `mappings` (other wp-paths, e.g. `wp-content/mu-plugins/…`) are
+unchanged. If a slug appears in both a legacy key and the map, the **map wins**
+(with a warning). Prefer the map for new configs; the legacy keys will be removed
+in a later release once the map is proven.
+
+> Per-plugin example configs live in each plugin repo
+> (`sandbox.config.override.example.json`); migrate those to the map form, e.g.
+> `{ "plugins": { "templately": "/Users/you/Sites/git/templately" } }`.
 
 ### How version pins resolve (server-aware)
 

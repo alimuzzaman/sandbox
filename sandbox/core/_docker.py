@@ -139,19 +139,19 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_NAME: wp
 {_env_config_lines(inst_cfg)}
     volumes:
-      - ./runtime/wp-{instance}:/var/www/html
-      - ./runtime/seeds:/seeds
+      - {RUNTIME_DIR}/wp-{instance}:/var/www/html
+      - {RUNTIME_DIR}/seeds:/seeds
       # Shared plugin/theme download cache: the dl-cache mu-plugin serves &
       # populates zips here so WP-runtime installs (Templately FSI especially)
       # reuse a cached zip instead of re-downloading. Shared across instances.
-      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
+      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
       # Bind-mount plugin sources at the same absolute host path so the
       # symlinks ensure_instance creates under wp-content/plugins/ resolve
       # inside the container.
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
-      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
       # Built-in wp-cli: shared host phar → exec `wp` in this container (no per-call container).
-      - ./runtime/wp-cli.phar:/usr/local/bin/wp:ro
+      - {RUNTIME_DIR}/bin/wp-cli.phar:/usr/local/bin/wp:ro
 """
 
 
@@ -180,13 +180,13 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_NAME: wp
 {_env_config_lines(inst_cfg)}
     volumes:
-      - ./runtime/wp-{instance}:/var/www/html
-      - ./runtime/seeds:/seeds
+      - {RUNTIME_DIR}/wp-{instance}:/var/www/html
+      - {RUNTIME_DIR}/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
-      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
-      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
+      - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
       # Built-in wp-cli: shared host phar → exec `wp` in the fpm container.
-      - ./runtime/wp-cli.phar:/usr/local/bin/wp:ro
+      - {RUNTIME_DIR}/bin/wp-cli.phar:/usr/local/bin/wp:ro
 
   nginx:
     image: nginx:1.27-alpine
@@ -196,14 +196,14 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - "{inst_cfg["wordpress_port"]}:80"
     volumes:
       # Same WP files nginx serves statically + computes $document_root from.
-      - ./runtime/wp-{instance}:/var/www/html:ro
+      - {RUNTIME_DIR}/wp-{instance}:/var/www/html:ro
       # Plugins are symlinked into wp-content/plugins as ABSOLUTE host paths
       # under plugins_host. nginx serves their static assets (js/css/images)
       # itself, so it must resolve those symlinks too — mount plugins_host at
       # the same path it does in the fpm `wp` service, or every symlinked
       # plugin's assets 404 and its admin UI renders blank.
       - {plugins_host}:{plugins_host}:ro{_extra_vol_lines(inst_cfg, ro=True)}
-      - ./config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
+      - {ROOT}/config/nginx-sandbox.conf:/etc/nginx/conf.d/default.conf:ro
 """
 
 
@@ -231,10 +231,10 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     environment:
       TZ: UTC
     volumes:
-      - ./runtime/wp-{instance}:{docroot}
-      - ./runtime/seeds:/seeds
+      - {RUNTIME_DIR}/wp-{instance}:{docroot}
+      - {RUNTIME_DIR}/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
-      - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
+      - {RUNTIME_DIR}/dl-cache/wp-http:/sandbox-dl-cache
 """
 
 
@@ -259,14 +259,14 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
 {_env_config_lines(inst_cfg, docroot)}
     volumes:
-      - ./runtime/wp-{instance}:{docroot}
-      - ./runtime/seeds:/seeds
+      - {RUNTIME_DIR}/wp-{instance}:{docroot}
+      - {RUNTIME_DIR}/seeds:/seeds
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       # Persistent, shared wp-cli download cache (WP_CLI_CACHE_DIR points here):
       # `wp plugin/theme/core install` reuse downloads across instances + runs
       # instead of re-fetching into ephemeral /tmp every time.
-      - ./runtime/dl-cache/wp-cli:/tmp/.wp-cli/cache
-      - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      - {RUNTIME_DIR}/dl-cache/wp-cli:/tmp/.wp-cli/cache
+      - {ROOT}/config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
     entrypoint: ["wp", "--allow-root"]
     command: ["--info"]
 """
@@ -394,6 +394,7 @@ def write_compose_files(cfg: dict) -> None:
     """
     COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
     _ensure_wp_cli_phar()  # shared wp-cli phar mounted into each wp container (built-in wp-cli)
+    _sync_shipped_seeds()  # seed fixtures shipped in the repo → base SEEDS_DIR (spec 009)
     # Shared, persistent download caches bind-mounted into every instance's web
     # + wpcli tiers. Pre-create them 0777 so the bind mount isn't created
     # root-owned by Docker (the container uids — www-data 33 / lsphp 1000 —
@@ -456,11 +457,32 @@ _WP_CLI_PHAR_URL = "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/pha
 _WP_CLI_BUILTIN: dict[str, bool] = {}  # per-process cache: instance → built-in wp present
 
 
+def _sync_shipped_seeds() -> None:
+    """Copy seed fixtures shipped in the repo (`sandbox/assets/seeds/`) into the
+    base SEEDS_DIR if missing. Spec 009: seeds are a tracked repo ASSET (shared via
+    git), but the running stacks read/mount SEEDS_DIR under the per-user base — so a
+    fresh clone (empty base) still gets the demo content. Idempotent; never
+    overwrites a user's own/edited seed of the same name."""
+    shipped = ROOT / "sandbox" / "assets" / "seeds"
+    if not shipped.is_dir():
+        return
+    SEEDS_DIR.mkdir(parents=True, exist_ok=True)
+    for src in shipped.iterdir():
+        if not src.is_file():
+            continue
+        dst = SEEDS_DIR / src.name
+        if not dst.exists():
+            try:
+                shutil.copy2(src, dst)
+            except OSError:
+                pass
+
+
 def _ensure_wp_cli_phar() -> None:
     """Download the wp-cli phar once into runtime/ (shared by all instances). It is
     bind-mounted read-only into each `wp` container so wp-cli runs via `exec` with no
     per-call `compose run` container (spec: built-in wp-cli per instance)."""
-    phar = ROOT / "runtime" / "wp-cli.phar"
+    phar = RUNTIME_DIR / "bin" / "wp-cli.phar"
     if phar.exists() and phar.stat().st_size > 0:
         return
     phar.parent.mkdir(parents=True, exist_ok=True)

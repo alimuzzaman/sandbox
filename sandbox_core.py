@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -151,6 +152,200 @@ def _deep_merge(a: dict, b: dict) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Plugin config map (spec 010): canonical slug-keyed plugins + per-field merge.
+#
+# A plugin entry decouples SOURCE (org | zip | local path) from STATE (active |
+# inactive | on-demand). Fields are explicitly UNSET until a layer sets them, so
+# layers field-merge without clobbering. Legacy `plugins`(list)/`mappings`/
+# `mappings_inactive` are folded in, preserving their exact current behavior.
+# --------------------------------------------------------------------------- #
+
+_UNSET = object()  # "this field was not specified by any layer (yet)"
+
+_PLUGIN_PREFIX = "wp-content/plugins/"
+
+
+def _is_zip_url(s: str) -> bool:
+    return isinstance(s, str) and s.startswith(("http://", "https://")) and s.endswith(".zip")
+
+
+def _looks_like_path(s: str) -> bool:
+    return isinstance(s, str) and (("/" in s) or s.startswith((".", "~")))
+
+
+def _blank_entry() -> dict:
+    return {"source": _UNSET, "active": _UNSET, "on_demand": _UNSET}
+
+
+def _normalize_plugin_value(value, slug: str) -> dict:
+    """One map value (shorthand or object) -> entry with UNSET-aware fields.
+
+    Shorthands set ONE axis only: bool -> state (source UNSET); string -> source
+    (state UNSET). 'org' is never stamped here — it is the final fallback.
+    """
+    entry = _blank_entry()
+    if value is True:
+        entry["active"] = True
+    elif value is False:
+        entry["active"] = False
+    elif isinstance(value, str):
+        if _is_zip_url(value):
+            entry["source"] = {"kind": "zip", "value": value}
+        elif _looks_like_path(value):
+            entry["source"] = {"kind": "path", "value": value}
+        else:  # a bare word as a value: treat as an explicit org source
+            entry["source"] = {"kind": "org", "value": None}
+    elif isinstance(value, dict):
+        srcs = [k for k in ("path", "zip", "source") if k in value]
+        if len(srcs) > 1:
+            raise ConfigError(
+                f"plugin '{slug}': more than one source ({', '.join(srcs)}) — "
+                f"use exactly one of path / zip / source")
+        if "path" in value:
+            entry["source"] = {"kind": "path", "value": value["path"]}
+        elif "zip" in value:
+            entry["source"] = {"kind": "zip", "value": value["zip"]}
+        elif "source" in value:
+            sv = value["source"]
+            if sv == "org":
+                entry["source"] = {"kind": "org", "value": None}
+            elif _is_zip_url(sv):
+                entry["source"] = {"kind": "zip", "value": sv}
+            elif _looks_like_path(sv):
+                entry["source"] = {"kind": "path", "value": sv}
+            else:
+                entry["source"] = {"kind": "org", "value": None}
+        if "active" in value:
+            entry["active"] = bool(value["active"])
+        if "onDemand" in value or "on_demand" in value:
+            entry["on_demand"] = bool(value.get("onDemand", value.get("on_demand")))
+    else:
+        raise ConfigError(f"plugin '{slug}': unsupported value {value!r}")
+    return entry
+
+
+def _legacy_list_entry(item):
+    """A legacy `plugins` list element -> (slug, entry) preserving today's
+    behavior (install+activate; local-path slug = dir name, for compat)."""
+    if not item:
+        return None, None
+    if item == ".":
+        return None, ("self", {"source": {"kind": "path", "value": "."},
+                               "active": True, "on_demand": False})
+    if _is_zip_url(item):
+        # slug derived later by the installer; key by the zip basename sans version
+        base = item.rstrip("/").rsplit("/", 1)[-1]
+        base = base[:-4] if base.endswith(".zip") else base
+        slug = re.sub(r"\.\d[\d.]*$", "", base)
+        return slug, {"source": {"kind": "zip", "value": item},
+                      "active": True, "on_demand": False}
+    if _looks_like_path(item):
+        slug = Path(str(item)).expanduser().name
+        return slug, {"source": {"kind": "path", "value": item},
+                      "active": True, "on_demand": False}
+    # bare wp.org slug
+    return item, {"source": _UNSET, "active": True, "on_demand": False}
+
+
+def _normalize_plugins(doc: dict):
+    """Raw config doc -> ({slug: entry}, used_legacy: bool, self_entry).
+
+    Handles the object (canonical) and array (legacy) `plugins` forms and folds
+    legacy `mappings`/`mappings_inactive` plugin entries in. Non-plugin mappings
+    (other wp-paths) are NOT touched here. `self_entry` carries a legacy "."
+    element (slug resolved against the project root by the consumer).
+    """
+    out: dict[str, dict] = {}
+    canonical: set[str] = set()  # slugs declared via the new map (win over legacy)
+    self_entry = None
+    used_legacy = False
+    plugins = doc.get("plugins")
+    if isinstance(plugins, dict):
+        for slug, val in plugins.items():
+            out[slug] = _normalize_plugin_value(val, slug)
+            canonical.add(slug)
+    elif isinstance(plugins, list):
+        used_legacy = True
+        for item in plugins:
+            slug, entry = _legacy_list_entry(item)
+            if entry is None:
+                continue
+            if slug is None and isinstance(entry, tuple) and entry[0] == "self":
+                self_entry = entry[1]
+            else:
+                out[slug] = entry
+    # Fold legacy plugin mappings (wp-content/plugins/<slug>) into the map. A slug
+    # already declared via the canonical map WINS — skip + warn (FR-012).
+    for key, active in (("mappings", True), ("mappings_inactive", False)):
+        m = doc.get(key)
+        if isinstance(m, dict) and m:
+            for wp_path, src in m.items():
+                wp = str(wp_path).strip("/")
+                if not (wp.startswith(_PLUGIN_PREFIX.strip("/")) and wp.count("/") == 2):
+                    continue  # non-plugin mapping — leave for the old path
+                used_legacy = True
+                slug = wp.split("/")[-1]
+                if slug in canonical:
+                    print(f"sandbox: plugin '{slug}' is in both the `plugins` map and "
+                          f"`{key}` — the map wins.", file=sys.stderr)
+                    continue
+                out[slug] = {"source": {"kind": "path", "value": src},
+                             "active": active, "on_demand": False}
+    return out, used_legacy, self_entry
+
+
+def _merge_plugin_entry(base: dict, top: dict) -> dict:
+    """Field-merge two entries — a field SET in `top` wins; UNSET never clobbers."""
+    out = dict(base)
+    for f in ("source", "active", "on_demand"):
+        if top.get(f, _UNSET) is not _UNSET:
+            out[f] = top[f]
+    return out
+
+
+def _merge_plugin_maps(*layers) -> dict:
+    """Field-merge plugin maps low->high precedence (later layers win per field)."""
+    out: dict[str, dict] = {}
+    for layer in layers:
+        for slug, entry in (layer or {}).items():
+            out[slug] = _merge_plugin_entry(out.get(slug, _blank_entry()), entry)
+    return out
+
+
+def _resolve_plugin_entry(entry: dict, project_declared: bool = False) -> dict:
+    """Apply final defaults to UNSET fields. `source` -> org. State default is
+    LAYER-AWARE: a slug the project/override declared (you opted in) defaults to
+    ACTIVE; a slug present ONLY in the user-global catalog defaults to ON-DEMAND
+    (never auto-enable). An explicit active/onDemand from any layer always wins."""
+    source = entry.get("source", _UNSET)
+    if source is _UNSET:
+        source = {"kind": "org", "value": None}
+    active = entry.get("active", _UNSET)
+    on_demand = entry.get("on_demand", _UNSET)
+    if on_demand is True:
+        active = False
+    elif active is not _UNSET:
+        on_demand = False
+    elif project_declared:        # opted in by project/override → install + activate
+        active, on_demand = True, False
+    else:                         # catalog-only → available, not enabled
+        active, on_demand = False, True
+    return {"source": source, "active": bool(active), "on_demand": bool(on_demand)}
+
+
+_DEPRECATION_WARNED = [False]
+
+
+def _warn_legacy_once() -> None:
+    if _DEPRECATION_WARNED[0]:
+        return
+    _DEPRECATION_WARNED[0] = True
+    print("sandbox: `plugins` list / `mappings` / `mappings_inactive` are "
+          "deprecated — use the slug-keyed `plugins` map (see "
+          "docs/sandbox-config-reference.md).", file=sys.stderr)
+
+
 def _merge_layers(base: dict, top: dict) -> dict:
     """Stack `top` over `base`, additively. `top` wins scalar conflicts; dicts
     deep-merge; lists UNION (base entries first, then top's new entries, order
@@ -175,15 +370,20 @@ def _merge_layers(base: dict, top: dict) -> dict:
 
 def _user_config_path() -> Path | None:
     """The user-global config file, if present. Explicit override via
-    SANDBOX_USER_CONFIG (a full path) wins; else
-    $XDG_CONFIG_HOME/sandbox/config.{json,yml} (default ~/.config/sandbox/)."""
+    SANDBOX_USER_CONFIG (a full path) wins; else the consolidated base location
+    ($SANDBOX_HOME/config.{json,yml}, spec 009); else the legacy
+    $XDG_CONFIG_HOME/sandbox/config.{json,yml} (default ~/.config/sandbox/) as a
+    backward-compat fallback until migration runs."""
     explicit = os.environ.get("SANDBOX_USER_CONFIG")
     if explicit:
         p = Path(explicit).expanduser()
         return p if p.is_file() else None
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    sandbox_dir = Path(base).expanduser() / "sandbox"
-    return _first_existing(sandbox_dir, USER_CONFIG_BASENAMES)
+    in_base = _first_existing(sandbox_base(), USER_CONFIG_BASENAMES)
+    if in_base:
+        return in_base
+    legacy_base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    legacy_dir = Path(legacy_base).expanduser() / "sandbox"
+    return _first_existing(legacy_dir, USER_CONFIG_BASENAMES)
 
 
 def _load_user_global() -> dict:
@@ -244,33 +444,59 @@ def load_project_config(project_dir) -> dict:
 
     native = _first_existing(root, CONFIG_BASENAMES)
     if native:
-        data = _load_doc(native)
+        native_doc = _load_doc(native)
         source = native.name
     else:
         wpenv = _first_existing(root, WPENV_BASENAMES)
         if wpenv:
-            data = _from_wp_env(_load_doc(wpenv))
+            native_doc = _from_wp_env(_load_doc(wpenv))
             source = wpenv.name
         else:
-            data, source = {}, "defaults"
+            native_doc, source = {}, "defaults"
 
-    override = _first_existing(root, OVERRIDE_BASENAMES)
-    if override:
-        data = _deep_merge(data, _load_doc(override))
-        source = f"{source}+{override.name}"
+    override_path = _first_existing(root, OVERRIDE_BASENAMES)
+    override_doc = _load_doc(override_path) if override_path else {}
 
-    # Fold the user-global layer UNDER the project (project wins scalars; lists
-    # and dicts union). Merge on the raw docs — before DEFAULTS — so the user's
-    # scalars apply only where the project is silent, not where a DEFAULTS fill
-    # would otherwise mask them.
-    user = _load_user_global()
-    if user:
-        data = _merge_layers(user, data)
+    user_doc = _load_user_global()
+
+    # Generic merge for all NON-plugin keys (themes, mappings for non-plugin
+    # wp-paths, scalars, …) — unchanged behavior: override over native, then the
+    # user-global layer folded under, then DEFAULTS.
+    data = _deep_merge(native_doc, override_doc)
+    if override_path:
+        source = f"{source}+{override_path.name}"
+    if user_doc:
+        data = _merge_layers(user_doc, data)
         source = f"user+{source}"
-
     merged = _deep_merge(DEFAULTS, data)
     merged["root"] = str(root)
     merged["source"] = source
+
+    # Spec 010: resolve the canonical slug-keyed plugin map SEPARATELY via
+    # normalize-then-field-merge (the generic merge would clobber per-slug). Layer
+    # precedence low->high: user-global (source catalog) < project < override.
+    layers = []
+    used_legacy = False
+    self_slug = root.name  # legacy "." installs under the project dir name (compat)
+    for doc in (user_doc, native_doc, override_doc):
+        m, legacy, self_entry = _normalize_plugins(doc or {})
+        if self_entry is not None:
+            m = dict(m)
+            m[self_slug] = self_entry
+        layers.append(m)
+        used_legacy = used_legacy or legacy
+    if used_legacy:
+        _warn_legacy_once()
+    user_map, native_map, override_map = layers
+    # "Opted in" = declared by the project or its machine override (NOT the
+    # user-global catalog). These default to active; catalog-only slugs default
+    # to on-demand (FR-004b — the catalog never auto-enables).
+    opted_in = set(native_map) | set(override_map)
+    merged_map = _merge_plugin_maps(*layers)
+    merged["plugins_resolved"] = {
+        slug: _resolve_plugin_entry(e, slug in opted_in)
+        for slug, e in merged_map.items()
+    }
     return merged
 
 
@@ -287,8 +513,37 @@ def load_project_config(project_dir) -> dict:
 _ROOT = Path(__file__).resolve().parent
 
 
+def sandbox_base() -> Path:
+    """The single per-user base for ALL machine-state (spec 009).
+
+    Default ~/sandbox; overridable via SANDBOX_HOME. Both the `sb` CLI and the
+    MCP server resolve this identically so they never disagree about where state
+    lives. expanduser()+resolve() collapses ~, relatives, and symlinks to one
+    absolute path.
+    """
+    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+
+
+def _legacy_runtime_dir() -> Path:
+    """The pre-009 in-repo runtime dir (state lived in <repo>/runtime)."""
+    return _ROOT / "runtime"
+
+
 def _runtime_dir() -> Path:
-    return Path(os.environ.get("SANDBOX_RUNTIME", str(_ROOT / "runtime")))
+    """Runtime state dir. SANDBOX_RUNTIME (tests) wins; else $SANDBOX_HOME/runtime.
+
+    Backward-compat (spec 009 FR-015): until the one-time migration runs, prefer
+    the in-repo runtime when it still holds the registry and the new base does
+    not — so existing instances keep resolving before `sb migrate`.
+    """
+    explicit = os.environ.get("SANDBOX_RUNTIME")
+    if explicit:
+        return Path(explicit)
+    new = sandbox_base() / "runtime"
+    if not (new / "registry.json").exists() and \
+            (_legacy_runtime_dir() / "registry.json").exists():
+        return _legacy_runtime_dir()
+    return new
 
 
 def _registry_path() -> Path:

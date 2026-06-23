@@ -115,7 +115,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
 
 def wp_dir(instance: str) -> Path:
     """Per-instance WordPress install dir."""
-    return ROOT / "runtime" / f"wp-{instance}"
+    return RUNTIME_DIR / f"wp-{instance}"
 
 
 def plugins_dir(instance: str) -> Path:
@@ -127,7 +127,7 @@ def focus_file(instance: str) -> Path:
 
 
 def snapshots_dir(instance: str) -> Path:
-    return ROOT / "runtime" / "snapshots" / instance
+    return RUNTIME_DIR / "snapshots" / instance
 
 
 def project_name(instance: str) -> str:
@@ -435,6 +435,19 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         _src = _src.resolve()
         if _src.exists() and not _src.is_relative_to(plugins_home_p):
             _extra.append(str(_src))
+    # Spec 010: canonical plugin map — every LOCAL-path source (active, inactive,
+    # or on-demand) needs a bind-mount so the symlink resolves / the on-demand
+    # mu-plugin can read+zip it inside the container.
+    for _e in (pconf.get("plugins_resolved") or {}).values():
+        _si = _e.get("source") or {}
+        if _si.get("kind") != "path" or not _si.get("value"):
+            continue
+        _src = Path(str(_si["value"])).expanduser()
+        if not _src.is_absolute():
+            _src = (root_p / _src).resolve()
+        _src = _src.resolve()
+        if _src.exists() and not _src.is_relative_to(plugins_home_p):
+            _extra.append(str(_src))
     extra_mounts = list(dict.fromkeys(_extra))  # deduplicate, preserve order
     if extra_mounts:
         block["extra_mounts"] = extra_mounts
@@ -646,6 +659,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
             if wp_dir(name).exists():
                 _write_mail_muplugin(name)
                 _write_dl_cache_muplugin(name)
+                _write_ondemand_muplugin(name)   # spec 010 — on-demand local plugin sourcing
                 _write_abilities_muplugin(name)  # spec 003 — in-instance WP Abilities
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).

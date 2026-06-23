@@ -201,7 +201,7 @@ def cmd_instance(cfg, args) -> None:
 
     # 2. Remove WP install dir + snapshots (+ MCP pinned-PHP shims, if any)
     for path in (wp_dir(name), snapshots_dir(name),
-                 ROOT / "runtime" / "herd-shims" / name):
+                 RUNTIME_DIR / "herd-shims" / name):
         if path.exists():
             info(f"removing {path}")
             shutil.rmtree(path, ignore_errors=True)

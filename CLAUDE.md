@@ -456,14 +456,14 @@ without a resolved instance. The MCP tools route by `project_dir` (no
 
 ### Web server per project (apache / nginx / litespeed)
 
-Set `"server"` in a project's `sandbox.config.json` (default `apache`). Only the
+Set `"server"` in a project's `sandbox.config.json` (default `nginx`). Only the
 compose web tier differs; DB/mailpit/wp-cli adapt automatically (litespeed uses
 a different docroot + uid).
 
 | Server | Stack | Permalinks |
 |--------|-------|-----------|
-| `apache` (default) | `wordpress:*` mod_php | `.htaccess` |
-| `nginx` | `wordpress:*-fpm` + `nginx:alpine` sidecar | nginx `try_files … /index.php` |
+| `apache` | `wordpress:*` mod_php | `.htaccess` |
+| `nginx` (default) | `wordpress:*-fpm` + `nginx:alpine` sidecar | nginx `try_files … /index.php` |
 | `litespeed` | OpenLiteSpeed (lsphp, single container) | OLS vhost, `.htaccess` autoload |
 | `herd` | HOST-native: Laravel Herd + host MySQL (no docker) | Herd's nginx (valet driver) |
 

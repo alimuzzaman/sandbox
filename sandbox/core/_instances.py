@@ -70,7 +70,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             # Only the compose web tier differs per server (see
             # render_compose); db/mailpit are server-agnostic.
             "server": _valid_server(inst.get("server",
-                                             runtime.get("server", "apache"))),
+                                             runtime.get("server", "nginx"))),
             # Optional custom local domain (e.g. xspeed.tst) mapped to
             # 127.0.0.1 via /etc/hosts. None → plain localhost:<port>.
             "domain": inst.get("domain"),
@@ -505,7 +505,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             name = _derive_instance_name(root, taken)
             ports = _pick_instance_ports(cfg)
 
-        server = _valid_server(pconf.get("server") or "apache")
+        server = _valid_server(pconf.get("server") or "nginx")
         php_v = pconf.get("phpVersion")
         wp_v = pconf.get("wpVersion")
         info(f"ensure_instance: {root} → instance '{name}' "
@@ -627,7 +627,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
             "mailpit_port": existing["mailpit_port"],
         }
         server = _valid_server(pconf.get("server") or existing.get("server")
-                               or "apache")
+                               or "nginx")
 
         # Detect whether multisite is being turned on now (was off in the live
         # block) so we can run the convert after the recreate.
@@ -651,7 +651,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
             _pin_wp_constants_in_config(name, inst_cfg)
         else:
             compose("up", "-d", "--force-recreate",
-                    *_web_services(inst_cfg.get("server", "apache")),
+                    *_web_services(inst_cfg.get("server", "nginx")),
                     instance=name, check=False)
             _wait_http(ports["wordpress_port"])
             # Re-assert the SSL + mail mu-plugins (recreate may have reset

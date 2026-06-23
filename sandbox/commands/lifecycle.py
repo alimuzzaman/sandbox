@@ -35,7 +35,7 @@ def cmd_up(cfg: dict, args) -> None:
     dom = inst_cfg.get("domain")
     if dom and dom.endswith(f".{_tld(inst_cfg)}") and proxy_available():
         _ensure_proxy_up(cfg)
-    compose("up", "-d", *_web_services(inst_cfg.get("server", "apache")),
+    compose("up", "-d", *_web_services(inst_cfg.get("server", "nginx")),
             instance=inst)
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
@@ -88,7 +88,7 @@ def cmd_status(cfg, args) -> None:
     ff = focus_file(inst)
     srv = mcp_server_name(inst)
     ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
-    ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'apache')}")
+    ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'nginx')}")
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("root"):
         ok(f"Project: {owner['root']}")
@@ -121,7 +121,7 @@ def cmd_install(cfg, args) -> None:
     inst_cfg = resolve_instances(cfg)[inst]
     adm = inst_cfg["admin"]
     port = inst_cfg["wordpress_port"]
-    server = inst_cfg.get("server", "apache")
+    server = inst_cfg.get("server", "nginx")
 
     # WordPress bootstrap, made robust for EVERY server:
     #  - The image is PHP-only (wordpress:php8.1) — WP core is downloaded here,

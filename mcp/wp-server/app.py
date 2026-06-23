@@ -348,11 +348,11 @@ def _instance_server(instance: str) -> str:
             (RUNTIME_DIR / "registry.json").read_text())
         for e in reg.get("instances", {}).values():
             if e.get("instance") == instance:
-                return e.get("server") or "apache"
+                return e.get("server") or "nginx"
     except (OSError, json.JSONDecodeError):
         pass
     blk = (_load_sandbox_yml().get("instances", {}) or {}).get(instance, {}) or {}
-    return blk.get("server", "apache")
+    return blk.get("server", "nginx")
 
 def _is_herd(instance: str) -> bool:
     return _instance_server(instance) == "herd"

@@ -97,7 +97,7 @@ file path.
 
   // Web stack. apache/nginx/litespeed are docker (only the compose web tier
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
-  "server": "apache",   // apache | nginx | litespeed | herd
+  "server": "nginx",    // nginx (default) | apache | litespeed | herd
 
   // Local domain TLD for the `./sb domains` proxy: instances serve at
   // <name>.<tld> (e.g. https://myplugin.tst). Default "tst". Avoid "sb"

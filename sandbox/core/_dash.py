@@ -39,7 +39,7 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
             "admin_url": f"{_base}/wp-admin/",
             "login_url": f"{_base}/?sandbox_autologin={_token}" if _token else "",
             "domain": inst_cfg.get("domain"),
-            "server": inst_cfg.get("server", "apache"),
+            "server": inst_cfg.get("server", "nginx"),
             "mcp_server": mcp_server_name(name),
             "project": project,
             "focus": ff.read_text().strip() if ff.exists() else "—",

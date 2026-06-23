@@ -58,7 +58,7 @@ def cmd_secure(cfg, args) -> None:
     write_compose_files(cfg)
     inst = resolve_instances(cfg)[name]
     compose("up", "-d", "--force-recreate",
-            *_web_services(inst.get("server", "apache")),
+            *_web_services(inst.get("server", "nginx")),
             instance=name, check=False)
     url = f"https://{dom}"
     wpcli(["option", "update", "siteurl", url], instance=name, check=False)
@@ -77,7 +77,7 @@ def cmd_server(cfg, args) -> None:
     if not inst:
         die(f"unknown instance '{name}'. Run: ./sb instances")
     target = _valid_server(args.server_type)
-    current = inst.get("server", "apache")
+    current = inst.get("server", "nginx")
     if target == current:
         ok(f"{name} already uses {current} — nothing to change.")
         return

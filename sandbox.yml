@@ -39,11 +39,11 @@ runtime:
   wpcli_image: "wordpress:cli"
 
   # Web server stack for instances that don't override it.
-  #   apache    (default) — wordpress:latest, Apache + mod_php, .htaccess
-  #   nginx     — wordpress:*-fpm + nginx sidecar
+  #   nginx     (default) — wordpress:*-fpm + nginx sidecar
+  #   apache    — wordpress:latest, Apache + mod_php, .htaccess
   #   litespeed — OpenLiteSpeed (lsphp); pre-installed LiteSpeed Cache is
   #               auto-deactivated on install so it can't shadow xSpeed
-  server: apache
+  server: nginx
 
   admin:
     user: admin

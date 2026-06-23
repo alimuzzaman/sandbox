@@ -150,6 +150,8 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       # inside the container.
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      # Built-in wp-cli: shared host phar → exec `wp` in this container (no per-call container).
+      - ./runtime/wp-cli.phar:/usr/local/bin/wp:ro
 """
 
 
@@ -183,6 +185,8 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - {plugins_host}:{plugins_host}{_extra_vol_lines(inst_cfg)}
       - ./runtime/dl-cache/wp-http:/sandbox-dl-cache
       - ./config/php-sandbox.ini:/usr/local/etc/php/conf.d/zz-sandbox.ini:ro
+      # Built-in wp-cli: shared host phar → exec `wp` in the fpm container.
+      - ./runtime/wp-cli.phar:/usr/local/bin/wp:ro
 
   nginx:
     image: nginx:1.27-alpine
@@ -389,6 +393,7 @@ def write_compose_files(cfg: dict) -> None:
     don't linger.
     """
     COMPOSE_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_wp_cli_phar()  # shared wp-cli phar mounted into each wp container (built-in wp-cli)
     # Shared, persistent download caches bind-mounted into every instance's web
     # + wpcli tiers. Pre-create them 0777 so the bind mount isn't created
     # root-owned by Docker (the container uids — www-data 33 / lsphp 1000 —
@@ -444,18 +449,60 @@ def compose(*args: str, instance: str,
     )
 
 
+# Host-cached wp-cli phar, bind-mounted into every instance's `wp` container at
+# /usr/local/bin/wp (one shared file — see _web_apache/_nginx volumes). The path
+# uses ROOT, which is back-filled at call time, so it's computed in the function.
+_WP_CLI_PHAR_URL = "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
+_WP_CLI_BUILTIN: dict[str, bool] = {}  # per-process cache: instance → built-in wp present
+
+
+def _ensure_wp_cli_phar() -> None:
+    """Download the wp-cli phar once into runtime/ (shared by all instances). It is
+    bind-mounted read-only into each `wp` container so wp-cli runs via `exec` with no
+    per-call `compose run` container (spec: built-in wp-cli per instance)."""
+    phar = ROOT / "runtime" / "wp-cli.phar"
+    if phar.exists() and phar.stat().st_size > 0:
+        return
+    phar.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _download(_WP_CLI_PHAR_URL, phar)
+        phar.chmod(0o755)
+    except Exception:
+        pass  # fall back to the wpcli `run` container if the download fails
+
+
+def _wp_has_builtin_cli(instance: str) -> bool:
+    """True if the instance's running `wp` container has the mounted wp binary.
+    Doubles as a running-check (the exec fails if the container is down). Positive
+    results are cached for the process; negatives are retried (transient downtime)."""
+    if _WP_CLI_BUILTIN.get(instance):
+        return True
+    r = compose("exec", "-T", "wp", "test", "-f", "/usr/local/bin/wp",
+                instance=instance, check=False, capture=True)
+    ok = getattr(r, "returncode", 1) == 0
+    if ok:
+        _WP_CLI_BUILTIN[instance] = True
+    return ok
+
+
 def wpcli(args: list[str], instance: str,
           check: bool = True, capture: bool = False):
-    """Run wp-cli against an instance. Docker instances exec in the wpcli
-    container; herd instances run the HOST wp with --path at the same WP dir —
-    this single seam is what makes every provisioning step (install, constants,
-    multisite, plugins, themes) work identically on both runtimes."""
+    """Run wp-cli against an instance. Herd runs the HOST wp with --path; Docker
+    runs the **built-in** wp (a host wp-cli.phar bind-mounted into the always-running
+    `wp` container) via `exec -u www-data` — no per-call container. Falls back to the
+    one-shot `wpcli` service container if the built-in isn't present yet (e.g. an
+    instance not recreated since this landed, or the web container is down)."""
     if _is_herd_instance(instance):
         # Run wp-cli under the instance's PINNED PHP (php_version), not the
         # phar's default `php` — so plugin code, migrations, and `wp eval`
         # execute on the same PHP the web tier serves.
         return run([*_herd_wp_cmd(instance), f"--path={wp_dir(instance)}", *args],
                    check=check, capture=capture)
+    if _wp_has_builtin_cli(instance):
+        # exec into the running web container as www-data (uid 33) so files stay
+        # www-data-owned and no --allow-root is needed; same PHP the site serves.
+        return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
+                       instance=instance, check=check, capture=capture)
     return compose("run", "--rm", "wpcli", *args,
                    instance=instance, check=check, capture=capture)
 

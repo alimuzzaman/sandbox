@@ -399,6 +399,22 @@ def _herd_host_env(instance: str) -> dict:
     env["PATH"] = f"{shim}:{env.get('PATH', '')}"
     return env
 
+_WP_CLI_BUILTIN: dict[str, bool] = {}  # instance → built-in wp present (per process)
+
+
+def _wp_has_builtin_cli(instance: str) -> bool:
+    """True if the instance's running `wp` container has the mounted wp binary
+    (built-in wp-cli). Doubles as a running-check; positive results are cached."""
+    if _WP_CLI_BUILTIN.get(instance):
+        return True
+    r = _compose("exec", "-T", "wp", "test", "-f", "/usr/local/bin/wp",
+                 instance=instance, timeout=20)
+    ok = isinstance(r, dict) and r.get("code") == 0
+    if ok:
+        _WP_CLI_BUILTIN[instance] = True
+    return ok
+
+
 def _wpcli(args: list[str], instance: str,
            timeout: int = 60) -> dict:
     if _is_herd(instance):
@@ -408,6 +424,11 @@ def _wpcli(args: list[str], instance: str,
             [_herd_php_bin(instance), _host_wp_bin(),
              f"--path={_wp_root(instance)}", *args],
             timeout=timeout)
+    # Built-in wp-cli: exec the mounted phar in the running wp container as
+    # www-data (no per-call container). Fall back to the one-shot wpcli service.
+    if _wp_has_builtin_cli(instance):
+        return _compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
+                        instance=instance, timeout=timeout)
     return _compose("run", "--rm", "wpcli", *args,
                     instance=instance, timeout=timeout)
 
@@ -421,6 +442,9 @@ def _wpcli_shell(shell_cmd: str, instance: str,
         return _host_run(["sh", "-c", shell_cmd], timeout=timeout,
                          cwd=_wp_root(instance),
                          env=_herd_host_env(instance))
+    if _wp_has_builtin_cli(instance):
+        return _compose("exec", "-u", "www-data", "-T", "wp", "sh", "-c", shell_cmd,
+                        instance=instance, timeout=timeout)
     return _compose(
         "run", "--rm", "--entrypoint", "sh", "wpcli", "-c", shell_cmd,
         instance=instance, timeout=timeout,

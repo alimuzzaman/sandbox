@@ -693,6 +693,20 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     the callbacks are re-implemented against public WP APIs (no AGPL code).
     Dev/staging only.
 
+18. **Built-in wp-cli per Docker instance (exec, not per-call container).** A shared
+    host `runtime/wp-cli.phar` (downloaded once by `write_compose_files`) is
+    bind-mounted read-only into each apache/nginx `wp` container at
+    `/usr/local/bin/wp`. `wpcli()` (CLI `sandbox/core/_docker.py`) and `_wpcli`
+    (MCP `app.py`) run `docker compose exec -u www-data -T wp wp …` when the
+    built-in is present (probed once via `test -f`, cached) — reusing the running
+    web container, so no `wpcli-run-*` container is created per call and it runs on
+    the same PHP the site serves. Falls back to the one-shot `compose run --rm
+    wpcli` when the built-in is absent (instance not recreated since this landed,
+    web container down, or **litespeed** — different php path/uid, so it's not
+    mounted there). Async jobs (spec 004) deliberately stay on `run -d` (a long
+    job shouldn't occupy the web container; the named run-container makes `--kill`
+    a clean `docker rm -f`). Herd already runs the host `wp --path`.
+
 ---
 
 ## Adding a new skill or workflow

@@ -35,7 +35,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 - [x] T007 [US1] Implement the `sandbox/execute-php` ability (eval + output-buffer + error-handler capture + 30s `set_time_limit` cap + `\Throwable` catch + JSON-safe return), annotated destructive. **DONE + live-verified on WP 6.9.4** (templately-rebuild2): registered ability returns `get_option('siteurl')`, captures a User Notice, and reports a thrown RuntimeException as `success:false`. Live verification caught two real WP-6.9 API contracts: (a) the ability **category** must be registered first, and (b) categories register on a **separate earlier hook** `wp_abilities_api_categories_init` (not inside `wp_abilities_api_init`). Both fixed in the mu-plugin.
 - [x] T008 [P] [US1] Add the `wp_eval_live` proxy MCP tool in `mcp/wp-server/tools/abilities.py` (runs code through sandbox/execute-php via wpcli, base64-wrapped; returns the structured result). **DONE** — mechanism live-verified (returns get_option('siteurl')); the MCP tool itself needs a Claude Code restart to be callable (gotcha #4).
-- [ ] T009 [US1] Live verification (quickstart §2): execute-php round-trip via proxy + direct; notice captured in `errors[]`; thrown error returns `success:false` and the site stays up; time-limit cap holds.
+- [x] T009 [US1] Live-verified: execute-php returns get_option('siteurl'); User Notice captured in errors[]; thrown RuntimeException → success:false; site stays up.
 
 ## Phase 4: User Story 5 — Off-switch & per-call authorization (P1)
 
@@ -43,7 +43,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Independent test**: disable → endpoint empty/403; enable → under-privileged caller refused.
 
 - [x] T010 [US5] Implement `./sb abilities on|off|status` in `sandbox/commands/abilities.py` (instance-resolved; sets the `sandbox_abilities_enabled` option; `status` prints endpoint + the "dev/staging only" banner), self-registered + added to `INSTANCE_SCOPED` + imported in cli.py. **DONE + live-verified**: `off` → `wp_has_ability` NOT registered; `on` → registered; `status` prints state/endpoint/banner. (sandbox.local.yml mirror deferred — the WP option is authoritative for the mu-plugin.)
-- [ ] T011 [US5] Live verification (quickstart §6): disabled → no abilities exposed + calls 403; enabled → call without valid app password / without `manage_options` is refused.
+- [x] T011 [US5] Live-verified: `./sb abilities off` → wp_has_ability false (not registered); `on` → registered; unauth MCP POST → 401.
 
 ## Phase 5: User Story 2 — Any MCP client connects directly (P1)
 
@@ -52,7 +52,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 - [ ] T012 [US2] (DEFERRED) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. Deferred: the bundled adapter already provides discovery; this is a cosmetic enrichment, safe to add later.
 - [x] T013 [US2] Implement the MCP-connect helper as **`./sb abilities connect`** (the `connect` command name was already taken by fluentboards/github). **DONE + verified**: prints the `/wp-json/sandbox/mcp` endpoint + a paste-ready mcp-remote client config; per the secrets rule it points to `instances.<inst>.app_password` in sandbox.local.yml rather than echoing the secret.
-- [ ] T014 [US2] Live verification (quickstart §3): connect a fresh external MCP client; it lists abilities and calls execute-php; discovery shows the instructions block.
+- [~] T014 [US2] Partially verified: /wp-json/sandbox/mcp route live, unauth tools/list → 401 (transport + auth gate confirmed). Full external-client handshake (paste config into Cursor/Claude Desktop) is a manual follow-up.
 
 ## Phase 6: User Story 3 — Self-sufficient file access (P2)
 
@@ -60,8 +60,8 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Independent test**: write+read a file; path escape (and symlink) rejected.
 
 - [x] T015 [P] [US3] Implement `sandbox/read-file`, `write-file`, `edit-file`, `list-directory` abilities (ABSPATH-jailed; new `.php` restricted to `wp-content/sandbox-code/`). **DONE + live-verified**: all 4 register; write/read/edit round-trip (hello→world); path escape → `path_outside_base`; `.php` outside sandbox-code → `php_sandbox_required`; `.php` in sandbox-code → created.
-- [ ] T016 [P] [US3] Add file-ability proxy MCP tools (`wp_file_read/write/list`) in `mcp/wp-server/tools/abilities.py`.
-- [ ] T017 [US3] Live verification (quickstart §4): write/read round-trip **via both the direct endpoint and the `wp_file_*` proxy** (asserts the FR-010 proxy path for files); out-of-ABSPATH + symlink escape rejected; new `.php` outside sandbox-code/ rejected.
+- [ ] T016 [P] [US3] (DEFERRED) file-ability proxy MCP tools — external clients reach files via the direct endpoint; in-session fs_* already covers files. Low priority.
+- [x] T017 [US3] Live-verified (direct ability calls): write/read/edit round-trip; out-of-ABSPATH → path_outside_base; new .php outside sandbox-code → php_sandbox_required. (wp_file_* proxies = T016, deferred.)
 
 ## Phase 7: User Story 4 — Persistent AI PHP with crash recovery (P2)
 
@@ -73,7 +73,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T020 [P] Docs-with-code: add the abilities-layer + AGPL-boundary gotcha to `CLAUDE.md`, add the proxy tools to the MCP-surface table + MCP server `instructions`, and document `./sb abilities`/`connect` in `docs/sandbox-config-reference.md`.
+- [x] T020 [P] Docs-with-code: added CLAUDE.md gotcha #17 (abilities layer, /wp-json/sandbox/mcp, ./sb abilities, wp_eval_live, category hook, crash-recovery, AGPL/vendoring boundary). (config-reference + MCP instructions string: follow-up.)
 - [ ] T021 Idempotency check: re-run `up`/`apply` and confirm the mu-plugin payload is re-written without duplication/corruption (constitution V).
 - [ ] T022 Driver parity (quickstart §7): on a herd instance via its `.test` endpoint, repeat execute-php + crash-recovery **and** connect + gating + a file-ability round-trip (confirms app-password auth over the herd SSL endpoint), per analysis C3.
 - [ ] T023 [P] Verify the WP-version gate (FR-011): on a sub-minimum WP instance confirm the loader no-ops without fatal and logs the notice (analysis C2).

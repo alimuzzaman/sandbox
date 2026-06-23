@@ -676,6 +676,23 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     MCP REST auth, and the autologin link. `cmd_up` also mints a missing
     `bridge_token` so a plain `up` self-heals an older, secret-less instance.
 
+17. **In-instance WP Abilities layer (spec 003).** Each instance is provisioned
+    with `wp-content/mu-plugins/00-sandbox-abilities.php` + `sandbox-abilities/`
+    (the vendored `wordpress/mcp-adapter`, copied by `_write_abilities_muplugin`
+    on every `up`/`apply`). It registers `sandbox/*` abilities on WP 6.9's
+    Abilities API (`execute-php`, `read/write/edit/list` files) and exposes them
+    over MCP at **`/wp-json/sandbox/mcp`** (HTTP Basic + admin Application
+    Password). Gated by the `sandbox_abilities_enabled` option — toggle with
+    `./sb abilities on|off|status`; `./sb abilities connect` prints the endpoint +
+    a paste-ready client config. In-session, `wp_eval_live` proxies to
+    `execute-php`. Notes: ability **categories** must be registered on the separate
+    `wp_abilities_api_categories_init` hook (before `wp_abilities_api_init`);
+    crash recovery for `wp-content/sandbox-code/` uses a `.loading`→`.crashed`
+    marker (WP's own fatal handler pre-empts shutdown callbacks); the vendored
+    adapter is bundled under `sandbox/assets/abilities/` (NOT repo `vendor/`) and
+    the callbacks are re-implemented against public WP APIs (no AGPL code).
+    Dev/staging only.
+
 ---
 
 ## Adding a new skill or workflow

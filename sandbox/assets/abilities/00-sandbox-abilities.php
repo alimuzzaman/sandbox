@@ -25,6 +25,11 @@ if (!function_exists('wp_register_ability')) {
 
 define('SANDBOX_ABILITIES_MAX_EXEC', 30); // hard execution-time cap (seconds), spec FR-003.
 
+// spec 005 — editor-authoring helpers (Gutenberg/EB + Elementor/EA).
+if (is_readable(__DIR__ . '/sandbox-editor.php')) {
+    require_once __DIR__ . '/sandbox-editor.php';
+}
+
 /** Per-instance enable flag (default on for disposable Sandbox instances). */
 function sandbox_abilities_enabled(): bool
 {
@@ -234,6 +239,32 @@ function sandbox_abilities_register(): void
         'permission_callback' => 'sandbox_abilities_permission_callback',
         'meta' => $rest_meta + ['annotations' => ['readonly' => true, 'destructive' => false, 'idempotent' => true]],
     ]);
+
+    // spec 005 — editor authoring abilities (if the helpers loaded).
+    if (function_exists('sandbox_editor_gutenberg_insert')) {
+        $rw = $rest_meta + ['annotations' => ['readonly' => false, 'destructive' => true, 'idempotent' => false]];
+        $ro = $rest_meta + ['annotations' => ['readonly' => true, 'destructive' => false, 'idempotent' => true]];
+        wp_register_ability('sandbox/gutenberg-insert', [
+            'label' => __('Insert Gutenberg block', 'sandbox'), 'description' => __('Append a Gutenberg/Essential Blocks block to a post (parse→serialize, unique blockId).', 'sandbox'),
+            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
+            'execute_callback' => 'sandbox_editor_gutenberg_insert', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
+        ]);
+        wp_register_ability('sandbox/gutenberg-get', [
+            'label' => __('Get Gutenberg blocks', 'sandbox'), 'description' => __('Return a post\'s parsed block tree.', 'sandbox'),
+            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
+            'execute_callback' => 'sandbox_editor_gutenberg_get', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $ro,
+        ]);
+        wp_register_ability('sandbox/elementor-insert', [
+            'label' => __('Insert Elementor widget', 'sandbox'), 'description' => __('Insert an Elementor/Essential Addons widget via Document::save (7-hex ids, CSS regen).', 'sandbox'),
+            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
+            'execute_callback' => 'sandbox_editor_elementor_insert', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
+        ]);
+        wp_register_ability('sandbox/editor-schema', [
+            'label' => __('Editor schema', 'sandbox'), 'description' => __('Introspect registered Gutenberg blocks / Elementor widgets.', 'sandbox'),
+            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
+            'execute_callback' => 'sandbox_editor_schema', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $ro,
+        ]);
+    }
 }
 
 /**

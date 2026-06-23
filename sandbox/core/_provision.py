@@ -107,6 +107,10 @@ def _write_abilities_muplugin(instance: str) -> None:
     mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
     mu_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src, mu_dir / "00-sandbox-abilities.php")
+    # spec 005 — the editor-authoring helpers the loader require_once's.
+    editor = asset_dir / "sandbox-editor.php"
+    if editor.exists():
+        shutil.copyfile(editor, mu_dir / "sandbox-editor.php")
     # Copy the payload dir (vendored wordpress/mcp-adapter) that the loader
     # require_once's for the MCP-server exposure. Refresh in place each call.
     payload = asset_dir / "sandbox-abilities"

@@ -51,8 +51,8 @@ def cmd_abilities(cfg, args) -> None:
         except Exception:
             url = "(unknown)"
         print(f"abilities: {'on' if enabled else 'off'}  (instance: {inst})")
-        print(f"endpoint:  {url}/wp-json/  "
-              "(MCP server exposure pending mcp-adapter vendoring)")
+        print(f"endpoint:  {url}/wp-json/sandbox/mcp  "
+              "(MCP server — HTTP Basic + admin Application Password)")
         print("note:      dev/staging only — never enable on a production site")
         return
 

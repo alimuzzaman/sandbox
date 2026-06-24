@@ -123,14 +123,41 @@ function sandbox_abilities_register_mcp_server($adapter): void
         [\WP\MCP\Transport\HttpTransport::class],
         null,                      // error handler → adapter default
         null,                      // observability → adapter default
-        [
-            'sandbox/execute-php',
-            'sandbox/read-file',
-            'sandbox/write-file',
-            'sandbox/edit-file',
-            'sandbox/list-directory',
-        ]
+        sandbox_abilities_mcp_tool_ids()
     );
+}
+
+/**
+ * The ability IDs exposed as MCP tools. The editor-authoring set is gated on the
+ * same condition used to REGISTER it (the helper file having loaded) — NOT on
+ * wp_get_ability(), because create_server() can run before
+ * wp_abilities_api_init registers the abilities (an ordering trap that would
+ * silently expose zero tools).
+ */
+function sandbox_abilities_mcp_tool_ids(): array
+{
+    $ids = [
+        'sandbox/execute-php',
+        'sandbox/read-file',
+        'sandbox/write-file',
+        'sandbox/edit-file',
+        'sandbox/list-directory',
+    ];
+    if (function_exists('sandbox_editor_gutenberg_insert')) {
+        $ids = array_merge($ids, [
+            'sandbox/gutenberg-insert',
+            'sandbox/gutenberg-get',
+            'sandbox/gutenberg-update',
+            'sandbox/gutenberg-delete',
+            'sandbox/gutenberg-finalize',
+            'sandbox/elementor-insert',
+            'sandbox/elementor-get',
+            'sandbox/elementor-update',
+            'sandbox/elementor-delete',
+            'sandbox/editor-schema',
+        ]);
+    }
+    return $ids;
 }
 
 function sandbox_abilities_register_category(): void

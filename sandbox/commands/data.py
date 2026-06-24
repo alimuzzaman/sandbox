@@ -118,7 +118,11 @@ def _restore_snapshot(inst: str, snap_root: Path, name: str) -> None:
     # `db reset --yes` drops+recreates the empty schema first so restore is a true
     # replacement (tables created after the snapshot don't survive).
     info("Resetting DB (drop all tables) before import…")
-    wpcli(["db", "reset", "--yes"], instance=inst)
+    # Run via the dedicated `wpcli` service, NOT the wpcli() helper: that helper
+    # execs into the web (php-fpm) container, which has no mysql client, so
+    # `wp db reset` dies with "env: 'mysql': No such file or directory". The wpcli
+    # service image ships the client — same path the import/export below use.
+    compose("run", "--rm", "wpcli", "db", "reset", "--yes", instance=inst)
     info(f"Importing DB ← {sql}")
     compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
             "wpcli", "db", "import", f"/snapshots/{name}/db.sql", instance=inst)

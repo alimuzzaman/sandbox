@@ -520,7 +520,13 @@ def wpcli(args: list[str], instance: str,
         # execute on the same PHP the web tier serves.
         return run([*_herd_wp_cmd(instance), f"--path={wp_dir(instance)}", *args],
                    check=check, capture=capture)
-    if _wp_has_builtin_cli(instance):
+    # `wp db ...` shells out to the mysql/mysqldump client binary, which the fpm
+    # (nginx) web image does NOT ship — only the dedicated `wpcli` service image
+    # does. Route DB subcommands to that service so db query/reset/import/etc.
+    # work on every server tier (the exec-into-web path 500s with
+    # "env: 'mysql': No such file or directory" on nginx).
+    needs_db_client = bool(args) and args[0] == "db"
+    if _wp_has_builtin_cli(instance) and not needs_db_client:
         # exec into the running web container as www-data (uid 33) so files stay
         # www-data-owned and no --allow-root is needed; same PHP the site serves.
         return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,

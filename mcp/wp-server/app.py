@@ -458,9 +458,14 @@ def _wpcli(args: list[str], instance: str,
             [_herd_php_bin(instance), _host_wp_bin(),
              f"--path={_wp_root(instance)}", *args],
             timeout=timeout)
+    # `wp db ...` shells out to the mysql/mysqldump client, absent from the fpm
+    # (nginx) web image — only the dedicated `wpcli` service ships it. Route DB
+    # subcommands there so db_query etc. work on every server tier (the
+    # exec-into-web path fails with "env: 'mysql': No such file or directory").
+    needs_db_client = bool(args) and args[0] == "db"
     # Built-in wp-cli: exec the mounted phar in the running wp container as
     # www-data (no per-call container). Fall back to the one-shot wpcli service.
-    if _wp_has_builtin_cli(instance):
+    if _wp_has_builtin_cli(instance) and not needs_db_client:
         return _compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
                         instance=instance, timeout=timeout)
     return _compose("run", "--rm", "wpcli", *args,

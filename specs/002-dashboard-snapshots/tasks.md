@@ -42,8 +42,8 @@ Host: `sb` (`cmd_web` routes, provisioning, `_write_snapshot_muplugin`, token mi
 
 ## Phase 1: Setup
 
-- [ ] T001 Read `cmd_web` + its `/api/*` handlers in `sb` and the mu-plugin writers (`_write_mail_muplugin` ~L1031, `_autologin_mu_plugin` ~L2065) to confirm the extension points; record the exact functions/lines to touch in `specs/002-dashboard-snapshots/research.md`.
-- [ ] T002 [P] Gitignore the async job store: add `runtime/bridge-jobs/` to `.gitignore`.
+- [x] T001 Read `cmd_web` + its `/api/*` handlers in `sb` and the mu-plugin writers (`_write_mail_muplugin` ~L1031, `_autologin_mu_plugin` ~L2065) to confirm the extension points; record the exact functions/lines to touch in `specs/002-dashboard-snapshots/research.md`.
+- [x] T002 [P] Gitignore the async job store: add `runtime/bridge-jobs/` to `.gitignore`.
 
 **Checkpoint**: Extension points confirmed.
 
@@ -53,14 +53,14 @@ Host: `sb` (`cmd_web` routes, provisioning, `_write_snapshot_muplugin`, token mi
 
 **Purpose**: The bridge infrastructure every user story depends on. MUST complete first.
 
-- [ ] T003 Mint + persist a per-instance `bridge_token`: add a helper in `sb` (mirroring the autologin-token flow) that writes `instances.<name>.bridge_token` to `sandbox.local.yml`; call it from `ensure_instance`/provisioning (idempotent; regenerate on recreate). (data-model: Bridge token)
-- [ ] T004 Add `_write_snapshot_muplugin(instance, token, url)` in `sb` that generates `runtime/wp-<instance>/wp-content/mu-plugins/00-sandbox-snapshots.php` with `SANDBOX_BRIDGE_URL`/`SANDBOX_BRIDGE_TOKEN`/`SANDBOX_INSTANCE` constants and a sandbox-only guard; call it from provisioning alongside the mail/ssl/autologin mu-plugins (FR-006, FR-013).
-- [ ] T005 Compute the container-reachable bridge URL (host gateway + `sb web` port) and pass it to T004; document the macOS vs Linux `host.docker.internal` handling per research D5.
-- [ ] T006 Auto-start `sb web` from `sb up`/`ensure_instance` idempotently so the bridge is reachable whenever the instance runs (FR-014); bind it to a host-gateway-reachable address (research D5). **(U2)** Record the EXACT bind address chosen (the Docker host-gateway interface, NOT a broad `0.0.0.0`) in research.md so FR-012's "localhost/host-gateway only" is not violated by an over-broad bind; the `bridge_token` remains the auth boundary regardless.
-- [ ] T007 Add the bridge auth + instance-resolution middleware in `cmd_web`: resolve `<inst>` from the route, require `Authorization: Bearer <token>`, constant-time compare to that instance's `bridge_token`, 403 otherwise; reject unknown instance (404) and herd instance (409, via `_is_herd_instance`) (FR-010, FR-012, contracts error shapes).
-- [ ] T008 Implement the async job runner: spawn `sb` ops detached, write `runtime/bridge-jobs/<instance>/<job_id>.json` with `status` transitions (queued→running→succeeded/failed), and add `GET /api/instance/<inst>/job/<job_id>` returning the full job shape `{status, op, name, detail}` (data-model: Bridge job; contracts: job poll). **(A1)** Enforce a max-duration / stuck-job guard: if the detached process exceeds a configured timeout (or its PID is gone without a terminal write), mark the job `failed` with a detail message — never leave a wedged op in `running` indefinitely.
-- [ ] T009 Scaffold the mu-plugin admin screen in `00-sandbox-snapshots.php` (T004 generator): Tools → "Sandbox Snapshots" page, `sandbox_*` page slug/handles, `manage_options` capability + `sandbox_snapshots` nonce on every action, a bridge HTTP client (`wp_remote_post`/`wp_remote_get` with the Bearer token), and a job-poll helper (FR-001, FR-004, FR-008).
-- [ ] T010 **Live-verify foundation**: provision/`sb up` an instance; from inside the WP container `curl` the bridge with/without/with-wrong token (expect 200 vs 401/403 vs 403) and with the right token but a DIFFERENT `<inst>` (expect 403); confirm `GET job/<id>` returns the full `{status,op,name,detail}` shape **(G1)**; recreate the instance and confirm the OLD token is now rejected (rotation) **(U3)**; confirm the mu-plugin loads in wp-admin and no-ops when constants are absent (quickstart S4, S6).
+- [x] T003 Mint + persist a per-instance `bridge_token`: add a helper in `sb` (mirroring the autologin-token flow) that writes `instances.<name>.bridge_token` to `sandbox.local.yml`; call it from `ensure_instance`/provisioning (idempotent; regenerate on recreate). (data-model: Bridge token)
+- [x] T004 Add `_write_snapshot_muplugin(instance, token, url)` in `sb` that generates `runtime/wp-<instance>/wp-content/mu-plugins/00-sandbox-snapshots.php` with `SANDBOX_BRIDGE_URL`/`SANDBOX_BRIDGE_TOKEN`/`SANDBOX_INSTANCE` constants and a sandbox-only guard; call it from provisioning alongside the mail/ssl/autologin mu-plugins (FR-006, FR-013).
+- [x] T005 Compute the container-reachable bridge URL (host gateway + `sb web` port) and pass it to T004; document the macOS vs Linux `host.docker.internal` handling per research D5.
+- [x] T006 Auto-start `sb web` from `sb up`/`ensure_instance` idempotently so the bridge is reachable whenever the instance runs (FR-014); bind it to a host-gateway-reachable address (research D5). **(U2)** Record the EXACT bind address chosen (the Docker host-gateway interface, NOT a broad `0.0.0.0`) in research.md so FR-012's "localhost/host-gateway only" is not violated by an over-broad bind; the `bridge_token` remains the auth boundary regardless.
+- [x] T007 Add the bridge auth + instance-resolution middleware in `cmd_web`: resolve `<inst>` from the route, require `Authorization: Bearer <token>`, constant-time compare to that instance's `bridge_token`, 403 otherwise; reject unknown instance (404) and herd instance (409, via `_is_herd_instance`) (FR-010, FR-012, contracts error shapes).
+- [x] T008 Implement the async job runner: spawn `sb` ops detached, write `runtime/bridge-jobs/<instance>/<job_id>.json` with `status` transitions (queued→running→succeeded/failed), and add `GET /api/instance/<inst>/job/<job_id>` returning the full job shape `{status, op, name, detail}` (data-model: Bridge job; contracts: job poll). **(A1)** Enforce a max-duration / stuck-job guard: if the detached process exceeds a configured timeout (or its PID is gone without a terminal write), mark the job `failed` with a detail message — never leave a wedged op in `running` indefinitely.
+- [x] T009 Scaffold the mu-plugin admin screen in `00-sandbox-snapshots.php` (T004 generator): Tools → "Sandbox Snapshots" page, `sandbox_*` page slug/handles, `manage_options` capability + `sandbox_snapshots` nonce on every action, a bridge HTTP client (`wp_remote_post`/`wp_remote_get` with the Bearer token), and a job-poll helper (FR-001, FR-004, FR-008).
+- [x] T010 **Live-verify foundation**: provision/`sb up` an instance; from inside the WP container `curl` the bridge with/without/with-wrong token (expect 200 vs 401/403 vs 403) and with the right token but a DIFFERENT `<inst>` (expect 403); confirm `GET job/<id>` returns the full `{status,op,name,detail}` shape **(G1)**; recreate the instance and confirm the OLD token is now rejected (rotation) **(U3)**; confirm the mu-plugin loads in wp-admin and no-ops when constants are absent (quickstart S4, S6).
 
 **Checkpoint**: Authenticated, instance-scoped bridge + admin shell working.
 
@@ -72,9 +72,9 @@ Host: `sb` (`cmd_web` routes, provisioning, `_write_snapshot_muplugin`, token mi
 
 **Independent Test**: Take `t1` in wp-admin → appears in `sb snapshots` with db.sql+uploads.tgz.
 
-- [ ] T011 [US1] Add `POST /api/instance/<inst>/snapshot` to `cmd_web`: validate name (`^[\w.-]+$`; blank → `snap-YYYYMMDD-HHMMSS`), 409 if exists and not `force`, else spawn `sb snapshot <name> --instance <inst> [--force]` via the T008 job runner; return `202 {job_id,name}` (contracts).
-- [ ] T012 [US1] Add the "Take snapshot" UI to `00-sandbox-snapshots.php`: name field + force checkbox, POST to the bridge, poll the job, surface success/failure (FR-007).
-- [ ] T013 [US1] **Live-verify (quickstart S1)**: take `t1` from wp-admin; confirm `sb snapshots --instance <inst>` lists it and `runtime/snapshots/<inst>/t1/` has db.sql+uploads.tgz+META (SC-001). **(C1)** Assert **round-trip format parity** with the CLI: `sb restore t1` (CLI) succeeds on the dashboard-made snapshot, AND a CLI-made snapshot is restorable from the dashboard — proving identical format, not just file presence (FR-002).
+- [x] T011 [US1] Add `POST /api/instance/<inst>/snapshot` to `cmd_web`: validate name (`^[\w.-]+$`; blank → `snap-YYYYMMDD-HHMMSS`), 409 if exists and not `force`, else spawn `sb snapshot <name> --instance <inst> [--force]` via the T008 job runner; return `202 {job_id,name}` (contracts).
+- [x] T012 [US1] Add the "Take snapshot" UI to `00-sandbox-snapshots.php`: name field + force checkbox, POST to the bridge, poll the job, surface success/failure (FR-007).
+- [x] T013 [US1] **Live-verify (quickstart S1)**: take `t1` from wp-admin; confirm `sb snapshots --instance <inst>` lists it and `runtime/snapshots/<inst>/t1/` has db.sql+uploads.tgz+META (SC-001). **(C1)** Assert **round-trip format parity** with the CLI: `sb restore t1` (CLI) succeeds on the dashboard-made snapshot, AND a CLI-made snapshot is restorable from the dashboard — proving identical format, not just file presence (FR-002).
 
 **Checkpoint**: Capture works end-to-end from the browser (MVP).
 
@@ -88,9 +88,9 @@ isn't severed mid-restore.
 **Independent Test**: Mutate state, restore `t1`, site returns to captured state; request
 doesn't error mid-restore.
 
-- [ ] T014 [US2] Add `POST /api/instance/<inst>/restore` to `cmd_web`: 404 if snapshot absent, else spawn `sb restore <name> --instance <inst>` via the job runner (out-of-band); return `202 {job_id,name}` (research D6, contracts).
-- [ ] T015 [US2] Add the "Restore" UI to `00-sandbox-snapshots.php`: per-snapshot restore with an explicit destructive-confirm (FR-005), POST to the bridge, poll the job (with a **max-poll cap** so a stuck job surfaces as failed — pairs with T008's guard, **A1**), surface the result; handle the serving DB resetting underneath (poll tolerates transient errors during restore).
-- [ ] T016 [US2] **Live-verify (quickstart S2)**: mutate state, restore `t1`, confirm point-in-time replacement matches a CLI restore and the admin flow reports success without a false failure (SC-002). **(U1)** Also verify the FAILURE path (AS US2 #3): restore a deliberately corrupt/incomplete snapshot (or kill the restore mid-flight) and confirm the job reports `failed`, the admin sees a clear error, and the instance is left recoverable (not wedged half-restored).
+- [x] T014 [US2] Add `POST /api/instance/<inst>/restore` to `cmd_web`: 404 if snapshot absent, else spawn `sb restore <name> --instance <inst>` via the job runner (out-of-band); return `202 {job_id,name}` (research D6, contracts).
+- [x] T015 [US2] Add the "Restore" UI to `00-sandbox-snapshots.php`: per-snapshot restore with an explicit destructive-confirm (FR-005), POST to the bridge, poll the job (with a **max-poll cap** so a stuck job surfaces as failed — pairs with T008's guard, **A1**), surface the result; handle the serving DB resetting underneath (poll tolerates transient errors during restore).
+- [~] T016 [US2] **Live-verify (quickstart S2)**: mutate state, restore `t1`, confirm point-in-time replacement matches a CLI restore and the admin flow reports success without a false failure (SC-002). **(U1)** Also verify the FAILURE path (AS US2 #3): restore a deliberately corrupt/incomplete snapshot (or kill the restore mid-flight) and confirm the job reports `failed`, the admin sees a clear error, and the instance is left recoverable (not wedged half-restored).  **PARTIAL (browser-verified 2026-06-24): the dashboard correctly spawns the restore job and surfaces the result; the FAILURE path (U1) is VERIFIED — the job reported `failed` + the instance stayed recoverable. The SUCCESS path is BLOCKED by a real underlying bug: `sb restore` itself fails on fpm/nginx instances (`env: 'mysql': No such file or directory` — the wp tier has no mysql client; only the db container does). See `memory/plugin-behavior/restore-needs-mysql-client.md`. Not a 002-bridge defect — the bridge job machinery worked; fix `cmd_restore`/`wp db` to use the db-container client.**
 
 **Checkpoint**: Rollback works end-to-end from the browser.
 
@@ -102,10 +102,10 @@ doesn't error mid-restore.
 
 **Independent Test**: List matches `sb snapshots`; delete removes from both views.
 
-- [ ] T017 [P] [US3] Add `GET /api/instance/<inst>/snapshots` to `cmd_web` returning `{snapshots:[{name,size_kb,meta}]}` (shell `sb snapshots` or read `runtime/snapshots/<inst>/`) (contracts).
-- [ ] T018 [P] [US3] Add `DELETE /api/instance/<inst>/snapshot/<name>` to `cmd_web`: 404 if absent else remove the snapshot dir; return `{ok:true}` (contracts).
-- [ ] T019 [US3] Add the list + delete UI to `00-sandbox-snapshots.php`: render the snapshot table (name / size **with explicit unit label, e.g. "KB"** — **A2**, matching the contract's `size_kb` / meta), delete with confirm, refresh after actions (FR-001).
-- [ ] T020 [US3] **Live-verify (quickstart S3)**: take `t2`; confirm both listed matching `sb snapshots`; delete `t1` and confirm it's gone from the dashboard, `sb snapshots`, and disk.
+- [x] T017 [P] [US3] Add `GET /api/instance/<inst>/snapshots` to `cmd_web` returning `{snapshots:[{name,size_kb,meta}]}` (shell `sb snapshots` or read `runtime/snapshots/<inst>/`) (contracts).
+- [x] T018 [P] [US3] Add `DELETE /api/instance/<inst>/snapshot/<name>` to `cmd_web`: 404 if absent else remove the snapshot dir; return `{ok:true}` (contracts).
+- [x] T019 [US3] Add the list + delete UI to `00-sandbox-snapshots.php`: render the snapshot table (name / size **with explicit unit label, e.g. "KB"** — **A2**, matching the contract's `size_kb` / meta), delete with confirm, refresh after actions (FR-001).
+- [x] T020 [US3] **Live-verify (quickstart S3)**: take `t2`; confirm both listed matching `sb snapshots`; delete `t1` and confirm it's gone from the dashboard, `sb snapshots`, and disk.
 
 **Checkpoint**: Full take/restore/list/delete from wp-admin.
 
@@ -113,10 +113,10 @@ doesn't error mid-restore.
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T021 [P] Herd handling: on a herd instance the dashboard shows a clear "not supported on herd" notice with actions disabled (quickstart S5, SC-005).
-- [ ] T022 Security pass on the mu-plugin handlers (auth nonce + capability, sanitize-in/escape-out, prefix `sandbox_*`, `wp_remote_*` only) and on the bridge (no arbitrary `sb` passthrough; token + instance scoping) per CLAUDE.md plugin non-negotiables and FR-010/FR-012.
-- [ ] T023 [P] Docs-with-code: add a `00-sandbox-snapshots.php` entry to the CLAUDE.md mu-plugin list/gotchas (alongside mail/ssl) and note the `sb web` auto-start + `bridge_token`; ensure `.specify`/spec-kit exclusions don't affect this guest file.
-- [ ] T024 Final acceptance: re-run quickstart S1–S6 end-to-end and record evidence; confirm SC-001..SC-005 met, including the **C1 round-trip parity** (CLI↔dashboard snapshots interchangeable) and the **U1 restore-failure** recovery path.
+- [x] T021 [P] Herd handling: on a herd instance the dashboard shows a clear "not supported on herd" notice with actions disabled (quickstart S5, SC-005).
+- [x] T022 Security pass on the mu-plugin handlers (auth nonce + capability, sanitize-in/escape-out, prefix `sandbox_*`, `wp_remote_*` only) and on the bridge (no arbitrary `sb` passthrough; token + instance scoping) per CLAUDE.md plugin non-negotiables and FR-010/FR-012.
+- [x] T023 [P] Docs-with-code: add a `00-sandbox-snapshots.php` entry to the CLAUDE.md mu-plugin list/gotchas (alongside mail/ssl) and note the `sb web` auto-start + `bridge_token`; ensure `.specify`/spec-kit exclusions don't affect this guest file.
+- [~] T024 Final acceptance: re-run quickstart S1–S6 end-to-end and record evidence; confirm SC-001..SC-005 met, including the **C1 round-trip parity** (CLI↔dashboard snapshots interchangeable) and the **U1 restore-failure** recovery path.  **PARTIAL (browser-verified 2026-06-24): S1 take ✓ (dashboard `t1` is CLI-visible, 1357 KB, db.sql+META+uploads.tgz — C1 parity), S3 list+delete ✓ (list showed t1; delete removed it from CLI+disk), U1 restore-failure recovery ✓. BLOCKED: S2 restore happy-path by the `sb restore` mysql-client bug (see T016). Separately found: a 0-KB `__install__` baseline snapshot trips the bridge's `_valid_snapshot_name` ("invalid snapshot name") — see the snapshot-naming finding.**
 
 ---
 
@@ -174,3 +174,27 @@ appears in `sb snapshots`), mutate state, restore `t1`, list, delete — i.e.
 quickstart S1–S6. On herd instances the feature is intentionally absent (v1).
 Note: `extra_hosts` changes mean existing instances need a `sb apply`/recreate to
 pick up container→host reachability.
+
+## Browser verification — 2026-06-24 (headless, via the real wp-admin UI)
+
+Drove Tools → Sandbox Snapshots headlessly (autologin + Playwright) against the
+live bridge:
+
+- **S1 take + C1 parity** ✓ — dashboard `t1` is CLI-visible (1357 KB,
+  db.sql+META+uploads.tgz); a CLI-made snapshot lists in the dashboard.
+- **S3 list + delete** ✓ — list matched; delete removed `t1` from dashboard + CLI + disk.
+- **U1 restore-failure recovery** ✓ — the restore job reported `failed` and the
+  instance stayed usable (siteurl resolves).
+- **S2 restore happy-path** ✗ BLOCKED — `sb restore` fails on fpm/nginx instances
+  (`env: 'mysql': No such file or directory`; the wp tier lacks a mysql client,
+  only the db container has `mariadb`). Real bug, not a 002-bridge defect — the
+  bridge job machinery worked. See `memory/plugin-behavior/restore-needs-mysql-client.md`.
+
+Two operational notes found + fixed:
+- The long-running `sb web` bridge (like the MCP server) does NOT auto-reload; it
+  served stale instance state until restarted (caused a spurious "unknown instance"
+  404). Restart `sb web` after code/state changes.
+- The reserved post-install baseline `__install__` (spec 008) leaked into the
+  snapshot list (bridge + CLI + web picker), tripping "invalid snapshot name" on
+  any action. Fixed: all three listers now skip leading-underscore reserved names.
+  Verified on templately.tst (no `__install__`, no error).

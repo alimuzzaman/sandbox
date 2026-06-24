@@ -56,30 +56,44 @@ _BASELINE_DIR = "__install__"
 
 def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -> None:
     """Export the DB (always) + uploads (unless db_only) into snap_root/<name>/,
-    recording mode in META. Shared by cmd_snapshot, the baseline, and reset."""
+    recording mode in META. Shared by cmd_snapshot, the baseline, and reset.
+
+    On any failure the partial target dir is removed and the error re-raised, so a
+    failed capture never leaves a half-written snapshot (e.g. an empty dir with no
+    db.sql that later reads as a 0 KB snapshot)."""
     target = snap_root / name
     target.mkdir(parents=True, exist_ok=True)
-    info(f"Exporting DB → {target}/db.sql")
-    compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
-            "wpcli", "db", "export", f"/snapshots/{name}/db.sql", "--add-drop-table",
-            instance=inst)
-    mode = "db-only"
-    if not db_only:
-        uploads = wp_dir(inst) / "wp-content" / "uploads"
-        if uploads.exists():
-            info(f"Archiving uploads → {target}/uploads.tgz")
-            run(["tar", "-C", str(uploads.parent), "-czf",
-                 str(target / "uploads.tgz"), "uploads"])
-            mode = "full"
-    active = _active_project_name(inst) or ""
-    (target / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+    try:
+        info(f"Exporting DB → {target}/db.sql")
+        compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
+                "wpcli", "db", "export", f"/snapshots/{name}/db.sql", "--add-drop-table",
+                instance=inst)
+        if not (target / "db.sql").exists():
+            raise RuntimeError(f"db export produced no db.sql for snapshot '{name}'")
+        mode = "db-only"
+        if not db_only:
+            uploads = wp_dir(inst) / "wp-content" / "uploads"
+            if uploads.exists():
+                info(f"Archiving uploads → {target}/uploads.tgz")
+                run(["tar", "-C", str(uploads.parent), "-czf",
+                     str(target / "uploads.tgz"), "uploads"])
+                mode = "full"
+        active = _active_project_name(inst) or ""
+        (target / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)  # no half-written snapshot left behind
+        raise
 
 
 def capture_install_baseline(inst: str, force: bool = False) -> None:
     """Capture the reserved db-only @install baseline (spec 008), representing the
     post-provision state (after plugins/themes are wired). Captured ONCE — a no-op
     if a baseline already exists unless `force` (so `up`/`ensure` never overwrite a
-    good baseline with later, dirtied state). Docker only."""
+    good baseline with later, dirtied state). Docker only.
+
+    Never breaks provisioning, but a failure is LOGGED (not silently swallowed) —
+    a swallowed failure used to leave an empty `__install__` dir reading as a 0 KB
+    snapshot. _capture_snapshot now cleans up the partial dir on failure."""
     if _is_herd_instance(inst):
         return
     snap_root = snapshots_dir(inst)
@@ -88,8 +102,32 @@ def capture_install_baseline(inst: str, force: bool = False) -> None:
         return
     try:
         _capture_snapshot(inst, snap_root, _BASELINE_DIR, db_only=True)
-    except Exception:
-        pass  # never let baseline capture break provisioning
+    except Exception as e:
+        info(f"⚠ @install baseline capture failed for '{inst}' (reset won't have a "
+             f"baseline until the next up): {e}")
+
+
+# A full (DB + uploads) named snapshot of the clean post-install state, taken on
+# first create/recreate so the install can be fully rolled back (vs the db-only
+# __install__ baseline that `reset` uses). Listed + restorable like any snapshot.
+INSTALL_FULL_SNAPSHOT = "install-baseline"
+
+
+def capture_install_full_snapshot(inst: str, force: bool = False) -> None:
+    """Capture a FULL named snapshot (DB + uploads) of the post-provision state as
+    `install-baseline`, on first create/recreate. No-op if it already exists unless
+    `force`. Docker only; logs (never breaks provisioning) on failure."""
+    if _is_herd_instance(inst):
+        return
+    snap_root = snapshots_dir(inst)
+    snap_root.mkdir(parents=True, exist_ok=True)
+    if (snap_root / INSTALL_FULL_SNAPSHOT / "db.sql").exists() and not force:
+        return
+    try:
+        _capture_snapshot(inst, snap_root, INSTALL_FULL_SNAPSHOT, db_only=False)
+    except Exception as e:
+        info(f"⚠ full install snapshot '{INSTALL_FULL_SNAPSHOT}' capture failed "
+             f"for '{inst}': {e}")
 
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance

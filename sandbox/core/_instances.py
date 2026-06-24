@@ -666,11 +666,15 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
 
-        # spec 008: capture the post-provision @install baseline ONCE (no-op if it
-        # already exists), so `./sb reset` can roll the DB back to a clean install.
+        # spec 008: capture the post-provision @install state ONCE (no-op if it
+        # already exists; a destroy wipes snapshots, so recreate naturally refreshes
+        # both). The db-only `__install__` baseline powers `./sb reset`; the full
+        # `install-baseline` named snapshot (DB + uploads) allows a complete rollback.
         try:
-            from sandbox.commands.data import capture_install_baseline
+            from sandbox.commands.data import (capture_install_baseline,
+                                               capture_install_full_snapshot)
             capture_install_baseline(name)
+            capture_install_full_snapshot(name)
         except Exception:
             pass
 

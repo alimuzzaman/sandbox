@@ -33,6 +33,13 @@ restore arbitrary points (and uploads). `db reset/import` run via the `wpcli`
 service (the fpm web image has no mysql client — see
 `memory/plugin-behavior/restore-needs-mysql-client.md`).
 
+**Auto-captured on first create/recreate** (Docker; spec 008): the db-only
+`__install__` baseline above, **plus** a FULL named snapshot `install-baseline`
+(DB + uploads) for a complete post-install rollback — `./sb restore install-baseline`.
+Both are captured once after plugins/themes are wired; a `recreate` wipes the
+snapshots dir first, so they refresh to the fresh install. A failed capture is
+logged and leaves no half-written dir (no more 0 KB `__install__`).
+
 ## From wp-admin (spec 002)
 
 Named snapshots are also take/restore/list/delete-able from **Tools → Sandbox

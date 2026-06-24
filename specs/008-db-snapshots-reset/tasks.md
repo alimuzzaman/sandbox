@@ -75,3 +75,22 @@ spec-002 dashboard mu-plugin/bridge.
 
 US1 + US2 (T001-T009) — db-only snapshots + `./sb reset` to the post-install baseline —
 is the core increment; the dashboard surface (US3) is the P2 add-on.
+
+## Enhancement — 2026-06-24: auto-capture on create/recreate + robustness
+
+Per a follow-up request ("on first instance create/recreate we should create a
+full/db snapshot"):
+
+- The post-provision capture (in `_instances.py` ensure path, which create AND
+  recreate run) now takes **two** snapshots: the existing db-only `__install__`
+  baseline (powers `reset`) **plus** a full named `install-baseline` (DB +
+  uploads) via `capture_install_full_snapshot` — `./sb restore install-baseline`
+  for a complete post-install rollback. `install-baseline` is a normal listed
+  snapshot; `__install__` stays hidden.
+- A `destroy` wipes `snapshots_dir`, so a recreate refreshes both to the fresh
+  install (no stale baseline).
+- Robustness: `_capture_snapshot` now removes a partial target + re-raises on
+  failure, and `capture_install_baseline`/`capture_install_full_snapshot` LOG
+  (not silently swallow) — fixes the empty 0 KB `__install__` left by a swallowed
+  failure. Live-verified: both captured, listed correctly, `reset` + `restore
+  install-baseline` both roll back.

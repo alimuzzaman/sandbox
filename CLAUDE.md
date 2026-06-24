@@ -345,7 +345,7 @@ the repo root; always prefix `tmp/`. Don't commit `tmp/`.
 
 ---
 
-## MCP surface (one `sandbox` server, ~23 tools)
+## MCP surface (one `sandbox` server, ~39 tools)
 
 There is **one** MCP server, `sandbox` (`mcp__sandbox__*`). Every tool takes a
 **required `project_dir`** and resolves the target instance from the on-disk
@@ -362,19 +362,26 @@ else your cwd. Pass `instance=` only to deliberately override the resolved one.
 | `apply_config` | Reconcile a running instance with its current config IN PLACE — re-render compose, recreate web tier, re-sync plugins/themes, convert multisite if newly enabled. No DB drop. Prefer over `recreate_instance` for config edits. |
 | `run_tests` | Run the plugin's phpunit tests on the external WP harness → `{ok, passed, summary}` |
 | `wp_cli` | Run any `wp` command |
+| `wp_cli_async` / `wp_cli_job` / `wp_cli_job_kill` | Spec 004 — start a long `wp` command detached (returns a job id), poll its output, or kill it. CLI equiv: `./sb wp --async …` / `./sb job <id>` / `./sb jobs`. Use for migrations / imports that outlive one call. |
 | `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
+| `wp_eval_live` | Spec 003 — run PHP in the live runtime via the `sandbox/execute-php` ability (full WP env; returns value + output + diagnostics). |
 | `wp_rest` | Call the WordPress REST API |
 | `http_fetch` | Anonymous HTTP probe (status/headers/body/redirects) — lighter than `visit` |
 | `visit` | Headless Chromium; auto-login on `/wp-admin/`. DOM + console + network + screenshot |
 | `db_query` | SQL — writes require `mutate: true` |
-| `tail_log` | Tail `wp-content/debug.log` |
+| `wp_reset` | Spec 008 — reset the DB to the post-install `@install` baseline (fast in-place rollback; keeps uploads). `rebaseline:true` re-captures the baseline; `confirm:true` required. CLI equiv: `./sb reset [--rebaseline]`. |
+| `qm_capture` | Spec 007 — load a URL and capture Query Monitor data (queries, hooks, PHP errors, timing). CLI: `./sb qm`. |
+| `xdebug` | Spec 007 — `on`/`off`/`status` for step-debugging (trigger-gated). CLI: `./sb xdebug`. |
+| `tail_log` | Tail `wp-content/debug.log` (spec 007: `file` selects debug.log / php error log / fpm / nginx). |
 | `fs_read` / `fs_write` / `fs_list` | Files under the instance's WP dir (scoped) |
 | `mail_list` / `mail_get` | Mailpit (test SMTP inbox) |
 | `focus_get` | The project's focused plugin + its `CLAUDE.md` |
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | WXR import from `runtime/seeds/` |
 | `cache_info` / `cache_clear` | Inspect / empty the shared plugin/theme/core download cache (global; no `project_dir`). CLI equiv: `./sb cache [info\|clear]` |
+| `secure_instance` / `setup_domains` | Mint the clean-URL HTTPS proxy / assign `.tst` domains to instances. |
 | `load_context` / `load_skill` / `load_workflow` | Pull the deep guide / a skill / a workflow on demand |
+| `list_skills` / `skill_write` / `skill_edit` / `skill_delete` | Spec 006 — agents author sandbox skills: list, create/overwrite (foldered `SKILL.md` + frontmatter), string-replace edit, delete. CLI: `./sb skill`. |
 
 ### The project handshake (this is mandatory)
 
@@ -577,12 +584,17 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
   (snapshot → reproduce live → fix → verify against snapshot). Then
   branch → diff → confirm-then-commit → confirm-then-push.
 
-- **Diagnosing a WP / plugin error** → `skills/wp-debug/SKILL.md`. Covers
-  `tail_log`, Xdebug (`./sb xdebug on`), Query Monitor, and a
-  symptom→cause table for the most common failures.
+- **Debugging a WP / plugin error** → `skills/wp-debug/SKILL.md`. Escalation
+  ladder (cheap → heavy): `dump()`/`dd()` + `tail_log` → `qm_capture` (Query
+  Monitor: queries/hooks/PHP errors/timing) → `xdebug` (real breakpoints,
+  trigger-gated). `tail_log` takes a `file` selector (debug.log / php / fpm /
+  nginx). Plus a symptom→cause table for the most common failures.
 
-- **Saving / restoring state** → `skills/snapshot/SKILL.md`. Use before
-  any destructive flow or whenever you'd rather not rebuild a fixture.
+- **Saving / restoring state** → `skills/snapshot/SKILL.md`. Use before any
+  destructive flow or whenever you'd rather not rebuild a fixture. For a fast
+  in-place DB rollback to the post-install state use `wp_reset` / `./sb reset`
+  (spec 008 — restores the `@install` baseline, keeps uploads); full named
+  snapshots (DB + uploads) are also takeable/restorable from wp-admin (spec 002).
 
 - **Fast plugin dev/fix/ship** → `workflows/fast-plugin-ship/WORKFLOW.md`.
   Use this for every focused plugin unless a more specific plugin workflow
@@ -808,6 +820,13 @@ workflows/<name>/
 
 Cross-reference with the full path:
 `workflows/ship-fix/WORKFLOW.md`, `skills/designer/SKILL.md`.
+
+**Agents can author skills directly (spec 006)** — no hand-editing files needed:
+`list_skills` to see what exists, `skill_write` to create/overwrite (it scaffolds
+the foldered `SKILL.md` with valid frontmatter), `skill_edit` for a string-replace
+tweak, `skill_delete` to remove one (CLI: `./sb skill …`). New/changed skills are
+picked up on the next `load_skill`; the MCP server's `instructions` field also
+advertises the skill catalog so a fresh session knows what's available.
 
 ---
 

@@ -15,6 +15,32 @@ Gitignored — they're a per-machine convenience, not shared state.
 
 ---
 
+## Fast DB rollback — `./sb reset` (spec 008)
+
+For the common "undo what this test did to the DB" case you don't need a named
+snapshot. Each instance keeps a reserved **`@install` baseline** (a db-only
+snapshot captured once at provision time, stored as `__install__` — hidden from
+`./sb snapshots`):
+
+```bash
+./sb reset              # drop the DB + restore the post-install baseline (keeps uploads)
+./sb reset --rebaseline # re-capture the baseline from the CURRENT DB instead
+```
+
+MCP: `wp_reset(confirm:true)` / `wp_reset(rebaseline:true)`. Use `reset` for a
+fast in-place rollback; use a **named snapshot** when you need to capture and
+restore arbitrary points (and uploads). `db reset/import` run via the `wpcli`
+service (the fpm web image has no mysql client — see
+`memory/plugin-behavior/restore-needs-mysql-client.md`).
+
+## From wp-admin (spec 002)
+
+Named snapshots are also take/restore/list/delete-able from **Tools → Sandbox
+Snapshots** in wp-admin — same format as the CLI (interchangeable). Docker only
+(not herd).
+
+---
+
 ## When to snapshot
 
 - **Before reproducing a bug** that may mutate state (most bugs do).

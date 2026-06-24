@@ -63,7 +63,7 @@ spec-002 dashboard mu-plugin/bridge.
 ## Phase 7: Polish & Cross-Cutting
 
 - [x] T014 [P] herd guard: `reset`/`--db-only` emit the existing herd-unsupported notice on herd instances (consistent with `cmd_snapshot`/`cmd_restore`).  **DONE: reset/--db-only die with the herd-unsupported notice on herd (consistent with snapshot/restore).**
-- [ ] T015 [P] Docs-with-code: CLAUDE.md snapshot section + a `reset` common-loop entry + MCP table (`wp_reset`, `snapshot` db_only); update `skills/snapshot/SKILL.md`; cross-reference spec 002.
+- [x] T015 [P] Docs-with-code: CLAUDE.md snapshot section + a `reset` common-loop entry + MCP table (`wp_reset`, `snapshot` db_only); update `skills/snapshot/SKILL.md`; cross-reference spec 002.  **DONE: CLAUDE.md MCP table adds `wp_reset`; "Saving / restoring state" common-loop covers reset vs named snapshots; `skills/snapshot/SKILL.md` gained `@install` reset + wp-admin (spec 002) sections, cross-referenced.**
 
 ## Dependencies & Order
 

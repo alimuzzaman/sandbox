@@ -63,7 +63,7 @@ skill roots = repo `skills/`, `<focused-plugin>/.claude/skills/`, `~/.claude/ski
 ## Phase 7: Polish & Cross-Cutting
 
 - [x] T014 [P] Guards verification (quickstart §6): flat single-file write rejected; out-of-root path rejected; `enable:false` omitted from `list_skills`.  **DONE: built-in-shadow refused; foldered-only (no flat files); enable:false omitted**
-- [ ] T015 [P] Docs-with-code: update the CLAUDE.md "Adding a new skill or workflow" section (agents can now author skills) + MCP-surface table (`skill_write/edit/delete`, `list_skills`) + MCP `instructions` catalog note.
+- [x] T015 [P] Docs-with-code: update the CLAUDE.md "Adding a new skill or workflow" section (agents can now author skills) + MCP-surface table (`skill_write/edit/delete`, `list_skills`) + MCP `instructions` catalog note.  **DONE: CLAUDE.md "Adding a new skill or workflow" notes agent authoring (`list_skills`/`skill_write`/`skill_edit`/`skill_delete`, `./sb skill`) + the MCP `instructions` catalog; MCP-surface table updated.**
 
 ## Dependencies & Order
 

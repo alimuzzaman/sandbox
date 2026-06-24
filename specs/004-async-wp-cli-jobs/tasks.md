@@ -52,7 +52,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 8: Polish
 
 - [x] T019 Safety: `job_id` validated against `^[a-f0-9]{16}$` before any filesystem/container access; `--async` is only an execution mode for `wp` (no widened surface).
-- [ ] T020 Docs-with-code: add `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` + `./sb wp --async`/`job`/`jobs` to the CLAUDE.md MCP table + config reference. (Pending a docs pass.)
+- [x] T020 Docs-with-code: add `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` + `./sb wp --async`/`job`/`jobs` to the CLAUDE.md MCP table + config reference. (Pending a docs pass.)  **DONE: CLAUDE.md MCP table now documents `wp_cli_async`/`wp_cli_job`/`wp_cli_job_kill` + the `./sb wp --async`/`job`/`jobs` CLI equivalents (spec 004).**
 
 ## Notes
 

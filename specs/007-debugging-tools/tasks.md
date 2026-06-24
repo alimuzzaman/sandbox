@@ -56,7 +56,7 @@ Two provisioned mu-plugins + host CLI/MCP: `mcp/wp-server/tools/`,
 ## Phase 6: Polish & Cross-Cutting
 
 - [x] T014 [P] Hygiene (quickstart §4): `./sb dump --clear` / `./sb qm --clear` truncate; both gitignored.  **DONE: ./sb dump --clear / ./sb qm --clear truncate; both under gitignored runtime.**
-- [ ] T015 [P] Docs-with-code: add `qm_capture`, `tail_log` `file` selector, `xdebug` to the CLAUDE.md MCP-surface table + MCP `instructions`; add a "Debugging" common-loop entry; update `skills/wp-debug/SKILL.md` with the dump → QM → Xdebug escalation ladder; document in `docs/sandbox-config-reference.md`.
+- [x] T015 [P] Docs-with-code: add `qm_capture`, `tail_log` `file` selector, `xdebug` to the CLAUDE.md MCP-surface table + MCP `instructions`; add a "Debugging" common-loop entry; update `skills/wp-debug/SKILL.md` with the dump → QM → Xdebug escalation ladder; document in `docs/sandbox-config-reference.md`.  **DONE: CLAUDE.md MCP table adds `qm_capture`/`xdebug`/`tail_log` `file` selector; "Debugging" common-loop entry rewritten as the dump→QM→Xdebug escalation ladder; `skills/wp-debug/SKILL.md` gained the escalation-ladder section.**
 
 ## Dependencies & Order
 

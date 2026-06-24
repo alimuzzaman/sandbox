@@ -6,6 +6,21 @@ Use when you see a fatal, a white screen, a 500, an unexpected REST 4xx, a
 
 ---
 
+## Escalation ladder (cheap → heavy — spec 007)
+
+Climb only as far as the bug needs:
+
+1. **`dump()` / `dd()` + `tail_log`** — drop `dump($x)` in plugin code (captured,
+   not echoed) and watch the log. `tail_log` takes a `file` selector:
+   `debug.log` (default), `php` (PHP error log), `fpm`, `nginx`. Fastest signal.
+2. **`qm_capture`** (`./sb qm`) — load a URL and capture **Query Monitor**:
+   queries (+ slow/dupe), hooks/callbacks, PHP errors/notices, HTTP calls, and
+   timing. The right tool for "why is this slow / which hook / what query."
+3. **`xdebug`** (`./sb xdebug on`) — real breakpoints when you need to step. See
+   below; trigger-gated so normal traffic isn't blocked.
+
+---
+
 ## Step-debug with Xdebug (real breakpoints)
 
 ```bash

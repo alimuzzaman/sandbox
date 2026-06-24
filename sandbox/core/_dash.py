@@ -304,7 +304,8 @@ def _web_list_snapshots(instance: str) -> list[str]:
     d = snapshots_dir(instance)
     if not d.exists():
         return []
-    return sorted(p.name for p in d.iterdir() if p.is_dir())
+    # Exclude reserved internal baselines (e.g. __install__, leading underscore).
+    return sorted(p.name for p in d.iterdir() if p.is_dir() and not p.name.startswith("_"))
 
 
 def _web_list_seeds() -> list[str]:

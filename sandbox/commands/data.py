@@ -155,13 +155,19 @@ def cmd_reset(cfg, args) -> None:
 def cmd_snapshots(cfg, args) -> None:
     inst = args.resolved_instance
     snap_root = snapshots_dir(inst)
-    if not snap_root.exists() or not any(snap_root.iterdir()):
+    # Count only user snapshots (reserved baselines like __install__ use a leading
+    # underscore and are hidden), so a baseline-only dir still reads as "empty".
+    user_snaps = ([p for p in snap_root.iterdir() if p.is_dir() and not p.name.startswith("_")]
+                  if snap_root.exists() else [])
+    if not user_snaps:
         info(f"No snapshots yet for instance '{inst}'. "
              f"Save one: ./sb snapshot <name> --instance {inst}")
         return
     print()
     for entry in sorted(snap_root.iterdir()):
-        if not entry.is_dir():
+        # Hide reserved internal baselines (_BASELINE_DIR / __install__) — they are
+        # not restorable as named user snapshots (leading-underscore convention).
+        if not entry.is_dir() or entry.name.startswith("_"):
             continue
         m = entry / "META"
         meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""

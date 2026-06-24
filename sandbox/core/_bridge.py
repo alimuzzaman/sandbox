@@ -139,7 +139,10 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         snaps = []
         if root.exists():
             for e in sorted(root.iterdir()):
-                if not e.is_dir():
+                # Skip reserved internal baselines (e.g. __install__): leading-
+                # underscore names aren't user snapshots and fail _valid_snapshot_name,
+                # so listing them only yields an "invalid snapshot name" on any action.
+                if not e.is_dir() or e.name.startswith("_"):
                     continue
                 meta = ((e / "META").read_text().strip().replace("\n", " ")
                         if (e / "META").exists() else "")

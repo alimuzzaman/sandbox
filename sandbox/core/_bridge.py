@@ -144,10 +144,13 @@ def _bridge_handle(method: str, instance: str, subpath: str,
                 # so listing them only yields an "invalid snapshot name" on any action.
                 if not e.is_dir() or e.name.startswith("_"):
                     continue
-                meta = ((e / "META").read_text().strip().replace("\n", " ")
-                        if (e / "META").exists() else "")
+                meta_txt = (e / "META").read_text() if (e / "META").exists() else ""
+                mode = next((ln[len("mode="):].strip() for ln in meta_txt.splitlines()
+                             if ln.startswith("mode=")), "")
+                meta = meta_txt.strip().replace("\n", " ")
                 size = sum(f.stat().st_size for f in e.rglob("*") if f.is_file())
-                snaps.append({"name": e.name, "size_kb": size // 1024, "meta": meta})
+                snaps.append({"name": e.name, "size_kb": size // 1024,
+                              "mode": mode, "meta": meta})
         return 200, {"ok": True, "snapshots": snaps}
 
     if method == "POST" and subpath == "/snapshot":
@@ -160,7 +163,8 @@ def _bridge_handle(method: str, instance: str, subpath: str,
                          f"could not derive a snapshot name from '{raw}' — use "
                          "letters, numbers, spaces or hyphens"}
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name,
-                                    force=bool(body.get("force")))
+                                    force=bool(body.get("force")),
+                                    db_only=bool(body.get("db_only")))
         jid = _start_job(f"snapshot {name}", lambda: cmd_snapshot(cfg, ns))
         return 202, {"ok": True, "job_id": jid, "name": name}
 

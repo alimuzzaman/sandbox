@@ -285,7 +285,7 @@ add_action( 'wp_ajax_sandbox_snap', function () {
 	if ( 'list' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'GET', '/snapshots' ) );
 	} elseif ( 'take' === $op ) {
-		wp_send_json( sandbox_snapshots_bridge( 'POST', '/snapshot', array( 'name' => $name, 'force' => ! empty( $_POST['force'] ) ) ) );
+		wp_send_json( sandbox_snapshots_bridge( 'POST', '/snapshot', array( 'name' => $name, 'force' => ! empty( $_POST['force'] ), 'db_only' => ! empty( $_POST['db_only'] ) ) ) );
 	} elseif ( 'restore' === $op ) {
 		wp_send_json( sandbox_snapshots_bridge( 'POST', '/restore', array( 'name' => $name ) ) );
 	} elseif ( 'delete' === $op ) {
@@ -304,9 +304,10 @@ function sandbox_snapshots_render() {
 	echo '<p>Capture or roll back this instance\'s database + uploads (runs on the sandbox host).</p>';
 	echo '<p><input type="text" id="sbx-name" class="regular-text" placeholder="snapshot name (optional)"> ';
 	echo '<button class="button button-primary" id="sbx-take">Take snapshot</button> ';
-	echo '<label><input type="checkbox" id="sbx-force"> overwrite</label></p>';
+	echo '<label><input type="checkbox" id="sbx-force"> overwrite</label> ';
+	echo '<label title="Capture the database only (skip the uploads archive)"><input type="checkbox" id="sbx-dbonly"> DB only</label></p>';
 	echo '<div id="sbx-msg" style="margin:8px 0"></div>';
-	echo '<table class="widefat striped" id="sbx-table"><thead><tr><th>Name</th><th>Size</th><th>Meta</th><th></th></tr></thead><tbody></tbody></table>';
+	echo '<table class="widefat striped" id="sbx-table"><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Meta</th><th></th></tr></thead><tbody></tbody></table>';
 	echo '</div>';
 	$ajax = esc_url( admin_url( 'admin-ajax.php' ) );
 	?>
@@ -325,11 +326,12 @@ function sandbox_snapshots_render() {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function refresh(){ return call('list').then(function(r){ tb.innerHTML='';
     (r.snapshots||[]).forEach(function(s){ var tr=document.createElement('tr'); var n=esc(s.name);
-      tr.innerHTML='<td>'+n+'</td><td>'+(parseInt(s.size_kb)||0)+' KB</td><td>'+esc(s.meta)+'</td>'+
+      var mode=s.mode||((/mode=([\w-]+)/.exec(s.meta||'')||[])[1])||'';
+      tr.innerHTML='<td>'+n+'</td><td>'+(parseInt(s.size_kb)||0)+' KB</td><td>'+esc(mode)+'</td><td>'+esc(s.meta)+'</td>'+
         '<td><button class="button" data-r="'+n+'">Restore</button> <button class="button" data-d="'+n+'">Delete</button></td>';
       tb.appendChild(tr); }); }); }
   document.getElementById('sbx-take').onclick=function(){ var n=document.getElementById('sbx-name').value;
-    say('Taking snapshot…'); call('take',{name:n,force:document.getElementById('sbx-force').checked?1:''}).then(function(r){
+    say('Taking snapshot…'); call('take',{name:n,force:document.getElementById('sbx-force').checked?1:'',db_only:document.getElementById('sbx-dbonly').checked?1:''}).then(function(r){
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
     if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');

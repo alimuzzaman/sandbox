@@ -43,8 +43,10 @@ logged and leaves no half-written dir (no more 0 KB `__install__`).
 ## From wp-admin (spec 002)
 
 Named snapshots are also take/restore/list/delete-able from **Tools → Sandbox
-Snapshots** in wp-admin — same format as the CLI (interchangeable). Docker only
-(not herd).
+Snapshots** in wp-admin — same format as the CLI (interchangeable). Take has an
+**overwrite** and a **DB only** toggle (db-only skips the uploads archive), and
+the list shows a **Type** column (full / db-only, from each snapshot's META).
+Docker only (not herd).
 
 ---
 

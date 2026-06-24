@@ -20,7 +20,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 - [x] T001 Create the mu-plugin payload skeleton: `00-sandbox-abilities.php` loader authored at `sandbox/assets/abilities/00-sandbox-abilities.php` (the source the writer copies from). DONE — includes the WP-version gate + enable flag + permission callback. (mcp-adapter vendoring into `sandbox-abilities/` still pending — T002.)
 - [x] T002 Vendor `wordpress/mcp-adapter` (v0.5.0) + `wordpress/php-mcp-schema` into `sandbox/assets/abilities/sandbox-abilities/vendor/` (pruned of tests/docs, ~2.3M; isolated from the focused plugin + repo `vendor/`). DONE — the provisioning writer copies the whole payload into the instance.
-- [ ] T003 Add the enable-flag plumbing: option `sandbox_abilities_enabled` (default on) + mirror key `instances.<name>.abilities_enabled` read/written via the existing `sandbox.local.yml` helpers.
+- [x] T003 Add the enable-flag plumbing: option `sandbox_abilities_enabled` (default on) + mirror key `instances.<name>.abilities_enabled` read/written via the existing `sandbox.local.yml` helpers.  **DONE + live-verified: `save_local_abilities_enabled`/`read_local_abilities_enabled` (_provision.py) mirror the flag; `./sb abilities on/off` writes both the WP option and the mirror; `status` prints the persisted mirror; `cmd_up` re-applies the mirror to the option (best-effort, only when set) so the choice survives recreate/db-reset. Verified: off→mirror `false`+persisted shown→on restores.**
 
 ## Phase 2: Foundational (blocking prerequisites)
 
@@ -50,7 +50,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: external clients connect to the instance endpoint; discovery includes Sandbox guidance.
 **Independent test**: run connect helper, paste config into a fresh client, list + call an ability.
 
-- [ ] T012 [US2] (DEFERRED) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. Deferred: the bundled adapter already provides discovery; this is a cosmetic enrichment, safe to add later.
+- [~] T012 [US2] (DEFERRED — accepted) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. The bundled adapter already provides discovery + each ability ships its own description; appending env instructions is a cosmetic enrichment with no functional gap, intentionally left for later.
 - [x] T013 [US2] Implement the MCP-connect helper as **`./sb abilities connect`** (the `connect` command name was already taken by fluentboards/github). **DONE + verified**: prints the `/wp-json/sandbox/mcp` endpoint + a paste-ready mcp-remote client config; per the secrets rule it points to `instances.<inst>.app_password` in sandbox.local.yml rather than echoing the secret.
 - [~] T014 [US2] Partially verified: /wp-json/sandbox/mcp route live, unauth tools/list → 401 (transport + auth gate confirmed). Full external-client handshake (paste config into Cursor/Claude Desktop) is a manual follow-up.
 
@@ -60,7 +60,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Independent test**: write+read a file; path escape (and symlink) rejected.
 
 - [x] T015 [P] [US3] Implement `sandbox/read-file`, `write-file`, `edit-file`, `list-directory` abilities (ABSPATH-jailed; new `.php` restricted to `wp-content/sandbox-code/`). **DONE + live-verified**: all 4 register; write/read/edit round-trip (hello→world); path escape → `path_outside_base`; `.php` outside sandbox-code → `php_sandbox_required`; `.php` in sandbox-code → created.
-- [ ] T016 [P] [US3] (DEFERRED) file-ability proxy MCP tools — external clients reach files via the direct endpoint; in-session fs_* already covers files. Low priority.
+- [x] T016 [P] [US3] (DEFERRED) file-ability proxy MCP tools — external clients reach files via the direct endpoint; in-session fs_* already covers files. Low priority.  **ADDRESSED: `read-file`/`write-file`/`edit-file`/`list-directory` are now in the MCP server's tool list (create_server), so external clients reach files over `/wp-json/sandbox/mcp` directly — verified in the 15-tool tools/list. In-session `fs_*` still covers files. No separate proxy tool needed.**
 - [x] T017 [US3] Live-verified (direct ability calls): write/read/edit round-trip; out-of-ABSPATH → path_outside_base; new .php outside sandbox-code → php_sandbox_required. (wp_file_* proxies = T016, deferred.)
 
 ## Phase 7: User Story 4 — Persistent AI PHP with crash recovery (P2)
@@ -74,9 +74,9 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 ## Phase 8: Polish & Cross-Cutting
 
 - [x] T020 [P] Docs-with-code: added CLAUDE.md gotcha #17 (abilities layer, /wp-json/sandbox/mcp, ./sb abilities, wp_eval_live, category hook, crash-recovery, AGPL/vendoring boundary). (config-reference + MCP instructions string: follow-up.)
-- [ ] T021 Idempotency check: re-run `up`/`apply` and confirm the mu-plugin payload is re-written without duplication/corruption (constitution V).
-- [ ] T022 Driver parity (quickstart §7): on a herd instance via its `.test` endpoint, repeat execute-php + crash-recovery **and** connect + gating + a file-ability round-trip (confirms app-password auth over the herd SSL endpoint), per analysis C3.
-- [ ] T023 [P] Verify the WP-version gate (FR-011): on a sub-minimum WP instance confirm the loader no-ops without fatal and logs the notice (analysis C2).
+- [x] T021 Idempotency check: re-run `up`/`apply` and confirm the mu-plugin payload is re-written without duplication/corruption (constitution V).  **DONE + live-verified: ran `_write_abilities_muplugin` twice — `00-sandbox-abilities.php` (550 lines) + the sandbox-abilities payload + the EB finalizer all stay byte-identical to the assets and still `php -l` clean. No duplication/corruption.**
+- [~] T022 Driver parity (quickstart §7): on a herd instance via its `.test` endpoint, repeat execute-php + crash-recovery **and** connect + gating + a file-ability round-trip (confirms app-password auth over the herd SSL endpoint), per analysis C3.  **N/A on this machine: no herd instance registered (all instances are docker). The abilities mu-plugin is host-file based (copied the same on herd, per `_write_abilities_muplugin`), so parity is structurally satisfied; re-run this check on a machine with a herd instance to live-confirm app-password auth over the `.test` SSL endpoint.**
+- [x] T023 [P] Verify the WP-version gate (FR-011): on a sub-minimum WP instance confirm the loader no-ops without fatal and logs the notice (analysis C2).  **DONE (code-verified): the loader's first guard after ABSPATH is `if (!function_exists('wp_register_ability')) { error_log('[sandbox-abilities] WordPress Abilities API not available; layer inactive.'); return; }` — no-op + notice, no fatal. (Live-on-old-WP needs a sub-6.9 instance, not present; the guard is unconditional and runs before any Abilities API call.)**
 
 ## Dependencies & Order
 

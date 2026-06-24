@@ -616,6 +616,39 @@ def save_local_app_password(app_pw: str, instance: str) -> None:
         yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
 
 
+def save_local_abilities_enabled(enabled: bool, instance: str) -> None:
+    """Mirror the abilities enable-flag into sandbox.local.yml (spec 003 T003).
+
+    The WP option `sandbox_abilities_enabled` is the runtime source of truth, but
+    it lives in the DB and is wiped by a recreate / db-reset. Mirroring the choice
+    to `instances.<name>.abilities_enabled` makes it durable so `up` can re-apply
+    it. Written via the same per-instance pattern as the other secrets."""
+    ensure_pyyaml()
+    import yaml
+    local = {}
+    if CONFIG_LOCAL.exists():
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+    local.setdefault("instances", {}).setdefault(instance, {})["abilities_enabled"] = bool(enabled)
+    with CONFIG_LOCAL.open("w") as f:
+        yaml.safe_dump(local, f, default_flow_style=False, sort_keys=False)
+
+
+def read_local_abilities_enabled(instance: str):
+    """Return the mirrored abilities enable-flag (bool) or None if unset."""
+    if not CONFIG_LOCAL.exists():
+        return None
+    try:
+        ensure_pyyaml()
+        import yaml
+        with CONFIG_LOCAL.open() as f:
+            local = yaml.safe_load(f) or {}
+        val = (local.get("instances", {}).get(instance, {}) or {}).get("abilities_enabled")
+        return None if val is None else bool(val)
+    except Exception:
+        return None
+
+
 def save_local_autologin_token(token: str, instance: str) -> None:
     """Persist the sandbox autologin token in sandbox.local.yml so it can be
     included in the ensure_instance return value as login_url."""

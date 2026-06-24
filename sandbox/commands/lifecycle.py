@@ -45,6 +45,17 @@ def cmd_up(cfg: dict, args) -> None:
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
+        # explicit on/off survives recreate / db-reset (which wipes the WP option,
+        # default-on). Only touches wpcli when the mirror is explicitly set.
+        try:
+            from sandbox.core._provision import read_local_abilities_enabled
+            _ab = read_local_abilities_enabled(inst)
+            if _ab is not None:
+                wpcli(["option", "update", "sandbox_abilities_enabled", "1" if _ab else "0"],
+                      instance=inst, check=False)
+        except Exception:
+            pass
         _write_debug_muplugins(inst)     # spec 007 — dump()/dd() + QM capture (host-file, ok on herd)
         try:  # spec 004 — reap old background-job artifacts (>24h)
             from sandbox.commands.jobs import prune_jobs

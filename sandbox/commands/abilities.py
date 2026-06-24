@@ -53,11 +53,26 @@ def cmd_abilities(cfg, args) -> None:
         print(f"abilities: {'on' if enabled else 'off'}  (instance: {inst})")
         print(f"endpoint:  {url}/wp-json/sandbox/mcp  "
               "(MCP server — HTTP Basic + admin Application Password)")
+        try:
+            from sandbox.core._provision import read_local_abilities_enabled
+            mirror = read_local_abilities_enabled(inst)
+            if mirror is not None:
+                print(f"persisted: {'on' if mirror else 'off'}  "
+                      "(sandbox.local.yml mirror — re-applied on up)")
+        except Exception:
+            pass
         print("note:      dev/staging only — never enable on a production site")
         return
 
     wpcli(["option", "update", "sandbox_abilities_enabled",
            "1" if state == "on" else "0"], instance=inst)
+    # Mirror the choice into sandbox.local.yml so it survives a recreate / db-reset
+    # and `up` can re-apply it (spec 003 T003).
+    try:
+        from sandbox.core._provision import save_local_abilities_enabled
+        save_local_abilities_enabled(state == "on", inst)
+    except Exception:
+        pass
     ok(f"Abilities {state} for instance '{inst}'.")
 
 

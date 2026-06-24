@@ -46,9 +46,10 @@ const ELEMENTS = [
         settleMs: 0,
         input: { postId: POST_ID, elements: ELEMENTS },
         evaluate: async ({ postId, elements }) => {
-            // Assign Elementor IDs (8 hex chars) to anything missing one
+            // Assign Elementor IDs (7 hex chars — matches getUniqueId(); an
+            // 8-char id desyncs from Elementor's format, see spec 005 T013)
             const assignIds = (arr) => arr.forEach((e) => {
-                e.id = e.id || Math.random().toString(16).slice(2, 10);
+                e.id = e.id || Math.random().toString(16).slice(2, 9);
                 if (Array.isArray(e.elements)) assignIds(e.elements);
             });
             assignIds(elements);

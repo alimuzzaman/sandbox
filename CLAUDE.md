@@ -72,11 +72,17 @@ evidence — only a live MCP call against the stack is.
 - **About to mutate DB / run a migration / touch licensing →**
   `./sb snapshot <short-name>` first. A 30-second snapshot beats a
   30-minute rebuild.
-- **Editor-dependent authoring (Gutenberg blocks with stateful
-  `save()`, Elementor widgets, Customizer) →** drive real wp-admin
-  through `skills/wp-pilot/SKILL.md`. Hand-authored PHP markup only
-  works for core blocks without JS save logic. Skip wp-pilot for bulk
-  operations — wp-cli is 50× faster.
+- **Page-builder authoring (Gutenberg/Essential Blocks, Elementor/EA) →**
+  use the **spec-005 editor-authoring abilities**, not hand-written
+  markup: `skills/gutenberg-eb/SKILL.md` (`sandbox/gutenberg-*` +
+  the headless `gutenberg-finalize` for static/third-party blocks) and
+  `skills/elementor-ea/SKILL.md` (`sandbox/elementor-*`, with EA
+  auto-enable + CSS regen). These produce editor-valid, styled output —
+  the old "hand-authored PHP only works for core blocks without JS
+  save logic" limitation is lifted (static blocks now route through the
+  real-`wp.blocks` finalizer). Drive real wp-admin via
+  `skills/wp-pilot/SKILL.md` only for Customizer or as the `visit`-based
+  escape hatch. Skip all of these for bulk ops — wp-cli is 50× faster.
 - **"Add" / "build" / "implement" / "create a new" X →** call the MCP
   tool `load_workflow('build-feature')` (NOT `Read` or `cat` on the
   WORKFLOW.md file) and run the three-phase loop:
@@ -328,7 +334,14 @@ traps, and minimum verification rules by changed area.
 | A step-by-step playbook | `workflows/<flow>/WORKFLOW.md` |
 | A cross-plugin / non-obvious runtime finding | `memory/plugin-behavior/<note>.md` (tracked — shared with team) |
 | Per-bug repro state (machine-specific) | `memory/repros/<slug>.md` (gitignored) |
+| A screenshot / scratch artifact / throwaway script | repo-root `tmp/` (gitignored) — NEVER repo root |
 | Generated state | gitignored — never commit |
+
+**Scratch artifacts never land in the repo root.** Screenshots (the `visit`
+`screenshot=` path, `./sb visit --screenshot`), throwaway scripts, dumps — all
+go in the gitignored `tmp/` (e.g. `screenshot="tmp/editor.png"`). The `visit`
+tool resolves a bare filename relative to cwd, so a path without `tmp/` litters
+the repo root; always prefix `tmp/`. Don't commit `tmp/`.
 
 ---
 
@@ -721,7 +734,10 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     with `wp-content/mu-plugins/00-sandbox-abilities.php` + `sandbox-abilities/`
     (the vendored `wordpress/mcp-adapter`, copied by `_write_abilities_muplugin`
     on every `up`/`apply`). It registers `sandbox/*` abilities on WP 6.9's
-    Abilities API (`execute-php`, `read/write/edit/list` files) and exposes them
+    Abilities API (`execute-php`, `read/write/edit/list` files; plus the spec-005
+    editor-authoring set — `gutenberg-insert/get/update/delete/finalize`,
+    `elementor-insert/get/update/delete`, `editor-schema` from `sandbox-editor.php`
+    + the headless EB finalizer `00-sandbox-eb-finalizer.php`) and exposes them
     over MCP at **`/wp-json/sandbox/mcp`** (HTTP Basic + admin Application
     Password). Gated by the `sandbox_abilities_enabled` option — toggle with
     `./sb abilities on|off|status`; `./sb abilities connect` prints the endpoint +

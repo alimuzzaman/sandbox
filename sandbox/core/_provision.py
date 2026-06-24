@@ -111,6 +111,10 @@ def _write_abilities_muplugin(instance: str) -> None:
     editor = asset_dir / "sandbox-editor.php"
     if editor.exists():
         shutil.copyfile(editor, mu_dir / "sandbox-editor.php")
+    # spec 005 US5 — the headless EB real-editor finalizer (own mu-plugin).
+    finalizer = asset_dir / "00-sandbox-eb-finalizer.php"
+    if finalizer.exists():
+        shutil.copyfile(finalizer, mu_dir / "00-sandbox-eb-finalizer.php")
     # Copy the payload dir (vendored wordpress/mcp-adapter) that the loader
     # require_once's for the MCP-server exposure. Refresh in place each call.
     payload = asset_dir / "sandbox-abilities"

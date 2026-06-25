@@ -6,7 +6,8 @@ import types as _types
 from importlib import import_module
 
 _SUBMODS = ['bridge', 'config', 'dash', 'docker', 'domains', 'herd',
-            'instances', 'integ', 'misc', 'paths', 'provision', 'tests', 'ui']
+            'instances', 'integ', 'licensing', 'misc', 'paths', 'provision',
+            'tests', 'ui']
 _mods = [import_module(f'sandbox.core._{m}') for m in _SUBMODS]
 
 # Collect every name defined across the submodules (functions, classes,

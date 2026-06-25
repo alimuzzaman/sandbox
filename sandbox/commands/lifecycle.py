@@ -45,6 +45,7 @@ def cmd_up(cfg: dict, args) -> None:
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
         # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
         # explicit on/off survives recreate / db-reset (which wipes the WP option,
         # default-on). Only touches wpcli when the mirror is explicitly set.
@@ -263,6 +264,7 @@ def cmd_install(cfg, args) -> None:
         # is only mounted on docker tiers, so the mu-plugin no-ops on herd anyway.
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
+        _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
     ok(f"Admin: {base}/wp-admin"

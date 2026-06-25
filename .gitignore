@@ -55,3 +55,6 @@ deploy/install-site/public/
 deploy/install-image/install.sh
 deploy/install-image/sandbox-latest.tar.gz
 /tmp
+
+# Playwright MCP scratch (snapshots/console logs)
+.playwright-mcp/

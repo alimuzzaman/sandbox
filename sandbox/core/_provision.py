@@ -402,6 +402,56 @@ def _write_ondemand_muplugin(instance: str) -> None:
     (mu_dir / "00-sandbox-ondemand.php").write_text(_ONDEMAND_MU_TEMPLATE)
 
 
+def _write_licensing_state(instance: str) -> None:
+    """Write the per-instance Pro-license state file `sandbox-licensing.json` from
+    the central key store (spec 013). Carries the keys + the Elementor primary URL +
+    whether THIS instance is the primary, for the modular licensing mu-plugin to read
+    at runtime. ALWAYS written (even empty) so a cleared key reverts behavior.
+    Secrets live only in this gitignored runtime file (like the snapshot bridge token)
+    — never committed/echoed. Idempotent."""
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    prim = elementor_primary()
+    state = {}
+    wpd = get_license("wpdeveloper")
+    el = get_license("elementor")
+    if wpd:
+        state["wpdeveloper_key"] = wpd
+    if el:
+        state["elementor_pro_key"] = el
+        state["elementor_primary_url"] = prim.get("url")
+        state["is_primary"] = (prim.get("instance") == instance)
+    (mu_dir / "sandbox-licensing.json").write_text(json.dumps(state, indent=2))
+    try:
+        (mu_dir / "sandbox-licensing.json").chmod(0o600)  # holds secrets
+    except OSError:
+        pass
+
+
+def _write_licensing_muplugin(instance: str) -> None:
+    """Drop the modular Pro-license activation mu-plugin (spec 013): a loader
+    (00-sandbox-licensing.php) + one file per platform under
+    sandbox-licensing/platforms/. The loader reads sandbox-licensing.json and
+    includes each platform module, which self-gates on its key. Copied from the
+    maintained assets (real, lintable PHP). No key → no-op (additive). Mirrors
+    _write_abilities_muplugin (dir-copy)."""
+    asset_dir = Path(__file__).resolve().parent.parent / "assets" / "licensing"
+    loader = asset_dir / "00-sandbox-licensing.php"
+    if not loader.exists():
+        return
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    mu_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(loader, mu_dir / "00-sandbox-licensing.php")
+    platforms = asset_dir / "platforms"
+    if platforms.is_dir():
+        dest = mu_dir / "sandbox-licensing" / "platforms"
+        if dest.parent.exists():
+            shutil.rmtree(dest.parent)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(platforms, dest)
+    _write_licensing_state(instance)
+
+
 def _write_dl_cache_muplugin(instance: str) -> None:
     """Drop a mu-plugin that caches plugin/theme zip downloads, so WP-runtime
     installs reuse a cached zip instead of re-downloading. The headline win is

@@ -34,6 +34,7 @@ import sandbox.commands.skill  # noqa: F401  (registers commands)
 import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
+import sandbox.commands.license  # noqa: F401  (registers commands)
 import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 
@@ -300,6 +301,15 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="limit `clear` to one layer (default: both)")
     ca.add_argument("--yes", action="store_true",
         help="skip the confirmation prompt on `clear`")
+
+    lic = sub.add_parser("license",
+        help="Manage Pro plugin license keys + sharing (Elementor Pro, WPDeveloper)")
+    lic.add_argument("action", nargs="?", choices=["status", "set", "clear"],
+        default="status", help="status (default, masked); set <family> <key>; clear [family]")
+    lic.add_argument("family", nargs="?", choices=["wpdeveloper", "elementor"],
+        help="license family for set/clear (clear without it clears all)")
+    lic.add_argument("key", nargs="?",
+        help="the license key for `set` (stored in the gitignored secret store; never echoed)")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

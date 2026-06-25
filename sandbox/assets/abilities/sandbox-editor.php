@@ -596,6 +596,317 @@ function sandbox_editor_elementor_delete($input)
             'state_hash' => md5((string) get_post_meta($post_id, '_elementor_data', true))];
 }
 
+/* ------------------- EB attribute-schema resolver (spec 011) --------------- *
+ * EB declares 0 attributes in block.json and assembles its real attribute set
+ * (hundreds) at JS runtime from src/blocks/<name>/src/attributes.js plus generator
+ * helpers in the controls package. The registered WP_Block_Type therefore only
+ * exposes ~3 generic keys. This resolver reads the source checkout (discovered
+ * under the bind-mounted plugin-home) and expands attributes.js + its generators
+ * to the full set, with an honest fidelity report. Reads only; never mutates.    */
+
+/** EB generator helper name -> source filename under controls/src/helpers. */
+function sandbox_editor_eb_helper_file($generator)
+{
+    static $map = [
+        'generateTypographyAttributes'             => 'typoHelpers.js',
+        'generateDimensionsAttributes'             => 'dimensionHelpers.js',
+        'generateBorderShadowAttributes'           => 'borderShadowHelpers.js',
+        'generateBackgroundAttributes'             => 'backgroundHelpers.js',
+        'generateResponsiveRangeAttributes'        => 'responsiveRangeHelpers.js',
+        'generateResponsiveAlignAttributes'        => 'responsiveAlignControlHelpers.js',
+        'generateShapeDividerAttributes'           => 'shapeDividerHelpers.js',
+        'generateResponsiveSelectControlAttributes' => 'responsiveSelectControlHelpers.js',
+        'generateTextControllerAttributes'         => 'responsiveTextControllerHelpers.js',
+    ];
+    return isset($map[$generator]) ? $map[$generator] : null;
+}
+
+/** Verified per-prefix key-family counts — fallback ONLY when a helper file cannot
+ *  be parsed; using it marks the response 'partial'. (data-model.md) */
+function sandbox_editor_eb_fallback_count($generator)
+{
+    static $counts = [
+        'generateTypographyAttributes'      => 24,
+        'generateDimensionsAttributes'      => 16,
+        'generateBorderShadowAttributes'    => 85,
+        'generateBackgroundAttributes'      => 155,
+        'generateResponsiveRangeAttributes' => 7,
+        'generateResponsiveAlignAttributes' => 3,
+    ];
+    return isset($counts[$generator]) ? $counts[$generator] : null;
+}
+
+/** Return the substring from the brace at $open to its string-aware match. */
+function sandbox_editor_eb_brace_slice($s, $open)
+{
+    $len = strlen($s);
+    $depth = 0;
+    $inStr = false;
+    $q = '';
+    for ($i = $open; $i < $len; $i++) {
+        $c = $s[$i];
+        if ($inStr) {
+            if ($c === '\\') { $i++; continue; }
+            if ($c === $q) { $inStr = false; }
+            continue;
+        }
+        if ($c === '"' || $c === "'" || $c === '`') { $inStr = true; $q = $c; continue; }
+        if ($c === '{') { $depth++; }
+        elseif ($c === '}') { $depth--; if ($depth === 0) { return substr($s, $open, $i - $open + 1); } }
+    }
+    return substr($s, $open);
+}
+
+/** Strip // line comments and block comments (so commented-out generator spreads
+ *  in EB helpers are not mistaken for live ones). */
+function sandbox_editor_eb_decomment($src)
+{
+    $src = preg_replace('!/\*.*?\*/!s', '', $src);
+    $src = preg_replace('!^[ \t]*//.*$!m', '', $src);
+    return $src;
+}
+
+/** Discover an EB source for this block: scan the EB plugins WP actually loads from
+ *  (WP_PLUGIN_DIR, resolving symlinks to their mounted source), any explicit
+ *  source roots passed in, and a mounted plugin-home if SANDBOX_PLUGINS_HOST is set.
+ *  attributes.js (explicit attrs + generator calls) ships even in the .org build;
+ *  the controls helpers ship only in a full source checkout. (FR-006) */
+function sandbox_editor_eb_source_discover($block_dir_name, $extra_roots = [])
+{
+    $roots = [];
+    foreach ((array) $extra_roots as $r) {
+        if ($r && is_dir($r)) { $roots[] = rtrim($r, '/'); }
+    }
+    foreach (['essential-blocks', 'essential-blocks-pro'] as $slug) {
+        $p = WP_PLUGIN_DIR . '/' . $slug;
+        if (is_dir($p)) {
+            $roots[] = $p;
+            $rp = realpath($p);
+            if ($rp && $rp !== $p) { $roots[] = $rp; }
+        }
+    }
+    $home = getenv('SANDBOX_PLUGINS_HOST');
+    if ($home && is_dir($home)) {
+        foreach (['essential-blocks', 'essential-blocks-pro'] as $slug) {
+            foreach (array_merge(glob("$home/$slug", GLOB_ONLYDIR) ?: [],
+                                 glob("$home/*/$slug", GLOB_ONLYDIR) ?: []) as $d) {
+                $roots[] = $d;
+            }
+        }
+    }
+    $roots = array_values(array_unique($roots));
+
+    $attr = null; $blockDir = null; $checkout = null; $helpers = null; $helpers_from = null;
+    foreach ($roots as $dir) {
+        $base = $dir . '/src/blocks/' . $block_dir_name;
+        // attributes.js lives either at <block>/src/attributes.js or
+        // <block>/src/components/attributes.js depending on the block.
+        foreach (['/src/attributes.js', '/src/components/attributes.js'] as $rel) {
+            if ($attr === null && is_file($base . $rel)) {
+                $attr = $base . $rel; $blockDir = $base; $checkout = $dir;
+            }
+        }
+        $h = $dir . '/src/controls/src/helpers';
+        if ($helpers === null && is_dir($h)) { $helpers = $h; $helpers_from = $dir; }
+    }
+    if ($attr === null) { return null; }
+    return ['checkout' => $checkout, 'attributes_file' => $attr,
+            'block_dir' => $blockDir, 'helpers' => $helpers, 'helpers_from' => $helpers_from];
+}
+
+/** Resolve prefix constants imported by a block's attributes.js to their string
+ *  values (read from the block's ./constants/*.js). */
+function sandbox_editor_eb_resolve_constants($src, $attr_dir)
+{
+    $map = [];
+    // Any relative import (./… or ../…) may carry prefix-constant string values.
+    if (preg_match_all('!import\s*\{[^}]*\}\s*from\s*["\'](\.[^"\']+)["\']!', $src, $im, PREG_SET_ORDER)) {
+        foreach ($im as $imp) {
+            $file = $attr_dir . '/' . $imp[1] . '.js';
+            if (!is_file($file)) { continue; }
+            $csrc = @file_get_contents($file);
+            if ($csrc === false) { continue; }
+            if (preg_match_all('!export\s+const\s+([A-Za-z0-9_]+)\s*=\s*["\']([^"\']*)["\']!', $csrc, $cm, PREG_SET_ORDER)) {
+                foreach ($cm as $c) { $map[$c[1]] = $c[2]; }
+            }
+        }
+    }
+    return $map;
+}
+
+/** Parse a block's attributes.js -> explicit attrs (name=>{type,default}) and
+ *  generator spread calls (generator + resolved prefix value). (D3) */
+function sandbox_editor_eb_parse_attributes($attributes_file, $block_dir)
+{
+    $src = @file_get_contents($attributes_file);
+    if ($src === false) { return ['explicit' => [], 'generators' => []]; }
+    $constants = sandbox_editor_eb_resolve_constants($src, dirname($attributes_file));
+
+    $body = $src;
+    if (preg_match('/const\s+attributes\s*=\s*\{/s', $src, $m, PREG_OFFSET_CAPTURE)) {
+        $open = $m[0][1] + strlen($m[0][0]) - 1;
+        $body = sandbox_editor_eb_brace_slice($src, $open);
+    }
+    $clean = sandbox_editor_eb_decomment($body);
+
+    // Generator spreads: ...generateXxxAttributes(PREFIX, ...)
+    $generators = [];
+    if (preg_match_all('/\.\.\.\s*(generate[A-Za-z]+Attributes)\s*\(\s*([A-Za-z0-9_]+)/', $clean, $gm, PREG_SET_ORDER)) {
+        foreach ($gm as $g) {
+            $generators[] = ['generator' => $g[1], 'const' => $g[2],
+                             'prefix' => isset($constants[$g[2]]) ? $constants[$g[2]] : null];
+        }
+    }
+
+    // Explicit depth-1 attrs: `name: { ... type ... }` (string- and depth-aware).
+    $explicit = [];
+    $len = strlen($clean);
+    $depth = 0; $i = 0; $inStr = false; $q = '';
+    while ($i < $len) {
+        $c = $clean[$i];
+        if ($inStr) {
+            if ($c === '\\') { $i += 2; continue; }
+            if ($c === $q) { $inStr = false; }
+            $i++; continue;
+        }
+        if ($c === '"' || $c === "'" || $c === '`') { $inStr = true; $q = $c; $i++; continue; }
+        if ($c === '[' || $c === '(') { $depth++; $i++; continue; }
+        if ($c === ']' || $c === ')') { $depth--; $i++; continue; }
+        if ($c === '{') {
+            $depth++; $i++; continue;
+        }
+        if ($c === '}') { $depth--; $i++; continue; }
+        if ($depth === 1 && (ctype_alpha($c) || $c === '_')
+            && preg_match('/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\{/A', $clean, $km, 0, $i)) {
+            $name = $km[1];
+            $bracePos = strpos($clean, '{', $i);
+            $obj = sandbox_editor_eb_brace_slice($clean, $bracePos);
+            $type = null; $default = null;
+            if (preg_match('/type\s*:\s*["\']([^"\']+)["\']/', $obj, $tm)) { $type = $tm[1]; }
+            if (preg_match('/default\s*:\s*("(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|true|false|-?\d+(?:\.\d+)?)/', $obj, $dm)) {
+                $raw = $dm[1];
+                if ($raw === 'true') { $default = true; }
+                elseif ($raw === 'false') { $default = false; }
+                elseif (is_numeric($raw)) { $default = $raw + 0; }
+                else { $default = trim($raw, "\"'"); }
+            }
+            $explicit[$name] = ['type' => $type, 'default' => $default];
+            $i = $bracePos + strlen($obj);
+            continue;
+        }
+        $i++;
+    }
+    return ['explicit' => $explicit, 'generators' => $generators];
+}
+
+/** Expand one generator (recursively, incl. nested spreads) to its emitted attribute
+ *  keys for the given prefix value, by parsing the helper source. Marks $unresolved
+ *  when a helper file is missing/unparseable. (D4, FR-002) */
+function sandbox_editor_eb_expand_generator($generator, $prefix, $helpers_dir, &$unresolved, $depth = 0)
+{
+    if ($prefix === null || $depth > 5) { return []; }
+    $file = sandbox_editor_eb_helper_file($generator);
+    if (!$file || !$helpers_dir) { $unresolved[$generator] = true; return []; }
+    $path = $helpers_dir . '/' . $file;
+    $src = @file_get_contents($path);
+    if ($src === false) { $unresolved[$generator] = true; return []; }
+    $src = sandbox_editor_eb_decomment($src);
+
+    $keys = [];
+    // Attribute-definition templates: [`...${x}...`]: { ... type: ...
+    if (preg_match_all('/\[`([^`]*\$\{[^}]+\}[^`]*)`\]\s*:\s*\{/', $src, $mm, PREG_OFFSET_CAPTURE)) {
+        foreach ($mm[1] as $idx => $cap) {
+            $after = substr($src, $mm[0][$idx][1] + strlen($mm[0][$idx][0]), 160);
+            if (strpos($after, 'type:') === false) { continue; }
+            $key = preg_replace('/\$\{[^}]+\}/', $prefix, $cap[0]);
+            $keys[$key] = true;
+        }
+    }
+    // Nested generator spreads inside the helper: ...generateXxx(`...${x}...`, ...)
+    if (preg_match_all('/\.\.\.\s*(generate[A-Za-z]+Attributes)\s*\(\s*`([^`]*)`/', $src, $nm, PREG_SET_ORDER)) {
+        foreach ($nm as $n) {
+            $nestedPrefix = preg_replace('/\$\{[^}]+\}/', $prefix, $n[2]);
+            foreach (sandbox_editor_eb_expand_generator($n[1], $nestedPrefix, $helpers_dir, $unresolved, $depth + 1) as $k => $_) {
+                $keys[$k] = true;
+            }
+        }
+    }
+    return $keys;
+}
+
+/** Build the structured fidelity report + back-compat string. (D6, FR-003) */
+function sandbox_editor_eb_fidelity($level, $count, $checkout, $unresolved)
+{
+    $reason = null;
+    if ($level === 'reduced') {
+        $reason = 'no EB source (src/blocks/<name>/.../attributes.js) found in the active EB plugin dirs or configured source roots; returning block.json attributes only';
+    } elseif ($level === 'partial') {
+        $reason = count($unresolved) . ' generator(s) could not be expanded from source; counts may be incomplete';
+    }
+    return [
+        'level' => $level,
+        'count' => $count,
+        'source_checkout' => $checkout,
+        'unresolved' => array_values(array_keys($unresolved)),
+        'reason' => $reason,
+    ];
+}
+
+/** Full EB schema for a named block: discover source, parse, expand, cache.
+ *  Returns the named-block response array (FR-001..005, FR-011) or null to fall
+ *  back to the reduced (block.json) path. */
+function sandbox_editor_eb_resolve($block_name, $block_type, $extra_roots = [])
+{
+    $block_dir_name = substr($block_name, strlen('essential-blocks/'));
+    $src = sandbox_editor_eb_source_discover($block_dir_name, $extra_roots);
+    if ($src === null) {
+        return null; // caller renders reduced fidelity
+    }
+
+    // Cache key fingerprints the checkout + relevant source mtimes. (D5)
+    $fp = [$src['attributes_file']];
+    $attr_dir = dirname($src['attributes_file']);
+    foreach ((glob($attr_dir . '/constants/*.js') ?: []) as $f) { $fp[] = $f; }
+    foreach ((glob($src['block_dir'] . '/src/constants/*.js') ?: []) as $f) { $fp[] = $f; }
+    if ($src['helpers']) {
+        foreach ((glob($src['helpers'] . '/*.js') ?: []) as $f) { $fp[] = $f; }
+    }
+    $sig = [];
+    foreach ($fp as $f) { $sig[] = $f . ':' . (@filemtime($f) ?: 0); }
+    $cache_key = 'sbx_eb_schema_' . md5($block_name . '|' . implode('|', $sig));
+    $cached = get_transient($cache_key);
+    if (is_array($cached)) { return $cached; }
+
+    $parsed = sandbox_editor_eb_parse_attributes($src['attributes_file'], $src['block_dir']);
+    $attrs = [];
+    foreach ($parsed['explicit'] as $k => $def) {
+        $attrs[$k] = ['type' => $def['type'], 'default' => $def['default']];
+    }
+    $unresolved = [];
+    foreach ($parsed['generators'] as $g) {
+        if ($g['prefix'] === null) { $unresolved[$g['generator'] . '(' . $g['const'] . ')'] = true; continue; }
+        $expanded = sandbox_editor_eb_expand_generator($g['generator'], $g['prefix'], $src['helpers'], $unresolved);
+        if (!$expanded && sandbox_editor_eb_fallback_count($g['generator']) !== null) {
+            $unresolved[$g['generator']] = true; // helper unparseable; count-only knowledge
+        }
+        foreach ($expanded as $k => $_) {
+            if (!isset($attrs[$k])) { $attrs[$k] = ['type' => null, 'default' => null]; } // explicit wins
+        }
+    }
+
+    $level = $unresolved ? 'partial' : 'full';
+    $resp = [
+        'builder' => 'gutenberg',
+        'name' => $block_name,
+        'dynamic' => (bool) $block_type->render_callback,
+        'attributes' => $attrs,
+        'fidelity' => sandbox_editor_eb_fidelity($level, count($attrs), $src['checkout'], $unresolved),
+        'eb_attribute_fidelity' => $level,
+    ];
+    set_transient($cache_key, $resp, HOUR_IN_SECONDS);
+    return $resp;
+}
+
 /* ------------------------------- Schema ----------------------------------- */
 
 function sandbox_editor_schema($input)
@@ -605,7 +916,32 @@ function sandbox_editor_schema($input)
 
     if ($builder === 'gutenberg') {
         $reg = WP_Block_Type_Registry::get_instance();
-        // src/controls present => full attribute fidelity; built plugin => block.json only.
+
+        // spec 011: named EB block -> resolve the FULL attribute set from source, or
+        // honestly report reduced fidelity. Non-EB blocks + listings stay unchanged.
+        if ($name && strpos($name, 'essential-blocks/') === 0) {
+            $bt = $reg->get_registered($name);
+            if (!$bt) {
+                return new WP_Error('not_found', "block '$name' not registered");
+            }
+            $extra_roots = [];
+            if (!empty($input['source_root'])) { $extra_roots[] = (string) $input['source_root']; }
+            $full = sandbox_editor_eb_resolve($name, $bt, $extra_roots);
+            if ($full !== null) {
+                return $full; // level: full | partial
+            }
+            // No reachable source checkout: block.json attributes only, flagged reduced.
+            $attrs = [];
+            foreach ((array) $bt->attributes as $k => $def) {
+                $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
+            }
+            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => (bool) $bt->render_callback,
+                    'attributes' => $attrs,
+                    'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
+                    'eb_attribute_fidelity' => 'reduced'];
+        }
+
+        // Pre-feature behavior, byte-for-byte, for non-EB named blocks + all listings.
         $eb_full   = is_dir(WP_PLUGIN_DIR . '/essential-blocks/src/controls');
         $fidelity  = $eb_full ? 'full (src/controls)' : 'reduced (block.json attributes only; no src/controls checkout)';
         if ($name) {

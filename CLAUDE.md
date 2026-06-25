@@ -750,6 +750,12 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
     editor-authoring set — `gutenberg-insert/get/update/delete/finalize`,
     `elementor-insert/get/update/delete`, `editor-schema` from `sandbox-editor.php`
     + the headless EB finalizer `00-sandbox-eb-finalizer.php`) and exposes them
+    (spec 011: `editor-schema` for a named EB block resolves the FULL attribute set
+    from the EB source — `attributes.js` + the `@essential-blocks/controls`
+    generators — returning a `fidelity` report `full|partial|reduced`; full needs
+    `src/controls` reachable in-container, i.e. the active EB plugin is a source
+    checkout, not the `.org` build; the content key is `titleText`, not `title`.
+    See `memory/plugin-behavior/eb-attribute-schema.md`)
     over MCP at **`/wp-json/sandbox/mcp`** (HTTP Basic + admin Application
     Password). Gated by the `sandbox_abilities_enabled` option — toggle with
     `./sb abilities on|off|status`; `./sb abilities connect` prints the endpoint +
@@ -839,5 +845,5 @@ to apply changes. New commands should follow the same shape.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/010-plugin-config-map/plan.md
+at specs/011-eb-attribute-schema/plan.md
 <!-- SPECKIT END -->

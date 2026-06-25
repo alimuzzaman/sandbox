@@ -39,5 +39,22 @@ All-raw-HTML insert (no `name`) is refused; deprecated slugs are refused with a 
 
 ## Schema
 `sandbox/editor-schema {builder:"gutenberg", eb_only:true}` lists blocks + whether each is
-dynamic + its attribute keys; add `name:"essential-blocks/..."` for one block's attributes +
-defaults + the `eb_attribute_fidelity` flag (full only with EB's `src/controls` checkout).
+dynamic + its block.json attribute keys (shallow, fast). Add `name:"essential-blocks/..."` for one
+block's FULL attribute set (spec 011): the resolver reads the EB source (`attributes.js` + the
+`@essential-blocks/controls` generators) and returns every attribute name + type + default — e.g.
+`advanced-heading` resolves to ~787 attributes (the content key is **`titleText`**, not `title`).
+
+Each named-EB response carries a structured `fidelity` report:
+- `level: "full"` — all generators expanded from a source checkout (needs `src/controls/src/helpers`
+  reachable, i.e. the active EB plugin is a full source checkout, not the `.org` build).
+- `level: "partial"` — `attributes.js` found (explicit attrs incl. `titleText`) but some generators
+  couldn't expand; `unresolved` names them.
+- `level: "reduced"` — no EB source found; block.json (generic) attributes only, with a `reason`.
+
+Pass `source_root:"<path>"` to point discovery at a specific EB checkout. The resolver runs
+in-instance, so the checkout must be readable **inside the container** — the `.org` build alone
+yields `partial` (no `src/controls`). See `memory/plugin-behavior/eb-attribute-schema.md`.
+
+**Schema ≠ render**: the correct attribute names make authoring correct, but static EB blocks (e.g.
+`advanced-heading`, which ships a real `save.js`) still need the **finalizer** to render non-empty —
+a self-closing `gutenberg-insert` renders empty even with the right `titleText`.

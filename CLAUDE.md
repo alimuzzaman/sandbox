@@ -154,6 +154,12 @@ specific action. Push new branches with `-u origin <branch>` — a
 feature branch's upstream is itself, not `main`. No emojis in code or
 commit messages.
 
+**Backup reference point.** The `original-reference` branch marks the known-good
+pre-spec-work baseline at commit `f3f36330feab8906ac04e7226abb0a094a9d1039`
+(`fix(url): set up the .sb proxy at install …`). If it's ever deleted, recreate it:
+`git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never
+force-delete or rewrite this point.
+
 **File boundaries.** `runtime/wp/` core files are off-limits — they
 get clobbered on `wordpress:latest` pull. `vendor/` packages are
 off-limits — patch from plugin code or upstream PR; vendor edits get

@@ -18,8 +18,11 @@ scoped `sandbox-licensing.json` into each instance (see _provision). This module
 is the host-side read/write surface used by `sb license` and provisioning."""
 
 # Families → the secret key name in the licensing block.
+# NOTE: WPDeveloper is intentionally absent — its pro plugins are force-activated
+# keylessly in-instance (the licensed download is 2FA/activation-gated, so a key
+# buys nothing; see assets/licensing/platforms/wpdeveloper.php). Only vendors that
+# genuinely need a managed secret (e.g. Elementor) live here.
 LICENSE_FAMILIES = {
-    "wpdeveloper": "wpdeveloper_key",
     "elementor": "elementor_pro_key",
 }
 
@@ -115,9 +118,9 @@ def set_elementor_primary(instance: str, url: str) -> None:
 
 
 def license_status() -> dict:
-    """Presence + masked hints + primary, for `sb license status`. No raw keys."""
+    """Presence + masked hints + primary, for `sb license status`. No raw keys.
+    WPDeveloper is not listed — its pro plugins are force-activated keylessly."""
     return {
-        "wpdeveloper": _mask(get_license("wpdeveloper")),
         "elementor": _mask(get_license("elementor")),
         "elementor_primary": elementor_primary(),
     }

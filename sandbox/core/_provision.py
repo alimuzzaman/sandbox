@@ -411,12 +411,10 @@ def _write_licensing_state(instance: str) -> None:
     — never committed/echoed. Idempotent."""
     mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
     mu_dir.mkdir(parents=True, exist_ok=True)
+    # WPDeveloper needs no key — its platform module force-activates keylessly.
     prim = elementor_primary()
     state = {}
-    wpd = get_license("wpdeveloper")
     el = get_license("elementor")
-    if wpd:
-        state["wpdeveloper_key"] = wpd
     if el:
         state["elementor_pro_key"] = el
         state["elementor_primary_url"] = prim.get("url")

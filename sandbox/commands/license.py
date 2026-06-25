@@ -43,8 +43,8 @@ def cmd_license(cfg, args) -> None:
     # default: status — presence + masked hint only, never the raw key.
     st = license_status()
     ok("Pro license status (values masked — keys are secret):")
-    info(f"  wpdeveloper : {st['wpdeveloper']}")
     info(f"  elementor   : {st['elementor']}")
+    info("  wpdeveloper : keyless (pro plugins force-activated in-instance)")
     prim = st["elementor_primary"]
     if prim.get("instance") or prim.get("url"):
         info(f"  EL primary  : {prim.get('instance') or '?'} ({prim.get('url') or '?'})")

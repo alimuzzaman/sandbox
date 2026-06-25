@@ -306,8 +306,9 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Manage Pro plugin license keys + sharing (Elementor Pro, WPDeveloper)")
     lic.add_argument("action", nargs="?", choices=["status", "set", "clear"],
         default="status", help="status (default, masked); set <family> <key>; clear [family]")
-    lic.add_argument("family", nargs="?", choices=["wpdeveloper", "elementor"],
-        help="license family for set/clear (clear without it clears all)")
+    lic.add_argument("family", nargs="?", choices=["elementor"],
+        help="license family for set/clear (clear without it clears all). "
+             "WPDeveloper needs no key — its pro plugins are force-activated keylessly.")
     lic.add_argument("key", nargs="?",
         help="the license key for `set` (stored in the gitignored secret store; never echoed)")
 

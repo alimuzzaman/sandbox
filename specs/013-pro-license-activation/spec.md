@@ -15,31 +15,36 @@
 - Q: Where do the license keys and shared state live? → A: A central store under `$SANDBOX_HOME`, shared by all instances; the actual secret keys live in the per-machine secret store (`sandbox.local.yml` / `.env.local`, chmod 600), never committed/echoed. The per-instance mu-plugin reads both at runtime, like the existing bridge token.
 - Q: Does this assume the developer owns the licenses? → A: Yes. This is dev/staging-only tooling for a plugin developer (WPDeveloper) using licenses they own across their own local instances; the sandbox is explicitly dev-only. Seat-compliance enforcement is out of scope.
 - Q: How is the Elementor Pro "primary" instance designated? → A: The first instance to activate Elementor Pro auto-becomes primary and is recorded in the central store; all later instances pin to it. No manual designation. If the primary is destroyed, the next instance to activate takes over.
-- Q: How does the developer manage the central license keys? → A: A dedicated `sb license` command (e.g. `sb license set elementor|wpdeveloper <key>`, plus list/clear/status) that writes to the gitignored secret store and never echoes the key value.
+- Q: How does the developer manage the central license keys? → A: A dedicated `sb license` command (e.g. `sb license set elementor <key>`, plus list/clear/status) that writes to the gitignored secret store and never echoes the key value.
+- Q: Should WPDeveloper use a managed license key? → A: NO. Verified live: the WPDeveloper licensed update API gates the actual plugin download (`package_download`) on a real upstream site activation (which needs 2FA + consumes a seat), so a key buys nothing in the sandbox — the local force-activation works identically with or without one. WPDeveloper is therefore **keyless**: its pro plugins are force-activated in-instance (no key, no `sb license` family). Only vendors that genuinely need a managed secret (e.g. Elementor) remain key-managed.
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - One WPDeveloper key licenses all WPDeveloper pro plugins on every instance (Priority: P1)
+### User Story 1 - WPDeveloper pro plugins force-activated keylessly on every instance (Priority: P1)
 
-A developer sets a single WPDeveloper license key once, centrally. Every sandbox instance then comes
-up with all installed WPDeveloper pro plugins already licensed/activated — no per-plugin, per-instance
-manual activation.
+Every sandbox instance comes up with all installed WPDeveloper pro plugins already activated — with
+**no license key at all** — so they run without nag screens and with pro features unlocked, no
+per-plugin, per-instance manual activation.
 
 **Why this priority**: This is the core pain — re-activating many WPDeveloper pro plugins on every
-throwaway instance by hand. One key → all plugins → all instances is the primary value.
+throwaway instance by hand. A key buys nothing here (the licensed download is 2FA/activation-gated;
+see Clarifications), so the value is the keyless force-activation: install a WPDeveloper pro plugin →
+it's active.
 
-**Independent Test**: Set the central WPDeveloper key; create/boot two instances with several
-WPDeveloper pro plugins; confirm each plugin reports licensed/activated on both instances with zero
-manual activation steps.
+**Independent Test**: Boot an instance with several WPDeveloper pro plugins and NO key set; confirm
+each plugin reports licensed/activated with zero manual steps; confirm it stays valid on a live
+re-check (no 2FA prompt).
 
 **Acceptance Scenarios**:
 
-1. **Given** a central WPDeveloper key is set, **When** an instance boots with a WPDeveloper pro
-   plugin installed, **Then** that plugin reports licensed/activated without any manual key entry.
-2. **Given** the same key, **When** multiple WPDeveloper pro plugins are installed across multiple
-   instances, **Then** all of them are licensed from that one key.
-3. **Given** no central WPDeveloper key is set, **When** an instance boots, **Then** behavior is
-   exactly as today (plugins inactive/unlicensed until manually activated) — no breakage.
+1. **Given** no key is set, **When** an instance boots with a WPDeveloper pro plugin active, **Then**
+   that plugin reports licensed/activated without any key entry or 2FA.
+2. **Given** several WPDeveloper pro plugins are active across instances, **When** they boot, **Then**
+   all of them are force-activated, in any context (front-end, admin, REST).
+3. **Given** a WPDeveloper plugin runs a live license check, **When** it calls the WPDeveloper backend,
+   **Then** it receives a synthetic `valid` (never `required_otp`) — the 2FA/seat path is bypassed.
+4. **Given** `define('SANDBOX_WPD_ACTIVATE_OFF', true)`, **When** an instance boots, **Then** WPDeveloper
+   plugins are left in their real (unlicensed) state — an explicit escape hatch.
 
 ---
 
@@ -144,8 +149,10 @@ artifact to confirm the key value never appears; confirm the instances still pic
 
 ### Functional Requirements
 
-- **FR-001**: A single centrally-stored WPDeveloper license key MUST license/activate every installed
-  WPDeveloper pro plugin on every instance, with no per-plugin or per-instance manual activation.
+- **FR-001**: Every installed WPDeveloper pro plugin MUST be force-activated on every instance with NO
+  license key — no per-plugin or per-instance manual activation, and no 2FA. The activation MUST work
+  in every request context (front-end, admin, REST) by deriving each plugin's license-status option
+  from the active-plugin slug (not from context-dependent plugin constants).
 - **FR-002**: A single centrally-stored Elementor Pro license key MUST be shared across all instances
   so that secondary instances report activated by pinning license verification to one designated
   primary instance's site identity (one seat, many instances).
@@ -159,16 +166,16 @@ artifact to confirm the key value never appears; confirm the instances still pic
 - **FR-005**: The feature MUST be additive: with no key set, every Pro plugin behaves exactly as
   today (local-source install, manual/unlicensed state); the change MUST never break instances that
   lack the Pro plugins.
-- **FR-006**: When a WPDeveloper key is present, installing a WPDeveloper plugin MUST fetch the
-  licensed build from the WPDeveloper API using the key. Elementor Pro install-from-API is
-  **best-effort/parity** (the local build is the reliable default). In all cases, when no key is
-  present OR the vendor API is unreachable, the system MUST deterministically fall back to the
-  existing local-source path; only if no local source exists either does it fail, with a clear error
-  (never a broken install).
-- **FR-007**: A developer MUST be able to set, update, clear, and inspect the central keys and the
-  primary designation through a dedicated `sb license` command (e.g. `sb license set
-  elementor|wpdeveloper <key>`, `sb license status|clear`) that writes to the gitignored secret store
-  and never echoes secret values.
+- **FR-006**: Install path for Pro plugins is **local source** (the existing on-demand mechanism).
+  Installing from the WPDeveloper licensed API is NOT used: verified live, `package_download` is gated
+  on a real upstream site activation (2FA/seat), which the keyless bypass deliberately avoids — so the
+  download 401s. WPDeveloper update *checks* (`get_version`) still pass through unmodified. Elementor
+  Pro install-from-API is likewise best-effort/parity with the local build as the default.
+- **FR-007**: For key-managed vendors (Elementor), a developer MUST be able to set, update, clear, and
+  inspect the central key + primary designation through a dedicated `sb license` command (`sb license
+  set elementor <key>`, `sb license status|clear`) that writes to the gitignored secret store and
+  never echoes secret values. WPDeveloper has NO key family (keyless force-activation); `sb license
+  status` reports it as keyless.
 - **FR-008**: The first instance to activate Elementor Pro MUST auto-become the recorded primary for
   sharing; all later instances MUST pin to it. The system MUST detect when the primary is gone and let
   the next instance to activate take over, so sharing keeps working without manual designation.
@@ -197,8 +204,8 @@ artifact to confirm the key value never appears; confirm the instances still pic
 
 ### Measurable Outcomes
 
-- **SC-001**: With one WPDeveloper key set, 100% of installed WPDeveloper pro plugins report
-  licensed/activated on a freshly booted instance with zero manual activation actions.
+- **SC-001**: With NO key, 100% of installed WPDeveloper pro plugins report licensed/activated on a
+  freshly booted instance with zero manual activation actions, in front-end, admin, and REST contexts.
 - **SC-002**: With one Elementor Pro key and a designated primary, a freshly booted secondary instance
   reports Elementor Pro activated, consuming no additional license seat (verification resolves to the
   primary's identity).
@@ -208,10 +215,9 @@ artifact to confirm the key value never appears; confirm the instances still pic
   before the feature (no regression); instances without Pro plugins boot unaffected.
 - **SC-005**: A license key value appears in zero tracked files, zero command outputs, and zero
   snapshots across the whole workflow (verified by search).
-- **SC-006**: With a WPDeveloper key set, a WPDeveloper plugin install is sourced from the licensed API
-  in 100% of attempts where the API is reachable, and falls back to local source in 100% of attempts
-  where it is not. (Elementor Pro install-from-API is best-effort/parity and not part of this metric;
-  its local build is the default.)
+- **SC-006**: WPDeveloper pro plugins install from local source in 100% of cases (the licensed API
+  download is activation-gated and intentionally not used under the keyless bypass). A WPDeveloper
+  live license check returns synthetic `valid` (never `required_otp`) in 100% of cases — 2FA bypassed.
 - **SC-007**: This feature unblocks spec 012's Pro coverage — with Pro plugins activated across
   instances, the schema catalog can include Elementor Pro and WPDeveloper Pro widgets/blocks.
 

@@ -27,6 +27,10 @@ def cmd_license(cfg, args) -> None:
            f"Re-provision instances to apply: `./sb apply` / `ensure_instance`.")
         return
 
+    if action == "elementor-sync" or action == "sync":
+        _elementor_sync(cfg, getattr(args, "from_instance", None))
+        return
+
     if action == "clear":
         family = getattr(args, "family", None)
         try:
@@ -50,6 +54,60 @@ def cmd_license(cfg, args) -> None:
         info(f"  EL primary  : {prim.get('instance') or '?'} ({prim.get('url') or '?'})")
     else:
         info("  EL primary  : (none yet — set on first activation)")
+
+
+def _el_opt(instance: str, args: list) -> str:
+    """Read a wp option (or eval) from an instance via wp-cli; '' on any failure."""
+    try:
+        res = wpcli(args, instance, check=False, capture=True)
+    except Exception:
+        return ""
+    return (getattr(res, "stdout", "") or "").strip()
+
+
+def _elementor_sync(cfg, from_instance) -> None:
+    """Capture a manually-connected instance's Elementor Pro activation and
+    propagate it so every other instance rides the one seat. Connect Elementor Pro
+    on ONE instance by hand first (it's OAuth/seat-limited)."""
+    import json as _json
+    instances = list(resolve_instances(cfg).keys())
+    if not instances:
+        die("no registered instances.")
+
+    primary = from_instance
+    if primary and primary not in instances:
+        die(f"unknown instance '{primary}'. Known: {', '.join(sorted(instances))}.")
+    if not primary:
+        for name in instances:
+            try:
+                if not _instance_running(name):
+                    continue   # don't hang on stopped instances
+            except Exception:
+                continue
+            if _el_opt(name, ["option", "get", "elementor_pro_license_key"]):
+                primary = name
+                break
+    if not primary:
+        die("No instance has Elementor Pro connected. Activate + connect Elementor Pro "
+            "on ONE instance (wp-admin → Elementor → License → Connect & Activate), "
+            "then re-run `./sb license elementor-sync`.")
+
+    key = _el_opt(primary, ["option", "get", "elementor_pro_license_key"])
+    if not key:
+        die(f"instance '{primary}' has no Elementor Pro license key — is it connected?")
+    url = _el_opt(primary, ["eval", "echo home_url();"])
+    raw = _el_opt(primary, ["option", "get", "_elementor_pro_license_v2_data", "--format=json"])
+    try:
+        data = _json.loads(raw) if raw else None
+    except Exception:
+        data = None
+
+    capture_elementor(primary, url, key, data)
+    for name in instances:
+        _write_licensing_state(name)
+    ok(f"Captured Elementor Pro activation from '{primary}' ({url}); propagated to "
+       f"{len(instances)} instance(s). Secondaries now share the one seat — re-apply/boot "
+       f"them if they were already running (value not shown).")
 
 
 register({"license": cmd_license})

@@ -304,13 +304,19 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     lic = sub.add_parser("license",
         help="Manage Pro plugin license keys + sharing (Elementor Pro, WPDeveloper)")
-    lic.add_argument("action", nargs="?", choices=["status", "set", "clear"],
-        default="status", help="status (default, masked); set <family> <key>; clear [family]")
+    lic.add_argument("action", nargs="?",
+        choices=["status", "set", "clear", "elementor-sync", "sync"],
+        default="status",
+        help="status (default, masked); set <family> <key>; clear [family]; "
+             "elementor-sync (share a connected Elementor Pro activation across instances)")
     lic.add_argument("family", nargs="?", choices=["elementor"],
         help="license family for set/clear (clear without it clears all). "
              "WPDeveloper needs no key — its pro plugins are force-activated keylessly.")
     lic.add_argument("key", nargs="?",
         help="the license key for `set` (stored in the gitignored secret store; never echoed)")
+    lic.add_argument("--from", dest="from_instance", default=None,
+        help="for elementor-sync: the instance you connected Elementor Pro on "
+             "(default: auto-detect the connected instance)")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

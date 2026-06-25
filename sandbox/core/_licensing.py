@@ -117,6 +117,30 @@ def set_elementor_primary(instance: str, url: str) -> None:
     _write_licensing_block(block)
 
 
+def capture_elementor(instance: str, url: str, key: str, data) -> None:
+    """Capture a connected instance's full Elementor Pro activation (key + license
+    data option value + URL + which instance) into the central store, so other
+    instances can ride the single activation. Called by `sb license elementor-sync`
+    after you connect Elementor Pro on one instance by hand."""
+    block = _licensing_block()
+    block["elementor_pro_key"] = key
+    block["elementor_primary_instance"] = instance
+    block["elementor_primary_url"] = url
+    block["elementor_license_data"] = data
+    _write_licensing_block(block)
+
+
+def elementor_capture() -> dict:
+    """The captured Elementor Pro primary activation from the central store."""
+    b = _licensing_block()
+    return {
+        "instance": b.get("elementor_primary_instance"),
+        "url": b.get("elementor_primary_url"),
+        "key": b.get("elementor_pro_key"),
+        "data": b.get("elementor_license_data"),
+    }
+
+
 def license_status() -> dict:
     """Presence + masked hints + primary, for `sb license status`. No raw keys.
     WPDeveloper is not listed — its pro plugins are force-activated keylessly."""

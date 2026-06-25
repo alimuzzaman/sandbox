@@ -412,13 +412,16 @@ def _write_licensing_state(instance: str) -> None:
     mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
     mu_dir.mkdir(parents=True, exist_ok=True)
     # WPDeveloper needs no key — its platform module force-activates keylessly.
-    prim = elementor_primary()
+    # Elementor: carry the captured primary activation (key + license-data + URL)
+    # so secondary instances ride the one connected activation.
+    cap = elementor_capture()
     state = {}
-    el = get_license("elementor")
-    if el:
-        state["elementor_pro_key"] = el
-        state["elementor_primary_url"] = prim.get("url")
-        state["is_primary"] = (prim.get("instance") == instance)
+    if cap.get("key"):
+        state["elementor_pro_key"] = cap["key"]
+        state["elementor_primary_url"] = cap.get("url")
+        state["is_primary"] = (cap.get("instance") == instance)
+        if cap.get("data") is not None:
+            state["elementor_license_data"] = cap["data"]
     (mu_dir / "sandbox-licensing.json").write_text(json.dumps(state, indent=2))
     try:
         (mu_dir / "sandbox-licensing.json").chmod(0o600)  # holds secrets

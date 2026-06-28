@@ -383,9 +383,12 @@ def _cmd_generate(inst: str) -> None:
     # and own (widget-unique). Gutenberg stays flat (little cross-block overlap).
     if el_entries:
         info("Normalizing Elementor catalog (extracting shared control pool)…")
-        el_packed = normalize_elementor_catalog(el_entries)
+        descriptions = load_descriptions()
+        el_packed = normalize_elementor_catalog(el_entries, descriptions=descriptions)
         pool_size = len(el_packed.get("_pool", {}))
-        info(f"  Pool: {pool_size} shared control definitions.")
+        desc_count = sum(1 for v in el_packed.get("_pool", {}).values()
+                         if isinstance(v, dict) and v.get("description"))
+        info(f"  Pool: {pool_size} shared control definitions, {desc_count} with descriptions.")
     else:
         el_packed = {}
 

@@ -26,13 +26,22 @@ from pathlib import Path
 # follows the package, not the cwd.
 CATALOG_ASSET_DIR = Path(__file__).resolve().parent.parent / "assets" / "editor-schema"
 BUILDERS = ("gutenberg", "elementor")
+DESCRIPTIONS_FILE = CATALOG_ASSET_DIR / "control-descriptions.json"
+
+
+def load_descriptions() -> dict[str, str]:
+    """Load the hand-curated control descriptions companion file (empty dict if absent)."""
+    if not DESCRIPTIONS_FILE.exists():
+        return {}
+    with open(DESCRIPTIONS_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def _catalog_file(builder: str) -> Path:
     return CATALOG_ASSET_DIR / f"{builder}.json.gz"
 
 
-def normalize_elementor_catalog(entries: dict) -> dict:
+def normalize_elementor_catalog(entries: dict, descriptions: dict | None = None) -> dict:
     """Convert a flat {name: entry} Elementor catalog to the normalized v2 format.
 
     Pool: control definitions that appear in ≥2 widgets. Uses the most-common
@@ -92,6 +101,13 @@ def normalize_elementor_catalog(entries: dict) -> dict:
         if own:
             widget_entry["own"] = own
         out[name] = widget_entry
+
+    # Inject descriptions into pool entries AFTER per-widget splitting so the
+    # identity check (widget control vs pool entry) isn't affected by description keys.
+    if descriptions:
+        for ctrl_id, desc in descriptions.items():
+            if ctrl_id in pool:
+                pool[ctrl_id]["description"] = desc
 
     return out
 

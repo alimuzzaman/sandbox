@@ -369,18 +369,30 @@ def _cmd_generate(inst: str) -> None:
     el_entries = _build_elementor_entries(el_raw, plugin_versions)
     gb_entries = _build_gutenberg_entries(gb_raw, plugin_versions)
 
-    # 5. Pack into committed gzipped catalog.
-    info("Packing catalog…")
-    gb_report = pack_builder("gutenberg", gb_entries)
-    el_report = pack_builder("elementor", el_entries) if el_entries else {"count": 0, "compressed_bytes": 0}
-
-    # 6. Coverage report.
+    # 5. Coverage report (before normalization, while entries are still flat).
     ok("Coverage report:")
     _print_coverage(gb_entries, "gutenberg", plugin_versions)
     if el_entries:
         _print_coverage(el_entries, "elementor", plugin_versions)
     else:
         info("  elementor: skipped (plugin not active on gen instance)")
+
+    # 6. Normalize Elementor into pool + per-widget {controls, overrides, own}.
+    # Controls shared across ≥2 widgets are stored once in _pool; per-widget
+    # entries carry only a list of IDs (pool hits), overrides (different values),
+    # and own (widget-unique). Gutenberg stays flat (little cross-block overlap).
+    if el_entries:
+        info("Normalizing Elementor catalog (extracting shared control pool)…")
+        el_packed = normalize_elementor_catalog(el_entries)
+        pool_size = len(el_packed.get("_pool", {}))
+        info(f"  Pool: {pool_size} shared control definitions.")
+    else:
+        el_packed = {}
+
+    # 7. Pack into committed gzipped catalog.
+    info("Packing catalog…")
+    gb_report = pack_builder("gutenberg", gb_entries)
+    el_report = pack_builder("elementor", el_packed) if el_packed else {"count": 0, "compressed_bytes": 0}
 
     total = gb_report["compressed_bytes"] + el_report["compressed_bytes"]
     bound = 5 * 1024 * 1024

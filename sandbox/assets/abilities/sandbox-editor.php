@@ -957,14 +957,46 @@ function sandbox_editor_catalog_entry($builder, $name)
     static $cache = [];
     if (!array_key_exists($builder, $cache)) {
         $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/' . $builder . '.json.gz';
-        $cache[$builder] = [];
+        $cache[$builder] = ['_format' => 'v1', '_pool' => [], '_entries' => []];
         if (is_file($f)) {
-            $raw = @file_get_contents($f);
+            $raw  = @file_get_contents($f);
             $json = ($raw !== false && function_exists('gzdecode')) ? @gzdecode($raw) : false;
-            if ($json !== false) { $cache[$builder] = json_decode($json, true) ?: []; }
+            if ($json !== false) {
+                $data = json_decode($json, true) ?: [];
+                if (($data['_format'] ?? 'v1') === 'v2') {
+                    $cache[$builder]['_format']  = 'v2';
+                    $cache[$builder]['_pool']    = $data['_pool'] ?? [];
+                    $cache[$builder]['_entries'] = array_diff_key($data, ['_format' => 1, '_pool' => 1]);
+                } else {
+                    $cache[$builder]['_entries'] = $data;
+                }
+            }
         }
     }
-    return $cache[$builder][$name] ?? null;
+
+    $entry = $cache[$builder]['_entries'][$name] ?? null;
+    if ($entry === null) { return null; }
+
+    // v2 Elementor: resolve pool + overrides + own back to a flat controls dict.
+    if ($cache[$builder]['_format'] === 'v2' && $builder === 'elementor') {
+        $pool     = $cache[$builder]['_pool'];
+        $controls = [];
+        foreach ((array) ($entry['controls'] ?? []) as $id) {
+            if (isset($pool[$id])) { $controls[$id] = $pool[$id]; }
+        }
+        foreach ((array) ($entry['overrides'] ?? []) as $id => $val) {
+            $controls[$id] = $val;
+        }
+        foreach ((array) ($entry['own'] ?? []) as $id => $val) {
+            $controls[$id] = $val;
+        }
+        return array_merge(
+            array_diff_key($entry, ['controls' => 1, 'overrides' => 1, 'own' => 1]),
+            ['controls' => $controls, 'count' => count($controls)]
+        );
+    }
+
+    return $entry;
 }
 
 function sandbox_editor_plugin_version($slug)

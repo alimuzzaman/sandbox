@@ -16,7 +16,7 @@ evidence captured.
 ## Phase 1: Setup
 
 - [x] T001 Cut working branch `012-bundled-schema-catalog` from current HEAD (push upstream as itself; pause for user approval before any push).
-- [ ] T002 Confirm two instances: a **generation** instance with EB free + Pro and Elementor + Pro/EA active and a **consumer** instance running the `.org` builds with NO source checkout. Snapshot before changes. Pro activation is reachable via spec 013 (keyless WPDeveloper + Elementor sharing — already merged to `main`); if EL Pro isn't connected yet, fall back to activating it manually on the generation instance so the registries are complete.
+- [x] T002 Confirm two instances: a **generation** instance with EB free + Pro and Elementor + Pro/EA active and a **consumer** instance running the `.org` builds with NO source checkout. Snapshot before changes. Pro activation is reachable via spec 013 (keyless WPDeveloper + Elementor sharing — already merged to `main`); if EL Pro isn't connected yet, fall back to activating it manually on the generation instance so the registries are complete.
 
 ## Phase 2: Foundational (blocking prerequisites)
 

@@ -9,8 +9,15 @@ JSON object per builder mapping `name -> entry`. Each entry carries the full
 attribute/control set + `coverage` (full|partial) + the source plugin `version`.
 Provisioning copies these into each instance so the ability (in-container PHP)
 can gzdecode + look one up. Pure data + gzip — no per-plugin code.
+
+Elementor catalogs use format v2 (normalized pool):
+  `_format`: "v2"
+  `_pool`:   {ctrl_id -> definition}  — controls shared across ≥2 widgets
+  per widget: {controls: [id,...], overrides: {id: def,...}, own: {id: def,...}}
+  Consumer resolves: pool[id] for each id in controls, then merge overrides, then own.
 """
 from __future__ import annotations
+import collections
 import gzip
 import json
 from pathlib import Path
@@ -25,9 +32,77 @@ def _catalog_file(builder: str) -> Path:
     return CATALOG_ASSET_DIR / f"{builder}.json.gz"
 
 
+def normalize_elementor_catalog(entries: dict) -> dict:
+    """Convert a flat {name: entry} Elementor catalog to the normalized v2 format.
+
+    Pool: control definitions that appear in ≥2 widgets. Uses the most-common
+    value for each control ID as the pool definition.
+    Per-widget:
+      controls  — ordered list of IDs resolved verbatim from the pool
+      overrides — full definitions for pool controls that differ in this widget
+      own       — full definitions for widget-unique controls (not in pool)
+    """
+    # Collect all (ctrl_id, serialized_value) pairs per widget.
+    ctrl_appearances: dict[str, list[tuple[str, str]]] = collections.defaultdict(list)
+    widget_data: dict[str, dict] = {}
+
+    for name, entry in entries.items():
+        controls = entry.get("controls")
+        if not isinstance(controls, dict):
+            continue
+        meta = {k: v for k, v in entry.items() if k not in ("controls", "builder", "name", "count")}
+        widget_data[name] = {"controls": controls, "meta": meta}
+        for ctrl_id, ctrl_val in controls.items():
+            ctrl_appearances[ctrl_id].append((name, json.dumps(ctrl_val, sort_keys=True)))
+
+    # Build the pool: most-common definition for each control in ≥2 widgets.
+    pool: dict[str, object] = {}
+    pool_ids: set[str] = set()
+    for ctrl_id, appearances in ctrl_appearances.items():
+        if len(appearances) >= 2:
+            pool_ids.add(ctrl_id)
+            common_json = collections.Counter(v for _, v in appearances).most_common(1)[0][0]
+            pool[ctrl_id] = json.loads(common_json)
+
+    out: dict = {"_format": "v2", "_pool": pool}
+
+    for name, entry in entries.items():
+        if name not in widget_data:
+            out[name] = entry  # passthrough (e.g. entries with non-dict controls)
+            continue
+        controls = widget_data[name]["controls"]
+        meta = widget_data[name]["meta"]
+
+        ctrl_list: list[str] = []
+        overrides: dict[str, object] = {}
+        own: dict[str, object] = {}
+
+        for ctrl_id, ctrl_val in controls.items():
+            if ctrl_id in pool_ids:
+                if json.dumps(ctrl_val, sort_keys=True) == json.dumps(pool[ctrl_id], sort_keys=True):
+                    ctrl_list.append(ctrl_id)
+                else:
+                    overrides[ctrl_id] = ctrl_val
+            else:
+                own[ctrl_id] = ctrl_val
+
+        widget_entry: dict = {**meta, "controls": ctrl_list}
+        if overrides:
+            widget_entry["overrides"] = overrides
+        if own:
+            widget_entry["own"] = own
+        out[name] = widget_entry
+
+    return out
+
+
 def pack_builder(builder: str, entries: dict) -> dict:
-    """Write `{name: entry}` for one builder to the committed gzipped catalog.
-    Returns a small report (count, compressed bytes). Idempotent: overwrites."""
+    """Write entries for one builder to the committed gzipped catalog.
+    Returns a small report (count, compressed bytes). Idempotent: overwrites.
+
+    `entries` may be a flat {name: entry} dict (v1, Gutenberg) or a normalized
+    v2 dict with `_format`/`_pool` keys (Elementor). Count is the number of
+    widget/block entries (keys not starting with `_`)."""
     if builder not in BUILDERS:
         raise ValueError(f"unknown builder '{builder}' (expected {', '.join(BUILDERS)})")
     CATALOG_ASSET_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,7 +111,8 @@ def pack_builder(builder: str, entries: dict) -> dict:
     # mtime=0 so the gzip is reproducible (same input → same bytes → clean diffs).
     with gzip.GzipFile(filename="", mode="wb", fileobj=open(out, "wb"), mtime=0) as gz:
         gz.write(payload)
-    return {"builder": builder, "count": len(entries),
+    count = sum(1 for k in entries if not k.startswith("_"))
+    return {"builder": builder, "count": count,
             "compressed_bytes": out.stat().st_size, "file": str(out)}
 
 

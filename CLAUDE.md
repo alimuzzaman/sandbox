@@ -347,7 +347,7 @@ else your cwd. Pass `instance=` only to deliberately override the resolved one.
 | `recreate_instance` | Destroy + immediately recreate — gives a clean WP install from the current config (wipes DB + uploads). |
 | `apply_config` | Reconcile a running instance with its current config IN PLACE — re-render compose, recreate web tier, re-sync plugins/themes, convert multisite if newly enabled. No DB drop. Prefer over `recreate_instance` for config edits. |
 | `run_tests` | Run the plugin's phpunit tests on the external WP harness → `{ok, passed, summary}` |
-| `wp_cli` | Run any `wp` command |
+| `wp_cli` | Run any `wp` command. `wp config get/set/delete/list` manages wp-config.php constants (note: persisted constants belong in `WORDPRESS_CONFIG_EXTRA` — see gotcha 10). |
 | `wp_cli_async` / `wp_cli_job` / `wp_cli_job_kill` | Spec 004 — start a long `wp` command detached (returns a job id), poll its output, or kill it. CLI equiv: `./sb wp --async …` / `./sb job <id>` / `./sb jobs`. Use for migrations / imports that outlive one call. |
 | `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
 | `wp_eval_live` | Spec 003 — run PHP in the live runtime via the `sandbox/execute-php` ability (full WP env; returns value + output + diagnostics). |
@@ -526,34 +526,17 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 
 ## Common loops
 
-- **Working on a plugin** → `cd` into its repo (or pass its dir as
-  `project_dir`). `sandbox init` if it isn't a project yet (scaffolds
-  `sandbox.config.json` + boots + provisions the harness); else `ensure_instance`
-  boots on demand. `focus_get(project_dir)` pulls in its `CLAUDE.md`.
+- **Working on a plugin** → `cd` into its repo (or pass `project_dir`). `sandbox init` if not a project yet; else `ensure_instance`. `focus_get(project_dir)` pulls in its `CLAUDE.md`.
 
-- **Running tests** → `run_tests(project_dir)` (or `sandbox test`). Externally
-  provisioned WP suite + phpunit + polyfills; the plugin's composer stays clean.
-  Pass extra phpunit args after `--` (e.g. `sandbox test -- --filter Foo`).
+- **Running tests** → `run_tests(project_dir)` (or `sandbox test`). Pass extra phpunit args after `--`.
 
-- **Fixing a bug** → `skills/bug-repro/SKILL.md` is the canonical loop
-  (snapshot → reproduce live → fix → verify against snapshot). Then
-  branch → diff → confirm-then-commit → confirm-then-push.
+- **Fixing a bug** → `skills/bug-repro/SKILL.md` (snapshot → reproduce → fix → verify).
 
-- **Debugging a WP / plugin error** → `skills/wp-debug/SKILL.md`. Escalation
-  ladder (cheap → heavy): `dump()`/`dd()` + `tail_log` → `qm_capture` (Query
-  Monitor: queries/hooks/PHP errors/timing) → `xdebug` (real breakpoints,
-  trigger-gated). `tail_log` takes a `file` selector (debug.log / php / fpm /
-  nginx). Plus a symptom→cause table for the most common failures.
+- **Debugging a WP / plugin error** → `skills/wp-debug/SKILL.md`. Ladder: `tail_log` → `qm_capture` → `xdebug`.
 
-- **Saving / restoring state** → `skills/snapshot/SKILL.md`. Use before any
-  destructive flow or whenever you'd rather not rebuild a fixture. For a fast
-  in-place DB rollback to the post-install state use `wp_reset` / `./sb reset`
-  (spec 008 — restores the `@install` baseline, keeps uploads); full named
-  snapshots (DB + uploads) are also takeable/restorable from wp-admin (spec 002).
+- **Saving / restoring state** → `skills/snapshot/SKILL.md`. Fast in-place rollback: `wp_reset` / `./sb reset` (restores `@install`, keeps uploads).
 
 - **Fast plugin dev/fix/ship** → `workflows/fast-plugin-ship/WORKFLOW.md`.
-  Use this for every focused plugin unless a more specific plugin workflow
-  overrides it.
 
 - **Testing a release zip in isolation** → use a SEPARATE project dir so the instance is independent of your dev symlink, then `wp_cli(project_dir=<that dir>, command="plugin install /path/foo.zip --activate")`. Reproduces non-symlink bugs without disturbing your dev tree.
 
@@ -598,7 +581,7 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
    shareable fixtures use WXR in `runtime/seeds/` or a `wp_cli` seed
    script checked into the plugin repo.
 
-10. **wp-config constants live in compose env, not wp-config.php.** The official image regenerates `wp-config.php` from env on every start, wiping `wp config set` values. Constants are rendered into `WORDPRESS_CONFIG_EXTRA` (web + wpcli tiers). Litespeed gets literal `wp config set` pins instead (lsphp can't read container env). Apply config changes in-place: `./sb apply` / `apply_config` (no DB drop). A changed `wpVersion` needs a recreate.
+10. **wp-config constants live in compose env, not wp-config.php.** WP regenerates `wp-config.php` from env on every start, wiping `wp config set` values. Set persistent constants in `WORDPRESS_CONFIG_EXTRA` (web + wpcli tiers); litespeed gets literal `wp config set` pins (lsphp can't read container env). Apply in-place: `./sb apply` / `apply_config`. A changed `wpVersion` needs a recreate.
 
 11. **Captured mail needs the mail mu-plugin.** `00-sandbox-mail.php` routes PHP mail to `mailpit:1025` via `phpmailer_init` and fixes the invalid `wordpress@localhost` sender. Written by `_write_mail_muplugin` on every `sb up` + `sb install`; mounted so both web and wpcli mail is captured.
 

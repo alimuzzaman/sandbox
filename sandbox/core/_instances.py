@@ -662,6 +662,7 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
                 _write_ondemand_muplugin(name)   # spec 010 — on-demand local plugin sourcing
                 _write_abilities_muplugin(name)  # spec 003 — in-instance WP Abilities
                 _write_licensing_muplugin(name)  # spec 013 — cross-instance Pro license activation
+                _write_schema_catalog(name)  # spec 012 — bundled schema catalog
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
         _wire_project_plugins(name, root, pconf)

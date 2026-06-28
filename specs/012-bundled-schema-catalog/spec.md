@@ -14,6 +14,8 @@
 
 - Q: What is the authoritative source for each builder's schema? → A: Live runtime registries, not plugin source: Elementor/EA/Elementor-Pro from the PHP control registry (`get_controls()`); Gutenberg core + EB free/Pro from the editor JS block registry (`wp.blocks.getBlockTypes()`), dumped headlessly. Source parsing (spec 011) is only an offline fallback.
 - Q: Does this remove the need for plugin source code? → A: Yes for schema. Only Elementor Pro lacks source, but its controls come from the PHP registry, so it is fully covered. No source checkout is required for any builder.
+- Q: Where does the bundled catalog physically live? → A: A committed, gzipped, version-keyed asset in the repo (under `sandbox/assets/`), so every clone/install has it with no generation step; regeneratable via the `sb` command. Compressed footprint only — no uncompressed multi-MB blob in the tree.
+- Q: When editor-schema has both a live result and a catalog entry, which wins? → A: The richer result — prefer the live registry/source result; fall back to the catalog only when live is partial/reduced/unavailable. Deterministic: pick whichever yields the more complete (higher-fidelity / larger) attribute set.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -153,9 +155,10 @@ saved key/value.
 - **FR-004**: `editor-schema` MUST serve from the bundled catalog as a fallback so that, on a fresh
   install with no source checkout, a caller still receives the full schema for any covered
   widget/block; the result MUST indicate it was catalog-sourced.
-- **FR-005**: The merge/precedence between a live result and a catalog entry MUST be deterministic and
-  documented, and MUST return the complete result rather than a degraded one when a complete one is
-  available.
+- **FR-005**: Precedence MUST be deterministic: when the LIVE result is `full`, return it (the catalog
+  is not consulted). Otherwise — live is partial/reduced/absent — return whichever of {live, catalog}
+  yields the more complete (higher-fidelity / larger) attribute set, preferring the catalog on ties.
+  The response MUST indicate which source served it.
 - **FR-006**: Every catalog entry MUST carry a coverage/fidelity marker (full vs partial) and its
   source plugin version, so consumers can judge completeness and currency.
 - **FR-007**: The catalog MUST be version-aware: a served entry whose plugin version does not match
@@ -163,8 +166,10 @@ saved key/value.
   current.
 - **FR-008**: The change MUST be additive: Elementor and core-block schema results from the live path
   MUST remain unchanged; the catalog only adds a fallback/coverage layer.
-- **FR-009**: The shipped catalog MUST be stored compactly (compressed) so it does not materially
-  bloat the repository or release artifact.
+- **FR-009**: The shipped catalog MUST be a committed, gzipped, version-keyed asset under
+  `sandbox/assets/` — present for every clone/install with no generation step — stored compactly
+  (compressed only; no uncompressed multi-MB blob in the working tree) so it does not materially bloat
+  the repository or release artifact.
 - **FR-010**: The catalog and its fallback MUST require NO per-user regeneration: a user who never
   runs the generator still gets full fidelity for covered widgets/blocks out of the box.
 - **FR-011**: The optional sampled control-to-value validation pass (US4) MUST, when run, report its
@@ -188,8 +193,9 @@ saved key/value.
 ### Measurable Outcomes
 
 - **SC-001**: On a fresh install with NO plugin source checkout mounted, `editor-schema` returns the
-  full schema (named attributes/controls + types + defaults) for 100% of registered Elementor-family
-  widgets and ≥95% of registered Gutenberg-family blocks, including EB Pro and Elementor Pro.
+  full schema (named attributes/controls + types + defaults) for 100% of the Elementor-family widgets
+  and ≥95% of the Gutenberg-family blocks **registered in that consumer install**, including EB Pro and
+  Elementor Pro.
 - **SC-002**: EB Pro blocks that return `reduced` today return their full attribute set via the
   catalog (e.g. the 22 Pro blocks observed in spec 011 go from ~3 keys to their real attribute sets).
 - **SC-003**: A user performs zero regeneration steps and still gets full-fidelity schemas — the

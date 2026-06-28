@@ -453,6 +453,23 @@ def _write_licensing_muplugin(instance: str) -> None:
     _write_licensing_state(instance)
 
 
+def _write_schema_catalog(instance: str) -> None:
+    """Provision the bundled schema catalog (spec 012) into the instance so the
+    in-instance editor-schema ability can serve it: copy the committed gzipped
+    per-builder catalog files into mu-plugins/sandbox-schema-catalog/. No-op when
+    the asset isn't present (catalog not generated yet). Idempotent."""
+    asset_dir = Path(__file__).resolve().parent.parent / "assets" / "editor-schema"
+    if not asset_dir.is_dir():
+        return
+    gz = list(asset_dir.glob("*.json.gz"))
+    if not gz:
+        return
+    dest = wp_dir(instance) / "wp-content" / "mu-plugins" / "sandbox-schema-catalog"
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in gz:
+        shutil.copyfile(f, dest / f.name)
+
+
 def _write_dl_cache_muplugin(instance: str) -> None:
     """Drop a mu-plugin that caches plugin/theme zip downloads, so WP-runtime
     installs reuse a cached zip instead of re-downloading. The headline win is

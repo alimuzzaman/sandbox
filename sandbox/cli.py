@@ -35,6 +35,7 @@ import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
 import sandbox.commands.license  # noqa: F401  (registers commands)
+import sandbox.commands.schema_catalog  # noqa: F401  (registers commands)
 import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 
@@ -317,6 +318,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     lic.add_argument("--from", dest="from_instance", default=None,
         help="for elementor-sync: the instance you connected Elementor Pro on "
              "(default: auto-detect the connected instance)")
+
+    sc = sub.add_parser("schema-catalog",
+        help="Generate/inspect the bundled editor-schema catalog (Pro-inclusive)")
+    sc.add_argument("action", nargs="?", choices=["status", "generate"], default="status",
+        help="status (default — counts + size); generate (dump registries → committed catalog)")
+    sc.add_argument("--instance", dest="gen_instance", default=None,
+        help="for generate: the instance to dump from (free + Pro plugins active)")
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

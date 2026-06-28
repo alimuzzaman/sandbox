@@ -909,6 +909,58 @@ function sandbox_editor_eb_resolve($block_name, $block_type, $extra_roots = [])
 
 /* ------------------------------- Schema ----------------------------------- */
 
+/* ------------------ Bundled schema catalog fallback (spec 012) ------------- *
+ * editor-schema serves full fidelity from a provisioned, gzipped catalog when the
+ * LIVE result is partial/reduced/absent and the catalog entry is richer. Live is
+ * preferred when full; the catalog only fills gaps (e.g. EB Pro / no source). A
+ * catalog-served (or EB) response carries `source`; installed Elementor/core live
+ * results stay byte-identical (no marker). The catalog is provisioned to
+ * mu-plugins/sandbox-schema-catalog/<builder>.json.gz.                            */
+
+function sandbox_editor_catalog_entry($builder, $name)
+{
+    static $cache = [];
+    if (!array_key_exists($builder, $cache)) {
+        $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/' . $builder . '.json.gz';
+        $cache[$builder] = [];
+        if (is_file($f)) {
+            $raw = @file_get_contents($f);
+            $json = ($raw !== false && function_exists('gzdecode')) ? @gzdecode($raw) : false;
+            if ($json !== false) { $cache[$builder] = json_decode($json, true) ?: []; }
+        }
+    }
+    return $cache[$builder][$name] ?? null;
+}
+
+function sandbox_editor_plugin_version($slug)
+{
+    if (!$slug) { return null; }
+    if (!function_exists('get_plugins')) { require_once ABSPATH . 'wp-admin/includes/plugin.php'; }
+    foreach (get_plugins() as $file => $data) {
+        if (strpos($file, $slug . '/') === 0) { return $data['Version'] ?? null; }
+    }
+    return null;
+}
+
+/** Build an editor-schema response from a catalog entry (source: catalog). */
+function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null)
+{
+    $key  = $builder === 'gutenberg' ? 'attributes' : 'controls';
+    $resp = ['builder' => $builder, 'name' => $name, $key => $cat[$key] ?? [],
+             'source' => 'catalog'];
+    $installed = sandbox_editor_plugin_version($cat['plugin'] ?? null);
+    $resp['catalog'] = ['version' => $cat['version'] ?? null, 'installed_version' => $installed];
+    if ($installed && !empty($cat['version']) && $installed !== $cat['version']) {
+        $resp['version_mismatch'] = true;
+    }
+    if ($builder === 'gutenberg') {
+        $resp['dynamic']  = $bt ? (bool) $bt->render_callback : ($cat['dynamic'] ?? null);
+        $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
+                             'count' => count($cat[$key] ?? [])];
+    }
+    return $resp;
+}
+
 function sandbox_editor_schema($input)
 {
     $builder = (string) ($input['builder'] ?? '');
@@ -927,10 +979,20 @@ function sandbox_editor_schema($input)
             $extra_roots = [];
             if (!empty($input['source_root'])) { $extra_roots[] = (string) $input['source_root']; }
             $full = sandbox_editor_eb_resolve($name, $bt, $extra_roots);
+            $live_level = $full['fidelity']['level'] ?? 'reduced';
+            $live_count = $full ? count($full['attributes']) : 0;
+            // spec 012: live preferred when full; else catalog if it's richer.
+            if ($live_level !== 'full') {
+                $cat = sandbox_editor_catalog_entry('gutenberg', $name);
+                if ($cat && count($cat['attributes'] ?? []) > $live_count) {
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt);
+                }
+            }
             if ($full !== null) {
+                $full['source'] = 'live';
                 return $full; // level: full | partial
             }
-            // No reachable source checkout: block.json attributes only, flagged reduced.
+            // No source + no catalog: block.json attributes only, flagged reduced.
             $attrs = [];
             foreach ((array) $bt->attributes as $k => $def) {
                 $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
@@ -938,7 +1000,7 @@ function sandbox_editor_schema($input)
             return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => (bool) $bt->render_callback,
                     'attributes' => $attrs,
                     'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
-                    'eb_attribute_fidelity' => 'reduced'];
+                    'eb_attribute_fidelity' => 'reduced', 'source' => 'live'];
         }
 
         // Pre-feature behavior, byte-for-byte, for non-EB named blocks + all listings.
@@ -974,6 +1036,12 @@ function sandbox_editor_schema($input)
         if ($name) {
             $w = is_array($types) ? ($types[$name] ?? null) : null;
             if (!$w) {
+                // spec 012: not registered live → serve the catalog if we have it
+                // (e.g. Elementor Pro/EA widget absent on this install).
+                $cat = sandbox_editor_catalog_entry('elementor', $name);
+                if ($cat) {
+                    return sandbox_editor_catalog_response('elementor', $name, $cat);
+                }
                 return new WP_Error('not_found', "widget '$name' not registered (enable it first if EA)");
             }
             $controls = [];

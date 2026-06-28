@@ -36,9 +36,9 @@ Elementor Pro widget → each returns its full attribute/control set with `sourc
 was reduced.
 
 - [x] T006 [US1] Implement `sb schema-catalog generate --instance <gen>` in `schema_catalog.py` + `_schema_catalog.py`: drive the Elementor PHP `get_controls()` dump (reuse the introspect/editor-schema path) and the headless Gutenberg dump page; collect both; pack → committed gzipped catalog + index under `sandbox/assets/editor-schema/`. Each packed entry MUST record its `coverage` (full/partial) + source plugin `version` (FR-006). Print a coverage report. (FR-001/002/003/006, contracts/sb-schema-catalog-cli)
-- [ ] T007 [US1] Generate the catalog from the generation instance (EB Pro + Elementor Pro active) and commit the gzipped asset; confirm it includes EB Pro blocks (e.g. pro-business-hours) + Elementor Pro widgets at full coverage. (FR-001)
+- [x] T007 [US1] Generate the catalog from the generation instance (EB Pro + Elementor Pro active) and commit the gzipped asset; confirm it includes EB Pro blocks (e.g. pro-business-hours) + Elementor Pro widgets at full coverage. (FR-001)
 - [x] T008 [US1] Add the `editor-schema` catalog fallback in `sandbox/assets/abilities/sandbox-editor.php`: after the live result, when live is partial/reduced/absent and a catalog entry exists, return the catalog entry; tag `source` (live|catalog) + catalog/installed version; read the provisioned catalog (gunzip one entry). (FR-004, D4, contracts/editor-schema-catalog)
-- [ ] T009 [US1] Live-verify quickstart Check 3 on the consumer instance: EB Pro / EB free / Elementor Pro all return full schemas from the catalog (EB Pro ~3 keys → full); ≥95% GB blocks + 100% EL widgets full. Capture evidence. (SC-001, SC-002)
+- [x] T009 [US1] Live-verify quickstart Check 3 on the consumer instance: EB Pro / EB free / Elementor Pro all return full schemas from the catalog (EB Pro ~3 keys → full); ≥95% GB blocks + 100% EL widgets full. Capture evidence. (SC-001, SC-002)
 
 **Checkpoint**: US1 delivers the core value — full schemas everywhere, no source, no per-user regen.
 
@@ -64,7 +64,7 @@ never presented as current.
 
 - [x] T012 [US3] In the fallback, compare the served entry's plugin version with the installed plugin version; when they differ, serve (better than reduced) but set `version_mismatch` with both versions. (FR-007, D6)
 - [x] T013 [US3] Add `sb schema-catalog status`: per-plugin catalog-vs-installed version (drift), per-builder counts, and committed compressed size vs the ~3MB bound. (FR-007, contracts/sb-schema-catalog-cli)
-- [ ] T014 [US3] Live-verify quickstart Check 6 (bump a plugin version → `version_mismatch` flagged) and Check 2 (`status` size ≤~3MB, ≥5× smaller than raw). (SC-004, SC-006)
+- [x] T014 [US3] Live-verify quickstart Check 6 (bump a plugin version → `version_mismatch` flagged) and Check 2 (`status` size ≤~3MB, ≥5× smaller than raw). (SC-004, SC-006)
 
 ## Phase 6: User Story 4 — Sampled control-to-value validation (Priority: P3, optional)
 
@@ -79,8 +79,8 @@ key matches the saved key.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T016 [US2] Live-verify quickstart Check 5 (no regression): installed Elementor widget (`eael-info-box`) + core block (`core/heading`) are byte-identical to pre-feature — NO `source` marker on those live results. Diff against pre-feature baselines. (FR-008, SC-005)
-- [ ] T017 [US1] Live-verify quickstart Check 7 — narrowly the **zero-regeneration** claim: a brand-new consumer instance that has run NO `sb schema-catalog generate` still serves Pro schemas from the committed catalog out of the box (distinct from T009's full-coverage check). (SC-003)
+- [x] T016 [US2] Live-verify quickstart Check 5 (no regression): installed Elementor widget (`eael-info-box`) + core block (`core/heading`) are byte-identical to pre-feature — NO `source` marker on those live results. Diff against pre-feature baselines. (FR-008, SC-005)
+- [x] T017 [US1] Live-verify quickstart Check 7 — narrowly the **zero-regeneration** claim: a brand-new consumer instance that has run NO `sb schema-catalog generate` still serves Pro schemas from the committed catalog out of the box (distinct from T009's full-coverage check). (SC-003)
 - [ ] T018 [P] Docs-with-code: update `skills/gutenberg-eb/SKILL.md` + `skills/elementor-ea/SKILL.md` (editor-schema catalog fallback + the `source`/version markers) and `CLAUDE.md` (a gotcha on the bundled catalog + how to regenerate). (Constitution V)
 - [ ] T019 [P] Add `memory/plugin-behavior/schema-catalog.md` — runtime-registry-as-truth, the headless GB `wp.blocks` dump vs server-side block.json, version-keyed committed catalog, regen with Pro active. (Constitution V)
 - [ ] T020 Wire `sb schema-catalog` into `sandbox/registry.py` + `sandbox/cli.py` (registry-wide, like `cache`/`license`); restore the T002 snapshots; assemble the evidence bundle.

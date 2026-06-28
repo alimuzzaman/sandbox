@@ -108,11 +108,14 @@ echo json_encode($out);
 
 # Map PHP class top-level namespace → plugin slug for Elementor widgets.
 _NS_TO_PLUGIN: dict[str, str] = {
-    'Elementor':           'elementor',
-    'ElementorPro':        'elementor-pro',
-    'EssentialAddons':     'essential-addons-for-elementor-lite',
-    'EssentialAddonsPro':  'essential-addons-elementor-pro',
-    'EAEL':                'essential-addons-for-elementor-lite',
+    'Elementor':                   'elementor',
+    'ElementorPro':                'elementor-pro',
+    # EA free + Pro share the Essential_Addons_Elementor namespace;
+    # Pro subclasses live under \Pro\ but we attribute all to free (the carrier plugin).
+    'Essential_Addons_Elementor':  'essential-addons-for-elementor-lite',
+    'EssentialAddons':             'essential-addons-for-elementor-lite',
+    'EssentialAddonsPro':          'essential-addons-elementor',
+    'EAEL':                        'essential-addons-for-elementor-lite',
 }
 
 
@@ -144,6 +147,9 @@ def _run_php(inst: str, php_src: str) -> dict:
 
 
 def _ns_to_plugin(class_name: str) -> str | None:
+    # EA Pro subclasses live under Essential_Addons_Elementor\Pro\...
+    if "Essential_Addons_Elementor" in class_name and "\\Pro\\" in class_name:
+        return "essential-addons-elementor"
     top = class_name.split("\\")[0] if "\\" in class_name else class_name.split("_")[0]
     return _NS_TO_PLUGIN.get(top)
 
@@ -261,6 +267,49 @@ def _cmd_generate(inst: str) -> None:
     gb_raw = _run_php(inst, _GUTENBERG_DUMP_PHP)
     if not gb_raw:
         die("Gutenberg dump returned no data.")
+
+    # 3b. Merge JS runtime dump (written by the headless schema-dump page).
+    # The JS dump captures the full wp.blocks registry — including EB Pro blocks
+    # where the PHP source resolver can't reach full fidelity (dist build, no src/).
+    # JS dump wins for any block it contains (it has the real attribute set from
+    # the JS runtime); PHP source resolver wins for blocks not in the JS dump.
+    js_dump_path = wp_dir(inst) / "wp-content" / "sandbox-schema-dump" / "gutenberg.json"
+    if js_dump_path.exists():
+        info(f"Merging JS runtime dump ({js_dump_path.stat().st_size // 1024}KB)…")
+        try:
+            with open(js_dump_path, encoding="utf-8") as fh:
+                js_raw: dict = json.load(fh)
+            merged = 0
+            for block_name, js_block in js_raw.items():
+                js_attrs = js_block.get("attributes", {})
+                php_entry = gb_raw.get(block_name, {})
+                php_attrs = php_entry.get("attributes", {})
+                # JS wins when it has more attributes OR the PHP entry is partial.
+                if len(js_attrs) > len(php_attrs) or php_entry.get("coverage") == "partial":
+                    # Infer plugin for EB Pro blocks by name prefix.
+                    plugin = php_entry.get("plugin")
+                    if plugin is None:
+                        if "essential-blocks/pro-" in block_name:
+                            plugin = "essential-blocks-pro"
+                        elif block_name.startswith("essential-blocks/"):
+                            plugin = "essential-blocks"
+                        elif block_name.startswith("core/"):
+                            plugin = "wordpress-core"
+                    gb_raw[block_name] = {
+                        "attributes": js_attrs,
+                        "supports":   js_block.get("supports", php_entry.get("supports", {})),
+                        "dynamic":    php_entry.get("dynamic", False),
+                        "coverage":   "full",
+                        "plugin":     plugin,
+                    }
+                    merged += 1
+            info(f"  JS dump merged {merged} blocks (upgraded coverage to full).")
+        except Exception as exc:
+            warn(f"JS dump load failed ({exc}) — using PHP-only results.")
+    else:
+        warn(f"No JS dump found at {js_dump_path} — EB Pro blocks will be partial. "
+             "Run the headless schema-dump page first: "
+             "visit https://sandbox.tst/wp-admin/admin.php?page=sandbox-schema-dump")
 
     # 4. Build catalog entries.
     el_entries = _build_elementor_entries(el_raw, plugin_versions)

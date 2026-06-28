@@ -81,9 +81,9 @@ key matches the saved key.
 
 - [x] T016 [US2] Live-verify quickstart Check 5 (no regression): installed Elementor widget (`eael-info-box`) + core block (`core/heading`) are byte-identical to pre-feature — NO `source` marker on those live results. Diff against pre-feature baselines. (FR-008, SC-005)
 - [x] T017 [US1] Live-verify quickstart Check 7 — narrowly the **zero-regeneration** claim: a brand-new consumer instance that has run NO `sb schema-catalog generate` still serves Pro schemas from the committed catalog out of the box (distinct from T009's full-coverage check). (SC-003)
-- [ ] T018 [P] Docs-with-code: update `skills/gutenberg-eb/SKILL.md` + `skills/elementor-ea/SKILL.md` (editor-schema catalog fallback + the `source`/version markers) and `CLAUDE.md` (a gotcha on the bundled catalog + how to regenerate). (Constitution V)
-- [ ] T019 [P] Add `memory/plugin-behavior/schema-catalog.md` — runtime-registry-as-truth, the headless GB `wp.blocks` dump vs server-side block.json, version-keyed committed catalog, regen with Pro active. (Constitution V)
-- [ ] T020 Wire `sb schema-catalog` into `sandbox/registry.py` + `sandbox/cli.py` (registry-wide, like `cache`/`license`); restore the T002 snapshots; assemble the evidence bundle.
+- [x] T018 [P] Docs-with-code: update `skills/gutenberg-eb/SKILL.md` + `skills/elementor-ea/SKILL.md` (editor-schema catalog fallback + the `source`/version markers) and `CLAUDE.md` (a gotcha on the bundled catalog + how to regenerate). (Constitution V)
+- [x] T019 [P] Add `memory/plugin-behavior/schema-catalog.md` — runtime-registry-as-truth, the headless GB `wp.blocks` dump vs server-side block.json, version-keyed committed catalog, regen with Pro active. (Constitution V)
+- [x] T020 Wire `sb schema-catalog` into `sandbox/registry.py` + `sandbox/cli.py` (registry-wide, like `cache`/`license`); restore the T002 snapshots; assemble the evidence bundle.
 
 ## Dependencies & Execution Order
 

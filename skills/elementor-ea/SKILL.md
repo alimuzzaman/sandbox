@@ -41,3 +41,13 @@ widget (Pro-only / not installed) returns `widget_unavailable`.
 ## Schema
 `sandbox/editor-schema {builder:"elementor"}` lists registered widget names (incl. `eael-*`);
 add `name:"eael-..."` for one widget's control ids + defaults (enable it first).
+
+**Bundled schema catalog (spec 012)**: `editor-schema` serves full control sets from the committed
+catalog when a widget isn't live-registered (e.g. Elementor Pro / EA on a consumer instance without
+those plugins). Response carries `source: "catalog"` + `catalog.version`. A `version_mismatch` flag
+is set when the installed plugin version differs from the catalog entry — schema served regardless
+(better than nothing). Live results for installed widgets are byte-identical to pre-feature (no
+`source` marker). Catalog: `sandbox/assets/editor-schema/elementor.json.gz` (81 Pro widgets, 102 EA
+widgets at full coverage). To regenerate after a plugin update: `./sb schema-catalog generate
+--instance <gen>` on an instance with Elementor + Pro + EA active.
+See `memory/plugin-behavior/schema-catalog.md`.

@@ -55,6 +55,17 @@ Pass `source_root:"<path>"` to point discovery at a specific EB checkout. The re
 in-instance, so the checkout must be readable **inside the container** — the `.org` build alone
 yields `partial` (no `src/controls`). See `memory/plugin-behavior/eb-attribute-schema.md`.
 
+**Bundled schema catalog (spec 012)**: when the live resolver returns partial/reduced AND the
+bundled catalog has a richer entry, `editor-schema` automatically serves the catalog entry
+instead (`source: "catalog"`). This covers EB Pro blocks on any instance — they're a dist build,
+so the live resolver can't reach full fidelity, but the catalog has the full JS-runtime attribute
+set (1764 attrs for `pro-business-hours`, etc.). The catalog is committed at
+`sandbox/assets/editor-schema/gutenberg.json.gz` and provisioned to each instance on `up`/`apply`.
+`source: "live"` means the PHP resolver ran and won (preferred over catalog when full).
+To regenerate: run the headless dump page (`admin.php?page=sandbox-schema-dump`) on an instance
+with EB free + Pro active, then `./sb schema-catalog generate --instance <gen>`.
+See `memory/plugin-behavior/schema-catalog.md`.
+
 **Schema ≠ render**: the correct attribute names make authoring correct, but static EB blocks (e.g.
 `advanced-heading`, which ships a real `save.js`) still need the **finalizer** to render non-empty —
 a self-closing `gutenberg-insert` renders empty even with the right `titleText`.

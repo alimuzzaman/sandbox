@@ -621,6 +621,8 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
 
 19. **All machine-state lives under one swappable base `$SANDBOX_HOME` (spec 009).** Default `~/sandbox`. Baked-path artifacts (compose files, herd shims, Caddyfile, tools venv) are REGENERATED on relocate; pure data (registry, snapshots, dl-cache, wp installs) moves cleanly. Migration: `./sb migrate --apply`. Relocate: `./sb home <dir>`. DB volumes are Docker-named — untouched by a move. Single-file bind mounts are VirtioFS-fragile after moves — keep files in a subdir (e.g. `runtime/bin/wp-cli.phar`) to sidestep stale negative-cache bugs.
 
+20. **Bundled schema catalog (spec 012) — regenerate after a Pro plugin update.** Committed `sandbox/assets/editor-schema/*.json.gz` is version-keyed; `editor-schema` flags `version_mismatch` when installed version differs. Regenerate: (a) visit `https://<gen>.tst/wp-admin/admin.php?page=sandbox-schema-dump` with EB free + Pro active (wait for `#sandbox-schema-dump-done`), then (b) `./sb schema-catalog generate --instance <gen>`, commit the `.json.gz`. Catalog is provisioned on `up`/`apply`; consumer instances need no regen step. EB Pro uses the JS dump (dist build, PHP can't reach full fidelity); EB free uses the PHP source resolver. See `memory/plugin-behavior/schema-catalog.md`.
+
 ---
 
 ## Adding a new skill or workflow

@@ -992,7 +992,8 @@ function sandbox_editor_catalog_entry($builder, $name)
         }
         return array_merge(
             array_diff_key($entry, ['controls' => 1, 'overrides' => 1, 'own' => 1]),
-            ['controls' => $controls, 'count' => count($controls)]
+            ['controls' => $controls, 'count' => count($controls),
+             'groups'   => sandbox_editor_group_controls($controls, $entry['content_ids'] ?? [])]
         );
     }
 
@@ -1007,6 +1008,52 @@ function sandbox_editor_plugin_version($slug)
         if (strpos($file, $slug . '/') === 0) { return $data['Version'] ?? null; }
     }
     return null;
+}
+
+/**
+ * Split a flat controls dict into content / style / common groups.
+ *
+ * content — tab="content": the primary controls defining what the widget shows
+ *           (text, image, link). Look here first.
+ * style   — tab="style": widget-specific appearance (colors, typography, spacing
+ *           for inner elements). These target widget-inner selectors.
+ * common  — tab="advanced" or _/eael_ prefix: Elementor base + EA extension
+ *           controls applied to {{WRAPPER}} (outer div). Background, padding,
+ *           border, animation, motion effects, etc. are all here and work
+ *           identically on every widget.
+ *
+ * @param array $controls  flat {ctrl_id => definition} map
+ * @param array $content_ids  ordered list of known content-tab IDs (from catalog)
+ */
+function sandbox_editor_group_controls(array $controls, array $content_ids = []): array
+{
+    $content = [];
+    $style   = [];
+    $common  = [];
+
+    // Honor catalog-recorded content_ids order first (most accurate).
+    $content_set = array_flip($content_ids);
+    foreach ($content_ids as $id) {
+        if (isset($controls[$id])) { $content[$id] = $controls[$id]; }
+    }
+
+    foreach ($controls as $id => $def) {
+        if (isset($content_set[$id])) { continue; }  // already in content
+        $tab = $def['tab'] ?? null;
+        $is_base    = strncmp($id, '_', 1) === 0;
+        $is_ea_ext  = strncmp($id, 'eael_', 5) === 0;
+        if ($is_base || $is_ea_ext || $tab === 'advanced') {
+            $common[$id] = $def;
+        } elseif ($tab === 'style') {
+            $style[$id] = $def;
+        } elseif ($tab === 'content') {
+            $content[$id] = $def;  // caught via tab when not in content_ids
+        } else {
+            $common[$id] = $def;   // unknown tab → treat as common
+        }
+    }
+
+    return ['content' => $content, 'style' => $style, 'common' => $common];
 }
 
 /** Build an editor-schema response from a catalog entry (source: catalog). */
@@ -1131,7 +1178,9 @@ function sandbox_editor_schema($input)
             } catch (\Throwable $e) {
                 return new WP_Error('controls_unavailable', $e->getMessage());
             }
-            return ['builder' => 'elementor', 'name' => $name, 'controls' => $controls];
+            return ['builder' => 'elementor', 'name' => $name,
+                    'controls' => $controls, 'count' => count($controls),
+                    'groups'   => sandbox_editor_group_controls($controls)];
         }
         $names = is_array($types) ? array_keys($types) : [];
         return ['builder' => 'elementor', 'count' => count($names), 'widgets' => $names];

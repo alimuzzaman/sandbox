@@ -95,7 +95,17 @@ def normalize_elementor_catalog(entries: dict, descriptions: dict | None = None)
             else:
                 own[ctrl_id] = ctrl_val
 
+        # content_ids: ordered list of control IDs in the "content" tab — these are
+        # the primary/defining controls for this widget (text, image, link, etc.).
+        # Agents should look here first to understand what the widget does.
+        content_ids: list[str] = [
+            cid for cid in controls
+            if controls[cid].get("tab") == "content"
+        ]
+
         widget_entry: dict = {**meta, "controls": ctrl_list}
+        if content_ids:
+            widget_entry["content_ids"] = content_ids
         if overrides:
             widget_entry["overrides"] = overrides
         if own:

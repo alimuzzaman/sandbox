@@ -1011,53 +1011,110 @@ function sandbox_editor_plugin_version($slug)
 }
 
 /**
- * Split a flat controls dict into content / style / common groups.
+ * Split a flat controls dict into navigable groups.
  *
- * content — tab="content": the primary controls defining what the widget shows
- *           (text, image, link). Look here first.
- * style   — tab="style": widget-specific appearance (colors, typography, spacing
- *           for inner elements). These target widget-inner selectors.
- * common  — tab="advanced" or _/eael_ prefix: Elementor base + EA extension
- *           controls applied to {{WRAPPER}} (outer div). Background, padding,
- *           border, animation, motion effects, etc. are all here and work
- *           identically on every widget.
+ * content — flat {ctrl_id => def}: primary controls defining what the widget
+ *           shows (text, image, link). Read these first to understand the widget.
+ * style   — {section_name => {ctrl_id => def}}: widget-specific appearance
+ *           (colors, typography) targeting widget-inner elements.
+ * common  — {section_name => {ctrl_id => def}}: Elementor base + EA extension
+ *           controls targeting {{WRAPPER}} (outer div). Identical across all
+ *           widgets. Key sections: _section_background (background color/image/
+ *           gradient), _section_border, _section_box_shadow, section_effects
+ *           (entrance animation), section_motion_effects, _section_transform.
+ *           To change wrapper background → common._section_background.
  *
- * @param array $controls  flat {ctrl_id => definition} map
+ * Structural UI controls (section, tab, raw_html, alert, divider) are omitted —
+ * they are editor chrome, not widget settings.
+ *
+ * @param array $controls     flat {ctrl_id => definition} map
  * @param array $content_ids  ordered list of known content-tab IDs (from catalog)
  */
 function sandbox_editor_group_controls(array $controls, array $content_ids = []): array
 {
-    $content = [];
-    $style   = [];
-    $common  = [];
+    // Editor chrome — not real settings agents can write.
+    static $skip = ['section', 'tab', 'tabs', 'raw_html', 'alert', 'heading', 'divider'];
 
-    // Honor catalog-recorded content_ids order first (most accurate).
+    $content = [];
+    $style   = [];  // section_name  => {ctrl_id => def}
+    $common  = [];  // section_name  => {ctrl_id => def}
+
     $content_set = array_flip($content_ids);
     foreach ($content_ids as $id) {
-        if (isset($controls[$id])) { $content[$id] = $controls[$id]; }
+        if (isset($controls[$id]) && !in_array($controls[$id]['type'] ?? '', $skip, true)) {
+            $content[$id] = $controls[$id];
+        }
     }
 
     foreach ($controls as $id => $def) {
-        if (isset($content_set[$id])) { continue; }  // already in content
-        $tab = $def['tab'] ?? null;
-        $is_base    = strncmp($id, '_', 1) === 0;
-        $is_ea_ext  = strncmp($id, 'eael_', 5) === 0;
-        if ($is_base || $is_ea_ext || $tab === 'advanced') {
-            $common[$id] = $def;
+        if (isset($content_set[$id])) { continue; }
+        if (in_array($def['type'] ?? '', $skip, true)) { continue; }
+
+        $tab     = $def['tab'] ?? null;
+        $section = $def['section'] ?? '_root';
+        $is_base = strncmp($id, '_', 1) === 0;
+        $is_ea   = strncmp($id, 'eael_', 5) === 0;
+
+        if ($is_base || $is_ea || $tab === 'advanced') {
+            $common[$section][$id] = $def;
         } elseif ($tab === 'style') {
-            $style[$id] = $def;
+            $style[$section][$id] = $def;
         } elseif ($tab === 'content') {
-            $content[$id] = $def;  // caught via tab when not in content_ids
+            $content[$id] = $def;
         } else {
-            $common[$id] = $def;   // unknown tab → treat as common
+            $common[$section][$id] = $def;
         }
     }
 
     return ['content' => $content, 'style' => $style, 'common' => $common];
 }
 
+/**
+ * Keyword search across all controls of a widget.
+ *
+ * Matches on: control ID, label, description, selector keys + CSS values.
+ * Each match carries `group` (content|style|common) and `section` so the
+ * agent knows where it lives and can pass the same key to elementor-update.
+ *
+ * Usage: sandbox_editor_schema(['builder'=>'elementor','name'=>'heading','search'=>'background'])
+ */
+function sandbox_editor_search_controls(array $controls, string $query, array $groups): array
+{
+    $q = strtolower($query);
+
+    // Build a ctrl_id → {group, section} index from the already-computed groups.
+    $index = [];
+    foreach (($groups['content'] ?? []) as $id => $_) {
+        $index[$id] = ['group' => 'content', 'section' => null];
+    }
+    foreach (['style', 'common'] as $grp) {
+        foreach (($groups[$grp] ?? []) as $section => $ctrls) {
+            foreach ($ctrls as $id => $_) {
+                $index[$id] = ['group' => $grp, 'section' => $section];
+            }
+        }
+    }
+
+    $matches = [];
+    foreach ($controls as $id => $def) {
+        $haystack = strtolower(implode(' ', array_filter([
+            $id,
+            $def['label']       ?? '',
+            $def['description'] ?? '',
+            implode(' ', array_keys ($def['selectors'] ?? [])),
+            implode(' ', array_values($def['selectors'] ?? [])),
+        ])));
+        if (strpos($haystack, $q) !== false) {
+            $loc = $index[$id] ?? ['group' => 'unknown', 'section' => null];
+            $matches[$id] = array_merge($def, $loc);
+        }
+    }
+
+    return $matches;
+}
+
 /** Build an editor-schema response from a catalog entry (source: catalog). */
-function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null)
+function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $search = null)
 {
     $key  = $builder === 'gutenberg' ? 'attributes' : 'controls';
     $resp = ['builder' => $builder, 'name' => $name, $key => $cat[$key] ?? [],
@@ -1071,6 +1128,16 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null)
         $resp['dynamic']  = $bt ? (bool) $bt->render_callback : ($cat['dynamic'] ?? null);
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
                              'count' => count($cat[$key] ?? [])];
+    }
+    if ($builder === 'elementor' && !empty($cat['groups'])) {
+        if ($search !== null && $search !== '') {
+            return array_merge(
+                ['builder' => $builder, 'name' => $name, 'search' => $search, 'source' => 'catalog'],
+                array_intersect_key($resp, ['catalog' => 1, 'version_mismatch' => 1]),
+                ['matches' => sandbox_editor_search_controls($cat[$key] ?? [], $search, $cat['groups'])]
+            );
+        }
+        $resp['groups'] = $cat['groups'];
     }
     return $resp;
 }
@@ -1159,6 +1226,7 @@ function sandbox_editor_schema($input)
 
         $wm = \Elementor\Plugin::$instance->widgets_manager;
         $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
+        $search = isset($input['search']) ? trim((string) $input['search']) : null;
         if ($name) {
             $w = is_array($types) ? ($types[$name] ?? null) : null;
             if (!$w) {
@@ -1166,7 +1234,7 @@ function sandbox_editor_schema($input)
                 // (e.g. Elementor Pro/EA widget absent on this install).
                 $cat = sandbox_editor_catalog_entry('elementor', $name);
                 if ($cat) {
-                    return sandbox_editor_catalog_response('elementor', $name, $cat);
+                    return sandbox_editor_catalog_response('elementor', $name, $cat, null, $search);
                 }
                 return new WP_Error('not_found', "widget '$name' not registered (enable it first if EA)");
             }
@@ -1178,9 +1246,15 @@ function sandbox_editor_schema($input)
             } catch (\Throwable $e) {
                 return new WP_Error('controls_unavailable', $e->getMessage());
             }
-            return ['builder' => 'elementor', 'name' => $name,
+            $groups = sandbox_editor_group_controls($controls);
+            if ($search !== null && $search !== '') {
+                return ['builder' => 'elementor', 'name' => $name, 'search' => $search,
+                        'source' => 'live',
+                        'matches' => sandbox_editor_search_controls($controls, $search, $groups)];
+            }
+            return ['builder' => 'elementor', 'name' => $name, 'source' => 'live',
                     'controls' => $controls, 'count' => count($controls),
-                    'groups'   => sandbox_editor_group_controls($controls)];
+                    'groups'   => $groups];
         }
         $names = is_array($types) ? array_keys($types) : [];
         return ['builder' => 'elementor', 'count' => count($names), 'widgets' => $names];

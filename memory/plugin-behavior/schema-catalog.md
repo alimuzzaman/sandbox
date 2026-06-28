@@ -45,6 +45,55 @@ Elementor Pro v4.1.1, EA free v6.6.8, EA Pro v6.9.1.
    dump, merges, packs to `sandbox/assets/editor-schema/*.json.gz`, prints coverage report.
 4. Commit the updated `.json.gz` files; provision to instances via `./sb apply` or `up`.
 
+## Elementor catalog — v2 normalized format
+
+The Elementor catalog uses a pool-based v2 format to avoid duplicating the ~73.7% of controls
+that are identical across widgets (reduces from 4.3MB to 1.4MB compressed).
+
+```
+_format: "v2"
+_pool:   {ctrl_id → definition}   — controls appearing in ≥2 widgets; most-common value wins
+<widget>: {
+  controls:   [ctrl_id, ...]       — ordered list of IDs that match pool exactly
+  overrides:  {ctrl_id → def}      — pool controls with widget-specific values
+  own:        {ctrl_id → def}      — widget-unique controls (not in pool)
+  content_ids:[ctrl_id, ...]       — ordered IDs where tab=="content" (primary widget controls)
+}
+```
+
+`sandbox_editor_catalog_entry()` resolves this back to a flat controls dict before returning.
+3,434 pool entries; 730 have `description` strings (from `control-descriptions.json`).
+
+## Elementor catalog — groups
+
+Every named-widget `editor-schema` response includes a `groups` key for navigation:
+- `content` — flat `{ctrl_id: def}`: the widget's primary controls (from `content_ids`). Agents
+  should inspect these first to understand what the widget does.
+- `style` — `{section_name: {ctrl_id: def}}`: widget-specific appearance controls targeting
+  widget-inner elements. Sections are named by Elementor (e.g. `section_title_style`).
+- `common` — `{section_name: {ctrl_id: def}}`: Elementor base + EA extension wrapper controls,
+  identical across all widgets. Key sections:
+  - `_section_background` — background type, color, gradient, image, video, slideshow (~67 controls)
+  - `_section_border` — border type, width, radius, box-shadow
+  - `section_effects` — entrance animation (CSS class applied at scroll-into-view)
+  - `_section_transform` — rotate, scale, offset, skew, flip
+  - `section_motion_effects` — scrolling effects (parallax, mouse-track, 3D tilt)
+
+Structural editor-chrome types (section, tab, tabs, raw_html, alert, heading, divider) are
+omitted from all groups — they are Elementor UI scaffolding, not widget settings.
+
+## Search param
+
+Pass `search:"keyword"` to `editor-schema` for a widget to filter controls by id, label,
+description, and CSS selector text. Each match is tagged with `group` and `section`:
+
+```json
+{"builder":"elementor","name":"heading","search":"background color"}
+→ {"matches":{"_background_color":{"type":"color","group":"common","section":"_section_background",...}}}
+```
+
+Source is `live` when the widget is registered, `catalog` otherwise.
+
 ## EA widget attribution
 
 EA free and EA Pro share the `Essential_Addons_Elementor` PHP namespace. Pro subclasses have

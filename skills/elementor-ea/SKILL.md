@@ -40,14 +40,36 @@ widget (Pro-only / not installed) returns `widget_unavailable`.
 
 ## Schema
 `sandbox/editor-schema {builder:"elementor"}` lists registered widget names (incl. `eael-*`);
-add `name:"eael-..."` for one widget's control ids + defaults (enable it first).
+add `name:"eael-..."` for one widget's full control set (enable it first if EA).
+
+### Response shape
+Every named-widget response includes `groups` for navigation:
+- `groups.content` — flat `{ctrl_id: def}` of the widget's primary controls (text, image, link).
+  Read these first to understand what the widget does.
+- `groups.style` — `{section: {ctrl_id: def}}` for widget-inner appearance controls (typography,
+  colors targeting inner elements, etc.).
+- `groups.common` — `{section: {ctrl_id: def}}` for Elementor base + EA wrapper controls, identical
+  across all widgets. Key sections: `_section_background` (background fill, image, video, gradient),
+  `_section_border`, `_section_box_shadow`, `section_effects` (entrance animation),
+  `section_motion_effects`, `_section_transform`.
+  **To set the wrapper background** → `groups.common._section_background`.
+
+Structural editor-chrome controls (section headers, dividers, raw_html) are omitted from groups.
+
+### Search
+Pass `search:"keyword"` to filter controls by id, label, description, and CSS selector text.
+Returns `{matches: {ctrl_id: {def…, group, section}}}` — each match tagged with its group and
+section so the agent knows where it lives for `elementor-update`.
+
+```
+editor-schema {builder:"elementor", name:"heading", search:"background"}
+```
 
 **Bundled schema catalog (spec 012)**: `editor-schema` serves full control sets from the committed
 catalog when a widget isn't live-registered (e.g. Elementor Pro / EA on a consumer instance without
 those plugins). Response carries `source: "catalog"` + `catalog.version`. A `version_mismatch` flag
 is set when the installed plugin version differs from the catalog entry — schema served regardless
-(better than nothing). Live results for installed widgets are byte-identical to pre-feature (no
-`source` marker). Catalog: `sandbox/assets/editor-schema/elementor.json.gz` (81 Pro widgets, 102 EA
-widgets at full coverage). To regenerate after a plugin update: `./sb schema-catalog generate
+(better than nothing). Catalog uses v2 normalized format (`_pool` + per-widget split); resolved
+transparently before response. To regenerate after a plugin update: `./sb schema-catalog generate
 --instance <gen>` on an instance with Elementor + Pro + EA active.
 See `memory/plugin-behavior/schema-catalog.md`.

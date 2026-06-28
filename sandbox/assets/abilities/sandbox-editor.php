@@ -917,6 +917,41 @@ function sandbox_editor_eb_resolve($block_name, $block_type, $extra_roots = [])
  * results stay byte-identical (no marker). The catalog is provisioned to
  * mu-plugins/sandbox-schema-catalog/<builder>.json.gz.                            */
 
+/** Extract rich metadata from one Elementor control definition (spec 012 ext).
+ *  Returns: type, label, default, section, tab, selectors (css map), options (key→label). */
+function sandbox_editor_el_control_entry(array $c): array
+{
+    $e = [
+        'type'    => $c['type'] ?? null,
+        'label'   => isset($c['label']) ? (string) $c['label'] : null,
+        'default' => $c['default'] ?? null,
+        'section' => $c['section'] ?? null,
+        'tab'     => $c['tab'] ?? null,
+    ];
+    if (!empty($c['selectors']) && is_array($c['selectors'])) {
+        $sel = [];
+        foreach ($c['selectors'] as $selector => $css) {
+            if (is_string($selector) && is_string($css)) { $sel[$selector] = $css; }
+        }
+        if ($sel) { $e['selectors'] = $sel; }
+    }
+    if (!empty($c['options']) && is_array($c['options'])) {
+        $opts = [];
+        foreach ($c['options'] as $k => $v) {
+            if (is_string($v) || is_numeric($v)) {
+                $opts[$k] = (string) $v;
+            } elseif (is_array($v) && isset($v['title'])) {
+                $opts[$k] = (string) $v['title'];
+            } elseif (is_array($v) && isset($v['label'])) {
+                $opts[$k] = (string) $v['label'];
+            }
+            if (count($opts) >= 30) { break; }  // skip icon/font packs (100+ items)
+        }
+        if ($opts) { $e['options'] = $opts; }
+    }
+    return $e;
+}
+
 function sandbox_editor_catalog_entry($builder, $name)
 {
     static $cache = [];
@@ -1031,6 +1066,18 @@ function sandbox_editor_schema($input)
     }
 
     if ($builder === 'elementor' && class_exists('\\Elementor\\Plugin')) {
+        // Elementor v4+ strips label/tab/options during WP init (non-REST context).
+        // Reset the Performance static flag + clear control stacks so get_controls()
+        // rebuilds with full metadata in this REST request context.
+        try {
+            if (!defined('REST_REQUEST')) { define('REST_REQUEST', true); }
+            $perf_ref = new ReflectionClass('Elementor\Core\Frontend\Performance');
+            $perf_prop = $perf_ref->getProperty('is_frontend');
+            $perf_prop->setAccessible(true);
+            $perf_prop->setValue(null, null);
+        } catch (\Throwable $_) {}
+        \Elementor\Plugin::$instance->controls_manager->clear_stack_cache();
+
         $wm = \Elementor\Plugin::$instance->widgets_manager;
         $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
         if ($name) {
@@ -1047,7 +1094,7 @@ function sandbox_editor_schema($input)
             $controls = [];
             try {
                 foreach ((array) $w->get_controls() as $cid => $c) {
-                    $controls[$cid] = ['type' => $c['type'] ?? null, 'default' => $c['default'] ?? null];
+                    $controls[$cid] = sandbox_editor_el_control_entry($c);
                 }
             } catch (\Throwable $e) {
                 return new WP_Error('controls_unavailable', $e->getMessage());

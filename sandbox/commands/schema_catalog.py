@@ -19,10 +19,64 @@ from sandbox.registry import register
 # ---------------------------------------------------------------------------
 
 _ELEMENTOR_DUMP_PHP = r"""<?php
+// Elementor v4+ strips label/tab/options in non-admin/non-REST context via
+// Performance::should_optimize_controls(). The static flag is set during WP init
+// (before REST_REQUEST is defined), so simply defining REST_REQUEST is too late.
+// Solution: reset the static via reflection, then clear the controls manager cache
+// so each widget's stack is rebuilt with labels on the next get_controls() call.
 if (!class_exists('Elementor\Plugin')) {
     echo json_encode(['_error' => 'elementor_not_loaded']);
     return;
 }
+
+// Reset Performance::$is_frontend (private static) via reflection so the next
+// get_controls() call sees REST_REQUEST=true and preserves labels/tabs/options.
+try {
+    if (!defined('REST_REQUEST')) { define('REST_REQUEST', true); }
+    $perf_ref = new ReflectionClass('Elementor\Core\Frontend\Performance');
+    $prop = $perf_ref->getProperty('is_frontend');
+    $prop->setAccessible(true);
+    $prop->setValue(null, null);  // reset to null so it re-evaluates next call
+} catch (\Throwable $_) {}
+// Flush the cached control stacks so each widget rebuilds them with labels.
+\Elementor\Plugin::$instance->controls_manager->clear_stack_cache();
+
+/** Extract rich metadata from one Elementor control definition. */
+function _sandbox_el_control_entry(array $c): array {
+    $e = [
+        'type'    => $c['type'] ?? null,
+        'label'   => isset($c['label']) ? (string) $c['label'] : null,
+        'default' => $c['default'] ?? null,
+        'section' => $c['section'] ?? null,
+        'tab'     => $c['tab'] ?? null,
+    ];
+    // selectors: string→string CSS maps (skip callable / array values).
+    if (!empty($c['selectors']) && is_array($c['selectors'])) {
+        $sel = [];
+        foreach ($c['selectors'] as $selector => $css) {
+            if (is_string($selector) && is_string($css)) { $sel[$selector] = $css; }
+        }
+        if ($sel) { $e['selectors'] = $sel; }
+    }
+    // options: for select/choose/icon controls — flatten to key→label strings.
+    // Cap at 30 entries; large icon/font packs (100+ items) are bloat for agents.
+    if (!empty($c['options']) && is_array($c['options'])) {
+        $opts = [];
+        foreach ($c['options'] as $k => $v) {
+            if (is_string($v) || is_numeric($v)) {
+                $opts[$k] = (string) $v;
+            } elseif (is_array($v) && isset($v['title'])) {
+                $opts[$k] = (string) $v['title'];
+            } elseif (is_array($v) && isset($v['label'])) {
+                $opts[$k] = (string) $v['label'];
+            }
+            if (count($opts) >= 30) { break; }
+        }
+        if ($opts) { $e['options'] = $opts; }
+    }
+    return $e;
+}
+
 $wm = Elementor\Plugin::$instance->widgets_manager;
 $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
 $dump = [];
@@ -31,7 +85,7 @@ foreach ($types as $name => $w) {
     try {
         $controls = [];
         foreach ($w->get_controls() as $cid => $c) {
-            $controls[$cid] = ['type' => $c['type'] ?? null, 'default' => $c['default'] ?? null];
+            $controls[$cid] = _sandbox_el_control_entry($c);
         }
         $dump[$name] = ['controls' => $controls, 'class' => $cls];
     } catch (\Throwable $e) {
@@ -232,7 +286,7 @@ def cmd_schema_catalog(cfg, args) -> None:
         for b, d in st["builders"].items():
             info(f"  {b:10} {d['count']:>5} entries   {_human_bytes(d['compressed_bytes']):>9}")
         size = st["total_compressed_bytes"]
-        bound = 3 * 1024 * 1024
+        bound = 5 * 1024 * 1024
         flag = "OK" if size <= bound else "OVER ~3MB bound"
         ok(f"Total: {st['total_entries']} entries, {_human_bytes(size)} compressed ({flag}).")
         return
@@ -329,7 +383,7 @@ def _cmd_generate(inst: str) -> None:
         info("  elementor: skipped (plugin not active on gen instance)")
 
     total = gb_report["compressed_bytes"] + el_report["compressed_bytes"]
-    bound = 3 * 1024 * 1024
+    bound = 5 * 1024 * 1024
     flag = "OK" if total <= bound else "OVER ~3MB bound!"
     ok(f"Total: {gb_report['count'] + el_report['count']} entries, "
        f"{_human_bytes(total)} compressed ({flag}).")

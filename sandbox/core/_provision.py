@@ -115,6 +115,10 @@ def _write_abilities_muplugin(instance: str) -> None:
     finalizer = asset_dir / "00-sandbox-eb-finalizer.php"
     if finalizer.exists():
         shutil.copyfile(finalizer, mu_dir / "00-sandbox-eb-finalizer.php")
+    # spec 012 — headless Gutenberg block registry dump page.
+    schema_dump = asset_dir / "00-sandbox-schema-dump.php"
+    if schema_dump.exists():
+        shutil.copyfile(schema_dump, mu_dir / "00-sandbox-schema-dump.php")
     # Copy the payload dir (vendored wordpress/mcp-adapter) that the loader
     # require_once's for the MCP-server exposure. Refresh in place each call.
     payload = asset_dir / "sandbox-abilities"

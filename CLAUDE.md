@@ -303,26 +303,6 @@ workflow is its own folder with an uppercase entry file
 | **Dev's personal skills** | `~/.claude/skills/*/SKILL.md` | Loaded by Claude Code itself, independent of the sandbox |
 
 This is **generic** — works for any plugin a dev adds via `./sb add`.
-If `notificationx` ships `notificationx/.claude/skills/nx-realtime/SKILL.md`,
-that pack is discovered automatically when `focus = notificationx`. Same for
-betterdocs, schedulepress, anything else.
-
-### What plugin authors should ship in their repo
-
-```
-<plugin-repo>/
-├── CLAUDE.md                       # high-level conventions, gotchas, file map
-└── .claude/
-    └── skills/
-        ├── <feature-or-area>/SKILL.md   # deep-dive per feature
-        └── <another-area>/SKILL.md
-```
-
-Both are picked up automatically by `focus_get`. No sandbox-side wiring needed.
-
-Each plugin repo's `CLAUDE.md` should stay short but operational: source map,
-build commands, test commands, release/package command, known compatibility
-traps, and minimum verification rules by changed area.
 
 ---
 
@@ -467,18 +447,7 @@ sandbox ensure                        # boot/refresh (create-if-missing)
 ./sb instance delete <name>           # tear one down (containers, volume, dir, registry)
 ```
 
-Per-project is the only instance model — there is **no implicit/global `main`
-instance**. CLI commands resolve their target instance by this precedence:
-explicit `--instance <name>` → `$SANDBOX_INSTANCE` → **the instance registered
-for the current working directory's project** (via the registry) → **error**.
-So `cd` into a plugin checkout and bare `./sb status` / `./sb wp …` target that
-project's instance with no flag; run an instance-scoped command from a dir that
-isn't a registered project and it aborts with guidance (`cd` into one, or `sb
-init` / `sb ensure`) rather than targeting a fallback. Registry-wide commands
-(`instances`, `dashboard`, `web`, `setup`, `global`, `uninstall`, `domains`)
-and project-routed ones (`ensure`/`test`/`init`, `apply --project-dir`) run
-without a resolved instance. The MCP tools route by `project_dir` (no
-`instance=` needed; pass it only to override).
+Per-project is the only instance model. CLI command resolution: `--instance <name>` → `$SANDBOX_INSTANCE` → **instance registered for cwd** → error. `cd` into a plugin checkout and bare `./sb status` / `./sb wp …` target that project's instance. Registry-wide commands (`instances`, `dashboard`, `web`, `setup`) and project-routed ones (`ensure`/`test`/`init`) run without a resolved instance.
 
 ### Web server per project (apache / nginx / litespeed)
 
@@ -493,19 +462,7 @@ a different docroot + uid).
 | `litespeed` | OpenLiteSpeed (lsphp, single container) | OLS vhost, `.htaccess` autoload |
 | `herd` | HOST-native: Laravel Herd + host MySQL (no docker) | Herd's nginx (valet driver) |
 
-`server: "herd"` is the host driver: the WP install stays at
-`runtime/wp-<instance>/` but is served by `herd link` at
-`https://<instance>.test`, DB on host MySQL (`sandbox_<instance>`), constants
-pinned literal (host wp-config is stable). `wpcli()`/MCP tools route to host
-`wp --path` transparently; `sb test` runs phpunit on host PHP. **`phpVersion`
-is authoritative on herd for BOTH tiers**: web via `herd isolate php@<v>
---site <instance>` (run after secure, verified+retried), CLI/phpunit via the
-version-specific Herd binary `php<MM>` (`8.1`→`php81`) — NOT the generic `php`
-(Herd's default) nor `herd which-php` (also reports default). Per-machine
-choice — put it in `sandbox.config.override.json`. NOT on herd (v1):
-snapshots, xdebug, Mailpit capture, `./sb server` switching (docker↔herd =
-re-provision), `.tst` domains. See docs/sandbox-config-reference.md §"Host
-driver".
+`server: "herd"` uses Laravel Herd + host MySQL (no Docker). WP install at `runtime/wp-<instance>/`, served by `herd link` at `https://<instance>.test`. `wpcli()`/MCP tools route to host `wp --path`. `phpVersion` pins web via `herd isolate php@<v> --site <instance>` (after `herd secure`) and CLI/phpunit via the `php<MM>` binary. NOT on herd (v1): snapshots, xdebug, Mailpit, `./sb server` switching, `.tst` domains.
 
 **Switch an existing instance's server in place** — same URL/port/DB/content:
 
@@ -540,15 +497,7 @@ instances — that's `sandbox init` in a plugin repo.
 ./sb web                # browser dashboard on http://127.0.0.1:8765 (localhost only)
 ```
 
-`./sb web`'s `/api/instances` payload is `{instances, plugins (from the
-registry), servers, seeds, domains_ready}`; per-instance detail has
-Start/Stop/Restart, a focus dropdown, a web-server dropdown (switch in place), a
-live-streaming Tools console (logs/status/doctor/update/snapshot/wp-cli), and a
-"Use with Claude" block (the single `mcp__sandbox__*` namespace). The "New
-instance" page points to `./sb init` (creation is CLI/per-project). The UI is
-TypeScript under `src/web`, built to the vendored `config/sandbox-web.js` (so
-`./sb web` needs no Node; only rebuilding does: `./scripts/build-web-js.sh`,
-CSS via `./scripts/build-web-css.sh`).
+`./sb web`'s UI has per-instance Start/Stop/Restart, focus/server dropdowns, a live Tools console, and a "Use with Claude" block. The "New instance" page points to `./sb init`. UI source: `src/web` (TypeScript), built to `config/sandbox-web.js` (`./scripts/build-web-js.sh` / `build-web-css.sh`).
 
 ---
 
@@ -606,19 +555,9 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
   Use this for every focused plugin unless a more specific plugin workflow
   overrides it.
 
-- **Testing a release zip in isolation** → use a SEPARATE project dir (its own
-  `sandbox.config.json`) so its instance is independent of your dev symlink,
-  then `wp_cli(project_dir=<that dir>, command="plugin install /path/foo.zip
-  --activate")`. Reproduces bugs that only appear in a non-symlink install
-  (broken `plugin_dir_url()`, etc.) without disturbing your dev tree.
+- **Testing a release zip in isolation** → use a SEPARATE project dir so the instance is independent of your dev symlink, then `wp_cli(project_dir=<that dir>, command="plugin install /path/foo.zip --activate")`. Reproduces non-symlink bugs without disturbing your dev tree.
 
-- **Reading or closing a FluentBoards card** → `skills/fluentboards/SKILL.md`.
-  This is the company's task tracker; the skill ships scripts for reading
-  cards, posting comments, moving stages, assigning users, etc. Needs
-  `FLUENTBOARDS_SITE`, `FLUENTBOARDS_USER`, `FLUENTBOARDS_APP_PASSWORD` in
-  env (or `sandbox.local.yml` if you wire it through). Never creates,
-  updates, or archives **boards or stages** — only tasks/comments/labels/
-  subtasks/attachments.
+- **Reading or closing a FluentBoards card** → `skills/fluentboards/SKILL.md`. Needs `FLUENTBOARDS_SITE`, `FLUENTBOARDS_USER`, `FLUENTBOARDS_APP_PASSWORD` in env. Never modifies boards or stages — only tasks/comments/labels/subtasks/attachments.
 
 - **Starting the day** → `./sb update` (git-pulls the project repo this instance
   tracks). Pairs with `./sb doctor`.
@@ -640,181 +579,47 @@ defaults — never edit `sandbox.yml` for laptop-specific values.
    `runtime/wp/wp-content/plugins/<slug>` works. WP's `get_plugins()` does
    not scan subfolders — anything under `_sandbox/<slug>` is invisible.
 
-3. **Bind-mount plugin source at the same absolute host path inside the
-   container.** Absolute symlinks under `wp-content/plugins/` only resolve
-   if the target path exists with the same string in the container. The
-   compose file mounts `${SANDBOX_PLUGINS_HOST}:${SANDBOX_PLUGINS_HOST}`
-   for this reason — don't "simplify" it.
+3. **Bind-mount plugin source at the same absolute host path inside the container.** Compose mounts `${SANDBOX_PLUGINS_HOST}:${SANDBOX_PLUGINS_HOST}` so absolute symlinks resolve — don't simplify it.
 
 4. **MCP tool changes need a Claude Code restart** to take effect. The MCP
    server's tools are registered at process start and aren't hot-reloaded.
 
-5. **`git rm --cached` refuses nested git repos without `-f`.** When cleaning
-   up an accidental `git add` of `plugins/<repo>`, use `git rm -rf --cached`.
+5. **`git rm --cached` refuses nested git repos without `-f`.** Use `git rm -rf --cached` for `plugins/<repo>`.
 
 6. **`wp post meta update` with JSON needs shell.** wp-cli doesn't expand
    `$()`; use `docker compose run --rm --entrypoint sh wpcli -c '…'` or pipe.
 
-7. **Xdebug only attaches on trigger.** `./sb xdebug on` enables
-   `xdebug.start_with_request=trigger`. Requests without `XDEBUG_TRIGGER`
-   (cookie / GET param / env) won't break — that's deliberate so cron and
-   background traffic don't deadlock the debugger.
+7. **Xdebug only attaches on trigger.** `./sb xdebug on` sets `xdebug.start_with_request=trigger`. Requests without `XDEBUG_TRIGGER` skip the debugger — deliberate, so cron/background traffic doesn't deadlock.
 
-8. **Pretty permalinks need `AllowOverride All`.** The `wordpress:latest`
-   Apache config defaults to `AllowOverride None` for `/var/www/`, which
-   silently breaks `/wp-json/` (404) even though `?rest_route=…` works.
-   The compose `command:` override on the `wp` service patches this on
-   start; don't remove it.
+8. **Pretty permalinks need `AllowOverride All`.** Apache defaults to `AllowOverride None`, silently 404ing `/wp-json/`. The compose `command:` override on the `wp` service patches this — don't remove it.
 
 9. **Snapshots are local-only.** `runtime/snapshots/` is gitignored and
    contains machine-specific absolute paths in uploads metadata. For
    shareable fixtures use WXR in `runtime/seeds/` or a `wp_cli` seed
    script checked into the plugin repo.
 
-10. **wp-config constants live in compose env, not wp-config.php.** The
-    official image's entrypoint regenerates `wp-config.php` from env on every
-    start, wiping `wp config set` values. The project's `config` dict (and the
-    multisite network constants) are rendered into `WORDPRESS_CONFIG_EXTRA` in
-    the generated compose file — on the web tier AND wpcli, so `wp eval` sees
-    them too. Multisite constants are gated on the
-    `runtime/wp-<instance>/.sandbox-multisite` marker (written after
-    `multisite-convert`); litespeed instead gets literal `wp config set` pins
-    (lsphp can't read container env). Config changes apply **in place** via
-    `./sb apply --project-dir <DIR>` / MCP `apply_config` (force-recreates the
-    web tier, no DB drop) — prefer it over `recreate_instance` (which wipes
-    data). A changed `wpVersion` is NOT applied by `apply` (needs a recreate).
+10. **wp-config constants live in compose env, not wp-config.php.** The official image regenerates `wp-config.php` from env on every start, wiping `wp config set` values. Constants are rendered into `WORDPRESS_CONFIG_EXTRA` (web + wpcli tiers). Litespeed gets literal `wp config set` pins instead (lsphp can't read container env). Apply config changes in-place: `./sb apply` / `apply_config` (no DB drop). A changed `wpVersion` needs a recreate.
 
-11. **Captured mail needs the mail mu-plugin.** The official `wordpress` image
-    has no working `sendmail`, so `wp_mail()` returns `false` and Mailpit stays
-    empty unless `00-sandbox-mail.php` routes PHP mail to `mailpit:1025` on
-    `phpmailer_init`. It also fixes WP's default `wordpress@localhost` sender
-    (PHPMailer rejects it as invalid — no TLD) via `wp_mail_from`. Written by
-    `_write_mail_muplugin` on every `sb up` + `sb install`; lives in the shared
-    bind-mount so BOTH web and wpcli mail is captured. Don't remove it.
+11. **Captured mail needs the mail mu-plugin.** `00-sandbox-mail.php` routes PHP mail to `mailpit:1025` via `phpmailer_init` and fixes the invalid `wordpress@localhost` sender. Written by `_write_mail_muplugin` on every `sb up` + `sb install`; mounted so both web and wpcli mail is captured.
 
 12. **`restore` resets the DB first.** `cmd_restore` runs `wp db reset --yes`
     before `wp db import`, so it's a true point-in-time replacement: tables
     created after the snapshot (e.g. multisite `wp_2_*`) are dropped, not
     merged. `--add-drop-table` in the export only drops tables IN the dump.
 
-13. **Subdomain multisite needs a wildcard Caddy block + cert SAN.** When an
-    instance is `multisite: "subdomain"` and has a `.tst` domain, `regen_caddyfile`
-    emits a `*.<name>.tst` block (via `_caddy_block(..., wildcard=True)`) next to
-    the apex, and `_mint_cert` adds a `*.<name>.tst` SAN (gated on
-    `_multisite_mode(...) == "subdomain"`). Wildcards directly under `.tst` are
-    browser-rejected; `*.<name>.tst` (one level deeper) is valid. dnsmasq already
-    wildcards `.tst`. Subdomain multisite on bare `localhost:<port>` still has no
-    per-sub-site host — assign a `.tst` domain.
+13. **Subdomain multisite needs a wildcard Caddy block + cert SAN.** `regen_caddyfile` emits `*.<name>.tst` (wildcard=True) and `_mint_cert` adds `*.<name>.tst` SAN. Wildcards directly under `.tst` are browser-rejected; `*.<name>.tst` (one level deeper) is valid.
 
-14. **On herd, `phpVersion` is enforced via the `php<MM>` binary, not the
-    generic `php`.** Herd's `php` symlink and `herd which-php <site>` both report
-    Herd's *default* version even for an isolated site — so CLI/phpunit resolve
-    the version-specific binary directly (`8.1`→`<Herd bin>/php81`, see
-    `_herd_php_bin` in `sb` and `mcp/wp-server/server.py`). The web tier is pinned
-    with `herd isolate php@<v> --site <instance>` run AFTER `herd secure` (a fresh
-    `link` isn't in Herd's site list yet, so a pre-secure isolate fails with
-    "site could not be found"), then verified against `herd isolated` and retried
-    once. `wp_exec` gets the pin via per-instance PATH shims under
-    `runtime/herd-shims/<instance>/`. `WP_PHP_BINARY` in the herd tests-config is
-    **shell-quoted** (`_php_squote`) because the Herd php path has spaces and the
-    WP suite splices it unescaped into `system()`.
+14. **On herd, `phpVersion` resolves via `php<MM>` binary, not `php` or `herd which-php`.** (`8.1`→`php81`). Web tier: `herd isolate php@<v> --site <instance>` run AFTER `herd secure` (site not in Herd's list until then). CLI/phpunit use the version-specific Herd binary. `WP_PHP_BINARY` is shell-quoted (Herd path has spaces; WP suite splices it unescaped into `system()`).
 
-15. **Plugin/theme downloads are cached in a shared, version-aware cache.**
-    Two layers, both keyed by version so a new release naturally misses the
-    cache: (a) the wpcli tier mounts a persistent host dir at `WP_CLI_CACHE_DIR`
-    (`runtime/dl-cache/wp-cli`), so `wp plugin/theme/core install` reuses
-    downloads across instances + runs — wp-cli already queries `plugins_api` for
-    the latest version every time, so it's check-then-serve-by-version for free;
-    (b) the `00-sandbox-dl-cache.php` mu-plugin (web tier) hooks WP's
-    `upgrader_pre_download` — the path **Templately FSI** installs through
-    (`Plugin_Upgrader->install($download_link)`) — caching zips in
-    `runtime/dl-cache/wp-http` (mounted at `/sandbox-dl-cache`). It revalidates
-    with a conditional GET (ETag/Last-Modified) only once the throttle window
-    `SANDBOX_DL_CACHE_TTL` (default 12h, override via a wp-config `define`) has
-    elapsed; within the window it serves with no upstream call. It ALWAYS hands
-    WP a throwaway temp copy because `WP_Upgrader` deletes the package it
-    returns — returning the cache file directly would delete it after one use.
-    The cache dir is shared across instances; inspect/clear it with
-    `./sb cache [info|clear]` (or the `cache_info`/`cache_clear` MCP tools) —
-    gitignored. Not on herd.
+15. **Plugin/theme downloads cached in `runtime/dl-cache/` (two layers, version-keyed).** (a) wp-cli cache at `WP_CLI_CACHE_DIR` (across instances/runs); (b) `00-sandbox-dl-cache.php` mu-plugin hooks `upgrader_pre_download` (FSI path), caching in `dl-cache/wp-http`. Revalidates via conditional GET after 12h (`SANDBOX_DL_CACHE_TTL`). Always returns a throwaway copy (WP_Upgrader deletes the package). Inspect/clear: `./sb cache [info|clear]`. Not on herd.
 
-16. **Install-time secrets must survive a block rebuild.** `bridge_token`,
-    `app_password`, and `autologin_token` live in the `sandbox.local.yml`
-    instance block but are minted by `cmd_install` (via `save_local_*`), not by
-    `_build_instance_block` — which reconstructs the block from config on every
-    `ensure`/`apply`/onboard. `_build_instance_block` therefore explicitly
-    carries those three keys over from the previous block (like it does for
-    `domain`/`tld`); dropping them silently breaks the wp-admin snapshot bridge,
-    MCP REST auth, and the autologin link. `cmd_up` also mints a missing
-    `bridge_token` so a plain `up` self-heals an older, secret-less instance.
+16. **Install-time secrets must survive block rebuilds.** `bridge_token`, `app_password`, `autologin_token` are minted at install time and explicitly carried over by `_build_instance_block` on every `ensure`/`apply`/onboard — dropping them silently breaks the snapshot bridge, REST auth, and autologin. `cmd_up` mints a missing `bridge_token` to self-heal older instances.
 
-17. **In-instance WP Abilities layer (spec 003).** Each instance is provisioned
-    with `wp-content/mu-plugins/00-sandbox-abilities.php` + `sandbox-abilities/`
-    (the vendored `wordpress/mcp-adapter`, copied by `_write_abilities_muplugin`
-    on every `up`/`apply`). It registers `sandbox/*` abilities on WP 6.9's
-    Abilities API (`execute-php`, `read/write/edit/list` files; plus the spec-005
-    editor-authoring set — `gutenberg-insert/get/update/delete/finalize`,
-    `elementor-insert/get/update/delete`, `editor-schema` from `sandbox-editor.php`
-    + the headless EB finalizer `00-sandbox-eb-finalizer.php`) and exposes them
-    (spec 011: `editor-schema` for a named EB block resolves the FULL attribute set
-    from the EB source — `attributes.js` + the `@essential-blocks/controls`
-    generators — returning a `fidelity` report `full|partial|reduced`; full needs
-    `src/controls` reachable in-container, i.e. the active EB plugin is a source
-    checkout, not the `.org` build; the content key is `titleText`, not `title`.
-    See `memory/plugin-behavior/eb-attribute-schema.md`)
-    over MCP at **`/wp-json/sandbox/mcp`** (HTTP Basic + admin Application
-    Password). Gated by the `sandbox_abilities_enabled` option — toggle with
-    `./sb abilities on|off|status`; `./sb abilities connect` prints the endpoint +
-    a paste-ready client config. In-session, `wp_eval_live` proxies to
-    `execute-php`. Notes: ability **categories** must be registered on the separate
-    `wp_abilities_api_categories_init` hook (before `wp_abilities_api_init`);
-    crash recovery for `wp-content/sandbox-code/` uses a `.loading`→`.crashed`
-    marker (WP's own fatal handler pre-empts shutdown callbacks); the vendored
-    adapter is bundled under `sandbox/assets/abilities/` (NOT repo `vendor/`) and
-    the callbacks are re-implemented against public WP APIs (no AGPL code).
-    Dev/staging only.
+17. **In-instance WP Abilities layer (spec 003).** `00-sandbox-abilities.php` + `sandbox-abilities/` mu-plugins register `sandbox/*` abilities (execute-php, file r/w, gutenberg/elementor insert/get/update/delete/finalize, editor-schema) and expose them over MCP at `/wp-json/sandbox/mcp`. Toggle: `./sb abilities on|off|status`. `wp_eval_live` proxies to `execute-php`. Ability **categories** must register on `wp_abilities_api_categories_init` (before `wp_abilities_api_init`). `editor-schema` returns `fidelity: full|partial|reduced` depending on whether EB `src/controls` is reachable. Dev/staging only.
 
-18. **Built-in wp-cli per Docker instance (exec, not per-call container).** A shared
-    host `runtime/wp-cli.phar` (downloaded once by `write_compose_files`) is
-    bind-mounted read-only into each apache/nginx `wp` container at
-    `/usr/local/bin/wp`. `wpcli()` (CLI `sandbox/core/_docker.py`) and `_wpcli`
-    (MCP `app.py`) run `docker compose exec -u www-data -T wp wp …` when the
-    built-in is present (probed once via `test -f`, cached) — reusing the running
-    web container, so no `wpcli-run-*` container is created per call and it runs on
-    the same PHP the site serves. Falls back to the one-shot `compose run --rm
-    wpcli` when the built-in is absent (instance not recreated since this landed,
-    web container down, or **litespeed** — different php path/uid, so it's not
-    mounted there). Async jobs (spec 004) deliberately stay on `run -d` (a long
-    job shouldn't occupy the web container; the named run-container makes `--kill`
-    a clean `docker rm -f`). Herd already runs the host `wp --path`.
+18. **Built-in wp-cli runs via `docker compose exec` on the web container, not per-call container.** `runtime/bin/wp-cli.phar` is bind-mounted into each apache/nginx container; `wpcli()` runs `exec -u www-data -T wp wp …`, reusing the running container. Falls back to `compose run --rm wpcli` (no built-in, web down, or litespeed). Async jobs (spec 004) use `run -d` so long jobs don't block the web container.
 
-19. **All machine-state lives under one swappable base `$SANDBOX_HOME` (spec 009).**
-    Default `~/sandbox`; override via the env var. `sandbox/core/_paths.py` owns the
-    seam: `BASE` → `RUNTIME_DIR = BASE/runtime`, `CONFIG_FILE`, `LOCAL_YML`,
-    `ENV_LOCAL`; every former `ROOT/"runtime"` constant + inline ref derives from
-    `RUNTIME_DIR`. `sandbox_core.py` (`sandbox_base()`/`_runtime_dir()`) and the MCP
-    `app.py` replicate the SAME resolver (same env + default) — three copies kept in
-    lockstep so the CLI and MCP never disagree about where state lives. Two rules
-    keep it swappable: (a) every state path derives from the one base; (b) anything
-    that bakes an absolute path is REGENERATED/RECREATED on relocate, never moved —
-    compose files (now use ABSOLUTE mount sources, not relative `./runtime`), herd
-    shims, the Caddyfile, and the tools venv `runtime/.venv-tools` (its shebangs
-    bake the path; `ensure_tools_venv` detects a moved venv and rebuilds it). Pure
-    data (registry, sandbox.local.yml, snapshots, dl-cache, seeds, wp-<inst>, certs)
-    moves cleanly. Migration: `./sb migrate` (dry-run plan) → `./sb migrate --apply`
-    moves in-repo state + `~/.config/sandbox/config.json` under the base, regenerates
-    baked artifacts, and recreates each running web tier for the new mounts. Until
-    you migrate, a backward-compat fallback reads the old in-repo locations so
-    nothing breaks. Relocate the base: `./sb home <dir>`. DB volumes are Docker-named
-    (not under the base) → untouched by a move. `./sb home` (no arg) prints the base.
-    **Single-file bind mounts are fragile after a host move:** Docker Desktop's
-    VirtioFS keeps a stale negative-cache for a moved single FILE's path
-    (`mkdir <path>: file exists` on container create; the file is invisible inside
-    a dir mount too) while DIRECTORY mounts resync fine. That's why `wp-cli.phar`
-    lives in `runtime/bin/wp-cli.phar` (a fresh subdir path) and the mount points
-    there — relocating to a never-cached path sidesteps the bug without a Docker
-    restart. If you ever hit it on another file, move it to a fresh path or restart
-    Docker Desktop to clear the FUSE cache.
+19. **All machine-state lives under one swappable base `$SANDBOX_HOME` (spec 009).** Default `~/sandbox`. Baked-path artifacts (compose files, herd shims, Caddyfile, tools venv) are REGENERATED on relocate; pure data (registry, snapshots, dl-cache, wp installs) moves cleanly. Migration: `./sb migrate --apply`. Relocate: `./sb home <dir>`. DB volumes are Docker-named — untouched by a move. Single-file bind mounts are VirtioFS-fragile after moves — keep files in a subdir (e.g. `runtime/bin/wp-cli.phar`) to sidestep stale negative-cache bugs.
 
 ---
 
@@ -851,5 +656,5 @@ to apply changes. New commands should follow the same shape.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/012-bundled-schema-catalog/spec.md
+at specs/012-bundled-schema-catalog/plan.md
 <!-- SPECKIT END -->

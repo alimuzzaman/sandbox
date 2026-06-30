@@ -292,3 +292,42 @@ multi-word terms miss: `"font size"`→0 (it's `typography_font_size`/label "Siz
 - **Header/nav is an inherent approximation** (sticky/dropdowns) — spec it as its own
   section and state the approximation; keep it out of the body-fidelity median.
 - Inject Elementor page data via the [[elementor-page-data-injection-recipe]] memory note.
+
+## Reference D — editor tools (sandbox abilities; all validated green)
+**Order of use: discover → read → mutate.** (`*` = required; thread `base_hash` from the
+prior read into every mutate — a stale hash returns `conflict`, the concurrency guard.)
+1. **editor-schema** `{builder*: elementor|gutenberg, name?, search?, source_root?}` — FIRST,
+   to learn control keys/options before building. No `name` → list (Elementor = 250 widgets);
+   `name` → full schema (Elementor groups `content/style/common` + `controls`/`count`; Gutenberg
+   `attributes` + `fidelity`). **Elementor branch is WIDGET-ONLY** — section/column/container
+   error here; introspect those via `elements_manager->get_element_types(<type>)->get_controls()`
+   (Reference B).
+2. **elementor-get / gutenberg-get** `{post_id*}` → element/block tree (ids, elType/widgetType)
+   + `state_hash`. Read-before-write: take the ids for update/delete and the hash as `base_hash`.
+3. **elementor-insert** `{post_id*, widget*, settings?, full_width?, base_hash?}` /
+   **gutenberg-insert** `{post_id*, name*, attributes?, inner_blocks?, inner_html?, base_hash?}`
+   — adds ONE element (Elementor wraps it in section›column›widget; returns `element_id`/`blockId`
+   + `widget_survived`). For a WHOLE page prefer injecting `_elementor_data` wholesale via
+   `execute-php` + `Document::save` (the [[elementor-page-data-injection-recipe]]) — far fewer calls.
+4. **elementor-update / gutenberg-update** `{post_id*, element_id|block_id*, settings|attributes, base_hash?}`
+   — merge per key/attr into one element located by id (responsive/typography/repeater round-trip).
+5. **elementor-delete / gutenberg-delete** `{…, confirm:true*, base_hash?}` — confirm-gated.
+   `gutenberg-finalize {post_id, block_spec, base_hash?}` queues a static block for the headless finalizer.
+
+**`search` (control search) — accepted values + behavior:** it is **per-WIDGET** (filters the
+named widget's controls; there is NO cross-widget/global search — you must know the widget).
+Matching = case-insensitive **SUBSTRING** of the query over `id + label + description +
+selector keys/values`, returned in registration order — **no ranking, no tokenization**. So
+id-like tokens work (`padding`→`_padding`), but core controls sink under EA-Pro on noisy terms
+(`radius`→`_border_radius` rank 14/17; `background`→`_section_background` 48/124) and literal
+terms miss (`font size`→0, `space`→0, `dimension`→0). Treat search as a hint: scan the full
+match list for the non-`eael_` core id, then **verify by injection**.
+
+**Validated guards (rely on them):** stale `base_hash`→`conflict`; unknown id→`not_found`;
+delete without `confirm`→`confirm_required`; unknown / Pro-absent widget→`widget_unavailable`
+(insert also auto-enables a disabled `eael-*`); missing required→`bad_input`.
+
+**Discovery FIDELITY differs by builder:** Elementor widgets resolve FULL/live (heading = 879
+controls); **EB Gutenberg blocks may resolve only `"partial"`** without a `src/controls`
+checkout (e.g. `essential-blocks/button` = 5 attrs) — check the `fidelity.level` before
+trusting a GB block's attribute set (pass `source_root` to point at a checkout for full fidelity).

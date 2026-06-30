@@ -126,10 +126,19 @@ every colored element exist as files. Fonts + `:hover` captured.
 ---
 
 ## PHASE 2 — Build (native-first, on the CORRECT element)
+**Choose the layout primitive FIRST.** If the build has the flexbox **Container** active
+(`experiments->is_feature_active('container')` — it was, on ChatAIBot), BUILD WITH
+CONTAINERS, not legacy Section/Column. Container has native `flex_gap` (inter-card gaps),
+`flex_align_items`/`flex_justify_content` (vertical centering), `flex_direction`/`flex_wrap`,
+`margin`, `padding`, `content_width` — i.e. the exact things that, on legacy Section/Column,
+forced CSS hacks (the 24px card gap, integration-text centering, button breathing room were
+ALL self-inflicted by choosing Section/Column). Legacy column `margin` is unreliable;
+Container `flex_gap` is not.
 Generate the builder JSON (`_elementor_data`) with native controls per the Phase-0 toolset.
 For every colored element, put background AND its padding AND radius on the SAME element
 (Law 2). Use `custom_css` for what natives can't express; global `<style>` only with a
-logged reason. Look up exact control keys from the schema catalog (`sandbox/editor-schema`)
+logged reason. Look up keys via `editor-schema` for widgets and
+`elements_manager->get_element_types(<type>)->get_controls()` for section/column/container
 — do not guess key names.
 
 **Exit gate:** page renders, all images load (verify via DOM `naturalWidth`, not a
@@ -252,10 +261,14 @@ common section holds margin/padding. **Mind the prefix:**
 **Discovery-tool limits (benchmarked — trust accordingly):** `editor-schema` is the right
 lens for WIDGET controls (it resolves the merged common controls that a raw `get_controls()`
 call drops — that resolution is cache/context-dependent, so never use raw `get_controls()`).
-But: (1) **no section/column support** — `editor-schema` only takes WIDGET names
-(`get_widget_types()`), so the layout-critical unprefixed `padding`/`margin`/`gap`/
-`content_width`/`css_classes`/`layout` on sections & columns are NOT discoverable through it
-— use the key map above + verify by injection. (2) **`search` has no relevance ranking and
+But: (1) **the tool is WIDGET-ONLY** — `editor-schema` enumerates `get_widget_types()`, so
+`section`/`column`/`container` return `WP_Error "not registered"`. The elements absolutely
+EXIST (this build registers `section, column, container, e-div-block, e-flexbox, e-tabs,
+e-form`); they live in a different registry and are fully introspectable directly:
+`\Elementor\Plugin::$instance->elements_manager->get_element_types('container')->get_controls()`
+(container = 853 controls incl. `flex_gap`/`flex_direction`/`flex_align_items`/`margin`/
+`padding`/`content_width`). For structural controls, query `elements_manager` directly.
+(2) **`search` has no relevance ranking and
 floods with EA-Pro controls** on an EA-heavy instance: e.g. `search:"radius"` → core
 `_border_radius` ranked 14/17; `"background"` → `_section_background` ranked 48/124;
 `"border"` 44/54. Scan the FULL match list for the core (non-`eael_`) id, don't take the

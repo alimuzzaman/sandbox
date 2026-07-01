@@ -53,5 +53,9 @@
   "scripts": {
     "prepack": "find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null; true",
     "postinstall": "node -e \"process.stdout.write('\\n  sandbox installed. Run `sandbox setup` once, then `cd` into a plugin and `sandbox init`.\\n  (Needs Python 3 + Docker.)\\n\\n')\""
+  },
+  "devDependencies": {
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0"
   }
 }

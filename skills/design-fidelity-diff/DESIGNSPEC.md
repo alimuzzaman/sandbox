@@ -73,10 +73,44 @@ drifted every run and made diffing fragile.
   PNG-derived numbers as exact; they seed the build, then Phase-3 web-diff of the BUILD against
   the real reference (if available) is what proves fidelity. If the reference only exists as a
   PNG, say so and cap the done-gate at "visually matches", not ±2px.
-- **Figma → `figma-adapter` (later)** REST `/v1/files/:key/nodes` → map nodes to DesignSpec v1
-  (`absoluteBoundingBox`→top/left/w/h, `fills`→background/color, `style`→font.*,
-  `cornerRadius`→radius, `paddingLeft…`→box.padding, `effects`→shadow). Richest source,
-  `fidelity: full`, `colorFormat: hex`. Needs a Figma token + file key.
+- **Figma** — richest source, `fidelity: full`, `colorFormat: hex`. **The two access modes DO
+  NOT share a data shape** — pick the adapter by mode:
+  - **REST** (`/v1/files/:key/nodes?ids=<id>` → `nodes["<id>"].document`, needs a token + file
+    key) → full node JSON with `fills`/`style`/`cornerRadius`/`paddingLeft`. Feed that document to
+    **`extract-figma.js`** `figmaToDesignSpec(frame, meta)` — it maps `absoluteBoundingBox`→
+    top/left/w/h (normalised to frame origin), `fills`→background/color, `style`→font.*,
+    `cornerRadius`→radius, `paddingLeft…`→box.padding, `strokes`→border.
+  - **Figma desktop / Dev-Mode MCP** (`mcp__figma-desktop__*`, http `127.0.0.1:3845/mcp`; needs
+    the app OPEN on the file) → **NOT** node JSON. `extract-figma.js` does not apply directly;
+    instead ASSEMBLE DesignSpec from these tools, or just drive the build from them:
+    - `get_metadata` → XML skeleton: `id/type/name/x/y/width/height` **only** — geometry, no
+      styles. Gives you `top/left/w/h` + the section tree.
+    - `get_design_context` → generated styled code + asset URLs + a screenshot. The style source
+      (colors, fonts, spacing, radii). The MCP **requires** you call this before implementing —
+      metadata alone can't build.
+    - `get_variable_defs` → design tokens (color/type/spacing) — the clean values behind the code.
+    - `get_screenshot` → raster of the node = the pixelmatch/Phase-3 baseline.
+    Merge geometry (metadata) + styles (design-context/variable-defs) into DesignSpec, or treat
+    `get_design_context` code as the build reference and `get_screenshot` as the diff baseline.
+  **Figma gotchas (learned on HomeHymn):**
+  - **A node URL usually targets a BOARD, not a page.** `1-17295` was a 13962×24411 "resources"
+    moodboard (children are stock-photo rectangles); `1-15009` was a 26028×16219 "Real Estate
+    2025" board holding many artboards. The buildable unit is a single **page frame** inside it
+    (e.g. `Home page`, 1600×12912). Read `get_metadata` on the board, pick the page frame's node
+    id, and target THAT — never spec a whole board.
+  - **`get_metadata` on a board is enormous** (the board above = 235k chars / 628 text nodes /
+    1883 boxes → blows the tool token cap, spills to a file). Scope to the page-frame node id;
+    if it still overflows, `jq`/`python` the saved file in a subagent, don't read it raw.
+  - **Node id in a URL uses `-`; the API uses `:`** (`1-17295` → `1:17295`). Convert before fetch.
+  - **The desktop MCP disconnects when the app loses focus / closes** (`server "figma-desktop"
+    is not connected`). Keep Figma desktop open on the file; re-probe `127.0.0.1:3845/mcp` and
+    retry rather than switching approaches.
+  - **Image fills are hashes, not URLs.** REST `src` is an `imageRef` (`naturalW/H` unknown) —
+    resolve the real asset URL separately; desktop assets come from `get_design_context`.
+  - **Asset URLs are signed + short-lived** and may hand you SVG bytes under a `.png` name —
+    download to a local file and `file`-check the real type before `wp media import`.
+  - **Figma has no margin** (spacing is auto-layout gap / absolute position) → `box.margin:"0px"`;
+    do not treat a gap as a margin when diffing.
 
 ## Diff contract
 Because reference and build emit the SAME shape, the diff is mechanical:

@@ -50,7 +50,14 @@ per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffi
   best-effort band boundaries/colors (`fidelity:low`); then a VISION pass fills each section's
   `elements` (text/kind/≈font/≈box), every value flagged low. If the reference exists ONLY as a
   PNG, cap the done-gate at "visually matches", not ±2px.
-- **Figma** (later) → REST nodes → DesignSpec v1, `fidelity:full`.
+- **Figma** → FIRST scope: a node URL usually names a BOARD of many artboards; read
+  `get_metadata`, pick the single **page frame** node id (e.g. `Home page`, 1600×tall), target
+  THAT. Then by mode (URL `-`→API `:` in the id): **REST** `/v1/files/:key/nodes?ids=<id>` →
+  `.document` → `extract-figma.js` `figmaToDesignSpec(frame, meta)`. **Desktop Dev-Mode MCP**
+  (`mcp__figma-desktop__*`) is NOT node JSON — merge `get_metadata` (geometry) + `get_design_context`
+  (styles/code/assets, must-call to build) + `get_variable_defs` (tokens); `get_screenshot` is the
+  Phase-3 baseline. → DesignSpec v1, `fidelity:full`, `colorFormat:hex`. See `DESIGNSPEC.md` for
+  the full adapter + Figma gotchas (board-vs-page, huge metadata, MCP disconnects, asset hashes).
 
 DesignSpec captures, per Phase-1 intent: section `top/height/bgOwner{background,padding,radius}/
 contentWidth/columns`, and per element `kind/text|src/top/left/w/h/font{...}/box{...,bgOwner}/

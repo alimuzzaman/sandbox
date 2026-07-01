@@ -1106,8 +1106,9 @@ function sandbox_editor_search_synonyms(): array
         'colour'    => ['color'],
         'bg'        => ['background'],
         'font'      => ['typography', 'font_family', 'font_size'],
-        'text'      => ['typography', 'text'],
-        'align'     => ['alignment', 'align'],
+        'align'     => ['alignment'],
+        'alignment' => ['align'],
+        'position'  => ['align'],
         'hidden'    => ['hide'],
         'responsive'=> ['tablet', 'mobile'],
     ];
@@ -1148,13 +1149,22 @@ function sandbox_editor_search_controls(array $controls, string $query, array $g
     $tokenAlts = [];
     foreach ($tokens as $t) {
         $alts = [$t];
-        if (isset($syn[$t])) { $alts = array_merge($alts, $syn[$t]); }
+        // light stem so a longer query token still matches a short id
+        if (strlen($t) > 5 && substr($t, -4) === 'ment') { $alts[] = substr($t, 0, -4); } // alignment→align
+        if (strlen($t) > 4 && substr($t, -1) === 's')    { $alts[] = substr($t, 0, -1); } // dimensions→dimension
+        foreach (array_values($alts) as $a) {              // synonyms for token AND its stems
+            if (isset($syn[$a])) { $alts = array_merge($alts, $syn[$a]); }
+        }
         $tokenAlts[] = array_values(array_unique($alts));
     }
     $qKey = str_replace(' ', '_', $q); // "font size" → "font_size" for whole-id checks
 
+    // UI chrome — not writable settings; keep out of search results.
+    static $chrome = ['section', 'tab', 'tabs', 'raw_html', 'alert', 'heading', 'divider'];
+
     $scored = [];
     foreach ($controls as $id => $def) {
+        if (in_array($def['type'] ?? '', $chrome, true)) { continue; }
         $lid      = strtolower($id);
         $idParts  = explode('_', $lid);
         $section  = strtolower((string) ($def['section'] ?? ($index[$id]['section'] ?? '')));
@@ -1187,13 +1197,24 @@ function sandbox_editor_search_controls(array $controls, string $query, array $g
         }
         if (!$allMatched) { continue; }
 
-        // Whole-query boosts.
+        // Whole-query boosts. Multi-word queries reward the exact human phrase in the
+        // label ("text color"→title_color); single-word phrase boosts are skipped —
+        // a generic "Color" label would otherwise outrank the semantically-primary control.
         if     ($lid === $q || $lid === $qKey)      { $score += 500; }
         elseif (strpos($lid, $qKey) !== false)      { $score += 120; }
+        if (count($tokens) > 1) {
+            $lbl = strtolower((string) ($def['label'] ?? ''));
+            if     ($lbl === $q)                    { $score += 200; }
+            elseif (strpos($lbl, $q) !== false)     { $score += 90; }
+        }
 
-        // core vs extension: keep core Elementor above EA/extension noise.
+        // core vs extension: keep core Elementor above EA/extension noise even when the
+        // extension control has strong id matches (penalty > a double id-segment hit).
+        // Large penalty: a flat shift only breaks CORE-vs-EXTENSION ties within one
+        // widget (where core is wanted); intra-extension order on EA-only widgets is
+        // unchanged since every control is penalized equally.
         $isExt  = (strncmp($id, 'eael_', 5) === 0) || (strpos($id, '_eael') !== false);
-        if ($isExt) { $score -= 45; }
+        if ($isExt) { $score -= 250; }
 
         $loc = $index[$id] ?? ['group' => 'unknown', 'section' => null];
         $scored[$id] = array_merge($def, $loc, [

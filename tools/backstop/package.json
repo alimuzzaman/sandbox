@@ -1,0 +1,11 @@
+{
+  "name": "sandbox-vrdiff",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BackstopJS visual-regression diff (reference URL vs build URL) with a browsable HTML web report. Backs the `sb vrdiff` command; the design-fidelity workflow uses it for the visual/web-preview pass (pixelmatch/`sb pxdiff` stays as the numeric locator).",
+  "type": "module",
+  "bin": { "vrdiff": "./vrdiff.mjs" },
+  "dependencies": {
+    "backstopjs": "^6.3.25"
+  }
+}

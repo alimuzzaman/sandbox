@@ -174,10 +174,16 @@ remembered).
    `left` by ~12px → the pixelmatch overlay goes red on *every* line even when heights are perfect.
    This is a systemic, whole-page offset — fix it before chasing per-element drift. Also confirm
    the container is capped + centered at a WIDE viewport (~1680), not full-bleed.
-3. **pixelmatch overlay = LOCATOR, not a score — use the `pixelmatch_diff` tool.** Run
-   `pixelmatch_diff {reference, build, diff_out, bands:12}` (MCP) or `sb pxdiff <ref> <build>
-   --diff-out <p>`; read **`worstBands`** to jump straight to the y-ranges that drifted most, and
-   `dimensionsMatch` (false → your page height is already wrong). **Whole overlay red = SYSTEMIC**
+3. **Two diff tools — BackstopJS for the web preview, pixelmatch for the numeric locator.**
+   For a browsable side-by-side **web report** (reference | test | diff, per viewport) run
+   `sb vrdiff <referenceUrl> <buildUrl> --label <name> --viewport 1280x900` (BackstopJS drives its
+   OWN full-page screenshots from the URLs, so the build is always captured full-page at the
+   reference viewport — this is what makes it immune to the 952px viewport-only capture bug). For
+   the **per-band numeric locator** use the pixelmatch tool: `pixelmatch_diff {reference, build,
+   diff_out, bands:12}` (MCP) or `sb pxdiff <ref.png> <build.png> --diff-out <p>` — read
+   **`worstBands`** to jump straight to the y-ranges that drifted most, and `dimensionsMatch`
+   (false → your page height is already wrong). The overlay is a LOCATOR, never the score.
+   **Whole overlay red = SYSTEMIC**
    (content-width mismatch per #2, or cumulative height drift per #4), NOT 40 tiny misses — do not
    start per-element. **Classify each red zone:** text doubled/ghosted = position offset (find the
    band via `worstBands` + the height table); solid red blob = missing/wrong image (an absent
@@ -347,7 +353,11 @@ let el=node,chain=[]; for(let i=0;i<5&&el;i++){const c=getComputedStyle(el);
   chain.push({cls:el.className.toString().slice(0,40),bg:c.backgroundColor,pad:c.padding,radius:c.borderRadius}); el=el.parentElement;} return chain;
 ```
 **Per-section height table:** heights of top-level sections on both pages; diff per section (NOT cumulative tops).
-**pixelmatch → use the `pixelmatch_diff` MCP tool (or `sb pxdiff <ref> <build> --diff-out <p>`)**,
+**Web preview → `sb vrdiff <referenceUrl> <buildUrl> --label <name> --viewport 1280x900`** (BackstopJS;
+see `tools/backstop/README.md`). It captures BOTH URLs full-page itself and writes a browsable HTML
+report (reference | test | diff) — the fastest way to SEE where the rebuild diverges, and it can't
+fall for the viewport-only capture bug. One-time: `npm --prefix tools/backstop install`.
+**Numeric locator → use the `pixelmatch_diff` MCP tool (or `sb pxdiff <ref.png> <build.png> --diff-out <p>`)**,
 not a hand-rolled node snippet. It crops to the smaller image, writes the red overlay, and returns
 `{mismatch, pct, verdict, dimensionsMatch, bands[], worstBands[]}` — read `worstBands` (y-top/height/
 pct) as the locator to jump to the drifted section, and `dimensionsMatch:false` means the page height

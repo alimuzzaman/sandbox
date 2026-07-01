@@ -289,9 +289,49 @@ def cmd_pxdiff(cfg, args):
         print(f"diff overlay: {data['diff']}")
 
 
+def cmd_vrdiff(cfg, args):
+    """BackstopJS visual-regression diff (reference URL vs build URL) with a browsable HTML web
+    report. Shells to tools/backstop/vrdiff.mjs — the design-fidelity VISUAL/web-preview pass;
+    `sb pxdiff` remains the numeric per-band locator."""
+    root = Path(__file__).resolve().parents[2]
+    script = root / "tools" / "backstop" / "vrdiff.mjs"
+    if not script.is_file():
+        die(f"missing {script}")
+    cmd = ["node", str(script), args.reference_url, args.build_url,
+           "--label", args.label, "--selector", args.selector,
+           "--threshold", str(args.threshold), "--delay", str(args.delay),
+           "--workdir", str(Path(args.workdir).expanduser())]
+    for vp in (args.viewport or []):
+        cmd += ["--viewport", vp]
+    if getattr(args, "no_open", False):
+        cmd.append("--no-open")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=str(root))
+    except FileNotFoundError:
+        die("node not found on PATH (needed for BackstopJS)")
+    except subprocess.TimeoutExpired:
+        die("vrdiff timed out after 600s")
+    try:
+        data = json.loads(res.stdout)
+    except Exception:
+        die(f"vrdiff produced no JSON:\n{res.stderr or res.stdout}")
+    if not data.get("ok"):
+        die(data.get("error", "vrdiff failed"))
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return
+    print(f"reference  {data['reference']}")
+    print(f"build      {data['build']}")
+    for s in data.get("scenarios", []):
+        dim = "" if s.get("sameDimensions") else "  (dims differ)"
+        print(f"  [{s.get('viewport')}] {s.get('label')}: {s.get('misMatchPct')}% mismatch  [{s.get('status')}]{dim}")
+    print(f"web report: {data['htmlReport']}")
+
+
 register({
     'domains': cmd_domains,
     'secure': cmd_secure,
     'server': cmd_server,
     'pxdiff': cmd_pxdiff,
+    'vrdiff': cmd_vrdiff,
 })

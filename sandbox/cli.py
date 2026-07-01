@@ -338,6 +338,25 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="horizontal slices for the per-band locator (default 12)")
     px.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
 
+    vr = sub.add_parser("vrdiff",
+        help="BackstopJS visual-regression diff (reference URL vs build URL) + browsable HTML web report")
+    vr.add_argument("reference_url", help="reference design URL (captured first)")
+    vr.add_argument("build_url", help="build URL to compare against the reference")
+    vr.add_argument("--label", default="page", help="scenario label shown in the report (default: page)")
+    vr.add_argument("--viewport", action="append", metavar="WxH",
+        help="viewport WxH, repeatable for responsive checks (default: 1280x900)")
+    vr.add_argument("--selector", default="document",
+        help="capture selector; 'document' = full page (default)")
+    vr.add_argument("--threshold", type=float, default=0.1,
+        help="mismatch tolerance 0..1 (default 0.1)")
+    vr.add_argument("--delay", type=int, default=1500,
+        help="ms to wait after load before capture, lets fonts/images settle (default 1500)")
+    vr.add_argument("--workdir", default="tmp/vrdiff",
+        help="where to write bitmaps + the HTML report (default tmp/vrdiff)")
+    vr.add_argument("--no-open", dest="no_open", action="store_true",
+        help="don't auto-open the HTML report in a browser")
+    vr.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
+
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
     # we register it on the top-level parser AND inject the same flag onto

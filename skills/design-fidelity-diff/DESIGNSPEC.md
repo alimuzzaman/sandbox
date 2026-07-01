@@ -113,6 +113,28 @@ drifted every run and made diffing fragile.
     the image (you get a background with the design's headline printed on it). If you must
     screenshot a node for a bg, pass **`contentsOnly:true`** (isolated render). Reserve plain
     `get_screenshot` for the pixelmatch/Phase-3 baseline, where you WANT the composited look.
+  - **Preserve RICH TEXT — don't flatten to `textContent`.** `get_design_context` returns the
+    FULL typography of every text node (family, weight, size, **`lineHeightPx`**, **letterSpacing/
+    tracking**, **`text-transform` (`capitalize`/`lowercase`)**, color) AND its structure: **authored
+    line breaks = separate `<p>` runs**, **inline style changes = separate `<span>` runs** (e.g. a
+    Playfair-italic phrase inside a Figtree heading). If you grab only the concatenated string and
+    let one font auto-wrap at a width, you lose the authored breaks AND the per-run fonts — and
+    since the italic run is wider, even auto-wrap then breaks in the wrong place. Measured on
+    HomeHymn: Figma "Dedicated Buyer / Representation Designed To / Turn Your Home Search Into A Win"
+    (3 authored lines) rendered as auto-wrapped "…Representation / Designed To Turn… / Into A Win".
+    Fidelity requires reproducing per node: (1) authored line breaks (multi-`<p>` → `<br>`/lines);
+    (2) per-run font/style (mixed-font single line → two heading widgets; mixed-font WRAPPING text →
+    a text-editor/heading with styled `<span>` runs — content markup inside a native widget, which
+    is NOT a banned HTML *layout* widget); (3) line-height in **px** not em; (4) letterSpacing;
+    (5) `text-transform`; (6) the text box width + auto-resize mode (fixed vs hug-content).
+    IMPLEMENTATION (Elementor, verified): the heading widget renders HTML in its `title`, so put
+    `<br>` for each authored break and `<span class="hh-run">` for each style run — but an INLINE
+    `style` on the span is dropped/overridden (kept `font-style` but font-family fell back to the
+    heading's Figtree), so define the run font in the enqueued stylesheet with a class +
+    `!important` (`.hh-italic{font-family:'Playfair Display',serif!important;font-style:italic!important}`).
+    Set `typography_text_transform:capitalize` on the widget. Because an auto-wrap heading's break
+    depends on exact font metrics (Playfair italic is wider than Figtree → shifts the wrap), pin
+    Figma's rendered lines with explicit `<br>` rather than trusting cross-engine auto-wrap.
   - **Image fills are hashes, not URLs.** REST `src` is an `imageRef` (`naturalW/H` unknown) —
     resolve the real asset URL separately; desktop assets come from `get_design_context`.
   - **Asset URLs are signed + short-lived** and may hand you SVG bytes under a `.png` name —

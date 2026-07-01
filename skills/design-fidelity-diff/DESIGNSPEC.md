@@ -105,6 +105,14 @@ drifted every run and made diffing fragile.
   - **The desktop MCP disconnects when the app loses focus / closes** (`server "figma-desktop"
     is not connected`). Keep Figma desktop open on the file; re-probe `127.0.0.1:3845/mcp` and
     retry rather than switching approaches.
+  - **Extract backgrounds from the ASSET URL, not a node screenshot.** To pull a section/card
+    background image, use the raw asset URL from `get_design_context` (`const img =
+    "http://localhost:3845/assets/<hash>.png"`) — that's the pure uploaded bitmap. Do NOT use
+    `get_screenshot(nodeId)` for a background: it **defaults to `contentsOnly:false`, which renders
+    the node as seen on the canvas and BAKES IN overlapping/floating text** from layers sitting over
+    the image (you get a background with the design's headline printed on it). If you must
+    screenshot a node for a bg, pass **`contentsOnly:true`** (isolated render). Reserve plain
+    `get_screenshot` for the pixelmatch/Phase-3 baseline, where you WANT the composited look.
   - **Image fills are hashes, not URLs.** REST `src` is an `imageRef` (`naturalW/H` unknown) —
     resolve the real asset URL separately; desktop assets come from `get_design_context`.
   - **Asset URLs are signed + short-lived** and may hand you SVG bytes under a `.png` name —

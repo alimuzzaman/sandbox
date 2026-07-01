@@ -59,3 +59,6 @@ deploy/install-image/sandbox-latest.tar.gz
 # Playwright MCP scratch (snapshots/console logs)
 .playwright-mcp/
 /.claude/tmp
+
+# scratch artifacts
+tmp/

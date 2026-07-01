@@ -22,6 +22,22 @@ says* instead of what actually *rendered*. The phases kill that.
    for the element type, control dropped, kit override). After EVERY change re-measure the
    exact thing you changed. A setting you didn't verify probably did nothing.
 
+> **CRITICAL RULE — NATIVE WIDGETS ONLY, NEVER THE HTML WIDGET.** Build every element with a
+> real builder widget (heading, button, text-editor, image, icon-list, container) and style it
+> with that widget's own controls; fall back to `custom_css` when a control is missing — **never**
+> to a `widgetType:"html"` block or hand-written HTML/inline-style markup for layout. An HTML
+> widget bypasses the control system the whole workflow depends on and is a hard NO. If a look
+> seems to "need" HTML you picked the wrong primitive — see Phase 2. [[never-html-widget-native-controls]]
+>
+> **CRITICAL RULE — LAYOUT-FIRST, ABSOLUTE IS A FALLBACK.** Reproduce the reference's auto-layout
+> with FLOW: flex containers (`flex_direction`/`flex_gap`/`justify_content`/`align_items`) +
+> `padding`/`margin` so spacing comes from padding/margin/gap, not coordinates. Use
+> `_position:absolute` + offsets ONLY for genuinely overlapping / free-floating elements (text over
+> a hero image). A section built entirely from absolute offsets is a smell — rebuild it as flow.
+> **Custom CSS is allowed** (not banned like HTML): add a class via the CSS Classes control
+> (`_css_classes` on widgets, `css_classes` on containers) and style it in an enqueued stylesheet
+> (mu-plugin), or Pro `custom_css`. Fonts still load via a mu-plugin `<link>` (enqueue, not markup).
+
 ---
 
 # THE PROCEDURE
@@ -80,8 +96,29 @@ truncated/reworded copy is a top cause of vertical drift that masquerades as a f
   1. the element's own native control (button `text_padding`/`background_color`/`border_radius`;
      column/section `background_color`/`padding`; widget `typography_*`; Container `flex_*`).
   2. a native common control verified in Phase 0.
-  3. **Pro per-element `custom_css`** (`"custom_css":"selector{...}"`) — renders via injection.
-  4. global `<style>` (html widget) — last resort, with a logged reason.
+  3. **native LAYOUT controls** — reproduce the design's auto-layout with flex containers
+     (`flex_direction`/`flex_gap`/`justify_content`/`align_items`) + `padding`/`margin`. This is
+     the DEFAULT for structure and spacing (the design-context code shows the flex/gap/padding to
+     copy). Match gaps with `flex_gap`, offsets with `padding`/`margin` — not coordinates.
+  4. **custom CSS via a class** — add a class with the CSS Classes control (`_css_classes` on
+     widgets, `css_classes` on containers), then style it in an enqueued stylesheet (mu-plugin
+     CSS), or Pro per-element `custom_css` if Pro is active. Available WITHOUT Pro; it is NOT an
+     HTML widget. Use for what controls can't express (mixed inline styling, object-fit, etc.).
+  5. **absolute positioning — LAST-RESORT FALLBACK.** `_position:absolute` + `_offset_x/y` only
+     for genuinely overlapping / free-floating elements (text over a hero image). A whole section
+     of absolute offsets is a smell — rebuild as flow (item 3).
+  6. **BANNED — HTML widget / inline-style markup / global `<style>`.** A hard NO. Re-pick the
+     primitive: two-font single line → two heading widgets; list → icon-list / stacked headings;
+     nav → container + heading/button widgets; exact-size media → image widget or container bg.
+  - **Abs gotcha (measured):** widget children honor `_position:absolute`; **nested containers
+    ignore the injected abs offset** and collapse to flow — another reason to lay out with flow +
+    gap. If you must go absolute, do it on a direct widget child, not a wrapping container.
+  - **Widget won't match? Swap EL↔EA.** Core Elementor (EL) and Essential Addons (EA, `eael-*`)
+    widgets for the "same" thing (button, heading, icon-box, image, accordion, tabs, nav, counter)
+    emit **different markup + CSS**, so one is often far easier to style/measure to the reference
+    than the other. When a control can't get you there, try the counterpart widget (EL→EA or EA→EL)
+    BEFORE reaching for custom CSS — re-run discovery on both (`editor-schema {name}`) to compare
+    which exposes the control you need. Prefer whichever lands the design with native controls.
 - Look up keys via the discovery method below — do not guess.
 **Exit gate:** page renders; all images load (verify via DOM `naturalWidth`, not a screenshot).
 
@@ -159,6 +196,31 @@ Then re-test at 768 + 480 and verify hover.
 - **Plugin source grep → last-resort confirm** of a selector/registration. Fiddly: EA
   registers via shared traits (ids not where you'd guess); `flex_gap` lives in
   `elementor/includes/elements/container.php`.
+
+**Elementor CONTAINER flex keys (verified; wrong key = silent no-op).** These only appear in
+`get_controls()` AFTER REST priming (the trap below); inject them by exact name:
+- layout: `flex_direction` (`row`/`column`), `flex_justify_content` (`space-between`/`center`/…),
+  `flex_align_items` (`center`/`flex-start`/…), `flex_gap` (`{column,row,unit,isLinked}`),
+  `flex_wrap`, `flex_align_content`.
+- width: `content_width` (`boxed`|`full`); when boxed, the max-width key is **`boxed_width`** (a
+  slider) — NOT `width`. `content_width:full` makes a nested flex child stretch to 100% (fills the
+  row); there is **no native hug-content** — add a class (`css_classes`) + `width:max-content` in
+  the enqueued stylesheet.
+- flex-child (on the child): `_flex_grow`, `_flex_shrink`, `_flex_align_self`, `_flex_order`,
+  `_flex_size`. NOTE the guessable-but-WRONG names `justify_content`/`align_items`/`width` do
+  nothing — always `flex_*`. Verify a set of keys once via primed `get_controls()` per builder.
+
+**CONTAINER DEFAULTS bite (measured — set them explicitly on EVERY container):**
+- **`flex_gap` defaults to ~20px**, so a section container silently inserts 20px between its
+  children (heading block ↔ row) → a phantom `+20` on everything below. Set `flex_gap` to `0`
+  (or the design's gap) on every container, including the top-level section.
+- **A nested container's default padding is ~10px** → a uniform `+10` on its content both axes.
+  Set `padding` explicitly (usually `0`) on sub-containers.
+- **Image widget** won't take a fixed height from a control — give it a class and
+  `img{width/height/object-fit:…!important}` in the enqueued stylesheet.
+- Zero `--widgets-spacing` globally (`body{--widgets-spacing:0px}`) since gaps come from `flex_gap`.
+Diagnose an unexplained offset by walking the box chain (`getBoundingClientRect` + computed
+`gap`/`margin`/`padding` up the ancestors) — don't compensate blindly; find the gap/padding owner.
 
 **Key naming by element type (wrong prefix silently no-ops):** widgets use `_`-prefixed
 (`_margin`, `_padding`, `_css_classes`); sections & columns use UNPREFIXED (`margin`,

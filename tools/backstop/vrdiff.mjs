@@ -80,8 +80,9 @@ const onReadyDir = path.join(paths.engine_scripts, 'puppet');
 fs.mkdirSync(onReadyDir, { recursive: true });
 fs.writeFileSync(path.join(onReadyDir, 'onReady.js'), `module.exports = async (page) => {
   await page.evaluate(async () => {
-    document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });
     const sleep = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });
+    // Scroll the whole document to trigger lazy-load + reveal animations, then return to top.
     const step = Math.max(400, Math.round(window.innerHeight * 0.85));
     let y = 0;
     for (let guard = 0; guard < 400 && y < document.body.scrollHeight; guard++) {
@@ -92,7 +93,7 @@ fs.writeFileSync(path.join(onReadyDir, 'onReady.js'), `module.exports = async (p
     const imgs = [...document.images].map(i => i.complete ? null : i.decode().catch(() => {}));
     await Promise.race([Promise.all(imgs), sleep(8000)]);
   });
-  await new Promise(r => setTimeout(r, 800));
+  await new Promise(r => setTimeout(r, 600));
 };
 `);
 
@@ -114,8 +115,11 @@ const config = {
   }],
   paths,
   report: open ? ['browser', 'CI'] : ['CI'],
-  engine: 'puppeteer',
-  engineOptions: { args: ['--no-sandbox', '--ignore-certificate-errors'] },
+  // playwright engine: its Chromium captures tall full pages correctly (capture-beyond-viewport),
+  // unlike the puppeteer engine's bundled Chromium which mis-tiles and DUPLICATES the top-of-page
+  // content into the bottom region on long pages. ignoreHTTPSErrors defaults true (handles .tst).
+  engine: 'playwright',
+  engineOptions: { browser: 'chromium', args: ['--no-sandbox'] },
   asyncCaptureLimit: 1,
   asyncCompareLimit: 5,
   debug: false,

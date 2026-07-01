@@ -10,6 +10,11 @@ screenshots from the URLs (default selector `document` = the whole document), so
 always captured full-page at the reference viewport — the old harness compared a full-page
 reference against a single ~952px build viewport, which silently hid the real drift.
 
+Uses BackstopJS's **playwright engine** (not puppeteer): the puppeteer engine's bundled Chromium
+mis-tiles long full-page captures and DUPLICATES the top-of-page content into the bottom region
+(a header/hero appearing mid-page in the report). Playwright's Chromium captures tall pages
+correctly. `ignoreHTTPSErrors` defaults on, so self-signed `.tst` build URLs work.
+
 ## Install (one-time)
 
 ```bash

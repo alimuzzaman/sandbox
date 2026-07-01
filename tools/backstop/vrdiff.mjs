@@ -71,6 +71,31 @@ const paths = {
 };
 fs.mkdirSync(workdir, { recursive: true });
 
+// onReady engine script — CRITICAL for full-page captures of lazy-loaded pages (EB/Templately,
+// Elementor). Without scrolling, everything below the fold never renders (lazy images stay blank,
+// reveal-on-scroll sections stay hidden) → a "broken", mostly-empty reference/build screenshot.
+// This scrolls the whole document top→bottom to trigger lazy-load + reveal animations, force-loads
+// images, waits for decode, then returns to the top before BackstopJS shoots the full page.
+const onReadyDir = path.join(paths.engine_scripts, 'puppet');
+fs.mkdirSync(onReadyDir, { recursive: true });
+fs.writeFileSync(path.join(onReadyDir, 'onReady.js'), `module.exports = async (page) => {
+  await page.evaluate(async () => {
+    document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const step = Math.max(400, Math.round(window.innerHeight * 0.85));
+    let y = 0;
+    for (let guard = 0; guard < 400 && y < document.body.scrollHeight; guard++) {
+      window.scrollTo(0, y); y += step; await sleep(120);
+    }
+    window.scrollTo(0, document.body.scrollHeight); await sleep(700);
+    window.scrollTo(0, 0); await sleep(300);
+    const imgs = [...document.images].map(i => i.complete ? null : i.decode().catch(() => {}));
+    await Promise.race([Promise.all(imgs), sleep(8000)]);
+  });
+  await new Promise(r => setTimeout(r, 800));
+};
+`);
+
 const config = {
   id: 'vrdiff',
   viewports: vpList,
@@ -82,6 +107,7 @@ const config = {
     misMatchThreshold: threshold * 100, // BackstopJS uses a 0..100 percentage
     requireSameDimensions: false,       // reference vs a different engine won't match to the pixel
     delay,
+    onReadyScript: 'puppet/onReady.js', // scroll to trigger lazy-load BEFORE the full-page shot
     readyEvent: null,
     hideSelectors: [],
     removeSelectors: [],

@@ -129,6 +129,14 @@ Then re-test at 768 + 480 and verify hover.
 - **`editor-schema {search}` with NO name — GLOBAL search** ("which widget/element has X?").
   Scans all ~263 types (~1s), returns each type's best match, top 40 by score. Use when you
   don't know which widget owns a control (`search:"grayscale"` → `eael-logo-carousel`).
+  Options: `types:"widgets"|"elements"` to narrow, `limit:N` to cap.
+- **Responsive controls** — Elementor stores ONE base key + an `is_responsive` flag; the
+  per-device keys are DERIVED (`{key}_tablet`, `{key}_mobile` for active breakpoints;
+  desktop = the bare key). `editor-schema {name}` flags each responsive control
+  (`responsive:true`) and returns a `responsive:{breakpoints, controls:[...]}` block. To get
+  the exact per-device keys to write, call `editor-schema {name, variants:"typography_font_size"}`
+  → `{responsive, breakpoints, variants:{desktop, tablet:..._tablet, mobile:..._mobile}}`.
+  Set the desktop value on the base key and each breakpoint on its `_<breakpoint>` key.
 - **Raw `get_controls()` is a TRAP — never call it directly.** Elementor v4+ strips the entire
   Advanced/common tab outside a REST context (heading: **623 keys, no `_padding`/`_margin`**);
   primed it returns **879 with them**. The `editor-schema` ability already primes
@@ -149,10 +157,11 @@ widget `mb:0` is ignored; override via the widget's `custom_css`. See [[elemento
 # EDITOR TOOLS (sandbox abilities — validated; discover → read → mutate)
 `*`=required. Thread `base_hash` (from the prior read) into every mutate — a stale hash
 returns `conflict` (concurrency guard).
-- **editor-schema** `{builder*: elementor|gutenberg, name?, search?, source_root?}` — discover
-  (Phase 0/2). No name → list (widgets + elements); `name` (widget OR section/column/container)
-  → full schema (`kind`, groups, controls); `name`+`search` → ranked matches (`origin`+`score`);
-  `search` alone → GLOBAL search across all types.
+- **editor-schema** `{builder*: elementor|gutenberg, name?, search?, variants?, types?, limit?, source_root?}`
+  — discover (Phase 0/2). No name → list (widgets + elements); `name` (widget OR
+  section/column/container) → full schema (`kind`, groups, controls, `responsive` block);
+  `name`+`search` → ranked matches (`origin`+`score`); `name`+`variants:"<key>"` → per-device
+  responsive keys; `search` alone → GLOBAL search (`types`/`limit` to narrow).
 - **elementor-get / gutenberg-get** `{post_id*}` → tree (ids, elType/widgetType) + `state_hash`.
 - **elementor-insert** `{post_id*, widget*, settings?, full_width?, base_hash?}` /
   **gutenberg-insert** `{post_id*, name*, attributes?, inner_blocks?, inner_html?, base_hash?}`

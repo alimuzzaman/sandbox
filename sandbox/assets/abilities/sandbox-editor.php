@@ -928,6 +928,9 @@ function sandbox_editor_el_control_entry(array $c): array
         'section' => $c['section'] ?? null,
         'tab'     => $c['tab'] ?? null,
     ];
+    // Responsive: Elementor keeps ONE base key + an is_responsive flag; the per-device
+    // keys ({key}_tablet/{key}_mobile) are derived, never listed by get_controls().
+    if (!empty($c['is_responsive'])) { $e['responsive'] = true; }
     if (!empty($c['selectors']) && is_array($c['selectors'])) {
         $sel = [];
         foreach ($c['selectors'] as $selector => $css) {
@@ -1090,6 +1093,35 @@ function sandbox_editor_elementor_prime_context(): void
     }
 }
 
+/** Active Elementor breakpoints (desktop is the base; e.g. ['mobile','tablet']). */
+function sandbox_editor_active_breakpoints(): array
+{
+    try {
+        if (isset(\Elementor\Plugin::$instance->breakpoints)) {
+            $keys = array_keys(\Elementor\Plugin::$instance->breakpoints->get_active_breakpoints());
+            if ($keys) { return $keys; }
+        }
+    } catch (\Throwable $_) {}
+    return ['mobile', 'tablet'];
+}
+
+/**
+ * Per-device variant keys for a responsive control, desktop-first in Elementor's
+ * large→small order: {desktop: key, tablet: key_tablet, mobile: key_mobile}.
+ * Desktop uses the BARE key; each active breakpoint appends _<breakpoint>.
+ */
+function sandbox_editor_responsive_variants(string $key, array $breakpoints): array
+{
+    static $order = ['widescreen', 'desktop', 'laptop', 'tablet_extra',
+                     'tablet', 'mobile_extra', 'mobile'];
+    $out = ['desktop' => $key];
+    foreach ($order as $bp) {
+        if ($bp === 'desktop') { continue; }
+        if (in_array($bp, $breakpoints, true)) { $out[$bp] = $key . '_' . $bp; }
+    }
+    return $out;
+}
+
 /** Human-term → control-token synonyms, so "font size"/"space" resolve. */
 function sandbox_editor_search_synonyms(): array
 {
@@ -1106,10 +1138,22 @@ function sandbox_editor_search_synonyms(): array
         'colour'    => ['color'],
         'bg'        => ['background'],
         'font'      => ['typography', 'font_family', 'font_size'],
+        'weight'    => ['font_weight'],
         'align'     => ['alignment'],
         'alignment' => ['align'],
         'position'  => ['align'],
         'hidden'    => ['hide'],
+        'hide'      => ['hide'],
+        'thickness' => ['width', 'border_width'],
+        'stroke'    => ['border', 'text_stroke'],
+        'opacity'   => ['opacity'],
+        'zindex'    => ['z_index'],
+        'z-index'   => ['z_index'],
+        'overflow'  => ['overflow'],
+        'sticky'    => ['sticky'],
+        'animation' => ['animation', 'motion_fx'],
+        'width'     => ['width', 'content_width'],
+        'height'    => ['height', 'min_height'],
         'responsive'=> ['tablet', 'mobile'],
     ];
 }
@@ -1369,14 +1413,41 @@ function sandbox_editor_schema($input)
                 return new WP_Error('controls_unavailable', $e->getMessage());
             }
             $groups = sandbox_editor_group_controls($controls);
+
+            // Responsive variant lookup: resolve a control's per-device keys.
+            //   editor-schema {name, variants:"typography_font_size"}
+            if (isset($input['variants'])) {
+                $vk  = (string) $input['variants'];
+                if (!isset($controls[$vk])) {
+                    return new WP_Error('not_found', "control '$vk' not found on '$name'");
+                }
+                $isResp = !empty($controls[$vk]['responsive']);
+                $bps    = sandbox_editor_active_breakpoints();
+                return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind,
+                        'control' => $vk, 'responsive' => $isResp,
+                        'breakpoints' => $isResp ? $bps : [],
+                        'variants' => $isResp
+                            ? sandbox_editor_responsive_variants($vk, $bps)
+                            : ['desktop' => $vk],
+                        'source' => 'live'];
+            }
+
             if ($search !== null && $search !== '') {
                 return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind,
                         'search' => $search, 'source' => 'live',
                         'matches' => sandbox_editor_search_controls($controls, $search, $groups)];
             }
+            // Separate `responsive` block: active breakpoints + which controls are
+            // responsive (so agents don't scan every control for the flag).
+            $respControls = [];
+            foreach ($controls as $cid => $cdef) {
+                if (!empty($cdef['responsive'])) { $respControls[] = $cid; }
+            }
             return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind, 'source' => 'live',
                     'controls' => $controls, 'count' => count($controls),
-                    'groups'   => $groups];
+                    'groups'   => $groups,
+                    'responsive' => ['breakpoints' => sandbox_editor_active_breakpoints(),
+                                     'controls' => $respControls]];
         }
         $names   = is_array($types) ? array_keys($types) : [];
         $elNames = ($em && method_exists($em, 'get_element_types'))
@@ -1385,8 +1456,12 @@ function sandbox_editor_schema($input)
         // GLOBAL search (no name): "which widget/element has control X?" Scans every
         // widget + element type, keeps each one's single best-scoring match, returns
         // the top matches across all. Heavier than a per-widget search (instantiates
-        // all stacks) — use a specific `name` when you know the widget.
+        // all stacks, ~1s) — pass `types:"widgets"` to skip elements, or a specific
+        // `name` when you know the widget. `limit` caps results (default 40).
         if ($search !== null && $search !== '') {
+            @set_time_limit(120); // never die mid-scan
+            $only  = isset($input['types']) ? (string) $input['types'] : 'all'; // all|widgets|elements
+            $limit = isset($input['limit']) ? max(1, (int) $input['limit']) : 40;
             $all = [];
             $scan = function ($host, $hostName, $hostKind) use ($search, &$all) {
                 try {
@@ -1396,23 +1471,24 @@ function sandbox_editor_schema($input)
                     }
                     $groups  = sandbox_editor_group_controls($ctrls);
                     $matches = sandbox_editor_search_controls($ctrls, $search, $groups);
-                    $best = null;
-                    foreach ($matches as $id => $m) { $best = ['id' => $id] + $m; break; } // already sorted
-                    if ($best) {
-                        $all[] = ['name' => $hostName, 'kind' => $hostKind, 'control' => $best['id'],
-                                  'origin' => $best['origin'], 'score' => $best['score'],
-                                  'group' => $best['group'], 'section' => $best['section']];
+                    foreach ($matches as $id => $m) {                       // best (already sorted)
+                        $all[] = ['name' => $hostName, 'kind' => $hostKind, 'control' => $id,
+                                  'origin' => $m['origin'], 'score' => $m['score'],
+                                  'group' => $m['group'], 'section' => $m['section']];
+                        break;
                     }
                 } catch (\Throwable $_) {}
             };
-            if (is_array($types)) { foreach ($types as $wn => $wobj) { $scan($wobj, $wn, 'widget'); } }
-            if ($em && method_exists($em, 'get_element_types')) {
+            if ($only !== 'elements' && is_array($types)) {
+                foreach ($types as $wn => $wobj) { $scan($wobj, $wn, 'widget'); }
+            }
+            if ($only !== 'widgets' && $em && method_exists($em, 'get_element_types')) {
                 foreach ($em->get_element_types() as $en => $eobj) { $scan($eobj, $en, 'element'); }
             }
             usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
             return ['builder' => 'elementor', 'search' => $search, 'source' => 'live',
-                    'scanned' => count($names) + count($elNames),
-                    'matches' => array_slice($all, 0, 40)];
+                    'scanned' => count($all), 'types' => $only,
+                    'matches' => array_slice($all, 0, $limit)];
         }
 
         return ['builder' => 'elementor', 'count' => count($names) + count($elNames),

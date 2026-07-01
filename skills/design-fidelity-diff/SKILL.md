@@ -304,6 +304,11 @@ Then re-test at 768 + 480 and verify hover.
   (measured: carousel nav dots built as 6 empty styled containers rendered `dotCount:0`). For small
   decorative pips/dots use a real TEXT-GLYPH widget (a heading of `&#9679;` `●` sized/colored), not an
   empty container — a section that silently loses a dots row reads as an unexplained height deficit.
+- **A heading with NO explicit line-height renders at ~1.0 (tight); references are usually ~1.2** —
+  so EVERY section title comes out ~`0.2×fs` short (measured: an `fs:56` heading rendered 56px vs the
+  reference's 67px, i.e. −11px on *every* fs-56 section heading at once). This is a SYSTEMIC per-section
+  deficit hiding as many small ones: set `line_height ≈ 1.2×fs` on every heading (read the reference's
+  computed `lineHeight`), don't leave it to the kit default. Same trap on text blocks — set `lh`.
 - Zero `--widgets-spacing` globally (`body{--widgets-spacing:0px}`) since gaps come from `flex_gap`.
 Diagnose an unexplained offset by walking the box chain (`getBoundingClientRect` + computed
 `gap`/`margin`/`padding` up the ancestors) — don't compensate blindly; find the gap/padding owner.

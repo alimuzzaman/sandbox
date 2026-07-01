@@ -326,6 +326,18 @@ Per-project (each plugin carries its own sandbox.config.json):
     sc.add_argument("--instance", dest="gen_instance", default=None,
         help="for generate: the instance to dump from (free + Pro plugins active)")
 
+    px = sub.add_parser("pxdiff",
+        help="Pixel-diff two PNG screenshots (reference vs build) + locate the drift")
+    px.add_argument("reference", help="reference PNG path")
+    px.add_argument("build", help="build/screenshot PNG path")
+    px.add_argument("--diff-out", dest="diff_out", default=None,
+        help="write the red-overlay diff PNG here (e.g. tmp/diff.png)")
+    px.add_argument("--threshold", type=float, default=0.1,
+        help="pixelmatch colour sensitivity 0..1 (default 0.1)")
+    px.add_argument("--bands", type=int, default=12,
+        help="horizontal slices for the per-band locator (default 12)")
+    px.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
+
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
     # we register it on the top-level parser AND inject the same flag onto

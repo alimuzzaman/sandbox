@@ -80,6 +80,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `wp_rest` | WordPress REST API. |
 | `http_fetch` | Anonymous HTTP probe (lighter than `visit`). |
 | `visit` | Headless Chromium; auto-login on `/wp-admin/`. |
+| `pixelmatch_diff` | Diff two PNGs (reference vs build) → mismatch % + per-band locator (`worstBands`). |
 | `db_query` | SQL (`mutate: true` for writes). |
 | `wp_reset` | Reset DB to `@install` baseline (`confirm: true` required). |
 | `qm_capture` | Query Monitor data for a URL. |

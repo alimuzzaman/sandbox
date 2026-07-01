@@ -11,6 +11,13 @@ drifted every run and made diffing fragile.
 2. **Normalized keys, no abbreviations.** `font.size` not `fs`; `font.family` not `ff`.
 3. **Box-model OWNER is explicit.** Every colored element records whether IT owns its
    background + the padding that gives breathing room (the "Contact us" bug). `box.bgOwner`.
+   **Background is more than a color.** Capture the full paint: `color` AND `gradient` AND
+   `image` (url filename) AND `backgroundSize/Position`, read from the element AND its
+   `::before`/`::after`. A section whose real background is a gradient mesh or a decorative
+   object PNG (transparent `backgroundColor`) is the #1 cause of "rebuild looks flat/white" —
+   `backgroundColor` alone silently reads transparent. Every section also carries a `decor[]`
+   list of decorative background layers (object PNGs, pattern/mesh gradients, absolutely-
+   positioned images) so they can be rebuilt, not dropped.
 4. **Honest fidelity.** Each spec + element carries `fidelity: full|partial|low`. Web/Figma =
    full; PNG = low (raster can't yield exact padding/margins/line-height).
 5. **Units in px, numbers not strings.** Colors as `rgb()/rgba()` (web) or hex (figma), stated in `meta`.
@@ -37,10 +44,18 @@ drifted every run and made diffing fragile.
     "label": "Powerful Features To…",  // landmark heading/text (stable key for diff)
     "top": 178, "height": 294,
     "bgOwner": {                        // the element that CARRIES the background
-      "background": "rgb(255,252,237)",
+      "background": "rgb(255,252,237)",  // solid color, or rgba(0,0,0,0) if none
+      "gradient": "linear-gradient(180deg, rgb(249,255,237) 0%, rgb(255,255,255) 100%)",  // or null
+      "image": "flexigency-hero-object.png",     // bg-image url filename, or null
+      "backgroundSize": "cover", "backgroundPosition": "center center",
       "padding": "36px 40px 45px 92px",
       "radius": "16px"
     },
+    "decor": [                          // decorative bg layers to REBUILD, not drop
+      {"src":"flexigency-hero-object.png","gradient":false,"pseudo":"::before",
+       "position":"absolute","top":0,"left":0,"w":1280,"h":832},
+      {"src":null,"gradient":true,"pseudo":null,"position":"static","top":0,"left":0,"w":1280,"h":832}
+    ],
     "contentWidth": 1240, "align": "center",
     "columns": [{"width": 660, "gap": 24}],   // immediate layout children + inter-col gap
     "elements": [{
@@ -50,7 +65,8 @@ drifted every run and made diffing fragile.
       "top": 497, "left": 112, "w": 581, "h": 372,
       "font": {"family":"Archivo","size":36,"weight":600,"lineHeight":43.2,
                "letterSpacing":"normal","align":"left","color":"rgb(17,17,17)"},
-      "box": {"background":"rgba(0,0,0,0)","padding":"0px","margin":"0px 0px 20px",
+      "box": {"background":"rgba(0,0,0,0)","backgroundImage":null,"backgroundGradient":null,
+              "padding":"0px","margin":"0px 0px 20px",
               "radius":"0px","border":"none","bgOwner": false},
       "image": {"naturalW":1272,"naturalH":1213,"objectFit":"cover","filter":"none"},
       "states": {"hover": {"background":"…","color":"…","filter":"…"}},  // optional
@@ -144,7 +160,12 @@ drifted every run and made diffing fragile.
 
 ## Diff contract
 Because reference and build emit the SAME shape, the diff is mechanical:
-- **section diff**: match by `label`, compare `height` (±2px) and `bgOwner.{background,padding,radius}`.
-- **element diff**: match by `text|src` within a section, compare `top/left/w/h` (dLeft~0, dTop cumulative → fix heights first) and `font.*` / `box.*`.
+- **section diff**: match by `label`, compare `height` (±2px) and `bgOwner.{background,gradient,image,radius}`.
+- **background parity** (NEW, mandatory): for each section compare `bgOwner.gradient`/`bgOwner.image`
+  and the `decor[]` set (by `src` + approx box). A section that has a gradient/object-PNG on the
+  reference but a bare color (or nothing) on the build is a **FAIL**, even if height matches. This
+  is the check whose absence let flat-white rebuilds pass.
+- **element diff**: match by `text|src` within a section, compare `top/left/w/h` (dLeft~0, dTop
+  cumulative → fix heights first) and `font.*` / `box.*` (incl. `backgroundImage`/`backgroundGradient`).
 - **box-owner check**: any element with a background must have `bgOwner:true` on BOTH sides.
 See SKILL.md Phase 3–5 for the numeric gate.

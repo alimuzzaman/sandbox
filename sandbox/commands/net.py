@@ -248,8 +248,50 @@ def cmd_domains(cfg, args) -> None:
 
     die("usage: ./sb domains setup|up|down|teardown|repair-ca|list")
 
+def cmd_pxdiff(cfg, args):
+    """Pixel-diff two PNG screenshots and locate the drift (shells to tools/pxdiff/pxdiff.mjs)."""
+    root = Path(__file__).resolve().parents[2]
+    script = root / "tools" / "pxdiff" / "pxdiff.mjs"
+    if not script.is_file():
+        die(f"missing {script}")
+    ref, build = Path(args.reference).expanduser(), Path(args.build).expanduser()
+    for label, pth in (("reference", ref), ("build", build)):
+        if not pth.is_file():
+            die(f"{label} not found: {pth}")
+    cmd = ["node", str(script), str(ref.resolve()), str(build.resolve()),
+           "--threshold", str(args.threshold), "--bands", str(args.bands)]
+    if args.diff_out:
+        cmd += ["--out", str(Path(args.diff_out).expanduser())]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60, cwd=str(root))
+    except FileNotFoundError:
+        die("node not found on PATH (needed for pixelmatch)")
+    except subprocess.TimeoutExpired:
+        die("pxdiff timed out after 60s")
+    try:
+        data = json.loads(res.stdout)
+    except Exception:
+        die(f"pxdiff produced no JSON:\n{res.stderr or res.stdout}")
+    if not data.get("ok"):
+        die(data.get("error", "pxdiff failed"))
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return
+    r, b, c = data["reference"], data["build"], data["compared"]
+    print(f"reference {r['w']}x{r['h']}  ·  build {b['w']}x{b['h']}  ·  compared {c['w']}x{c['h']}"
+          + ("" if data["dimensionsMatch"] else "  (cropped to smaller)"))
+    print(f"mismatch: {data['mismatch']:,} px  =  {data['pct']}%   [{data['verdict']}]")
+    if data.get("worstBands"):
+        print("worst bands  (y-top / height / diff%):")
+        for wb in data["worstBands"]:
+            print(f"  {wb['top']:>6} / {wb['h']:<5} {wb['pct']}%")
+    if data.get("diff"):
+        print(f"diff overlay: {data['diff']}")
+
+
 register({
     'domains': cmd_domains,
     'secure': cmd_secure,
     'server': cmd_server,
+    'pxdiff': cmd_pxdiff,
 })

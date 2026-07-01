@@ -57,6 +57,54 @@ def http_fetch(url: str, method: str = "GET", follow_redirects: bool = True,
     }
 
 @mcp.tool()
+def pixelmatch_diff(reference: str, build: str, diff_out: str | None = None,
+                    threshold: float = 0.1, bands: int = 12) -> dict:
+    """Pixel-diff two PNG screenshots and LOCATE where they differ.
+
+    Use this to measure design-rebuild fidelity: pass a reference screenshot and
+    the build screenshot (e.g. from `visit ... --screenshot`) and get back not
+    just a single mismatch % but a per-horizontal-band breakdown that pinpoints
+    WHICH part of the page drifted — so a high number becomes actionable instead
+    of vague. The % is a locator, not a verdict: heights differing or a few
+    decorative images still read as "diff". Read `worstBands` (top/height/pct) to
+    jump to the section that actually moved.
+
+    Args: `reference`/`build` = PNG paths (~/ ok). `diff_out` = optional path to
+    write the red-overlay diff PNG (defaults under tmp/ by convention — pass one
+    to keep it). `threshold` 0..1 (pixelmatch colour sensitivity, 0.1 default).
+    `bands` = number of horizontal slices for the locator (12 default).
+
+    Images of different sizes are cropped to the smaller (never errors on a
+    size mismatch — see `dimensionsMatch`). Returns {ok, reference{w,h},
+    build{w,h}, compared{w,h}, dimensionsMatch, mismatch, pct, verdict, bands[],
+    worstBands[], diff}. No sandbox instance needed — it compares two files.
+    """
+    script = SANDBOX_ROOT / "tools" / "pxdiff" / "pxdiff.mjs"
+    if not script.is_file():
+        return {"ok": False, "error": f"missing {script}"}
+    ref_p, build_p = Path(reference).expanduser(), Path(build).expanduser()
+    if not ref_p.is_file():
+        return {"ok": False, "error": f"reference not found: {ref_p}"}
+    if not build_p.is_file():
+        return {"ok": False, "error": f"build not found: {build_p}"}
+    cmd = ["node", str(script), str(ref_p.resolve()), str(build_p.resolve()),
+           "--threshold", str(threshold), "--bands", str(bands)]
+    if diff_out:
+        cmd += ["--out", str(Path(diff_out).expanduser())]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                             cwd=str(SANDBOX_ROOT))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "pxdiff timed out after 60s"}
+    except FileNotFoundError:
+        return {"ok": False, "error": "node not found on PATH (needed for pixelmatch)"}
+    data = _safe_json(res.stdout)
+    if data is None:
+        return {"ok": False, "error": "pxdiff produced no JSON",
+                "stderr": res.stderr, "raw_stdout": res.stdout[:500]}
+    return data
+
+@mcp.tool()
 def visit(url: str, login: bool = False, check_iframes: bool = False,
           screenshot: str | None = None, full_page: bool = False,
           timeout: int = 20, width: int = 1280, height: int = 800,

@@ -112,20 +112,28 @@ Then re-test at 768 + 480 and verify hover.
 
 ---
 
-# CONTROL DISCOVERY — find the exact key (validated method, hybrid)
-No single source is complete; use this order:
-- **Widget controls → `editor-schema {builder, name}` (full).** Authoritative; resolves the
-  merged common controls (`_margin`/`_padding`/`typography_*`) that a cold raw `get_controls()`
-  silently omits. Scan `groups` (content/style/common) or `controls`. This is also how you
-  discover an unknown widget's real key (e.g. an EA control id you can't guess).
-- **Section / Column / Container → `elements_manager->get_element_types(type)->get_controls()`.**
-  `editor-schema` is WIDGET-ONLY (`section`/`column`/`container` → `not_found`). Container has
-  `flex_gap`/`flex_*`/`margin`/`padding`/`content_width`; column has `margin`/`padding`/`css_classes`.
-- **`editor-schema` `search` is a HINT only.** Per-widget; case-insensitive SUBSTRING over
-  id+label+description+selectors; no ranking, no tokenization. Single id-tokens rank well
-  (`padding`,`radius`,`width`); human phrases MISS (`font size`→0, `button text`→0); EA-Pro
-  floods precision (`background`→core at 48/124, `radius`→14/17). Scan the full list for the
-  non-`eael_` id; confirm by injection.
+# CONTROL DISCOVERY — find the exact key (`editor-schema` is the primary tool)
+`editor-schema` now covers widgets AND structural elements, with ranked search. Use it first:
+- **Widget or element controls → `editor-schema {builder, name}`.** `name` = a widget
+  (`heading`, `button`, `eael-*`) OR a structural element (`section`, `column`, `container`,
+  `e-flexbox`, `e-form`, …) — both resolve (`kind: widget|element`). Container returns
+  `flex_gap`/`flex_*`/`margin`/`padding`/`content_width`; column `margin`/`padding`/`css_classes`.
+  Scan `groups` (content/style/common) or `controls`. This resolves the merged common controls
+  (`_margin`/`_padding`) reliably — the ability primes a REST context first (see next note).
+- **`editor-schema {name, search}` — ranked, tokenized, synonym-aware.** Returns `matches`
+  sorted by relevance, each with `origin` (core|extension) + `score`. Token-AND with synonyms,
+  so human phrases work now (`font size`→`typography_font_size` rank 0; `button text`→
+  `button_text` rank 0; `space`→padding/margin; `gap`→`flex_gap`). Core Elementor controls rank
+  above `eael_*` noise (`background`/`radius` now surface the core key in the top 1–2). Still
+  confirm the intended key by injection for anything ambiguous.
+- **`editor-schema {search}` with NO name — GLOBAL search** ("which widget/element has X?").
+  Scans all ~263 types (~1s), returns each type's best match, top 40 by score. Use when you
+  don't know which widget owns a control (`search:"grayscale"` → `eael-logo-carousel`).
+- **Raw `get_controls()` is a TRAP — never call it directly.** Elementor v4+ strips the entire
+  Advanced/common tab outside a REST context (heading: **623 keys, no `_padding`/`_margin`**);
+  primed it returns **879 with them**. The `editor-schema` ability already primes
+  (`REST_REQUEST` + reset `Performance::is_frontend` + `clear_stack_cache`) — so USE THE TOOL,
+  don't hand-roll `get_controls()`.
 - **Plugin source grep → last-resort confirm** of a selector/registration. Fiddly: EA
   registers via shared traits (ids not where you'd guess); `flex_gap` lives in
   `elementor/includes/elements/container.php`.
@@ -142,8 +150,9 @@ widget `mb:0` is ignored; override via the widget's `custom_css`. See [[elemento
 `*`=required. Thread `base_hash` (from the prior read) into every mutate — a stale hash
 returns `conflict` (concurrency guard).
 - **editor-schema** `{builder*: elementor|gutenberg, name?, search?, source_root?}` — discover
-  (Phase 0/2). No name → list; name → full schema; +search → filter (hint). Elementor branch
-  is widget-only.
+  (Phase 0/2). No name → list (widgets + elements); `name` (widget OR section/column/container)
+  → full schema (`kind`, groups, controls); `name`+`search` → ranked matches (`origin`+`score`);
+  `search` alone → GLOBAL search across all types.
 - **elementor-get / gutenberg-get** `{post_id*}` → tree (ids, elType/widgetType) + `state_hash`.
 - **elementor-insert** `{post_id*, widget*, settings?, full_width?, base_hash?}` /
   **gutenberg-insert** `{post_id*, name*, attributes?, inner_blocks?, inner_html?, base_hash?}`

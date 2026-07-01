@@ -1070,19 +1070,66 @@ function sandbox_editor_group_controls(array $controls, array $content_ids = [])
 }
 
 /**
- * Keyword search across all controls of a widget.
+ * Prime a REST context so Elementor v4+ rebuilds control stacks with FULL
+ * metadata (labels/tabs/options) AND the Advanced/common tab (padding, margin,
+ * background, border, ...). Outside REST, get_controls() returns a stripped set
+ * (heading: 623 keys, no _padding/_margin) — primed it returns 879 with them.
+ * Idempotent; call before any get_controls() introspection.
+ */
+function sandbox_editor_elementor_prime_context(): void
+{
+    try {
+        if (!defined('REST_REQUEST')) { define('REST_REQUEST', true); }
+        $ref  = new ReflectionClass('Elementor\Core\Frontend\Performance');
+        $prop = $ref->getProperty('is_frontend');
+        $prop->setAccessible(true);
+        $prop->setValue(null, null);
+    } catch (\Throwable $_) {}
+    if (isset(\Elementor\Plugin::$instance->controls_manager)) {
+        \Elementor\Plugin::$instance->controls_manager->clear_stack_cache();
+    }
+}
+
+/** Human-term → control-token synonyms, so "font size"/"space" resolve. */
+function sandbox_editor_search_synonyms(): array
+{
+    return [
+        'space'     => ['padding', 'margin', 'gap', 'spacing'],
+        'spacing'   => ['padding', 'margin', 'gap'],
+        'dimension' => ['padding', 'margin', 'width', 'height'],
+        'dimensions'=> ['padding', 'margin', 'width', 'height'],
+        'gutter'    => ['gap', 'padding'],
+        'shadow'    => ['box_shadow'],
+        'round'     => ['radius'],
+        'rounded'   => ['radius'],
+        'corner'    => ['radius'],
+        'colour'    => ['color'],
+        'bg'        => ['background'],
+        'font'      => ['typography', 'font_family', 'font_size'],
+        'text'      => ['typography', 'text'],
+        'align'     => ['alignment', 'align'],
+        'hidden'    => ['hide'],
+        'responsive'=> ['tablet', 'mobile'],
+    ];
+}
+
+/**
+ * Ranked keyword search across a widget/element's controls. Tokenized AND
+ * (every query token — or a synonym — must match SOMEWHERE), weighted by field
+ * (id > label > section > description > selector) with exact/whole-segment
+ * boosts, and core Elementor controls surfaced above extension (`eael_*`) noise.
  *
- * Matches on: control ID, label, description, selector keys + CSS values.
- * Each match carries `group` (content|style|common) and `section` so the
- * agent knows where it lives and can pass the same key to elementor-update.
+ * Each match carries: `group` (content|style|common), `section`, `origin`
+ * (core|extension), and `score`. Returned highest-score first.
  *
- * Usage: sandbox_editor_schema(['builder'=>'elementor','name'=>'heading','search'=>'background'])
+ * Usage: sandbox_editor_schema(['builder'=>'elementor','name'=>'heading','search'=>'font size'])
  */
 function sandbox_editor_search_controls(array $controls, string $query, array $groups): array
 {
-    $q = strtolower($query);
+    $q = strtolower(trim($query));
+    if ($q === '') { return []; }
 
-    // Build a ctrl_id → {group, section} index from the already-computed groups.
+    // ctrl_id → {group, section} index from the already-computed groups.
     $index = [];
     foreach (($groups['content'] ?? []) as $id => $_) {
         $index[$id] = ['group' => 'content', 'section' => null];
@@ -1095,22 +1142,74 @@ function sandbox_editor_search_controls(array $controls, string $query, array $g
         }
     }
 
-    $matches = [];
+    // Split query into tokens; expand each with synonyms (token OR its aliases).
+    $syn    = sandbox_editor_search_synonyms();
+    $tokens = array_values(array_filter(preg_split('/\s+/', $q)));
+    $tokenAlts = [];
+    foreach ($tokens as $t) {
+        $alts = [$t];
+        if (isset($syn[$t])) { $alts = array_merge($alts, $syn[$t]); }
+        $tokenAlts[] = array_values(array_unique($alts));
+    }
+    $qKey = str_replace(' ', '_', $q); // "font size" → "font_size" for whole-id checks
+
+    $scored = [];
     foreach ($controls as $id => $def) {
-        $haystack = strtolower(implode(' ', array_filter([
-            $id,
-            $def['label']       ?? '',
-            $def['description'] ?? '',
-            implode(' ', array_keys ($def['selectors'] ?? [])),
-            implode(' ', array_values($def['selectors'] ?? [])),
-        ])));
-        if (strpos($haystack, $q) !== false) {
-            $loc = $index[$id] ?? ['group' => 'unknown', 'section' => null];
-            $matches[$id] = array_merge($def, $loc);
+        $lid      = strtolower($id);
+        $idParts  = explode('_', $lid);
+        $section  = strtolower((string) ($def['section'] ?? ($index[$id]['section'] ?? '')));
+        $fields   = [
+            [$lid,                                             100], // id
+            [strtolower((string) ($def['label'] ?? '')),        60], // label
+            [$section,                                          40], // section title
+            [strtolower((string) ($def['description'] ?? '')),  25], // description
+            [strtolower(implode(' ', array_merge(
+                array_keys($def['selectors'] ?? []),
+                array_values($def['selectors'] ?? [])))),       15], // selectors
+        ];
+
+        // Token-AND: every token (or a synonym) must score in some field.
+        $allMatched = true;
+        $score      = 0;
+        foreach ($tokenAlts as $alts) {
+            $best = 0;
+            foreach ($alts as $alt) {
+                foreach ($fields as [$hay, $w]) {
+                    if ($hay === '') { continue; }
+                    if ($hay === $alt)                    { $best = max($best, $w + 50); }
+                    elseif ($w === 100 && in_array($alt, $idParts, true))
+                                                          { $best = max($best, $w + 25); } // whole id segment
+                    elseif (strpos($hay, $alt) !== false) { $best = max($best, $w); }
+                }
+            }
+            if ($best === 0) { $allMatched = false; break; }
+            $score += $best;
         }
+        if (!$allMatched) { continue; }
+
+        // Whole-query boosts.
+        if     ($lid === $q || $lid === $qKey)      { $score += 500; }
+        elseif (strpos($lid, $qKey) !== false)      { $score += 120; }
+
+        // core vs extension: keep core Elementor above EA/extension noise.
+        $isExt  = (strncmp($id, 'eael_', 5) === 0) || (strpos($id, '_eael') !== false);
+        if ($isExt) { $score -= 45; }
+
+        $loc = $index[$id] ?? ['group' => 'unknown', 'section' => null];
+        $scored[$id] = array_merge($def, $loc, [
+            'origin' => $isExt ? 'extension' : 'core',
+            'score'  => $score,
+        ]);
     }
 
-    return $matches;
+    // Sort: score desc, then core before extension, then id asc (stable-ish).
+    uasort($scored, function ($a, $b) {
+        if ($a['score'] !== $b['score']) { return $b['score'] <=> $a['score']; }
+        if ($a['origin'] !== $b['origin']) { return $a['origin'] === 'core' ? -1 : 1; }
+        return 0;
+    });
+
+    return $scored;
 }
 
 /** Build an editor-schema response from a catalog entry (source: catalog). */
@@ -1212,35 +1311,37 @@ function sandbox_editor_schema($input)
     }
 
     if ($builder === 'elementor' && class_exists('\\Elementor\\Plugin')) {
-        // Elementor v4+ strips label/tab/options during WP init (non-REST context).
-        // Reset the Performance static flag + clear control stacks so get_controls()
-        // rebuilds with full metadata in this REST request context.
-        try {
-            if (!defined('REST_REQUEST')) { define('REST_REQUEST', true); }
-            $perf_ref = new ReflectionClass('Elementor\Core\Frontend\Performance');
-            $perf_prop = $perf_ref->getProperty('is_frontend');
-            $perf_prop->setAccessible(true);
-            $perf_prop->setValue(null, null);
-        } catch (\Throwable $_) {}
-        \Elementor\Plugin::$instance->controls_manager->clear_stack_cache();
+        // Elementor v4+ strips label/tab/options during WP init (non-REST context)
+        // AND omits the entire Advanced/common tab (padding, margin, background, ...).
+        // Prime a REST context so get_controls() rebuilds with FULL metadata.
+        sandbox_editor_elementor_prime_context();
 
         $wm = \Elementor\Plugin::$instance->widgets_manager;
+        $em = \Elementor\Plugin::$instance->elements_manager;
         $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
         $search = isset($input['search']) ? trim((string) $input['search']) : null;
         if ($name) {
-            $w = is_array($types) ? ($types[$name] ?? null) : null;
-            if (!$w) {
+            // Widget first; then a structural element type (section|column|container|
+            // e-flexbox|e-div-block|...) which lives in the elements_manager registry.
+            $obj  = is_array($types) ? ($types[$name] ?? null) : null;
+            $kind = 'widget';
+            if (!$obj && $em && method_exists($em, 'get_element_types')) {
+                $el = $em->get_element_types($name);
+                if ($el) { $obj = $el; $kind = 'element'; }
+            }
+            if (!$obj) {
                 // spec 012: not registered live → serve the catalog if we have it
                 // (e.g. Elementor Pro/EA widget absent on this install).
                 $cat = sandbox_editor_catalog_entry('elementor', $name);
                 if ($cat) {
                     return sandbox_editor_catalog_response('elementor', $name, $cat, null, $search);
                 }
-                return new WP_Error('not_found', "widget '$name' not registered (enable it first if EA)");
+                return new WP_Error('not_found',
+                    "'$name' is not a registered widget or element type (enable it first if EA)");
             }
             $controls = [];
             try {
-                foreach ((array) $w->get_controls() as $cid => $c) {
+                foreach ((array) $obj->get_controls() as $cid => $c) {
                     $controls[$cid] = sandbox_editor_el_control_entry($c);
                 }
             } catch (\Throwable $e) {
@@ -1248,16 +1349,53 @@ function sandbox_editor_schema($input)
             }
             $groups = sandbox_editor_group_controls($controls);
             if ($search !== null && $search !== '') {
-                return ['builder' => 'elementor', 'name' => $name, 'search' => $search,
-                        'source' => 'live',
+                return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind,
+                        'search' => $search, 'source' => 'live',
                         'matches' => sandbox_editor_search_controls($controls, $search, $groups)];
             }
-            return ['builder' => 'elementor', 'name' => $name, 'source' => 'live',
+            return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind, 'source' => 'live',
                     'controls' => $controls, 'count' => count($controls),
                     'groups'   => $groups];
         }
-        $names = is_array($types) ? array_keys($types) : [];
-        return ['builder' => 'elementor', 'count' => count($names), 'widgets' => $names];
+        $names   = is_array($types) ? array_keys($types) : [];
+        $elNames = ($em && method_exists($em, 'get_element_types'))
+                   ? array_keys($em->get_element_types()) : [];
+
+        // GLOBAL search (no name): "which widget/element has control X?" Scans every
+        // widget + element type, keeps each one's single best-scoring match, returns
+        // the top matches across all. Heavier than a per-widget search (instantiates
+        // all stacks) — use a specific `name` when you know the widget.
+        if ($search !== null && $search !== '') {
+            $all = [];
+            $scan = function ($host, $hostName, $hostKind) use ($search, &$all) {
+                try {
+                    $ctrls = [];
+                    foreach ((array) $host->get_controls() as $cid => $c) {
+                        $ctrls[$cid] = sandbox_editor_el_control_entry($c);
+                    }
+                    $groups  = sandbox_editor_group_controls($ctrls);
+                    $matches = sandbox_editor_search_controls($ctrls, $search, $groups);
+                    $best = null;
+                    foreach ($matches as $id => $m) { $best = ['id' => $id] + $m; break; } // already sorted
+                    if ($best) {
+                        $all[] = ['name' => $hostName, 'kind' => $hostKind, 'control' => $best['id'],
+                                  'origin' => $best['origin'], 'score' => $best['score'],
+                                  'group' => $best['group'], 'section' => $best['section']];
+                    }
+                } catch (\Throwable $_) {}
+            };
+            if (is_array($types)) { foreach ($types as $wn => $wobj) { $scan($wobj, $wn, 'widget'); } }
+            if ($em && method_exists($em, 'get_element_types')) {
+                foreach ($em->get_element_types() as $en => $eobj) { $scan($eobj, $en, 'element'); }
+            }
+            usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
+            return ['builder' => 'elementor', 'search' => $search, 'source' => 'live',
+                    'scanned' => count($names) + count($elNames),
+                    'matches' => array_slice($all, 0, 40)];
+        }
+
+        return ['builder' => 'elementor', 'count' => count($names) + count($elNames),
+                'widgets' => $names, 'elements' => $elNames];
     }
     return new WP_Error('bad_builder', 'builder must be gutenberg|elementor');
 }

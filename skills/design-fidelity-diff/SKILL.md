@@ -89,20 +89,29 @@ white means the extractor/root is wrong — fix before building).
   3. **Pro per-element `custom_css`** (`"custom_css":"selector{...}"`) — renders via injection.
   4. global `<style>` (html widget) — last resort, with a logged reason.
 - Look up keys via the discovery method below — do not guess.
-**Exit gate:** page renders; all images load (verify via DOM `naturalWidth`, not a screenshot).
+**Exit gate:** page renders; the boxed content width == the reference `contentMaxWidth` (set it
+explicitly — don't inherit the builder's default); all images load (verify via DOM `naturalWidth`,
+not a screenshot) AND every reference asset `src`/decor is actually placed (not just the subset you
+remembered).
 
 ## Phase 3 — Full diagnosis BEFORE fixing anything (produce all, then rank)
 1. **Fonts loaded?** `document.fonts.check('700 56px Archivo')` per family/weight — a matching
    `font-family` with status `unloaded` is a FALSE PASS; inject the webfont yourself
    (`<link>`/`@import`, include the italic axis if accent words are italic).
-2. **Container capped + centered at a WIDE viewport (~1680).** A section can look right at the
-   design width yet be full-bleed. Measure `.elementor-top-section>.elementor-container`
-   `width`/`maxWidth`/`left`.
-3. **pixelmatch overlay = LOCATOR, not a score.** Crop both PNGs to common dims,
-   `pixelmatch(...,{threshold:0.1})`. **Classify every red zone by measurement:** text
-   doubled/ghosted = position offset (FIXABLE — find the band via the height table); isolated
-   red rectangle with clean surrounding text = inherent image diff (ignore). Never wave a
-   region off as "just images" without the height table.
+2. **Content-width parity — match the reference `contentMaxWidth` EXACTLY.** Read it from the
+   reference DesignSpec (`page.contentMaxWidth`, e.g. 1240) and set the build's boxed width to the
+   SAME number. A 20–24px delta (e.g. building at 1216 vs a 1240 reference) shifts every element's
+   `left` by ~12px → the pixelmatch overlay goes red on *every* line even when heights are perfect.
+   This is a systemic, whole-page offset — fix it before chasing per-element drift. Also confirm
+   the container is capped + centered at a WIDE viewport (~1680), not full-bleed.
+3. **pixelmatch overlay = LOCATOR, not a score — use the `pixelmatch_diff` tool.** Run
+   `pixelmatch_diff {reference, build, diff_out, bands:12}` (MCP) or `sb pxdiff <ref> <build>
+   --diff-out <p>`; read **`worstBands`** to jump straight to the y-ranges that drifted most, and
+   `dimensionsMatch` (false → your page height is already wrong). **Whole overlay red = SYSTEMIC**
+   (content-width mismatch per #2, or cumulative height drift per #4), NOT 40 tiny misses — do not
+   start per-element. **Classify each red zone:** text doubled/ghosted = position offset (find the
+   band via `worstBands` + the height table); solid red blob = missing/wrong image (an absent
+   asset, see #7); isolated red rect with clean surrounding text = inherent image diff (ignore).
 4. **Per-SECTION height table** (build vs ref) — the anti-accumulation metric.
 5. **Per-ELEMENT dTop/dLeft map**, keyed by text/src. `dLeft` should be ~0; if not it's a
    width/alignment/structure bug, not fonts.
@@ -111,8 +120,13 @@ white means the extractor/root is wrong — fix before building).
    A build section that is flat-color (or white) where the reference has a gradient or decorative
    PNG is a defect — list it with the missing `src`/gradient. (This is the class of miss the old
    gate never caught.)
+7. **Asset completeness — every reference `src` present.** Collect the set of all image/decor
+   `src` filenames from the reference DesignSpec (`elements[].src` + `sections[].decor[].src`) and
+   from the build; `reference − build` MUST be empty. Missing assets render as solid-red blobs.
+   The Phase-2 "images load" check only proves the images you INCLUDED work — it never notices the
+   ones you never added. List every missing `src` with the section it belongs to.
 **Exit gate:** every defect listed with measured magnitude + cause — including any missing
-background/decor layer.
+background/decor layer AND any missing asset `src`.
 
 ## Phase 4 — Fix by cause, top-down, SECTION HEIGHTS FIRST, verify each
 Per-element `dTop` is mostly cumulative: a section 20px too tall shoves everything below it
@@ -127,12 +141,20 @@ content, wrapping) — not blank space.
 **Exit gate:** every section height ±2px; per-element dTop median ≤ 3px.
 
 ## Phase 5 — Done-gate (numeric) + responsive + hover
+- **Content width** == reference `contentMaxWidth` (exact). A systemic width delta reddens every
+  line in the overlay regardless of heights — this is a gate, not a nicety.
 - **dLeft** median ~0, max ≤ ~3px (horizontal off = real bug, not fonts).
+- **Asset completeness** (hard gate): `reference_srcs − build_srcs == ∅` (images + `decor[]`).
+  Every reference asset is placed; a missing PNG is a solid-red blob, not a rounding error.
 - **Background parity** (hard gate): every section's `bgOwner.{gradient,image}` and every
   `decor[]` layer present on the reference is present on the build (matched by `src`/gradient).
   A flat-white/flat-color section where the reference has a gradient or object-PNG FAILS the gate —
   no "close enough". Backgrounds carry the design's identity; a heights-only pass is not done.
 - **Per-section height** every section ±2px.
+- **Whole-overlay-red is a FAIL, not a floor.** If `pixelmatch_diff` is red across the page, the
+  cause is systemic (content width or accumulated height), not the cross-engine sub-pixel floor —
+  fix width + section heights until only isolated image rects remain red. "Standing fast" (correct
+  content, unmatched heights/width) is a valid INTERIM state but is NOT done; say which one you're in.
 - **Per-element dTop** median ≤ ~3px; every residual >5px named with its cause.
 - **Control budget** reported; global-`<style>` ≈ 0.
 - **Honest cross-engine floor:** literal 0px on every element is NOT achievable rebuilding in
@@ -230,7 +252,11 @@ let el=node,chain=[]; for(let i=0;i<5&&el;i++){const c=getComputedStyle(el);
   chain.push({cls:el.className.toString().slice(0,40),bg:c.backgroundColor,pad:c.padding,radius:c.borderRadius}); el=el.parentElement;} return chain;
 ```
 **Per-section height table:** heights of top-level sections on both pages; diff per section (NOT cumulative tops).
-**pixelmatch (node, pngjs+pixelmatch):** crop both PNGs to `min(w,h)`; `pixelmatch(a,b,diff,w,h,{threshold:0.1})`; read % as a locator only.
+**pixelmatch → use the `pixelmatch_diff` MCP tool (or `sb pxdiff <ref> <build> --diff-out <p>`)**,
+not a hand-rolled node snippet. It crops to the smaller image, writes the red overlay, and returns
+`{mismatch, pct, verdict, dimensionsMatch, bands[], worstBands[]}` — read `worstBands` (y-top/height/
+pct) as the locator to jump to the drifted section, and `dimensionsMatch:false` means the page height
+itself is off. The % is a locator, never the done-gate (Phase 5 numbers are).
 
 # REFERENCE — gotchas
 - **Decode race ≠ missing image.** Verify render via DOM (`naturalWidth`, `complete`); a

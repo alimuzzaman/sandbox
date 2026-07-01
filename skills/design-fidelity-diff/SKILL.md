@@ -295,6 +295,15 @@ Then re-test at 768 + 480 and verify hover.
   Set `padding` explicitly (usually `0`) on sub-containers.
 - **Image widget** won't take a fixed height from a control — give it a class and
   `img{width/height/object-fit:…!important}` in the enqueued stylesheet.
+- **A fixed-width image still flex-shrinks below that width inside a flex row** (measured: a `w:260`
+  image in a 48% card rendered 169px → its height collapsed proportionally, shorting the whole row).
+  WRAP the image in a fixed-width container (a column with `width:<imgw>` + image `width:100%`) so it
+  holds its size; a bare image widget as a direct flex child is the shrink trap. This is a top cause
+  of a card row measuring too SHORT even though the image `src` and `width` control look correct.
+- **Empty Elementor containers collapse to 0 height** even with `min_height`/`background`/`width` set
+  (measured: carousel nav dots built as 6 empty styled containers rendered `dotCount:0`). For small
+  decorative pips/dots use a real TEXT-GLYPH widget (a heading of `&#9679;` `●` sized/colored), not an
+  empty container — a section that silently loses a dots row reads as an unexplained height deficit.
 - Zero `--widgets-spacing` globally (`body{--widgets-spacing:0px}`) since gaps come from `flex_gap`.
 Diagnose an unexplained offset by walking the box chain (`getBoundingClientRect` + computed
 `gap`/`margin`/`padding` up the ancestors) — don't compensate blindly; find the gap/padding owner.

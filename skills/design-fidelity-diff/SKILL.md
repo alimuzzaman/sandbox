@@ -37,6 +37,32 @@ says* instead of what actually *rendered*. The phases kill that.
 > **Custom CSS is allowed** (not banned like HTML): add a class via the CSS Classes control
 > (`_css_classes` on widgets, `css_classes` on containers) and style it in an enqueued stylesheet
 > (mu-plugin), or Pro `custom_css`. Fonts still load via a mu-plugin `<link>` (enqueue, not markup).
+>
+> **CRITICAL RULE — ONE SECTION AT A TIME, GATED AGAINST A MEASURED SPEC (never whole-page-then-diff).**
+> The signature, expensive failure of this workflow is generating/building the WHOLE page from
+> estimated numbers and diffing only at the end. Per-section height errors then compound into runaway
+> vertical drift — every row is off by the SUM of all errors above it — so the final overlay is red
+> top-to-bottom (doubled/ghosted text that fans further apart the lower you go) with no single obvious
+> cause. This is a rebuild that "looks like a complete mess with everything in the wrong position."
+> Two invariants prevent it — treat both as hard gates, not advice:
+> 1. **Phase 1 is MANDATORY and MEASURED — a hand-authored generator is a Phase-1 violation.** Before
+>    building, extract the reference into a per-section + per-element spec of REAL `getBoundingClientRect`
+>    numbers (extract-web.js). A Python/JS generator whose padding/gap/width/height/min-height are
+>    *guessed* (literal px you did not read off the reference DOM) has no ground truth to build toward
+>    or gate against, so it cannot help but drift. If you are typing a px value into a generator and
+>    can't point at the reference measurement it came from, STOP and measure first.
+> 2. **Build TOP-DOWN and GATE each section before the next.** After emitting section N, render it and
+>    measure its rendered top + height against the reference section (±2px) AND its per-element
+>    dTop/dLeft. Do NOT start section N+1 until N passes. The per-section height table is NOT a Phase-4
+>    post-mortem you run once at the end — it is a BUILD-TIME gate applied section by section. A section
+>    that renders at ~half its reference height is missing rows/cards/content or has collapsed padding:
+>    fix the CAUSE (Law 2) and re-gate before moving on. Never proceed past a known-short section.
+>
+> **Corollary — the diff must be captured FULL-PAGE at the reference's viewport.** A build screenshot
+> shorter than the reference (e.g. build 952px vs reference 9562px) is a BROKEN capture (full-page not
+> enabled / lazy images not forced), NOT a short page. Any mismatch % from it is meaningless and hides
+> the real drift — confirm `dimensionsMatch` and that both heights are full-page before trusting a
+> single diff number. [[headless-screenshot-image-decode-race]]
 
 ---
 

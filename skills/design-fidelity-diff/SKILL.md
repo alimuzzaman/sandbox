@@ -43,22 +43,35 @@ throwaway and MEASURE which settings take effect. Confirm at minimum:
 Emit **DesignSpec v1** — ONE canonical, source-agnostic JSON (schema + adapters in
 `DESIGNSPEC.md`). The build emits the same shape, so the diff is key-for-key. Do NOT invent a
 per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffing was fragile).
-- **Web** → run `extract-web.js` (paste the function into `browser_evaluate`; images
+- **Web** → **RUN `extract-web.js`** (paste the function into `browser_evaluate`; images
   force-loaded; override `window.__DS_ROOT` if section auto-detect is wrong). `fidelity:full`.
-  Run it on the reference AND, in Phase 3/5, on the build.
+  Run it on the reference AND, in Phase 3/5, on the build. **Do NOT hand-roll a shallow
+  `browser_evaluate` that grabs text + `backgroundColor`** — that shortcut silently drops every
+  gradient, `::before`/`::after` layer, and decorative object-PNG background, producing flat
+  white sections that "don't match at all". The tool captures them (`bgOwner.{gradient,image}` +
+  `decor[]`); an ad-hoc scrape does not. If you must inline-measure, port `bgOf()`/`decorOf()`.
 - **PNG** → `python3 extract-png.py <img> --out spec.json` gives reliable page dims + page bg +
   best-effort band boundaries/colors (`fidelity:low`); then a VISION pass fills each section's
   `elements` (text/kind/≈font/≈box), every value flagged low. If the reference exists ONLY as a
   PNG, cap the done-gate at "visually matches", not ±2px.
 - **Figma** (later) → REST nodes → DesignSpec v1, `fidelity:full`.
 
-DesignSpec captures, per Phase-1 intent: section `top/height/bgOwner{background,padding,radius}/
-contentWidth/columns`, and per element `kind/text|src/top/left/w/h/font{...}/box{...,bgOwner}/
-image{...}`. **The box-model OWNER is explicit** (`box.bgOwner`): the element with the
-background must also carry the breathing-room padding (the "Contact us" bug — panel had the bg,
-`padding-bottom:0`, button flush to the colored edge). Also diff `text` length per element —
-truncated/reworded copy is a top cause of vertical drift that masquerades as a font problem.
-**Exit gate:** a DesignSpec v1 file for the reference exists (sections + elements + bgOwner).
+DesignSpec captures, per Phase-1 intent: section `top/height/bgOwner{background,gradient,image,
+backgroundSize/Position,padding,radius}/decor[]/contentWidth/columns`, and per element
+`kind/text|src/top/left/w/h/font{...}/box{...,backgroundImage,backgroundGradient,bgOwner}/image{...}`.
+**Backgrounds are captured in full — color, gradient, image, AND pseudo-element/decorative
+layers — not just `backgroundColor`.** On EB/Elementor the section's real background almost never
+lives on `backgroundColor`: it's a gradient, an inner-wrapper image, a `::before`, or an
+absolutely-positioned object PNG. `decor[]` lists those so you REBUILD them (as container
+`background_*` / a positioned image widget), never drop them. **The box-model OWNER is explicit**
+(`box.bgOwner`): the element with the background must also carry the breathing-room padding (the
+"Contact us" bug — panel had the bg, `padding-bottom:0`, button flush to the colored edge). Also
+diff `text` length per element — truncated/reworded copy is a top cause of vertical drift that
+masquerades as a font problem.
+**Exit gate:** a DesignSpec v1 file for the reference exists (sections + elements + bgOwner +
+`decor[]`); every section with a non-white reference background has its gradient/image/decor
+recorded (a section showing only `background: rgba(0,0,0,0)` when the reference clearly isn't
+white means the extractor/root is wrong — fix before building).
 
 ## Phase 2 — Build (native-first, correct element, right primitive)
 - **Pick the layout primitive first.** If Container is active, BUILD WITH CONTAINERS, not
@@ -93,7 +106,13 @@ truncated/reworded copy is a top cause of vertical drift that masquerades as a f
 4. **Per-SECTION height table** (build vs ref) — the anti-accumulation metric.
 5. **Per-ELEMENT dTop/dLeft map**, keyed by text/src. `dLeft` should be ~0; if not it's a
    width/alignment/structure bug, not fonts.
-**Exit gate:** every defect listed with measured magnitude + cause.
+6. **Background parity per section.** Diff `bgOwner.{gradient,image}` and the `decor[]` set
+   (by `src`) ref↔build. Every reference gradient / object-PNG / pattern must exist on the build.
+   A build section that is flat-color (or white) where the reference has a gradient or decorative
+   PNG is a defect — list it with the missing `src`/gradient. (This is the class of miss the old
+   gate never caught.)
+**Exit gate:** every defect listed with measured magnitude + cause — including any missing
+background/decor layer.
 
 ## Phase 4 — Fix by cause, top-down, SECTION HEIGHTS FIRST, verify each
 Per-element `dTop` is mostly cumulative: a section 20px too tall shoves everything below it
@@ -109,6 +128,10 @@ content, wrapping) — not blank space.
 
 ## Phase 5 — Done-gate (numeric) + responsive + hover
 - **dLeft** median ~0, max ≤ ~3px (horizontal off = real bug, not fonts).
+- **Background parity** (hard gate): every section's `bgOwner.{gradient,image}` and every
+  `decor[]` layer present on the reference is present on the build (matched by `src`/gradient).
+  A flat-white/flat-color section where the reference has a gradient or object-PNG FAILS the gate —
+  no "close enough". Backgrounds carry the design's identity; a heights-only pass is not done.
 - **Per-section height** every section ±2px.
 - **Per-element dTop** median ≤ ~3px; every residual >5px named with its cause.
 - **Control budget** reported; global-`<style>` ≈ 0.

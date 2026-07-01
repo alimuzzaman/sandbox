@@ -39,19 +39,26 @@ throwaway and MEASURE which settings take effect. Confirm at minimum:
 - image widgets may lack `.elementor-widget-container` (`<img>` is a direct child).
 **Exit gate:** you can name which controls render and your fallback for each.
 
-## Phase 1 — Spec the reference: SECTION pass, then ELEMENT pass
-Reference at a fixed viewport (e.g. 1280), images force-loaded. Save raw output to files.
-- **1a Section pass** — per top-level band: landmark text, `top`, `height`, **which element
-  carries the background**, that element's `padding` + `border-radius`, the content
-  `max-width` + left offset (centered?), and the column layout (widths + gap).
-- **1b Element pass** — every `h*/p/a/button/img`: `{text|src, top, left, w, h, fontFamily,
-  fontSize, fontWeight, lineHeight, color, textAlign}`. AND for each colored element record
-  the **box-model owner**: walk up and note which element owns background / padding / margin
-  / radius / border. **Background-owner and padding-owner must be the same element** (the
-  "Contact us" bug: panel had the bg, `padding-bottom:0`, button bottom-aligned → flush to
-  the colored edge). Also diff `textContent.length` per element — truncated/reworded copy is
-  a top cause of vertical drift and masquerades as a font problem.
-**Exit gate:** per-section table + per-element map + box-model-owner notes saved.
+## Phase 1 — Spec the reference into DesignSpec v1 (the extraction standard)
+Emit **DesignSpec v1** — ONE canonical, source-agnostic JSON (schema + adapters in
+`DESIGNSPEC.md`). The build emits the same shape, so the diff is key-for-key. Do NOT invent a
+per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffing was fragile).
+- **Web** → run `extract-web.js` (paste the function into `browser_evaluate`; images
+  force-loaded; override `window.__DS_ROOT` if section auto-detect is wrong). `fidelity:full`.
+  Run it on the reference AND, in Phase 3/5, on the build.
+- **PNG** → `python3 extract-png.py <img> --out spec.json` gives reliable page dims + page bg +
+  best-effort band boundaries/colors (`fidelity:low`); then a VISION pass fills each section's
+  `elements` (text/kind/≈font/≈box), every value flagged low. If the reference exists ONLY as a
+  PNG, cap the done-gate at "visually matches", not ±2px.
+- **Figma** (later) → REST nodes → DesignSpec v1, `fidelity:full`.
+
+DesignSpec captures, per Phase-1 intent: section `top/height/bgOwner{background,padding,radius}/
+contentWidth/columns`, and per element `kind/text|src/top/left/w/h/font{...}/box{...,bgOwner}/
+image{...}`. **The box-model OWNER is explicit** (`box.bgOwner`): the element with the
+background must also carry the breathing-room padding (the "Contact us" bug — panel had the bg,
+`padding-bottom:0`, button flush to the colored edge). Also diff `text` length per element —
+truncated/reworded copy is a top cause of vertical drift that masquerades as a font problem.
+**Exit gate:** a DesignSpec v1 file for the reference exists (sections + elements + bgOwner).
 
 ## Phase 2 — Build (native-first, correct element, right primitive)
 - **Pick the layout primitive first.** If Container is active, BUILD WITH CONTAINERS, not

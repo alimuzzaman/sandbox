@@ -309,6 +309,12 @@ Then re-test at 768 + 480 and verify hover.
   reference's 67px, i.e. −11px on *every* fs-56 section heading at once). This is a SYSTEMIC per-section
   deficit hiding as many small ones: set `line_height ≈ 1.2×fs` on every heading (read the reference's
   computed `lineHeight`), don't leave it to the kit default. Same trap on text blocks — set `lh`.
+- **A multi-row grid's inter-row gap is NOT the section gap** — a `grid(cards, cols=3)` that wraps
+  onto 2 rows spaces those rows by the section container's own `flex_gap`, so you cannot tune row
+  spacing without also moving every other band. When the reference's row-to-row gap differs from the
+  band gap (measured: testimonials rows sat 54px apart while the section band gap was different),
+  WRAP the grid in its own column — `col(grid(cards, 3, gap=20), gap=54)` — so the wrapper owns the
+  inter-row spacing independently. This is how you close a per-row deficit without disturbing §-level flow.
 - Zero `--widgets-spacing` globally (`body{--widgets-spacing:0px}`) since gaps come from `flex_gap`.
 Diagnose an unexplained offset by walking the box chain (`getBoundingClientRect` + computed
 `gap`/`margin`/`padding` up the ancestors) — don't compensate blindly; find the gap/padding owner.

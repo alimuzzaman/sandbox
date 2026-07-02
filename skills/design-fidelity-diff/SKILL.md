@@ -58,6 +58,19 @@ says* instead of what actually *rendered*. The phases kill that.
 >    that renders at ~half its reference height is missing rows/cards/content or has collapsed padding:
 >    fix the CAUSE (Law 2) and re-gate before moving on. Never proceed past a known-short section.
 >
+> **Corollary — SECTION-HEIGHT MATCHING IS NOT FIDELITY; gate every LEAF ELEMENT.** A section can render
+> at the exact reference height while its interior is wrong, and height-gating is structurally BLIND to
+> three defects that make a page "look like nothing is aligned": (a) **internal Y-drift** — the heading
+> sits 60px too low inside a correct-height section (over/under-shoots elsewhere cancel in the sum);
+> (b) **a MISSING element** — a whole button/text/badge absent, its space absorbed by centering, so the
+> height still matches; (c) **a WRONG-SIZED element** — an icon rendering 24px vs 38px, a logo at the
+> wrong x. WORSE: gating on section-INDEX height sums can cancel a big positive error (a +120px nav band)
+> against a big negative one (a −800px collapsed grid) and report "converged" on a page that is a mess.
+> So the real gate is: for each section, enumerate EVERY leaf (`h1..h6, p, img, a, li, svg`) in a
+> Y-range on BOTH pages, PAIR them by label/order, and assert per-element `dTop/dLeft/dW/dH` within ±3px
+> AND that the counts match (a missing/extra element is an instant fail). Height is a cheap smoke test,
+> never the pass condition. If you only ever measured section tops+heights, you have NOT verified fidelity.
+>
 > **Corollary — the diff must be captured FULL-PAGE at the reference's viewport.** A build screenshot
 > shorter than the reference (e.g. build 952px vs reference 9562px) is a BROKEN capture (full-page not
 > enabled / lazy images not forced), NOT a short page. Any mismatch % from it is meaningless and hides
@@ -321,9 +334,22 @@ Diagnose an unexplained offset by walking the box chain (`getBoundingClientRect`
 
 **Key naming by element type (wrong prefix silently no-ops):** widgets use `_`-prefixed
 (`_margin`, `_padding`, `_css_classes`); sections & columns use UNPREFIXED (`margin`,
-`padding`, `css_classes`). Kit rule `.elementor-widget:not(:last-child){margin-block-end:
+`padding`, `css_classes`). This extends to POSITIONING/z-index: on a CONTAINER use `z_index`
+and `position` (UNPREFIXED); the widget keys `_z_index`/`_position` are silently ignored on a
+container (measured: `_z_index` left the nav at computed `z-index:auto`; switching to `z_index`
+applied `100`). Kit rule `.elementor-widget:not(:last-child){margin-block-end:
 var(--widgets-spacing)}` (spec 0,0,2,0) out-specifies a widget's own `_margin` (0,0,1,0) — a
 widget `mb:0` is ignored; override via the widget's `custom_css`. See [[elementor-kit-widget-spacing-gotcha]].
+- **After injecting `_elementor_data` directly (wp_eval_live), the per-element CSS does NOT
+  regenerate on its own** — `files_manager->clear_cache()` is not enough; positioning/z-index/margin
+  rules stay stale and your change looks ignored in the DOM. Force it: `delete_post_meta($id,
+  '_elementor_css')` then `\Elementor\Core\Files\CSS\Post::create($id)->update()`, and re-measure.
+- **Overlay nav (transparent nav sitting ON the hero, 0 layout height, like most reference heroes):**
+  Elementor won't honor `position:absolute` on a *top-level* container after data injection. Instead
+  keep the nav in-flow + TRANSPARENT with `z_index:100`, and give the hero a NEGATIVE top margin
+  (`margin=(-navH,0,0,0)`) to pull it up under the nav. Without the z-index the hero (later in DOM)
+  paints OVER the nav and hides the logo/CTA — the nav menu text may still show, masking the bug, so
+  verify with `elementFromPoint` on the LOGO, not just that "some nav is visible".
 
 ---
 

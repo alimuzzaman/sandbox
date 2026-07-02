@@ -468,3 +468,16 @@ itself is off. The % is a locator, never the done-gate (Phase 5 numbers are).
 - **Playwright `browser_take_screenshot`/`browser_evaluate` filename writes to cwd** — pass `tmp/...`.
 - **Header/nav is an inherent approximation** (sticky/dropdowns) — spec it as its own section,
   state the approximation, keep it out of the body-fidelity median.
+- **Elementor row container: two children with no explicit width silently split 50/50**, not
+  content-hug, even with `flex-grow:0` computed. An icon (38px content) next to a text column
+  (needs 120px) both rendered at exactly `available-width / 2`. Don't trust `flex-grow:0` +
+  `flex-basis:auto` to mean "hug content" — verify actual rendered widths on BOTH children, and if
+  they're suspiciously equal despite unequal content, force it explicitly: hug-content child gets
+  `flex:0 0 auto;width:auto`, the sibling that should absorb remaining space gets `flex:1 1 auto`.
+- **The flex row you need to zero the `gap` on is `<container>.e-con-inner`, not `<container>`
+  itself.** A container's own `--gap` CSS variable lives on the outer `.elementor-element-XXXX`
+  node, but the actual `display:flex; gap:...` rule applies to its child `.e-con-inner`, which can
+  carry its own independently-set `--gap` that doesn't inherit your override. Overriding
+  `.my-class{--gap:0}` silently no-ops; `getComputedStyle` on the OUTER element will even report
+  `gap:0px` correctly while the visible row still has the old gap — measure the `.e-con-inner`
+  child directly, and override `.my-class > .e-con-inner{gap:0!important}` (bypass the CSS var).

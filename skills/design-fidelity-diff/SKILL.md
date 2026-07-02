@@ -355,6 +355,17 @@ widget `mb:0` is ignored; override via the widget's `custom_css`. See [[elemento
   regenerate on its own** — `files_manager->clear_cache()` is not enough; positioning/z-index/margin
   rules stay stale and your change looks ignored in the DOM. Force it: `delete_post_meta($id,
   '_elementor_css')` then `\Elementor\Core\Files\CSS\Post::create($id)->update()`, and re-measure.
+- **Elementor does NOT emit width / flex-shrink / flex-grow CSS for nested flex-child CONTAINERS
+  when the layout is injected via `_elementor_data` (verified):** `min_height`, `flex_direction`,
+  `padding`, `background`, `border_radius` all generate their `--var` rules, but `width` (self width),
+  `_element_custom_width`, `flex_shrink`, `_flex_shrink`, `flex_grow` produce NO rule — the container
+  keeps the default `flex-shrink:1` and collapses to an equal share of its parent. So you CANNOT pin a
+  fixed-width flex child (e.g. a pinwheel bento of 357/266px cards) through container settings alone;
+  the cards shrink to equal width, wrapping labels and inflating height. FIX = the css_classes +
+  enqueued-stylesheet escape hatch: put a stable class on the container (`css_classes` on containers,
+  `_css_classes` on widgets) and define `width` + `flex:0 0 <w>` in a mu-plugin stylesheet. Confirm the
+  generated rule actually carries a width (`getComputedStyle` + scan `document.styleSheets` for the
+  element id) — don't assume a `width` setting took.
 - **Overlay nav (transparent nav sitting ON the hero, 0 layout height, like most reference heroes):**
   Elementor won't honor `position:absolute` on a *top-level* container after data injection. Instead
   keep the nav in-flow + TRANSPARENT with `z_index:100`, and give the hero a NEGATIVE top margin

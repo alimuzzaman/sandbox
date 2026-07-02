@@ -361,11 +361,27 @@ widget `mb:0` is ignored; override via the widget's `custom_css`. See [[elemento
   `_element_custom_width`, `flex_shrink`, `_flex_shrink`, `flex_grow` produce NO rule — the container
   keeps the default `flex-shrink:1` and collapses to an equal share of its parent. So you CANNOT pin a
   fixed-width flex child (e.g. a pinwheel bento of 357/266px cards) through container settings alone;
-  the cards shrink to equal width, wrapping labels and inflating height. FIX = the css_classes +
-  enqueued-stylesheet escape hatch: put a stable class on the container (`css_classes` on containers,
-  `_css_classes` on widgets) and define `width` + `flex:0 0 <w>` in a mu-plugin stylesheet. Confirm the
-  generated rule actually carries a width (`getComputedStyle` + scan `document.styleSheets` for the
-  element id) — don't assume a `width` setting took.
+  the cards shrink to equal width, wrapping labels and inflating height. FIX (VALIDATED end-to-end on
+  the §2 pinwheel) = the css_classes + custom-stylesheet escape hatch: put a stable class on the
+  container (`css_classes` on containers), then inject the rules with `wp_update_custom_css_post($css)`
+  — the WP Customizer "Additional CSS" (a core feature; **mu-plugins are off-limits in the sandbox and
+  Pro `custom_css` needs Pro**). Pin `flex:0 0 <w>px;width:<w>px;max-width:<w>px` for HORIZONTAL flex
+  children, and `height:<h>px` where needed. Confirm the rule actually carries the width
+  (`getComputedStyle` + scan `document.styleSheets`) — don't assume a `width` setting took.
+- **`flex:0 0 <w>` sets the flex-BASIS on the MAIN axis — in a COLUMN parent that is HEIGHT, not width**
+  (measured: a logos card in a column went 647×647 square). For a child of a column, pin `width:<w>` ONLY
+  (no `flex-basis`); reserve `flex:0 0 <w>` for children of ROWS.
+- **Every Elementor container carries default padding that STACKS per nesting level and silently
+  inflates a layout** (measured, §2): each `.e-con` has `padding-left/right:10px` and each `.e-con-inner`
+  has `padding-top/bottom:10px`. Three nested layout containers (col→col→row) therefore push content
+  +30px right and add ~20px between every row — reading as a mysterious "+100px too tall / shifted
+  right." KILL it section-scoped: `.sec .e-con-inner{padding:0!important}` + `.sec .e-con{padding-left:0
+  !important;padding-right:0!important}`, then RE-FORCE the real card paddings on the card classes
+  (`.card>.e-con-inner{padding:30px!important}`). This one recipe took §2 from +101px/±40 to +1px/±2.
+- **ALWAYS verify `window.innerWidth===1280` (resize) before measuring.** A browser restart / MCP
+  reconnect silently resets the viewport (seen: 1512), and a boxed(1240) layout then centers with
+  bigger side margins — shifting every x by ~130px and masquerading as a huge horizontal defect that is
+  purely a viewport artifact. Resize first, every session, on both reference and build.
 - **Overlay nav (transparent nav sitting ON the hero, 0 layout height, like most reference heroes):**
   Elementor won't honor `position:absolute` on a *top-level* container after data injection. Instead
   keep the nav in-flow + TRANSPARENT with `z_index:100`, and give the hero a NEGATIVE top margin

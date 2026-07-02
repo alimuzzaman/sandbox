@@ -71,6 +71,17 @@ says* instead of what actually *rendered*. The phases kill that.
 > AND that the counts match (a missing/extra element is an instant fail). Height is a cheap smoke test,
 > never the pass condition. If you only ever measured section tops+heights, you have NOT verified fidelity.
 >
+> **Corollary — LAZY IMAGES MAKE A GOOD SECTION LOOK COLLAPSED; dwell before you measure.** A section
+> whose cards contain `loading="lazy"` images (Elementor/EB default) with no width+height attributes
+> renders at a FRACTION of its true height until those images actually load — an unloaded `<img>` is
+> 0px tall, so the card collapses and the section measures e.g. 880px when its real height is 1250px.
+> A fast scroll (≤100ms dwell per step) does NOT give the images time to fetch+decode+reflow, so you
+> capture the collapsed state and mis-diagnose a perfectly good section as a "−364 collapse." Before ANY
+> section/element measurement: scroll through in steps with a real dwell (≥400ms/step), then confirm
+> every in-range `img` has `complete===true && naturalWidth>0` BEFORE trusting a single top/height/count.
+> A card that is short ONLY because its image hasn't loaded is a measurement bug, not a build defect —
+> re-measure loaded before touching the generator. [[headless-screenshot-image-decode-race]]
+>
 > **Corollary — the diff must be captured FULL-PAGE at the reference's viewport.** A build screenshot
 > shorter than the reference (e.g. build 952px vs reference 9562px) is a BROKEN capture (full-page not
 > enabled / lazy images not forced), NOT a short page. Any mismatch % from it is meaningless and hides

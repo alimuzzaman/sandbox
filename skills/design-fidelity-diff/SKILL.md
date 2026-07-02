@@ -71,6 +71,20 @@ says* instead of what actually *rendered*. The phases kill that.
 > AND that the counts match (a missing/extra element is an instant fail). Height is a cheap smoke test,
 > never the pass condition. If you only ever measured section tops+heights, you have NOT verified fidelity.
 >
+> **Corollary — GEOMETRY GATING IS NOT ENOUGH; you MUST also gate APPEARANCE.** Matching every leaf's
+> box (top/left/width/height) proves layout, NOT fidelity. A hero can pass box-gating to ±2px while
+> looking completely different: wrong text COLOR (black vs navy), missing font STYLING (an italic-serif
+> emphasis span on one word), missing `text-transform` (with vs With), a missing BADGE/PILL background
+> + border-radius on an eyebrow, missing card BORDERS + star icons on a rating block, a missing icon
+> GLYPH (a "Book a Call ↗" arrow), or an IMAGE whose box is right but whose rendered CONTENT is wrong
+> (spheres with the centre cube-cluster missing). Box-gating is blind to ALL of these. So per element
+> also assert, on BOTH pages: `color`, `font-family/-style/-weight`, `text-transform`, the innerHTML
+> emphasis structure (spans), `background`/`border`/`border-radius`, presence of icon/pseudo glyphs, and
+> for images that `naturalWidth>0` AND the src is the SAME asset (not a lookalike). AND — non-negotiable
+> — take a screenshot of the section on both pages and eyeball them side by side; a pixel/vision diff
+> catches what no computed-style check enumerates. "Boxes line up" is a PRE-condition for a visual pass,
+> never the pass itself. If you only measured getBoundingClientRect, you have NOT verified the rebuild.
+>
 > **Corollary — LAZY IMAGES MAKE A GOOD SECTION LOOK COLLAPSED; dwell before you measure.** A section
 > whose cards contain `loading="lazy"` images (Elementor/EB default) with no width+height attributes
 > renders at a FRACTION of its true height until those images actually load — an unloaded `<img>` is

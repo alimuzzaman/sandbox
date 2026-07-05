@@ -83,6 +83,8 @@ file path.
   //   "<slug>": { "path"|"zip"|"source", "active", "onDemand" }  → full control
   "plugins": {
     "my-addon":  ".",          // this repo, active (slug = the key, not the dir)
+    "query-monitor": true,     // wp.org, active by default in new scaffolds
+    "mcp-adapter": "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
     "elementor": true,         // wp.org, active
     "elementor-pro": { "path": "~/dev/elementor-pro", "onDemand": true }
   },
@@ -157,6 +159,11 @@ orthogonal axes:
 
 The **key is the authoritative slug**, so a local source installs under the right
 slug even from a git worktree whose directory name differs.
+
+New `sandbox init` scaffolds include the current project (`"."`), Query Monitor,
+and the official WordPress MCP Adapter release zip by default. Replace the
+`plugins` field in a project config with a smaller map/list if that project
+should not install those development helpers.
 
 ### Value shorthands
 

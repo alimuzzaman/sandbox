@@ -54,7 +54,11 @@ USER_CONFIG_BASENAMES = ("config.json", "config.yml", "config.yaml")
 # "use the wordpress:latest default" — no implicit pinning.
 DEFAULTS: dict = {
     "slug": None,              # project plugin slug; used for legacy plugins:["."]
-    "plugins": ["."],          # "." = this repo; others are slugs/paths/zip URLs
+    "plugins": [
+        ".",                   # this repo; others are slugs/paths/zip URLs
+        "query-monitor",
+        "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
+    ],
     "themes": [],
     "mappings": {},            # wp-path -> host path, bind-mounted AND activated
     "mappings_inactive": {},   # wp-path -> host path, bind-mounted but NOT activated

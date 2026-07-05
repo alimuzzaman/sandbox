@@ -394,6 +394,16 @@ class TestPluginConfigMap(unittest.TestCase):
         self.assertTrue(r["active"]); self.assertFalse(r["on_demand"])
         self.assertEqual(r["source"], {"kind": "org", "value": None})
 
+    def test_default_scaffold_plugins_include_debug_and_mcp(self):
+        m, _legacy, self_e = sandbox_core._normalize_plugins(
+            {"plugins": sandbox_core.DEFAULTS["plugins"]})
+        self.assertIsNotNone(self_e)
+        self.assertIn("query-monitor", m)
+        self.assertIn("mcp-adapter", m)
+        self.assertEqual(m["mcp-adapter"]["source"]["kind"], "zip")
+        self.assertTrue(m["query-monitor"]["active"])
+        self.assertTrue(m["mcp-adapter"]["active"])
+
     def test_shorthand_false_is_inactive_installed(self):
         r = self._resolve({"plugins": {"qm": False}})["qm"]
         self.assertFalse(r["active"]); self.assertFalse(r["on_demand"])

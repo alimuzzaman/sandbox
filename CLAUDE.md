@@ -106,6 +106,8 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 "slug": "templately-ai-builder",
 "plugins": {
   "templately-ai-builder": ".",       // this repo, active
+  "query-monitor": true,              // wp.org, active by default in new scaffolds
+  "mcp-adapter": "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
   "templately": true,                  // org build, active
   "elementor-pro": { "path": "~/dev/elementor-pro", "onDemand": true }
 }

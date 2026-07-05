@@ -100,9 +100,10 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 
 ## sandbox.config.json — plugins map
 
-`plugins` slug-keyed map: `true`=org+active, `false`=org+inactive, `"<path>"`=local+active, `"<zip-url>"`=zip+active, or `{ "path"|"zip"|"source", "active"?, "onDemand"? }`.
+`slug` names this checkout's plugin slug for legacy `plugins: ["."]` in worktrees. `plugins` slug-keyed map: `true`=org+active, `false`=org+inactive, `"<path>"`=local+active, `"<zip-url>"`=zip+active, or `{ "path"|"zip"|"source", "active"?, "onDemand"? }`.
 
 ```jsonc
+"slug": "templately-ai-builder",
 "plugins": {
   "templately-ai-builder": ".",       // this repo, active
   "templately": true,                  // org build, active

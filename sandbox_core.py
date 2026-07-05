@@ -53,6 +53,7 @@ USER_CONFIG_BASENAMES = ("config.json", "config.yml", "config.yaml")
 # Normalised schema returned by load_project_config(). `null` version fields mean
 # "use the wordpress:latest default" — no implicit pinning.
 DEFAULTS: dict = {
+    "slug": None,              # project plugin slug; used for legacy plugins:["."]
     "plugins": ["."],          # "." = this repo; others are slugs/paths/zip URLs
     "themes": [],
     "mappings": {},            # wp-path -> host path, bind-mounted AND activated
@@ -246,6 +247,22 @@ def _legacy_list_entry(item):
                       "active": True, "on_demand": False}
     # bare wp.org slug
     return item, {"source": _UNSET, "active": True, "on_demand": False}
+
+
+def _project_slug(raw, fallback: str) -> str:
+    """Return the project plugin slug for legacy self entries.
+
+    The canonical plugins map is still slug-keyed and does not need this. The
+    top-level slug keeps legacy `plugins: ["."]` stable in git worktrees whose
+    directory name is not the plugin's install slug.
+    """
+    slug = str(raw or "").strip() or fallback
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug):
+        raise ConfigError(
+            f"invalid project slug {slug!r}; use a WordPress plugin slug "
+            "(lowercase letters, numbers, hyphen, underscore)"
+        )
+    return slug
 
 
 def _normalize_plugins(doc: dict):
@@ -477,7 +494,7 @@ def load_project_config(project_dir) -> dict:
     # precedence low->high: user-global (source catalog) < project < override.
     layers = []
     used_legacy = False
-    self_slug = root.name  # legacy "." installs under the project dir name (compat)
+    self_slug = _project_slug(merged.get("slug"), root.name)
     for doc in (user_doc, native_doc, override_doc):
         m, legacy, self_entry = _normalize_plugins(doc or {})
         if self_entry is not None:

@@ -14,6 +14,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -372,6 +373,22 @@ class TestPluginConfigMap(unittest.TestCase):
         return {s: sandbox_core._resolve_plugin_entry(e, s in opted)
                 for s, e in merged.items()}
 
+    def _load_project_doc(self, doc, dirname="plugin-worktree-123"):
+        tmp = tempfile.mkdtemp(prefix="sb-slug-", dir=str(Path.home()))
+        old_user_config = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(Path(tmp) / "missing-user-config.json")
+        root = Path(tmp) / dirname
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(json.dumps(doc))
+        try:
+            return sandbox_core.load_project_config(root)
+        finally:
+            if old_user_config is None:
+                os.environ.pop("SANDBOX_USER_CONFIG", None)
+            else:
+                os.environ["SANDBOX_USER_CONFIG"] = old_user_config
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_shorthand_true_is_active_org(self):
         r = self._resolve({"plugins": {"woo": True}})["woo"]
         self.assertTrue(r["active"]); self.assertFalse(r["on_demand"])
@@ -442,6 +459,26 @@ class TestPluginConfigMap(unittest.TestCase):
         self.assertTrue(legacy)
         self.assertIsNotNone(self_e)                       # "." -> self entry
         self.assertTrue(m["woo"]["active"])
+
+    def test_top_level_slug_names_legacy_self_entry(self):
+        cfg = self._load_project_doc({
+            "slug": "real-plugin-slug",
+            "plugins": ["."],
+        })
+        self.assertIn("real-plugin-slug", cfg["plugins_resolved"])
+        self.assertNotIn("plugin-worktree-123", cfg["plugins_resolved"])
+        self.assertEqual(
+            cfg["plugins_resolved"]["real-plugin-slug"]["source"],
+            {"kind": "path", "value": "."},
+        )
+
+    def test_legacy_self_entry_falls_back_to_directory_name(self):
+        cfg = self._load_project_doc({"plugins": ["."]}, dirname="real-plugin-slug")
+        self.assertIn("real-plugin-slug", cfg["plugins_resolved"])
+
+    def test_rejects_invalid_top_level_slug(self):
+        with self.assertRaises(sandbox_core.ConfigError):
+            self._load_project_doc({"slug": "../nope", "plugins": ["."]})
 
     def test_legacy_mappings_fold_in(self):
         m, legacy, _ = sandbox_core._normalize_plugins(

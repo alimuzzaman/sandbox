@@ -68,6 +68,11 @@ file path.
 
 ```jsonc
 {
+  // This project's own WordPress plugin slug. Optional, but recommended for
+  // git worktrees because legacy plugins:["."] otherwise falls back to the
+  // directory name. Canonical plugin-map keys remain authoritative.
+  "slug": "my-addon",
+
   // Plugins — a slug-keyed MAP (the canonical form, spec 010). The KEY is the
   // authoritative install slug (worktree-proof). The value sets SOURCE and/or
   // STATE; see "Plugins (the slug-keyed map)" below for the full rules.
@@ -117,6 +122,28 @@ file path.
 ```
 
 All fields are optional; omitted fields take the defaults above.
+
+### Project slug
+
+`slug` names the plugin represented by this project checkout. It is used only
+for legacy self references such as `plugins: ["."]`; with `"slug": "my-addon"`,
+that legacy entry installs the current checkout at
+`wp-content/plugins/my-addon` even if the worktree directory is named
+`my-addon-fix-123`.
+
+The canonical `plugins` map does not need top-level `slug` because its key is
+already the install slug:
+
+```jsonc
+{
+  "plugins": {
+    "my-addon": "."
+  }
+}
+```
+
+If `slug` is omitted, `plugins: ["."]` keeps its old behavior and uses the
+project directory name.
 
 ## Plugins (the slug-keyed map)
 

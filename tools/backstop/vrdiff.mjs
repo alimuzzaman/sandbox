@@ -78,7 +78,25 @@ fs.mkdirSync(workdir, { recursive: true });
 // images, waits for decode, then returns to the top before BackstopJS shoots the full page.
 const onReadyDir = path.join(paths.engine_scripts, 'puppet');
 fs.mkdirSync(onReadyDir, { recursive: true });
-fs.writeFileSync(path.join(onReadyDir, 'onReady.js'), `module.exports = async (page) => {
+// VIEWPORT capture (selector 'viewport' = above-the-fold, e.g. a hero-only diff): do NOT scroll the
+// document. The full-page scroll below is only needed to force lazy-load lower down; for a viewport crop
+// it races — the two pages can end at DIFFERENT scroll positions at capture time (one at top, one still
+// mid-scroll), producing a garbage diff that compares the hero against a lower section. Above-fold content
+// loads without scrolling, so just settle images and pin scroll to 0.
+const heroMode = selector === 'viewport';
+fs.writeFileSync(path.join(onReadyDir, 'onReady.js'), heroMode ? `module.exports = async (page) => {
+  await page.evaluate(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });
+    window.scrollTo(0, 0);
+    const imgs = [...document.images].filter(i => i.getBoundingClientRect().top < innerHeight)
+      .map(i => i.complete ? null : i.decode().catch(() => {}));
+    await Promise.race([Promise.all(imgs), sleep(6000)]);
+    window.scrollTo(0, 0); await sleep(300);
+  });
+  await new Promise(r => setTimeout(r, 600));
+};
+` : `module.exports = async (page) => {
   await page.evaluate(async () => {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; });

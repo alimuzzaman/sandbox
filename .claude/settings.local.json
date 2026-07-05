@@ -6,7 +6,9 @@
       "mcp__sandbox__wp_cli",
       "mcp__sandbox__focus_set",
       "mcp__sandbox__load_context",
-      "mcp__sandbox__focus_get"
+      "mcp__sandbox__focus_get",
+      "mcp__playwright__browser_evaluate",
+      "mcp__playwright__browser_navigate"
     ]
   },
   "enableAllProjectMcpServers": true,

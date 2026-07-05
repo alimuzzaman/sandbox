@@ -229,6 +229,11 @@ def cmd_global(cfg, args) -> None:
     the link."""
     self_path = ENTRY
     remove = getattr(args, "remove", False)
+    node_ca = getattr(args, "node_ca", False)
+
+    if node_ca:
+        _configure_node_extra_ca()
+        return
 
     if remove:
         # Remove any `sb` on PATH that points back at this install.
@@ -295,6 +300,47 @@ def cmd_global(cfg, args) -> None:
               "automatically.)")
     else:
         print("  Now run `sb` from any folder — e.g. `sb web`, `sb instances`.")
+
+
+def _node_ca_sources() -> list[Path]:
+    """Candidate local CA roots for Node-based MCP proxies.
+
+    Sandbox .tst domains use mkcert; Herd/Valet .test domains use Herd's local
+    CA. Node's NODE_EXTRA_CA_CERTS accepts one file, so we combine any roots
+    present on this machine into a generated bundle.
+    """
+    out: list[Path] = []
+    if shutil.which("mkcert"):
+        r = subprocess.run(["mkcert", "-CAROOT"], capture_output=True, text=True)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            out.append(Path(r.stdout.strip()) / "rootCA.pem")
+    out.append(Path.home() / "Library" / "Application Support" / "Herd" /
+               "config" / "valet" / "CA" / "LaravelValetCASelfSigned.pem")
+    return [p for p in out if p.exists()]
+
+
+def _configure_node_extra_ca() -> None:
+    sources = _node_ca_sources()
+    if not sources:
+        die("no local CA roots found. Run `./sb domains setup` for mkcert, "
+            "or `herd secure` for Herd/Valet, then retry.")
+
+    BASE.mkdir(parents=True, exist_ok=True)
+    bundle = BASE / "node-extra-ca-certs.pem"
+    text = []
+    for src in sources:
+        text.append(f"# {src}\n")
+        text.append(src.read_text())
+        text.append("\n")
+    bundle.write_text("".join(text))
+
+    subprocess.run(["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", str(bundle)],
+                   check=False)
+    os.environ["NODE_EXTRA_CA_CERTS"] = str(bundle)
+    ok(f"NODE_EXTRA_CA_CERTS → {bundle}")
+    for src in sources:
+        print(f"  included: {src}")
+    print("  Restart GUI MCP clients/Codex/Cursor/VS Code so they inherit it.")
 
 def cmd_onboard(cfg, args) -> None:
     """Run the guided onboarding against an existing instance (default: main).

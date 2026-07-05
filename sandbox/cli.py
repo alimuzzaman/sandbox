@@ -279,6 +279,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Install a global `sb` command so you can run it from any folder")
     gl.add_argument("--remove", action="store_true",
         help="remove the global `sb` symlink instead of installing it")
+    gl.add_argument("--node-ca", action="store_true",
+        help="set NODE_EXTRA_CA_CERTS globally for local mkcert/Herd HTTPS")
 
     un = sub.add_parser("uninstall",
         help="Remove the whole sandbox (containers, volumes, proxy, MCP)")

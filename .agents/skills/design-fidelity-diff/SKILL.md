@@ -130,13 +130,19 @@ throwaway and MEASURE which settings take effect. Confirm at minimum:
 Emit **DesignSpec v1** — ONE canonical, source-agnostic JSON (schema + adapters in
 `DESIGNSPEC.md`). The build emits the same shape, so the diff is key-for-key. Do NOT invent a
 per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffing was fragile).
-- **Web** → **RUN `extract-web.js`** (paste the function into `browser_evaluate`; images
-  force-loaded; override `window.__DS_ROOT` if section auto-detect is wrong). `fidelity:full`.
-  Run it on the reference AND, in Phase 3/5, on the build. **Do NOT hand-roll a shallow
-  `browser_evaluate` that grabs text + `backgroundColor`** — that shortcut silently drops every
-  gradient, `::before`/`::after` layer, and decorative object-PNG background, producing flat
-  white sections that "don't match at all". The tool captures them (`bgOwner.{gradient,image}` +
-  `decor[]`); an ad-hoc scrape does not. If you must inline-measure, port `bgOf()`/`decorOf()`.
+- **Web → `sb specextract <url> --out spec.json`** (→ `tools/dfdiff/specextract.py`). The scripted
+  Phase-1 path: it drives headless Chromium, force-loads lazy images, **dwell-scrolls** so they
+  fetch+reflow, **freezes animation**, waits for webfonts, then runs `extract-web.js` and writes
+  DesignSpec v1 (`fidelity:full`, `meta.tool:extract-web.js@3`, incl. the `fonts[]` load block).
+  Run it on the reference AND on the build (`--login`/`--auto-login` for a wp-admin build preview;
+  `--root .elementor` / `.eb-fullwidth-content-wrapper` when section auto-detect is wrong; `--width`
+  MUST match ref↔build). You can still paste the `extract-web.js` function into `browser_evaluate`
+  by hand, but the command does the image/animation/font prep the workflow requires — prefer it.
+  **Do NOT hand-roll a shallow `browser_evaluate` that grabs text + `backgroundColor`** — that
+  shortcut silently drops every gradient, `::before`/`::after` layer, and decorative object-PNG
+  background, producing flat white sections that "don't match at all". The tool captures them
+  (`bgOwner.{gradient,image}` + `decor[]`); an ad-hoc scrape does not. If you must inline-measure,
+  port `bgOf()`/`decorOf()`.
 - **PNG** → `python3 extract-png.py <img> --out spec.json` gives reliable page dims + page bg +
   best-effort band boundaries/colors (`fidelity:low`); then a VISION pass fills each section's
   `elements` (text/kind/≈font/≈box), every value flagged low. If the reference exists ONLY as a
@@ -480,9 +486,13 @@ not a hand-rolled node snippet. It crops to the smaller image, writes the red ov
 `{mismatch, pct, verdict, dimensionsMatch, bands[], worstBands[]}` — read `worstBands` (y-top/height/
 pct) as the locator to jump to the drifted section, and `dimensionsMatch:false` means the page height
 itself is off. The % is a locator, never the done-gate (Phase 5 numbers are).
+**The scripted spine is three one-liners** (no judgement, no hand-rolled `browser_evaluate`):
+`sb specextract <refUrl> --out ref.json` · `sb specextract <buildUrl> --out build.json` (after the
+agent BUILD) · `sb specgate ref.json build.json`. `specextract` (→ `tools/dfdiff/specextract.py`)
+drives the browser + page-prep; `specdiff`/`specgate` (→ `tools/dfdiff/dfdiff.py`) do the numbers.
 **Numeric diff + done-gate → `sb specdiff` / `sb specgate <ref-spec.json> <build-spec.json>`**
-(→ `tools/dfdiff/dfdiff.py`, pure Python, no browser). The DesignSpec-vs-DesignSpec spine: both
-sides are `extract-web.js` JSON, so the diff is key-for-key. `specdiff` = the Phase-3 ranked defect
+(pure Python, no browser). The DesignSpec-vs-DesignSpec spine: both sides are `extract-web.js`
+JSON (from `specextract`), so the diff is key-for-key. `specdiff` = the Phase-3 ranked defect
 report (content-width, section heights, dTop/dLeft, fonts, background parity, asset completeness);
 `specgate` = the Phase-5 PASS/FAIL (exit 1 on fail). `--json` on either for the machine shape.
 This is the deterministic half of the workflow — it does NOT do the BUILD, the FIX-by-cause, or the

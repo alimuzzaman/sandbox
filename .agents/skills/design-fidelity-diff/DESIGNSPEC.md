@@ -81,10 +81,14 @@ drifted every run and made diffing fragile.
 ```
 
 ## Source adapters
-- **Web → `extract-web.js`** (Playwright `browser_evaluate`). Computed styles from the live DOM;
-  `fidelity: full`. THE canonical extractor — run it on the reference AND the build. Override the
-  top-level `ROOT` selector when auto-detect picks the wrong content root (EB pages:
-  `.eb-fullwidth-content-wrapper`; Elementor: `.elementor`).
+- **Web → `sb specextract <url> --out spec.json`** (→ `tools/dfdiff/specextract.py`, wraps
+  `extract-web.js`). Computed styles from the live DOM; `fidelity: full`. THE canonical extractor —
+  run it on the reference AND the build. The command handles the required page-prep (force-load
+  lazy images, dwell-scroll, freeze animation, wait for webfonts) before evaluating. `--root`
+  overrides the content-root selector when auto-detect picks wrong (EB pages:
+  `.eb-fullwidth-content-wrapper`; Elementor: `.elementor`); `--login`/`--auto-login` for a
+  wp-admin build preview; `--width` MUST match ref↔build. (You can still paste the function into
+  `browser_evaluate` by hand, but then YOU own the image/animation/font prep.)
 - **PNG → `extract-png.py`** (raster hints) + a vision pass. The script yields what a raster can
   give: `page` dims, per-band boundaries (row-luminance deltas) and each band's dominant
   background — as sections with `fidelity: low` and empty `elements`. Then the VISION step (you,

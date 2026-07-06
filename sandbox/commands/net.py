@@ -352,6 +352,33 @@ def _run_dfdiff(sub, args):
     raise SystemExit(res.returncode)
 
 
+def cmd_specextract(cfg, args):
+    """Run extract-web.js on a URL → DesignSpec v1 JSON (Phase 1 extraction, scripted).
+    Needs the tools/ Playwright venv (same as `sb visit`)."""
+    py = ensure_tools_venv()
+    script = TOOLS_DIR / "dfdiff" / "specextract.py"
+    if not script.is_file():
+        die(f"missing {script}")
+    cmd = [str(py), str(script), args.url,
+           "--out", args.out, "--width", str(args.width), "--height", str(args.height),
+           "--dwell", str(args.dwell), "--timeout", str(args.timeout)]
+    if args.root:
+        cmd += ["--root", args.root]
+    if args.extractor:
+        cmd += ["--extractor", args.extractor]
+    if getattr(args, "no_freeze", False):
+        cmd.append("--no-freeze")
+    if args.login:
+        cmd.append("--login")
+    if getattr(args, "auto_login", False):
+        cmd.append("--auto-login")
+    if args.login_user:
+        cmd += ["--login-user", args.login_user]
+    if args.login_password:
+        cmd += ["--login-password", args.login_password]
+    os.execv(str(py), cmd)
+
+
 def cmd_specdiff(cfg, args):
     """DesignSpec v1 diff — Phase 3 ranked defect report (reference vs build JSON)."""
     _run_dfdiff("diff", args)
@@ -368,6 +395,7 @@ register({
     'server': cmd_server,
     'pxdiff': cmd_pxdiff,
     'vrdiff': cmd_vrdiff,
+    'specextract': cmd_specextract,
     'specdiff': cmd_specdiff,
     'specgate': cmd_specgate,
 })

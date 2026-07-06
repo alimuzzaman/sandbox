@@ -359,6 +359,24 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="don't auto-open the HTML report in a browser")
     vr.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
 
+    se = sub.add_parser("specextract",
+        help="Run extract-web.js on a URL → DesignSpec v1 JSON (Phase 1 extraction, scripted)")
+    se.add_argument("url", help="URL to extract (reference design or the build page)")
+    se.add_argument("--out", default="-", help="write DesignSpec JSON here (default: stdout)")
+    se.add_argument("--root", default=None,
+        help="override the content-root selector (e.g. .elementor, .eb-fullwidth-content-wrapper)")
+    se.add_argument("--extractor", default=None, help="extractor JS path (default: the skill's extract-web.js)")
+    se.add_argument("--width", type=int, default=1280, help="viewport width — MUST match ref/build (default 1280)")
+    se.add_argument("--height", type=int, default=900, help="viewport height (default 900)")
+    se.add_argument("--dwell", type=int, default=450, help="ms dwell per scroll step so lazy media loads (default 450)")
+    se.add_argument("--no-freeze", dest="no_freeze", action="store_true",
+        help="do NOT pause CSS animation/transition/media before measuring")
+    se.add_argument("--timeout", type=int, default=30, help="navigation timeout seconds (default 30)")
+    se.add_argument("--login", action="store_true", help="log in via wp-login.php before navigating")
+    se.add_argument("--auto-login", dest="auto_login", action="store_true", help="log in only when the URL is /wp-admin/")
+    se.add_argument("--login-user", dest="login_user", default="", help="WP username (else $WP_ADMIN_USER or admin)")
+    se.add_argument("--login-password", dest="login_password", default="", help="WP password (else $WP_ADMIN_PASSWORD)")
+
     sd = sub.add_parser("specdiff",
         help="DesignSpec v1 diff (reference vs build JSON) — Phase 3 ranked defect report")
     sd.add_argument("reference", help="reference DesignSpec JSON path (extract-web.js on the reference)")

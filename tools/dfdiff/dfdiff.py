@@ -154,8 +154,11 @@ SEV = {
     "content_width": 100, "font_unloaded": 90, "missing_asset": 85, "section_missing": 88,
     "missing_element": 80, "background_missing": 75, "extra_element": 70,
     "section_height": 60, "element_dleft": 50, "appearance": 45, "element_dtop": 40,
-    "element_dim": 35, "box_owner": 55,
+    "element_dim": 35, "box_owner": 55, "appearance_soft": 18,
 }
+# categorical style diffs that FAIL the appearance gate (box-gating is blind to these).
+# appearance_soft (line-height/letter-spacing) is sub-pixel across engines → reported, not gated.
+APPEARANCE_GATE_CATS = ("appearance", "box_owner")
 
 
 def _finding(cat, msg, mag=0.0, where=""):
@@ -271,6 +274,7 @@ def compute_diff(ref: dict, build: dict) -> dict:
 
 def _appearance(re_: dict, be_: dict, label: str, k: str, findings: list):
     rf, bf = re_.get("font") or {}, be_.get("font") or {}
+    # categorical style diffs — box-gating is blind to these; they FAIL the appearance gate
     if rf.get("color") and bf.get("color") and _norm_color(rf["color"]) != _norm_color(bf["color"]):
         findings.append(_finding("appearance", f"'{label}' {k}: color {bf['color']} vs {rf['color']}", 45, label))
     if _norm_text(rf.get("family")) and _norm_text(rf.get("family")) != _norm_text(bf.get("family")):
@@ -278,6 +282,23 @@ def _appearance(re_: dict, be_: dict, label: str, k: str, findings: list):
     rw_, bw_ = _n(rf.get("weight")), _n(bf.get("weight"))
     if rw_ is not None and bw_ is not None and rw_ != bw_:
         findings.append(_finding("appearance", f"'{label}' {k}: font-weight {bw_:.0f} vs {rw_:.0f}", 30, label))
+    # italic/oblique emphasis — a missing accent style on one run (SKILL appearance corollary)
+    rstyle, bstyle = _norm_text(rf.get("style")), _norm_text(bf.get("style"))
+    if rstyle and rstyle != "normal" and rstyle != bstyle:
+        findings.append(_finding("appearance", f"'{label}' {k}: font-style '{bf.get('style') or 'normal'}' vs '{rf.get('style')}' (missing italic accent?)", 45, label))
+    elif rstyle == "normal" and bstyle and bstyle not in ("normal", ""):
+        findings.append(_finding("appearance", f"'{label}' {k}: font-style '{bf.get('style')}' vs 'normal' (unexpected italic)", 35, label))
+    # text-transform — "With" vs "with" reads as a different word (SKILL appearance corollary)
+    rtr, btr = _norm_text(rf.get("transform")), _norm_text(bf.get("transform"))
+    if rtr and rtr != btr:
+        findings.append(_finding("appearance", f"'{label}' {k}: text-transform '{bf.get('transform') or 'none'}' vs '{rf.get('transform')}'", 40, label))
+    # soft style diffs — sub-pixel across engines; REPORTED, never gate-failing (honest floor)
+    rls, bls = _norm_color(rf.get("letterSpacing")), _norm_color(bf.get("letterSpacing"))
+    if rls and rls != "normal" and rls != bls:
+        findings.append(_finding("appearance_soft", f"'{label}' {k}: letter-spacing {bf.get('letterSpacing')} vs {rf.get('letterSpacing')}", 18, label))
+    rlh, blh = _n(rf.get("lineHeight")), _n(bf.get("lineHeight"))
+    if rlh is not None and blh is not None and abs(rlh - blh) > 2:
+        findings.append(_finding("appearance_soft", f"'{label}' {k}: line-height {blh:.0f} vs {rlh:.0f} (d={blh-rlh:+.0f}px)", abs(rlh - blh), label))
     rb, bb = re_.get("box") or {}, be_.get("box") or {}
     if bool(rb.get("bgOwner")) and not bool(bb.get("bgOwner")):
         findings.append(_finding("box_owner", f"'{label}' {k}: reference element OWNS its bg+padding, build does not (Box-Model Owner rule)", 55, label))
@@ -329,6 +350,13 @@ def compute_gate(ref: dict, build: dict) -> dict:
 
     unloaded = [f for f in diff["findings"] if f["category"] == "font_unloaded"]
     gate("fonts", not unloaded, "all reference families loaded on build" if not unloaded else f"{len(unloaded)} font issue(s)")
+
+    appearance = [f for f in diff["findings"] if f["category"] in APPEARANCE_GATE_CATS]
+    gate("appearance", not appearance,
+         "color/font-style/text-transform/weight/box-owner all match"
+         if not appearance else f"{len(appearance)} style diff(s) — "
+         + "; ".join(f["message"].split(": ", 1)[-1] for f in appearance[:4])
+         + (f" (+{len(appearance)-4} more)" if len(appearance) > 4 else ""))
 
     passed = all(g["pass"] for g in gates)
     return {"ok": True, "pass": passed, "gates": gates, "summary": s, "residual_dtop": residuals[:CAP]}

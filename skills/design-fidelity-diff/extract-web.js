@@ -1,4 +1,4 @@
-// extract-web.js@3 — canonical DesignSpec v1 web extractor.
+// extract-web.js@4 — canonical DesignSpec v1 web extractor.
 // Paste the FUNCTION BODY into Playwright browser_evaluate (run on reference AND build).
 // Force-load images first (see SKILL Reference A). Override ROOT if section detection is wrong.
 //
@@ -12,6 +12,8 @@
 // v3: adds a top-level `fonts:[{family,weight,loaded}]` block (document.fonts.check per used
 // family) so `sb specgate` can gate silent webfont fallback offline. Feed the reference AND
 // build JSON to `sb specdiff` / `sb specgate` (tools/dfdiff) for the Phase-3/5 numeric diff.
+// v4: font.style (italic) + font.transform (text-transform) so specdiff gates APPEARANCE, not
+// just geometry (a hero can box-match to ±2px yet render wrong color/case/italic — SKILL corollary).
 
 () => {
   const r2 = n => Math.round(n);
@@ -117,6 +119,7 @@
       font: {
         family: c.fontFamily.split(',')[0].replace(/["']/g, ''),
         size: num(c.fontSize), weight: num(c.fontWeight),
+        style: c.fontStyle, transform: c.textTransform,
         lineHeight: num(c.lineHeight), letterSpacing: c.letterSpacing,
         align: c.textAlign, color: c.color,
       },
@@ -185,7 +188,7 @@
   return {
     designspec: '1.0',
     meta: { source: 'web', ref: location.href, viewport: { w: innerWidth, h: innerHeight },
-            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@3' },
+            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@4' },
     page: {
       width: r2(box(ROOT).width), height: document.body.scrollHeight,
       background: cs(document.body).backgroundColor,

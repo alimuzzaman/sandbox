@@ -67,8 +67,10 @@ drifted every run and made diffing fragile.
       "text": "Transform Customer Support",   // OR:
       "src": "chataibot-featured-image-001.png",
       "top": 497, "left": 112, "w": 581, "h": 372,
-      "font": {"family":"Archivo","size":36,"weight":600,"lineHeight":43.2,
-               "letterSpacing":"normal","align":"left","color":"rgb(17,17,17)"},
+      "font": {"family":"Archivo","size":36,"weight":600,"style":"normal","transform":"none",
+               "lineHeight":43.2,"letterSpacing":"normal","align":"left","color":"rgb(17,17,17)"},
+      // style (italic) + transform (text-transform) drive the APPEARANCE gate — box-gating is
+      // blind to a lost italic accent or a "With"→"with" case change (SKILL appearance corollary).
       "box": {"background":"rgba(0,0,0,0)","backgroundImage":null,"backgroundGradient":null,
               "padding":"0px","margin":"0px 0px 20px",
               "radius":"0px","border":"none","bgOwner": false},

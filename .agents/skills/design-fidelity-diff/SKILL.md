@@ -280,10 +280,13 @@ content, wrapping) — not blank space.
 ## Phase 5 — Done-gate (numeric) + responsive + hover
 **The gate is scripted: `sb specgate <ref-spec.json> <build-spec.json>` (→ `tools/dfdiff`)** asserts
 every hard gate below and prints PASS/FAIL per gate (exit 0 = pass, 1 = fail — so `sb specgate … &&
-ship` composes). It is the authority for the numeric gates; the two things it CANNOT gate stay
-manual — the **appearance/vision pass** (side-by-side eyeball, emphasis spans, glyphs — use
-`sb pxdiff`/`sb vrdiff`) and **responsive + hover** below. A green `specgate` with an unseen
-side-by-side is NOT done.
+ship` composes). It now includes an **`appearance` gate** — categorical style diffs (color,
+font-family/-weight, **font-style/italic**, **text-transform**, element bg gradient, box-model
+owner) FAIL it even when every box lines up (sub-pixel line-height/letter-spacing are reported, not
+gated — the honest cross-engine floor). What it still CANNOT gate stays manual: the **vision pass**
+(side-by-side eyeball for emphasis-span structure, icon/pseudo glyphs, and whether an image's
+CONTENT — not just its box — is the right asset — use `sb pxdiff`/`sb vrdiff`) and **responsive +
+hover** below. A green `specgate` with an unseen side-by-side is NOT done.
 - **Content width** == reference `contentMaxWidth` (exact). A systemic width delta reddens every
   line in the overlay regardless of heights — this is a gate, not a nicety.
 - **dLeft** median ~0, max ≤ ~3px (horizontal off = real bug, not fonts).

@@ -273,6 +273,13 @@ def compute_diff(ref: dict, build: dict) -> dict:
 
 
 def _appearance(re_: dict, be_: dict, label: str, k: str, findings: list):
+    # font/color checks are meaningless on images (they carry only INHERITED text styles) —
+    # a build inheriting a different theme font must not read as a per-image appearance defect.
+    if (re_.get("kind") == "image") or re_.get("src") or be_.get("src"):
+        rb, bb = re_.get("box") or {}, be_.get("box") or {}
+        if _norm_color(rb.get("radius")) and _norm_color(rb.get("radius")) != _norm_color(bb.get("radius")):
+            findings.append(_finding("appearance", f"'{label}' {k}: border-radius {bb.get('radius')} vs {rb.get('radius')}", 20, label))
+        return
     rf, bf = re_.get("font") or {}, be_.get("font") or {}
     # categorical style diffs — box-gating is blind to these; they FAIL the appearance gate
     if rf.get("color") and bf.get("color") and _norm_color(rf["color"]) != _norm_color(bf["color"]):

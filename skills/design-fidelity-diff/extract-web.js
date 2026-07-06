@@ -192,7 +192,7 @@
     page: {
       width: r2(box(ROOT).width), height: document.body.scrollHeight,
       background: cs(document.body).backgroundColor,
-      contentMaxWidth: sections.length ? r2(box(sections[0].querySelector('.elementor-container,[class*="container"]') || sections[0]).width) : null,
+      contentMaxWidth: sections.length ? r2(box(sections[0].querySelector('.e-con-inner,.elementor-container,[class*="container"]') || sections[0]).width) : null,
     },
     fonts: Object.values(fontSet),
     sections: secs,

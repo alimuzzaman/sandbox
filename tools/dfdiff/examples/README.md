@@ -17,6 +17,11 @@ sb specextract https://agency.blocks.templately.com/flexigency/ --out flexigency
 - 53 images, all loaded; 37 elements carry `text-transform:capitalize`; per-section gradients + decor captured
 - Extraction is stable: two independent runs diff to **0 defects** (dLeft max 1px), so this file is a
   trustworthy golden reference, not a one-off capture.
+- **Known limitation — section 10 ("Explore Digital Insights") has 15 elements with negative
+  `left`.** That section is a horizontally-scrolling blog-card carousel; its slide offset is
+  autoplay-driven, independent of page scroll, so it's a moving target at capture time — the same
+  class of issue as the nav (SKILL "Header/nav is an inherent approximation"). Don't gate section 10
+  on exact `left`/`dLeft`; gate height/content/asset presence instead.
 
 ### Use it
 

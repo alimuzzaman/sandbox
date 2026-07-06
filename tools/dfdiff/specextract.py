@@ -38,10 +38,15 @@ DEFAULT_EXTRACTOR = REPO_ROOT / "skills" / "design-fidelity-diff" / "extract-web
 # too short for a heavy page of remote images (measured: 49/56 unloaded on the flexigency demo).
 PREP_JS = r"""
 async ({ freeze, dwellMs }) => {
+  // transition:none is safe to force immediately — a class-toggled reveal then applies its
+  // final state INSTANTLY (no animation to interrupt). animation-play-state:paused is NOT safe
+  // to force yet: a scroll-triggered @keyframes reveal (IntersectionObserver adds a class that
+  // starts a slide-in animation) would freeze at frame 0 — its off-screen starting transform —
+  // the instant the class is added, since play-state is already forced paused. So transitions
+  // are killed now; animations are paused ONLY after the dwell-scroll below lets them complete.
   if (freeze) {
     const s = document.createElement('style');
-    s.textContent = '*,*::before,*::after{animation-play-state:paused!important;' +
-      'transition:none!important;scroll-behavior:auto!important}';
+    s.textContent = '*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}';
     document.documentElement.appendChild(s);
     document.querySelectorAll('video,audio').forEach(m => { try { m.pause(); } catch (e) {} });
   }
@@ -56,6 +61,24 @@ async ({ freeze, dwellMs }) => {
   });
   const H = document.body.scrollHeight, step = Math.max(1, Math.floor(innerHeight * 0.8));
   for (let y = 0; y <= H; y += step) { scrollTo(0, y); await new Promise(r => setTimeout(r, dwellMs)); }
+  // let the last scroll-triggered reveal finish its animation before we pause anything
+  await new Promise(r => setTimeout(r, 700));
+  if (freeze) {
+    const s2 = document.createElement('style');
+    s2.textContent = '*,*::before,*::after{animation-play-state:paused!important}';
+    document.documentElement.appendChild(s2);
+    // Pin JS-driven scroll-reveal/parallax BEFORE scrolling back to top — a scroll-LINKED
+    // library (not a one-time class toggle) ties inline transform/opacity directly to scroll
+    // position, so scrollTo(0,0) below would snap it back to its off-screen starting value.
+    // Bake the CURRENT computed transform/opacity into an inline !important override so the
+    // scroll-back can't move it again (measured: flexigency's stat-card row read x=-249 while
+    // visually rendered at x=52 — a mid-parallax frame captured after an unconditional scroll-up).
+    document.querySelectorAll('body *').forEach(el => {
+      const cs = getComputedStyle(el);
+      if (cs.transform && cs.transform !== 'none') el.style.setProperty('transform', cs.transform, 'important');
+      if (cs.opacity && cs.opacity !== '1') el.style.setProperty('opacity', cs.opacity, 'important');
+    });
+  }
   scrollTo(0, 0);
   await new Promise(r => setTimeout(r, 300));
   return { images: document.images.length };

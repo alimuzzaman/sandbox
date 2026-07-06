@@ -103,7 +103,22 @@ says* instead of what actually *rendered*. The phases kill that.
 > slider, or animated counter is still changing, you are comparing a transient frame, not the design.
 > Freeze it first, then measure the settled state.
 >
-> **Corollary — the diff must be captured FULL-PAGE at the reference's viewport.** A build screenshot
+> **Corollary — freeze animations only AFTER letting them run, never before; scroll-linked
+> parallax needs pinning too.** `sb specextract` forces `animation-play-state:paused` to stop
+> hero loops/counters from moving mid-measurement — but if you pause BEFORE a scroll-triggered
+> `@keyframes` reveal has run (IntersectionObserver adds a class that starts a slide-in
+> animation), it freezes at frame 0 — the element's off-screen STARTING position, not its
+> settled one (measured on flexigency: a stat-card row read `left:-249` while visually rendered
+> at `left:108`). Order matters: dwell-scroll first (let revealed animations complete), THEN
+> pause. A scroll-LINKED library (transform tied continuously to scroll position, not a one-time
+> class toggle) additionally needs its current computed `transform`/`opacity` baked into an
+> inline `!important` override before scrolling back to top — otherwise the scroll-up itself
+> snaps it back to the off-screen value. **A horizontally-scrolling CAROUSEL is a further,
+> unfixable case** — its slide offset is autoplay-driven, independent of page scroll, so it's a
+> moving target at capture time regardless of ordering; treat it like nav (an inherent
+> approximation) — gate its section on height/content/asset presence, never on exact `left`/`dLeft`.
+
+ A build screenshot
 > shorter than the reference (e.g. build 952px vs reference 9562px) is a BROKEN capture (full-page not
 > enabled / lazy images not forced), NOT a short page. Any mismatch % from it is meaningless and hides
 > the real drift — confirm `dimensionsMatch` and that both heights are full-page before trusting a

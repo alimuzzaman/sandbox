@@ -96,6 +96,13 @@ says* instead of what actually *rendered*. The phases kill that.
 > A card that is short ONLY because its image hasn't loaded is a measurement bug, not a build defect —
 > re-measure loaded before touching the generator. [[headless-screenshot-image-decode-race]]
 >
+> **Corollary — animated content must settle, then be manually frozen before measurement.** Hero loops,
+> counters, carousels, Lottie-style motion, and entrance animations can all move the boxes you are about
+> to compare. Let the page finish loading and the animation complete its first cycle, then manually stop
+> the motion in the browser before taking measurements or screenshots. If you measure while a spinner,
+> slider, or animated counter is still changing, you are comparing a transient frame, not the design.
+> Freeze it first, then measure the settled state.
+>
 > **Corollary — the diff must be captured FULL-PAGE at the reference's viewport.** A build screenshot
 > shorter than the reference (e.g. build 952px vs reference 9562px) is a BROKEN capture (full-page not
 > enabled / lazy images not forced), NOT a short page. Any mismatch % from it is meaningless and hides

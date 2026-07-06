@@ -37,6 +37,9 @@ widget (Pro-only / not installed) returns `widget_unavailable`.
 - Settings key = the control id; responsive controls add `_tablet`/`_mobile`; typography
   groups gate on `{prefix}_typography:"custom"`.
 - Concurrency: pass the `state_hash` you read as `base_hash`; a mismatch returns `conflict`.
+- When matching a live design, wait for all page animations, lazy media, counters, and carousels
+  to finish loading, then manually stop or freeze the motion before measuring or diffing. Animated
+  frames are transient and will throw off spacing, height, and screenshot comparisons.
 
 ## Schema
 `sandbox/editor-schema {builder:"elementor"}` lists registered widget names (incl. `eael-*`);

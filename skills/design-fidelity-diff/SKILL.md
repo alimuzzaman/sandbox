@@ -210,6 +210,13 @@ not a screenshot) AND every reference asset `src`/decor is actually placed (not 
 remembered).
 
 ## Phase 3 — Full diagnosis BEFORE fixing anything (produce all, then rank)
+**Run the diff, don't hand-roll it.** Extract the BUILD with `extract-web.js` (as in Phase 1),
+then `sb specdiff <ref-spec.json> <build-spec.json>` (→ `tools/dfdiff`) computes items 1–7 below
+deterministically — content-width delta, per-section height table, per-element dTop/dLeft, font
+loading, background parity, asset completeness — and prints them ranked by cause/severity. That
+is the whole of this phase except the pixel/vision pass (`sb pxdiff`/`sb vrdiff` + eyeball). Do
+NOT re-derive these numbers by hand; the CLI is more reliable than an ad-hoc `browser_evaluate`.
+The items below are what it reports — read them to interpret its output, not to reimplement it.
 1. **Fonts loaded?** `document.fonts.check('700 56px Archivo')` per family/weight — a matching
    `font-family` with status `unloaded` is a FALSE PASS; inject the webfont yourself
    (`<link>`/`@import`, include the italic axis if accent words are italic).
@@ -262,6 +269,12 @@ content, wrapping) — not blank space.
 **Exit gate:** every section height ±2px; per-element dTop median ≤ 3px.
 
 ## Phase 5 — Done-gate (numeric) + responsive + hover
+**The gate is scripted: `sb specgate <ref-spec.json> <build-spec.json>` (→ `tools/dfdiff`)** asserts
+every hard gate below and prints PASS/FAIL per gate (exit 0 = pass, 1 = fail — so `sb specgate … &&
+ship` composes). It is the authority for the numeric gates; the two things it CANNOT gate stay
+manual — the **appearance/vision pass** (side-by-side eyeball, emphasis spans, glyphs — use
+`sb pxdiff`/`sb vrdiff`) and **responsive + hover** below. A green `specgate` with an unseen
+side-by-side is NOT done.
 - **Content width** == reference `contentMaxWidth` (exact). A systemic width delta reddens every
   line in the overlay regardless of heights — this is a gate, not a nicety.
 - **dLeft** median ~0, max ≤ ~3px (horizontal off = real bug, not fonts).
@@ -467,6 +480,13 @@ not a hand-rolled node snippet. It crops to the smaller image, writes the red ov
 `{mismatch, pct, verdict, dimensionsMatch, bands[], worstBands[]}` — read `worstBands` (y-top/height/
 pct) as the locator to jump to the drifted section, and `dimensionsMatch:false` means the page height
 itself is off. The % is a locator, never the done-gate (Phase 5 numbers are).
+**Numeric diff + done-gate → `sb specdiff` / `sb specgate <ref-spec.json> <build-spec.json>`**
+(→ `tools/dfdiff/dfdiff.py`, pure Python, no browser). The DesignSpec-vs-DesignSpec spine: both
+sides are `extract-web.js` JSON, so the diff is key-for-key. `specdiff` = the Phase-3 ranked defect
+report (content-width, section heights, dTop/dLeft, fonts, background parity, asset completeness);
+`specgate` = the Phase-5 PASS/FAIL (exit 1 on fail). `--json` on either for the machine shape.
+This is the deterministic half of the workflow — it does NOT do the BUILD, the FIX-by-cause, or the
+pixel/vision pass. Where `pxdiff` locates drift in pixels, `specgate` decides done in numbers.
 
 # REFERENCE — gotchas
 - **Decode race ≠ missing image.** Verify render via DOM (`naturalWidth`, `complete`); a

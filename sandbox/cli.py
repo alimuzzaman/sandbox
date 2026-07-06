@@ -359,6 +359,18 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="don't auto-open the HTML report in a browser")
     vr.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
 
+    sd = sub.add_parser("specdiff",
+        help="DesignSpec v1 diff (reference vs build JSON) — Phase 3 ranked defect report")
+    sd.add_argument("reference", help="reference DesignSpec JSON path (extract-web.js on the reference)")
+    sd.add_argument("build", help="build DesignSpec JSON path (extract-web.js on the build)")
+    sd.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
+
+    sg = sub.add_parser("specgate",
+        help="DesignSpec v1 done-gate (reference vs build JSON) — Phase 5 numeric PASS/FAIL")
+    sg.add_argument("reference", help="reference DesignSpec JSON path")
+    sg.add_argument("build", help="build DesignSpec JSON path")
+    sg.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
+
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so
     # we register it on the top-level parser AND inject the same flag onto

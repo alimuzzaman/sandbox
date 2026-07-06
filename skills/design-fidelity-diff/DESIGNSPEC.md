@@ -39,6 +39,10 @@ drifted every run and made diffing fragile.
     "background": "rgb(255,255,255)",
     "contentMaxWidth": 1240            // centered content cap, or null if full-bleed
   },
+  "fonts": [                           // per used (family,weight): did the webfont actually LOAD?
+    {"family": "Archivo", "weight": 700, "loaded": true},   // loaded:false = silent fallback = FALSE PASS
+    {"family": "Inter",   "weight": 400, "loaded": true}    // document.fonts.check() at extract time
+  ],
   "sections": [{
     "id": "s1",
     "label": "Powerful Features To…",  // landmark heading/text (stable key for diff)
@@ -159,7 +163,14 @@ drifted every run and made diffing fragile.
     do not treat a gap as a margin when diffing.
 
 ## Diff contract
-Because reference and build emit the SAME shape, the diff is mechanical:
+Because reference and build emit the SAME shape, the diff is mechanical — and therefore
+scripted. `tools/dfdiff/dfdiff.py` (via `sb specdiff` / `sb specgate`) consumes two DesignSpec
+docs and computes ALL of the below with no browser and no judgement: `sb specdiff ref.json
+build.json` prints the ranked Phase-3 defect list; `sb specgate ref.json build.json` prints the
+Phase-5 PASS/FAIL done-gate (exit 0 = pass, 1 = fail). Extract both sides with `extract-web.js`
+first. The two agent steps the CLI does NOT replace are the BUILD (Phase 2) and FIX-by-cause
+(Phase 4); it also does not do the pixel/vision pass (`sb pxdiff` / `sb vrdiff` + eyeballing).
+The rules it implements:
 - **section diff**: match by `label`, compare `height` (±2px) and `bgOwner.{background,gradient,image,radius}`.
 - **background parity** (NEW, mandatory): for each section compare `bgOwner.gradient`/`bgOwner.image`
   and the `decor[]` set (by `src` + approx box). A section that has a gradient/object-PNG on the

@@ -328,10 +328,46 @@ def cmd_vrdiff(cfg, args):
     print(f"web report: {data['htmlReport']}")
 
 
+def _run_dfdiff(sub, args):
+    """Shell to tools/dfdiff/dfdiff.py (pure-Python DesignSpec v1 diff/gate) and stream its
+    report + exit code through. This is the deterministic spine of design-fidelity-diff —
+    it needs no browser: both reference and build were already extracted to DesignSpec JSON
+    (extract-web.js). `pxdiff`/`vrdiff` cover the pixel/visual side; this covers the numbers."""
+    root = Path(__file__).resolve().parents[2]
+    script = root / "tools" / "dfdiff" / "dfdiff.py"
+    if not script.is_file():
+        die(f"missing {script}")
+    ref, build = Path(args.reference).expanduser(), Path(args.build).expanduser()
+    for label, pth in (("reference", ref), ("build", build)):
+        if not pth.is_file():
+            die(f"{label} DesignSpec not found: {pth}")
+    cmd = [sys.executable, str(script), sub, str(ref.resolve()), str(build.resolve())]
+    if getattr(args, "json", False):
+        cmd.append("--json")
+    # Inherit stdout/stderr so the tool's formatting is the single source of truth;
+    # propagate its exit code (1 = defects/fail) so `sb specgate && ship` composes.
+    res = subprocess.run(cmd, cwd=str(root))
+    if res.returncode == 2:
+        die("dfdiff: bad input (see message above)")
+    raise SystemExit(res.returncode)
+
+
+def cmd_specdiff(cfg, args):
+    """DesignSpec v1 diff — Phase 3 ranked defect report (reference vs build JSON)."""
+    _run_dfdiff("diff", args)
+
+
+def cmd_specgate(cfg, args):
+    """DesignSpec v1 done-gate — Phase 5 numeric PASS/FAIL (reference vs build JSON)."""
+    _run_dfdiff("gate", args)
+
+
 register({
     'domains': cmd_domains,
     'secure': cmd_secure,
     'server': cmd_server,
     'pxdiff': cmd_pxdiff,
     'vrdiff': cmd_vrdiff,
+    'specdiff': cmd_specdiff,
+    'specgate': cmd_specgate,
 })

@@ -1,4 +1,4 @@
-// extract-web.js@2 — canonical DesignSpec v1 web extractor.
+// extract-web.js@3 — canonical DesignSpec v1 web extractor.
 // Paste the FUNCTION BODY into Playwright browser_evaluate (run on reference AND build).
 // Force-load images first (see SKILL Reference A). Override ROOT if section detection is wrong.
 //
@@ -9,6 +9,9 @@
 // AND its ::before/::after, plus a per-section `decor` list of decorative background layers
 // (the reason flat rebuilds "don't match": EB/Elementor put the real bg on an inner wrapper, a
 // pseudo-element, or an absolutely-positioned object PNG — never just backgroundColor).
+// v3: adds a top-level `fonts:[{family,weight,loaded}]` block (document.fonts.check per used
+// family) so `sb specgate` can gate silent webfont fallback offline. Feed the reference AND
+// build JSON to `sb specdiff` / `sb specgate` (tools/dfdiff) for the Phase-3/5 numeric diff.
 
 () => {
   const r2 = n => Math.round(n);
@@ -163,15 +166,32 @@
     };
   };
 
+  const secs = sections.map(sectionSpec);
+
+  // v3: per-(family,weight) webfont load status. A control can NAME a font without LOADING it
+  // (silent fallback) — a matching font-family with document.fonts.check()===false is a FALSE
+  // PASS. Capture it here so `dfdiff`/`sb specgate` can gate font loading offline (Phase 3 #1).
+  const fontSet = {};
+  secs.forEach(s => (s.elements || []).forEach(e => {
+    if (e.kind === 'image' || !e.font || !e.font.family) return;
+    const fam = e.font.family, w = num(e.font.weight) || 400, k = fam + '|' + w;
+    if (!fontSet[k]) {
+      let loaded = null;
+      try { loaded = document.fonts.check(w + ' 16px "' + fam + '"'); } catch (_) {}
+      fontSet[k] = { family: fam, weight: w, loaded };
+    }
+  }));
+
   return {
     designspec: '1.0',
     meta: { source: 'web', ref: location.href, viewport: { w: innerWidth, h: innerHeight },
-            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@2' },
+            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@3' },
     page: {
       width: r2(box(ROOT).width), height: document.body.scrollHeight,
       background: cs(document.body).backgroundColor,
       contentMaxWidth: sections.length ? r2(box(sections[0].querySelector('.elementor-container,[class*="container"]') || sections[0]).width) : null,
     },
-    sections: sections.map(sectionSpec),
+    fonts: Object.values(fontSet),
+    sections: secs,
   };
 }

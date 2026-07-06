@@ -361,7 +361,7 @@ def cmd_specextract(cfg, args):
         die(f"missing {script}")
     cmd = [str(py), str(script), args.url,
            "--out", args.out, "--width", str(args.width), "--height", str(args.height),
-           "--dwell", str(args.dwell), "--timeout", str(args.timeout)]
+           "--dwell", str(args.dwell), "--settle", str(args.settle), "--timeout", str(args.timeout)]
     if args.root:
         cmd += ["--root", args.root]
     if args.extractor:

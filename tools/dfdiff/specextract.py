@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,14 +31,13 @@ from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EXTRACTOR = REPO_ROOT / "skills" / "design-fidelity-diff" / "extract-web.js"
 
-# Page-prep injected before extraction. Bounded everywhere (SKILL "NEVER await unbounded
-# decode()"): force lazy images eager, dwell-scroll top→bottom so they load+reflow, then
-# confirm decode. Returns a small report so the caller can warn on stragglers.
+# Page-prep injected before extraction. Freeze motion, promote every lazy image to eager
+# (native loading="lazy" AND the common data-src lazyload schemes), and dwell-scroll top→bottom
+# so viewport-gated media starts fetching + the layout reflows. Image DOWNLOAD is then awaited
+# on the Python side (network-idle + a bounded completeness poll) — a fixed JS decode() race is
+# too short for a heavy page of remote images (measured: 49/56 unloaded on the flexigency demo).
 PREP_JS = r"""
 async ({ freeze, dwellMs }) => {
-  // 1) freeze motion first so nothing moves under the measurements (best-effort:
-  //    pauses CSS animation/transition + media; JS-driven counters/lotties can't be
-  //    fully stopped from here — the workflow lets them settle via the dwell below).
   if (freeze) {
     const s = document.createElement('style');
     s.textContent = '*,*::before,*::after{animation-play-state:paused!important;' +
@@ -45,21 +45,38 @@ async ({ freeze, dwellMs }) => {
     document.documentElement.appendChild(s);
     document.querySelectorAll('video,audio').forEach(m => { try { m.pause(); } catch (e) {} });
   }
-  // 2) force lazy images to fetch
-  document.querySelectorAll('img[loading="lazy"]').forEach(i => { i.loading = 'eager'; if (i.src) i.src = i.src; });
-  // 3) dwell-scroll top→bottom so lazy media actually loads + the layout reflows
+  // promote lazy images: native loading, plus data-src/data-lazy-src/data-srcset schemes
+  document.querySelectorAll('img').forEach(i => {
+    i.loading = 'eager';
+    const ds = i.getAttribute('data-src') || i.getAttribute('data-lazy-src');
+    const dss = i.getAttribute('data-srcset') || i.getAttribute('data-lazy-srcset');
+    if (ds && ds !== i.src) i.src = ds;
+    else if (i.src) i.src = i.src;
+    if (dss && !i.srcset) i.srcset = dss;
+  });
   const H = document.body.scrollHeight, step = Math.max(1, Math.floor(innerHeight * 0.8));
   for (let y = 0; y <= H; y += step) { scrollTo(0, y); await new Promise(r => setTimeout(r, dwellMs)); }
   scrollTo(0, 0);
-  await new Promise(r => setTimeout(r, 400));
-  // 4) bounded decode wait — never await decode() unbounded
+  await new Promise(r => setTimeout(r, 300));
+  return { images: document.images.length };
+}
+"""
+
+# Run after images have had time to download (Python-side network-idle + poll). Bounded decode +
+# fonts.ready, then report stragglers so the caller can warn (a still-unloaded img = a section
+# that may measure collapsed — a measurement bug, not a build defect).
+SETTLE_JS = r"""
+async () => {
   const decs = [...document.images].map(i => i.decode().catch(() => {}));
-  await Promise.race([Promise.all(decs), new Promise(r => setTimeout(r, 8000))]);
+  await Promise.race([Promise.all(decs), new Promise(r => setTimeout(r, 5000))]);
   try { await Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 4000))]); } catch (e) {}
   const imgs = [...document.images];
   return { images: imgs.length, notComplete: imgs.filter(i => !(i.complete && i.naturalWidth > 0)).length };
 }
 """
+
+# Count still-loading images — the poll predicate.
+COUNT_JS = "() => [...document.images].filter(i => !(i.complete && i.naturalWidth > 0)).length"
 
 
 def _wp_login_url(target_url: str) -> str:
@@ -141,13 +158,33 @@ def run(args) -> int:
             page.evaluate("(r) => { window.__DS_ROOT = r; }", args.root)
 
         try:
-            prep = page.evaluate(PREP_JS, {"freeze": not args.no_freeze, "dwellMs": args.dwell})
+            page.evaluate(PREP_JS, {"freeze": not args.no_freeze, "dwellMs": args.dwell})
         except PWError as e:
             print(f"specextract: page-prep failed: {e}", file=sys.stderr)
             return 1
-        if prep and prep.get("notComplete"):
-            print(f"specextract: WARNING {prep['notComplete']}/{prep['images']} images still not "
-                  f"loaded after dwell — a short section may be a measurement bug, not a defect", file=sys.stderr)
+
+        # Wait for image downloads to settle: network-idle first, then a bounded completeness
+        # poll (nudge-scroll to trip any IntersectionObserver loaders) up to --settle seconds.
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(args.settle, 20) * 1000)
+        except PWTimeout:
+            pass
+        deadline = time.monotonic() + args.settle
+        remaining = args.width  # placeholder to enter loop
+        while time.monotonic() < deadline:
+            remaining = page.evaluate(COUNT_JS)
+            if not remaining:
+                break
+            page.evaluate("() => scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(800)
+            page.evaluate("() => scrollTo(0, 0)")
+            page.wait_for_timeout(400)
+
+        settle = page.evaluate(SETTLE_JS)
+        if settle and settle.get("notComplete"):
+            print(f"specextract: WARNING {settle['notComplete']}/{settle['images']} images still not "
+                  f"loaded after {args.settle}s settle — raise --settle, or treat short sections as a "
+                  f"measurement artifact (not a build defect)", file=sys.stderr)
 
         try:
             spec = page.evaluate(extractor)
@@ -192,6 +229,7 @@ def main() -> int:
     p.add_argument("--width", type=int, default=1280, help="viewport width — MUST match ref↔build (default 1280)")
     p.add_argument("--height", type=int, default=900, help="viewport height (default 900)")
     p.add_argument("--dwell", type=int, default=450, help="ms dwell per scroll step so lazy media loads (default 450)")
+    p.add_argument("--settle", type=int, default=30, help="max seconds to wait for image downloads to complete (default 30)")
     p.add_argument("--no-freeze", action="store_true", help="do NOT pause CSS animation/transition/media before measuring")
     p.add_argument("--timeout", type=int, default=30, help="navigation timeout seconds (default 30)")
     p.add_argument("--login", action="store_true", help="log in via wp-login.php before navigating")

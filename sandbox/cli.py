@@ -369,6 +369,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     se.add_argument("--width", type=int, default=1280, help="viewport width — MUST match ref/build (default 1280)")
     se.add_argument("--height", type=int, default=900, help="viewport height (default 900)")
     se.add_argument("--dwell", type=int, default=450, help="ms dwell per scroll step so lazy media loads (default 450)")
+    se.add_argument("--settle", type=int, default=30, help="max seconds to wait for image downloads to complete (default 30)")
     se.add_argument("--no-freeze", dest="no_freeze", action="store_true",
         help="do NOT pause CSS animation/transition/media before measuring")
     se.add_argument("--timeout", type=int, default=30, help="navigation timeout seconds (default 30)")

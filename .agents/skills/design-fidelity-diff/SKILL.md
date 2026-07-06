@@ -136,7 +136,10 @@ per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffi
   DesignSpec v1 (`fidelity:full`, `meta.tool:extract-web.js@3`, incl. the `fonts[]` load block).
   Run it on the reference AND on the build (`--login`/`--auto-login` for a wp-admin build preview;
   `--root .elementor` / `.eb-fullwidth-content-wrapper` when section auto-detect is wrong; `--width`
-  MUST match ref↔build). You can still paste the `extract-web.js` function into `browser_evaluate`
+  MUST match ref↔build; **raise `--settle` on a heavy page of remote images** — it waits for
+  downloads, then WARNs if any `img` is still unloaded so a collapsed section reads as a measurement
+  artifact, not a defect. Measured on flexigency: default settle took the page 8485→9562px as the
+  images loaded). You can still paste the `extract-web.js` function into `browser_evaluate`
   by hand, but the command does the image/animation/font prep the workflow requires — prefer it.
   **Do NOT hand-roll a shallow `browser_evaluate` that grabs text + `backgroundColor`** — that
   shortcut silently drops every gradient, `::before`/`::after` layer, and decorative object-PNG

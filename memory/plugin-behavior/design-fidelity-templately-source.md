@@ -445,3 +445,41 @@ Went back in with the same rigor; found and fixed three more REAL, previously-mi
   each one, verified by re-measuring, was necessary every time. Net result this pass: page-wide
   dTop median 25-29px → 11px, dLeft median 17-22px → 9px, appearance findings held at 8 (from an
   earlier 75), element-count gap 4 → 1.
+
+## Two compensation attempts that made things WORSE — revert fast, don't chain guesses
+Continuing to converge Brand Strategy Development (-19px height) and Pricing (a −99px
+section-heading residual), two "obvious" fixes were tried and both REGRESSED the overall page —
+caught immediately by re-running the full gate after each, and reverted in full before moving on:
+
+- **Pushing one element down by increasing a container's top padding also pushes every sibling
+  AFTER it down by the same amount — a compensating reduction elsewhere is not automatically
+  "the same number."** The pricing section's own title sat 80px too high relative to its section
+  top. Naively adding 80px of top padding fixed the title but pushed the (already well-converged)
+  pricing CARDS down by the same 80px — tried compensating by proportionally cutting the
+  heading-to-cards gap and the cards' own top padding by an estimated matching amount; the actual
+  result overshot in the other direction (dTop median 11px → 33px, a WORSE state than before
+  touching it). The arithmetic that looks like it should cancel doesn't necessarily cancel in a
+  real flex layout with multiple interacting padding/gap/margin sources — verify with a REAL
+  re-measurement before trusting the compensation math, and revert immediately (don't chain a
+  second guess on top) if the gate result gets worse, not better.
+- **Fixing a genuinely-wrong measurement (row2 card images rendering short: 173-195px tall vs
+  reference's 238-244px) by forcing the correct height directly grew the WHOLE card by the same
+  amount** — the card's overall height was NOT independently fixed/capped by anything else; it
+  auto-sized to its content, so the image's short-rendering had been (accidentally) absorbed into
+  an already-matching card height. Forcing `height` + `object-fit:cover` on the image (a real,
+  independently-correct fix — root cause was `imagew()`'s own `h` parameter being silently
+  IGNORED, a genuine code bug now fixed in the helper) made the SPECIFIC element correct but blew
+  the section height from −19px to +46px and dTop median from 11px to 59px, because nothing was
+  reduced to compensate for the ~50-65px of added image height. Reverted both the height value AND
+  the `imagew()` fix itself (reverting a partial fix can un-revert cleanly if the fix was
+  conditional — `if h: ...` meant simply not passing `h` again would have been enough, but
+  reverting the helper too was the safer/clearer rollback given the file was already re-injected).
+  **The `imagew()` bug is real and worth revisiting** — but the follow-on fix needs to ALSO
+  identify and shrink whatever is currently consuming the ~50-65px slack in that same card
+  (likely the card's own vertical padding/gap budget) BEFORE forcing the image taller, not after
+  observing the overshoot.
+- Lesson for future passes: when a "compensating" edit is more than one variable at a time
+  (padding here, gap there, to net to zero), it is genuinely easy to get the sign or magnitude
+  wrong in a nested flex layout. Make ONE change, re-measure the FULL gate (not just the one
+  number you're chasing), and only proceed once it's a net improvement — don't stack a second
+  planned-to-cancel change before confirming the first one actually moved things the right way.

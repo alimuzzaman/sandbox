@@ -394,3 +394,54 @@ dLeft median 22.5px→17px. New, generalizable findings:
   and zeroed it on: the info-box/image inner wrapper columns inside each card, the row containers
   (rowA/B/C) themselves, AND a CTA text-column wrapper — each a separate, independent instance of
   the same root cause, each silently adding ~10-20px of unintended offset until explicitly zeroed.
+
+## Pushed back again ("section top still not in position") — root-caused three more real bugs
+User rejected the prior turn's "smaller residuals, individually investigate later" framing outright.
+Went back in with the same rigor; found and fixed three more REAL, previously-misdiagnosed bugs:
+
+- **`flex_align_items:"center"` on a row with two very differently-sized columns is NOT
+  interchangeable across sibling cards, even when they look like "the same pattern."** Two
+  side-by-side row-cards (text-column + image-column, `align-items:center`) can need OPPOSITE
+  alignment: one card's text column is short relative to its image (needs `center`, matches
+  reference exactly), the other's text column is nearly as tall as its image (needs
+  `flex-start`, or `center` overshoots by 50-80px). Verified via the actual centering arithmetic
+  — `offset = (tallColumnHeight − shortColumnHeight) / 2` — computed per card, not assumed
+  uniform. Each `card_row()` call is an INDEPENDENT container with its own `flex_align_items`;
+  there's no reason to force them to match. A margin-based attempt to "fix" this by artificially
+  inflating one column's height to change the auto-center math made things WORSE (moved further
+  from target) — margin on a flex child DOES count toward centering math, so adding it just
+  shifted the offset further in the wrong direction. The reliable fix was switching that one
+  card's OWN `flex_align_items` to `flex-start`, not fighting the centering formula.
+- **A widget's inner wrapper can carry a HARDCODED `text-align:center` that a "content
+  alignment: left" control never reaches.** EAAL's info-box button sits in a `.infobox-button`
+  DIV with the widget's own bundled CSS forcing `text-align:center` — completely independent of
+  `eael_infobox_content_alignment_left_right` (which only touches `.infobox-content`). This
+  silently mis-centered the "Learn More" link 60-130px right of its heading/text siblings on
+  EVERY card, page-wide — one CSS override (`.gbel-infobox .infobox-button{text-align:left
+  !important}`) fixed every instance at once. Lesson: a "content alignment" control does not
+  necessarily cover every child element the widget renders — verify each child's own computed
+  `text-align`/`justify-content`, don't assume one alignment setting reaches the whole widget.
+- **A repeater/list-item element can have an EXPLICIT fixed `height` (not `auto`) with
+  `box-sizing:border-box`, silently absorbing any padding you add rather than growing.** EAAL's
+  pricing feature-list items (`.eael-pricing-item-feature`) render at a hardcoded `height:39px`
+  — adding `padding-bottom` (via either the native control OR a CSS override) had ZERO visible
+  effect on the gap to the next item, because border-box padding is carved OUT of a fixed height,
+  not added on top. Wasted two iterations assuming the padding control "didn't apply" before
+  checking `getComputedStyle(el).height` directly and finding it was an explicit px value, not
+  `auto`. The actual fix: override `height` itself via CSS, not padding/margin. **When adding
+  padding to close a vertical-rhythm gap has zero effect, check whether the element has an
+  explicit `height` before assuming the control silently no-ops** — box-sizing:border-box + fixed
+  height is a distinct failure mode from "wrong control key."
+- **A missing content element (pricing subtitle) can be fully restorable even after an earlier
+  session accepted its absence as a tradeoff** — the earlier "style-2 adds an unwanted icon+band,
+  not worth it" conclusion was reversible: keep `style-2` (required — `style-1`'s template
+  silently drops the subtitle regardless of setting `eael_pricing_table_sub_title`, confirmed by
+  testing both), then neutralize JUST the unwanted decoration via CSS
+  (`display:none` on `.eael-pricing-icon`, `background:transparent` on `.header`) instead of
+  reverting the whole style. Don't accept "this control brings baggage I don't want" as final —
+  check whether the baggage is independently killable via the CSS-override escape hatch first.
+- Every one of these fixes cascaded into a HEIGHT change on the same card/section (the recurring
+  "local fix cascades" pattern) — re-tuning the outer widget `_padding`/`container_padding` after
+  each one, verified by re-measuring, was necessary every time. Net result this pass: page-wide
+  dTop median 25-29px → 11px, dLeft median 17-22px → 9px, appearance findings held at 8 (from an
+  earlier 75), element-count gap 4 → 1.

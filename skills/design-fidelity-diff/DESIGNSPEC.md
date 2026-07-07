@@ -91,6 +91,36 @@ drifted every run and made diffing fragile.
   `.eb-fullwidth-content-wrapper`; Elementor: `.elementor`); `--login`/`--auto-login` for a
   wp-admin build preview; `--width` MUST match ref↔build. (You can still paste the function into
   `browser_evaluate` by hand, but then YOU own the image/animation/font prep.)
+- **Templately source → the Templately plugin API (no browser).** When the reference is a
+  Templately template — the common case for this skill — do NOT reverse-engineer structure from
+  pixels. The AUTHORED JSON for BOTH engines is downloadable and is a strictly richer ground truth
+  than the rendered DOM: exact widget/block TYPES, authored CONTROL VALUES (padding/color/
+  typography), exact COPY, and the section tree. **It is a COMPLEMENT, not a replacement, for the
+  Web adapter** — authored JSON carries no rendered geometry (no px tops/heights), so you still
+  `specextract` the live preview URL for the geometric DesignSpec you gate against. Division of
+  labour: **build FROM the source (recipe + control values + widget map), gate GEOMETRY against the
+  `-ref` DesignSpec, gate COMPLETENESS against the source inventory.** Fetch (all GraphQL POST to
+  `https://app.templately.com/api/plugin`; browse is public, content download needs a Pro-owning
+  account + a connected `x-templately-url`):
+  1. `{packs(search:"<name>", platform:"elementor|gutenberg"){data{id name slug live_url}}}` → the
+     pack id per engine (EL and GB are SEPARATE packs — e.g. flexigency EL=569, GB=572).
+  2. `{packs(id:<packId>){data{items{id name type slug}}}}` → the page's item id (home/landing).
+  3. Connect a site once: `mutation{connectWithApiKey(api_key, site_url, ip){status}}` — the key
+     lives in `$TEMPLATELY_API_KEY`; it authenticates on the PROD server (`app.templately.com`),
+     while the plugin inside a dev sandbox defaults to the DEV server (`app.templately.dev`) and
+     rejects the prod key — so drive this with `curl`/`wp_eval_live` against prod explicitly.
+  4. `{itemContent(api_key, id){status message data}}` → `data` (a JSON string): EL = `{content:
+     <_elementor_data tree>, page_settings, …}`; GB = `{content:<block markup>, …}`.
+  This is the ONLY adapter that gives you the exact cross-engine widget map — the same design's EL
+  (EAAL) widgets vs GB (Essential Blocks) blocks are a deterministic 1:1 (see the map in
+  `tools/dfdiff/examples/README.md`): `eael-info-box`↔`infobox`, `eael-testimonial`↔`testimonial`,
+  `eael-counter`/`counter`↔`number-counter`, `icon-list`↔`feature-list`, `eael-post-carousel`↔
+  `post-carousel`, `heading`/`text-editor`↔`advanced-heading`, `image`↔`advanced-image`,
+  `container`↔`row`/`column`/`wrapper`. Rebuilding one engine's design in the other = look up the
+  map and copy authored control values; do NOT pick a primitive by eye (that is how a build ends up
+  with a `text-editor` where the source has a `heading` or an `eael-info-box`). Full recipe +
+  gotchas: `memory/plugin-behavior/design-fidelity-templately-source.md`; worked fixtures:
+  `tools/dfdiff/examples/flexigency-{el,gb}-source.json` + `flexigency-inventory.json`.
 - **PNG → `extract-png.py`** (raster hints) + a vision pass. The script yields what a raster can
   give: `page` dims, per-band boundaries (row-luminance deltas) and each band's dominant
   background — as sections with `fidelity: low` and empty `elements`. Then the VISION step (you,

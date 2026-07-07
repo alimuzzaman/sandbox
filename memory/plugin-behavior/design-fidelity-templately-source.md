@@ -1,0 +1,55 @@
+# Fetching a Templately template's AUTHORED source JSON (both engines)
+
+Cross-plugin runtime finding, used by the **design-fidelity-diff** skill. When the reference
+design is a Templately template, the exact authored JSON — Elementor `_elementor_data` AND
+Gutenberg block markup — is downloadable via the Templately plugin's GraphQL API. That is a
+richer ground truth than reverse-engineering the rendered page (exact widget types, authored
+control values, exact copy, section tree, and the cross-engine widget map). Build from it; still
+`specextract` the live preview for the geometric DesignSpec you gate against.
+
+## Endpoint & auth
+- Everything is a GraphQL POST to **`https://app.templately.com/api/plugin`** (prod).
+  Body: `{"query":"<graphql>"}`. Headers: `Content-Type: application/json`,
+  `x-templately-url: https://<site>/`, `x-templately-version: 3.5.0`.
+- **Catalog browse (`packs`) is PUBLIC** — no api_key, url gate not enforced.
+- **Content download (`itemContent`) is gated**: needs a valid api_key AND the calling
+  `x-templately-url` to be a site CONNECTED to that key's account. Pro items need an account that
+  OWNS the template.
+- Keys live in env: `TEMPLATELY_API_KEY` (prod, a `lifetime-five-hundred-site` Pro account that
+  owns the exclusive packs), `TEMPLATELY_API_KEY_FREE` (prod, free plan), and `*_DEV` variants for
+  the **dev** server (`app.templately.dev`). **A prod key is "Invalid API key" on the dev server
+  and vice-versa** — match key to server.
+- **Gotcha:** the templately plugin running inside a dev sandbox instance defaults its `Http` to
+  the DEV server, so calling `itemContent` via `wp_eval_live` with the prod key returns
+  "Unauthorized request detected." Drive the download with `curl` against prod explicitly (or force
+  the plugin's prod mode). Never print the key — expand `$TEMPLATELY_API_KEY` in-shell.
+
+## The 4 steps (worked example: FlexiGency home/landing page)
+```
+# 1. pack id per engine (public)                              EL and GB are SEPARATE packs
+{packs(search:"flexigency", platform:"elementor"){data{id name slug live_url}}}   # -> 569
+{packs(search:"flexigency", platform:"gutenberg"){data{id name slug live_url}}}   # -> 572
+# 2. list a pack's pages -> the item id you want
+{packs(id:569){data{items{id name type slug live_url}}}}   # 6136 = FlexiGency Landing Page (EL)
+{packs(id:572){data{items{id name type slug}}}}            # 6190 = Flexigency Landing Page GB
+# 3. connect a site to the key ONCE (registers the site; idempotent for an already-connected url)
+mutation{connectWithApiKey(api_key:"$KEY", site_url:"https://<connected>.tst/", ip:"127.0.0.1"){status message user{plan}}}
+# 4. download the authored JSON (send the SAME connected url as x-templately-url)
+{itemContent(api_key:"$KEY", id:6136){status message data}}
+```
+- `itemContent.data` is a JSON STRING. EL → `{content:<_elementor_data array>, page_settings,
+  version, title, type, template_type}`. GB → `{content:<block-markup string>, __file, title,
+  syncStatus, type, template_type}`.
+- Other useful queries in the plugin: `myCloudInsert(api_key, file_id, file_type)` (a user's saved
+  cloud item), `myItems` (the account's cloud), `v2/import/pack/<id>` REST (the whole pack as a ZIP,
+  `Authorization: Bearer <key>`, also site-gated).
+
+## Cross-engine widget map (verified 1:1 on FlexiGency; EAAL ⇄ Essential Blocks)
+`container`⇄`row|column|wrapper` · `heading`/`text-editor`⇄`advanced-heading` ·
+`image`⇄`advanced-image` · `eael-info-box`⇄`infobox` · `button`⇄`button` ·
+`eael-testimonial`⇄`testimonial` · `eael-counter`/`counter`⇄`number-counter` ·
+`icon-list`⇄`feature-list` · `image-gallery`⇄`image-gallery` · `form`⇄`form`(+`form-email-field`) ·
+`eael-post-carousel`⇄`post-carousel`.
+
+Fixtures committed: `tools/dfdiff/examples/flexigency-{el,gb}-source.json` +
+`flexigency-inventory.json` (per-section widget counts = the completeness gate).

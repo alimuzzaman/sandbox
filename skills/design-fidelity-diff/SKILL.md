@@ -145,6 +145,18 @@ throwaway and MEASURE which settings take effect. Confirm at minimum:
 Emit **DesignSpec v1** — ONE canonical, source-agnostic JSON (schema + adapters in
 `DESIGNSPEC.md`). The build emits the same shape, so the diff is key-for-key. Do NOT invent a
 per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffing was fragile).
+- **Reference is a Templately template? Pull the AUTHORED source FIRST — do not reverse-engineer
+  structure from pixels.** This skill mostly rebuilds Templately designs, and for those the exact
+  authored JSON for BOTH engines is downloadable (widget/block TYPES, authored CONTROL VALUES,
+  exact COPY, the section tree) — a strictly richer ground truth than computed styles. It does not
+  replace the Web extract (authored JSON has no rendered geometry): **build FROM the source, gate
+  GEOMETRY against the Web `-ref` DesignSpec, gate COMPLETENESS against the source inventory.** It
+  also hands you the deterministic cross-engine widget map (EL EAAL ↔ GB Essential Blocks), so an
+  EL→GB (or GB→EL) rebuild is a lookup, not a guess-the-primitive exercise — the single biggest
+  defense against the "wrong primitive" failure (a `text-editor` where the source has a `heading`/
+  `eael-info-box`). See the **Templately source adapter** in `DESIGNSPEC.md` for the 4-step fetch
+  (`packs`→`itemContent`, key from `$TEMPLATELY_API_KEY`, prod server) + the recipe/gotchas in
+  `memory/plugin-behavior/design-fidelity-templately-source.md` and the worked fixtures under `tools/dfdiff/examples/`.
 - **Web → `sb specextract <url> --out spec.json`** (→ `tools/dfdiff/specextract.py`). The scripted
   Phase-1 path: it drives headless Chromium, force-loads lazy images, **dwell-scrolls** so they
   fetch+reflow, **freezes animation**, waits for webfonts, then runs `extract-web.js` and writes
@@ -277,8 +289,17 @@ The items below are what it reports — read them to interpret its output, not t
    from the build; `reference − build` MUST be empty. Missing assets render as solid-red blobs.
    The Phase-2 "images load" check only proves the images you INCLUDED work — it never notices the
    ones you never added. List every missing `src` with the section it belongs to.
+8. **Section + widget INVENTORY completeness (when you have the authored source).** Asset-`src`
+   completeness (#7) catches missing *images*, not missing *sections* or *widgets*. If the
+   reference is a Templately template, build the authored inventory (`flexigency-inventory.json`
+   style: per-section widget-type counts) and assert the build contains **every section** and, per
+   section, **≥ every authored widget instance** (mapped cross-engine via the EL↔GB widget map).
+   This is the check that catches a build which stopped at 3 of 10 sections, or one that dropped
+   all `eael-info-box`/`testimonial`/`counter`/`post-carousel` widgets — a whole-class omission a
+   pixel/height diff can rationalize away as "the page is just shorter." Report `missing sections`
+   and `missing/undercounted widget types` explicitly.
 **Exit gate:** every defect listed with measured magnitude + cause — including any missing
-background/decor layer AND any missing asset `src`.
+background/decor layer, any missing asset `src`, AND (with a source) any missing section/widget.
 
 ## Phase 4 — Fix by cause, top-down, SECTION HEIGHTS FIRST, verify each
 Per-element `dTop` is mostly cumulative: a section 20px too tall shoves everything below it
@@ -307,6 +328,11 @@ hover** below. A green `specgate` with an unseen side-by-side is NOT done.
 - **dLeft** median ~0, max ≤ ~3px (horizontal off = real bug, not fonts).
 - **Asset completeness** (hard gate): `reference_srcs − build_srcs == ∅` (images + `decor[]`).
   Every reference asset is placed; a missing PNG is a solid-red blob, not a rounding error.
+- **Inventory completeness** (hard gate, when a Templately/authored source exists): every authored
+  section present AND every authored widget instance present (cross-engine-mapped). A build missing
+  a section or a whole widget class FAILS regardless of how the surviving sections measure — this is
+  the gate that fails a 3-of-10-sections or "no testimonials/counters" rebuild that height/pixel
+  diffs let slide.
 - **Background parity** (hard gate): every section's `bgOwner.{gradient,image}` and every
   `decor[]` layer present on the reference is present on the build (matched by `src`/gradient).
   A flat-white/flat-color section where the reference has a gradient or object-PNG FAILS the gate —

@@ -205,3 +205,49 @@ a hardcoded default font (Manrope) that doesn't inherit page-level type. Fixed v
   biggest position defect on the page** — fixing the two affected containers (hero + pricing-title
   wrappers) from `center`→`stretch` dropped page-wide `dLeft` max from 363px to 139px in one change,
   bigger than every other position defect combined. Total defects 263→197 across this pass.
+
+## Vision pass caught a WRONG-CONTENT bug that specdiff structurally could not see — fixed the tool
+User sent screenshots and called the pricing section "totally broken": prices showed a fake
+sale pattern (`$99 $89`) instead of the reference's plain `$49`, and the feature list was 5 items
+of made-up copy ("Unlimited calls", "Free hosting"...) instead of the reference's real 6 items
+("Customization Options", "Responsive Design"...). Root cause: I built `pricing-content.json` from
+`service-el-src.json` (the AUTHORED **EL** DEMO content) instead of the GB source — on a **GB→EL
+conversion task**, the content must come from the GB block markup, not EL's own placeholder data
+(same class of mistake as the earlier-documented "EL and GB authored versions diverge," but this
+time I used the wrong one as my source instead of just gating against the wrong one).
+**Why `sb specdiff` reported clean the whole time:** the price is a bare `<div class=
+"eael-pricing-tag">` and each feature an `<li>` — both OUTSIDE `extract-web.js`'s v1-v4 element
+scan (`h1-h6,p,a,button,img,input`). The content wasn't mismatched-and-ignored, it was **invisible
+to the extractor**, so there was nothing for `elem_key()` to compare. Fixed the TOOL, not just the
+content: `extract-web.js@5` adds `li` + a leaf-node `div`/`span` rule (zero child elements + own
+text, excluding descendants of an already-tag-matched ancestor to avoid double-counting a button's
+inner label span). Verified: element count on this page went 43→71 (ref); re-extracting after the
+fix now surfaces real min-max text diffs on prices/features that v1-v4 would have silently passed.
+See SKILL.md gate 6c + DESIGNSPEC.md "Diff contract" for the full writeup.
+
+Two more confirmed-then-fixed bugs from the same vision pass, both process gotchas rather than
+new code defects:
+- **A decorative accent image rendered as a soft, wrong-looking blur** — not a broken asset (the
+  downloaded PNG, opened directly, was a normal soft-gradient graphic) but a **stale re-injection**:
+  my Python generator always emits the REMOTE `demo.assets.templately.com` URL for every image
+  (it has no memory of a prior sideload), so a later "just fixing CSS" re-injection that skipped
+  the sideload/rewrite step silently reverted that image back to the slow CDN, and the screenshot's
+  decode-race then caught it mid-fetch. **Rule going forward: every re-injection of a
+  regenerated JSON re-runs the full sideload+rewrite, not just the first one.**
+- **The same decorative image also visually "floated" above its card as a stray patch** — the
+  absolute-positioned decor had too large a negative `offset_y` (-110px), escaping the pricing
+  panel's own rounded-corner visual boundary into the white space above it. Fixed by both reducing
+  the offset AND right-sizing the image (150→110px) to read as a small contained corner-accent
+  behind the "Popular" badge, matching the reference's actual (much subtler) treatment.
+- **A vision-reported "text/image overlap" inside a card turned out to be a `vrdiff`/BackstopJS
+  capture artifact, not a real bug** — direct `getBoundingClientRect` measurement after a proper
+  dwell-scroll + `decode()` wait showed clean, non-overlapping boxes (image 869–1064px, heading
+  1134–1192px, paragraph 1218–1294px). `sb vrdiff`'s default settle delay isn't always enough for
+  a page with many/slow images; verify an apparent layout defect with a fresh DOM measurement
+  before trusting a scrubber screenshot alone.
+- **`eael-pricing-table`'s subtitle field is conditionally gated to `style-2`** — setting
+  `eael_pricing_table_sub_title` under the default `style-1` silently no-ops (verified via the
+  control's own `"condition":{"eael_pricing_table_style":["style-2"]}`). Switching to style-2
+  DOES show the subtitle but also adds an unwanted icon-circle header + colored band neither
+  reference has — reverted to style-1 and accepted the missing subtitle line as a smaller, bounded
+  defect than the two new unwanted elements a style swap would introduce.

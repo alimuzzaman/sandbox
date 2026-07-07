@@ -318,6 +318,18 @@ further before calling a pass done.
    background colour from the reference screenshot/DOM and diff instance-by-instance, not once per
    section. A badge/pill (small rounded, often rotated, colored text-on-color) is easy to render as
    plain text — treat "does this text sit on its own colored chip" as its own checklist item.
+6c. **Content STRING parity — but only if the extractor's element scan actually sees the tag.**
+   `sb specdiff` matches elements by exact own-text, so a WRONG price/label/feature ("$99" vs
+   "$49", a 5-item feature list vs the reference's 6-item list with completely different copy)
+   SHOULD surface as a `missing_element`+`extra_element` pair. It only will if that text lives in
+   a tag the scan visits (`h1-h6,p,a,button,img,input,li`, plus any leaf `div`/`span` per
+   `extract-web.js@5`). **Verified failure mode:** a full pricing-table content swap (wrong price
+   format, entirely different feature list) produced ZERO findings across two build iterations
+   because the price was a bare `<div>` and each feature an `<li>` — both outside the pre-v5
+   scan. Before trusting a clean `missing_element`/`extra_element` count on a repeated-item
+   widget, spot-check the ACTUAL rendered text against the reference by eye — content that
+   "reads as similar length" (a price, a short feature label) is exactly what a length-only
+   sanity check would miss, and what a tag-scan gap makes literally invisible to the diff.
 7. **Asset completeness — every reference `src` present.** Collect the set of all image/decor
    `src` filenames from the reference DesignSpec (`elements[].src` + `sections[].decor[].src`) and
    from the build; `reference − build` MUST be empty. Missing assets render as solid-red blobs.

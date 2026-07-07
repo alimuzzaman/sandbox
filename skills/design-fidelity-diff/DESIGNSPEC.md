@@ -147,6 +147,38 @@ drifted every run and made diffing fragile.
     on the DECODED array, not a regex over the raw string); (2) **regenerate CSS**:
     `delete_post_meta($id,'_elementor_css')` then `\Elementor\Core\Files\CSS\Post::create($id)->update()`;
     (3) import the kit/fonts/custom-CSS per the bullet above.
+  - **If you regenerate the `_elementor_data` JSON from a hand-written PYTHON generator (not the
+    raw authored source) and re-inject it, the sideload/rewrite step (1) MUST run again on EVERY
+    injection, not just the first.** A generator function that builds an image widget from a
+    filename constant (`IMGBASE + fn`) always emits the REMOTE url — it has no memory of a prior
+    sideload. Skipping the rewrite step on a "just fixing one CSS thing" re-injection silently
+    reverts every image back to the slow CDN. **Symptom, verified:** a decorative accent image
+    rendered as an amorphous soft blur/wrong-looking patch in a fresh full-page screenshot — not
+    because the asset was broken (the downloaded file, opened directly, was a perfectly normal
+    soft-gradient PNG) but because it was being fetched fresh from the remote CDN on every
+    pageload and the screenshot didn't wait long enough for it to fully decode — the SAME
+    decode-race class of bug the skill already documents for `<img loading="lazy">`, just
+    triggered by a process gap (stale local copy) rather than lazy-loading. Before concluding an
+    image "looks wrong," check `img.src` in the live DOM — if it's still the `demo.assets.…`
+    remote host after you believe you sideloaded it, that's the bug, not the asset.
+  - **`sb vrdiff`/BackstopJS screenshots are subject to the same decode-race as any other
+    screenshot — its default settle delay is not always enough for a page with many/slow images.**
+    A scrubber comparison showed what looked like overlapping/duplicated text+image inside a card;
+    a direct DOM measurement (`getBoundingClientRect` on the heading/image/paragraph after a
+    manual dwell-scroll + `decode()` wait) proved the layout was correct with clean, non-overlapping
+    boxes. Don't trust an apparent layout defect from a `vrdiff`/backstop capture alone — verify
+    with a fresh, dwell-scrolled DOM measurement before treating it as a real bug, especially for
+    cards below the fold with decorative images.
+  - **A widget's alternate STYLE VARIANT can gate a content field behind unwanted side-effects —
+    weigh the swap, don't take it blindly.** `eael-pricing-table`'s `sub_title` control has
+    `"condition":{"eael_pricing_table_style":["style-2"]}` — the subtitle text is silently
+    dropped under the default `style-1` no matter what you set, because the CONTROL ITSELF is
+    conditionally hidden/inert outside style-2, not because the key is wrong. Switching to
+    style-2 SHOWS the subtitle but ALSO adds an icon-circle header and a colored accent band
+    neither engine's reference has — a worse mismatch than the missing subtitle line. Verify a
+    style-variant swap's FULL visual diff before committing to it; reverting and accepting one
+    missing content line as a documented residual can be the correct call over introducing two
+    new unwanted elements.
   - **CONVERTING block→widget (GB→EL) from source — three gotchas proven building the Service page
     conversion by hand (`flexigency-service-gb2el`, structurally validated against the authored EL:
     IDENTICAL leaf-widget inventory — 9 image / 7 info-box / 5 heading / 3 pricing / 1 breadcrumbs /
@@ -265,3 +297,27 @@ The rules it implements:
   cumulative → fix heights first) and `font.*` / `box.*` (incl. `backgroundImage`/`backgroundGradient`).
 - **box-owner check**: any element with a background must have `bgOwner:true` on BOTH sides.
 See SKILL.md Phase 3–5 for the numeric gate.
+
+**A "wrong CONTENT entirely" bug (not wrong style, not missing — a DIFFERENT string) is only
+catchable if the extractor's element scan sees the tag it's in.** `elem_key()` matches ref↔build
+by exact own-text, so a build showing `"$99"` where the reference shows `"$49"` (or "Unlimited
+calls" vs "Customization Options") SHOULD surface as a `missing_element`+`extra_element` pair —
+but only if that text-bearing node is one of the tags the scan visits. **Verified gap (fixed in
+`extract-web.js@5`):** a full pricing-table CONTENT swap — wrong price format (`$99 $89` sale
+pattern vs a plain `$49`), an entirely different 5-item feature list vs the reference's 6-item
+list — produced **ZERO** findings across two build iterations, because the price is a bare `<div
+class="eael-pricing-tag">` and each feature is an `<li>`, and the v1–v4 scan was
+`h1,h2,h3,h4,h5,h6,p,a,button,img,input` — no `li`, no bare `div`/`span`. The content wasn't
+mismatched-and-ignored, it was **invisible to the tool**, so `sb specdiff`/`sb specgate` reported
+clean while vision caught it instantly. **v5 fix:** add `li` to the tag scan, plus a LEAF-NODE
+rule — any `div`/`span` with zero child ELEMENTS (so it can't be a structural wrapper) and
+non-trivial own text, EXCLUDING nodes already inside a tag-matched ancestor (`h1-h6,p,a,button,li`)
+to avoid double-counting a button's own inner label span as a second, spuriously "missing" text
+element. Element count on the flexigency Service page went 43→71 (ref) with this fix; the true
+content-swap bug (now fixed) verified as fully caught: `text:'get started with basic features…'`
+correctly appears as `missing_element` when a card lacks it, `text:'$49'` vs `text:'$99'` would
+now be a real missing+extra pair instead of silence. **Lesson for future widgets:** if a
+repeated-item widget (pricing table, counter, stat block, testimonial rating) renders its core
+content in something other than a heading/paragraph/list tag, assume the extractor is BLIND to it
+until you've verified via `document.querySelectorAll` on the live DOM which tag actually wraps
+that text — don't assume "the diff was clean" means "the content is right."

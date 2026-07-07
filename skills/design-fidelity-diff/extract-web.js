@@ -1,4 +1,4 @@
-// extract-web.js@4 — canonical DesignSpec v1 web extractor.
+// extract-web.js@5 — canonical DesignSpec v1 web extractor.
 // Paste the FUNCTION BODY into Playwright browser_evaluate (run on reference AND build).
 // Force-load images first (see SKILL Reference A). Override ROOT if section detection is wrong.
 //
@@ -14,6 +14,13 @@
 // build JSON to `sb specdiff` / `sb specgate` (tools/dfdiff) for the Phase-3/5 numeric diff.
 // v4: font.style (italic) + font.transform (text-transform) so specdiff gates APPEARANCE, not
 // just geometry (a hero can box-match to ±2px yet render wrong color/case/italic — SKILL corollary).
+// v5: adds `li` to the tag scan + a LEAF-NODE div/span rule (any div/span with zero child
+// ELEMENTS and non-trivial text). Some widgets (EAAL/EB pricing tables) render price/feature-list
+// content in bare <li>/<div> tags with no semantic wrapper — invisible to the v1-v4 tag list
+// (h1-h6,p,a,button,img,input), so a build with COMPLETELY WRONG price/feature text ($99 vs $49,
+// "Unlimited calls" vs "Customization Options") produced ZERO missing/extra element findings —
+// the diff had no way to see the content existed at all. Verified: this was the actual root cause
+// of a content-swap bug that only vision caught, not `sb specdiff`.
 
 () => {
   const r2 = n => Math.round(n);
@@ -152,8 +159,25 @@
       gap = r2(box(kids[1]).left - (box(kids[0]).left + box(kids[0]).width));
       cols.forEach(c => c.gap = gap);
     }
-    const els = [...sec.querySelectorAll('h1,h2,h3,h4,h5,h6,p,a,button,img,input')]
-      .filter(e => !CHROME.has(e.tagName) && box(e).width > 3 && box(e).height > 3 && (e.tagName === 'IMG' || txt(e)))
+    // v5: some widgets (EAAL/EB pricing tables, badges, counters) render meaningful text in a
+    // bare <div>/<span> with NO semantic tag at all (a price like "$49/month" in
+    // <div class="eael-pricing-tag">) — invisible to the tag-based scan below, which made
+    // wrong CONTENT (not just wrong style) in these fields structurally undetectable by the
+    // diff. Catch them with a LEAF-NODE rule: any div/span with NO child ELEMENTS (so it can't
+    // be a structural wrapper) and non-trivial own text — EXCLUDING one already inside a
+    // tag-matched ancestor (h1-h6/p/a/button/li), which would otherwise double-count a button's
+    // own inner label span as a second, spuriously "missing" text element.
+    const TAG_MATCHED = 'h1,h2,h3,h4,h5,h6,p,a,button,li';
+    const leafTextNodes = [...sec.querySelectorAll('div,span')]
+      .filter(e => e.children.length === 0 && txt(e).length > 0 && box(e).width > 3 && box(e).height > 3
+        && !e.closest(TAG_MATCHED));
+    const seen = new Set();
+    const els = [...sec.querySelectorAll('h1,h2,h3,h4,h5,h6,p,a,button,img,input,li'), ...leafTextNodes]
+      .filter(e => {
+        if (seen.has(e)) return false;
+        seen.add(e);
+        return !CHROME.has(e.tagName) && box(e).width > 3 && box(e).height > 3 && (e.tagName === 'IMG' || txt(e));
+      })
       .map(elemSpec);
     const head = sec.querySelector('h1,h2,h3,h4,h5,h6');
     return {
@@ -188,7 +212,7 @@
   return {
     designspec: '1.0',
     meta: { source: 'web', ref: location.href, viewport: { w: innerWidth, h: innerHeight },
-            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@4' },
+            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@5' },
     page: {
       width: r2(box(ROOT).width), height: document.body.scrollHeight,
       background: cs(document.body).backgroundColor,

@@ -157,6 +157,14 @@ per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffi
   `eael-info-box`). See the **Templately source adapter** in `DESIGNSPEC.md` for the 4-step fetch
   (`packs`→`itemContent`, key from `$TEMPLATELY_API_KEY`, prod server) + the recipe/gotchas in
   `memory/plugin-behavior/design-fidelity-templately-source.md` and the worked fixtures under `tools/dfdiff/examples/`.
+  TWO traps proven on the Service-page conversion, both in `DESIGNSPEC.md`: (1) `itemContent.content`
+  is **NOT self-contained** — it references the Elementor **Global Kit** (`__globals__` colour IDs) +
+  named fonts + custom CSS; inject `content` alone and the page renders with the WRONG palette,
+  fallback fonts (Roboto), and the kit's default width — geometry passes, identity is lost. Import
+  the kit/globals + fonts + custom CSS too, and GATE APPEARANCE. (2) The EL and GB authored versions
+  genuinely DIVERGE (width 1240 vs 1280, some copy, ±20–63px section heights) — gate each build
+  against **its own engine's** preview (`agency.elementor…` for EL, `agency.blocks…` for GB), never
+  cross-engine.
 - **Web → `sb specextract <url> --out spec.json`** (→ `tools/dfdiff/specextract.py`). The scripted
   Phase-1 path: it drives headless Chromium, force-loads lazy images, **dwell-scrolls** so they
   fetch+reflow, **freezes animation**, waits for webfonts, then runs `extract-web.js` and writes

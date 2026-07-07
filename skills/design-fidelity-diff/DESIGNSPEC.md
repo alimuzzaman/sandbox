@@ -121,6 +121,32 @@ drifted every run and made diffing fragile.
   with a `text-editor` where the source has a `heading` or an `eael-info-box`). Full recipe +
   gotchas: `memory/plugin-behavior/design-fidelity-templately-source.md`; worked fixtures:
   `tools/dfdiff/examples/flexigency-{el,gb}-source.json` + `flexigency-inventory.json`.
+  - **`itemContent.content` is NOT self-contained — it references the Elementor GLOBAL KIT, fonts,
+    and custom CSS you must import SEPARATELY, or the rebuild loses its colour/type identity while
+    passing geometry.** Verified converting the FlexiGency Service page: the EL `content` carried 31
+    `__globals__` refs (`globals/colors?id=c1f2ab8`, …) + named `Inter Tight`. Injecting `content`
+    alone (no kit) rendered the whole page with the WRONG palette (headings light-blue/green kit
+    defaults instead of near-black), fell the fonts back to **Roboto**, and inherited the kit's
+    default **content-width 1240** instead of the design's 1280 — structure and box geometry matched,
+    the design was unrecognisable. Templately's real import runs Customizer (kit/globals),
+    Dependencies (fonts) and CustomCSS runners ALONGSIDE the content for exactly this reason. So when
+    you build from source: import the pack's kit/global colours + typography (or set the same global
+    values), enqueue the named webfonts, and apply any custom CSS — then gate APPEARANCE, not just
+    boxes. A green `specgate` on geometry with the kit missing is a false pass.
+  - **The two engines' authored versions genuinely DIVERGE — gate each build against its OWN
+    engine's render, never cross-engine.** Same Service page: EL content-width 1240 vs GB 1280;
+    pricing CTA copy "Get Started" (EL) vs "Choose Plan" (GB); the "Popular" badge is a `heading`
+    (GB) vs plain text (EL); section heights differ 20–63px (2–4%). So the honest CROSS-ENGINE floor
+    is section-level, not sub-pixel — do NOT diff an EL build against the GB `-ref` (or vice-versa)
+    and treat the deltas as defects. Extract the matching engine's preview: EL →
+    `agency.elementor.templately.com/<slug>/`, GB → `agency.blocks.templately.com/<slug>/`.
+  - **Wholesale-injection fixup pass (verified recipe):** after injecting `content` via
+    `_elementor_data`, (1) **sideload remote assets to local** — the `demo.assets.templately.com`
+    CDN images time out in-container (7/16 unloaded after 45s `--settle`), so decode `_elementor_data`,
+    download each image field to uploads, rewrite the URL, re-encode (mind JSON `\/` escaping — work
+    on the DECODED array, not a regex over the raw string); (2) **regenerate CSS**:
+    `delete_post_meta($id,'_elementor_css')` then `\Elementor\Core\Files\CSS\Post::create($id)->update()`;
+    (3) import the kit/fonts/custom-CSS per the bullet above.
 - **PNG → `extract-png.py`** (raster hints) + a vision pass. The script yields what a raster can
   give: `page` dims, per-band boundaries (row-luminance deltas) and each band's dominant
   background — as sections with `fidelity: low` and empty `elements`. Then the VISION step (you,

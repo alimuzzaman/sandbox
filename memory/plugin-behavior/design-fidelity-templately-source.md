@@ -52,4 +52,23 @@ mutation{connectWithApiKey(api_key:"$KEY", site_url:"https://<connected>.tst/", 
 `eael-post-carousel`⇄`post-carousel`.
 
 Fixtures committed: `tools/dfdiff/examples/flexigency-{el,gb}-source.json` +
-`flexigency-inventory.json` (per-section widget counts = the completeness gate).
+`flexigency-inventory.json` (per-section widget counts = the completeness gate). More pack items for
+re-fetch: EL home 6136 / GB home 6190; EL Service 6137 / GB Service 6191 (same 4-section page each).
+
+## `itemContent.content` is NOT self-contained (proven on the Service page)
+The downloaded `content` references the Elementor **Global Kit** (`__globals__` colour IDs like
+`globals/colors?id=c1f2ab8`), named fonts, and custom CSS — none of which travel with it. Inject
+`content` alone (raw `_elementor_data`) and the page renders with the WRONG palette (kit-default
+light-blue/green headings instead of near-black), fonts fall back to **Roboto**, and it inherits the
+kit's default **content-width 1240** (design was 1280) — box geometry matches, identity is gone.
+Templately's real import runs the Customizer (kit/globals) + Dependencies (fonts) + CustomCSS runners
+alongside content. So building from source needs: import/set the kit global colours + typography,
+enqueue the named webfonts, apply custom CSS — then gate APPEARANCE, not just boxes.
+
+Also: **EL and GB authored versions diverge** (width 1240 vs 1280, some copy — pricing CTA "Get
+Started" vs "Choose Plan" — "Popular" as heading vs text, ±20–63px section heights). Gate each build
+against its own engine's preview, never cross-engine.
+
+Wholesale-inject fixup: sideload `demo.assets.templately.com` images to local (they time out
+in-container; decode the JSON array to rewrite URLs, don't regex the `\/`-escaped raw string), then
+`delete_post_meta(id,'_elementor_css')` + `\Elementor\Core\Files\CSS\Post::create(id)->update()`.

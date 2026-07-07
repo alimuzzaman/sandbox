@@ -165,7 +165,11 @@ drifted every run and made diffing fragile.
     positioned image widgets, not just the content blocks. (c) **`flex_align_items:center` on a COLUMN
     container shrinks its children to content-width**, so a centered heading's box collapses to the
     text and mis-measures `dLeft` (+363px on the hero heading). Center TEXT via the heading's own
-    `align:center` and leave the container cross-axis at stretch.
+    `align:center` and leave the container cross-axis at stretch. **Fix confirmed:** switching the
+    two affected containers (page-hero `flex_direction:column` wrapper, pricing-section title
+    wrapper) from `flex_align_items:"center"` to `"stretch"` dropped the page's overall `dLeft` max
+    from 363px to 139px in one change — this single bug was the single largest outlier on the
+    whole page, bigger than every other position defect combined.
 - **PNG → `extract-png.py`** (raster hints) + a vision pass. The script yields what a raster can
   give: `page` dims, per-band boundaries (row-luminance deltas) and each band's dominant
   background — as sections with `fidelity: low` and empty `elements`. Then the VISION step (you,

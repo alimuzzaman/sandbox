@@ -170,3 +170,38 @@ real proof of a fixed height-drift is the qualitative overlay: doubled/ghosted t
 each section (tens of px) instead of fanning wider and wider down the page (hundreds of px,
 cumulative) — compare the per-section height TABLE before/after, not the single mismatch %, when
 judging whether a height-drift fix worked.
+
+## Appearance-defect pass: 84 findings sat unread behind `| head -20` (process gap, not a tool gap)
+`sb specdiff` was computing button color/font-family/text-transform/gradient defects the entire
+time — I just never read past the truncated CLI output while chasing height numbers (findings rank
+content-width/height/position FIRST, appearance LAST). Full `--json` read surfaced 104 appearance
+findings. Root content cause: typography was set on the hand-built section-title headings but never
+on sub-elements INSIDE EAAL widgets (info-box button/text, pricing-table title/button), which ship
+a hardcoded default font (Manrope) that doesn't inherit page-level type. Fixed via:
+- **Two widget control-key traps, both requiring PRIMED `get_controls()`** (not just Elementor-core
+  widgets — a 3rd-party widget's entire STYLE tab can be missing unprimed: `eael-pricing-table` went
+  410→760 keys primed, unlocking ALL radius/typography/button-color controls that read as
+  nonexistent before). (1) `eael-info-box`'s "normal state" CONTENT typography key has an unexpected
+  `_hover_` segment (`eael_infobox_content_typography_hover_font_family`, not `..._typography_font_family`) —
+  used the "obvious" key, it silently no-op'd. (2) `eael_pricing_table_btn` (not `_btn_text`) is the
+  actual button-text-content key.
+- **A confirmed-correct, correctly-serialized native control can still lose to a widget's bundled
+  CSS.** `eael_pricing_table_border_radius`/`_container_padding`/`_background_background` were all
+  verified via primed introspection and correctly present in `_elementor_data`, yet computed style
+  kept showing the plugin's own default (4px radius, transparent bg) — Elementor's generated CSS
+  never emitted a competing rule. Fix: `_css_classes` + `wp_update_custom_css_post()` (`!important`,
+  targeting the widget's own rendered class) — the skill's documented fallback, reached after two
+  failed re-verification rounds rather than continuing to guess keys.
+- **Elementor's native lazy-load strips `background-image` (wildcard `*`, `!important`) on any
+  below-the-fold container until `.e-lazyloaded` lands** — this made a correctly-authored gradient
+  override look broken in ad-hoc `getComputedStyle` checks (showed `none`) until dwell-scrolling
+  first, exactly like the skill's existing lazy-`<img>` corollary but for CSS backgrounds too.
+  **Real regression caught this way:** the fallback I first wrote paired the gradient override with
+  `background-color:transparent`, which made pricing-button TEXT INVISIBLE (white-on-white card)
+  in the pre-scroll state — a real visitor risk, not just a measurement artifact. Fixed by giving
+  the override an explicit SOLID `background-color` matching the gradient's dark stop (unaffected by
+  the lazy-load rule, which only ever nulls `background-image`).
+- **The `flex_align_items:center` shrink-to-content bug (already documented) was the single
+  biggest position defect on the page** — fixing the two affected containers (hero + pricing-title
+  wrappers) from `center`→`stretch` dropped page-wide `dLeft` max from 363px to 139px in one change,
+  bigger than every other position defect combined. Total defects 263→197 across this pass.

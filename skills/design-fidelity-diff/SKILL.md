@@ -264,6 +264,15 @@ loading, background parity, asset completeness — and prints them ranked by cau
 is the whole of this phase except the pixel/vision pass (`sb pxdiff`/`sb vrdiff` + eyeball). Do
 NOT re-derive these numbers by hand; the CLI is more reliable than an ad-hoc `browser_evaluate`.
 The items below are what it reports — read them to interpret its output, not to reimplement it.
+**Read the FULL findings list — never pipe `specdiff` through `head`.** Findings are ranked by
+category (content-width, section-height, dTop/dLeft first; `appearance`/`appearance_soft` LAST),
+so truncating output while chasing height/position numbers silently hides every color/font-family/
+text-transform defect — they were computed the whole time, just past the fold. Verified: a whole
+height-drift fix-and-verify cycle ran clean while 84 unread `appearance` findings (wrong button
+color, wrong font-family, missing gradient) sat unaddressed below a `| head -20`. Use `--json` and
+either print every finding or at minimum print `summary` (which includes total defect count) so a
+suspiciously large gap between "sections converged" and "total defects" prompts you to look
+further before calling a pass done.
 1. **Fonts loaded?** `document.fonts.check('700 56px Archivo')` per family/weight — a matching
    `font-family` with status `unloaded` is a FALSE PASS; inject the webfont yourself
    (`<link>`/`@import`, include the italic axis if accent words are italic).
@@ -454,6 +463,64 @@ Then re-test at 768 + 480 and verify hover.
   primed it returns **879 with them**. The `editor-schema` ability already primes
   (`REST_REQUEST` + reset `Performance::is_frontend` + `clear_stack_cache`) — so USE THE TOOL,
   don't hand-roll `get_controls()`.
+  **The trap is NOT limited to Elementor-core widgets or just the Advanced tab — it strips a
+  THIRD-PARTY widget's entire STYLE tab too.** Verified on `eael-pricing-table`: unprimed
+  `get_controls()` returned 410 keys with ZERO containing "radius" or "typography" (its whole
+  style tab — button/title color, font, border-radius, background — was simply absent); primed
+  the SAME widget returned 760 keys including all of them. If a widget's control list looks
+  suspiciously thin for something with an obvious visual style (a pricing card has borders/
+  radius/fonts — of course it has controls for them), that thinness IS the tell — prime and
+  re-query before concluding "no control exists," not after.
+  **When wp_eval_live is your only channel (no `editor-schema` ability available on that
+  instance), replicate the exact priming inline** — don't invent your own variant:
+  ```php
+  if (!defined('REST_REQUEST')) { define('REST_REQUEST', true); }
+  $ref = new ReflectionClass('Elementor\Core\Frontend\Performance');
+  $prop = $ref->getProperty('is_frontend'); $prop->setAccessible(true); $prop->setValue(null, null);
+  if (isset(\Elementor\Plugin::$instance->controls_manager)) {
+      \Elementor\Plugin::$instance->controls_manager->clear_stack_cache();
+  }
+  ```
+  (lifted verbatim from `sandbox_editor_elementor_prime_context()` in the sandbox's own
+  `sandbox-editor.php` — the exact code the `editor-schema` ability runs).
+- **A widget's "normal state" control can have an unexpected extra name segment — verify the
+  EXACT key per widget, don't assume symmetry with a sibling widget.** Verified on
+  `eael-info-box`: BUTTON typography is `eael_infobox_button_typography_*` (as expected), but
+  CONTENT typography is `eael_infobox_content_typography_HOVER_font_family` — "hover" appears in
+  the key for the NORMAL/default state too, not just the `:hover` variant. Using the
+  "obviously correct" key without "_hover_" silently no-ops (falls back to the plugin's own
+  default font). When a set typography value doesn't show up in computed style, don't assume the
+  concept has no control — dump the FULL (primed) key list for that content area and grep, rather
+  than pattern-matching from a similar widget.
+- **A native-control override can be beaten by the widget's own bundled CSS even with the
+  RIGHT key and a regenerated stylesheet — verify computed style, and if it doesn't move, escalate
+  to the `_css_classes` + Additional-CSS fallback rather than re-guessing keys forever.**
+  Verified on `eael-pricing-table`: `eael_pricing_table_border_radius` / `_container_padding` /
+  `_background_background` were confirmed-correct (primed introspection) and correctly serialized
+  into `_elementor_data`, yet computed style on `.eael-pricing-item` still showed the plugin's
+  bundled default (4px radius, transparent bg) — Elementor's generated per-post CSS never even
+  emitted a rule for that specific combination. Two rounds of re-verifying the key were not
+  productive; switching to `_css_classes` + `wp_update_custom_css_post()` (`!important`, targeting
+  the widget's OWN rendered class like `.eael-pricing-item`) fixed it immediately and is the
+  sanctioned fallback (skill's build-vehicle priority list, item 4) for exactly this situation.
+- **Elementor's own native LAZY-LOAD optimization strips `background-image` (not just `<img>`)
+  on any below-the-fold container via a blanket `*` wildcard — this can look exactly like your
+  custom-CSS override "isn't working" when it's actually a transient pre-scroll state.** The
+  page emits (verified in rendered HTML): `.e-con.e-parent:nth-of-type(n+N):not(.e-lazyloaded),
+  .e-con.e-parent:nth-of-type(n+N):not(.e-lazyloaded) *{background-image:none!important}` for
+  containers past a breakpoint-dependent index, removed only once JS adds `.e-lazyloaded` on
+  intersection. A `getComputedStyle` check on a below-the-fold element's `background-image`
+  BEFORE scrolling will show `none` even when your rule is correctly authored, correctly scoped,
+  and `!important` — dwell-scroll first (exactly the existing lazy-image corollary, now proven to
+  also apply to CSS `background-image`, not just `<img>` decode) before trusting that check.
+  **Corollary — never let the "broken until scroll" state ship invisible content:** if you set a
+  `background-image` override with `background-color:transparent` as a shorthand side-effect (or
+  explicitly), TEXT ON THAT ELEMENT CAN BE INVISIBLE until the lazy-load class lands (verified:
+  white button text on a white card, pre-scroll — buttons visually vanished in a fresh screenshot).
+  Always set an explicit, matching **solid** `background-color` alongside a `background-image`
+  override — `background-color` is untouched by this lazy-load rule (it only ever nulls
+  `background-image`), so it's the safe fallback both for your own gating AND for real visitors
+  who land mid-scroll or with JS still initializing.
 - **Plugin source grep → last-resort confirm** of a selector/registration. Fiddly: EA
   registers via shared traits (ids not where you'd guess); `flex_gap` lives in
   `elementor/includes/elements/container.php`.

@@ -336,6 +336,45 @@ content, wrapping) — not blank space.
 - **A local fix cascades:** before pulling one element up, check the elements below; if they
   are already aligned, moving the block edge mis-aligns all of them. Re-measure after each
   batch; a cluster of new same-signed outliers below the edit = "you changed a height", revert.
+- **A widget/section can be silently EMPTY, not just short.** Before assuming a height deficit is a
+  padding/gap problem, `getBoundingClientRect` the suspect element directly — a Pro-only widget
+  (Elementor's native `form`) or a form-plugin wrapper widget (`eael-contact-form-7`, `-fluentform`,
+  `-gravity-form`, `-wpforms`, …) with no matching plugin active renders a truly EMPTY container
+  (`height:0`), no error, and can single-handedly account for most of a section's shortfall
+  (verified: −153px of a CTA section's −601 deficit was one empty `form` widget). Check
+  `plugin list --status=active` for what's actually installed before reaching for a "native" form
+  widget; if nothing is installed, build the VISUAL only from native non-form widgets (a styled
+  container + heading + icon standing in for an input+button) rather than leaving an invisible gap.
+- **"Same-height featured item with a badge above it" is an overlap case for `_position:absolute`,
+  not a stack.** A pricing table's "Popular" card commonly keeps ALL cards at identical height —
+  the badge/decor floats above/overlapping via absolute position, outside normal flow. Stacking it
+  in-flow (image, then badge, then the card) pushes that one column taller than its siblings and
+  misaligns every aligned row below it (buttons, footers). If reference siblings share an exact
+  `top`/height and the "special" one has extra decor, that decor is very likely absolutely
+  positioned in the source — reproduce it the same way (`_position:absolute` + negative
+  `_offset_y` on a `position:"relative"` parent), keeping the core widget in normal flow to match
+  its siblings.
+- **No exposed control for a widget's internal spacing? Use its own common `_padding` and
+  iterate against `specdiff`.** Some widgets (verified: `eael-pricing-table`, ~410 controls) expose
+  NOTHING for internal title/price/feature-list spacing — the default rendering can be
+  systematically more compact than a reference's premium/airy card. Don't fight the fixed internal
+  CSS; add the widget's own common `_padding` (top/bottom) and re-measure — it won't reproduce the
+  exact internal rhythm (gaps stay compact, whitespace lands at the outer edges instead) but
+  converges overall height correctly. Treat the section-height number as the iteration target:
+  bump the padding, re-run `specdiff`, adjust, repeat — don't guess a value and stop.
+- **A content-width delta can be a MEASUREMENT ARTIFACT — verify via `getComputedStyle` before
+  re-tuning the setting.** `specdiff` reporting e.g. 1240 vs a reference 1280 does NOT necessarily
+  mean your `boxed_width` setting is wrong; check `getComputedStyle(innerEl).maxWidth` on the live
+  page first. A vertical scrollbar at the exact capture viewport eats real pixels from the
+  available width, so the extractor can measure narrower than the CSS actually specifies. If the
+  computed max-width already matches the reference, do not "fix" a setting that isn't broken.
+- **Section-height convergence won't necessarily move the overall visual-diff mismatch % much, and
+  that's expected — judge by the per-section height TABLE, not one percentage.** Out-of-scope or
+  inherent diffs (missing nav/footer chrome, two different renders of the same 3D asset) dominate a
+  raw pixelmatch/vrdiff percentage regardless of internal alignment quality — fixing every section
+  to ±12px can leave the overall % flat or even tick up. The real signal that a height-drift fix
+  worked: doubled/ghosted text in the overlay stays LOCAL to each section (tens of px) instead of
+  fanning wider down the page (hundreds of px, cumulative). Compare the height table before/after.
 **Exit gate:** every section height ±2px; per-element dTop median ≤ 3px.
 
 ## Phase 5 — Done-gate (numeric) + responsive + hover

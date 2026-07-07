@@ -115,3 +115,58 @@ section-height fix-by-cause pass, not a background defect).
 stretched bar, not a snug pill). Fix with the native flex-child control `_flex_align_self:
 "flex-start"` on the widget (shrinks the wrapper) PLUS `width:fit-content!important` in the custom
 CSS (shrinks the tag itself) — either alone was insufficient.
+
+## Fixing the height drift (Service page): 4/4 sections converged to ±12px
+Per-section height table before → after this pass: Services We Provide +10→+10 (untouched, already
+fine), Brand Strategy Development +72→+12, Flexible Pricing Plan −56→−2, Solutions/CTA −153→+6.
+Three distinct root causes, each verified via `sb specdiff` re-runs, not guessed:
+
+1. **Elementor's native `form` widget is Pro-only and renders COMPLETELY EMPTY when Pro isn't
+   active — silently, no error, `<div class="elementor-widget-container"></div>`.** This alone
+   accounted for most of the CTA section's −153px deficit (a `getBoundingClientRect` on the form
+   node showed `height:0`). None of EAAL's `eael-*-form` widgets help either — they're wrappers
+   around Contact Form 7 / Fluent Forms / Gravity Forms / WPForms, all ABSENT from this instance,
+   so they'd render empty too. Fix: when no form plugin is installed, replicate the VISUAL only
+   with native non-form widgets — a `container` (row, `background_color`+`border`+`border_radius`
+   matching the reference input chrome) holding a `heading` (placeholder-styled text) and an
+   `icon` widget (arrow), not a functional form. This is a legitimate native-widget substitute, not
+   an HTML-widget violation — check what form-handling plugins are actually active before assuming
+   the native/Pro form widget will render.
+2. **A "same-height featured card with a badge floating above" (the classic pricing-table
+   "Popular" pattern) is a genuine overlap case for `_position:absolute`, not a stacking layout.**
+   The reference's Standard/Premium/Enterprise "Choose Plan" buttons sit at the IDENTICAL `top`
+   (2727 in all three) — the Popular badge + decorative image are positioned ABOVE/overlapping the
+   Premium card, outside normal flow. A naive column stack (image, then badge, then pricing table)
+   pushes the Premium column ~195px lower than its siblings and un-aligns every button row. Fix:
+   put the decor image + badge as `_position:absolute` children (with negative `_offset_y`) of a
+   `position:"relative"` featured container, alongside the pricing-table widget in NORMAL flow —
+   this is exactly the skill's documented overlap case, just easy to miss when translating a
+   design that visually reads as "stacked."
+3. **A widget can have NO exposed control for its own internal spacing** — `eael-pricing-table`
+   exposes ~410 controls but zero for feature-list item padding/gap; its default rendering is
+   markedly more compact than the reference's premium/airy card (title→button span 354px vs
+   reference's 587px). When Phase-0 control discovery turns up nothing for the specific internal
+   rhythm you need, the pragmatic native lever is the widget's own COMMON `_padding` (top/bottom) —
+   it won't reproduce the exact internal proportions (title/price/feature gaps stay compact,
+   whitespace lands at the card's outer edges instead) but converges overall card height
+   correctly; iterate the padding value against `sb specdiff`'s section-height number until it
+   converges (verified: 0→50→120px `_padding` took the section from −242 to −2).
+
+**Content-width delta can be a MEASUREMENT ARTIFACT, not a real defect — verify via computed style
+before re-tuning settings.** `sb specdiff` reported content-width 1240 vs reference 1280 throughout
+this build, but `getComputedStyle(innerEl).maxWidth` on the live page showed exactly `1280px` — the
+`boxed_width` setting WAS correct. At the exact 1280px viewport `specextract` uses, a vertical
+scrollbar eats ~40-55px of the visible content width before layout, so the extractor measures a
+narrower box than the CSS actually specifies. Don't chase a content-width delta by changing
+`boxed_width` again if you've already confirmed the computed `max-width` matches the reference —
+you'd be "fixing" a correct setting.
+
+**Section-height convergence does not by itself move the overall `sb vrdiff` mismatch % much, and
+that's expected — check the RIGHT metric.** Fixing all 4 sections to ±12px left the overall pixel
+mismatch roughly flat (24.90% → 26.13%, even ticking up slightly) because out-of-scope/inherent
+diffs (missing nav+footer chrome, the sampled 3D-render images differing pixel-for-pixel from the
+reference's own renders) dominate the raw percentage regardless of internal alignment quality. The
+real proof of a fixed height-drift is the qualitative overlay: doubled/ghosted text stays LOCAL to
+each section (tens of px) instead of fanning wider and wider down the page (hundreds of px,
+cumulative) — compare the per-section height TABLE before/after, not the single mismatch %, when
+judging whether a height-drift fix worked.

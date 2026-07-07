@@ -251,3 +251,43 @@ new code defects:
   DOES show the subtitle but also adds an unwanted icon-circle header + colored band neither
   reference has — reverted to style-1 and accepted the missing subtitle line as a smaller, bounded
   defect than the two new unwanted elements a style swap would introduce.
+
+## Reset-and-rebuild-from-scratch caught two REAL bugs a live-instance patch loop had masked
+No `@install` baseline existed for this instance, so "reset" meant: delete all test pages +
+Additional CSS + uploaded assets, regenerate `_elementor_data` fresh from the current Python
+generator, and rebuild on a brand-new page id. This is worth doing periodically even without a
+user request — a long chain of live in-place patches on the SAME page can accumulate hidden state
+(stale custom CSS rules, leftover meta) that masks whether the SCRIPT itself is actually correct
+end-to-end. It found two real, independent regressions:
+- **A string-replace edit silently dropped an unrelated fix that shared its line.** Removing the
+  onsale/sale-price settings from `pricing()` also deleted `_padding=px(120,0,120,0)` — the
+  earlier-tuned lever that converged the pricing card height to the reference — because both sat
+  in the same multi-kwarg replace block. Section height silently regressed from ~±5px to −185px
+  and stayed that way across several edits, because nothing re-verified the FULL settings dict
+  after the replace, only that the specific unwanted keys were gone. **Rule: after any
+  string-replace on a multi-setting call, re-`grep` the function for every OTHER setting you
+  didn't intend to touch, don't just confirm the removed one is gone.**
+- **`card_stack()`'s image/text order was backwards for all three row-2 cards, and had been since
+  it was first written** — misattributed the GB source's `flexDirection` attribute (read off the
+  `infobox` block's OWN attrs) as controlling the SIBLING order between the separate `advanced-image`
+  block and the infobox block, when it actually only controls the infobox's OWN internal icon/text
+  arrangement — irrelevant to two separate sibling blocks entirely. Real evidence should come from
+  the EXTRACTED render geometry (which top comes first), not a plausible-sounding attribute name on
+  an unrelated block. This produced dTop residuals of 200-290px for every row-2 element — the
+  largest defect class in the whole page — and had been silently absorbed into "known height drift"
+  across multiple earlier passes without being root-caused. Fixed by swapping the child order
+  (infobox first/top, image second/bottom) to match the reference's actual measured order. dTop
+  median dropped 46px→25px in this one fix; overall `vrdiff` mismatch hit its best number of the
+  whole exercise (23.41%) after this + the pricing padding restore + the info-box button fix
+  (below) — with the remaining ~601px height gap being the already-documented out-of-scope
+  nav/footer chrome, not further build defects.
+- **The info-box "Learn More" button had the wrong visual treatment entirely — a solid dark button
+  box (`#333333` background, 5px/10px padding) where the reference renders a plain transparent
+  text link** (`background:rgba(0,0,0,0)`, `padding:0`, navy text, no radius) — caught by the user
+  from a cropped screenshot alone, not from any numeric gate (a "button" widget having a filled
+  background is not itself flagged as wrong; the appearance gate reports colour mismatches but at
+  low severity among 80+ other findings, easy to miss). Fixed via
+  `eael_infobox_button_background_color="#33333300"` (EAAL's OWN default IS `#333333`, hence the
+  false "it renders fine" impression until directly diffed against the reference) +
+  `eael_creative_button_padding=px(0,0,0,0)`, with the same `_css_classes`+Additional-CSS fallback
+  pattern as a safety net given prior widgets in this build needed it.

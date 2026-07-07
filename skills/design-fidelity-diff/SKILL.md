@@ -357,6 +357,25 @@ content, wrapping) — not blank space.
 - **A local fix cascades:** before pulling one element up, check the elements below; if they
   are already aligned, moving the block edge mis-aligns all of them. Re-measure after each
   batch; a cluster of new same-signed outliers below the edit = "you changed a height", revert.
+- **A string-replace edit can silently delete an unrelated, already-working fix that happens to
+  share the same line/block.** Verified: removing an obsolete sale-price setting from a multi-kwarg
+  widget call also deleted a previously-tuned padding value sitting in the same replaced block —
+  a real, working height-convergence fix, gone with no error, no diff shown (it's YOUR edit, so
+  nothing flags it as a regression). It stayed broken across several subsequent edits because
+  nothing re-verified the FULL settings dict after the replace, only that the unwanted key was
+  gone. **After any string-replace touching a multi-setting call, `grep` the function afterward
+  for every OTHER setting that should still be there** — don't just confirm the thing you meant
+  to remove is gone.
+- **Don't infer sibling layout order from a plausible-sounding attribute on the WRONG block.** A
+  GB source's `flexDirection`/`imgPos`-style attribute read off an `infobox` block controls that
+  block's OWN internal icon/text arrangement — it says nothing about the order of a SEPARATE
+  sibling block (a standalone `advanced-image`) placed next to it in a row/column. Verified: this
+  misattribution put an entire row's image-vs-text order backwards (image top, text bottom)
+  against the reference's actual order (text top, image bottom) — a 200-290px dTop residual on
+  every element in the row, the largest defect class on the page, silently absorbed into "known
+  height drift" for multiple passes before being root-caused. The authoritative source for sibling
+  order is the EXTRACTED render geometry (which element's `top` comes first in the reference),
+  never a same-sounding attribute name on an unrelated block.
 - **A widget/section can be silently EMPTY, not just short.** Before assuming a height deficit is a
   padding/gap problem, `getBoundingClientRect` the suspect element directly — a Pro-only widget
   (Elementor's native `form`) or a form-plugin wrapper widget (`eael-contact-form-7`, `-fluentform`,

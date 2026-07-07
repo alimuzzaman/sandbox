@@ -342,3 +342,55 @@ before→after on the Service page hero ("Services We Provide"):
 irreducible cross-engine floor until proven so by exhausting the exposed controls AND a scoped
 CSS override AND re-verifying the numbers moved.** "Not a real defect" and "can't be fixed
 further" are conclusions to ARRIVE AT after this process, not assumptions to open with.
+
+## Remaining sections driven the same way — key findings applicable beyond this build
+Continued the same rigor into Brand Strategy Development (cards), Flexible Pricing Plan, and
+Solutions/CTA. Appearance findings dropped 75→8 page-wide; Brand Strategy height −34px→−19px;
+dLeft median 22.5px→17px. New, generalizable findings:
+
+- **Measure the reference's ACTUAL card-panel rectangles via `getBoundingClientRect` on elements
+  matched by background COLOR, not by reverse-engineering from text positions.** Reverse-
+  engineering card width/gap from two text elements' left positions produces WRONG numbers if you
+  don't already know the padding — an early estimate of "64px gap between cards" was actually
+  text-to-text distance including padding on both sides; the REAL card-to-card gap (measured
+  directly off the pastel background panels) was a uniform 24px everywhere. When a repeated card
+  grid's exact gap/width isn't obvious from element positions alone, filter for the panel's own
+  background-color and measure ITS rect directly — don't infer from children.
+- **The authored EL source (when you have it, e.g. from `itemContent`) is a goldmine for exact
+  padding/margin/width-percentage values that are otherwise unmeasurable from computed style**
+  (Elementor's own container padding often can't be reverse-engineered to the pixel from rendered
+  boxes alone, because of the "stacked nested-container default padding" gotcha polluting the
+  numbers). Cross-referencing authored-EL padding against direct GB-reference panel measurements
+  let several per-card paddings converge to exact values (e.g. `40px` left / `0px` right / `44px`
+  top on most row1/row3 cards) that pure pixel-reverse-engineering alone would have taken many more
+  iterations to find.
+- **A DIFFERENT font-size between visually-similar repeated items is easy to miss without
+  checking EVERY one.** Row1/row3 card titles use `fs:26`; row2 (the 3-card stacked layout) uses
+  `fs:32` — a real, previously-unnoticed difference that explained a −91px heading-height residual
+  once found (verified via direct `getComputedStyle` on multiple cards, not assumed uniform from
+  one sample).
+- **A repeated-item's own `padding`-driving-height finding may be implemented as a `margin`
+  control, which does NOT count toward `getBoundingClientRect` height the way reference's CSS
+  `padding` does.** Setting `eael_infobox_title_margin` moved the title's start position (margin
+  affects layout/siblings) but did NOT inflate the title's OWN measured height to match a
+  reference whose extra height came from real `padding` — no matching padding control existed on
+  the widget at all. When a control is margin-only and the reference's own inflation is
+  padding-based, accept the residual rather than force a mismatch between the two mechanisms; the
+  CSS override escape hatch is the only way to truly match if the gap matters more than the risk.
+- **A "wrong color" appearance finding can be a FALSE POSITIVE when a heading's actual visible
+  text lives in child SPANS with their own color, not the outer heading tag.** A CTA headline
+  showed `color:rgb(17,17,17)` (near-black) via `getComputedStyle` on the `<h2>` itself — but
+  `document.elementFromPoint()` on the actual glyph pixels landed on a `<span class="first-title">`
+  with its OWN `color:rgb(255,255,255)` (white), matching the visibly-rendered page exactly. EB's
+  "advanced-heading" (and similar rich-text widgets) commonly wrap ALL visible text in per-run
+  spans for word-level color/highlight control (the same pattern used for a lime-highlighted word
+  elsewhere on this page) — the outer tag's own `color` is a NEVER-RENDERED fallback in that case.
+  **Before trusting a heading's computed color, sample the color at the actual glyph position via
+  `elementFromPoint`, not just `getComputedStyle` on the outer tag** — this is a real gap in
+  `extract-web.js`'s `elemSpec()` (it always reads the outer element's own color) worth fixing if
+  this pattern recurs.
+- **Nested nearby container default padding (the "~10px stacks per level" gotcha) can appear at
+  MULTIPLE unrelated points in a build** — not just the widely-known column/section case. Found
+  and zeroed it on: the info-box/image inner wrapper columns inside each card, the row containers
+  (rowA/B/C) themselves, AND a CTA text-column wrapper — each a separate, independent instance of
+  the same root cause, each silently adding ~10-20px of unintended offset until explicitly zeroed.

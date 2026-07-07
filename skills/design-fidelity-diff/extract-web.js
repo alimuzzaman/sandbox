@@ -29,6 +29,17 @@
 // as ~1280px. Verified: this produced a spurious "content-width delta -40px" finding on a build
 // that was already pixel-identical to the reference — an entire investigation chasing a defect
 // that didn't exist, because one side of the comparison was measured wrong.
+//
+// KNOWN LIMITATION (not yet fixed — flagged for a future v7): `elemSpec()`'s font.color always
+// reads `getComputedStyle(el).color` on the OUTER heading/text element. When a rich-text widget
+// (EB's "advanced-heading" and similar) wraps ALL visible text in per-run child <span>s for
+// word-level color/highlight control, the outer element's own `color` is a fallback that never
+// actually renders — verified a heading measuring `color:rgb(17,17,17)` (black) via this method
+// while every visible glyph was actually white (a child `<span class="first-title">` with its own
+// `color:rgb(255,255,255)`, confirmed via `document.elementFromPoint()` on the glyph pixels).
+// This produces a false-positive "wrong color" appearance finding. If you hit a suspicious color
+// mismatch on a heading, verify with `elementFromPoint` on an actual glyph before trusting
+// `elemSpec`'s reported color; don't "fix" a build that already matches the reference.
 
 () => {
   const r2 = n => Math.round(n);

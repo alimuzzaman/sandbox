@@ -152,14 +152,27 @@ Three distinct root causes, each verified via `sb specdiff` re-runs, not guessed
    correctly; iterate the padding value against `sb specdiff`'s section-height number until it
    converges (verified: 0→50→120px `_padding` took the section from −242 to −2).
 
-**Content-width delta can be a MEASUREMENT ARTIFACT, not a real defect — verify via computed style
-before re-tuning settings.** `sb specdiff` reported content-width 1240 vs reference 1280 throughout
-this build, but `getComputedStyle(innerEl).maxWidth` on the live page showed exactly `1280px` — the
-`boxed_width` setting WAS correct. At the exact 1280px viewport `specextract` uses, a vertical
-scrollbar eats ~40-55px of the visible content width before layout, so the extractor measures a
-narrower box than the CSS actually specifies. Don't chase a content-width delta by changing
-`boxed_width` again if you've already confirmed the computed `max-width` matches the reference —
-you'd be "fixing" a correct setting.
+**CORRECTED (see extract-web.js@6 below) — a "content-width delta is a measurement artifact"
+claim was WRONG and should never have been accepted without finding the actual root cause.** An
+earlier pass here hand-waved the −40px content-width delta as "a vertical scrollbar eating pixels"
+because `getComputedStyle(innerEl).maxWidth` read `1280px` and that felt like enough proof. It
+wasn't: `max-width` is a CSS ceiling, not the element's actual rendered width, and nobody checked
+`getBoundingClientRect().width` on the SAME element. When directly challenged to "make sure
+container width match" instead of accepting the hand-wave, the real cause fell out immediately:
+`extract-web.js`'s `contentMaxWidth` used a class-name selector
+(`.e-con-inner,.elementor-container,[class*="container"]`) that matches ONLY Elementor markup —
+on the Gutenberg/EB reference nothing matched, so it silently fell back to measuring `sections[0]`
+itself (the full-width OUTER wrapper, 1280px) instead of the reference's true, narrower content
+wrapper (`.eb-wrapper-inner-blocks`, genuinely 1240px — verified via `getBoundingClientRect`).
+**Both engines' real content width was already 1240px this whole time** — the "defect" was a
+one-sided extraction bug, not a rendering difference. Fixed properly in `extract-web.js@6`: a
+GEOMETRIC content-wrapper finder (descend single-child wrapper chains from the section root until
+width stops matching the section) that needs no class-name knowledge of either engine, used for
+both `page.contentMaxWidth` and each section's own `contentWidth`. **Lesson: "the computed style
+looks right" is not the same claim as "the rendered width matches" — check
+`getBoundingClientRect().width` on BOTH sides with the SAME method before calling ANY delta a
+measurement artifact, and never accept your own earlier explanation without re-deriving it when
+pushed on.**
 
 **Section-height convergence does not by itself move the overall `sb vrdiff` mismatch % much, and
 that's expected — check the RIGHT metric.** Fixing all 4 sections to ±12px left the overall pixel
@@ -291,3 +304,41 @@ end-to-end. It found two real, independent regressions:
   false "it renders fine" impression until directly diffed against the reference) +
   `eael_creative_button_padding=px(0,0,0,0)`, with the same `_css_classes`+Additional-CSS fallback
   pattern as a safety net given prior widgets in this build needed it.
+
+## Hero section driven to true convergence — a worked example of "iterate until 0, not near 0"
+Pushed back on twice ("what do you mean not real" / "why not fixed") for accepting a hand-waved
+explanation and a 111px position miss without root-causing either. Both turned out fixable. Full
+before→after on the Service page hero ("Services We Provide"):
+- **Content width: -40px → 0px (PASS).** Real cause was the extractor (see above), not the build.
+- **Section height: +10px → -2px.** Root cause: `flex_gap` on the hero container (24px) was
+  simply too large — the reference's actual breadcrumb-to-heading gap, measured directly
+  (`heading.top - breadcrumbWidget.bottom`), is ~11-13px, not 24. Iterating the gap value against
+  `specextract` re-measurements (24→11→13→26, the last two compensating for two OTHER fixes that
+  each shrank the breadcrumb widget's own height) converged the heading's `top` to an EXACT match
+  (230=230) and section height to -2px (an honest sub-pixel floor — internal math is self-
+  consistent: 182 padding-top + 67 heading height + 30 padding-bottom accounts for the whole
+  content span with nothing unaccounted for).
+- **Breadcrumb "Home"/"current page" horizontal position: up to 111px off → 1px.** Two stacked
+  causes: (1) the "current page" trail label was pulling the WordPress page's own (verbose, debug-
+  named) title instead of a short label — renaming the page fixed the width of that segment; (2)
+  the SEPARATOR icon's default spacing (`eael_separator_spacing`, default 10px) + size
+  (`separator_size`, default 15px) rendered ~12px wider than the reference's, shifting the
+  CENTERED trail's start point by half that (6px) — tightened to `eael_separator_spacing=4,
+  separator_size=12` to close it.
+- **Breadcrumb vertical text position: 6-8px off → 1-3px.** The visible `<a>`/text sits inside
+  `.eael-breadcrumbs__content`, which carries an UNEXPOSED internal default `padding:5px 15px` —
+  no control surfaces it, and the widget's own `breadcrumb_typography_line_height` control does
+  NOT affect this (tried it first; zero effect, confirming the offset comes from the wrapper's
+  padding, not the text's line-height). Fixed via a scoped CSS override
+  (`.eael-breadcrumbs__content{padding-top:0!important;padding-bottom:0!important}`) — after which
+  the wrapper shrank, so its down-stream contribution to section height had to be re-compensated
+  in `flex_gap` again (the "local fix cascades" corollary applies even to fixing an offset, not
+  just moving an element).
+- **Breadcrumb typography/color: totally wrong (Manrope, washed-out gray) → exact.** Set
+  `breadcrumb_typography_*` + `breadcrumb_link_color`/`breadcrumb_text_color` — the widget's
+  default styling was never touched before, same class of gap as the info-box button.
+
+**Process takeaway: every one of these had a findable, fixable root cause. None were an
+irreducible cross-engine floor until proven so by exhausting the exposed controls AND a scoped
+CSS override AND re-verifying the numbers moved.** "Not a real defect" and "can't be fixed
+further" are conclusions to ARRIVE AT after this process, not assumptions to open with.

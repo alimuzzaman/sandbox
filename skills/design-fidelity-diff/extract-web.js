@@ -1,4 +1,4 @@
-// extract-web.js@5 — canonical DesignSpec v1 web extractor.
+// extract-web.js@6 — canonical DesignSpec v1 web extractor.
 // Paste the FUNCTION BODY into Playwright browser_evaluate (run on reference AND build).
 // Force-load images first (see SKILL Reference A). Override ROOT if section detection is wrong.
 //
@@ -21,6 +21,14 @@
 // "Unlimited calls" vs "Customization Options") produced ZERO missing/extra element findings —
 // the diff had no way to see the content existed at all. Verified: this was the actual root cause
 // of a content-swap bug that only vision caught, not `sb specdiff`.
+// v6: contentMaxWidth is now GEOMETRIC (descend single-child wrapper chains until the width
+// stops matching the section), not class-name-based. The old selector
+// ('.e-con-inner,.elementor-container,[class*="container"]') only matches Elementor markup — on
+// a Gutenberg/EB page nothing matched, so it silently fell back to measuring the OUTER full-width
+// section instead of the real content wrapper, reporting a reference's true ~1240px content width
+// as ~1280px. Verified: this produced a spurious "content-width delta -40px" finding on a build
+// that was already pixel-identical to the reference — an entire investigation chasing a defect
+// that didn't exist, because one side of the comparison was measured wrong.
 
 () => {
   const r2 = n => Math.round(n);
@@ -149,9 +157,29 @@
     return o;
   };
 
+  // v6: GEOMETRIC content-wrapper finder (see the `contentMaxWidth` note near `page` below) —
+  // descend single-child wrapper chains from `sec` until width stops matching the section, no
+  // class-name guessing. Used for BOTH the page-level `contentMaxWidth` and each section's own
+  // `contentWidth`/`columns` — the old class-based selector
+  // ('.elementor-container, [class*="container"], [class*="row"]') never matched Gutenberg/EB
+  // markup, silently falling back to the section itself and over-reporting content width by the
+  // side-padding amount on every non-Elementor page.
+  const contentNodeOf = sec => {
+    const secW = box(sec).width;
+    let node = sec;
+    for (let i = 0; i < 10; i++) {
+      const kids = [...node.children].filter(c => box(c).width > 40 && box(c).height > 10);
+      if (!kids.length) break;
+      const next = kids[0], nextW = box(next).width;
+      node = next;
+      if (kids.length > 1 || nextW < secW - 4) break;
+    }
+    return node;
+  };
+
   const sectionSpec = (sec, i) => {
     const b = box(sec);
-    const inner = sec.querySelector('.elementor-container, [class*="container"], [class*="row"]') || sec;
+    const inner = contentNodeOf(sec);
     const cols = [...inner.children].filter(c => box(c).width > 40).map(c => ({ width: r2(box(c).width) }));
     let gap = null;
     if (cols.length > 1) {
@@ -209,14 +237,25 @@
     }
   }));
 
+  // v5: contentMaxWidth is now GEOMETRIC, not class-name-based. The old selector
+  // ('.e-con-inner,.elementor-container,[class*="container"]') only matches Elementor's own
+  // markup — on a Gutenberg/Essential-Blocks page NOTHING matches, so it silently fell back to
+  // `sections[0]` itself (the full-width OUTER wrapper), reporting the reference's real ~1240px
+  // content width as ~1280px. VERIFIED: this produced a spurious "content-width delta -40px"
+  // finding on a build that was already pixel-identical to the reference at 1240px true width —
+  // wasted an entire investigation chasing a defect that didn't exist. Fix: descend single-child
+  // wrapper chains from the section root as long as they stay full section-width; stop at (and
+  // measure) the first node that's either narrower than the section or has multiple wide
+  // children — that is the real content-capping wrapper, regardless of the engine's class names.
+
   return {
     designspec: '1.0',
     meta: { source: 'web', ref: location.href, viewport: { w: innerWidth, h: innerHeight },
-            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@5' },
+            colorFormat: 'rgb', fidelity: 'full', tool: 'extract-web.js@6' },
     page: {
       width: r2(box(ROOT).width), height: document.body.scrollHeight,
       background: cs(document.body).backgroundColor,
-      contentMaxWidth: sections.length ? r2(box(sections[0].querySelector('.e-con-inner,.elementor-container,[class*="container"]') || sections[0]).width) : null,
+      contentMaxWidth: sections.length ? r2(box(contentNodeOf(sections[0])).width) : null,
     },
     fonts: Object.values(fontSet),
     sections: secs,

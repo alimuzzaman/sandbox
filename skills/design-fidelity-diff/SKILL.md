@@ -402,12 +402,18 @@ content, wrapping) — not blank space.
   exact internal rhythm (gaps stay compact, whitespace lands at the outer edges instead) but
   converges overall height correctly. Treat the section-height number as the iteration target:
   bump the padding, re-run `specdiff`, adjust, repeat — don't guess a value and stop.
-- **A content-width delta can be a MEASUREMENT ARTIFACT — verify via `getComputedStyle` before
-  re-tuning the setting.** `specdiff` reporting e.g. 1240 vs a reference 1280 does NOT necessarily
-  mean your `boxed_width` setting is wrong; check `getComputedStyle(innerEl).maxWidth` on the live
-  page first. A vertical scrollbar at the exact capture viewport eats real pixels from the
-  available width, so the extractor can measure narrower than the CSS actually specifies. If the
-  computed max-width already matches the reference, do not "fix" a setting that isn't broken.
+- **A content-width delta CAN be a one-sided extractor bug, but prove it with
+  `getBoundingClientRect`, never with `getComputedStyle(...).maxWidth` alone.** `max-width` is a
+  CSS ceiling, not the rendered width — checking only that led an earlier pass in this project to
+  wrongly call a real −40px delta "a scrollbar measurement artifact" and move on. The actual cause
+  (verified when pushed to re-derive it): `extract-web.js`'s old `contentMaxWidth` selector only
+  matched Elementor's own class names, so on a Gutenberg/EB reference it silently fell back to
+  measuring the OUTER full-width section instead of the true (narrower) content wrapper — BOTH
+  engines' real rendered width were already identical the whole time. Fixed in `extract-web.js@6`
+  with a geometric wrapper-finder (no class names needed on either side). Before calling ANY
+  content-width delta a false positive: measure `getBoundingClientRect().width` on the actual
+  content wrapper on BOTH sides with the identical method, and if they already match, the bug is
+  in the extractor, not the design — fix the tool, don't just narrate around the number.
 - **Section-height convergence won't necessarily move the overall visual-diff mismatch % much, and
   that's expected — judge by the per-section height TABLE, not one percentage.** Out-of-scope or
   inherent diffs (missing nav/footer chrome, two different renders of the same 3D asset) dominate a

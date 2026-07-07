@@ -72,3 +72,15 @@ against its own engine's preview, never cross-engine.
 Wholesale-inject fixup: sideload `demo.assets.templately.com` images to local (they time out
 in-container; decode the JSON array to rewrite URLs, don't regex the `\/`-escaped raw string), then
 `delete_post_meta(id,'_elementor_css')` + `\Elementor\Core\Files\CSS\Post::create(id)->update()`.
+
+## GB->EL hand-conversion, worked (Service page)
+Built the GB Service page in Elementor from the GB source (content + the GB render geometry), native
+widgets via the widget map -> `flexigency-service-gb2el` (page 55 in the -figma instance). Result:
+leaf-widget inventory IDENTICAL to the authored EL (9 image / 7 info-box / 5 heading / 3 pricing / 1
+breadcrumbs / text-editor / form) — the map-driven conversion is sound. Three conversion gotchas
+(now in DESIGNSPEC.md): (a) RESOLVE global colours (`__globals__` / `var(--eb-global-*)`) to explicit
+hex from the render — carrying them forward breaks colours without the kit; 0-globals build rendered
+correct, 31-globals inject went light-blue. (b) block->widget drops DECOR/background layers (the CTA
+`flexigency-subscripton-cta-obj-img-01.png` is a container `background_image`, not a content block) —
+walk wrapper backgrounds too. (c) `flex_align_items:center` on a column shrinks children to
+content-width — center text via the heading's own `align`, keep the container at stretch.

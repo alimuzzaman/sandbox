@@ -147,6 +147,25 @@ drifted every run and made diffing fragile.
     on the DECODED array, not a regex over the raw string); (2) **regenerate CSS**:
     `delete_post_meta($id,'_elementor_css')` then `\Elementor\Core\Files\CSS\Post::create($id)->update()`;
     (3) import the kit/fonts/custom-CSS per the bullet above.
+  - **CONVERTING block→widget (GB→EL) from source — three gotchas proven building the Service page
+    conversion by hand (`flexigency-service-gb2el`, structurally validated against the authored EL:
+    IDENTICAL leaf-widget inventory — 9 image / 7 info-box / 5 heading / 3 pricing / 1 breadcrumbs /
+    text-editor / form — so the widget map is sound):** (a) **RESOLVE global colours to explicit
+    values, don't carry the reference.** Both sources point at kit globals (EL
+    `"__globals__":{...globals/colors?id=…}`, GB `var(--eb-global-*-color)`); copy those forward and
+    the build renders kit-default colours (headings went light-blue). Instead read each element's
+    computed colour from the `-ref` DesignSpec and set an EXPLICIT hex — the hand-built conversion
+    used 0 globals and rendered the correct near-black/navy palette while a raw authored-EL inject
+    with 31 globals did not. (This is the simpler alternative to importing the kit.) (b) **DECOR /
+    background layers get DROPPED** — a block→widget pass only walks CONTENT blocks, but the design's
+    section backgrounds + decorative object PNGs live on wrapper `background-image` / CSS (verified:
+    the CTA panel's `flexigency-subscripton-cta-obj-img-01.png` is a container `background_image` in
+    the authored EL, absent from the naive conversion → a `missing_asset` + a −171px short section).
+    Walk the source's wrapper background/`decor[]` and map them to EL container `background_*` /
+    positioned image widgets, not just the content blocks. (c) **`flex_align_items:center` on a COLUMN
+    container shrinks its children to content-width**, so a centered heading's box collapses to the
+    text and mis-measures `dLeft` (+363px on the hero heading). Center TEXT via the heading's own
+    `align:center` and leave the container cross-axis at stretch.
 - **PNG → `extract-png.py`** (raster hints) + a vision pass. The script yields what a raster can
   give: `page` dims, per-band boundaries (row-luminance deltas) and each band's dominant
   background — as sections with `fidelity: low` and empty `elements`. Then the VISION step (you,

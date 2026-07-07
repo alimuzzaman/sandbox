@@ -160,8 +160,11 @@ per-session shape (that drift — `{vw,bodyH}` vs `[{k,fs,fw}]` — is why diffi
   TWO traps proven on the Service-page conversion, both in `DESIGNSPEC.md`: (1) `itemContent.content`
   is **NOT self-contained** — it references the Elementor **Global Kit** (`__globals__` colour IDs) +
   named fonts + custom CSS; inject `content` alone and the page renders with the WRONG palette,
-  fallback fonts (Roboto), and the kit's default width — geometry passes, identity is lost. Import
-  the kit/globals + fonts + custom CSS too, and GATE APPEARANCE. (2) The EL and GB authored versions
+  fallback fonts (Roboto), and the kit's default width — geometry passes, identity is lost. Either
+  import the kit/globals + fonts + custom CSS too, OR (simpler, proven better) **resolve every global
+  colour to an explicit hex read from the `-ref` render** so the page is self-contained — a hand
+  conversion with 0 globals rendered the correct palette where a raw inject with 31 `__globals__`
+  went light-blue. Enqueue the named fonts regardless, and GATE APPEARANCE. (2) The EL and GB authored versions
   genuinely DIVERGE (width 1240 vs 1280, some copy, ±20–63px section heights) — gate each build
   against **its own engine's** preview (`agency.elementor…` for EL, `agency.blocks…` for GB), never
   cross-engine.

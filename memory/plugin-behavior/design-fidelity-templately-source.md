@@ -99,3 +99,19 @@ rotated pill badges on `#CB8FF3` (violet); the CTA panel background is `#091439`
 highlighted word in `#C2F250` (lime) inside the headline. **Lesson: always run the visual pass
 (`sb vrdiff`) on a design with repeated cards/badges even after a green `specgate`** — this class of
 defect is structurally invisible to section-scoped geometry/background gates. See SKILL.md gate 6b.
+
+**Fix validated by re-running `sb vrdiff`:** added `background_color`+`padding`+`border_radius` to
+each card's own OUTER container (the one wrapping text+image, not the text-only inner one — the
+reference's pastel panel covers the whole card), an outer `#F4F4FF` wrapper container around the 3
+pricing cards, a `.gbel-badge` custom-CSS pill (violet bg, italic, `rotate(-4deg)`) for "Popular"/
+"Solutions", and a navy `background_color` + lime-highlighted `<span>` in the heading `title` HTML
+for the CTA. Mismatch dropped **33.33% → 24.90%**; every card/pricing/CTA panel now shows as a
+CLEAN OUTLINE in the diff overlay (not a solid fill) — background parity is fixed. Remaining 24.90%
+is the known residual: missing nav+footer (template-level chrome, out of this page-content build's
+scope) and cumulative text-doubling from sections still ~715px short in total (a Phase-4
+section-height fix-by-cause pass, not a background defect).
+**Pill-badge gotcha:** a `heading` widget's own tag is block-level, so a card's default cross-axis
+`stretch` in a flex container makes a `display:inline-block` CSS pill still render full-width (a
+stretched bar, not a snug pill). Fix with the native flex-child control `_flex_align_self:
+"flex-start"` on the widget (shrinks the wrapper) PLUS `width:fit-content!important` in the custom
+CSS (shrinks the tag itself) — either alone was insufficient.

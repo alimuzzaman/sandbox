@@ -84,3 +84,18 @@ correct, 31-globals inject went light-blue. (b) block->widget drops DECOR/backgr
 `flexigency-subscripton-cta-obj-img-01.png` is a container `background_image`, not a content block) —
 walk wrapper backgrounds too. (c) `flex_align_items:center` on a column shrinks children to
 content-width — center text via the heading's own `align`, keep the container at stretch.
+
+## BackstopJS caught what specdiff/specgate did not: per-CARD background parity
+`sb specgate` on `flexigency-service-gb2el` was clean on section-level background parity (gradient
+hero, white body sections all matched) — but `sb vrdiff` against the live GB reference showed 33%
+mismatch, with every one of the 7 info-box cards, all 3 pricing cards, and both pill badges rendering
+solid magenta in the overlay. Cause: DesignSpec's `bgOwner` is captured per TOP-LEVEL SECTION only;
+none of the reference's REPEATED-ITEM backgrounds are section-level, so nothing failed numerically.
+Colours sampled from the reference screenshot (`PIL.Image.getpixel`, no MCP tool for this — installed
+Pillow in a venv since the system Python is externally-managed): info-box cards alternate
+`#F5F1FF`(lavender)/`#FEEBFF`(pink)/`#FFF6EB`(cream)/`#F2FBEE`(mint)/`#EDF7FA`(lightblue) in a fixed
+per-card sequence; the 3 pricing cards sit in an outer `#F4F4FF` panel; "Popular"/"Solutions" are
+rotated pill badges on `#CB8FF3` (violet); the CTA panel background is `#091439` (navy) with one
+highlighted word in `#C2F250` (lime) inside the headline. **Lesson: always run the visual pass
+(`sb vrdiff`) on a design with repeated cards/badges even after a green `specgate`** — this class of
+defect is structurally invisible to section-scoped geometry/background gates. See SKILL.md gate 6b.

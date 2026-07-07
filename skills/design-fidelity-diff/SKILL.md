@@ -295,6 +295,20 @@ The items below are what it reports — read them to interpret its output, not t
    A build section that is flat-color (or white) where the reference has a gradient or decorative
    PNG is a defect — list it with the missing `src`/gradient. (This is the class of miss the old
    gate never caught.)
+6b. **Background parity per REPEATED ITEM, not just per section — a whole class of miss #6 does
+   NOT catch.** `bgOwner` in DesignSpec is captured per top-level SECTION; a section can pass that
+   check while every card/item INSIDE it is still missing its own background. Verified on the
+   FlexiGency Service page: 7 info-box cards each carry a distinct pastel panel colour (lavender/
+   pink/cream/mint/light-blue — alternating, not random), the 3 pricing cards sit inside a light
+   lavender OUTER wrapper panel, and a "Popular"/"Solutions" pill BADGE has its own violet
+   background + rounded corners + slight rotation. A hand-built conversion that nailed section-level
+   background parity (gradient hero, white body sections) still rendered every card flat-white —
+   BackstopJS showed 33% mismatch and a fully-magenta card grid where the numeric per-section gate
+   was clean. **Fix:** don't just diff `sections[].bgOwner` — for any REPEATED element group
+   (info-box grid, pricing cards, testimonial cards, badges/pills), sample each instance's own
+   background colour from the reference screenshot/DOM and diff instance-by-instance, not once per
+   section. A badge/pill (small rounded, often rotated, colored text-on-color) is easy to render as
+   plain text — treat "does this text sit on its own colored chip" as its own checklist item.
 7. **Asset completeness — every reference `src` present.** Collect the set of all image/decor
    `src` filenames from the reference DesignSpec (`elements[].src` + `sections[].decor[].src`) and
    from the build; `reference − build` MUST be empty. Missing assets render as solid-red blobs.
@@ -348,6 +362,15 @@ hover** below. A green `specgate` with an unseen side-by-side is NOT done.
   `decor[]` layer present on the reference is present on the build (matched by `src`/gradient).
   A flat-white/flat-color section where the reference has a gradient or object-PNG FAILS the gate —
   no "close enough". Backgrounds carry the design's identity; a heights-only pass is not done.
+- **Repeated-item background parity** (hard gate, manual — the numeric gate is section-scoped and
+  CANNOT see this): sample the background colour of each instance in a repeated group (card grid,
+  pricing plans, testimonials, badges/pills) from both screenshots. Every reference item with a
+  non-white/non-inherited background must have a matching background on the build — a card grid
+  that is uniformly flat-white where the reference alternates pastel panel colours per card FAILS
+  even though section-level `bgOwner` and per-section height both pass. This is the gate a
+  `pixelmatch`/`vrdiff` overlay makes obvious (a solid-colored card block reads magenta end-to-end)
+  but the numeric `specgate` cannot catch — always run the visual pass for any design with a
+  repeated card/grid/badge pattern, not just once at sign-off.
 - **Per-section height** every section ±2px.
 - **Whole-overlay-red is a FAIL, not a floor.** If `pixelmatch_diff` is red across the page, the
   cause is systemic (content width or accumulated height), not the cross-engine sub-pixel floor —

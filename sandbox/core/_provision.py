@@ -499,6 +499,12 @@ def _write_schema_catalog(instance: str) -> None:
     block_descriptions = asset_dir / "block-descriptions.json"
     if block_descriptions.is_file():
         shutil.copyfile(block_descriptions, dest / block_descriptions.name)
+    # 157 Elementor widget/element descriptions -- unlike EB, Elementor has no
+    # description mechanism at all to extract from, so these are Haiku-fleet
+    # written (one sentence each, from real title+keywords, not invented).
+    elementor_descriptions = asset_dir / "elementor-descriptions.json"
+    if elementor_descriptions.is_file():
+        shutil.copyfile(elementor_descriptions, dest / elementor_descriptions.name)
 
 
 def _write_dl_cache_muplugin(instance: str) -> None:

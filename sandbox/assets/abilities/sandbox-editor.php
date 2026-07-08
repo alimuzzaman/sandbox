@@ -975,6 +975,25 @@ function sandbox_editor_el_control_descriptions(): array
     return $cache;
 }
 
+/** 157 Elementor widget/element descriptions -- one sentence each, written by a
+ *  10-agent Haiku fleet from each item's REAL title+keywords (its own registration
+ *  metadata, not invented) plus general knowledge of the named widget. Needed
+ *  because Elementor has no description mechanism at all (confirmed:
+ *  method_exists(..., 'get_description') is false on every Widget_Base/
+ *  Element_Base instance checked) -- unlike EB, there is no real source text to
+ *  extract instead. Provisioned alongside control-descriptions.json. Cached; []
+ *  if not provisioned. */
+function sandbox_editor_el_descriptions(): array
+{
+    static $cache = null;
+    if ($cache === null) {
+        $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/elementor-descriptions.json';
+        $json = is_file($f) ? @file_get_contents($f) : false;
+        $cache = ($json !== false) ? (json_decode($json, true) ?: []) : [];
+    }
+    return $cache;
+}
+
 /** Extract rich metadata from one Elementor control definition (spec 012 ext).
  *  Returns: type, label, default, section, tab, selectors (css map), options (key→label). */
 function sandbox_editor_el_control_entry(string $cid, array $c): array
@@ -2543,8 +2562,9 @@ function sandbox_editor_schema($input)
             $alts = array_unique(array_merge([$q], array_map('strtolower', $syn[$q] ?? [])));
             $onlyTypes = isset($input['types']) ? (string) $input['types'] : 'all';
             $limit = isset($input['limit']) ? max(1, (int) $input['limit']) : 40;
-            $scoreOne = function ($n, $title, $keywords) use ($alts, $q) {
-                $hay = strtolower(trim($title . ' ' . implode(' ', (array) $keywords) . ' ' . $n));
+            $elDescriptions = sandbox_editor_el_descriptions();
+            $scoreOne = function ($n, $title, $keywords, $desc) use ($alts, $q) {
+                $hay = strtolower(trim($title . ' ' . implode(' ', (array) $keywords) . ' ' . $desc . ' ' . $n));
                 $score = 0;
                 foreach ($alts as $alt) {
                     if ($alt === '') { continue; }
@@ -2558,16 +2578,18 @@ function sandbox_editor_schema($input)
                 foreach ($types as $wn => $wobj) {
                     $title = method_exists($wobj, 'get_title') ? $wobj->get_title() : '';
                     $kw    = method_exists($wobj, 'get_keywords') ? $wobj->get_keywords() : [];
-                    $score = $scoreOne($wn, $title, $kw);
-                    if ($score > 0) { $all[] = ['name' => $wn, 'kind' => 'widget', 'title' => $title, 'keywords' => $kw, 'score' => $score]; }
+                    $desc  = $elDescriptions[$wn] ?? '';
+                    $score = $scoreOne($wn, $title, $kw, $desc);
+                    if ($score > 0) { $all[] = ['name' => $wn, 'kind' => 'widget', 'title' => $title, 'description' => $desc ?: null, 'keywords' => $kw, 'score' => $score]; }
                 }
             }
             if ($onlyTypes !== 'widgets' && $em && method_exists($em, 'get_element_types')) {
                 foreach ($em->get_element_types() as $en => $eobj) {
                     $title = method_exists($eobj, 'get_title') ? $eobj->get_title() : '';
                     $kw    = method_exists($eobj, 'get_keywords') ? $eobj->get_keywords() : [];
-                    $score = $scoreOne($en, $title, $kw);
-                    if ($score > 0) { $all[] = ['name' => $en, 'kind' => 'element', 'title' => $title, 'keywords' => $kw, 'score' => $score]; }
+                    $desc  = $elDescriptions[$en] ?? '';
+                    $score = $scoreOne($en, $title, $kw, $desc);
+                    if ($score > 0) { $all[] = ['name' => $en, 'kind' => 'element', 'title' => $title, 'description' => $desc ?: null, 'keywords' => $kw, 'score' => $score]; }
                 }
             }
             usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
@@ -2639,11 +2661,15 @@ function sandbox_editor_schema($input)
             // no per-widget "description" method in Elementor's Widget_Base/
             // Element_Base at all (checked directly: heading/button/form/container all
             // return false for method_exists(..., 'get_description')) -- keywords is
-            // the closest real equivalent Elementor actually has.
+            // the closest real equivalent Elementor actually has. `description` below
+            // is curated (elementor-descriptions.json, 157 entries, Haiku-fleet
+            // written from real title+keywords -- Elementor itself has nothing to
+            // extract, unlike EB's real block.json descriptions).
             $title = method_exists($obj, 'get_title') ? $obj->get_title() : null;
             $keywords = method_exists($obj, 'get_keywords') ? $obj->get_keywords() : [];
             return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind, 'source' => 'live',
                     'title' => $title, 'keywords' => $keywords,
+                    'description' => sandbox_editor_el_descriptions()[$name] ?? null,
                     'controls' => $controls, 'count' => count($controls),
                     'groups'   => $groups,
                     'responsive' => ['breakpoints' => sandbox_editor_active_breakpoints(),

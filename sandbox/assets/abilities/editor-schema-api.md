@@ -327,7 +327,9 @@ GET ?builder=elementor&name=heading
   "kind": "widget",              // widget | element (section/column/container/e-flexbox/...)
   "source": "live",
   "title": "Heading",             // human label, Gutenberg's block-level title/description equivalent
-  "keywords": ["heading", "title", "text"],  // Elementor has no per-widget "description" method at all — keywords is the real equivalent
+  "keywords": ["heading", "title", "text"],  // Elementor has no per-widget "description" method at all — this is real registration metadata
+  "description": "Insert a heading with adjustable HTML tag, size, and alignment for page structure.",
+  // ^ curated (not from Elementor itself, which has nothing here) — one sentence per widget/element
   "controls": {                   // FLAT map, every control
     "title": { "type": "text", "label": "Title", "default": "Add Your Heading Text Here", "section": "section_title", "tab": "content" },
     "typography_font_size": { "type": "slider", "label": "Size", "section": "section_title_style", "tab": "style", "responsive": true },
@@ -417,14 +419,16 @@ GET ?builder=elementor&find=heading
 `search` finds an ATTRIBUTE/CONTROL by content within a block/widget you
 already know the name of. `find` is the other direction — finds the
 block/widget itself when you only know what you're looking for by
-description, not its exact slug. Matches against title + description
-(Gutenberg) or title + keywords (Elementor — it has no per-widget
-description at all, confirmed directly: no `get_description()` method
-anywhere in `Widget_Base`/`Element_Base`) + the raw name, expanded through a
-plain-English synonym dictionary (e.g. `"table"` also matches `"grid"`,
-`"pricing"` also matches `"price"`/`"plans"`) so you don't have to guess the
-exact word the block's own title uses. Ranked, literal title match scores
-highest.
+description, not its exact slug. Matches against title + description +
+keywords + the raw name, expanded through a plain-English synonym
+dictionary (e.g. `"table"` also matches `"grid"`, `"pricing"` also matches
+`"price"`/`"plans"`) so you don't have to guess the exact word the block's
+own title uses. Ranked, literal title match scores highest. (Elementor has
+no `description` mechanism of its own — confirmed directly: no
+`get_description()` method anywhere in `Widget_Base`/`Element_Base` — so
+its 157 descriptions are curated, one sentence each, written from each
+widget's real title+keywords; Gutenberg's are the plugin's own real
+`block.json` text where available.)
 
 ```jsonc
 {

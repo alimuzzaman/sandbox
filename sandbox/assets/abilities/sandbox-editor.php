@@ -834,6 +834,45 @@ function sandbox_editor_eb_expand_generator($generator, $prefix, $helpers_dir, &
     return $keys;
 }
 
+/** The true 'dynamic' signal for a Gutenberg block, EB-aware.
+ *
+ * `(bool) $block_type->render_callback` is what every call site used to report — but
+ * Essential Blocks' base `Block::register()` ALWAYS attaches a generic render_callback
+ * to EVERY block it registers, even ones with zero server-side content generation:
+ * that wrapper only handles conditional display (`should_display_block`) + inline-SVG-
+ * icon substitution, then falls through to `$this->render_callback(...)` ONLY when the
+ * concrete block subclass defines its OWN `render_callback()` method — otherwise it
+ * just returns $content unchanged. So `(bool) render_callback` is unconditionally TRUE
+ * for every single EB block, dynamic or not, and is useless as a static/dynamic signal.
+ * Verified by reading the plugin source directly: `infobox`, `number-counter`,
+ * `pricing-table`, `row`, `column`, `testimonial`, and `advanced-heading` (in its
+ * default 'custom' title-source mode) all report `dynamic:true` from the raw signal
+ * while their ENTIRE visible markup/styling is baked into the STATIC `save.js` output
+ * at editor-save time — a direct `gutenberg-insert` on any of them renders EMPTY on the
+ * frontend (matches the gutenberg-eb skill's existing static-block warning) and needs
+ * the real-editor finalizer instead. Only blocks whose class defines its own
+ * `render_callback()` (AdvancedImage, Button, Text, PostGrid, AdvancedHeading's
+ * 'dynamic-title' source, ...) actually generate content server-side from attributes.
+ * Recovered here via the closure's bound `$this` (Reflection) + `method_exists` — the
+ * exact same fork the plugin's own `register()` performs, just read back out. Only
+ * applied to `essential-blocks/*` names; core/other builders keep the original signal
+ * (already accurate for them — this is an EB-specific defect). */
+function sandbox_editor_dynamic_flag($name, $block_type)
+{
+    if (!$block_type) { return null; }
+    $cb = $block_type->render_callback ?? null;
+    if (strpos((string) $name, 'essential-blocks/') === 0 && $cb instanceof \Closure) {
+        try {
+            $refl  = new \ReflectionFunction($cb);
+            $bound = $refl->getClosureThis();
+            if ($bound !== null) { return method_exists($bound, 'render_callback'); }
+        } catch (\Throwable $e) {
+            // fall through to the raw signal below
+        }
+    }
+    return (bool) $cb;
+}
+
 /** Build the structured fidelity report + back-compat string. (D6, FR-003) */
 function sandbox_editor_eb_fidelity($level, $count, $checkout, $unresolved)
 {
@@ -898,7 +937,7 @@ function sandbox_editor_eb_resolve($block_name, $block_type, $extra_roots = [])
     $resp = [
         'builder' => 'gutenberg',
         'name' => $block_name,
-        'dynamic' => (bool) $block_type->render_callback,
+        'dynamic' => sandbox_editor_dynamic_flag($block_name, $block_type),
         'attributes' => $attrs,
         'fidelity' => sandbox_editor_eb_fidelity($level, count($attrs), $src['checkout'], $unresolved),
         'eb_attribute_fidelity' => $level,
@@ -1289,7 +1328,7 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         $resp['version_mismatch'] = true;
     }
     if ($builder === 'gutenberg') {
-        $resp['dynamic']  = $bt ? (bool) $bt->render_callback : ($cat['dynamic'] ?? null);
+        $resp['dynamic']  = $bt ? sandbox_editor_dynamic_flag($name, $bt) : ($cat['dynamic'] ?? null);
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
                              'count' => count($cat[$key] ?? [])];
     }
@@ -1350,7 +1389,7 @@ function sandbox_editor_schema($input)
             foreach ((array) $bt->attributes as $k => $def) {
                 $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
             }
-            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => (bool) $bt->render_callback,
+            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
                     'attributes' => $attrs,
                     'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
                     'eb_attribute_fidelity' => 'reduced', 'source' => 'live'];
@@ -1368,7 +1407,7 @@ function sandbox_editor_schema($input)
             foreach ((array) $bt->attributes as $k => $def) {
                 $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
             }
-            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => (bool) $bt->render_callback,
+            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
                     'eb_attribute_fidelity' => $fidelity, 'attributes' => $attrs];
         }
         $blocks = [];
@@ -1376,7 +1415,7 @@ function sandbox_editor_schema($input)
             if (!empty($input['eb_only']) && strpos($bn, 'essential-blocks/') !== 0) {
                 continue;
             }
-            $blocks[$bn] = ['dynamic' => (bool) $bt->render_callback,
+            $blocks[$bn] = ['dynamic' => sandbox_editor_dynamic_flag($bn, $bt),
                             'attributes' => array_keys((array) $bt->attributes)];
         }
         return ['builder' => 'gutenberg', 'count' => count($blocks),

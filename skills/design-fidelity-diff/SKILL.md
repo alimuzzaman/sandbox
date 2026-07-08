@@ -447,6 +447,14 @@ hover** below. A green `specgate` with an unseen side-by-side is NOT done.
   `decor[]` layer present on the reference is present on the build (matched by `src`/gradient).
   A flat-white/flat-color section where the reference has a gradient or object-PNG FAILS the gate —
   no "close enough". Backgrounds carry the design's identity; a heights-only pass is not done.
+- **Whole-section-count parity** (hard gate — check this explicitly, don't assume `specgate`
+  covers it): compare `reference.sections.length` to the build's, and the reference's total page
+  height to the sum of built section heights. A section that is MISSING OUTRIGHT (a footer never
+  built, a testimonial block skipped entirely) does not fail `section_heights` or
+  `element_counts` the way you'd expect — those gates compare MATCHED sections, and a section
+  with nothing on the build side to match against just doesn't appear in the diff at all. This has
+  silently persisted through an otherwise-green gate before — check section count and total page
+  height as their own explicit assertion, every time, not just when something looks visually short.
 - **Repeated-item background parity** (hard gate, manual — the numeric gate is section-scoped and
   CANNOT see this): sample the background colour of each instance in a repeated group (card grid,
   pricing plans, testimonials, badges/pills) from both screenshots. Every reference item with a

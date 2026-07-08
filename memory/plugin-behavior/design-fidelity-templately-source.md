@@ -483,3 +483,53 @@ caught immediately by re-running the full gate after each, and reverted in full 
   wrong in a nested flex layout. Make ONE change, re-measure the FULL gate (not just the one
   number you're chasing), and only proceed once it's a net improvement — don't stack a second
   planned-to-cancel change before confirming the first one actually moved things the right way.
+
+## User vision-review pass (screenshots) surfaced 4 more real gaps — full audit + fixes
+The user sent cropped screenshots pointing at specific visible defects rather than diff numbers.
+All four were real and independently fixable:
+
+- **A container with `border_radius` needs an explicit `overflow:"hidden"` or a
+  background-image/nested image WILL bleed past the rounded corners.** Elementor containers
+  don't clip children to their own radius by default. Every card panel in this build
+  (`card_row`/`card_stack`/`rowP`) had `border_radius` set but no `overflow` — the illustrative
+  object images inside visibly overflowed the rounded corners at the bottom edge. Fixed by adding
+  `overflow="hidden"` alongside every `border_radius` on a card-panel container. **This is a
+  paired setting — treat `border_radius` on any container holding an image/decor child as
+  incomplete until you've verified `overflow` is also set and re-screenshotted the corner.**
+- **A missing/wrong font-size on a repeater sub-element (list items, a currency symbol) is easy
+  to miss because typography controls are usually set in a BLOCK (family+weight+transform
+  together) and it's easy to forget font-size specifically inside that block.** The pricing
+  feature-list items were left at EAAL's default 14px (reference: 18px) — never explicitly set,
+  despite family/weight/transform all being set correctly right next to it. Same pattern on the
+  price "$" symbol (default ~24px vs reference's 48px) — though in THAT case, setting the native
+  `..._typography_font_size` control changed the SAVED data but not the RENDERED page (verified via
+  direct `get_post_meta` dump showing the correct value was persisted) — a CSS override was needed
+  on top. **When you set a typography sub-control and the number doesn't move, check the raw
+  saved JSON first** (rules out "the value didn't save") **before concluding "the control doesn't
+  apply"** (which needs the CSS-override escape hatch instead).
+- **Re-doing an earlier-reverted fix can work the second time if the surrounding conditions
+  changed.** `card_row`'s card-0 heading needed +66px of internal spacing (established several
+  passes ago), reverted because using `margin-top` doubled-shifted the heading (margin counts
+  toward flex centering, which this card used at the time). After later switching that SAME
+  card's `flex_align_items` from `center` to `flex-start` (a separate fix, for a separate reason),
+  the margin-based approach was no longer applicable ANYWAY (`flex-start` doesn't need a
+  countering margin), but a CSS `padding-top` override on a per-card unique class (added via a
+  conditional extra `_css_classes` entry keyed off the same `title_pad_top` parameter) worked
+  cleanly — `padding` (unlike `margin`) extends a box's own height without moving its own start
+  position, which is exactly what was needed. Went from a −72px residual to +6px in one shot.
+  **Don't treat an earlier revert as permanent** — re-evaluate once something structural nearby
+  has changed, and pick the CSS mechanism (padding vs margin) that matches what you actually need
+  (grow the box vs shift its position), rather than reaching for whatever happened to be
+  available on the widget's own control.
+- **A whole missing section (footer) is a distinct class of gap from "this section's numbers are
+  off"** — worth enumerating explicitly, not folding into the section-height table. This build
+  has NO footer at all (`document.querySelector('footer, .site-footer, #colophon')` → null);
+  reference's footer is a real, substantial 3-column link block (Information / Services / Legal &
+  Compliance, 12 links) + logo/tagline + 5 social icons, roughly 590px of page height, entirely
+  unbuilt. `sb specgate`'s `element_counts`/`section_heights` checks only compare MATCHED
+  sections — a wholesale missing section doesn't fail either of those checks the way you'd
+  expect (there's nothing on the build side to compare it against), so it can silently persist
+  even after every other gate goes green. **Explicitly diff `reference.sections.length` against
+  the build's, and check the reference's total page height against the sum of built section
+  heights, as its own gate** — don't rely on per-section comparisons alone to catch a section
+  that's missing outright.

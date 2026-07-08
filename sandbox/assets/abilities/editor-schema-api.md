@@ -291,6 +291,90 @@ Find which widget/element exposes a box-shadow control:
 GET /wp-json/sandbox/v1/editor-schema?builder=elementor&search=box%20shadow&types=widgets
 ```
 
+## Applying changes
+
+Editor Schema itself is **read-only** — it tells you what settings exist and
+how to use them, but it doesn't write anything. Actually changing a page
+means pairing a schema lookup with one of the paired editor-authoring
+abilities (`gutenberg-get`/`-insert`/`-update`/`-delete`,
+`elementor-get`/`-insert`/`-update`/`-delete`). Unlike Editor Schema, those
+require authentication. The workflow is always: **look up → read current
+state → write**.
+
+Both `gutenberg-update` and `elementor-update` locate the target by a stable
+id (`block_id` / `element_id`), not by position, and **merge** the settings
+you pass rather than replacing the whole block/element — so you only need to
+send the keys you're changing. Both also accept an optional `base_hash` (the
+`state_hash` a prior `-get` call returned); if the post changed since you
+read it, the update is refused with a `conflict` error instead of silently
+overwriting someone else's edit — read-before-write.
+
+### Change the color of an existing block
+
+1. **Gutenberg**: `gutenberg-get {post_id}` → find the block's `blockId`.
+   `editor-schema {builder:"gutenberg", name:"<blockName>"}` → check
+   `style_paths` for `color.text` / `color.background` / `color.gradients`.
+   Then `gutenberg-update {post_id, block_id, attributes: {style: {color: {text: "#0c0c24"}}}}`.
+   If the block exposes a plain preset attribute instead (`textColor`,
+   `backgroundColor` in `groups.common`), set that directly with a
+   theme-preset slug rather than going through `style`.
+2. **Elementor**: `elementor-get {post_id}` → find the element's `id` +
+   `widgetType`. `editor-schema {builder:"elementor", name:"<widgetType>",
+   search:"color"}` → find the exact control id (e.g. `title_color`, or a
+   shared one in `groups.common` like `_background_color`) and whether it's
+   `responsive`. Then `elementor-update {post_id, element_id, settings:
+   {<control_id>: "#0c0c24"}}`.
+
+### Change the content of an existing block
+
+1. **Gutenberg**: find the `blockId` via `gutenberg-get`. Look up the
+   block's content attribute via `editor-schema` — usually named `content`
+   (rich text) but check `groups.content` for the real name and its `source`/
+   `selector` (e.g. an image's text-like fields are `alt`/`title`, not
+   `content`). Then `gutenberg-update {post_id, block_id, attributes:
+   {content: "New text"}}`.
+2. **Elementor**: find the element `id` + `widgetType` via `elementor-get`.
+   `editor-schema {builder:"elementor", name:"<widgetType>"}` →
+   `groups.content` for the content control id (a heading widget's is
+   `title`, a text-editor's is `editor`). Then `elementor-update {post_id,
+   element_id, settings: {title: "New text"}}`.
+
+### Create a new block
+
+1. **Gutenberg**: `editor-schema {builder:"gutenberg", name:"<block-name>"}`
+   to see what attributes it takes. Then `gutenberg-insert {post_id,
+   name:"core/paragraph", attributes:{content:"Hello"}}`. It's appended to
+   the END of the post (no positional insert). Nest children with
+   `inner_blocks: [{name, attributes, inner_blocks}, ...]` (recursive, same
+   shape). A block whose class has no real server-render logic (see the
+   Dynamic flag section, above — most static/third-party blocks) may need a
+   follow-up `gutenberg-finalize` call so the saved markup passes real
+   editor validation; `gutenberg-insert`'s response flags when that's the
+   case.
+2. **Elementor**: `editor-schema {builder:"elementor", name:"<widget-name>"}`
+   to see its settings. Then `elementor-insert {post_id, widget:"heading",
+   settings:{title:"Hello"}}`. It's automatically wrapped in a
+   section→column and appended to the end of the page. An Essential Addons
+   widget not yet registered is auto-enabled for you; a Pro-only or
+   not-installed widget returns a `widget_unavailable` error instead.
+
+### Change other styles of an existing block
+
+Same shape as color, generalized:
+
+1. Locate the block/element (`gutenberg-get` / `elementor-get`) for its id.
+2. Look up `editor-schema` for that block/widget name:
+   - **Gutenberg**: check `style_paths` for the `style.*` path (spacing,
+     typography, border, shadow, dimensions, position — see "Styling
+     attributes NOT in `attributes`", above) or `groups.common` for a named
+     preset attribute.
+   - **Elementor**: check `groups.style` (widget-specific appearance) and
+     `groups.common` (shared wrapper controls — background, border,
+     box-shadow, entrance animation, transform) for the control id and its
+     `selectors` (what CSS it actually writes).
+3. Write it: `gutenberg-update {attributes: {style: {...}}}` (or a named
+   attribute) / `elementor-update {settings: {<control_id>: <value>}}`.
+
 ## Known limitations
 
 - Catalog-only Gutenberg entries (block not live-registered) don't carry

@@ -1460,6 +1460,34 @@ function sandbox_editor_gb_decode_attr(string $id): array
     }
     if ($unresolved !== '') { $decoded[] = ['token' => $unresolved, 'meaning' => null]; }
 
+    // Disambiguate "Bdr"/"BDR"/"Brd": genuinely means per-side border WIDTH
+    // when followed by a side/unit token (Top/Bottom/Left/Right/Unit/isLinked
+    // -- verified: generateBorderShadowAttributes() feeds `${controlName}Bdr_`
+    // into generateDimensionsAttributes() with per-side defaults). But when a
+    // block author names its WHOLE border+shadow control group "xxxBdr_" (a
+    // single arbitrary identifier, e.g. essential-blocks-pro/data-table's own
+    // `WRAPPER_BORDER_SHADOW = "wrpBdr_"`), every shadow sub-property
+    // generated under that same prefix (spread/blur/hOffset/vOffset/inset/
+    // shadowColor/shadowType/shadowTransition) inherits "Bdr_" too -- reading
+    // it as "Border width" there produces a nonsense juxtaposition ("Border
+    // width: Shadow spread"). Verified via source, not guessed: a real
+    // false-positive juxtaposition was reported on wrpBdr_spread/wrpBdr_
+    // vOffset and traced to exactly this. Relabel only in that specific case.
+    static $sideTokens   = ['Top' => 1, 'Bottom' => 1, 'Left' => 1, 'Right' => 1, 'Unit' => 1, 'isLinked' => 1];
+    static $shadowTokens = ['spread' => 1, 'blur' => 1, 'hOffset' => 1, 'vOffset' => 1, 'inset' => 1,
+                            'shadowColor' => 1, 'shadowType' => 1, 'shadowTransition' => 1,
+                            'VOffset' => 1, 'HOffset' => 1, 'Spread' => 1, 'Blur' => 1, 'Inset' => 1];
+    static $skipOver     = ['hover' => 1, 'Hover' => 1, 'hov_' => 1, 'Hv' => 1, 'hv' => 1]; // e.g. Bdr_hoverVOffset
+    foreach ($decoded as $idx => $seg) {
+        if (!in_array($seg['token'], ['Bdr', 'BDR', 'Brd'], true)) { continue; }
+        $j = $idx + 1;
+        while (isset($decoded[$j]['token']) && isset($skipOver[$decoded[$j]['token']])) { $j++; }
+        $next = $decoded[$j]['token'] ?? null;
+        if ($next !== null && isset($shadowTokens[$next]) && !isset($sideTokens[$next])) {
+            $decoded[$idx]['meaning'] = 'Border + shadow (group name, not literally "width" here)';
+        }
+    }
+
     return [
         'responsive' => $prefix['responsive'],
         'hover'      => $prefix['hover'],

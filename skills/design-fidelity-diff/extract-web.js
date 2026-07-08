@@ -29,8 +29,32 @@
 // as ~1280px. Verified: this produced a spurious "content-width delta -40px" finding on a build
 // that was already pixel-identical to the reference — an entire investigation chasing a defect
 // that didn't exist, because one side of the comparison was measured wrong.
+// v7: ROOT auto-detection now EXCLUDES header/footer/nav chrome and picks the TALLEST remaining
+// candidate, not the FIRST DOM match. `document.querySelector('main, .elementor, .site-main,
+// #content')` returns the first match in document order — but any page whose header/footer are
+// built with an Elementor/EB theme-builder template renders THREE separate top-level roots
+// (`<header class="elementor …">`, a `<div class="elementor …">` for the body content, `<footer
+// class="elementor …">`), all matching `.elementor`, with the header coming FIRST in the DOM.
+// Verified on lms.elementor.templately.com/womeninlead/: old logic picked the 93px `<header>` as
+// ROOT, so the whole 6479px body content (13 real sections) was invisible to the extractor —
+// `sections.length===1` with 13 elements total, when the real page has far more. Fixed by
+// filtering candidates to those NOT inside (or themselves) `header/footer/nav/[role=banner|
+// contentinfo|navigation]`, then picking the max-height survivor; falls back to the old
+// first-match behavior if every candidate is chrome (should not happen in practice).
+// v8: the single-child DESCEND loop now ignores near-zero-height siblings (<=30px) when
+// deciding whether to keep descending, instead of requiring EXACTLY one child. A standard WP
+// block-theme template renders `<!-- wp:post-title /--> <!-- wp:post-content /-->` as TWO
+// siblings under the same wrapper — if the page hides the title for a builder-style page (e.g.
+// `display:none` on `.wp-block-post-title`, a common "no theme chrome" pattern for a rebuilt
+// design), that hidden H1 still counts as a DOM child with 0 height, so the old `children.length
+// === 1` check saw 2 children and stopped descending ONE LEVEL TOO EARLY — treating [hidden-H1,
+// entry-content] as the final `sections` array (1 "real" section after the height>30 filter)
+// instead of continuing into entry-content's own 9 real top-level blocks. Verified while building
+// a Gutenberg rebuild: `main`'s single child (a wrapper group) had 2 children (0px H1 + 5327px
+// `.entry-content`); the fix descends past the 0px sibling into entry-content, correctly finding
+// all 9 top-level sections (nav, hero, 6 body sections, footer) instead of reporting 1.
 //
-// KNOWN LIMITATION (not yet fixed — flagged for a future v7): `elemSpec()`'s font.color always
+// KNOWN LIMITATION (not yet fixed — flagged for a future v9): `elemSpec()`'s font.color always
 // reads `getComputedStyle(el).color` on the OUTER heading/text element. When a rich-text widget
 // (EB's "advanced-heading" and similar) wraps ALL visible text in per-run child <span>s for
 // word-level color/highlight control, the outer element's own `color` is a fallback that never
@@ -76,8 +100,25 @@
   // ---- content root + top-level sections ----------------------------------
   const ROOT = (typeof window.__DS_ROOT === 'string' && document.querySelector(window.__DS_ROOT))
     || (() => {
-      let root = document.querySelector('main, .elementor, .site-main, #content') || document.body;
-      while (root && root.children.length === 1 && box(root.children[0]).height > 200) root = root.children[0];
+      const SEL = 'main, .elementor, .site-main, #content';
+      const isChrome = el => el.matches('header, footer, nav, [role="banner"], [role="contentinfo"], [role="navigation"]')
+        || !!el.closest('header, footer, nav, [role="banner"], [role="contentinfo"], [role="navigation"]');
+      const all = [...document.querySelectorAll(SEL)];
+      const nonChrome = all.filter(el => !isChrome(el));
+      let root = (nonChrome.length ? nonChrome : all)
+        .reduce((best, el) => (!best || box(el).height > box(best).height) ? el : best, null)
+        || document.body;
+      // Descend past wrapper levels that have exactly one SUBSTANTIAL child (>30px — the same
+      // threshold the section filter below uses), ignoring near-zero-height siblings (a hidden
+      // post-title, a collapsed spacer) so a real single content wrapper one level down isn't
+      // missed just because a invisible sibling technically exists in the DOM.
+      for (let guard = 0; guard < 10; guard++) {
+        const kids = [...root.children];
+        const substantial = kids.filter(c => box(c).height > 30);
+        if (substantial.length !== 1) break;
+        if (box(substantial[0]).height <= 200) break;
+        root = substantial[0];
+      }
       return root;
     })();
   const sections = [...ROOT.children].filter(c => box(c).height > 30);
@@ -175,15 +216,25 @@
   // ('.elementor-container, [class*="container"], [class*="row"]') never matched Gutenberg/EB
   // markup, silently falling back to the section itself and over-reporting content width by the
   // side-padding amount on every non-Elementor page.
+  // v9 fix: the loop used to unconditionally do `node = kids[0]` BEFORE checking
+  // `kids.length > 1`, so whenever the current level had MULTIPLE substantial children (a real
+  // multi-column row — e.g. a nav bar's [logo, nav-links] or a hero's [text-column, image-column])
+  // it still descended one wrong level into just the FIRST column, then stopped — returning that
+  // narrow single column's width as "content width" instead of the multi-column row's own width
+  // (the actual content wrapper). Verified: a nav bar (logo ~174px + links ~700px, row ~1170px)
+  // measured contentMaxWidth as 174 (the logo's own width) instead of 1170. Fixed: only descend
+  // when there is EXACTLY ONE substantial child; stop immediately (without moving `node`) at 0 or
+  // ≥2 substantial children, since ≥2 means the CURRENT node is already the content wrapper (the
+  // narrowing already happened at the parent), and 0 means there's nothing further to descend into.
   const contentNodeOf = sec => {
     const secW = box(sec).width;
     let node = sec;
     for (let i = 0; i < 10; i++) {
       const kids = [...node.children].filter(c => box(c).width > 40 && box(c).height > 10);
-      if (!kids.length) break;
-      const next = kids[0], nextW = box(next).width;
+      if (kids.length !== 1) break;
+      const next = kids[0];
       node = next;
-      if (kids.length > 1 || nextW < secW - 4) break;
+      if (box(next).width < secW - 4) break;
     }
     return node;
   };

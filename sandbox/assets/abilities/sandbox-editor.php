@@ -967,6 +967,8 @@ function sandbox_editor_el_control_entry(array $c): array
         'section' => $c['section'] ?? null,
         'tab'     => $c['tab'] ?? null,
     ];
+    // Rare (most controls have none) but real "how to use it" text when present.
+    if (!empty($c['description'])) { $e['description'] = (string) $c['description']; }
     // Responsive: Elementor keeps ONE base key + an is_responsive flag; the per-device
     // keys ({key}_tablet/{key}_mobile) are derived, never listed by get_controls().
     if (!empty($c['is_responsive'])) { $e['responsive'] = true; }
@@ -1050,6 +1052,165 @@ function sandbox_editor_plugin_version($slug)
         if (strpos($file, $slug . '/') === 0) { return $data['Version'] ?? null; }
     }
     return null;
+}
+
+/**
+ * Attribute names WordPress core auto-registers on ANY block once the
+ * matching `supports` flag is on, or unconditionally for editor bookkeeping
+ * (lock/metadata) — i.e. Gutenberg's rough equivalent of Elementor's shared
+ * "common"/Advanced-tab controls. Not declared per-block by the block's own
+ * author; identical across unrelated blocks. Data-driven, not guessed: found
+ * by diffing `attributes` across 8 unrelated core + EB blocks
+ * (core/heading, paragraph, image, button, group, columns, list,
+ * essential-blocks/advanced-heading) and keeping names that recurred across
+ * most/all of them (lock/metadata/className/style/anchor: 8/8; borderColor:
+ * 7/8; backgroundColor/textColor/gradient/fontSize/fontFamily: 6/8;
+ * align: 5/8) — the rest were block-specific (content, url, level, ...).
+ */
+function sandbox_editor_gb_common_attrs(): array
+{
+    return ['lock', 'metadata', 'className', 'style', 'anchor', 'align',
+            'backgroundColor', 'textColor', 'gradient', 'fontSize', 'fontFamily',
+            'borderColor'];
+}
+
+/** Split a flat Gutenberg attributes map into block-specific vs shared/common,
+ *  mirroring sandbox_editor_group_controls()'s content/common split for
+ *  Elementor. Unlike Elementor there's no naming-prefix signal (no `_`/`eael_`
+ *  convention) to detect shared attrs programmatically, so this uses the
+ *  static, data-driven list above instead of a heuristic. */
+function sandbox_editor_gb_group_attrs(array $attrs): array
+{
+    $common_names = array_flip(sandbox_editor_gb_common_attrs());
+    $content = [];
+    $common  = [];
+    foreach ($attrs as $k => $def) {
+        if (isset($common_names[$k])) {
+            $common[$k] = $def;
+        } else {
+            $content[$k] = $def;
+        }
+    }
+    return ['content' => $content, 'common' => $common];
+}
+
+/**
+ * Gutenberg's OTHER style surface, not visible in `attributes` at all: the
+ * `supports` flags a block declares (color/spacing/typography/border/shadow/
+ * dimensions/position) don't add named attributes — they enable the generic
+ * `style` attribute (an opaque JSON object with no schema of its own) to
+ * accept specific sub-paths, applied by core's block-supports renderers.
+ * Elementor's equivalent is a control's own `selectors` map (which literal
+ * CSS to write); this is Gutenberg's, one level removed — which literal
+ * `style.*` JSON path to write for `gutenberg-update`'s `attributes.style`.
+ *
+ * Every path below is READ DIRECTLY off WP core's own block-supports source
+ * (wp-includes/block-supports/{spacing,colors,typography,border,shadow,
+ * dimensions,position}.php), not guessed, e.g. spacing.php:
+ * `$block_styles['spacing']['padding'] ?? null` -> style.spacing.padding.
+ *
+ * A path only applies if the block's OWN `supports` has the matching flag
+ * (not false) — sandbox_editor_gb_style_paths() below filters to just the
+ * ones this specific block actually has.
+ */
+function sandbox_editor_gb_style_path_map(): array
+{
+    return [
+        'spacing.padding'              => 'style.spacing.padding',
+        'spacing.margin'               => 'style.spacing.margin',
+        'spacing.blockGap'             => 'style.spacing.blockGap',
+        'color.text'                   => 'style.color.text',
+        'color.background'             => 'style.color.background',
+        'color.gradients'              => 'style.color.gradient',
+        'typography.fontSize'          => 'style.typography.fontSize (custom values only — a chosen PRESET writes the top-level `fontSize` attribute slug instead)',
+        'typography.__experimentalFontFamily' => 'style.typography.fontFamily',
+        'typography.__experimentalFontStyle'  => 'style.typography.fontStyle',
+        'typography.__experimentalFontWeight' => 'style.typography.fontWeight',
+        'typography.lineHeight'        => 'style.typography.lineHeight',
+        'typography.textAlign'         => 'style.typography.textAlign',
+        'typography.__experimentalTextDecoration' => 'style.typography.textDecoration',
+        'typography.__experimentalTextTransform'  => 'style.typography.textTransform',
+        'typography.__experimentalLetterSpacing'  => 'style.typography.letterSpacing',
+        'typography.__experimentalWritingMode'    => 'style.typography.writingMode',
+        'typography.textColumns'       => 'style.typography.textColumns',
+        'typography.textIndent'        => 'style.typography.textIndent',
+        '__experimentalBorder.color'   => 'style.border.color',
+        '__experimentalBorder.width'   => 'style.border.width',
+        '__experimentalBorder.style'   => 'style.border.style',
+        '__experimentalBorder.radius'  => 'style.border.radius',
+        'shadow'                       => 'style.shadow',
+        'dimensions.aspectRatio'       => 'style.dimensions.aspectRatio',
+        'dimensions.minHeight'         => 'style.dimensions.minHeight',
+        'position'                     => 'style.position',
+    ];
+}
+
+/** Intersect a block's own `supports` with the verified map above -> only the
+ *  style.* paths THIS block actually accepts. `$supports[$a][$b]` truthy (not
+ *  literal false) enables it; a couple of keys (shadow, position) are flags
+ *  directly on `supports`, not nested under a feature group. */
+function sandbox_editor_gb_style_paths($supports): array
+{
+    if (!is_array($supports)) { return []; }
+    $out = [];
+    foreach (sandbox_editor_gb_style_path_map() as $flag => $path) {
+        if (strpos($flag, '.') === false) {
+            if (!empty($supports[$flag])) { $out[$flag] = $path; }
+            continue;
+        }
+        [$group, $sub] = explode('.', $flag, 2);
+        $group_val = $supports[$group] ?? false;
+        // color.text/color.background are the one pair WP core defaults to ENABLED
+        // when the parent 'color' support exists at all and doesn't explicitly say
+        // otherwise — verified straight from wp-includes/block-supports/colors.php:
+        // `true === $color_support || (isset($color_support['text']) && ...) ||
+        // (is_array($color_support) && !isset($color_support['text']))`. Every other
+        // flag in the map defaults to disabled when the sub-key is simply absent.
+        if (($flag === 'color.text' || $flag === 'color.background')
+            && (true === $group_val || (is_array($group_val) && !array_key_exists($sub, $group_val)))) {
+            $out[$flag] = $path;
+            continue;
+        }
+        $val = is_array($group_val) ? ($group_val[$sub] ?? null) : null;
+        if ($val !== null && $val !== false) { $out[$flag] = $path; }
+    }
+    return $out;
+}
+
+/** Block-level metadata missing from the flat attribute dump entirely:
+ *  title/description (human-facing, like Elementor's widget label) and
+ *  supports + the style_paths derived from it (non-block.json style attrs,
+ *  see sandbox_editor_gb_style_paths()). Only available when $bt is a live
+ *  WP_Block_Type — catalog-only entries don't carry these yet (the catalog
+ *  dump captures `attributes`+`supports` per block, but the `sb
+ *  schema-catalog generate` pipeline currently drops both title/description
+ *  and supports when writing the committed catalog; a known gap, not fixed
+ *  here — would need a catalog regen to take effect). */
+function sandbox_editor_gb_meta($bt): array
+{
+    if (!$bt) { return []; }
+    $supports = (array) ($bt->supports ?? []);
+    return [
+        'title'       => $bt->title ?? null,
+        'description' => $bt->description ?? null,
+        'supports'    => $supports,
+        'style_paths' => sandbox_editor_gb_style_paths($supports),
+    ];
+}
+
+/** Full attribute definition, not just type/default — passes through every
+ *  key WP/the block author declared (enum, source, selector, attribute,
+ *  query, items, role, ...). `source`/`selector`/`attribute` are Gutenberg's
+ *  "how to use it" info: they say which literal saved-markup element/HTML
+ *  attribute this reads from — Elementor's rough equivalent of `selectors`.
+ *  `enum` is the valid-values list, Elementor's equivalent of `options`. */
+function sandbox_editor_gb_attrs(array $raw_attrs): array
+{
+    $attrs = [];
+    foreach ($raw_attrs as $k => $def) {
+        $attrs[$k] = is_array($def) ? $def : ['type' => $def];
+    }
+    return $attrs;
 }
 
 /**
@@ -1331,6 +1492,14 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         $resp['dynamic']  = $bt ? sandbox_editor_dynamic_flag($name, $bt) : ($cat['dynamic'] ?? null);
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
                              'count' => count($cat[$key] ?? [])];
+        $resp['groups']   = sandbox_editor_gb_group_attrs((array) ($cat[$key] ?? []));
+        // title/description/supports/style_paths: pulled from the LIVE block type when
+        // this plugin happens to be active on this instance too (common — the catalog
+        // path is chosen for richer counts, not because the plugin is absent). Catalog
+        // entries themselves don't carry these yet (a known gap — the catalog-generation
+        // pipeline drops title/description/supports when writing the committed file;
+        // would need a regen to backfill for installs where the plugin truly isn't active).
+        $resp += sandbox_editor_gb_meta($bt);
     }
     if ($builder === 'elementor' && !empty($cat['groups'])) {
         if ($search !== null && $search !== '') {
@@ -1382,33 +1551,37 @@ function sandbox_editor_schema($input)
             }
             if ($full !== null) {
                 $full['source'] = 'live';
-                return $full; // level: full | partial
+                $full['groups'] = sandbox_editor_gb_group_attrs((array) ($full['attributes'] ?? []));
+                return $full + sandbox_editor_gb_meta($bt); // level: full | partial
             }
             // No source + no catalog: block.json attributes only, flagged reduced.
-            $attrs = [];
-            foreach ((array) $bt->attributes as $k => $def) {
-                $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
-            }
+            $attrs = sandbox_editor_gb_attrs((array) $bt->attributes);
             return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
-                    'attributes' => $attrs,
+                    'attributes' => $attrs, 'groups' => sandbox_editor_gb_group_attrs($attrs),
                     'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
-                    'eb_attribute_fidelity' => 'reduced', 'source' => 'live'];
+                    'eb_attribute_fidelity' => 'reduced', 'source' => 'live']
+                    + sandbox_editor_gb_meta($bt);
         }
 
-        // Pre-feature behavior, byte-for-byte, for non-EB named blocks + all listings.
-        $eb_full   = is_dir(WP_PLUGIN_DIR . '/essential-blocks/src/controls');
-        $fidelity  = $eb_full ? 'full (src/controls)' : 'reduced (block.json attributes only; no src/controls checkout)';
+        // Non-EB named blocks + all listings. NOTE: this branch is unreachable for any
+        // essential-blocks/* name (that whole family returns above, found-or-not) — so the
+        // EB-specific "reduced (block.json attributes only; no src/controls checkout)"
+        // wording this used to carry for EVERY non-EB block (core/*, ACF, any 3rd-party
+        // block) was simply wrong: block.json IS the complete, authoritative attribute
+        // declaration for a properly-registered non-EB block type — there is no
+        // "src/controls checkout" concept to be missing for them. Fixed to report 'full'
+        // for non-EB blocks; the EB reduced/full distinction only applies within the
+        // essential-blocks/* branch above.
         if ($name) {
             $bt = $reg->get_registered($name);
             if (!$bt) {
                 return new WP_Error('not_found', "block '$name' not registered");
             }
-            $attrs = [];
-            foreach ((array) $bt->attributes as $k => $def) {
-                $attrs[$k] = ['type' => $def['type'] ?? null, 'default' => $def['default'] ?? null];
-            }
+            $attrs = sandbox_editor_gb_attrs((array) $bt->attributes);
             return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
-                    'eb_attribute_fidelity' => $fidelity, 'attributes' => $attrs];
+                    'eb_attribute_fidelity' => 'full', 'attributes' => $attrs,
+                    'groups' => sandbox_editor_gb_group_attrs($attrs)]
+                    + sandbox_editor_gb_meta($bt);
         }
         $blocks = [];
         foreach ($reg->get_all_registered() as $bn => $bt) {

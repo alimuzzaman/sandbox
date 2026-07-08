@@ -1698,6 +1698,38 @@ function sandbox_editor_gb_enrich_attrs(array $attrs, bool $include_variants = f
     return $out;
 }
 
+/**
+ * Trim a computed {attributes, groups} response so the DEFAULT payload for a
+ * large EB block isn't dominated by hundreds of recurring global/style
+ * attributes (measured: pro-business-hours' 918 attributes are 715
+ * common/global -- 78% of the total). `groups.common` becomes just names +
+ * a count instead of full definitions; the top-level `attributes` map is
+ * reduced to `groups.content` only (this block's own settings, which is
+ * what a caller almost always actually wants first). `$full=true` skips all
+ * of this and returns everything unchanged -- the escape hatch.
+ *
+ * The `tip` field is written to be self-sufficient: an agent that has NEVER
+ * read the docs, seeing only this one JSON response, can act on it directly
+ * (per instruction -- this same explanation is also in editor-schema-api.md).
+ */
+function sandbox_editor_gb_trim_response(array $resp, bool $full): array
+{
+    if ($full || empty($resp['groups'])) { return $resp; }
+    $groups = $resp['groups'];
+    $commonCount = count($groups['common'] ?? []);
+    $resp['attributes']         = $groups['content'] ?? [];
+    $resp['groups']['common']   = array_keys($groups['common'] ?? []);
+    $resp['global_attributes_count'] = $commonCount;
+    if ($commonCount > 0) {
+        $resp['tip'] = "$commonCount recurring global/style attributes (background, border, shadow, "
+            . "spacing, typography, alignment, sizing, etc. -- the same kinds of settings found on "
+            . "nearly every block, just under a different literal name here) are omitted by default; "
+            . "groups.common lists their names only. Pass full=1 on this same request (same builder+name) "
+            . "to get their full definitions too.";
+    }
+    return $resp;
+}
+
 function sandbox_editor_gb_search_synonyms(): array
 {
     return [
@@ -2124,7 +2156,7 @@ function sandbox_editor_search_controls(array $controls, string $query, array $g
 }
 
 /** Build an editor-schema response from a catalog entry (source: catalog). */
-function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $search = null, $include_variants = false)
+function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $search = null, $include_variants = false, $full = false)
 {
     $key  = $builder === 'gutenberg' ? 'attributes' : 'controls';
     $resp = ['builder' => $builder, 'name' => $name, $key => $cat[$key] ?? [],
@@ -2162,6 +2194,7 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         if (empty($resp['description'])) {
             $resp['description'] = sandbox_editor_gb_block_descriptions()[$name] ?? null;
         }
+        return sandbox_editor_gb_trim_response($resp, $full);
     }
     if ($builder === 'elementor' && !empty($cat['groups'])) {
         if ($search !== null && $search !== '') {
@@ -2190,6 +2223,12 @@ function sandbox_editor_schema($input)
         // responsive/hover pointers on their base attr instead) -- pass true to
         // get the raw, full, undecorated list back.
         $gb_include_variants = !empty($input['include_variants']);
+        // Default: `groups.common` (the recurring style/global attrs -- often the
+        // MAJORITY of a large block's attribute count, e.g. 715 of 918 on
+        // pro-business-hours) is trimmed to just names, not full definitions --
+        // pass full:true to get everything back. `attributes`/`groups.content`
+        // (this block's own settings) are unaffected either way.
+        $gb_full = !empty($input['full']);
 
         // spec 011: named EB block -> resolve the FULL attribute set from source, or
         // honestly report reduced fidelity. Non-EB blocks + listings stay unchanged.
@@ -2202,7 +2241,7 @@ function sandbox_editor_schema($input)
                 // silently skipping the catalog fallback for this whole block family.
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null, $gb_search, $gb_include_variants);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null, $gb_search, $gb_include_variants, $gb_full);
                 }
                 return new WP_Error('not_found', "block '$name' not registered");
             }
@@ -2215,7 +2254,7 @@ function sandbox_editor_schema($input)
             if ($live_level !== 'full') {
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat && count($cat['attributes'] ?? []) > $live_count) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt, $gb_search, $gb_include_variants);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt, $gb_search, $gb_include_variants, $gb_full);
                 }
             }
             if ($full !== null) {
@@ -2226,7 +2265,7 @@ function sandbox_editor_schema($input)
                     return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
                             'matches' => sandbox_editor_gb_search_attrs($full['attributes'], $gb_search, $full['groups'])];
                 }
-                return $full + sandbox_editor_gb_meta($bt); // level: full | partial
+                return sandbox_editor_gb_trim_response($full + sandbox_editor_gb_meta($bt), $gb_full); // level: full | partial
             }
             // No source + no catalog: block.json attributes only, flagged reduced.
             $attrs = sandbox_editor_gb_enrich_attrs(sandbox_editor_gb_attrs((array) $bt->attributes), $gb_include_variants);
@@ -2235,11 +2274,11 @@ function sandbox_editor_schema($input)
                 return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
                         'matches' => sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups)];
             }
-            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
+            return sandbox_editor_gb_trim_response(['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
                     'attributes' => $attrs, 'groups' => $groups,
                     'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
                     'eb_attribute_fidelity' => 'reduced', 'source' => 'live']
-                    + sandbox_editor_gb_meta($bt);
+                    + sandbox_editor_gb_meta($bt), $gb_full);
         }
 
         // Non-EB named blocks + all listings. NOTE: this branch is unreachable for any
@@ -2262,10 +2301,10 @@ function sandbox_editor_schema($input)
                 return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
                         'matches' => sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups)];
             }
-            return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
+            return sandbox_editor_gb_trim_response(['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
                     'eb_attribute_fidelity' => 'full', 'attributes' => $attrs,
                     'groups' => $groups]
-                    + sandbox_editor_gb_meta($bt);
+                    + sandbox_editor_gb_meta($bt), $gb_full);
         }
         // GLOBAL search (no name): "which block has an attribute matching X?" --
         // Gutenberg's counterpart to Elementor's global search below. Was a

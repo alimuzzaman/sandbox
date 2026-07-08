@@ -37,6 +37,9 @@
  *   &source_root=<path>            (optional — EB source checkout override)
  *   &include_variants=1            (optional — Gutenberg: include MOB/TAB/hov_
  *                                     variant attrs instead of hiding them)
+ *   &full=1                        (optional — Gutenberg, with `name`: include full
+ *                                     definitions for global/style attrs too, not
+ *                                     just their names)
  *
  * GET /wp-json/sandbox/v1/editor-schema/docs
  *   Serves editor-schema-api.md (this same directory) as JSON, so an agent
@@ -83,6 +86,7 @@ function sandbox_editor_schema_rest_cb(WP_REST_Request $req)
         'variants'         => $req->get_param('variants'),
         'source_root'      => $req->get_param('source_root'),
         'include_variants' => $req->get_param('include_variants'),
+        'full'             => $req->get_param('full'),
     ];
     // Drop unset optional params rather than passing through empty-string/null —
     // sandbox_editor_schema() distinguishes "absent" (isset checks) from "present

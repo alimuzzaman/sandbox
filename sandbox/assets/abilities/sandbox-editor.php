@@ -2347,8 +2347,24 @@ function sandbox_editor_schema($input)
                 $desc  = $bt->description ?: ($curated['description'] ?? '');
                 $score = $scoreOne($bn, $title, $desc);
                 if ($score > 0) {
+                    // Same "catalog if richer" fix as the listing branch (verified bug:
+                    // an EB Pro block's live registration is often just the free-plugin
+                    // STUB -- 4 raw block.json attrs -- while the catalog has the real,
+                    // fully-resolved count, e.g. 500 for pro-data-table).
+                    $count = count((array) $bt->attributes);
+                    $src = 'live';
+                    if (strpos($bn, 'essential-blocks/') === 0) {
+                        $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                        // Counted post-enrichment (MOB/TAB/hover variants collapsed into
+                        // their base attr) so this matches what a subsequent `name=`
+                        // lookup on the SAME block actually reports -- the raw catalog
+                        // count is ~2x higher (variants not yet collapsed) and would be
+                        // a confusing mismatch between find's number and the real one.
+                        $catCount = count(sandbox_editor_gb_enrich_attrs((array) ($cat['attributes'] ?? [])));
+                        if ($catCount > $count) { $count = $catCount; $src = 'catalog'; }
+                    }
                     $all[] = ['name' => $bn, 'title' => $title, 'description' => $desc,
-                              'attribute_count' => count((array) $bt->attributes), 'score' => $score];
+                              'attribute_count' => $count, 'source' => $src, 'score' => $score];
                 }
             }
             foreach (sandbox_editor_catalog_all_names('gutenberg') as $bn) {
@@ -2360,8 +2376,9 @@ function sandbox_editor_schema($input)
                 $score = $scoreOne($bn, $title, $desc);
                 if ($score > 0) {
                     $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                    $count = count(sandbox_editor_gb_enrich_attrs((array) ($cat['attributes'] ?? [])));
                     $all[] = ['name' => $bn, 'title' => $title, 'description' => $desc,
-                              'attribute_count' => count($cat['attributes'] ?? []), 'score' => $score, 'source' => 'catalog'];
+                              'attribute_count' => $count, 'score' => $score, 'source' => 'catalog'];
                 }
             }
             usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
@@ -2551,10 +2568,13 @@ function sandbox_editor_schema($input)
         $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
         $search = isset($input['search']) ? trim((string) $input['search']) : null;
 
-        // Find a widget/element by TITLE/KEYWORDS/PURPOSE (not control content --
-        // that's `search`). Elementor has no per-widget description (confirmed
-        // earlier -- no get_description() method anywhere in Widget_Base/
-        // Element_Base), so keywords is the real text to match against here.
+        // Find a widget/element by TITLE/KEYWORDS/DESCRIPTION/PURPOSE (not control
+        // content -- that's `search`). Only scans LIVE-registered widgets/elements
+        // (unlike Gutenberg's find, which also scans catalog-only names) -- the
+        // Elementor catalog (elementor.json.gz) carries no title/keywords field at
+        // all (just controls/plugin/version/coverage), so a widget from a
+        // not-currently-installed Pro/EA plugin can't be scored/matched the same
+        // way; a known, documented gap rather than a half-working fallback.
         $find = isset($input['find']) ? trim((string) $input['find']) : null;
         if ($find && !$name) {
             $q = strtolower($find);
@@ -2577,6 +2597,12 @@ function sandbox_editor_schema($input)
             if ($onlyTypes !== 'elements' && is_array($types)) {
                 foreach ($types as $wn => $wobj) {
                     $title = method_exists($wobj, 'get_title') ? $wobj->get_title() : '';
+                    // Skip Elementor's internal base/plumbing "widgets" (common,
+                    // common-base, common-optimized, global) -- none are real,
+                    // insertable widgets (none has a title in the actual widget
+                    // panel either), so a bare name match (e.g. find=common) would
+                    // otherwise surface junk alongside real results.
+                    if ($title === '') { continue; }
                     $kw    = method_exists($wobj, 'get_keywords') ? $wobj->get_keywords() : [];
                     $desc  = $elDescriptions[$wn] ?? '';
                     $score = $scoreOne($wn, $title, $kw, $desc);
@@ -2586,6 +2612,7 @@ function sandbox_editor_schema($input)
             if ($onlyTypes !== 'widgets' && $em && method_exists($em, 'get_element_types')) {
                 foreach ($em->get_element_types() as $en => $eobj) {
                     $title = method_exists($eobj, 'get_title') ? $eobj->get_title() : '';
+                    if ($title === '') { continue; }
                     $kw    = method_exists($eobj, 'get_keywords') ? $eobj->get_keywords() : [];
                     $desc  = $elDescriptions[$en] ?? '';
                     $score = $scoreOne($en, $title, $kw, $desc);

@@ -566,11 +566,20 @@ Same shape as color, generalized:
 ## Known limitations
 
 - Catalog-only Gutenberg entries (block not live-registered) don't carry
-  `title`/`description`/`supports`/`style_paths` yet — the catalog-generation
-  pipeline captures `attributes` and drops the rest before writing the
-  committed file; would need the pipeline extended (thread `supports` through
-  `make_entry`/`_build_gutenberg_entries`, add title/description to the dump)
-  plus a regen to backfill.
+  `supports`/`style_paths` — the catalog-generation pipeline captures
+  `attributes` and drops the rest before writing the committed file; would
+  need the pipeline extended (thread `supports` through `make_entry`/
+  `_build_gutenberg_entries`) plus a regen to backfill. `title`/`description`
+  are NOT part of this gap anymore — they fall back to the curated
+  block-descriptions.json (92 real EB entries) even when `$bt` is entirely
+  null.
+- Elementor's `find` only scans LIVE-registered widgets/elements — unlike
+  Gutenberg's `find`, it does not also scan catalog-only names, because the
+  Elementor catalog (`elementor.json.gz`) carries no `title`/`keywords` field
+  at all (just `controls`/`plugin`/`version`/`coverage`), so a widget from a
+  not-currently-installed Pro/EA plugin can't be scored the same way. A
+  widget/element not active on this instance simply won't appear in `find`
+  results.
 - The Gutenberg search synonym dictionary was built from ~10,500 real
   Essential Blocks attribute names but EB's naming isn't fully consistent
   across every block/author — an uncommon casing or word-order variant can

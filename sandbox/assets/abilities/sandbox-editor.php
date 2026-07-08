@@ -956,9 +956,28 @@ function sandbox_editor_eb_resolve($block_name, $block_type, $extra_roots = [])
  * results stay byte-identical (no marker). The catalog is provisioned to
  * mu-plugins/sandbox-schema-catalog/<builder>.json.gz.                            */
 
+/** 730 hand-curated Elementor control descriptions (common `_`-prefixed controls
+ *  + `eael_` Essential Addons controls + widget-content controls), provisioned to
+ *  mu-plugins/sandbox-schema-catalog/control-descriptions.json alongside the
+ *  catalog gz files. Was already being read by the host-side catalog-generation
+ *  tooling and merged into catalog(source:"catalog") responses -- but never
+ *  wired into THIS live path at all, so the far more common case (a widget that
+ *  IS registered on this instance) got none of them. Cached; returns [] if the
+ *  file isn't provisioned (older instance, catalog feature predates this file). */
+function sandbox_editor_el_control_descriptions(): array
+{
+    static $cache = null;
+    if ($cache === null) {
+        $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/control-descriptions.json';
+        $json = is_file($f) ? @file_get_contents($f) : false;
+        $cache = ($json !== false) ? (json_decode($json, true) ?: []) : [];
+    }
+    return $cache;
+}
+
 /** Extract rich metadata from one Elementor control definition (spec 012 ext).
  *  Returns: type, label, default, section, tab, selectors (css map), options (key→label). */
-function sandbox_editor_el_control_entry(array $c): array
+function sandbox_editor_el_control_entry(string $cid, array $c): array
 {
     $e = [
         'type'    => $c['type'] ?? null,
@@ -967,8 +986,14 @@ function sandbox_editor_el_control_entry(array $c): array
         'section' => $c['section'] ?? null,
         'tab'     => $c['tab'] ?? null,
     ];
-    // Rare (most controls have none) but real "how to use it" text when present.
-    if (!empty($c['description'])) { $e['description'] = (string) $c['description']; }
+    if (!empty($c['description'])) {
+        // Rare (most controls' own definition has none) but real "how to use it"
+        // text when Elementor itself provides one.
+        $e['description'] = (string) $c['description'];
+    } else {
+        $curated = sandbox_editor_el_control_descriptions()[$cid] ?? null;
+        if ($curated) { $e['description'] = (string) $curated; }
+    }
     // Responsive: Elementor keeps ONE base key + an is_responsive flag; the per-device
     // keys ({key}_tablet/{key}_mobile) are derived, never listed by get_controls().
     if (!empty($c['is_responsive'])) { $e['responsive'] = true; }
@@ -2269,7 +2294,7 @@ function sandbox_editor_schema($input)
             $controls = [];
             try {
                 foreach ((array) $obj->get_controls() as $cid => $c) {
-                    $controls[$cid] = sandbox_editor_el_control_entry($c);
+                    $controls[$cid] = sandbox_editor_el_control_entry($cid, $c);
                 }
             } catch (\Throwable $e) {
                 return new WP_Error('controls_unavailable', $e->getMessage());
@@ -2340,7 +2365,7 @@ function sandbox_editor_schema($input)
                 try {
                     $ctrls = [];
                     foreach ((array) $host->get_controls() as $cid => $c) {
-                        $ctrls[$cid] = sandbox_editor_el_control_entry($c);
+                        $ctrls[$cid] = sandbox_editor_el_control_entry($cid, $c);
                     }
                     $groups  = sandbox_editor_group_controls($ctrls);
                     $matches = sandbox_editor_search_controls($ctrls, $search, $groups);

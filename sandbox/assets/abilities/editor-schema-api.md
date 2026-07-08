@@ -299,6 +299,8 @@ GET ?builder=elementor&name=heading
   "name": "heading",
   "kind": "widget",              // widget | element (section/column/container/e-flexbox/...)
   "source": "live",
+  "title": "Heading",             // human label, Gutenberg's block-level title/description equivalent
+  "keywords": ["heading", "title", "text"],  // Elementor has no per-widget "description" method at all — keywords is the real equivalent
   "controls": {                   // FLAT map, every control
     "title": { "type": "text", "label": "Title", "default": "Add Your Heading Text Here", "section": "section_title", "tab": "content" },
     "typography_font_size": { "type": "slider", "label": "Size", "section": "section_title_style", "tab": "style", "responsive": true },
@@ -322,7 +324,7 @@ GET ?builder=elementor&name=heading
 | `type` | Elementor control type (`text`, `select`, `slider`, `dimensions`, `color`, ...) |
 | `label` | Human label shown in the editor |
 | `default` | Default value |
-| `description` | Rare (most controls have none), but real help text when present |
+| `description` | Real help text when present — either from the control's own definition (rare, most don't declare one) or a curated description keyed by control id (730 entries covering common `_`-prefixed controls, Essential Addons `eael_*` controls, and widget-content controls — covers most of a typical widget's controls; e.g. `heading` gets descriptions on 281 of its 325) |
 | `section` / `tab` | Where this control lives in the editor panel |
 | `responsive` | `true` if this control has per-breakpoint variants — resolve them with `variants` (below), don't guess `_tablet`/`_mobile` suffixes |
 | `selectors` | **The literal CSS this control writes**, keyed by selector template (`{{WRAPPER}}` = this widget's own wrapper div) — the most direct "how to use it" data Elementor exposes |
@@ -340,17 +342,31 @@ GET ?builder=elementor&name=heading
   `_section_transform`. To change a widget's wrapper background, look in
   `groups.common._section_background`, not `groups.style`.
 
-### Global search (no `name`)
+### Global search (no `name`) — both builders
 
 ```
 GET ?builder=elementor&search=box%20shadow
+GET ?builder=gutenberg&search=border%20radius&eb_only=1
 ```
 
-Scans every registered widget AND element type, keeps each host's single
-best-scoring match, returns the top matches ranked — "which widget/element
-has a control matching X?" Heavier than a per-widget search (instantiates
-every control stack, ~1s) — pass `types=widgets` or `types=elements` to
-scope it, `limit` to cap results (default 40).
+Scans every registered widget/block (Elementor: + element types; Gutenberg:
++ any catalog-only names not live-registered), keeps each host's single
+best-scoring match, returns the top matches ranked — "which widget/block
+has a control/attribute matching X?" Heavier than a per-widget/block search
+(Elementor instantiates every control stack, ~1s) — Elementor: pass
+`types=widgets` or `types=elements` to scope it; Gutenberg: pass `eb_only=1`
+to scope to Essential Blocks. Both accept `limit` to cap results (default 40).
+
+Response shape (Gutenberg):
+```jsonc
+{
+  "builder": "gutenberg", "search": "border radius", "scanned": 75,
+  "matches": [
+    { "name": "essential-blocks/testimonial", "attribute": "borderRadius", "group": "content", "score": 220 },
+    { "name": "essential-blocks/pro-business-hours", "attribute": "badgeBorderRadius", "group": "content", "score": 220, "source": "catalog" }
+  ]
+}
+```
 
 ### Responsive variants
 
@@ -478,21 +494,33 @@ Same shape as color, generalized:
 ## Known limitations
 
 - Catalog-only Gutenberg entries (block not live-registered) don't carry
-  `title`/`description`/`supports`/`style_paths` yet.
-- Per-block `search` (with `name`) exists for Gutenberg (see above), but
-  there's no GLOBAL variant yet — Elementor's `search` with no `name` scans
-  every widget/element at once ("which widget has a control matching X?");
-  Gutenberg has no equivalent, so "which blocks support border color" still
-  means checking `supports`/`style_paths` per-block yourself.
+  `title`/`description`/`supports`/`style_paths` yet — the catalog-generation
+  pipeline captures `attributes` and drops the rest before writing the
+  committed file; would need the pipeline extended (thread `supports` through
+  `make_entry`/`_build_gutenberg_entries`, add title/description to the dump)
+  plus a regen to backfill.
 - The Gutenberg search synonym dictionary was built from ~10,500 real
   Essential Blocks attribute names but EB's naming isn't fully consistent
   across every block/author — an uncommon casing or word-order variant can
   occasionally miss a match (plain, longer words like `"shadow"`/`"gap"`
-  don't have this limitation; see the case-sensitivity note above).
+  don't have this limitation; see the case-sensitivity note above). Essential
+  Addons (`eael_*`) does NOT have this problem — its control ids are
+  descriptive snake_case (`eael_cl_fallback_content`, not an abbreviation),
+  so no equivalent tokenizer/decode treatment is needed there.
 - Essential Blocks attribute-generator functions (`generateTypographyAttributes`,
   `generateBackgroundAttributes`, `generateBorderShadowAttributes`,
   `generateDimensionsAttributes`, `generateResponsiveAlignAttributes`,
   `generateResponsiveRangeAttributes`) can't always be expanded — when they
   can't, `fidelity.level` is `"partial"` and `fidelity.unresolved` lists
   which generators were skipped; treat the attribute count as a floor, not
-  exact.
+  exact. Note: the git source checkout (as opposed to the packaged `.org`
+  build) has been found to include `src/controls/src/helpers/` — pointing
+  `source_root` at a git checkout may resolve some of these to `"full"`
+  where the packaged build can't; not yet exploited automatically.
+- No reverse lookup yet ("this renders `border-radius: 8px` — which control
+  produced it?") — `selectors` (Elementor) and `style_paths` (Gutenberg)
+  only go forward (control → CSS), not backward.
+- No value validation before write — `enum` (Gutenberg) and `options`
+  (Elementor) declare valid values, but there's no `?validate_value=X` mode
+  to check a proposed write against them before calling `gutenberg-update`/
+  `elementor-update`.

@@ -480,6 +480,16 @@ def _write_schema_catalog(instance: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for f in gz:
         shutil.copyfile(f, dest / f.name)
+    # 730 hand-curated Elementor control descriptions -- previously only reachable
+    # by the host-side catalog-generation tooling (_schema_catalog.py), never
+    # provisioned into the instance itself, so the LIVE editor-schema path (the
+    # common case -- a widget that IS registered on this instance) had no access
+    # to them at all and fell back to the rare ~3% of controls with their own
+    # `description` key. Provisioned here so sandbox_editor_el_control_entry()
+    # can read it directly, same directory the catalog gz files use.
+    descriptions = asset_dir / "control-descriptions.json"
+    if descriptions.is_file():
+        shutil.copyfile(descriptions, dest / descriptions.name)
 
 
 def _write_dl_cache_muplugin(instance: str) -> None:

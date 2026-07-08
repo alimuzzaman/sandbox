@@ -28,7 +28,7 @@ None required.
 | `variants` | elementor, with `name` | Resolve a specific control's per-breakpoint keys (see Responsive variants, below). |
 | `source_root` | gutenberg EB blocks | Override the Essential Blocks source-checkout path used to resolve full attribute sets; rarely needed. |
 | `include_variants` | gutenberg, with `name` | `1` to include MOB/TAB/hover-prefixed variant attributes as their own top-level entries instead of hiding them (see "Decoded descriptions + hidden variants", below). |
-| `full` | gutenberg, with `name` | `1` to get full definitions for `groups.common` (global/style) attributes too, not just their names — see "Default response is trimmed", below. |
+| `full` | gutenberg, with `name` | `1` to include the recurring global/style attributes too (omitted by default — see "Default response is trimmed", below), each with a full definition. |
 | `find` | both, no `name` | Find a block/widget by TITLE/DESCRIPTION/KEYWORDS (not attribute content — that's `search`). Returns matching names, ranked. See "Finding a block/widget by name or purpose", below. |
 
 ## Gutenberg: response shape
@@ -55,13 +55,9 @@ GET ?builder=gutenberg&name=core/heading
     "level": { "type": "number", "default": 2 },
     "...": "..."
   },
-  "groups": {
-    "content": { "content": {...}, "level": {...}, "levelOptions": {...}, "placeholder": {...} },
-    "common":  ["align", "backgroundColor", "textColor", "gradient", "fontSize", "fontFamily", "borderColor", "..."]
-    // ^ names ONLY by default — full definitions cost a second request, see below
-  },
+  // no `groups` key by default — see below for why
   "global_attributes_count": 7,
-  "tip": "7 recurring global/style attributes (...) are omitted by default; groups.common lists their names only. Pass full=1 on this same request to get their full definitions too.",
+  "tip": "7 recurring global/style attributes (...) exist but aren't shown by default. Pass full=1 on this same request to get all of them, each with a full definition including `decoded`.",
   "supports": { "color": {...}, "spacing": {...}, "typography": {...}, "...": "..." },
   "style_paths": {                 // see "Styling attributes NOT in block.json", below
     "spacing.padding": "style.spacing.padding",
@@ -74,18 +70,22 @@ GET ?builder=gutenberg&name=core/heading
 
 ### Default response is trimmed — `full=1` to get everything
 
-By default, `attributes` and `groups.content` only cover this block's OWN
-settings; `groups.common` (the recurring global/style attributes — margin,
+By default, `attributes` only covers this block's OWN settings — no
+`groups` key at all. The recurring global/style attributes (margin,
 padding, border, shadow, background, color, typography, alignment, sizing —
-the same KIND of setting found on nearly every block) is names-only, not
-full definitions. This matters most on large blocks: `essential-blocks/
-pro-data-table` has 500 attributes total, but only 110 are unique to it —
-the other 390 are the generic style vocabulary. The default response
-reflects only the 110; `groups.common` still lists all 390 names, so
-nothing is hidden, just not fully detailed by default.
+the same KIND of setting found on nearly every block) aren't shown, not even
+as bare names: an id like `wrpMrg_Top` has no standalone value without its
+`decoded` breakdown, so a names-only list would be noise, not information.
+This matters most on large blocks: `essential-blocks/pro-data-table` has 500
+attributes total, but only 110 are unique to it — the other 390 are the
+generic style vocabulary, and by default they're skipped entirely, not
+partially shown.
 
-Pass **`full=1`** on the same request (same `builder`+`name`) to get full
-definitions for the global ones too. The response always includes
+Pass **`full=1`** on the same request (same `builder`+`name`) to get all of
+them back, each with a full definition including `decoded` — the response
+shape becomes `{attributes: {...}, groups: {content: {...}, common: {...}}}`
+(both fully detailed; `attributes` covers everything, `groups` is the same
+data split by category). The default response always includes
 `global_attributes_count` and a self-explanatory `tip` field, so an agent
 that has never read this doc can still figure out what to do next just from
 the JSON itself.
@@ -175,11 +175,14 @@ base attribute by "mobile"/"tablet"/"hover" even when hidden — those
 keywords match against the presence of its `responsive`/`hover` pointers,
 not just the (now-absent) literal prefix in its id.
 
-### `groups.content` vs `groups.common`
+### `groups.content` vs `groups.common` (only present with `full=1`)
 
 Mirrors Elementor's own `groups.content`/`groups.style`/`groups.common` split
 (Gutenberg has no reliable signal to further split off a `style` bucket the
-way Elementor's `tab==='style'` does, so it's a 2-way split here):
+way Elementor's `tab==='style'` does, so it's a 2-way split here). Only
+appears when `full=1` is passed — by default there's no `groups` key at all
+(see "Default response is trimmed", above), since `attributes` is already
+content-only and a bare `common` id has no standalone value:
 
 - **`content`** — attributes specific to THIS block (a heading's `level`, an
   image's `url`/`alt`, a button's `text`).

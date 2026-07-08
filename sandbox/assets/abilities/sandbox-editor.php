@@ -1774,15 +1774,23 @@ function sandbox_editor_gb_trim_response(array $resp, bool $full): array
     if ($full || empty($resp['groups'])) { return $resp; }
     $groups = $resp['groups'];
     $commonCount = count($groups['common'] ?? []);
-    $resp['attributes']         = $groups['content'] ?? [];
-    $resp['groups']['common']   = array_keys($groups['common'] ?? []);
+    // `groups.common` is dropped entirely by default (not even names) -- a bare
+    // id like "wrpMrg_Top" has zero standalone value without its `decoded`
+    // breakdown (the whole reason decoded exists), so a names-only list was
+    // decoration, not information. `groups.content` is also dropped: it's the
+    // exact same data as `attributes` (which is already content-only by
+    // default), so keeping both was pure duplication for no reason -- just
+    // `attributes` + a count + a tip.
+    $resp['attributes'] = $groups['content'] ?? [];
+    unset($resp['groups']);
     $resp['global_attributes_count'] = $commonCount;
     if ($commonCount > 0) {
         $resp['tip'] = "$commonCount recurring global/style attributes (background, border, shadow, "
             . "spacing, typography, alignment, sizing, etc. -- the same kinds of settings found on "
-            . "nearly every block, just under a different literal name here) are omitted by default; "
-            . "groups.common lists their names only. Pass full=1 on this same request (same builder+name) "
-            . "to get their full definitions too.";
+            . "nearly every block, just under a different literal name here) exist but aren't shown -- "
+            . "their bare ids have no standalone meaning without a decoded breakdown, so listing just "
+            . "names would be noise, not information. Pass full=1 on this same request (same "
+            . "builder+name) to get all of them, each with a full definition including `decoded`.";
     }
     return $resp;
 }

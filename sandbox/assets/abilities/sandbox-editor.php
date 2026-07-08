@@ -1319,6 +1319,14 @@ function sandbox_editor_schema($input)
         if ($name && strpos($name, 'essential-blocks/') === 0) {
             $bt = $reg->get_registered($name);
             if (!$bt) {
+                // spec 012: not registered live (e.g. EB Pro or this block absent on
+                // this install) -> serve the catalog if we have it, same as the
+                // Elementor path below. Previously returned not_found immediately,
+                // silently skipping the catalog fallback for this whole block family.
+                $cat = sandbox_editor_catalog_entry('gutenberg', $name);
+                if ($cat) {
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null);
+                }
                 return new WP_Error('not_found', "block '$name' not registered");
             }
             $extra_roots = [];

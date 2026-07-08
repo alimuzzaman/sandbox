@@ -533,3 +533,34 @@ All four were real and independently fixable:
   the build's, and check the reference's total page height against the sum of built section
   heights, as its own gate** — don't rely on per-section comparisons alone to catch a section
   that's missing outright.
+
+## Brand Strategy Development converged (row2 image height) — a case where the "grow, then
+## compensate with trailing whitespace" pattern worked cleanly
+Row2 card images (`card_stack`, 3 side-by-side cards) rendered short (173-195px vs reference's
+238-244px) because of the `imagew()` height-parameter bug (see above). Fixing it correctly grows
+ALL THREE cards together, and since they're laid out `flex_direction:"row"` (side by side), the
+ROW's height is the MAX of the three, not their sum — growing all three by the same amount grows
+the section by that SAME amount once, not three times. Verified: growing images by ~65px grew the
+whole section by ~65px in one clean step (predictable, no compounding). The safe compensation
+this time was cutting the SECTION's own TRAILING bottom padding by the exact overshoot — since
+that's pure whitespace after the last row, reducing it can't disrupt any already-correct element
+position above it (unlike the earlier failed attempts that touched a GAP or padding sitting
+BETWEEN two already-measured elements, where the arithmetic didn't cancel as expected). **When
+compensating a height-growing fix, prefer cutting TRAILING/leading whitespace with nothing
+positioned relative to it, over cutting a gap or padding sandwiched between two elements whose
+own positions you've already verified as correct** — the former is safe arithmetic, the latter is
+where the "compensation didn't cancel" failures kept happening.
+
+## A "make text fit its box" fix attempted and reverted — flex-basis math in a 2-column row
+Reference's CTA subtitle text renders at 688px wide (fits one line); the build's same text
+wrapped to 2 lines at only 550px wide, because the container's own `padding-left:60` (added
+earlier to fix the CTA's left-edge position) shrinks the CONTENT area without growing the
+column's overall claimed width — the two competing needs (start position vs available content
+width) aren't the same lever. Tried forcing colR (the neighboring image column, no explicit width
+of its own) to an explicit smaller width so colL's `flex-grow` would claim more space — this
+REGRESSED the page badly (dLeft max 49px → 141px, Solutions section height −14px → −41px),
+because colR's implicit sizing was doing double duty (also driving the decorative background
+image's positioning) that an explicit width broke. Reverted immediately. **Not yet solved** — the
+right fix is likely `margin-left` instead of `padding-left` for colL's offset (margin doesn't
+shrink the box's own claimed content width the way padding does), but that wasn't tried yet before
+time ran out on this pass; try that next rather than fighting the two-column width split again.

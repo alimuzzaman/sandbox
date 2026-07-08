@@ -1044,6 +1044,32 @@ function sandbox_editor_catalog_entry($builder, $name)
     return $entry;
 }
 
+/** All names present in the committed catalog for a builder (global search /
+ *  listing needs to enumerate catalog-only entries too, e.g. an EB block not
+ *  live-registered on this instance at all). Small deliberate duplication of
+ *  sandbox_editor_catalog_entry()'s file-read (its cache is function-local
+ *  static, not exposable) -- just enough to list names, not resolve entries. */
+function sandbox_editor_catalog_all_names($builder): array
+{
+    static $cache = [];
+    if (!array_key_exists($builder, $cache)) {
+        $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/' . $builder . '.json.gz';
+        $names = [];
+        if (is_file($f)) {
+            $raw  = @file_get_contents($f);
+            $json = ($raw !== false && function_exists('gzdecode')) ? @gzdecode($raw) : false;
+            if ($json !== false) {
+                $data = json_decode($json, true) ?: [];
+                $entries = (($data['_format'] ?? 'v1') === 'v2')
+                    ? array_diff_key($data, ['_format' => 1, '_pool' => 1]) : $data;
+                $names = array_keys($entries);
+            }
+        }
+        $cache[$builder] = $names;
+    }
+    return $cache[$builder];
+}
+
 function sandbox_editor_plugin_version($slug)
 {
     if (!$slug) { return null; }
@@ -2115,16 +2141,90 @@ function sandbox_editor_schema($input)
                     'groups' => $groups]
                     + sandbox_editor_gb_meta($bt);
         }
+        // GLOBAL search (no name): "which block has an attribute matching X?" --
+        // Gutenberg's counterpart to Elementor's global search below. Was a
+        // documented gap (silently returned the full listing instead). Scans every
+        // live-registered block (+ any catalog-only names not live-registered, e.g.
+        // an EB block absent from this install) and keeps each block's single
+        // best-scoring match, ranked -- same shape as the Elementor version.
+        if ($gb_search) {
+            @set_time_limit(120);
+            $onlyEb = !empty($input['eb_only']);
+            $limit  = isset($input['limit']) ? max(1, (int) $input['limit']) : 40;
+            $all = [];
+            $seen = [];
+            foreach ($reg->get_all_registered() as $bn => $bt) {
+                if ($onlyEb && strpos($bn, 'essential-blocks/') !== 0) { continue; }
+                $seen[$bn] = true;
+                $liveAttrs = (array) $bt->attributes;
+                if (strpos($bn, 'essential-blocks/') === 0) {
+                    $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                    if ($cat && count($cat['attributes'] ?? []) > count($liveAttrs)) {
+                        $liveAttrs = (array) $cat['attributes'];
+                    }
+                }
+                $attrs   = sandbox_editor_gb_enrich_attrs($liveAttrs, false);
+                $groups  = sandbox_editor_gb_group_attrs($attrs);
+                $matches = sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups);
+                foreach ($matches as $aid => $m) { // best only, already sorted
+                    $all[] = ['name' => $bn, 'attribute' => $aid,
+                              'group' => $m['group'] ?? 'unknown', 'score' => $m['score'] ?? 0];
+                    break;
+                }
+            }
+            // catalog-only names (EB block/plugin not live-registered on this instance at all)
+            foreach (sandbox_editor_catalog_all_names('gutenberg') as $bn) {
+                if (isset($seen[$bn])) { continue; }
+                if ($onlyEb && strpos($bn, 'essential-blocks/') !== 0) { continue; }
+                $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                if (!$cat) { continue; }
+                $attrs   = sandbox_editor_gb_enrich_attrs((array) ($cat['attributes'] ?? []), false);
+                $groups  = sandbox_editor_gb_group_attrs($attrs);
+                $matches = sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups);
+                foreach ($matches as $aid => $m) {
+                    $all[] = ['name' => $bn, 'attribute' => $aid,
+                              'group' => $m['group'] ?? 'unknown', 'score' => $m['score'] ?? 0, 'source' => 'catalog'];
+                    break;
+                }
+            }
+            usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
+            return ['builder' => 'gutenberg', 'search' => $gb_search, 'scanned' => count($seen),
+                    'matches' => array_slice($all, 0, $limit)];
+        }
+
+        // Real bug found comparing this against the per-name path: EB blocks declare
+        // only ~3-4 generic attributes in their own block.json (the full set is only
+        // ever resolved by sandbox_editor_eb_resolve(), called from the per-name path
+        // above, NOT here) -- so this loop's `array_keys((array) $bt->attributes)` was
+        // reporting essential-blocks/pro-business-hours as having 4 attributes when it
+        // actually has 918 (visible) / 1764 (raw), a >200x undercount for every EB
+        // block in any listing. `$fidelity` referenced below was also undefined (a
+        // leftover from an earlier edit) -- would return null silently.
+        // Fix: for essential-blocks/* names, prefer the catalog's attribute set when
+        // it's richer than the live block.json set (same live-vs-catalog preference
+        // as the per-name path), and apply the same variant-hiding as the per-name
+        // view so the listing's counts are consistent with what a per-name lookup
+        // would show -- without paying for full per-block source resolution (parsing
+        // every EB block's JS attribute generators) on every listing call.
         $blocks = [];
         foreach ($reg->get_all_registered() as $bn => $bt) {
             if (!empty($input['eb_only']) && strpos($bn, 'essential-blocks/') !== 0) {
                 continue;
             }
+            $liveAttrs = (array) $bt->attributes;
+            $attrSource = 'live';
+            if (strpos($bn, 'essential-blocks/') === 0) {
+                $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                if ($cat && count($cat['attributes'] ?? []) > count($liveAttrs)) {
+                    $liveAttrs = (array) $cat['attributes'];
+                    $attrSource = 'catalog';
+                }
+                $liveAttrs = sandbox_editor_gb_enrich_attrs($liveAttrs, false);
+            }
             $blocks[$bn] = ['dynamic' => sandbox_editor_dynamic_flag($bn, $bt),
-                            'attributes' => array_keys((array) $bt->attributes)];
+                            'attributes' => array_keys($liveAttrs), 'attribute_source' => $attrSource];
         }
-        return ['builder' => 'gutenberg', 'count' => count($blocks),
-                'eb_attribute_fidelity' => $fidelity, 'blocks' => $blocks];
+        return ['builder' => 'gutenberg', 'count' => count($blocks), 'blocks' => $blocks];
     }
 
     if ($builder === 'elementor' && !class_exists('\\Elementor\\Plugin')) {
@@ -2205,7 +2305,18 @@ function sandbox_editor_schema($input)
             foreach ($controls as $cid => $cdef) {
                 if (!empty($cdef['responsive'])) { $respControls[] = $cid; }
             }
+            // title/keywords: Elementor's rough equivalent of Gutenberg's block-level
+            // title/description (offered earlier, never wired in until this gap-
+            // comparison pass) -- verified present on both widgets AND element types
+            // (container, section, ...), so safe to call regardless of $kind. There is
+            // no per-widget "description" method in Elementor's Widget_Base/
+            // Element_Base at all (checked directly: heading/button/form/container all
+            // return false for method_exists(..., 'get_description')) -- keywords is
+            // the closest real equivalent Elementor actually has.
+            $title = method_exists($obj, 'get_title') ? $obj->get_title() : null;
+            $keywords = method_exists($obj, 'get_keywords') ? $obj->get_keywords() : [];
             return ['builder' => 'elementor', 'name' => $name, 'kind' => $kind, 'source' => 'live',
+                    'title' => $title, 'keywords' => $keywords,
                     'controls' => $controls, 'count' => count($controls),
                     'groups'   => $groups,
                     'responsive' => ['breakpoints' => sandbox_editor_active_breakpoints(),

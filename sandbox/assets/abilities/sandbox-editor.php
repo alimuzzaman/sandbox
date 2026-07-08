@@ -1188,12 +1188,23 @@ function sandbox_editor_gb_group_attrs(array $attrs): array
         // block attributes don't, so this never fires for them (falls through
         // to the static-name check above, unchanged behavior).
         if (!$isCommon && is_array($def) && !empty($def['decoded']['decoded'])) {
-            $segs = array_reverse($def['decoded']['decoded']);
-            foreach ($segs as $seg) {
-                $meaning = $seg['meaning'] ?? null;
-                if ($meaning === null || isset($modifiers[$meaning])) { continue; } // skip modifiers/unresolved
-                if (isset($leafMeanings[$meaning])) { $isCommon = true; }
-                break; // first non-modifier token found, decided either way
+            // A boolean "show/enable/display X" attribute is a FEATURE TOGGLE
+            // (a content/behavior decision -- use this feature or don't), never
+            // itself a style value, no matter what style-sounding word its id
+            // ends in. Verified bug: "showIconBackground" (type boolean,
+            // default true) decoded to a trailing "Background" token and was
+            // misclassified common/style -- it's whether the icon HAS a
+            // background at all, not a background color/image value.
+            $isToggleName = (bool) preg_match('/^(show|enable|display)/i', $k);
+            $isBool = (($def['type'] ?? null) === 'boolean');
+            if (!($isToggleName && $isBool)) {
+                $segs = array_reverse($def['decoded']['decoded']);
+                foreach ($segs as $seg) {
+                    $meaning = $seg['meaning'] ?? null;
+                    if ($meaning === null || isset($modifiers[$meaning])) { continue; } // skip modifiers/unresolved
+                    if (isset($leafMeanings[$meaning])) { $isCommon = true; }
+                    break; // first non-modifier token found, decided either way
+                }
             }
         }
         if ($isCommon) {

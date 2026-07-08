@@ -119,6 +119,14 @@ def _write_abilities_muplugin(instance: str) -> None:
     schema_dump = asset_dir / "00-sandbox-schema-dump.php"
     if schema_dump.exists():
         shutil.copyfile(schema_dump, mu_dir / "00-sandbox-schema-dump.php")
+    # editor-schema REST convenience route (plain GET, no MCP/abilities envelope).
+    schema_rest = asset_dir / "00-sandbox-editor-schema-rest.php"
+    if schema_rest.exists():
+        shutil.copyfile(schema_rest, mu_dir / "00-sandbox-editor-schema-rest.php")
+    # its usage doc, served by the /editor-schema/docs route above.
+    schema_rest_doc = asset_dir / "editor-schema-api.md"
+    if schema_rest_doc.exists():
+        shutil.copyfile(schema_rest_doc, mu_dir / "editor-schema-api.md")
     # Copy the payload dir (vendored wordpress/mcp-adapter) that the loader
     # require_once's for the MCP-server exposure. Refresh in place each call.
     payload = asset_dir / "sandbox-abilities"

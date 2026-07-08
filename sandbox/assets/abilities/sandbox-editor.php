@@ -1484,7 +1484,7 @@ function sandbox_editor_gb_decode_attr(string $id): array
         while (isset($decoded[$j]['token']) && isset($skipOver[$decoded[$j]['token']])) { $j++; }
         $next = $decoded[$j]['token'] ?? null;
         if ($next !== null && isset($shadowTokens[$next]) && !isset($sideTokens[$next])) {
-            $decoded[$idx]['meaning'] = 'Border + shadow (group name, not literally "width" here)';
+            $decoded[$idx]['meaning'] = 'Border + shadow (group prefix)';
         }
     }
 

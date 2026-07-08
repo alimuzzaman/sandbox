@@ -1,46 +1,19 @@
 # Editor Schema API
 
-A read-only, network-accessible lookup for Gutenberg block attributes and
-Elementor widget/element controls — "what settings does this block/widget
-have, and how do I actually use each one to change styling?"
-
-Served by `sandbox_editor_schema()` (`sandbox/assets/abilities/sandbox-editor.php`).
-This document describes the plain-HTTP surface registered in
-`00-sandbox-editor-schema-rest.php`. There are two other ways to reach the
-same function (the generic WP Abilities REST controller, and the full MCP
-JSON-RPC server at `/wp-json/sandbox/mcp`) — this is the lightest one: a
-single GET request, no session handshake, no JSON-RPC envelope.
+A read-only lookup for Gutenberg block attributes and Elementor widget/element
+controls — "what settings does this block/widget have, and how do I actually
+use each one to change styling?"
 
 ## Endpoints
 
 ```
-GET /wp-json/sandbox/v1/editor-schema        — the schema lookup itself
+GET /wp-json/sandbox/v1/editor-schema        — the schema lookup
 GET /wp-json/sandbox/v1/editor-schema/docs   — this document, as JSON
 ```
 
-## Auth
+## Authentication
 
-**None.** Unlike every other sandbox REST route, this one does not require a
-logged-in `manage_options` user or an Application Password — it's read-only
-schema introspection (no post content, no user data, no code execution, no
-writes), meant to be queried by another machine on the LAN without
-provisioning credentials for it. Still gated by the instance-wide
-`sandbox_abilities_enabled()` kill switch (`wp option update
-sandbox_abilities_enabled 0` turns it off along with the rest of the
-abilities layer). Dev/staging only — Docker publishes the instance's WP port
-on `0.0.0.0`, so treat the whole instance as LAN-exposed, not just this route.
-
-## Host + port
-
-Each sandbox instance is its own Docker container on its own published port
-(see `docker port` or the instance's compose file, `ports: - "<port>:80"`).
-There is no single fixed port across instances — ask whoever owns the
-instance for its current `host:port`, or run `sb status` / check
-`ensure_instance`'s `wordpress_port` for this project.
-
-```
-http://<host-lan-ip>:<port>/wp-json/sandbox/v1/editor-schema?builder=gutenberg&name=core/heading
-```
+None required.
 
 ## Query parameters
 
@@ -53,7 +26,7 @@ http://<host-lan-ip>:<port>/wp-json/sandbox/v1/editor-schema?builder=gutenberg&n
 | `types` | elementor | `all` \| `widgets` \| `elements` — restrict a global search or listing to one kind. |
 | `limit` | elementor global search | Max results returned (default 40). |
 | `variants` | elementor, with `name` | Resolve a specific control's per-breakpoint keys (see Responsive variants, below). |
-| `source_root` | gutenberg EB blocks | Override the Essential Blocks source-checkout path used to resolve full attribute sets (spec 011); rarely needed. |
+| `source_root` | gutenberg EB blocks | Override the Essential Blocks source-checkout path used to resolve full attribute sets; rarely needed. |
 
 ## Gutenberg: response shape
 
@@ -68,7 +41,7 @@ GET ?builder=gutenberg&name=core/heading
   "dynamic": true,               // true if this block's class defines real server-render logic (see Dynamic flag, below)
   "title": "Heading",             // human label, like Elementor's widget label
   "description": "Introduce new sections and organize content...",
-  "eb_attribute_fidelity": "full", // full | partial | "reduced (...)" — see Fidelity levels, below
+  "eb_attribute_fidelity": "full", // full | partial — see Fidelity levels, below
   "attributes": {                 // FLAT map, every attribute, full definition (not just type/default)
     "content": {
       "type": "rich-text",
@@ -100,7 +73,7 @@ GET ?builder=gutenberg&name=core/heading
 ### Attribute definition fields ("how to use it")
 
 Each entry in `attributes` (and `groups.content`/`groups.common`) is the
-**full** WP attribute definition, not a stripped `{type, default}` pair. The
+**full** attribute definition, not a stripped `{type, default}` pair. The
 fields that actually tell you how to use the attribute:
 
 | Field | Meaning |
@@ -113,7 +86,7 @@ fields that actually tell you how to use the attribute:
 | `attribute` | The literal HTML attribute name (e.g. `src`, `alt`, `href`), when `source: "attribute"` |
 | `role` | `content` (user-facing content) vs `local`/absent (internal bookkeeping, e.g. `blob`) |
 
-Example — `core/image`'s `url` attribute: `{"type":"string","source":"attribute","selector":"img","attribute":"src"}` means the value lives in the saved markup as `<img src="...">`, not as block-comment JSON — read/write it by changing that `<img>` tag's `src`, which `gutenberg-update` does for you when you set `attributes.url`.
+Example — `core/image`'s `url` attribute: `{"type":"string","source":"attribute","selector":"img","attribute":"src"}` means the value lives in the saved markup as `<img src="...">`, not as block-comment JSON.
 
 ### `groups.content` vs `groups.common`
 
@@ -126,45 +99,38 @@ way Elementor's `tab==='style'` does, so it's a 2-way split here):
 - **`common`** — attributes present on nearly every block regardless of what
   it does (`lock`, `metadata`, `className`, `style`, `anchor`, `align`,
   `backgroundColor`, `textColor`, `gradient`, `fontSize`, `fontFamily`,
-  `borderColor`). This list is **data-driven, not guessed** — found by
-  diffing `attributes` across 8 unrelated core + Essential Blocks blocks and
-  keeping names that recurred across most/all of them.
+  `borderColor`). This list is data-driven — found by diffing `attributes`
+  across several unrelated blocks and keeping names that recurred across
+  most/all of them.
 
-### Styling attributes NOT in block.json (`supports` + `style_paths`)
+### Styling attributes NOT in `attributes` (`supports` + `style_paths`)
 
 This is the Gutenberg analogue of "how do I change this widget's background/
-border/shadow" for Elementor's `groups.common` (`_section_background`, etc.)
-— except Gutenberg's mechanism is one level more indirect.
+border/shadow" for Elementor's `groups.common` — except Gutenberg's mechanism
+is one level more indirect.
 
 A block's `supports` flags (color, spacing, typography, border, shadow,
 dimensions, position, ...) don't add named attributes to `attributes` at
 all. Instead they enable the *generic* `style` attribute — a single opaque
-JSON object with no schema of its own — to accept specific sub-paths, which
-core's block-supports renderers read when producing saved markup.
+JSON object with no schema of its own — to accept specific sub-paths.
 
 `style_paths` tells you, **for this specific block**, which `style.*` JSON
 paths its `supports` flags actually enable — e.g. if `supports.spacing.
 padding` is on, `style_paths` includes `"spacing.padding": "style.spacing.
-padding"`. Every path is read directly off WP core's own
-`wp-includes/block-supports/*.php` source (not guessed) — including the one
-real gotcha: `color.text`/`color.background` default to ENABLED when the
-`color` support group exists at all and doesn't explicitly say otherwise
-(every other flag defaults to disabled when simply absent).
+padding"`. One real gotcha worth knowing: `color.text`/`color.background`
+default to ENABLED when the `color` support group exists at all and doesn't
+explicitly say otherwise (every other flag defaults to disabled when simply
+absent).
 
-**To actually apply one**: write into the block's `attributes.style` at that
-path via `gutenberg-update` (or `gutenberg-insert`). Example — give a heading
-16px of top/bottom padding and a custom text color:
+**To actually apply one**: write into the block's `style` attribute at that
+path. Example — a heading with 16px top/bottom padding and a custom text
+color ends up with:
 
 ```jsonc
-// gutenberg-update input
 {
-  "post_id": 5,
-  "block_id": "<the block's blockId>",
-  "attributes": {
-    "style": {
-      "spacing": { "padding": { "top": "16px", "bottom": "16px" } },
-      "color":   { "text": "#0c0c24" }
-    }
+  "style": {
+    "spacing": { "padding": { "top": "16px", "bottom": "16px" } },
+    "color":   { "text": "#0c0c24" }
   }
 }
 ```
@@ -175,24 +141,24 @@ A couple of practical notes:
   the top-level `fontSize`/`fontFamily` attribute instead of `style.
   typography.*`. The `style.typography.*` path is only used for a fully
   custom (non-preset) value. `style_paths` flags this inline.
-- `style` is a deep-merge target, not a full-replace — `gutenberg-update`
-  merges attributes, so setting `style.color.text` doesn't clobber an
-  existing `style.spacing.padding` set earlier.
+- `style` should be treated as a deep-merge target, not a full-replace —
+  setting `style.color.text` shouldn't clobber an existing
+  `style.spacing.padding` set earlier.
 
 ### Dynamic flag
 
 `dynamic: true` means the block's class defines its OWN `render_callback()`
 — i.e. it generates some content server-side from its attributes at render
 time (a live query, current-post binding, etc.), not just static
-`save.js`-baked markup. **Essential Blocks gotcha**: EB's base
-`Block::register()` attaches a generic `render_callback` to literally every
-block it registers (handling conditional display + inline-SVG substitution
-only), so the RAW WP signal (`(bool) $block_type->render_callback`) is
-`true` for every single EB block whether or not it has real dynamic logic.
-This endpoint corrects for that — `dynamic` here reflects whether the
-concrete block subclass defines its own `render_callback()` method, which is
-the real signal. Note this is a **block-type-level** signal (does this kind
-of block support dynamic rendering at all), not a per-instance one — e.g.
+`save.js`-baked markup. **Essential Blocks gotcha**: EB's base block
+registration attaches a generic `render_callback` to literally every block
+it registers (handling conditional display + inline-SVG substitution only),
+so the raw signal is `true` for every single EB block whether or not it has
+real dynamic logic. This endpoint corrects for that — `dynamic` here
+reflects whether the concrete block subclass defines its own
+`render_callback()` method, which is the real signal. Note this is a
+**block-type-level** signal (does this kind of block support dynamic
+rendering at all), not a per-instance one — e.g.
 `essential-blocks/advanced-heading` reports `dynamic:true` because its class
 supports a dynamic title source, even for a specific instance configured
 with `source:"custom"` (static).
@@ -200,31 +166,26 @@ with `source:"custom"` (static).
 ### Fidelity levels (`eb_attribute_fidelity` / `fidelity`, `source`)
 
 - **Non-EB blocks** (`core/*`, any third-party block, ACF, etc.):
-  `eb_attribute_fidelity: "full"`. `block.json` (what `WP_Block_Type::
-  $attributes` exposes) is the complete, authoritative attribute
-  declaration for these — there's nothing further to resolve.
-- **`essential-blocks/*` blocks**: EB declares only ~3 generic attributes in
-  its own `block.json`; the REAL attribute set (dozens to low hundreds) is
-  assembled at runtime by JS generator functions
-  (`generateTypographyAttributes()`, `generateBackgroundAttributes()`, ...).
-  This endpoint resolves the full set from EB's own source checkout when
-  available (`source: "live"`, `eb_attribute_fidelity: "full"` or
+  `eb_attribute_fidelity: "full"`. The declared attribute set is the
+  complete, authoritative one for these — there's nothing further to
+  resolve.
+- **`essential-blocks/*` blocks**: EB declares only ~3 generic attributes up
+  front; the REAL attribute set (dozens to low hundreds) is assembled at
+  runtime by generator functions (`generateTypographyAttributes()`,
+  `generateBackgroundAttributes()`, ...). This endpoint resolves the full
+  set when possible (`source: "live"`, `eb_attribute_fidelity: "full"` or
   `"partial"` if some generator couldn't be expanded — see
-  `fidelity.unresolved` for which ones), and falls back to a committed
-  schema catalog (`source: "catalog"`) when the live source can't be
-  resolved or the plugin isn't installed on this instance at all.
+  `fidelity.unresolved` for which ones), and falls back to a precomputed
+  catalog (`source: "catalog"`) when the full set can't be resolved live.
 - **`source: "catalog"` responses**: `title`/`description`/`supports`/
-  `style_paths` are only populated if the SAME plugin/block also happens to
-  be live-registered on this instance (common — catalog is chosen for
-  richer attribute counts, not because the plugin is absent). Pure
-  catalog-only entries (plugin genuinely not installed) don't carry these
-  yet — the catalog-generation pipeline doesn't currently persist them; would
-  need a `sb schema-catalog generate` regen with the pipeline extended to
-  match.
+  `style_paths` are only populated when the same block is also
+  live-registered (common — catalog is chosen for richer attribute counts,
+  not because the block is unavailable). Pure catalog-only entries don't
+  carry these fields yet.
 - **`version_mismatch: true`**: the installed plugin version differs from
   the version the catalog entry was generated against — treat catalog
   attribute names as probably-right but re-verify against `source: "live"`
-  if this instance has the plugin active.
+  if available.
 
 ## Elementor: response shape
 
@@ -272,13 +233,12 @@ GET ?builder=elementor&name=heading
 - **`content`** — this widget's own primary settings (what it shows).
 - **`style`** — this widget's own appearance controls (colors, typography
   targeting the widget's inner elements).
-- **`common`** — Elementor base + Essential Addons extension controls
-  targeting `{{WRAPPER}}` (the outer div) — **identical across every
-  widget**: `_section_background` (color/image/gradient), `_section_border`,
-  `_section_box_shadow`, `section_effects` (entrance animation),
-  `section_motion_effects`, `_section_transform`. To change a widget's
-  wrapper background, look in `groups.common._section_background`, not
-  `groups.style`.
+- **`common`** — base + extension controls targeting `{{WRAPPER}}` (the
+  outer div) — **identical across every widget**: `_section_background`
+  (color/image/gradient), `_section_border`, `_section_box_shadow`,
+  `section_effects` (entrance animation), `section_motion_effects`,
+  `_section_transform`. To change a widget's wrapper background, look in
+  `groups.common._section_background`, not `groups.style`.
 
 ### Global search (no `name`)
 
@@ -298,13 +258,13 @@ scope it, `limit` to cap results (default 40).
 GET ?builder=elementor&name=heading&variants=typography_font_size
 ```
 
-Elementor's `get_controls()` only ever lists ONE base control key per
+Elementor's control list only ever includes ONE base control key per
 responsive setting — the per-device keys (`{key}_tablet`, `{key}_mobile`,
 ...) are derived, never listed directly. This resolves them: returns the
 active breakpoints and the exact key to write for each device, so you never
 have to guess the suffix convention.
 
-## Practical examples
+## Examples
 
 List every registered Gutenberg block:
 ```
@@ -331,19 +291,17 @@ Find which widget/element exposes a box-shadow control:
 GET /wp-json/sandbox/v1/editor-schema?builder=elementor&search=box%20shadow&types=widgets
 ```
 
-## Known gaps (not fixed here, flagged for follow-up)
+## Known limitations
 
-- Catalog-only Gutenberg entries (plugin genuinely absent on this instance)
-  don't carry `title`/`description`/`supports`/`style_paths` yet — the
-  `sb schema-catalog generate` pipeline captures `attributes` and drops the
-  rest; would need the pipeline extended + a regen.
+- Catalog-only Gutenberg entries (block not live-registered) don't carry
+  `title`/`description`/`supports`/`style_paths` yet.
 - No global "search across all Gutenberg blocks" equivalent to Elementor's
   `search` (no `name`) mode yet — e.g. "which blocks support border color"
   currently means checking `supports`/`style_paths` per-block yourself.
-- EB attribute-generator functions (`generateTypographyAttributes`,
+- Essential Blocks attribute-generator functions (`generateTypographyAttributes`,
   `generateBackgroundAttributes`, `generateBorderShadowAttributes`,
   `generateDimensionsAttributes`, `generateResponsiveAlignAttributes`,
-  `generateResponsiveRangeAttributes`) can't always be expanded from source
-  — when they can't, `fidelity.level` is `"partial"` and
-  `fidelity.unresolved` lists which generators were skipped; treat the
-  attribute count as a floor, not exact.
+  `generateResponsiveRangeAttributes`) can't always be expanded — when they
+  can't, `fidelity.level` is `"partial"` and `fidelity.unresolved` lists
+  which generators were skipped; treat the attribute count as a floor, not
+  exact.

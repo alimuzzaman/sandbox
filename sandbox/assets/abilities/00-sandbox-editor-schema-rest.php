@@ -98,12 +98,11 @@ function sandbox_editor_schema_docs_rest_cb(WP_REST_Request $req)
 {
     $path = __DIR__ . '/editor-schema-api.md';
     if (!is_readable($path)) {
-        return new WP_Error('docs_not_found', 'editor-schema-api.md was not provisioned on this instance.', ['status' => 404]);
+        return new WP_Error('docs_not_found', 'Editor Schema API docs are not available.', ['status' => 404]);
     }
     return new WP_REST_Response([
-        'format'      => 'markdown',
-        'title'       => 'Editor Schema API',
-        'source_path' => 'sandbox/assets/abilities/editor-schema-api.md',
-        'content'     => file_get_contents($path),
+        'format'  => 'markdown',
+        'title'   => 'Editor Schema API',
+        'content' => file_get_contents($path),
     ], 200);
 }

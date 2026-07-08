@@ -1237,13 +1237,37 @@ function sandbox_editor_gb_style_paths($supports): array
  *  schema-catalog generate` pipeline currently drops both title/description
  *  and supports when writing the committed catalog; a known gap, not fixed
  *  here — would need a catalog regen to take effect). */
+/** 92 real Essential Blocks descriptions extracted directly from block.json in
+ *  the free+pro plugin SOURCE (not generated). Needed because: (a) EB Pro's
+ *  free-plugin stub registration (active when Pro isn't installed) carries no
+ *  description at all, and (b) the packaged/distributed Pro plugin (unlike a
+ *  git checkout) ships no `src/` to read it from live either -- confirmed by
+ *  checking is_dir() from inside the WP runtime itself (false for the git
+ *  checkout path, since it isn't mounted into the container; the installed
+ *  Pro plugin directory has no src/ regardless). Provisioned alongside
+ *  control-descriptions.json. Cached; [] if not provisioned. */
+function sandbox_editor_gb_block_descriptions(): array
+{
+    static $cache = null;
+    if ($cache === null) {
+        $f = WPMU_PLUGIN_DIR . '/sandbox-schema-catalog/block-descriptions.json';
+        $json = is_file($f) ? @file_get_contents($f) : false;
+        $cache = ($json !== false) ? (json_decode($json, true) ?: []) : [];
+    }
+    return $cache;
+}
+
 function sandbox_editor_gb_meta($bt): array
 {
     if (!$bt) { return []; }
     $supports = (array) ($bt->supports ?? []);
+    $description = $bt->description ?? null;
+    if (!$description) {
+        $description = sandbox_editor_gb_block_descriptions()[$bt->name ?? ''] ?? null;
+    }
     return [
         'title'       => $bt->title ?? null,
-        'description' => $bt->description ?? null,
+        'description' => $description,
         'supports'    => $supports,
         'style_paths' => sandbox_editor_gb_style_paths($supports),
     ];
@@ -2054,13 +2078,19 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
                              'count' => count($cat[$key] ?? [])];
         $resp['groups']   = $groups;
-        // title/description/supports/style_paths: pulled from the LIVE block type when
-        // this plugin happens to be active on this instance too (common — the catalog
-        // path is chosen for richer counts, not because the plugin is absent). Catalog
-        // entries themselves don't carry these yet (a known gap — the catalog-generation
-        // pipeline drops title/description/supports when writing the committed file;
-        // would need a regen to backfill for installs where the plugin truly isn't active).
+        // title/supports/style_paths: pulled from the LIVE block type when this
+        // plugin happens to be active on this instance too (common — the catalog
+        // path is chosen for richer counts, not because the plugin is absent).
+        // Catalog entries themselves don't carry these yet (a known gap — the
+        // catalog-generation pipeline drops title/supports when writing the
+        // committed file; would need a regen to backfill for installs where the
+        // plugin truly isn't active). description falls back further still: the
+        // curated block-descriptions.json (real source data, not generated) even
+        // when $bt is entirely null (the plugin isn't even stub-registered).
         $resp += sandbox_editor_gb_meta($bt);
+        if (empty($resp['description'])) {
+            $resp['description'] = sandbox_editor_gb_block_descriptions()[$name] ?? null;
+        }
     }
     if ($builder === 'elementor' && !empty($cat['groups'])) {
         if ($search !== null && $search !== '') {

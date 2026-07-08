@@ -490,6 +490,15 @@ def _write_schema_catalog(instance: str) -> None:
     descriptions = asset_dir / "control-descriptions.json"
     if descriptions.is_file():
         shutil.copyfile(descriptions, dest / descriptions.name)
+    # 92 real Essential Blocks descriptions extracted directly from block.json in
+    # the free+pro source (not generated -- the plugin authors already wrote
+    # them). Needed because EB Pro's stub registration (when Pro isn't
+    # installed) and the catalog format both drop `description` entirely, and
+    # the packaged/distributed Pro plugin (unlike a git checkout) ships no
+    # `src/` to read it from live either.
+    block_descriptions = asset_dir / "block-descriptions.json"
+    if block_descriptions.is_file():
+        shutil.copyfile(block_descriptions, dest / block_descriptions.name)
 
 
 def _write_dl_cache_muplugin(instance: str) -> None:

@@ -175,6 +175,20 @@ inserts ([[elementor-page-data-injection-recipe]]).
    count). But since there's no Templately type meta to read, pick the dest `$type` from the
    API `template_type` or a registered key. Contrast: the Gutenberg `TemplateFactory` lands in
    `templately_library` WITH the platform/type meta set. The two builders' library homes differ.
+8. **Malformed HTML in source rich-text fails core block validation — normalize it.** A source
+   heading/text title can hold HTML Elementor tolerates but core's `save()` rewrites — measured:
+   a heading title `...business</span></br> growth` (an invalid `</br>` close tag). `core/heading`
+   `save()` emits the canonical `<br>`, so the stored markup mismatches -> `Block validation
+   failed`. Before emitting, normalize break tags (`</br>`/`<br/>`/`<br />` -> `<br>`) and generally
+   sanitize source rich-text to the exact HTML core would serialize (same class as gotcha 1).
+9. **EA/dynamic widgets have NO core-block twin — DECOMPOSE, don't drop.** With EB inactive,
+   `eael-info-box` -> `core/group{ image + heading(title,tag) + paragraph(text) + button }`,
+   `eael-testimonial` -> `group{ image(avatar) + paragraph(quote) + heading(name) + paragraph
+   (company) }`, `counter` -> `heading(number+suffix) + paragraph(title)`, `image-gallery` ->
+   `core/gallery` of `core/image`. A truly dynamic widget (`form`) has no static equivalent ->
+   emit an HONEST placeholder group (heading + note) and surface it, never a silent drop. Read
+   the EA content keys first (`eael_infobox_title`/`_text`/`_image`, `eael_testimonial_name`/
+   `_description`/`_company_title`, counter `ending_number`/`suffix`/`title`).
 
 ---
 
@@ -195,6 +209,15 @@ TEMPLATE -> library branch (CTA section, exercises text-editor + icon-list + 3 i
   `TemplateFactory('gutenberg')->create('page_single',...)->import(...)`
   (heading->h4, text-editor->paragraph, 3 images, icon-list->list); editor-valid, platform
   meta `gutenberg`. Images required explicit `media_sideload_image` localization (gotcha 4).
+
+FULL 10-section page (EL -> Gutenberg, the real-scale run):
+- **69** — `page`, entire FlexiGency Landing (10 sections, 76 EL containers, depth 5)
+  **converted EL -> Gutenberg** with a single recursive walk (container->group preserving
+  nesting/orientation). Output: 87 groups, 41 images (0 empty src — all localized), 33
+  headings, 29 paragraphs, 12 buttons, 2 lists, 1 gallery. EA widgets decomposed per gotcha 9
+  (`eael-info-box`x12, `eael-testimonial`x6, `counter`x2, `image-gallery`, `form`->placeholder).
+  Editor-valid after normalizing one `</br>` (gotcha 8). Content/structure faithful; theme
+  (not the EL kit) styles it — the One Law.
 
 ---
 

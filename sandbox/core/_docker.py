@@ -137,6 +137,9 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
+      # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point
+      # its download cache at a writable path so it doesn't warn on every call.
+      WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
 {_env_config_lines(inst_cfg)}
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html
@@ -178,6 +181,9 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
       WORDPRESS_DB_NAME: wp
+      # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point
+      # its download cache at a writable path so it doesn't warn on every call.
+      WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
 {_env_config_lines(inst_cfg)}
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:/var/www/html
@@ -230,6 +236,9 @@ def _web_litespeed(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
       - "{inst_cfg["wordpress_port"] + 1000}:7080"  # OLS WebAdmin console
     environment:
       TZ: UTC
+      # wp-cli runs here via `exec -u www-data` (HOME=/var/www, unwritable) — point
+      # its download cache at a writable path so it doesn't warn on every call.
+      WP_CLI_CACHE_DIR: /tmp/.wp-cli/cache
     volumes:
       - {RUNTIME_DIR}/wp-{instance}:{docroot}
       - {RUNTIME_DIR}/seeds:/seeds

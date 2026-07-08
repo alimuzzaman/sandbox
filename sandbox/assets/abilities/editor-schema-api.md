@@ -28,6 +28,8 @@ None required.
 | `variants` | elementor, with `name` | Resolve a specific control's per-breakpoint keys (see Responsive variants, below). |
 | `source_root` | gutenberg EB blocks | Override the Essential Blocks source-checkout path used to resolve full attribute sets; rarely needed. |
 | `include_variants` | gutenberg, with `name` | `1` to include MOB/TAB/hover-prefixed variant attributes as their own top-level entries instead of hiding them (see "Decoded descriptions + hidden variants", below). |
+| `full` | gutenberg, with `name` | `1` to get full definitions for `groups.common` (global/style) attributes too, not just their names — see "Default response is trimmed", below. |
+| `find` | both, no `name` | Find a block/widget by TITLE/DESCRIPTION/KEYWORDS (not attribute content — that's `search`). Returns matching names, ranked. See "Finding a block/widget by name or purpose", below. |
 
 ## Gutenberg: response shape
 
@@ -43,7 +45,7 @@ GET ?builder=gutenberg&name=core/heading
   "title": "Heading",             // human label, like Elementor's widget label
   "description": "Introduce new sections and organize content...",
   "eb_attribute_fidelity": "full", // full | partial — see Fidelity levels, below
-  "attributes": {                 // FLAT map, every attribute, full definition (not just type/default)
+  "attributes": {                 // block-specific attributes ONLY by default — see below
     "content": {
       "type": "rich-text",
       "source": "rich-text",      // <-- HOW this attribute maps into saved markup
@@ -51,16 +53,15 @@ GET ?builder=gutenberg&name=core/heading
       "role": "content"
     },
     "level": { "type": "number", "default": 2 },
-    "align": { "type": "string", "enum": ["left","center","right","wide","full",""] },
-    "backgroundColor": { "type": "string" },
     "...": "..."
   },
-  "groups": {                      // the SAME attributes map, split block-specific vs shared
+  "groups": {
     "content": { "content": {...}, "level": {...}, "levelOptions": {...}, "placeholder": {...} },
-    "common":  { "lock": {...}, "metadata": {...}, "className": {...}, "style": {...},
-                 "anchor": {...}, "align": {...}, "backgroundColor": {...}, "textColor": {...},
-                 "gradient": {...}, "fontSize": {...}, "fontFamily": {...}, "borderColor": {...} }
+    "common":  ["align", "backgroundColor", "textColor", "gradient", "fontSize", "fontFamily", "borderColor", "..."]
+    // ^ names ONLY by default — full definitions cost a second request, see below
   },
+  "global_attributes_count": 7,
+  "tip": "7 recurring global/style attributes (...) are omitted by default; groups.common lists their names only. Pass full=1 on this same request to get their full definitions too.",
   "supports": { "color": {...}, "spacing": {...}, "typography": {...}, "...": "..." },
   "style_paths": {                 // see "Styling attributes NOT in block.json", below
     "spacing.padding": "style.spacing.padding",
@@ -71,11 +72,34 @@ GET ?builder=gutenberg&name=core/heading
 }
 ```
 
+### Default response is trimmed — `full=1` to get everything
+
+By default, `attributes` and `groups.content` only cover this block's OWN
+settings; `groups.common` (the recurring global/style attributes — margin,
+padding, border, shadow, background, color, typography, alignment, sizing —
+the same KIND of setting found on nearly every block) is names-only, not
+full definitions. This matters most on large blocks: `essential-blocks/
+pro-data-table` has 500 attributes total, but only 110 are unique to it —
+the other 390 are the generic style vocabulary. The default response
+reflects only the 110; `groups.common` still lists all 390 names, so
+nothing is hidden, just not fully detailed by default.
+
+Pass **`full=1`** on the same request (same `builder`+`name`) to get full
+definitions for the global ones too. The response always includes
+`global_attributes_count` and a self-explanatory `tip` field, so an agent
+that has never read this doc can still figure out what to do next just from
+the JSON itself.
+
+`search` results are unaffected by this — they're already inherently small
+(only the matches), so they always return full definitions regardless of
+`full`.
+
 ### Attribute definition fields ("how to use it")
 
-Each entry in `attributes` (and `groups.content`/`groups.common`) is the
-**full** attribute definition, not a stripped `{type, default}` pair. The
-fields that actually tell you how to use the attribute:
+Each entry in `attributes` (and `groups.content`, or `groups.common` when
+`full=1` is passed) is the **full** attribute definition, not a stripped
+`{type, default}` pair. The fields that actually tell you how to use the
+attribute:
 
 | Field | Meaning |
 |---|---|
@@ -379,6 +403,47 @@ responsive setting — the per-device keys (`{key}_tablet`, `{key}_mobile`,
 ...) are derived, never listed directly. This resolves them: returns the
 active breakpoints and the exact key to write for each device, so you never
 have to guess the suffix convention.
+
+## Finding a block/widget by name or purpose (`find`, no `name`)
+
+```
+GET ?builder=gutenberg&find=pricing
+GET ?builder=elementor&find=heading
+```
+
+`search` finds an ATTRIBUTE/CONTROL by content within a block/widget you
+already know the name of. `find` is the other direction — finds the
+block/widget itself when you only know what you're looking for by
+description, not its exact slug. Matches against title + description
+(Gutenberg) or title + keywords (Elementor — it has no per-widget
+description at all, confirmed directly: no `get_description()` method
+anywhere in `Widget_Base`/`Element_Base`) + the raw name, expanded through a
+plain-English synonym dictionary (e.g. `"table"` also matches `"grid"`,
+`"pricing"` also matches `"price"`/`"plans"`) so you don't have to guess the
+exact word the block's own title uses. Ranked, literal title match scores
+highest.
+
+```jsonc
+{
+  "builder": "gutenberg", "find": "table",
+  "matches": [
+    { "name": "essential-blocks/pro-data-table", "title": "Data Table",
+      "description": "Insert an advanced data table...", "attribute_count": 500, "score": 200 },
+    { "name": "essential-blocks/post-grid", "title": "Post Grid",
+      "description": "Create a stunning...grid layout", "attribute_count": 6, "score": 100 }
+  ]
+}
+```
+
+Gutenberg: pass `eb_only=1` to scope to Essential Blocks, `limit` to cap
+results (default 40); scans catalog-only names too (a block/plugin not
+live-registered on this instance). Elementor: pass `types=widgets` or
+`types=elements` to scope it.
+
+**The intended workflow**: `find` to get the right `name` → `search` (with
+that `name`) to find the specific attribute/control you need → write it.
+Only fetch the full per-block/widget definition (no `search`) when you
+actually need to browse everything.
 
 ## Examples
 

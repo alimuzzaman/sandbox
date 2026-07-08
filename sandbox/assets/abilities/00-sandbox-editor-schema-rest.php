@@ -80,6 +80,7 @@ function sandbox_editor_schema_rest_cb(WP_REST_Request $req)
         'builder'          => (string) $req->get_param('builder'),
         'name'             => (string) $req->get_param('name'),
         'search'           => $req->get_param('search'),
+        'find'             => $req->get_param('find'),
         'eb_only'          => $req->get_param('eb_only'),
         'types'            => $req->get_param('types'),
         'limit'            => $req->get_param('limit'),

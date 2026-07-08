@@ -1308,14 +1308,15 @@ function sandbox_editor_gb_style_paths($supports): array
  *  schema-catalog generate` pipeline currently drops both title/description
  *  and supports when writing the committed catalog; a known gap, not fixed
  *  here — would need a catalog regen to take effect). */
-/** 92 real Essential Blocks descriptions extracted directly from block.json in
- *  the free+pro plugin SOURCE (not generated). Needed because: (a) EB Pro's
- *  free-plugin stub registration (active when Pro isn't installed) carries no
- *  description at all, and (b) the packaged/distributed Pro plugin (unlike a
- *  git checkout) ships no `src/` to read it from live either -- confirmed by
- *  checking is_dir() from inside the WP runtime itself (false for the git
- *  checkout path, since it isn't mounted into the container; the installed
- *  Pro plugin directory has no src/ regardless). Provisioned alongside
+/** 92 real Essential Blocks {title, description} pairs extracted directly
+ *  from block.json in the free+pro plugin SOURCE (not generated). Needed
+ *  because: (a) EB Pro's free-plugin stub registration (active when Pro
+ *  isn't installed) carries NEITHER title NOR description (verified live:
+ *  essential-blocks/pro-business-hours' $bt->title AND $bt->description are
+ *  both empty even though it IS live-registered), and (b) the packaged/
+ *  distributed Pro plugin (unlike a git checkout) ships no `src/` to read
+ *  either from live regardless -- confirmed by checking is_dir() from
+ *  inside the WP runtime itself. Provisioned alongside
  *  control-descriptions.json. Cached; [] if not provisioned. */
 function sandbox_editor_gb_block_descriptions(): array
 {
@@ -1332,15 +1333,71 @@ function sandbox_editor_gb_meta($bt): array
 {
     if (!$bt) { return []; }
     $supports = (array) ($bt->supports ?? []);
+    $curated  = sandbox_editor_gb_block_descriptions()[$bt->name ?? ''] ?? [];
+    $title       = $bt->title ?? null;
     $description = $bt->description ?? null;
-    if (!$description) {
-        $description = sandbox_editor_gb_block_descriptions()[$bt->name ?? ''] ?? null;
-    }
+    if (!$title)       { $title       = $curated['title'] ?? null; }
+    if (!$description) { $description = $curated['description'] ?? null; }
     return [
-        'title'       => $bt->title ?? null,
+        'title'       => $title,
         'description' => $description,
         'supports'    => $supports,
         'style_paths' => sandbox_editor_gb_style_paths($supports),
+    ];
+}
+
+/**
+ * Human search term -> alternate/near-synonym words for finding a BLOCK/
+ * WIDGET by purpose (`find`, title+description/keywords), as opposed to
+ * sandbox_editor_gb_search_synonyms() which is for finding an ATTRIBUTE by
+ * name within one already-known Gutenberg block (`search`, EB abbreviation
+ * decoding specifically). This one is plain English, shared by both
+ * builders. Derived by reading the real title list across all 92 EB blocks
+ * (Data Table, Post Grid, Pricing Table, Testimonial Slider, Advanced
+ * Search, Business Hours, ...) and noting where a natural search word
+ * wouldn't literally appear in the matching block's own title/description
+ * (e.g. "table" wouldn't literally match "Post Grid", but a grid IS a kind
+ * of tabular layout someone searching "table" might mean).
+ */
+function sandbox_editor_find_synonyms(): array
+{
+    return [
+        'table' => ['grid'], 'grid' => ['table', 'gallery'],
+        'slider' => ['carousel'], 'carousel' => ['slider'],
+        'gallery' => ['grid', 'images', 'photos'], 'images' => ['gallery', 'photo'], 'photos' => ['gallery', 'image'],
+        'form' => ['field', 'input', 'contact'], 'field' => ['form', 'input'],
+        'pricing' => ['price', 'plans', 'plan'], 'price' => ['pricing'], 'plans' => ['pricing'],
+        'testimonial' => ['review', 'rating', 'feedback'], 'review' => ['testimonial', 'rating'],
+        'rating' => ['review', 'testimonial'],
+        'menu' => ['navigation', 'nav'], 'navigation' => ['menu', 'nav'], 'nav' => ['menu', 'navigation'],
+        'accordion' => ['toggle', 'collapse', 'faq'], 'toggle' => ['accordion'], 'faq' => ['accordion', 'toggle'],
+        'tabs' => ['tab'], 'tab' => ['tabs'],
+        'countdown' => ['timer'], 'timer' => ['countdown'],
+        'social' => ['share', 'icons'],
+        'video' => ['animation', 'media'],
+        'map' => ['location', 'address'], 'location' => ['map'],
+        'icon' => ['symbol'],
+        'list' => ['contents', 'timeline'],
+        'progress' => ['chart', 'bar', 'stats'], 'chart' => ['progress', 'graph'], 'stats' => ['progress', 'counter'],
+        'hours' => ['schedule', 'time', 'business hours'], 'schedule' => ['hours', 'time'],
+        'search' => ['find'],
+        'popup' => ['modal', 'offcanvas', 'dialog'], 'modal' => ['popup'],
+        'banner' => ['cta', 'promo', 'hero'], 'cta' => ['banner', 'call to action'], 'hero' => ['banner', 'promo'],
+        'counter' => ['number', 'stats'], 'number' => ['counter'],
+        'team' => ['staff', 'member'], 'staff' => ['team'], 'member' => ['team'],
+        'shop' => ['woo', 'woocommerce', 'product', 'store'], 'product' => ['woo', 'shop'], 'store' => ['shop', 'woo'],
+        'layout' => ['container', 'wrapper', 'row', 'column'], 'container' => ['wrapper', 'layout'],
+        'wrapper' => ['container'],
+        'text' => ['typography', 'heading'], 'typography' => ['text', 'heading'],
+        'news' => ['ticker'], 'ticker' => ['news'],
+        'loop' => ['query', 'dynamic'], 'query' => ['loop'],
+        'divider' => ['separator', 'shape'], 'separator' => ['divider'],
+        'notice' => ['alert', 'message'], 'alert' => ['notice'],
+        'card' => ['flip', 'stacked'], 'flip' => ['card'],
+        'category' => ['taxonomy', 'tag'], 'taxonomy' => ['category', 'tag'],
+        'comparison' => ['before after', 'compare'], 'compare' => ['comparison'],
+        'hotspot' => ['point', 'marker'],
+        'captcha' => ['recaptcha'],
     ];
 }
 
@@ -2187,13 +2244,13 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         // Catalog entries themselves don't carry these yet (a known gap — the
         // catalog-generation pipeline drops title/supports when writing the
         // committed file; would need a regen to backfill for installs where the
-        // plugin truly isn't active). description falls back further still: the
-        // curated block-descriptions.json (real source data, not generated) even
-        // when $bt is entirely null (the plugin isn't even stub-registered).
+        // plugin truly isn't active). title/description fall back further
+        // still: the curated block-descriptions.json (real source data, not
+        // generated) even when $bt is entirely null (not even stub-registered).
         $resp += sandbox_editor_gb_meta($bt);
-        if (empty($resp['description'])) {
-            $resp['description'] = sandbox_editor_gb_block_descriptions()[$name] ?? null;
-        }
+        $curated = sandbox_editor_gb_block_descriptions()[$name] ?? [];
+        if (empty($resp['title']))       { $resp['title']       = $curated['title'] ?? null; }
+        if (empty($resp['description'])) { $resp['description'] = $curated['description'] ?? null; }
         return sandbox_editor_gb_trim_response($resp, $full);
     }
     if ($builder === 'elementor' && !empty($cat['groups'])) {
@@ -2229,6 +2286,60 @@ function sandbox_editor_schema($input)
         // pass full:true to get everything back. `attributes`/`groups.content`
         // (this block's own settings) are unaffected either way.
         $gb_full = !empty($input['full']);
+
+        // Find a block by TITLE/DESCRIPTION/PURPOSE (not attribute content --
+        // that's `search`). Scans every live-registered block (+ any catalog-only
+        // names not live-registered) matching title/description/name against
+        // the query + its synonym expansion, ranked. Only makes sense with no
+        // `name` (finding is how you GET a name to then look up).
+        $gb_find = isset($input['find']) ? trim((string) $input['find']) : null;
+        if ($gb_find && !$name) {
+            $q = strtolower($gb_find);
+            $syn = sandbox_editor_find_synonyms();
+            $alts = array_unique(array_merge([$q], array_map('strtolower', $syn[$q] ?? [])));
+            $onlyEb = !empty($input['eb_only']);
+            $limit  = isset($input['limit']) ? max(1, (int) $input['limit']) : 40;
+            $descriptions = sandbox_editor_gb_block_descriptions();
+            $seen = [];
+            $all = [];
+            $scoreOne = function ($bn, $title, $desc) use ($alts, $q) {
+                $hay = strtolower(trim($title . ' ' . $desc . ' ' . $bn));
+                $score = 0;
+                foreach ($alts as $alt) {
+                    if ($alt === '') { continue; }
+                    if (strtolower($title) === $alt) { $score = max($score, 500); }
+                    elseif (strpos($hay, $alt) !== false) { $score = max($score, $alt === $q ? 200 : 100); }
+                }
+                return $score;
+            };
+            foreach ($reg->get_all_registered() as $bn => $bt) {
+                if ($onlyEb && strpos($bn, 'essential-blocks/') !== 0) { continue; }
+                $seen[$bn] = true;
+                $curated = $descriptions[$bn] ?? [];
+                $title = $bt->title ?: ($curated['title'] ?? '');
+                $desc  = $bt->description ?: ($curated['description'] ?? '');
+                $score = $scoreOne($bn, $title, $desc);
+                if ($score > 0) {
+                    $all[] = ['name' => $bn, 'title' => $title, 'description' => $desc,
+                              'attribute_count' => count((array) $bt->attributes), 'score' => $score];
+                }
+            }
+            foreach (sandbox_editor_catalog_all_names('gutenberg') as $bn) {
+                if (isset($seen[$bn])) { continue; }
+                if ($onlyEb && strpos($bn, 'essential-blocks/') !== 0) { continue; }
+                $curated = $descriptions[$bn] ?? [];
+                $title = $curated['title'] ?? '';
+                $desc  = $curated['description'] ?? '';
+                $score = $scoreOne($bn, $title, $desc);
+                if ($score > 0) {
+                    $cat = sandbox_editor_catalog_entry('gutenberg', $bn);
+                    $all[] = ['name' => $bn, 'title' => $title, 'description' => $desc,
+                              'attribute_count' => count($cat['attributes'] ?? []), 'score' => $score, 'source' => 'catalog'];
+                }
+            }
+            usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
+            return ['builder' => 'gutenberg', 'find' => $gb_find, 'matches' => array_slice($all, 0, $limit)];
+        }
 
         // spec 011: named EB block -> resolve the FULL attribute set from source, or
         // honestly report reduced fidelity. Non-EB blocks + listings stay unchanged.
@@ -2412,6 +2523,49 @@ function sandbox_editor_schema($input)
         $em = \Elementor\Plugin::$instance->elements_manager;
         $types = method_exists($wm, 'get_widget_types') ? $wm->get_widget_types() : [];
         $search = isset($input['search']) ? trim((string) $input['search']) : null;
+
+        // Find a widget/element by TITLE/KEYWORDS/PURPOSE (not control content --
+        // that's `search`). Elementor has no per-widget description (confirmed
+        // earlier -- no get_description() method anywhere in Widget_Base/
+        // Element_Base), so keywords is the real text to match against here.
+        $find = isset($input['find']) ? trim((string) $input['find']) : null;
+        if ($find && !$name) {
+            $q = strtolower($find);
+            $syn = sandbox_editor_find_synonyms();
+            $alts = array_unique(array_merge([$q], array_map('strtolower', $syn[$q] ?? [])));
+            $onlyTypes = isset($input['types']) ? (string) $input['types'] : 'all';
+            $limit = isset($input['limit']) ? max(1, (int) $input['limit']) : 40;
+            $scoreOne = function ($n, $title, $keywords) use ($alts, $q) {
+                $hay = strtolower(trim($title . ' ' . implode(' ', (array) $keywords) . ' ' . $n));
+                $score = 0;
+                foreach ($alts as $alt) {
+                    if ($alt === '') { continue; }
+                    if (strtolower($title) === $alt) { $score = max($score, 500); }
+                    elseif (strpos($hay, $alt) !== false) { $score = max($score, $alt === $q ? 200 : 100); }
+                }
+                return $score;
+            };
+            $all = [];
+            if ($onlyTypes !== 'elements' && is_array($types)) {
+                foreach ($types as $wn => $wobj) {
+                    $title = method_exists($wobj, 'get_title') ? $wobj->get_title() : '';
+                    $kw    = method_exists($wobj, 'get_keywords') ? $wobj->get_keywords() : [];
+                    $score = $scoreOne($wn, $title, $kw);
+                    if ($score > 0) { $all[] = ['name' => $wn, 'kind' => 'widget', 'title' => $title, 'keywords' => $kw, 'score' => $score]; }
+                }
+            }
+            if ($onlyTypes !== 'widgets' && $em && method_exists($em, 'get_element_types')) {
+                foreach ($em->get_element_types() as $en => $eobj) {
+                    $title = method_exists($eobj, 'get_title') ? $eobj->get_title() : '';
+                    $kw    = method_exists($eobj, 'get_keywords') ? $eobj->get_keywords() : [];
+                    $score = $scoreOne($en, $title, $kw);
+                    if ($score > 0) { $all[] = ['name' => $en, 'kind' => 'element', 'title' => $title, 'keywords' => $kw, 'score' => $score]; }
+                }
+            }
+            usort($all, fn($a, $b) => $b['score'] <=> $a['score']);
+            return ['builder' => 'elementor', 'find' => $find, 'matches' => array_slice($all, 0, $limit)];
+        }
+
         if ($name) {
             // Widget first; then a structural element type (section|column|container|
             // e-flexbox|e-div-block|...) which lives in the elements_manager registry.

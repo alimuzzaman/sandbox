@@ -1595,6 +1595,16 @@ function sandbox_editor_schema($input)
                 'eb_attribute_fidelity' => $fidelity, 'blocks' => $blocks];
     }
 
+    if ($builder === 'elementor' && !class_exists('\\Elementor\\Plugin')) {
+        // Previously fell through to the generic bad_builder error below, which
+        // wrongly implied "elementor" was an invalid value for `builder` when the
+        // real cause is that Elementor simply isn't installed/active on THIS
+        // instance (verified: an instance with only Essential Blocks active hit
+        // this path and got a "builder must be gutenberg|elementor" error for a
+        // perfectly valid builder=elementor request).
+        return new WP_Error('elementor_inactive', 'Elementor is not installed or active on this instance.');
+    }
+
     if ($builder === 'elementor' && class_exists('\\Elementor\\Plugin')) {
         // Elementor v4+ strips label/tab/options during WP init (non-REST context)
         // AND omits the entire Advanced/common tab (padding, margin, background, ...).

@@ -1214,6 +1214,177 @@ function sandbox_editor_gb_attrs(array $raw_attrs): array
 }
 
 /**
+ * Human search term -> literal abbreviation TOKENS used in Essential Blocks'
+ * own attribute names, Gutenberg's equivalent of sandbox_editor_search_synonyms()
+ * (Elementor's control-id synonym map). Unlike Elementor, EB attribute names have
+ * no separate human-readable `label` field and no `_`/section-based naming
+ * convention to lean on — they're one long abbreviated camelCase string (e.g.
+ * `wrpMrg_isLinked`, `MOBclGp_Range`, `TABbtnBDRTop`) with NO literal substring
+ * overlap with the words a person would actually search for ("gap" is not a
+ * substring of "clGp"; "margin" is not a substring of "wrpMrg"). Naive substring
+ * search silently fails on exactly the attributes it's most needed for.
+ *
+ * This dictionary is DATA-DRIVEN, not guessed: reverse-engineered by 10 parallel
+ * agents each reading a ~1056-name slice of the full 10,557 unique attribute
+ * names in the committed Gutenberg schema catalog (essential-blocks/* entries
+ * only), each entry backed by real observed attribute names (not invented).
+ * Tokens are case-sensitive on purpose — EB itself is inconsistent about it
+ * (`Bdr` vs `BDR` vs `Brd` all mean border-width in different blocks) so the
+ * matcher below does case-INsensitive substring matching against these tokens;
+ * the tokens are kept mixed-case here only for readability/provenance.
+ */
+function sandbox_editor_gb_search_synonyms(): array
+{
+    return [
+        'align' => ['Align'],
+        'alignment' => ['Align', 'Alignment', 'Direction', 'Justify', 'VAlign'],
+        'background' => ['BG', 'Background', 'Bg', 'BgColor', 'background', 'backgroundColor', 'backgroundSize', 'backgroundType', 'bg', 'bgImage', 'bgImg', 'overlay'],
+        'background color' => ['BackgroundColor', 'BgColor', 'backgroundColor'],
+        'background image' => ['bgImg'],
+        'background position' => ['bgImgPos', 'customPos'],
+        'background repeat' => ['bgImgRepeat'],
+        'blur' => ['Blur', 'blur', 'fltrBlur'],
+        'border' => ['BDR', 'Bdr', 'Border', 'Brd', 'borderColor', 'borderStyle', 'borderType'],
+        'border radius' => ['Radius', 'Rds'],
+        'border style' => ['BDR', 'Bdr'],
+        'border width' => ['Bdr'],
+        'bottom' => ['Bottom'],
+        'box shadow' => ['BorderShadow'],
+        'button' => ['Btn'],
+        'color' => ['BgColor', 'Color', 'HColor', 'TextColor'],
+        'column' => ['Column'],
+        'corner' => ['Radius', 'Rds'],
+        'filter' => ['Filters', 'allowFilters', 'filtersTransition', 'fltr'],
+        'font' => ['Font', 'FontFamily', 'FontSize', 'FontSource', 'FontStyle', 'FontWeight', 'Typo', 'Typography'],
+        'font size' => ['FontSize'],
+        'gap' => ['Gap', 'GapIsAuto', 'GapRange', 'GapUnit', 'Gp'],
+        'gradient' => ['Gradient', 'gradient', 'gradientColor'],
+        'height' => ['Height', 'HeightRange', 'HeightUnit', 'height'],
+        'horizontal' => ['Horizontal'],
+        'hover' => ['Active', 'H', 'HBdr', 'HRds', 'Hover', 'Hv', 'hov_', 'hover', 'hoverBlur', 'hoverSpread', 'hv'],
+        'icon' => ['Icon', 'icn', 'icon'],
+        'image' => ['Image', 'Img', 'bgImg', 'image', 'img'],
+        'inset' => ['Inset', 'inset'],
+        'item' => ['item'],
+        'label' => ['label'],
+        'left' => ['Left'],
+        'letter spacing' => ['LetterSpacing', 'TypoLetterSpacing'],
+        'line height' => ['LineHeight', 'TypoLineHeight'],
+        'linked' => ['isLinked'],
+        'margin' => ['Margin', 'Mrg'],
+        'media' => ['Media'],
+        'mobile' => ['MOB', 'mob'],
+        'offset' => ['HOffset', 'Offset', 'VOffset', 'hOffset', 'vOffset'],
+        'opacity' => ['Opacity', 'opacity', 'opacityTransition'],
+        'overlay' => ['Overlay', 'isBgOverlay', 'overlay', 'overlayColor', 'overlayType', 'ovl', 'ovl_'],
+        'padding' => ['Pad', 'Padding'],
+        'position' => ['Position'],
+        'radius' => ['Radius', 'Rds'],
+        'range' => ['Range'],
+        'responsive' => ['TAB'],
+        'right' => ['Right'],
+        'rounded' => ['Radius', 'Rds'],
+        'row' => ['row'],
+        'shadow' => ['BorderShadow', 'BrdShd', 'Shadow', 'Shd', 'blur', 'hOffset', 'inset', 'shadow', 'shadowColor', 'shadowTransition', 'shadowType', 'spread', 'vOffset'],
+        'size' => ['Size'],
+        'spacing' => ['Gap', 'Margin', 'Mrg', 'Pad', 'Padding', 'Space', 'Spacing'],
+        'spread' => ['Spread', 'spread'],
+        'table' => ['table'],
+        'tablet' => ['TAB'],
+        'text' => ['Text'],
+        'top' => ['Top'],
+        'transition' => ['Transition', 'borderTransition', 'radiusTransition', 'shadowTransition', 'transition'],
+        'typography' => ['FontFamily', 'FontSize', 'FontWeight', 'LineHeight', 'Typo', 'Typography'],
+        'unit' => ['Unit'],
+        'vertical' => ['Vertical'],
+        'width' => ['Width', 'WidthIsAuto', 'WidthRange', 'WidthUnit', 'width'],
+        'wrapper' => ['Wrap', 'Wrp', 'wrapper', 'wrp'],
+    ];
+}
+
+/**
+ * Ranked keyword search across ONE Gutenberg block's attributes — the
+ * counterpart to sandbox_editor_search_controls() (Elementor). No `label`/
+ * `section`/`tab` metadata exists for Gutenberg attributes, so fields are
+ * necessarily thinner: the id itself (weight 100, the only field with real
+ * signal), then the markup-mapping hints `source`/`selector`/`attribute`
+ * (weight 20 — Gutenberg's rough equivalent of Elementor's `selectors`), then
+ * `enum` values (weight 10). Token-AND across query words; each token also
+ * expands through sandbox_editor_gb_search_synonyms() so "gap" matches the
+ * literal `Gp`/`Gap` substrings EB actually uses. `common` (groups.common)
+ * attributes are scored the same as `content` — unlike Elementor there's no
+ * core-vs-extension noise problem to penalize for.
+ */
+function sandbox_editor_gb_search_attrs(array $attrs, string $query, array $groups): array
+{
+    $q = strtolower(trim($query));
+    if ($q === '') { return []; }
+
+    $index = [];
+    foreach (($groups['content'] ?? []) as $id => $_) { $index[$id] = 'content'; }
+    foreach (($groups['common'] ?? []) as $id => $_)  { $index[$id] = 'common'; }
+
+    // Whole-phrase key (e.g. "border radius") takes priority as a single unit over
+    // treating it as two independent tokens.
+    $syn    = sandbox_editor_gb_search_synonyms();
+    $tokens = isset($syn[$q]) ? [$q] : array_values(array_filter(preg_split('/\s+/', $q)));
+
+    // Per token: the literal word (matched case-INsensitively -- safe, these are
+    // real words a human typed, e.g. "gap"/"color"/"border", long enough to not
+    // collide) + dictionary tokens (matched case-SENSITIVELY against the ORIGINAL,
+    // un-lowercased id -- these are short/abbreviated (2-4 chars, e.g. "Gp", "Bdr",
+    // "MOB") and EB's camelCase casing is the only thing that keeps them from
+    // colliding with unrelated substrings. Verified bug from a real false positive:
+    // case-INsensitive "Gp" matched inside "bgImgPos" (contains "gP", not "Gp") --
+    // wrongly surfacing background-image-position attributes on a "gap" search.
+    // Case-sensitive matching against the original id excludes that collision
+    // while still matching the real target ("MOBclGp_Range" DOES contain "Gp").
+    $tokenPlan = [];
+    foreach ($tokens as $t) {
+        $tokenPlan[] = ['literal' => $t, 'dict' => $syn[$t] ?? []];
+    }
+
+    $scored = [];
+    foreach ($attrs as $id => $def) {
+        $lid = strtolower($id);
+        $mapping = strtolower(implode(' ', array_filter([
+            (string) ($def['source'] ?? ''), (string) ($def['selector'] ?? ''), (string) ($def['attribute'] ?? ''),
+        ])));
+        $enum = strtolower(implode(' ', array_map('strval', (array) ($def['enum'] ?? []))));
+
+        $allMatched = true;
+        $score = 0;
+        foreach ($tokenPlan as $plan) {
+            $best = 0;
+            $lit  = $plan['literal'];
+            foreach ([[$lid, 100], [$mapping, 20], [$enum, 10]] as [$hay, $w]) {
+                if ($hay === '' || $lit === '') { continue; }
+                if ($hay === $lit) { $best = max($best, $w + 50); }
+                elseif (strpos($hay, $lit) !== false) { $best = max($best, $w); }
+            }
+            foreach ($plan['dict'] as $tok) {
+                if ($tok === '' || strpos($id, $tok) === false) { continue; } // case-sensitive, original $id
+                $best = max($best, ($id === $tok) ? 150 : 100);
+            }
+            if ($best === 0) { $allMatched = false; break; }
+            $score += $best;
+        }
+        if (!$allMatched) { continue; }
+
+        if ($lid === $q) { $score += 500; }
+        elseif (strpos($lid, str_replace(' ', '', $q)) !== false) { $score += 120; }
+
+        $scored[$id] = array_merge($def, [
+            'group' => $index[$id] ?? 'unknown',
+            'score' => $score,
+        ]);
+    }
+
+    uasort($scored, fn($a, $b) => $b['score'] <=> $a['score']);
+    return $scored;
+}
+
+/**
  * Split a flat controls dict into navigable groups.
  *
  * content — flat {ctrl_id => def}: primary controls defining what the widget
@@ -1489,10 +1660,15 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         $resp['version_mismatch'] = true;
     }
     if ($builder === 'gutenberg') {
+        $groups = sandbox_editor_gb_group_attrs((array) ($cat[$key] ?? []));
+        if ($search !== null && $search !== '') {
+            return ['builder' => 'gutenberg', 'name' => $name, 'search' => $search, 'source' => 'catalog',
+                    'matches' => sandbox_editor_gb_search_attrs((array) ($cat[$key] ?? []), $search, $groups)];
+        }
         $resp['dynamic']  = $bt ? sandbox_editor_dynamic_flag($name, $bt) : ($cat['dynamic'] ?? null);
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
                              'count' => count($cat[$key] ?? [])];
-        $resp['groups']   = sandbox_editor_gb_group_attrs((array) ($cat[$key] ?? []));
+        $resp['groups']   = $groups;
         // title/description/supports/style_paths: pulled from the LIVE block type when
         // this plugin happens to be active on this instance too (common — the catalog
         // path is chosen for richer counts, not because the plugin is absent). Catalog
@@ -1521,6 +1697,9 @@ function sandbox_editor_schema($input)
 
     if ($builder === 'gutenberg') {
         $reg = WP_Block_Type_Registry::get_instance();
+        // Previously silently ignored for Gutenberg (Elementor-only feature) -- a
+        // named-block search returned the FULL unfiltered attribute list either way.
+        $gb_search = isset($input['search']) ? trim((string) $input['search']) : null;
 
         // spec 011: named EB block -> resolve the FULL attribute set from source, or
         // honestly report reduced fidelity. Non-EB blocks + listings stay unchanged.
@@ -1533,7 +1712,7 @@ function sandbox_editor_schema($input)
                 // silently skipping the catalog fallback for this whole block family.
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null, $gb_search);
                 }
                 return new WP_Error('not_found', "block '$name' not registered");
             }
@@ -1546,18 +1725,27 @@ function sandbox_editor_schema($input)
             if ($live_level !== 'full') {
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat && count($cat['attributes'] ?? []) > $live_count) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt, $gb_search);
                 }
             }
             if ($full !== null) {
                 $full['source'] = 'live';
                 $full['groups'] = sandbox_editor_gb_group_attrs((array) ($full['attributes'] ?? []));
+                if ($gb_search) {
+                    return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
+                            'matches' => sandbox_editor_gb_search_attrs((array) ($full['attributes'] ?? []), $gb_search, $full['groups'])];
+                }
                 return $full + sandbox_editor_gb_meta($bt); // level: full | partial
             }
             // No source + no catalog: block.json attributes only, flagged reduced.
             $attrs = sandbox_editor_gb_attrs((array) $bt->attributes);
+            $groups = sandbox_editor_gb_group_attrs($attrs);
+            if ($gb_search) {
+                return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
+                        'matches' => sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups)];
+            }
             return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
-                    'attributes' => $attrs, 'groups' => sandbox_editor_gb_group_attrs($attrs),
+                    'attributes' => $attrs, 'groups' => $groups,
                     'fidelity' => sandbox_editor_eb_fidelity('reduced', count($attrs), null, []),
                     'eb_attribute_fidelity' => 'reduced', 'source' => 'live']
                     + sandbox_editor_gb_meta($bt);
@@ -1578,9 +1766,14 @@ function sandbox_editor_schema($input)
                 return new WP_Error('not_found', "block '$name' not registered");
             }
             $attrs = sandbox_editor_gb_attrs((array) $bt->attributes);
+            $groups = sandbox_editor_gb_group_attrs($attrs);
+            if ($gb_search) {
+                return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
+                        'matches' => sandbox_editor_gb_search_attrs($attrs, $gb_search, $groups)];
+            }
             return ['builder' => 'gutenberg', 'name' => $name, 'dynamic' => sandbox_editor_dynamic_flag($name, $bt),
                     'eb_attribute_fidelity' => 'full', 'attributes' => $attrs,
-                    'groups' => sandbox_editor_gb_group_attrs($attrs)]
+                    'groups' => $groups]
                     + sandbox_editor_gb_meta($bt);
         }
         $blocks = [];

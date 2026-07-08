@@ -103,6 +103,43 @@ way Elementor's `tab==='style'` does, so it's a 2-way split here):
   across several unrelated blocks and keeping names that recurred across
   most/all of them.
 
+### Searching a Gutenberg block's attributes (`search`, with `name`)
+
+```
+GET ?builder=gutenberg&name=essential-blocks/pro-data-table&search=margin
+```
+
+Essential Blocks' attribute names are abbreviated, not self-describing —
+`wrpMrg_isLinked`, `MOBclGp_Range`, `maxW_Range` mean "wrapper margin linked
+toggle", "mobile column gap", "max width", but there's no `label` field
+(unlike Elementor controls) and often no literal substring overlap with the
+word you'd actually search (`"gap"` is not a substring of `"clGp"`). Plain
+substring search silently returns nothing on exactly the attributes it's
+most needed for. A large Pro block can have 1000+ flat attributes — finding
+the 10 that matter by eye isn't practical.
+
+`search` (with `name`) resolves this: query tokens expand through a
+synonym dictionary mapping human terms to the literal abbreviation tokens
+EB actually uses (`"gap"` → `Gp`/`Gap`, `"margin"` → `Mrg`/`Margin`,
+`"radius"`/`"rounded"`/`"corner"` → `Rds`, `"hover"` → `H`/`hov_`/`Hv`,
+`"mobile"`/`"tablet"` → `MOB`/`TAB`). The dictionary was built by reading
+real attribute names across the whole catalog, not guessed. Returns
+`{builder, name, search, source, matches: {...}}`, each match carrying its
+full attribute definition plus a `group` (`content`/`common`) and a `score`,
+ranked highest first — same shape as Elementor's search response.
+
+One sharp edge worth knowing: the abbreviation tokens are matched
+**case-sensitively** against the real attribute id on purpose. A
+case-insensitive match on a short token like `Gp` produces false positives
+(`"gp"` is a substring of `"bgImgPos"` — background-image-position, nothing
+to do with gap) that case-sensitive matching correctly excludes, since EB's
+camelCase casing convention is itself part of the signal. This means a
+search can occasionally miss a real match when a block's author used a
+different casing/word-order variant than the dictionary was built from (e.g.
+`"ShadowEffectBorder"` instead of the more common `"BorderShadow"`) — plain,
+longer human words (`"shadow"`, `"gap"`, `"border"`) fall back to ordinary
+case-insensitive substring matching and don't have this limitation.
+
 ### Styling attributes NOT in `attributes` (`supports` + `style_paths`)
 
 This is the Gutenberg analogue of "how do I change this widget's background/
@@ -379,9 +416,16 @@ Same shape as color, generalized:
 
 - Catalog-only Gutenberg entries (block not live-registered) don't carry
   `title`/`description`/`supports`/`style_paths` yet.
-- No global "search across all Gutenberg blocks" equivalent to Elementor's
-  `search` (no `name`) mode yet — e.g. "which blocks support border color"
-  currently means checking `supports`/`style_paths` per-block yourself.
+- Per-block `search` (with `name`) exists for Gutenberg (see above), but
+  there's no GLOBAL variant yet — Elementor's `search` with no `name` scans
+  every widget/element at once ("which widget has a control matching X?");
+  Gutenberg has no equivalent, so "which blocks support border color" still
+  means checking `supports`/`style_paths` per-block yourself.
+- The Gutenberg search synonym dictionary was built from ~10,500 real
+  Essential Blocks attribute names but EB's naming isn't fully consistent
+  across every block/author — an uncommon casing or word-order variant can
+  occasionally miss a match (plain, longer words like `"shadow"`/`"gap"`
+  don't have this limitation; see the case-sensitivity note above).
 - Essential Blocks attribute-generator functions (`generateTypographyAttributes`,
   `generateBackgroundAttributes`, `generateBorderShadowAttributes`,
   `generateDimensionsAttributes`, `generateResponsiveAlignAttributes`,

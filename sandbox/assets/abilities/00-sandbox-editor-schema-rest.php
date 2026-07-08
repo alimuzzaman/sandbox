@@ -35,6 +35,8 @@
  *   &limit=<n>                     (optional — Elementor listing page size)
  *   &variants=<key>                (optional — Elementor per-name variant lookup)
  *   &source_root=<path>            (optional — EB source checkout override)
+ *   &include_variants=1            (optional — Gutenberg: include MOB/TAB/hov_
+ *                                     variant attrs instead of hiding them)
  *
  * GET /wp-json/sandbox/v1/editor-schema/docs
  *   Serves editor-schema-api.md (this same directory) as JSON, so an agent
@@ -72,14 +74,15 @@ function sandbox_editor_schema_rest_permission()
 function sandbox_editor_schema_rest_cb(WP_REST_Request $req)
 {
     $input = [
-        'builder'     => (string) $req->get_param('builder'),
-        'name'        => (string) $req->get_param('name'),
-        'search'      => $req->get_param('search'),
-        'eb_only'     => $req->get_param('eb_only'),
-        'types'       => $req->get_param('types'),
-        'limit'       => $req->get_param('limit'),
-        'variants'    => $req->get_param('variants'),
-        'source_root' => $req->get_param('source_root'),
+        'builder'          => (string) $req->get_param('builder'),
+        'name'             => (string) $req->get_param('name'),
+        'search'           => $req->get_param('search'),
+        'eb_only'          => $req->get_param('eb_only'),
+        'types'            => $req->get_param('types'),
+        'limit'            => $req->get_param('limit'),
+        'variants'         => $req->get_param('variants'),
+        'source_root'      => $req->get_param('source_root'),
+        'include_variants' => $req->get_param('include_variants'),
     ];
     // Drop unset optional params rather than passing through empty-string/null —
     // sandbox_editor_schema() distinguishes "absent" (isset checks) from "present

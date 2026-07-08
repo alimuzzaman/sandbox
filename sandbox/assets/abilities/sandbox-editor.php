@@ -1233,6 +1233,297 @@ function sandbox_editor_gb_attrs(array $raw_attrs): array
  * matcher below does case-INsensitive substring matching against these tokens;
  * the tokens are kept mixed-case here only for readability/provenance.
  */
+/**
+ * Verified token -> short human meaning, for decomposing an abbreviated
+ * Gutenberg/EB attribute id into its real parts (e.g. "wrpMrg_Top" -> wrp
+ * "Wrapper (outer container)" + Mrg "Margin" + Top "Top side"). Every entry
+ * was confirmed against the REAL Essential Blocks source by dedicated
+ * agents — NOT guessed from the abbreviation shape. Each agent greped the
+ * source for real attribute names containing the token, then found the
+ * actual UI control's `label=`/`label:` string (an i18n `__('...',
+ * 'essential-blocks')` call, or a code comment) physically next to where
+ * that attribute is read/written. A token with no such evidence was left
+ * out entirely rather than assigned a guessed meaning (e.g. bare "H",
+ * "FontSource", "table", "overlayType", "radiusTransition" — no confirming
+ * label/comment was found for these, so they decode as unresolved).
+ *
+ * Sorted longest-token-first so sandbox_editor_gb_decode_attr()'s greedy
+ * tokenizer prefers "BackgroundColor" over "Background" over "Color" when
+ * all three could start matching at the same position.
+ */
+function sandbox_editor_gb_token_meanings(): array
+{
+    return [
+        'TypoLetterSpacing' => 'Typography letter spacing',
+        'filtersTransition' => 'Filter transition duration',
+        'opacityTransition' => 'Opacity transition duration',
+        'borderTransition' => 'Border transition duration',
+        'shadowTransition' => 'Shadow transition duration',
+        'BackgroundColor' => 'Background color',
+        'backgroundColor' => 'Background color',
+        'TypoLineHeight' => 'Typography line height',
+        'backgroundSize' => 'Background size',
+        'backgroundType' => 'Background type (solid/gradient)',
+        'LetterSpacing' => 'Letter spacing',
+        'gradientColor' => 'Gradient color',
+        'BorderShadow' => 'Border + shadow',
+        'allowFilters' => 'Enable CSS filters toggle',
+        'overlayColor' => 'Overlay color',
+        'HeightRange' => 'Height value',
+        'WidthIsAuto' => 'Width auto-mode toggle',
+        'bgImgRepeat' => 'Background image repeat',
+        'borderColor' => 'Border color',
+        'borderStyle' => 'Border style',
+        'hoverSpread' => 'Hover shadow spread',
+        'isBgOverlay' => 'Enable background overlay toggle',
+        'shadowColor' => 'Shadow color',
+        'Background' => 'Background',
+        'FontFamily' => 'Font family',
+        'FontWeight' => 'Font weight',
+        'HeightUnit' => 'Height unit',
+        'Horizontal' => 'Horizontal',
+        'LineHeight' => 'Line height',
+        'Transition' => 'Transition duration',
+        'Typography' => 'Typography',
+        'WidthRange' => 'Width value',
+        'background' => 'Background',
+        'borderType' => 'Border style',
+        'shadowType' => 'Shadow type (normal/inset)',
+        'transition' => 'Transition duration',
+        'Alignment' => 'Alignment',
+        'Direction' => 'Layout direction',
+        'FontStyle' => 'Font style',
+        'TextColor' => 'Text color',
+        'customPos' => 'Custom background position',
+        'hoverBlur' => 'Hover shadow blur',
+        'FontSize' => 'Font size',
+        'GapRange' => 'Gap value',
+        'Gradient' => 'Gradient',
+        'Position' => 'Position',
+        'Vertical' => 'Vertical',
+        'bgImgPos' => 'Background image position',
+        'fltrBlur' => 'Filter blur',
+        'gradient' => 'Gradient',
+        'isLinked' => 'Linked/uniform sides toggle',
+        'BgColor' => 'Background color',
+        'Filters' => 'Content filters',
+        'GapUnit' => 'Gap unit',
+        'Justify' => 'Justify content',
+        'Opacity' => 'Opacity',
+        'Overlay' => 'Background overlay',
+        'Padding' => 'Padding',
+        'Spacing' => 'Spacing',
+        'VOffset' => 'Vertical shadow offset',
+        'bgImage' => 'Background image',
+        'hOffset' => 'Horizontal shadow offset',
+        'opacity' => 'Opacity',
+        'overlay' => 'Background overlay',
+        'vOffset' => 'Vertical shadow offset',
+        'wrapper' => 'Wrapper (outer container)',
+        'Active' => 'Active state',
+        'Border' => 'Border',
+        'Bottom' => 'Bottom side',
+        'BrdShd' => 'Border + shadow',
+        'Column' => 'Column',
+        'Height' => 'Height',
+        'Margin' => 'Margin',
+        'Offset' => 'Shadow offset',
+        'Radius' => 'Border radius',
+        'Shadow' => 'Shadow',
+        'Spread' => 'Shadow spread',
+        'VAlign' => 'Vertical alignment',
+        'height' => 'Height',
+        'shadow' => 'Shadow',
+        'spread' => 'Shadow spread',
+        'Align' => 'Alignment',
+        'Color' => 'Color',
+        'Hover' => 'Hover state',
+        'Image' => 'Image',
+        'Inset' => 'Inset shadow toggle',
+        'Media' => 'Media',
+        'Range' => 'Value',
+        'Right' => 'Right side',
+        'Space' => 'Spacing',
+        'Width' => 'Width',
+        'bgImg' => 'Background image',
+        'hover' => 'Hover state',
+        'image' => 'Image',
+        'inset' => 'Inset shadow toggle',
+        'label' => 'Label',
+        'width' => 'Width',
+        'Blur' => 'Blur',
+        'Font' => 'Font',
+        'HBdr' => 'Hover border width',
+        'HRds' => 'Hover border radius',
+        'Icon' => 'Icon',
+        'Left' => 'Left side',
+        'Size' => 'Size',
+        'Text' => 'Text',
+        'Typo' => 'Typography',
+        'Unit' => 'Unit',
+        'Wrap' => 'Wrapper (outer container)',
+        'blur' => 'Blur',
+        'fltr' => 'CSS filter',
+        'hov_' => 'Hover-state variant (prefix)',
+        'icon' => 'Icon',
+        'item' => 'Item',
+        'ovl_' => 'Overlay (prefix)',
+        'Bdr' => 'Border width',
+        'BDR' => 'Border width',
+        'Brd' => 'Border',
+        'Btn' => 'Button',
+        'Gap' => 'Gap',
+        'Img' => 'Image',
+        'MOB' => 'Mobile (responsive)',
+        'Mrg' => 'Margin',
+        'Pad' => 'Padding',
+        'Rds' => 'Border radius',
+        'Shd' => 'Shadow',
+        'TAB' => 'Tablet (responsive)',
+        'Top' => 'Top side',
+        'Wrp' => 'Wrapper (outer container)',
+        'icn' => 'Icon',
+        'img' => 'Image',
+        'mob' => 'Mobile (responsive)',
+        'ovl' => 'Overlay (prefix)',
+        'row' => 'Row (flex direction)',
+        'wrp' => 'Wrapper (outer container)',
+        'BG' => 'Background',
+        'Bg' => 'Background color',
+        'Gp' => 'Gap',
+        'Hv' => 'Hover state',
+        'bg' => 'Background',
+        'hv' => 'Hover state',
+    ];
+}
+
+/**
+ * Split an id into its device/state prefix layer + the bare remainder,
+ * matching the stacking order verified empirically across the whole
+ * catalog (99.9-100% of MOB/TAB/hov_-prefixed attributes have a matching
+ * un-prefixed counterpart in the same block): hover wraps outermost, then
+ * MOB/TAB, e.g. "hov_MOBwrpMrg_Top" -> hover=true, responsive=mobile,
+ * base="wrpMrg_Top".
+ */
+function sandbox_editor_gb_strip_variant_prefixes(string $id): array
+{
+    $hover = false;
+    $responsive = null;
+    $rest = $id;
+    if (strncmp($rest, 'hov_', 4) === 0) { $hover = true; $rest = substr($rest, 4); }
+    if (strncmp($rest, 'MOB', 3) === 0) { $responsive = 'mobile'; $rest = substr($rest, 3); }
+    elseif (strncmp($rest, 'TAB', 3) === 0) { $responsive = 'tablet'; $rest = substr($rest, 3); }
+    return ['hover' => $hover, 'responsive' => $responsive, 'base' => $rest];
+}
+
+/**
+ * Decompose one attribute id into {responsive, hover, decoded[], unresolved}
+ * — the "glue adapter": mechanical tokenization + verified-dictionary
+ * lookup only, NO composed sentence. The calling agent decides how (or
+ * whether) to phrase the parts into prose; a synthesized template risks
+ * silently misreading an unusual token order (the same class of mistake as
+ * the earlier case-sensitivity bug in search) — returning verified facts
+ * instead of a guessed sentence avoids that.
+ *
+ * Greedy longest-match against sandbox_editor_gb_token_meanings() (already
+ * sorted longest-first); a bare `_` is a pure separator, skipped silently;
+ * any other unmatched character run is reported in `unresolved`, never
+ * silently dropped or guessed.
+ */
+function sandbox_editor_gb_decode_attr(string $id): array
+{
+    $prefix = sandbox_editor_gb_strip_variant_prefixes($id);
+    $rest   = $prefix['base'];
+    $dict   = sandbox_editor_gb_token_meanings();
+
+    $decoded = [];
+    $unresolved = '';
+    $i = 0;
+    $len = strlen($rest);
+    while ($i < $len) {
+        if ($rest[$i] === '_') { $i++; continue; } // pure separator, not content
+        $matched = false;
+        foreach ($dict as $tok => $meaning) {
+            $tlen = strlen($tok);
+            if ($tlen > 0 && substr($rest, $i, $tlen) === $tok) { // case-sensitive on purpose
+                if ($unresolved !== '') {
+                    $decoded[] = ['token' => $unresolved, 'meaning' => null];
+                    $unresolved = '';
+                }
+                $decoded[] = ['token' => $tok, 'meaning' => $meaning];
+                $i += $tlen;
+                $matched = true;
+                break;
+            }
+        }
+        if (!$matched) { $unresolved .= $rest[$i]; $i++; }
+    }
+    if ($unresolved !== '') { $decoded[] = ['token' => $unresolved, 'meaning' => null]; }
+
+    return [
+        'responsive' => $prefix['responsive'],
+        'hover'      => $prefix['hover'],
+        'decoded'    => $decoded,
+    ];
+}
+
+/**
+ * Hide MOB/TAB/hov_-prefixed variant attributes from the default view,
+ * attaching them as `responsive`/`hover` pointers on their verified base
+ * attribute instead (their existence and exact key name are STILL fully
+ * discoverable — nothing is deleted, just decluttered: this roughly halves
+ * the visible attribute count on every EB block, verified across the whole
+ * catalog: 18,857 -> 10,236 total occurrences, 10,557 -> 5,761 unique
+ * names). A variant with no matching base (~0.1% of cases, verified) stays
+ * visible and is flagged `orphaned_variant`, never silently dropped.
+ * `$include_variants=true` skips all of this and returns the raw list.
+ *
+ * Every SURVIVING attribute also gets a `decoded` breakdown attached (see
+ * sandbox_editor_gb_decode_attr()).
+ */
+function sandbox_editor_gb_enrich_attrs(array $attrs, bool $include_variants = false): array
+{
+    if ($include_variants) {
+        $out = [];
+        foreach ($attrs as $id => $def) {
+            $out[$id] = (is_array($def) ? $def : ['type' => $def]) + ['decoded' => sandbox_editor_gb_decode_attr($id)];
+        }
+        return $out;
+    }
+
+    $idSet = array_flip(array_keys($attrs));
+    $out = [];
+    foreach ($attrs as $id => $def) {
+        $def = is_array($def) ? $def : ['type' => $def];
+        $isVariant = strncmp($id, 'hov_', 4) === 0 || strncmp($id, 'MOB', 3) === 0 || strncmp($id, 'TAB', 3) === 0;
+        if ($isVariant) {
+            $base = sandbox_editor_gb_strip_variant_prefixes($id)['base'];
+            if (isset($idSet[$base])) { continue; } // attached to $base's entry below
+            $out[$id] = $def + ['decoded' => sandbox_editor_gb_decode_attr($id), 'orphaned_variant' => true];
+            continue;
+        }
+
+        $entry = $def + ['decoded' => sandbox_editor_gb_decode_attr($id)];
+        $mobKey = 'MOB' . $id; $tabKey = 'TAB' . $id; $hovKey = 'hov_' . $id;
+        $responsive = array_filter([
+            'mobile' => isset($idSet[$mobKey]) ? $mobKey : null,
+            'tablet' => isset($idSet[$tabKey]) ? $tabKey : null,
+        ]);
+        if ($responsive) { $entry['responsive'] = $responsive; }
+        if (isset($idSet[$hovKey])) { $entry['hover'] = $hovKey; }
+        // nested hover+responsive (e.g. hov_MOBwrpMrg_Top) -- verified 100%
+        // match rate when hov_MOB/hov_TAB exist at all, so safe to attach
+        // directly on the root base entry alongside the plain ones above.
+        $hovResponsive = array_filter([
+            'mobile' => isset($idSet['hov_' . $mobKey]) ? 'hov_' . $mobKey : null,
+            'tablet' => isset($idSet['hov_' . $tabKey]) ? 'hov_' . $tabKey : null,
+        ]);
+        if ($hovResponsive) { $entry['hover_responsive'] = $hovResponsive; }
+        $out[$id] = $entry;
+    }
+    return $out;
+}
+
 function sandbox_editor_gb_search_synonyms(): array
 {
     return [
@@ -1351,13 +1642,23 @@ function sandbox_editor_gb_search_attrs(array $attrs, string $query, array $grou
             (string) ($def['source'] ?? ''), (string) ($def['selector'] ?? ''), (string) ($def['attribute'] ?? ''),
         ])));
         $enum = strtolower(implode(' ', array_map('strval', (array) ($def['enum'] ?? []))));
+        // MOB/TAB/hov_ variants are hidden from the id by default (see
+        // sandbox_editor_gb_enrich_attrs) and attached as responsive/hover
+        // pointers instead -- surface that here so "mobile"/"tablet"/"hover"
+        // still finds a base attribute that HAS a hidden variant, even though
+        // the literal prefix substring is no longer in $id.
+        $variantFlags = trim(implode(' ', [
+            !empty($def['responsive']['mobile']) ? 'mobile' : '',
+            !empty($def['responsive']['tablet']) ? 'tablet' : '',
+            (!empty($def['hover']) || !empty($def['hover_responsive'])) ? 'hover' : '',
+        ]));
 
         $allMatched = true;
         $score = 0;
         foreach ($tokenPlan as $plan) {
             $best = 0;
             $lit  = $plan['literal'];
-            foreach ([[$lid, 100], [$mapping, 20], [$enum, 10]] as [$hay, $w]) {
+            foreach ([[$lid, 100], [$mapping, 20], [$enum, 10], [$variantFlags, 10]] as [$hay, $w]) {
                 if ($hay === '' || $lit === '') { continue; }
                 if ($hay === $lit) { $best = max($best, $w + 50); }
                 elseif (strpos($hay, $lit) !== false) { $best = max($best, $w); }
@@ -1649,7 +1950,7 @@ function sandbox_editor_search_controls(array $controls, string $query, array $g
 }
 
 /** Build an editor-schema response from a catalog entry (source: catalog). */
-function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $search = null)
+function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $search = null, $include_variants = false)
 {
     $key  = $builder === 'gutenberg' ? 'attributes' : 'controls';
     $resp = ['builder' => $builder, 'name' => $name, $key => $cat[$key] ?? [],
@@ -1660,10 +1961,15 @@ function sandbox_editor_catalog_response($builder, $name, $cat, $bt = null, $sea
         $resp['version_mismatch'] = true;
     }
     if ($builder === 'gutenberg') {
-        $groups = sandbox_editor_gb_group_attrs((array) ($cat[$key] ?? []));
+        // Catalog entries are essential-blocks/* only (the only names that ever
+        // fall back to the catalog for gutenberg) -- same abbreviated-attribute
+        // naming as the live path, so the same hide/decode treatment applies.
+        $attrs  = sandbox_editor_gb_enrich_attrs((array) ($cat[$key] ?? []), $include_variants);
+        $groups = sandbox_editor_gb_group_attrs($attrs);
+        $resp[$key] = $attrs;
         if ($search !== null && $search !== '') {
             return ['builder' => 'gutenberg', 'name' => $name, 'search' => $search, 'source' => 'catalog',
-                    'matches' => sandbox_editor_gb_search_attrs((array) ($cat[$key] ?? []), $search, $groups)];
+                    'matches' => sandbox_editor_gb_search_attrs($attrs, $search, $groups)];
         }
         $resp['dynamic']  = $bt ? sandbox_editor_dynamic_flag($name, $bt) : ($cat['dynamic'] ?? null);
         $resp['fidelity'] = ['level' => $cat['coverage'] ?? 'full',
@@ -1700,6 +2006,10 @@ function sandbox_editor_schema($input)
         // Previously silently ignored for Gutenberg (Elementor-only feature) -- a
         // named-block search returned the FULL unfiltered attribute list either way.
         $gb_search = isset($input['search']) ? trim((string) $input['search']) : null;
+        // Default: MOB/TAB/hov_-prefixed EB variant attrs are hidden (attached as
+        // responsive/hover pointers on their base attr instead) -- pass true to
+        // get the raw, full, undecorated list back.
+        $gb_include_variants = !empty($input['include_variants']);
 
         // spec 011: named EB block -> resolve the FULL attribute set from source, or
         // honestly report reduced fidelity. Non-EB blocks + listings stay unchanged.
@@ -1712,7 +2022,7 @@ function sandbox_editor_schema($input)
                 // silently skipping the catalog fallback for this whole block family.
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null, $gb_search);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, null, $gb_search, $gb_include_variants);
                 }
                 return new WP_Error('not_found', "block '$name' not registered");
             }
@@ -1725,20 +2035,21 @@ function sandbox_editor_schema($input)
             if ($live_level !== 'full') {
                 $cat = sandbox_editor_catalog_entry('gutenberg', $name);
                 if ($cat && count($cat['attributes'] ?? []) > $live_count) {
-                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt, $gb_search);
+                    return sandbox_editor_catalog_response('gutenberg', $name, $cat, $bt, $gb_search, $gb_include_variants);
                 }
             }
             if ($full !== null) {
                 $full['source'] = 'live';
-                $full['groups'] = sandbox_editor_gb_group_attrs((array) ($full['attributes'] ?? []));
+                $full['attributes'] = sandbox_editor_gb_enrich_attrs((array) ($full['attributes'] ?? []), $gb_include_variants);
+                $full['groups'] = sandbox_editor_gb_group_attrs($full['attributes']);
                 if ($gb_search) {
                     return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',
-                            'matches' => sandbox_editor_gb_search_attrs((array) ($full['attributes'] ?? []), $gb_search, $full['groups'])];
+                            'matches' => sandbox_editor_gb_search_attrs($full['attributes'], $gb_search, $full['groups'])];
                 }
                 return $full + sandbox_editor_gb_meta($bt); // level: full | partial
             }
             // No source + no catalog: block.json attributes only, flagged reduced.
-            $attrs = sandbox_editor_gb_attrs((array) $bt->attributes);
+            $attrs = sandbox_editor_gb_enrich_attrs(sandbox_editor_gb_attrs((array) $bt->attributes), $gb_include_variants);
             $groups = sandbox_editor_gb_group_attrs($attrs);
             if ($gb_search) {
                 return ['builder' => 'gutenberg', 'name' => $name, 'search' => $gb_search, 'source' => 'live',

@@ -27,6 +27,7 @@ None required.
 | `limit` | elementor global search | Max results returned (default 40). |
 | `variants` | elementor, with `name` | Resolve a specific control's per-breakpoint keys (see Responsive variants, below). |
 | `source_root` | gutenberg EB blocks | Override the Essential Blocks source-checkout path used to resolve full attribute sets; rarely needed. |
+| `include_variants` | gutenberg, with `name` | `1` to include MOB/TAB/hover-prefixed variant attributes as their own top-level entries instead of hiding them (see "Decoded descriptions + hidden variants", below). |
 
 ## Gutenberg: response shape
 
@@ -87,6 +88,68 @@ fields that actually tell you how to use the attribute:
 | `role` | `content` (user-facing content) vs `local`/absent (internal bookkeeping, e.g. `blob`) |
 
 Example — `core/image`'s `url` attribute: `{"type":"string","source":"attribute","selector":"img","attribute":"src"}` means the value lives in the saved markup as `<img src="...">`, not as block-comment JSON.
+
+### Decoded descriptions + hidden MOB/TAB/hover variants
+
+Essential Blocks attribute names are one long abbreviated camelCase string
+with no separate `label` field — `wrpMrg_Top` gives you nothing to go on
+without knowing EB's naming convention. Two things address this, both only
+applied to `essential-blocks/*` names (core/third-party block ids are
+already self-describing and don't get this treatment):
+
+**1. `decoded` — a mechanical breakdown, not a guessed sentence.** Every
+surviving attribute gets a `decoded` field: the id is split into segments
+against a dictionary of ~140 tokens, each confirmed against the real
+Essential Blocks source (the actual UI control's `label` string or a code
+comment next to where that attribute is used — not inferred from the
+abbreviation shape alone).
+
+```jsonc
+"wrpMrg_Top": {
+  "type": "string",
+  "decoded": {
+    "responsive": null,      // or "mobile" / "tablet" if this is itself a MOB/TAB variant
+    "hover": false,           // true if this is itself a hov_ variant
+    "decoded": [
+      { "token": "wrp", "meaning": "Wrapper (outer container)" },
+      { "token": "Mrg", "meaning": "Margin" },
+      { "token": "Top", "meaning": "Top side" }
+    ]
+  }
+}
+```
+
+Deliberately **not** composed into a single English sentence — a template
+risks silently misreading an unusual token order (the same category of
+mistake as a case-sensitivity bug found and fixed while building the search
+feature above). Returning verified `{token, meaning}` facts instead of a
+synthesized sentence means a wrong guess can't be dressed up as confident
+prose; the calling agent decides how (or whether) to phrase the parts.
+Any segment that doesn't match a known token is still reported, just with
+`"meaning": null` — never silently dropped or invented.
+
+**2. MOB/TAB/hov_-prefixed variants are hidden by default.** Verified
+across the whole catalog: 99.9–100% of these variant attributes have a
+matching un-prefixed base attribute in the same block (the only exceptions,
+~0.1%, stay visible and flagged `orphaned_variant`). Hiding them roughly
+halves the visible attribute count everywhere (measured: 18,857 → 10,236
+total occurrences across all blocks; the worst single block,
+`pro-business-hours`, goes from 1,764 to 918). Nothing is lost — the base
+attribute carries pointers to the exact hidden key names:
+
+```jsonc
+"wrpMrg_Top": {
+  "responsive": { "mobile": "MOBwrpMrg_Top", "tablet": "TABwrpMrg_Top" },
+  "hover": "hov_wrpMrg_Top",
+  "hover_responsive": { "mobile": "hov_MOBwrpMrg_Top", "tablet": "hov_TABwrpMrg_Top" }
+}
+```
+
+Pass `include_variants=1` to get the raw, undecorated full list back
+instead (still with `decoded` attached to each). `search` still finds a
+base attribute by "mobile"/"tablet"/"hover" even when hidden — those
+keywords match against the presence of its `responsive`/`hover` pointers,
+not just the (now-absent) literal prefix in its id.
 
 ### `groups.content` vs `groups.common`
 

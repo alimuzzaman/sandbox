@@ -1130,13 +1130,73 @@ function sandbox_editor_gb_common_attrs(): array
  *  Elementor. Unlike Elementor there's no naming-prefix signal (no `_`/`eael_`
  *  convention) to detect shared attrs programmatically, so this uses the
  *  static, data-driven list above instead of a heuristic. */
+/**
+ * Meanings (from sandbox_editor_gb_token_meanings()) that indicate a generic,
+ * recurring STYLE property -- margin/padding/border/shadow/background/color/
+ * typography/alignment/sizing -- as opposed to a block-specific CONTENT or
+ * behavior word (icon, image, item, label are all real dictionary tokens but
+ * are naming WHICH sub-element, not a style property, so deliberately
+ * excluded even though recognized). Used to classify an EB attribute as
+ * `common`/global (the same *kind* of setting recurs on nearly every block,
+ * even though the literal id differs per block: "wrpMrg_Top" here vs
+ * "containerMrg_Top" there) vs `content` (genuinely specific to this block).
+ */
+function sandbox_editor_gb_style_leaf_meanings(): array
+{
+    return array_flip([
+        'Margin', 'Padding',
+        'Border width', 'Border radius', 'Border', 'Border + shadow (group prefix)',
+        'Hover border width', 'Hover border radius',
+        'Shadow', 'Shadow spread', 'Horizontal shadow offset', 'Vertical shadow offset',
+        'Blur', 'Filter blur', 'Inset shadow toggle', 'Shadow type (normal/inset)',
+        'Shadow color', 'Shadow transition duration', 'Border transition duration', 'Transition duration',
+        'Background', 'Background color', 'Background image', 'Background image position',
+        'Background image repeat', 'Background size', 'Background type (solid/gradient)',
+        'Enable background overlay toggle', 'Background overlay', 'Overlay color', 'Overlay (prefix)',
+        'Custom background position',
+        'Opacity', 'Opacity transition duration',
+        'Gradient', 'Gradient color',
+        'Color', 'Text color',
+        'Font', 'Font family', 'Font size', 'Font weight', 'Font style',
+        'Typography', 'Typography letter spacing', 'Typography line height', 'Letter spacing', 'Line height',
+        'Alignment', 'Vertical alignment', 'Vertical', 'Horizontal', 'Justify content',
+        'Width', 'Width value', 'Width auto-mode toggle', 'Height', 'Height value', 'Height unit', 'Size',
+        'Linked/uniform sides toggle', 'Unit', 'Value',
+        'CSS filter', 'Enable CSS filters toggle',
+    ]);
+}
+
 function sandbox_editor_gb_group_attrs(array $attrs): array
 {
     $common_names = array_flip(sandbox_editor_gb_common_attrs());
+    $leafMeanings = sandbox_editor_gb_style_leaf_meanings();
+    // Modifier tokens (side/unit/linked-toggle/bare-value) describe HOW a
+    // property is expressed, not WHAT it is -- e.g. "Bdr_Top" and "Bdr_Unit"
+    // are the SAME border-width property, just different sub-fields of it.
+    // Skip past these from the end to find the actual core-property token
+    // (verified bug: checking only the literal last token classified
+    // "...Bdr_Top" as content but "...Bdr_Unit" as common for the SAME
+    // control group, since "Top side"/"Unit" themselves aren't style-leaf
+    // meanings — only what precedes them is).
+    static $modifiers = ['Top side' => 1, 'Bottom side' => 1, 'Left side' => 1, 'Right side' => 1,
+                         'Unit' => 1, 'Linked/uniform sides toggle' => 1, 'Value' => 1];
     $content = [];
     $common  = [];
     foreach ($attrs as $k => $def) {
-        if (isset($common_names[$k])) {
+        $isCommon = isset($common_names[$k]);
+        // EB attributes (post-enrich_attrs) carry a `decoded` breakdown -- core
+        // block attributes don't, so this never fires for them (falls through
+        // to the static-name check above, unchanged behavior).
+        if (!$isCommon && is_array($def) && !empty($def['decoded']['decoded'])) {
+            $segs = array_reverse($def['decoded']['decoded']);
+            foreach ($segs as $seg) {
+                $meaning = $seg['meaning'] ?? null;
+                if ($meaning === null || isset($modifiers[$meaning])) { continue; } // skip modifiers/unresolved
+                if (isset($leafMeanings[$meaning])) { $isCommon = true; }
+                break; // first non-modifier token found, decided either way
+            }
+        }
+        if ($isCommon) {
             $common[$k] = $def;
         } else {
             $content[$k] = $def;

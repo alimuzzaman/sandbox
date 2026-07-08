@@ -57,6 +57,7 @@ DEFAULTS: dict = {
     "plugins": [
         ".",                   # this repo; others are slugs/paths/zip URLs
         "query-monitor",
+        "plugin-check",        # wp.org "Plugin Check" — automated compliance/lint testing
         "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
     ],
     "themes": [],

@@ -399,9 +399,11 @@ class TestPluginConfigMap(unittest.TestCase):
             {"plugins": sandbox_core.DEFAULTS["plugins"]})
         self.assertIsNotNone(self_e)
         self.assertIn("query-monitor", m)
+        self.assertIn("plugin-check", m)
         self.assertIn("mcp-adapter", m)
         self.assertEqual(m["mcp-adapter"]["source"]["kind"], "zip")
         self.assertTrue(m["query-monitor"]["active"])
+        self.assertTrue(m["plugin-check"]["active"])
         self.assertTrue(m["mcp-adapter"]["active"])
 
     def test_shorthand_false_is_inactive_installed(self):

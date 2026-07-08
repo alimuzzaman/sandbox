@@ -564,3 +564,113 @@ image's positioning) that an explicit width broke. Reverted immediately. **Not y
 right fix is likely `margin-left` instead of `padding-left` for colL's offset (margin doesn't
 shrink the box's own claimed content width the way padding does), but that wasn't tried yet before
 time ran out on this pass; try that next rather than fighting the two-column width split again.
+
+## Women In Lead (EL→GB) convergence pass — theme/layout bugs bigger than any single padding tune
+Resumed a prior pass on a native-Gutenberg rebuild of `lms.elementor.templately.com/womeninlead/`
+(page 5, `sandbox-design-fidelity-2` instance). Inherited state: content-width/fonts passing, but
+6/7 sections off by -159..+89px, 12 missing decor PNGs, 2 missing bg layers, 49 appearance findings,
+10.41% pixelmatch. Drove `sb specgate` from that state to **all 7 sections converged to ≤8px**
+(5 of 7 exact), assets 12→0 missing, appearance 49→5, element dTop median 56→~85 (see caveat below),
+pixelmatch 10.41%→9.6%. Three bugs found here are NOT page-specific — check for them on ANY
+Gutenberg-on-a-block-theme (Twenty Twenty-Five+) rebuild:
+
+1. **A block theme's global styles can set `body{font-weight:300}` and NO rule you write will look
+   like it's the cause when every paragraph renders "too light."** Verified via `getComputedStyle`
+   walking the ancestor chain (not just checking your own stylesheet) on Twenty Twenty-Five: `body`
+   itself computed `font-weight:300`, inherited by everything, even though zero rules — ours or the
+   theme's visible CSS — appeared to set it explicitly (it's baked into the theme's `theme.json`
+   global styles, which don't show up in a `document.styleSheets` scan the way you'd expect). This
+   was ~12 of 49 appearance findings (every `.wil-body`/label paragraph "font-weight 300 vs 400") in
+   ONE line: `body.page-id-N { font-weight:400; }`. **When an appearance gate reports a weight/color
+   defect on EVERY text element uniformly and your own CSS never sets that property, check `body`'s
+   own computed value first** — a block theme's `theme.json` is the likely culprit, not a missing
+   per-element rule.
+2. **Applying `max-width` AND horizontal `padding` to the SAME element double-shrinks content —
+   this is a distinct trap from the already-documented "10px stacks per nesting level" gotcha,
+   because here it's ONE element, not nesting.** `.wil-section{max-width:1170px}` (matching the
+   reference's own `contentMaxWidth`) plus `padding:130px 55px` on that same class gave an actual
+   inner content width of 1170-110=1060px — 110px narrower than every reference measurement assumed
+   width was based on. Symptom: a 3-up flex row (3×350px cards + 2×30px gaps = 1110px) that should
+   fit in 1170px was wrapping to 2+1 because only 1060px was actually available; verified via
+   `getBoundingClientRect().width` on the row (1060, not 1170) before touching anything. **Tried
+   fixing by bumping the outer box to 1280 (1280-110=1170)** — this "fixed" the inner width but
+   broke `sb specgate`'s `content_width` gate (regressed from PASS/0px to FAIL/+110px), because the
+   geometric contentWidth-finder now measured the OUTER 1280 box (a `max-width` cap doesn't change
+   an element's own rendered border-box width the way padding does — the extractor's "content width"
+   IS that rendered box width, unaffected by its own padding). **Correct fix: revert the box to
+   1170, and reduce the PADDING instead** to match what the reference's own per-section padding
+   really is (read `bgOwner.padding` per section — several sections in this design use only 0-20px
+   horizontal, not the visually-inferred 55px "gutter" — the 55px gutter comes from the 1280
+   viewport minus the 1170 box, not from padding at all). Lesson: when a max-width box ALSO carries
+   its own horizontal padding, the padding is pure additional shrinkage on top of the max-width —
+   verify the resulting content width numerically, don't assume the two compose the way a visual
+   gutter estimate suggests.
+3. **A block theme's global `--wp--style--block-gap` (Twenty Twenty-Five: `1.2rem`≈19.2px) inserts
+   a margin between EVERY top-level block in the content flow — across 8 section-to-section
+   transitions (nav→hero→…→footer) that's ~155-160px of PURE ACCUMULATED DRIFT, even when every
+   individual section's own height already matches the reference exactly.** This is the single
+   biggest, easiest-to-miss driver of a high `dtop_median` on an otherwise height-converged page:
+   `sb specgate`'s per-SECTION height table can show every section at ≤2px while the per-ELEMENT
+   dTop map still shows +150-250px residuals on sections near the bottom of the page, because the
+   per-section table diffs each section's OWN height (correct) while dTop diffs absolute page
+   position (which keeps accumulating the ~20px-per-transition tax). Verified: zeroing
+   `.page-id-N .entry-content.is-layout-constrained > *{margin-top:0!important;margin-bottom:0!important;}`
+   (harmless — every section already owns its own top/bottom padding) dropped dTop median from
+   130.5px to 47.5px in one change, with zero visual difference (no gap was actually "lost", it was
+   redundant with each section's own padding). **Check `getComputedStyle(parent).getPropertyValue(
+   '--wp--style--block-gap')` on the content wrapper whenever per-section heights look right but
+   dTop still climbs steadily section-by-section down the page** — it's very easy to blame the
+   wrong section for "still drifting" when the real cause is the theme's inter-block spacing, not
+   that section's own content.
+4. **A shared "centered narrow column" utility class (e.g. `.wil-center{max-width:820px}`) can be
+   WRONG for one specific heading even when it's right for a visually-similar sibling.** Two
+   different centered `h2`s used the same class; one (testimonials) genuinely wants an ~670-820px
+   column (matches reference), the other ("My Collaborations…") wants the FULL 1170px content width
+   in the reference — forcing the shared 820px cap wrapped it to 3 lines instead of 2, adding
+   60-80px of unwanted height that cascaded into +125-185px dTop on every logo below it. Fix was a
+   one-line specific override (`.wil-collab .wil-h2{max-width:1170px!important}`) once the reference
+   measurement (`w:1170` in the DesignSpec, not `820`) was actually checked instead of assumed from
+   "it looks like the same centered-heading pattern as the other section."
+5. **A decorative icon inserted as a normal flow child (heading → icon → paragraph) instead of a
+   positioned decoration adds its own height (+icon height +margins) to the whole column** and
+   shoves every later element down — caught via the per-element dTop residual jumping to +150-250px
+   on everything AFTER the icon in that same section, even though the icon's OWN position looked
+   fine in a screenshot. The reference's DesignSpec showed this icon (`download-icon.png`) at a
+   `left` coordinate that sits at the SEAM between the two flex columns (text column ends, image
+   column begins) — i.e. it's a positioned accent, not inline content — converting it to
+   `position:absolute` at the exact measured `top`/`left` (relative to a `position:relative`
+   section) removed the phantom height immediately.
+6. **A headless-screenshot decode race can make a correctly-positioned, correctly-`z-index`ed image
+   look completely WRONG (opaque decorative shape appearing to cover a photo it's actually BEHIND)
+   — reproduces the already-documented lazy-image corollary but through a different symptom.** A
+   `visit`-tool screenshot showed a solid white decorative circle seemingly painted OVER a
+   photograph despite the photo having a higher `z-index` (1 vs 0) — before concluding the CSS
+   stacking was broken, a fresh Playwright screenshot of the SAME state (after `scrollIntoView`,
+   forcing decode) showed the photo rendering perfectly on top, exactly as the (correct) CSS
+   intended. **When a stacking-order bug looks inexplicable given verified-correct computed
+   `position`/`z-index` values, re-screenshot fresh (scroll to it, wait, re-shoot) before doubting
+   the CSS** — the first capture may just be mid-decode.
+7. **An avatar/photo `<img>` that the reference DesignSpec says has `border-radius:0` (not circular)
+   can be a broken/invisible asset on the LIVE reference, not a real style choice** — direct pixel
+   inspection of the reference screenshot at the testimonial avatars' exact measured coordinates
+   showed nothing rendered there at all (pure white, no photo, no fallback icon) — the `<img>` tag
+   exists in the reference DOM (hence a real measured `w:45,h:45,radius:0` box) but the asset itself
+   fails to paint. Keeping our build's own circular, populated avatars (a deliberate, documented
+   deviation) reads as MORE faithful to evident design intent than matching a broken box — but this
+   is a judgment call, flag it rather than silently "fixing" to match an unverifiable ground truth.
+8. **`sb specgate`'s background-parity check only recognizes POSITIONED decorative layers, not any
+   `<img>` with the right `src` sitting in normal flow** — adding the reference's exact quote-mark
+   PNGs as ordinary flow `<img>` children (visually correct, asset-completeness gate PASSED) still
+   left `backgrounds: 2 missing` because the gate's `decor[]` matching expects a `position:relative`/
+   `absolute` box like the reference's own (`bgOwner.decor[].position:"relative"`). Converting them
+   to `position:absolute` decorative overlays (matching the reference's own treatment) is the
+   correct fix in principle; still showed as "missing" after doing so in this pass — worth a closer
+   look at `tools/dfdiff/dfdiff.py`'s decor-matching predicate if this recurs, since asset presence
+   is already proven and only the STRUCTURAL classification (flow vs. decor) is what the gate wants.
+9. **Fetching a Templately reference's un-catalogued asset URLs is a solved problem even without the
+   authored-source JSON**: the reference page's own per-post generated Elementor CSS
+   (`/wp-content/uploads/sites/N/elementor/css/post-<id>.css`) contains `url(...)` references for
+   assets that never appear as `<img>` tags in the raw HTML (e.g. CSS `background-image` decor like
+   testimonial quote-marks) — when a DesignSpec-listed decor `src` can't be found via `grep` on the
+   page's raw HTML, check EVERY per-section `post-<id>.css` linked in `<head>` (a design commonly
+   splits several across header/content/footer post IDs), not just the main content one.

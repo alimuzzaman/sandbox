@@ -254,7 +254,11 @@ as before this change.
   explicitly UNSET until a layer sets them, so layers field-merge without clobbering; the
   org source and the on-demand state are the resolved defaults for still-UNSET fields.
 - **Plugins map**: slug → plugin entry; the authoritative per-project plugin declaration,
-  merged per-slug across config layers.
+  merged per-slug across config layers. (Note for multi-instance-per-root: the plugins map
+  is resolved per project ROOT (source config), not per instance — every labelled instance
+  of a root shares the same resolved map, same source repo, and same bind-mounts. Divergent
+  plugin sets between labels of one root (e.g. a `qa` label excluding a plugin the
+  `default` label has) is out of scope; see `docs/multi-instance-spec.md` §7.)
 - **Local-source registry**: the generated map of slug → local source consulted at
   install time so on-demand (and locally-overridden) slugs are served from local instead of
   downloaded.

@@ -93,26 +93,49 @@ def _core():
     import sandbox_core
     return sandbox_core
 
-def _project_instance(project_dir: str):
-    """Resolve a project dir to its instance NAME.
+def _project_instance(project_dir: str, label: str | None = None):
+    """Resolve a project dir (+ optional label) to its instance NAME.
 
-    Returns (name, None) when an instance exists, or (None, error_dict) when the
-    path is invalid or no instance has been created yet. The error is returned
-    (not raised) so tools surface it cleanly to the agent.
+    label=None resolves the sole/default instance for that root (identical to
+    pre-multi-instance behavior when there's only one). When the root has
+    several instances and none is default, or `label` names one that doesn't
+    exist, returns a structured "which one?" error listing the real labels.
+
+    Returns (name, None) when an instance exists, or (None, error_dict)
+    otherwise. The error is returned (not raised) so tools surface it cleanly
+    to the agent.
     """
     sc = _core()
     try:
         root = str(sc.find_project_root(project_dir))
     except Exception as e:  # ConfigError / bad path
         return None, {"ok": False, "error": f"invalid project_dir {project_dir!r}: {e}"}
-    entry = sc.registry_get(root)
-    if not entry or not entry.get("instance"):
+    entries = sc.registry_list_for_root(root)
+    if not entries:
         return None, {
             "ok": False,
             "error": f"no sandbox instance for project '{root}'. "
                      f"Call ensure_instance(project_dir={project_dir!r}) first.",
         }
-    return entry["instance"], None
+    if label:
+        entry = next((e for e in entries if e.get("label") == label), None)
+        if not entry:
+            return None, {
+                "ok": False,
+                "error": f"no instance labelled '{label}' for '{root}'. "
+                         f"Labels: {[e['label'] for e in entries]}",
+            }
+        return entry["instance"], None
+    if len(entries) == 1:
+        return entries[0]["instance"], None
+    default = next((e for e in entries if e.get("is_default")), None)
+    if default:
+        return default["instance"], None
+    return None, {
+        "ok": False,
+        "error": f"'{root}' has multiple instances and none is default; pass label=. "
+                 f"Labels: {[e['label'] for e in entries]}",
+    }
 
 def _wp_root(instance: str) -> Path:
     return RUNTIME_DIR / f"wp-{instance}"
@@ -275,7 +298,7 @@ SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a per-
 PROJECT HANDSHAKE — this is mandatory:
 - Every tool takes `project_dir`. ALWAYS pass your current working directory (or the plugin's project root if you can determine it — the dir holding sandbox.config.* / .wp-env.json / .git). The server is a separate process; it cannot see your cd, so it relies on this.
 - Before using any stack tool, call `ensure_instance(project_dir=...)`. It returns the instance + URL, booting one on demand if needed (may take ~1 min the first time). Other tools error with "call ensure_instance first" until then.
-- One project directory ↔ one instance (per worktree). focus_get(project_dir) returns the project's plugin + its CLAUDE.md.
+- One project directory ↔ one-or-more instances (per worktree) — a root normally has exactly one (unchanged behavior); pass `label=` to target or mint an ADDITIONAL instance of the same root (e.g. 'qa', 'php81') for side-by-side testing. Omit `label` for the default/sole instance. focus_get(project_dir) returns the project's plugin + its CLAUDE.md.
 
 ACTIVATION: engage when the user wants to run/test a plugin, names a WPDeveloper plugin, or hits a WP error / stack trace / wp-admin issue. Stay quiet on non-WP work.
 

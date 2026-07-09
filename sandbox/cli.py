@@ -38,6 +38,20 @@ import sandbox.commands.license  # noqa: F401  (registers commands)
 import sandbox.commands.schema_catalog  # noqa: F401  (registers commands)
 import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
+import sandbox.commands.e2e  # noqa: F401  (registers commands)
+import sandbox.commands.ci  # noqa: F401  (registers commands)
+
+
+class _KVAction(argparse.Action):
+    """argparse action for repeatable `--flag k=v` pairs, collected into a dict
+    (used by `./sb ci run --matrix-filter php=8.1 --matrix-filter wp=6.4`)."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        d = getattr(namespace, self.dest, None) or {}
+        if "=" not in values:
+            parser.error(f"{option_string} expects key=value, got {values!r}")
+        k, v = values.split("=", 1)
+        d[k] = v
+        setattr(namespace, self.dest, d)
 
 
 
@@ -82,6 +96,10 @@ Per-project (each plugin carries its own sandbox.config.json):
              "config (constants/plugins/themes/multisite) without dropping the DB")
     ap.add_argument("--json", action="store_true",
         help="print the reconciled instance record as JSON (for the MCP server)")
+    ap.add_argument("--label", default=None,
+        help="which of --project-dir's instances to reconcile, when it owns "
+             "more than one (multi-instance-per-root); default: the sole/"
+             "default instance")
 
     cn = sub.add_parser("connect",
         help="Save credentials for an integration (fb/fluentboards/gh/github)")
@@ -111,6 +129,16 @@ Per-project (each plugin carries its own sandbox.config.json):
     jb.add_argument("--kill", action="store_true", help="terminate the job")
     jbs = sub.add_parser("jobs", help="List background wp jobs")
     jbs.add_argument("--prune", action="store_true", help="remove old job artifacts")
+
+    aj = sub.add_parser("async-job",
+        help="Poll/follow/kill a background e2e/ci run started with --async "
+             "(NOT instance-scoped, unlike `job`/`jobs`)")
+    aj.add_argument("job_id")
+    aj.add_argument("--follow", action="store_true", help="stream output until done")
+    aj.add_argument("--kill", action="store_true", help="terminate the job")
+    aj.add_argument("--offset", type=int, default=0,
+        help="byte offset for incremental output (default: 0, full output so far)")
+    aj.add_argument("--json", action="store_true", help="print status as JSON")
 
     dp = sub.add_parser("dump", help="Tail/clear the dump()/dd() log (spec 007)")
     dp.add_argument("--follow", action="store_true")
@@ -200,8 +228,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     c = sub.add_parser("clean", help="Stop + wipe DB volume")
     c.add_argument("--yes", action="store_true")
 
-    sub.add_parser("instances",
+    isc = sub.add_parser("instances",
         help="List defined sandbox instances + their status + ports")
+    isc.add_argument("--project-dir", dest="project_dir", default=None,
+        help="filter to one project root's instance(s) — useful once a root "
+             "owns more than one labelled instance")
 
     sub.add_parser("dashboard",
         help="Interactive TUI to view + manage all instances")
@@ -223,10 +254,84 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Run the plugin's phpunit tests (externally-provisioned WP harness)")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
+    ts.add_argument("--label", default=None,
+        help="which of --project-dir's instances to test, when it owns more "
+             "than one (multi-instance-per-root, e.g. a CI matrix cell); "
+             "default: the sole/default instance")
     ts.add_argument("--provision-only", dest="provision_only", action="store_true",
         help="set up the harness but don't run phpunit")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="args after `--` are passed to phpunit (e.g. --filter foo)")
+
+    e2 = sub.add_parser("e2e",
+        help="Run Playwright e2e tests with N workers, each against its OWN "
+             "fresh WordPress instance (multi-instance-per-root)")
+    e2.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory (default: current directory)")
+    e2.add_argument("--workers", type=int, default=2,
+        help="number of parallel workers / fresh instances (default: 2)")
+    e2.add_argument("--concurrency", type=int, default=None,
+        help="cap on simultaneously-booting instances (default: auto, see "
+             "docs/ci-e2e-runner-spec.md §2.4)")
+    e2.add_argument("--playwright-config", dest="playwright_config", default=None,
+        help="path to the project's playwright config, relative to --project-dir "
+             "(default: auto-discovered at root/, tests/, test/, e2e/, tests/e2e/)")
+    e2.add_argument("--grep", default=None, help="passed to `playwright test --grep`")
+    e2.add_argument("--keep-on-fail", dest="keep_on_fail", action="store_true",
+        help="preserve a failed worker's instance for inspection instead of tearing it down")
+    e2.add_argument("--strict-provision", dest="strict_provision", action="store_true",
+        help="abort the whole run if any worker's instance fails to boot "
+             "(default: continue with the healthy workers)")
+    e2.add_argument("--timeout", type=int, default=900,
+        help="per-worker playwright timeout in seconds (default: 900)")
+    e2.add_argument("--json", action="store_true",
+        help="print the aggregated result as JSON (for the MCP server)")
+    e2.add_argument("--async", dest="run_async", action="store_true",
+        help="run detached; prints {job_id} immediately — poll with "
+             "`./sb async-job <job_id>`")
+    e2.add_argument("passthrough", nargs=argparse.REMAINDER,
+        help="args after `--` are passed to `playwright test`")
+
+    ci_p = sub.add_parser("ci",
+        help="Interpret + run a bounded subset of a GitHub Actions workflow "
+             "locally against sandbox instances (see docs/ci-e2e-runner-spec.md)")
+    ci_p.add_argument("action", choices=["plan", "run"],
+        help="'plan': parse + classify only, execute nothing (always safe). "
+             "'run': actually execute (run: steps for real; deploy-class "
+             "steps skipped by default)")
+    ci_p.add_argument("workflow", help="path to a .github/workflows/*.yml file")
+    ci_p.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project directory for 'run' (default: current directory)")
+    ci_p.add_argument("--job", dest="jobs", action="append", default=None,
+        help="run only this job id (repeatable); default: all jobs in the file")
+    ci_p.add_argument("--matrix-filter", dest="matrix_filter", action=_KVAction,
+        default=None, metavar="K=V",
+        help="run only matrix cells matching key=value (repeatable)")
+    ci_p.add_argument("--if-event", dest="if_event", default=None,
+        help="only run if the workflow's `on:` triggers mention this event "
+             "(e.g. push, pull_request); otherwise print 'nothing to run' and exit 0")
+    ci_p.add_argument("--label-prefix", dest="label_prefix", default=None,
+        help="prefix for the ephemeral per-cell instance labels (default: 'ci')")
+    ci_p.add_argument("--concurrency", type=int, default=None,
+        help="cap on simultaneously-booting instances (default: auto)")
+    ci_p.add_argument("--allow-deploy", dest="allow_deploy", action="store_true",
+        help="actually attempt deploy-class steps instead of skipping them "
+             "(still requires every referenced secret to resolve; see §3.6)")
+    ci_p.add_argument("--list-secrets", dest="list_secrets", action="store_true",
+        help="print the secrets this workflow references and exit — no execution")
+    ci_p.add_argument("--keep-on-fail", dest="keep_on_fail", action="store_true",
+        help="preserve a failed cell's instance for inspection instead of tearing it down")
+    ci_p.add_argument("--strict-provision", dest="strict_provision", action="store_true",
+        help="abort the whole run if any cell's instance fails to boot")
+    ci_p.add_argument("--dry-run", dest="dry_run", action="store_true",
+        help="same as `ci plan` even when action=run — parse + classify only")
+    ci_p.add_argument("--timeout", type=int, default=900,
+        help="per-step timeout in seconds (default: 900)")
+    ci_p.add_argument("--json", action="store_true",
+        help="print the plan/result as JSON (for the MCP server)")
+    ci_p.add_argument("--async", dest="run_async", action="store_true",
+        help="(action=run only) run detached; prints {job_id} immediately — "
+             "poll with `./sb async-job <job_id>`")
 
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
@@ -234,6 +339,13 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="project directory (default: current directory)")
     en.add_argument("--json", action="store_true",
         help="print the instance record as JSON (for the MCP server)")
+    en.add_argument("--label", default=None,
+        help="target an ADDITIONAL instance for this project root "
+             "(multi-instance-per-root), e.g. 'qa' or 'php81'; default: the "
+             "project's default instance. Minting a brand-new label needs --create.")
+    en.add_argument("--create", action="store_true",
+        help="deliberately mint a new instance for --label if one doesn't "
+             "exist yet (guards against typo-spawning an extra stack)")
 
     ini = sub.add_parser("init",
         help="Make a plugin dir a sandbox project (config + instance + test harness)")
@@ -399,9 +511,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Which sandbox instance to target (default: $SANDBOX_INSTANCE, "
              "else the instance registered for the current project dir; "
              "errors if neither resolves)")
+    # Global --label: sibling to --instance, for multi-instance-per-root — pick
+    # WHICH of the cwd project's instances to target when it owns more than
+    # one. Ignored when --instance (a globally-unique name) is also given.
+    p.add_argument("--label", default=None,
+        help="Which of the cwd project's instances to target, when it owns "
+             "more than one (multi-instance-per-root), e.g. 'qa'. Ignored if "
+             "--instance is also given. Default: the project's sole/default "
+             "instance.")
     for sp_name, sp_parser in (sub.choices or {}).items():
-        # Don't double-add when a subparser already has --instance
-        # (none currently do; future-proof).
+        # Don't double-add when a subparser already has --instance/--label
+        # (en/ap/vr define their own --label with different semantics).
         if not any(a.option_strings == ["--instance"]
                    for a in sp_parser._actions):
             # default=SUPPRESS so that when --instance is NOT passed after the
@@ -409,6 +529,8 @@ Per-project (each plugin carries its own sandbox.config.json):
             # parser already set from a BEFORE-subcommand --instance. Without
             # this, `./sb --instance xx focus` silently resolved to main.
             sp_parser.add_argument("--instance", default=argparse.SUPPRESS)
+        if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
+            sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
     args = p.parse_args()
     if not args.cmd:
@@ -419,16 +541,18 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     # Resolve which instance this invocation targets. Precedence:
     #   1. explicit --instance   2. $SANDBOX_INSTANCE
-    #   3. the registry instance for the cwd's project   4. error
+    #   3. the registry instance for the cwd's project (scoped by --label/
+    #      $SANDBOX_LABEL when given)   4. error
     # There is no implicit/global instance: `sb <cmd>` in a project dir targets
     # THAT project's instance; run outside any registered project (and not
     # project-routed) it aborts with guidance rather than targeting a fallback.
     instances = resolve_instances(cfg)
     explicit = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE")
-    chosen = explicit or _cwd_instance()
+    cwd_label = getattr(args, "label", None) or os.environ.get("SANDBOX_LABEL")
+    chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci"}
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):
@@ -445,6 +569,19 @@ Per-project (each plugin carries its own sandbox.config.json):
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:
+            # Distinguish "no instance at all for this cwd" from "cwd's
+            # project owns MULTIPLE instances and neither --label nor a
+            # default disambiguates" (multi-instance-per-root) — the latter
+            # needs a --label hint, not "go run sb init".
+            sc = _core()
+            try:
+                cwd_root = str(sc.find_project_root(Path.cwd()))
+                owned = sc.registry_list_for_root(cwd_root)
+            except Exception:
+                owned = []
+            if len(owned) > 1:
+                labels = ", ".join(e["label"] for e in owned)
+                die(f"project has {len(owned)} instances ({labels}); pass --label.")
             _known = ", ".join(sorted(instances))
             die("no sandbox instance for this directory. cd into a registered "
                 "project, or run `sb init` / `sb ensure` to create one."

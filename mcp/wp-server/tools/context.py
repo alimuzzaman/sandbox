@@ -16,7 +16,7 @@ from app import *  # noqa: F401,F403
 
 @mcp.tool()
 def focus_get(project_dir: str, include_claude_md: bool = True,
-              max_bytes: int = 16_000) -> dict:
+              max_bytes: int = 16_000, label: str | None = None) -> dict:
     """Return the project's instance + focused plugin, its CLAUDE.md, and any
     skill packs it ships (so Claude can read them on demand).
 
@@ -24,7 +24,7 @@ def focus_get(project_dir: str, include_claude_md: bool = True,
     this reads CLAUDE.md / .claude/skills/*/SKILL.md from `project_dir` directly.
     Requires the instance to exist — call ensure_instance first.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     sc = _core()
@@ -67,17 +67,17 @@ def focus_get(project_dir: str, include_claude_md: bool = True,
     return out
 
 @mcp.tool()
-def activate_plugin(slug: str, *, project_dir: str) -> dict:
+def activate_plugin(slug: str, *, project_dir: str, label: str | None = None) -> dict:
     """wp plugin activate <slug>. Slug must match the plugin folder name."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     return _wpcli(["plugin", "activate", slug], instance=inst)
 
 @mcp.tool()
-def deactivate_plugin(slug: str, *, project_dir: str) -> dict:
+def deactivate_plugin(slug: str, *, project_dir: str, label: str | None = None) -> dict:
     """wp plugin deactivate <slug>."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     return _wpcli(["plugin", "deactivate", slug], instance=inst)

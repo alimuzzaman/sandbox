@@ -535,5 +535,92 @@ class TestPluginConfigMap(unittest.TestCase):
             norm({"plugins": {"x": True}})["x"])
 
 
+class TestPerLabelConfig(unittest.TestCase):
+    """Per-label sandbox.config.<label>.json override layer
+    (docs/multi-instance-spec.md) — lets a project root's separate labelled
+    instances diverge in plugin set/config, not just php/wp version."""
+
+    def _mkproject(self, native=None, override=None, label_docs=None,
+                   dirname="per-label-proj"):
+        """Write sandbox.config.json (+ optional override + per-label docs)
+        under a temp project dir and return its path. label_docs is
+        {label: doc}."""
+        tmp = tempfile.mkdtemp(prefix="sb-label-", dir=str(Path.home()))
+        old_user_config = os.environ.get("SANDBOX_USER_CONFIG")
+        os.environ["SANDBOX_USER_CONFIG"] = str(Path(tmp) / "missing-user-config.json")
+        self.addCleanup(lambda: (
+            os.environ.pop("SANDBOX_USER_CONFIG", None) if old_user_config is None
+            else os.environ.__setitem__("SANDBOX_USER_CONFIG", old_user_config)))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = Path(tmp) / dirname
+        root.mkdir()
+        (root / "sandbox.config.json").write_text(json.dumps(native or {}))
+        if override is not None:
+            (root / "sandbox.config.override.json").write_text(json.dumps(override))
+        for label, doc in (label_docs or {}).items():
+            (root / f"sandbox.config.{label}.json").write_text(json.dumps(doc))
+        return root
+
+    def test_label_layer_overrides_scalar_over_override_json(self):
+        root = self._mkproject(
+            native={"phpVersion": "8.1", "server": "nginx"},
+            override={"server": "apache"},
+            label_docs={"qa": {"server": "litespeed"}})
+        cfg = sandbox_core.load_project_config(root, label="qa")
+        self.assertEqual(cfg["server"], "litespeed")
+        self.assertIn("sandbox.config.qa.json", cfg["source"])
+
+    def test_no_label_skips_the_layer_entirely(self):
+        root = self._mkproject(
+            native={"server": "nginx"},
+            label_docs={"qa": {"server": "litespeed"}})
+        cfg = sandbox_core.load_project_config(root)
+        self.assertEqual(cfg["server"], "nginx")
+        self.assertNotIn("qa", cfg["source"])
+
+    def test_default_label_also_skips_the_layer(self):
+        # "default" is the implicit label for a single/first instance — it
+        # must never be treated as a per-label config key.
+        root = self._mkproject(
+            native={"server": "nginx"},
+            label_docs={"default": {"server": "litespeed"}})
+        cfg = sandbox_core.load_project_config(root, label="default")
+        self.assertEqual(cfg["server"], "nginx")
+
+    def test_missing_label_file_falls_back_silently(self):
+        root = self._mkproject(native={"server": "nginx"})
+        cfg = sandbox_core.load_project_config(root, label="php81")
+        self.assertEqual(cfg["server"], "nginx")
+        self.assertNotIn("php81", cfg["source"])
+
+    def test_malformed_label_is_ignored_not_raised(self):
+        root = self._mkproject(native={"server": "nginx"})
+        # Path-traversal-shaped labels must never reach a filesystem path —
+        # ignored silently, same as any other label with no matching file.
+        for bad in ("../../etc", "a/b", "UPPER", "-leading-dash", ""):
+            cfg = sandbox_core.load_project_config(root, label=bad)
+            self.assertEqual(cfg["server"], "nginx", f"label={bad!r}")
+
+    def test_label_layer_wins_plugin_map_precedence(self):
+        root = self._mkproject(
+            native={"plugins": {"woo": True}},
+            override={"plugins": {"woo": {"active": False}}},
+            label_docs={"qa": {"plugins": {"woo": True}}})
+        cfg = sandbox_core.load_project_config(root, label="qa")
+        self.assertTrue(cfg["plugins_resolved"]["woo"]["active"])
+
+    def test_config_label_distinct_from_instance_label(self):
+        # The CI runner passes a stable per-cell slug as config_label, distinct
+        # from the randomized instance label — load_project_config's `label`
+        # param IS that config key, so this just proves the substitution the
+        # CI runner relies on: passing the slug directly resolves the same
+        # layer a durable label of the same name would.
+        root = self._mkproject(
+            native={"phpVersion": "8.1"},
+            label_docs={"wp68-php84": {"phpVersion": "8.4"}})
+        cfg = sandbox_core.load_project_config(root, label="wp68-php84")
+        self.assertEqual(cfg["phpVersion"], "8.4")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

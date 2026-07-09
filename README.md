@@ -103,8 +103,12 @@ sandbox ensure    # just boot/refresh this project's instance (create-if-missing
 ```
 
 `init` is the one command from a bare checkout to a running, testable stack.
-Each project gets **one instance**, keyed by its directory and tracked in an
-on-disk registry. Sibling plugins listed in one config share that instance.
+Each project gets **one instance by default**, keyed by its directory and
+tracked in an on-disk registry. Sibling plugins listed in one config share
+that instance. A project can also own additional labelled instances side by
+side (e.g. to test a second PHP/WP version, or a zip install alongside dev) —
+pass `--label <name>` / `label=` (default `default`); see
+`docs/multi-instance-spec.md`.
 
 **With Claude, you don't even run those** — the MCP tools take `project_dir`
 (the agent passes your plugin dir), and `ensure_instance` boots on demand. Just

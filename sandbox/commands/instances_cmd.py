@@ -67,8 +67,10 @@ def cmd_ensure(cfg, args) -> None:
     ensure_instance tool wraps this; also usable by hand."""
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
+    label = getattr(args, "label", None)
+    create = getattr(args, "create", False)
     try:
-        entry = ensure_instance(cfg, pd)
+        entry = ensure_instance(cfg, pd, label=label or "default", create=create)
     except sc.ConfigError as e:
         die(str(e))
     if getattr(args, "json", False):
@@ -233,7 +235,7 @@ def cmd_instance(cfg, args) -> None:
     sc = _core()
     owner = sc.registry_find_instance(name)
     if owner and owner.get("root"):
-        sc.registry_remove(owner["root"])
+        sc.registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' from the instance registry")
 
     # 7. Tear down its custom domain. Primary: drop its route from the HTTPS
@@ -259,14 +261,25 @@ def cmd_instance(cfg, args) -> None:
     ok(f"Instance '{name}' deleted.")
 
 def cmd_instances(cfg, args) -> None:
-    """List defined instances + their status and ports."""
+    """List defined instances + their status and ports. --project-dir filters
+    to one project root — useful once a root owns more than one labelled
+    instance (multi-instance-per-root)."""
     rows = collect_instance_rows(cfg)
+    project_dir = getattr(args, "project_dir", None)
+    if project_dir:
+        sc = _core()
+        try:
+            root = str(sc.find_project_root(project_dir))
+        except Exception as e:
+            die(f"invalid --project-dir {project_dir!r}: {e}")
+        owned = {e["instance"] for e in sc.registry_list_for_root(root)}
+        rows = [r for r in rows if r["name"] in owned]
     print()
-    print(f"  {'STATUS':<10} {'NAME':<10} {'URL':<26} {'SERVER':<10} "
+    print(f"  {'STATUS':<10} {'NAME':<10} {'LABEL':<10} {'URL':<26} {'SERVER':<10} "
           f"{'MCP SERVER':<18} {'PROJECT':<12} FOCUS")
     for r in rows:
         status = "● running" if r["running"] else "○ stopped"
-        print(f"  {status:<10} {r['name']:<10} {r['url']:<26} {r['server']:<10} "
+        print(f"  {status:<10} {r['name']:<10} {r['label']:<10} {r['url']:<26} {r['server']:<10} "
               f"{r['mcp_server']:<18} {r['project']:<12} {r['focus']}")
     print()
     print(f"  Claude tools per instance: mcp__<MCP SERVER>__*  "

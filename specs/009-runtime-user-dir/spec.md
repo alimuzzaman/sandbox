@@ -159,7 +159,11 @@ references the old base.
   the base so they remain valid when the base is outside the repo checkout.
 - **FR-011**: The project→instance registry MUST continue to key state by project-root
   path; those project-root paths are independent of the base and MUST remain valid across
-  any migration or relocation.
+  any migration or relocation. (Amended for multi-instance-per-root: a project root MAY
+  own more than one instance, distinguished by a `label`; the registry key becomes
+  `<project-root>::<label>`, so "by project-root path" now means "by project-root path,
+  further scoped by label" rather than a strict one-to-one root→instance mapping. See
+  `docs/multi-instance-spec.md`.)
 - **FR-012**: Setting the base override to a different directory MUST relocate all state
   there (move pure-data, regenerate/recreate baked artifacts) such that instances boot
   from the new base and nothing references the old base.
@@ -186,7 +190,11 @@ references the old base.
 - **Per-machine config & secrets**: the consolidated user config file, per-machine config
   file, and secrets file, relocated under the base.
 - **Registry**: the project-root → instance mapping; authoritative, keyed by project root
-  (independent of the base), living under the base.
+  (independent of the base), living under the base. (Amended for multi-instance-per-root:
+  the authoritative key is `<project-root>::<label>`, so one root MAY back one-or-more
+  instance entries; a v1 (root-only-keyed) registry MUST be auto-migrated in place to the
+  v2 composite-key shape on first read, preserving every existing instance's identity,
+  ports, and status. See `docs/multi-instance-spec.md` §1.)
 - **Pure-data vs. baked artifacts**: pure-data artifacts (registry, config, snapshots,
   cache, seeds, instance files, certs) move cleanly; baked artifacts (orchestration files,
   environment shims, proxy config, tooling virtual environment) must be regenerated for

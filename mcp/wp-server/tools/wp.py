@@ -15,7 +15,7 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def wp_cli(command: str, timeout: int = 60, *, project_dir: str) -> dict:
+def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
     Note: this runs `wp <command>` directly. If you need shell features like
@@ -24,14 +24,14 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str) -> dict:
     project_dir: the plugin project to target (its instance must already exist —
     call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     return _wpcli(shlex.split(command), instance=inst, timeout=timeout)
 
 @mcp.tool()
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
-            timeout: int = 120, *, project_dir: str) -> dict:
+            timeout: int = 120, *, project_dir: str, label: str | None = None) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
 
     Use for composer, npm, node, php scripts, file ops, etc. Runs as the
@@ -41,7 +41,7 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     if _is_herd(inst):
@@ -60,14 +60,14 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
 
 @mcp.tool()
 def wp_rest(method: str, path: str, body: dict | None = None,
-            query: dict | None = None, *, project_dir: str) -> dict:
+            query: dict | None = None, *, project_dir: str, label: str | None = None) -> dict:
     """Call the WordPress REST API.
 
     path: e.g. '/wp/v2/posts' (leading slash optional)
     Auth via Application Password — auto-provisioned when the instance installs.
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     inst_cfg = _resolve_instance(inst)
@@ -91,7 +91,8 @@ def wp_rest(method: str, path: str, body: dict | None = None,
         return {"ok": False, "error": str(e)}
 
 @mcp.tool()
-def run_tests(project_dir: str, phpunit_args: str = "") -> dict:
+def run_tests(project_dir: str, phpunit_args: str = "",
+             label: str | None = None) -> dict:
     """Run the plugin's phpunit tests against an externally-provisioned WP test
     harness — the WP test suite, phpunit, polyfills, and an isolated wp_tests DB
     are all supplied by Sandbox (none need to be in the plugin's composer).
@@ -104,11 +105,13 @@ def run_tests(project_dir: str, phpunit_args: str = "") -> dict:
     Returns {ok, passed, summary, output}. This is live evidence — prefer it to
     asserting a fix works from code reading.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "test", "--project-dir", project_dir]
+    if label:
+        cmd += ["--label", label]
     if phpunit_args.strip():
         cmd += ["--", *shlex.split(phpunit_args)]
     try:
@@ -128,7 +131,7 @@ def run_tests(project_dir: str, phpunit_args: str = "") -> dict:
 
 
 @mcp.tool()
-def wp_cli_async(command: str, *, project_dir: str) -> dict:
+def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
     (media regenerate, big search-replace/imports). Poll with wp_cli_job, cancel
@@ -136,7 +139,7 @@ def wp_cli_async(command: str, *, project_dir: str) -> dict:
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     cmd = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "wp", "--async",
@@ -150,12 +153,12 @@ def wp_cli_async(command: str, *, project_dir: str) -> dict:
 
 
 @mcp.tool()
-def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_dir: str) -> dict:
+def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_dir: str, label: str | None = None) -> dict:
     """Poll a background wp-cli job (spec 004): returns {ok, status
     (running|completed|not_found), exit_code?, stdout, bytes_read, truncated}.
     Advance `offset` by `bytes_read` to fetch only new output. limit=-1 = whole log.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     import sys as _sys
@@ -170,10 +173,10 @@ def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_di
 
 
 @mcp.tool()
-def wp_cli_job_kill(job_id: str, *, project_dir: str) -> dict:
+def wp_cli_job_kill(job_id: str, *, project_dir: str, label: str | None = None) -> dict:
     """Cancel a running background wp-cli job (spec 004). No-op if already finished.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     import sys as _sys

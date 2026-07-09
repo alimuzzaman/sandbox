@@ -5,9 +5,9 @@ still works for the command modules."""
 import types as _types
 from importlib import import_module
 
-_SUBMODS = ['bridge', 'config', 'dash', 'docker', 'domains', 'herd',
-            'instances', 'integ', 'licensing', 'misc', 'paths', 'provision',
-            'schema_catalog', 'tests', 'ui']
+_SUBMODS = ['asyncjobs', 'bridge', 'config', 'dash', 'docker', 'domains',
+            'fanout', 'herd', 'instances', 'integ', 'licensing', 'misc',
+            'paths', 'provision', 'schema_catalog', 'tests', 'ui']
 _mods = [import_module(f'sandbox.core._{m}') for m in _SUBMODS]
 
 # Collect every name defined across the submodules (functions, classes,

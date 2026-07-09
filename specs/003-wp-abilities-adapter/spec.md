@@ -46,7 +46,10 @@ layer exists to add; everything else (file abilities, the editor engine in spec
 
 **Independent Test**: With one instance running and the layer enabled, call the
 code-execution ability and confirm it returns a structured result for a simple
-expression — fully testable on its own.
+expression — fully testable on its own. (No FR change under multi-instance-per-root:
+"one instance running" describes any single labelled instance of a project root — the
+abilities mu-plugin is written per instance-*name* by `apply_config`, so each labelled
+instance of a root gets its own, independently. See `docs/multi-instance-spec.md` §7.)
 
 **Acceptance Scenarios**:
 

@@ -15,14 +15,14 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str) -> dict:
+def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str, label: str | None = None) -> dict:
     """Tail a log for the project's instance.
 
     file: 'debug' (default → wp-content/debug.log), 'dump' (dump()/dd() output →
     wp-content/debug-dump.log, spec 007), or 'qm' (Query Monitor capture →
     wp-content/qm.jsonl, spec 007).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     if file == "dump":
@@ -43,14 +43,14 @@ def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str) -> dict
         return {"ok": False, "error": str(e)}
 
 @mcp.tool()
-def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str) -> dict:
+def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str, label: str | None = None) -> dict:
     """Read a file under the project instance's WordPress install.
 
     path is relative to the WP root — e.g. 'wp-content/themes/my-theme/style.css'.
     Refuses paths that escape the WP root.
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     wp_root = _wp_root(inst)
@@ -74,13 +74,13 @@ def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str) -> dict:
 
 @mcp.tool()
 def fs_write(path: str, content: str, create_dirs: bool = True,
-             *, project_dir: str) -> dict:
+             *, project_dir: str, label: str | None = None) -> dict:
     """Write a file under the project instance's WordPress install. Creates
     parent dirs by default. Refuses paths that escape WP root. Returns bytes.
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     wp_root = _wp_root(inst)
@@ -94,9 +94,9 @@ def fs_write(path: str, content: str, create_dirs: bool = True,
             "bytes": len(content.encode("utf-8"))}
 
 @mcp.tool()
-def fs_list(path: str = "", depth: int = 1, *, project_dir: str) -> dict:
+def fs_list(path: str = "", depth: int = 1, *, project_dir: str, label: str | None = None) -> dict:
     """List files under the project instance's WP install. depth=1 is shallow."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     wp_root = _wp_root(inst)

@@ -28,6 +28,7 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
         # serves (its dir basename), not the vestigial .active-project file.
         owner = sc.registry_find_instance(name)
         project = Path(owner["root"]).name if owner and owner.get("root") else "—"
+        label = owner.get("label", "default") if owner else "—"
         _base = site_url(inst_cfg)
         _token = local_cfg.get("instances", {}).get(name, {}).get("autologin_token", "")
         rows.append({
@@ -42,6 +43,7 @@ def collect_instance_rows(cfg: dict) -> list[dict]:
             "server": inst_cfg.get("server", "nginx"),
             "mcp_server": mcp_server_name(name),
             "project": project,
+            "label": label,
             "focus": ff.read_text().strip() if ff.exists() else "—",
         })
     return rows
@@ -346,9 +348,17 @@ def claude_usage(known_instances: list[str]) -> dict:
     pdir = _claude_projects_dir()
     blank = lambda: {"in": 0, "out": 0, "cw": 0, "cr": 0}
     # project root (canonical) -> instance, for mapping a tool's project_dir.
+    # A root MAY own several labelled instances (multi-instance-per-root); read
+    # the root from each entry's own `root` field (never the registry key,
+    # which is `<root>::<label>`), and attribute to the default-labelled
+    # instance so single-instance roots (the common case) are unaffected.
     sc = _core()
-    root_to_inst = {r: e.get("instance")
-                    for r, e in sc.registry_all().items() if e.get("instance")}
+    root_to_inst: dict[str, str] = {}
+    for e in sc.registry_all().values():
+        if not e.get("instance") or not e.get("root"):
+            continue
+        if e.get("is_default") or e["root"] not in root_to_inst:
+            root_to_inst[e["root"]] = e["instance"]
 
     def _pd_to_inst(pd):
         if not pd:

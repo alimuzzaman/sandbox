@@ -120,19 +120,30 @@ def cmd_introspect(cfg, args) -> None:
         ok(f"{t}: {count} entries → {out_path.relative_to(ROOT)}")
 
 def cmd_test(cfg, args) -> None:
-    """`./sb test [--project-dir DIR] [--provision-only] [-- <phpunit args>]` —
-    provision the (cached) external WP test harness (suite + phpunit + polyfills
+    """`./sb test [--project-dir DIR] [--label LABEL] [--provision-only] [-- <phpunit args>]`
+    — provision the (cached) external WP test harness (suite + phpunit + polyfills
     + composer + the isolated wp_tests DB + sandbox wp-tests-config.php) for a
-    project's instance, then run phpunit at the plugin dir."""
+    project's instance, then run phpunit at the plugin dir. `--label` selects
+    which of the project's instances to test, when it owns more than one
+    (multi-instance-per-root, e.g. a matrix cell); omitted defaults to the
+    sole/default instance — unchanged behavior for single-instance projects."""
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
+    label = getattr(args, "label", None)
     try:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:
         die(str(e))
-    entry = sc.registry_get(pconf["root"])
+    entry = sc.registry_get(pconf["root"], label=label)
     if not entry:
+        if label is None and len(sc.registry_list_for_root(pconf["root"])) > 1:
+            known = [e["label"] for e in sc.registry_list_for_root(pconf["root"])]
+            die(f"'{pconf['root']}' has multiple instances ({', '.join(known)}); "
+                f"pass --label to disambiguate.")
         die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
+    # Re-load with the RESOLVED label so a per-label sandbox.config.<label>.json
+    # layer (if present) applies — the first load above only existed to find root.
+    pconf = sc.load_project_config(pd, label=entry.get("label"))
     inst = entry["instance"]
 
     info("Provisioning test harness (cached)…")

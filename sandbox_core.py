@@ -46,6 +46,22 @@ OVERRIDE_BASENAMES = (
 WPENV_BASENAMES = (".wp-env.json",)
 ROOT_MARKERS = CONFIG_BASENAMES + WPENV_BASENAMES + (".git",)
 
+# Per-label config layer (multi-instance-per-root, docs/multi-instance-spec.md):
+# sandbox.config.<label>.json optionally sits ABOVE sandbox.config.override.json
+# in precedence, letting one project root's separate labelled instances diverge
+# in plugin set/config — not just the php/wp version override ensure_instance
+# already supports. Same validation as instance labels themselves (a label is
+# only ever derived from this pattern, never taken raw from user input without
+# checking) — reused here so a malicious/malformed label can't be used to
+# construct a path that escapes the project root.
+_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,20}$")
+
+
+def _label_config_basenames(label: str) -> tuple[str, ...]:
+    return (f"sandbox.config.{label}.json",
+            f"sandbox.config.{label}.yml",
+            f"sandbox.config.{label}.yaml")
+
 # User-global config: applies to every project on this machine. Honors
 # XDG_CONFIG_HOME; overridable for tests via SANDBOX_USER_CONFIG (a file path).
 USER_CONFIG_BASENAMES = ("config.json", "config.yml", "config.yaml")
@@ -455,8 +471,17 @@ def _from_wp_env(raw: dict) -> dict:
     }
 
 
-def load_project_config(project_dir) -> dict:
+def load_project_config(project_dir, label: str | None = None) -> dict:
     """Resolve the effective config for a project directory.
+
+    `label`: when given (and not "default"), also layers
+    `sandbox.config.<label>.json` (optional; falls back silently if absent) at
+    the HIGHEST precedence — above `sandbox.config.override.json` — so a
+    project root's separate labelled instances (multi-instance-per-root) can
+    diverge in plugin set/config, not just the php/wp version `ensure_instance`
+    already overrides directly. Malformed labels are ignored (never raise here
+    — config loading must not fail because of a bad label; callers that mint
+    instances validate labels themselves).
 
     Returns the normalised schema (DEFAULTS keys) plus:
       root:    absolute project root
@@ -479,14 +504,25 @@ def load_project_config(project_dir) -> dict:
     override_path = _first_existing(root, OVERRIDE_BASENAMES)
     override_doc = _load_doc(override_path) if override_path else {}
 
+    label_path = None
+    label_doc: dict = {}
+    if label and label != "default" and _LABEL_RE.match(label):
+        label_path = _first_existing(root, _label_config_basenames(label))
+        if label_path:
+            label_doc = _load_doc(label_path)
+
     user_doc = _load_user_global()
 
     # Generic merge for all NON-plugin keys (themes, mappings for non-plugin
-    # wp-paths, scalars, …) — unchanged behavior: override over native, then the
-    # user-global layer folded under, then DEFAULTS.
+    # wp-paths, scalars, …) — unchanged behavior: override over native, then
+    # the OPTIONAL per-label layer over that, then the user-global layer
+    # folded under, then DEFAULTS.
     data = _deep_merge(native_doc, override_doc)
     if override_path:
         source = f"{source}+{override_path.name}"
+    if label_doc:
+        data = _deep_merge(data, label_doc)
+        source = f"{source}+{label_path.name}"
     if user_doc:
         data = _merge_layers(user_doc, data)
         source = f"user+{source}"
@@ -495,12 +531,13 @@ def load_project_config(project_dir) -> dict:
     merged["source"] = source
 
     # Spec 010: resolve the canonical slug-keyed plugin map SEPARATELY via
-    # normalize-then-field-merge (the generic merge would clobber per-slug). Layer
-    # precedence low->high: user-global (source catalog) < project < override.
+    # normalize-then-field-merge (the generic merge would clobber per-slug).
+    # Layer precedence low->high: user-global (source catalog) < project <
+    # override < per-label (highest — a label's own plugin set wins last).
     layers = []
     used_legacy = False
     self_slug = _project_slug(merged.get("slug"), root.name)
-    for doc in (user_doc, native_doc, override_doc):
+    for doc in (user_doc, native_doc, override_doc, label_doc):
         m, legacy, self_entry = _normalize_plugins(doc or {})
         if self_entry is not None:
             m = dict(m)
@@ -509,11 +546,12 @@ def load_project_config(project_dir) -> dict:
         used_legacy = used_legacy or legacy
     if used_legacy:
         _warn_legacy_once()
-    user_map, native_map, override_map = layers
-    # "Opted in" = declared by the project or its machine override (NOT the
-    # user-global catalog). These default to active; catalog-only slugs default
-    # to on-demand (FR-004b — the catalog never auto-enables).
-    opted_in = set(native_map) | set(override_map)
+    user_map, native_map, override_map, label_map = layers
+    # "Opted in" = declared by the project, its machine override, or its label
+    # config (NOT the user-global catalog). These default to active;
+    # catalog-only slugs default to on-demand (FR-004b — the catalog never
+    # auto-enables).
+    opted_in = set(native_map) | set(override_map) | set(label_map)
     merged_map = _merge_plugin_maps(*layers)
     merged["plugins_resolved"] = {
         slug: _resolve_plugin_entry(e, slug in opted_in)
@@ -595,13 +633,56 @@ def _registry_lock():
         fh.close()
 
 
-def _registry_read() -> dict:
+def _migrate_registry_v1_to_v2(data: dict) -> dict:
+    """v1 keyed `{root: entry}` (one instance per root) -> v2 keyed
+    `{f"{root}::{label}": entry}` (one-or-more instances per root, spec:
+    multi-instance-per-root). Every pre-existing entry becomes that root's
+    "default" label. Idempotent — a v2 file is returned unchanged. Preserves
+    every field (ports/status/secrets) so a currently-running instance keeps
+    resolving with zero downtime; only the registry KEY gains a `::default`
+    suffix. See docs/multi-instance-spec.md §1."""
+    if data.get("version", 1) >= 2:
+        data.setdefault("instances", {})
+        return data
+    new_instances = {}
+    for root, entry in data.get("instances", {}).items():
+        label = entry.get("label", "default")
+        new_instances[f"{root}::{label}"] = {
+            **entry, "root": root, "label": label, "is_default": True,
+        }
+    return {"version": 2, "instances": new_instances}
+
+
+def _registry_read_raw() -> dict:
+    """Read the registry file with NO locking and NO migration. Callers that
+    already hold `_registry_lock()` (registry_put/registry_remove) MUST use
+    this, not `_registry_read()` — `fcntl.flock()` is not reentrant even
+    within the same process (each `_registry_lock()` call opens a fresh file
+    handle), so a lock-holding caller calling back into `_registry_read()`'s
+    own internal `with _registry_lock():` migration path deadlocks forever.
+    Confirmed live: `registry_put()` against a pre-existing v1 registry.json
+    hung indefinitely before this split existed."""
     try:
         data = json.loads(_registry_path().read_text())
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"version": 1, "instances": {}}
+        return {"version": 2, "instances": {}}
     data.setdefault("version", 1)
     data.setdefault("instances", {})
+    return data
+
+
+def _registry_read() -> dict:
+    """Read + auto-migrate if needed. Safe to call WITHOUT already holding
+    `_registry_lock()` — acquires it itself, only when migration is actually
+    needed. Do NOT call this from inside a `with _registry_lock():` block
+    already held by the caller (see `_registry_read_raw`'s docstring)."""
+    data = _registry_read_raw()
+    if data["version"] < 2:
+        with _registry_lock():
+            data = _registry_read_raw()  # re-read: another process may have migrated already
+            if data["version"] < 2:
+                data = _migrate_registry_v1_to_v2(data)
+                _registry_write(data)
     return data
 
 
@@ -614,31 +695,102 @@ def _registry_write(data: dict) -> None:
 
 
 def registry_all() -> dict:
-    """All registered projects, keyed by canonical project root."""
+    """All registered instances, keyed by `<canonical-project-root>::<label>`.
+    Every value carries its own `root` and `label` fields — read those, never
+    the dict key, when you need the root or label (spec: multi-instance-per-root)."""
     return _registry_read()["instances"]
 
 
-def registry_get(root) -> dict | None:
-    return registry_all().get(_canonical(root))
+def registry_list_for_root(root) -> list[dict]:
+    """Every instance entry owned by `root`, default-labelled one first. Powers
+    label-disambiguation errors and `sb instances --project-dir` listing."""
+    key_root = _canonical(root)
+    entries = [e for e in registry_all().values() if e.get("root") == key_root]
+    entries.sort(key=lambda e: (not e.get("is_default"), e.get("label", "")))
+    return entries
 
 
-def registry_put(root, **fields) -> dict:
-    """Create/update the entry for `root` (shallow-merged with existing) under
-    lock. Returns the stored entry."""
-    key = _canonical(root)
+def registry_default_label(root) -> str | None:
+    """The `is_default` label for `root`, or None if it has no instances."""
+    entries = registry_list_for_root(root)
+    if not entries:
+        return None
+    default = next((e for e in entries if e.get("is_default")), None)
+    return (default or entries[0]).get("label")
+
+
+def registry_get(root, label=None) -> dict | None:
+    """Resolve one instance entry for `root`.
+
+    label=None: back-compat fast path — a root with exactly one instance
+    returns it unconditionally (identical to the pre-multi-instance behavior);
+    a root with several returns the `is_default` one, or None if none is
+    marked default. label given: returns that exact labelled entry, or None.
+    """
+    entries = registry_list_for_root(root)
+    if not entries:
+        return None
+    if label is not None:
+        return next((e for e in entries if e.get("label") == label), None)
+    if len(entries) == 1:
+        return entries[0]
+    return next((e for e in entries if e.get("is_default")), None)
+
+
+def registry_put(root, label="default", **fields) -> dict:
+    """Create/update the entry for `root`+`label` (shallow-merged with existing)
+    under lock. First entry ever written for a root is marked `is_default`.
+    Returns the stored entry."""
+    key_root = _canonical(root)
+    key = f"{key_root}::{label}"
     with _registry_lock():
-        data = _registry_read()
-        entry = {**data["instances"].get(key, {}), **fields, "root": key}
+        data = _registry_read_raw()
+        if data["version"] < 2:
+            data = _migrate_registry_v1_to_v2(data)
+        prior = data["instances"].get(key)
+        is_default = fields.pop("is_default", None)
+        if is_default is None:
+            if prior is not None and "is_default" in prior:
+                # Updating an existing entry (e.g. ensure_instance's pending ->
+                # ready transition) — preserve its is_default, don't recompute.
+                # Recomputing here would count the entry itself as "already
+                # existing for this root" and wrongly flip a true default to
+                # False on its second write.
+                is_default = prior["is_default"]
+            else:
+                existing_for_root = [e for k, e in data["instances"].items()
+                                      if e.get("root") == key_root and k != key]
+                is_default = not existing_for_root
+        entry = {**data["instances"].get(key, {}), **fields,
+                 "root": key_root, "label": label, "is_default": is_default}
         data["instances"][key] = entry
         _registry_write(data)
     return entry
 
 
-def registry_remove(root) -> bool:
-    key = _canonical(root)
+def registry_remove(root, label=None) -> bool:
+    """Remove one instance entry for `root`. label=None + exactly one entry ->
+    remove it (back-compat). label=None + several entries -> raises (ambiguous
+    — caller must pass label). label given -> remove that entry."""
+    key_root = _canonical(root)
     with _registry_lock():
-        data = _registry_read()
-        existed = data["instances"].pop(key, None) is not None
+        data = _registry_read_raw()
+        if data["version"] < 2:
+            data = _migrate_registry_v1_to_v2(data)
+        matches = [k for k, e in data["instances"].items() if e.get("root") == key_root]
+        if label is not None:
+            target = f"{key_root}::{label}"
+            existed = data["instances"].pop(target, None) is not None
+        elif len(matches) <= 1:
+            existed = False
+            for k in matches:
+                data["instances"].pop(k, None)
+                existed = True
+        else:
+            raise ConfigError(
+                f"'{root}' has {len(matches)} instances "
+                f"({', '.join(sorted(data['instances'][k]['label'] for k in matches))}); "
+                f"pass label= to registry_remove to disambiguate.")
         if existed:
             _registry_write(data)
     return existed
@@ -711,7 +863,96 @@ def _selftest_registry() -> None:
     assert final == THREADS * ITERS, f"lost updates: {final} != {THREADS * ITERS}"
 
     assert registry_remove(root) and registry_get(root) is None, "remove"
-    print(f"registry self-test OK (count={final}, no lost updates; CRUD + lock verified)")
+
+    # Regression: a second registry_put on the SAME (root, label) — e.g.
+    # ensure_instance's pending -> ready transition — must NOT flip a true
+    # is_default to False (the entry itself must not count as "already
+    # existing for this root" when recomputing).
+    root1b = str(Path.home() / "proj-A1")
+    registry_put(root1b, label="default", instance="proj-a1", status="pending")
+    assert registry_get(root1b)["is_default"], "first write is default"
+    registry_put(root1b, label="default", instance="proj-a1", status="ready")
+    assert registry_get(root1b)["is_default"], \
+        "second write to the SAME (root, label) must stay default"
+    registry_remove(root1b, label="default")
+
+    # Multi-instance-per-root (spec: multi-instance-per-root).
+    root2 = str(Path.home() / "proj-B")
+    registry_put(root2, label="default", instance="proj-b", wordpress_port=8300)
+    registry_put(root2, label="qa", instance="proj-b-qa", wordpress_port=8301)
+    entries = registry_list_for_root(root2)
+    assert len(entries) == 2, "two labelled instances for one root"
+    assert entries[0]["is_default"] and entries[0]["label"] == "default", \
+        "default label sorts first"
+    assert registry_get(root2)["instance"] == "proj-b", \
+        "no-label get on multi-instance root resolves to default"
+    assert registry_get(root2, label="qa")["instance"] == "proj-b-qa", \
+        "labelled get resolves the requested label"
+    assert registry_default_label(root2) == "default"
+    try:
+        registry_remove(root2)
+        raise AssertionError("remove without label on multi-instance root should raise")
+    except ConfigError:
+        pass
+    assert registry_remove(root2, label="qa") and \
+        registry_get(root2, label="qa") is None, "labelled remove"
+    assert registry_get(root2)["instance"] == "proj-b", \
+        "removing one label leaves the other intact"
+    registry_remove(root2, label="default")
+
+    # v1 -> v2 migration: a raw pre-migration file loads, migrates in place, and
+    # every prior instance keeps resolving via registry_get(root) with no label.
+    root3 = str(Path.home() / "proj-C")
+    key3 = _canonical(root3)
+    _registry_write({"version": 1, "instances": {
+        key3: {"instance": "proj-c", "wordpress_port": 8400, "status": "ready"},
+    }})
+    migrated = registry_get(root3)
+    assert migrated is not None and migrated["instance"] == "proj-c", \
+        "v1 entry resolves after auto-migration"
+    assert migrated["label"] == "default" and migrated["is_default"], \
+        "migrated entry becomes the default label"
+    raw = _registry_read()
+    assert raw["version"] == 2 and f"{key3}::default" in raw["instances"], \
+        "on-disk file rewritten to v2 composite-key shape"
+    registry_remove(root3, label="default")
+
+    # Regression: registry_put/registry_remove call _registry_read_raw() (NOT
+    # _registry_read()) while already holding _registry_lock() — calling
+    # _registry_read() there instead deadlocks forever the FIRST time either
+    # is invoked against a pre-existing v1 file, because fcntl.flock() is not
+    # reentrant even within one process (each _registry_lock() call opens a
+    # fresh file handle, so a second acquire attempt blocks on the first).
+    # This must be the FIRST touch of the v1 file — no registry_get/
+    # _registry_read() call in between — to actually exercise the deadlock
+    # path (those warm the file to v2 via a lock-free read first, masking
+    # the bug). Guarded by a hard wall-clock deadline so a regression FAILS
+    # instead of hanging the whole test suite forever.
+    import threading
+    root4 = str(Path.home() / "proj-D")
+    key4 = _canonical(root4)
+    _registry_write({"version": 1, "instances": {
+        key4: {"instance": "proj-d", "wordpress_port": 8500, "status": "ready"},
+    }})
+    done = threading.Event()
+
+    def _put_first_touch():
+        registry_put(root4, label="default", instance="proj-d", status="ready")
+        done.set()
+
+    t = threading.Thread(target=_put_first_touch, daemon=True)
+    t.start()
+    if not done.wait(timeout=5):
+        raise AssertionError(
+            "registry_put deadlocked on first touch of a v1 registry file "
+            "(fcntl.flock() re-acquired while already held — see "
+            "_registry_read_raw vs _registry_read)")
+    assert registry_get(root4)["instance"] == "proj-d", \
+        "v1 entry survives a direct registry_put (no prior read) without deadlocking"
+    registry_remove(root4, label="default")
+
+    print(f"registry self-test OK (count={final}, no lost updates; CRUD + lock + "
+          f"multi-instance-per-root + v1->v2 migration verified)")
 
 
 if __name__ == "__main__":  # pragma: no cover

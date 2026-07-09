@@ -174,7 +174,10 @@ baseline can't be overwritten or deleted by ordinary snapshot operations.
   before import and tolerates a missing uploads archive, so DB-only restore needs no
   restore-side behavior change.
 - The baseline is captured after install seeds content and activates plugins, so
-  "initial state" matches what was provisioned; one baseline per instance.
+  "initial state" matches what was provisioned; one baseline per instance. (No FR change
+  under multi-instance-per-root: baselines and snapshot stores are keyed by instance
+  *name*, which stays globally unique when a project root owns several labelled
+  instances — each gets its own independent baseline. See `docs/multi-instance-spec.md` §7.)
 - Full (DB + uploads) snapshots remain available; DB-only is additive.
 - Host-served (herd) snapshot support is out of scope for v1 (tracked with the
   existing snapshot feature's limitation).

@@ -49,6 +49,12 @@ corresponds to a real registered project.
 only registered project instances; no `main` row appears; deleting any instance needs no
 special-case exception.
 
+**Amended for multi-instance-per-root** (`docs/multi-instance-spec.md`): `sb instances`
+and the web/TUI dashboard (`sandbox/core/_dash.py`, `sandbox/commands/ui_dash.py`) gain a
+`LABEL` column and MUST read each row's root from the entry's `root` field (not from the
+registry key, which becomes `<root>::<label>`) so listings stay correct once a project can
+own more than one instance.
+
 **Acceptance Scenarios**:
 
 1. **Given** a fresh machine with no `instances:` block, **When** I run `sb instances`,
@@ -132,7 +138,10 @@ CLI and the release tarball still work.
 - **FR-005**: The system MUST remove the legacy pre-multi-instance migration and all
   `main` special-cases (delete guards, name reservation) once parity is verified.
 - **FR-006**: All existing per-project instance features MUST continue to work unchanged
-  for registered instances (no regressions).
+  for registered instances (no regressions). (Satisfied, not broken, by
+  multi-instance-per-root: a project with exactly one instance MUST see zero behavior
+  change — no new required parameters, no new prompts — per the back-compat guarantee in
+  `docs/multi-instance-spec.md` §6.)
 - **FR-007**: Each CLI feature MUST be a self-contained module registered through a
   command registry; adding/removing a feature MUST NOT require editing a hand-maintained
   central dispatch table.
@@ -181,9 +190,15 @@ CLI and the release tarball still work.
 ### Key Entities
 
 - **Instance**: a per-project WordPress stack (containers/host, DB, WP dir, ports),
-  identified by an instance name, owned by exactly one project root.
+  identified by an instance name, owned by exactly one project root. (Amended for
+  multi-instance-per-root: "owned by exactly one project root" describes the
+  instance→root direction and still holds — the reverse is now many-to-one, i.e. one
+  project root MAY own several instances, each distinguished by a `label` and each still
+  owned by exactly that one root. See `docs/multi-instance-spec.md`.)
 - **Registry entry**: the authoritative project-root → instance mapping plus cached
-  metadata, stored in `runtime/registry.json`.
+  metadata, stored in `runtime/registry.json`. (Amended: keyed by `<project-root>::<label>`
+  once multi-instance-per-root lands, not by project-root alone — see spec 009 FR-011
+  amendment and `docs/multi-instance-spec.md` §1.)
 - **Instance config**: per-instance settings (ports, server, domain, wp_config,
   multisite, app password) under `sandbox.local.yml` `instances:`.
 - **Feature module**: a self-contained unit of CLI functionality that registers its

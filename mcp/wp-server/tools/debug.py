@@ -11,12 +11,12 @@ def _sb(inst: str, *args: str) -> subprocess.CompletedProcess:
 
 
 @mcp.tool()
-def qm_capture(url: str = "/", collectors: list[str] | None = None, *, project_dir: str) -> dict:
+def qm_capture(url: str = "/", collectors: list[str] | None = None, *, project_dir: str, label: str | None = None) -> dict:
     """Capture Query Monitor data for a real request to `url` as JSON (spec 007).
     Auto-activates QM, fires the request, returns the parsed collectors (db_queries,
     php_errors, timing, http, …; `hooks` excluded). Optional `collectors` filter.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     res = _sb(inst, "qm", url)
@@ -39,13 +39,13 @@ def qm_capture(url: str = "/", collectors: list[str] | None = None, *, project_d
 
 
 @mcp.tool()
-def xdebug(action: str = "status", *, project_dir: str) -> dict:
+def xdebug(action: str = "status", *, project_dir: str, label: str | None = None) -> dict:
     """Toggle/inspect Xdebug for the instance (spec 007). action: on|off|status.
     Docker toggles the container ini; herd reports status + guidance (shared host PHP).
     """
     if action not in ("on", "off", "status"):
         return {"ok": False, "error": "action must be on|off|status"}
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     res = _sb(inst, "xdebug", action)

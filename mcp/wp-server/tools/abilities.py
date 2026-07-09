@@ -6,7 +6,7 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def wp_eval_live(code: str, *, project_dir: str) -> dict:
+def wp_eval_live(code: str, *, project_dir: str, label: str | None = None) -> dict:
     """Run PHP in the live WordPress runtime via the in-instance `sandbox/execute-php`
     ability (spec 003), returning its structured result: success, return_value,
     captured output, warnings/notices, error_message/class on failure, timing.
@@ -17,7 +17,7 @@ def wp_eval_live(code: str, *, project_dir: str) -> dict:
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     b64 = base64.b64encode(code.encode("utf-8")).decode("ascii")

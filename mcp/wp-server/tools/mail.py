@@ -15,9 +15,9 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def mail_list(limit: int = 20, *, project_dir: str) -> dict:
+def mail_list(limit: int = 20, *, project_dir: str, label: str | None = None) -> dict:
     """List the most recent messages caught by Mailpit (test SMTP)."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     base = _mailpit_url(inst).rstrip("/")
@@ -30,9 +30,9 @@ def mail_list(limit: int = 20, *, project_dir: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 @mcp.tool()
-def mail_get(message_id: str, *, project_dir: str) -> dict:
+def mail_get(message_id: str, *, project_dir: str, label: str | None = None) -> dict:
     """Get a single message from Mailpit (headers, text, html)."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     base = _mailpit_url(inst).rstrip("/")

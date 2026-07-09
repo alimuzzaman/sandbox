@@ -64,7 +64,7 @@ State lives under `$SANDBOX_HOME` (`~/sandbox`), not the repo. Relocate: `./sb h
 
 ## MCP tools (`mcp__sandbox__*`)
 
-Every tool takes `project_dir`. Call `ensure_instance` first — other tools error until then. One directory ↔ one instance per worktree; never invent an instance name.
+Every tool takes `project_dir`. Call `ensure_instance` first — other tools error until then. One directory ↔ one-or-more instances per worktree (multi-instance-per-root: pass `label=` to target/mint an additional instance, e.g. `qa` or `php81`; omit it for the default/sole instance — unchanged behavior). Never invent an instance name; instance names are derived, only `label` is user-chosen.
 
 | Tool | Purpose |
 |---|---|
@@ -72,7 +72,9 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `destroy_instance` | Permanent delete (irreversible). |
 | `recreate_instance` | Destroy + clean WP install. |
 | `apply_config` | Reconcile config in place (no DB drop). |
-| `run_tests` | PHPUnit → `{ok, passed, summary}`. |
+| `run_tests` | PHPUnit → `{ok, passed, summary}`. `label=` targets a specific instance of a multi-instance root (e.g. a CI matrix cell). |
+| `run_e2e` | Playwright with N workers, EACH on its own fresh instance (multi-instance-per-root) — see `docs/ci-e2e-runner-spec.md` §2. |
+| `ci_plan` / `ci_run` | Interpret + (optionally) run a bounded subset of a project's GitHub Actions workflow locally, matrix cells fanned out to concurrent instances; deploy/publish steps skipped by default (`allow_deploy=true` to opt in) — see `docs/ci-e2e-runner-spec.md` §3. |
 | `wp_cli` | Any `wp` command. |
 | `wp_cli_async` / `wp_cli_job` / `wp_cli_job_kill` | Detached long-running wp commands. |
 | `wp_exec` | Shell in container (composer, npm, php). |
@@ -122,6 +124,8 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 
 - **Working on plugin** → `cd` into repo (or pass `project_dir`); `sandbox init` if new, else `ensure_instance`; `focus_get`.
 - **Tests** → `run_tests(project_dir)`.
+- **E2E across fresh sites** → `run_e2e(project_dir, workers=N)` — each worker gets its own fresh instance, not a shared one.
+- **Run a repo's GitHub Actions CI locally** → `ci_plan(workflow)` to see what it would do (safe, no execution), then `ci_run(project_dir, workflow)` — deploy/publish steps are skipped unless `allow_deploy=true`.
 - **Bug fix** → `load_skill('fix')` (snapshot → reproduce → fix → verify).
 - **WP/plugin error** → `load_skill('wp-debug')`: `tail_log` → `qm_capture` → `xdebug`.
 - **Save/restore state** → `load_skill('snapshot')`; fast rollback: `wp_reset` / `./sb reset`.

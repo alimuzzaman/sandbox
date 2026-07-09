@@ -246,10 +246,13 @@ def _core():
     return sandbox_core
 
 
-def _cwd_instance() -> str | None:
+def _cwd_instance(label: str | None = None) -> str | None:
     """Resolve the instance owning the current working directory's project via
-    the on-disk registry. Returns the instance name, or None when cwd isn't a
-    registered project (the caller then errors — there is no fallback instance).
+    the on-disk registry. label=None resolves the sole/default instance for
+    that root (back-compat); a specific label resolves that exact instance.
+    Returns the instance name, or None when cwd isn't a registered project, OR
+    when the root has multiple instances and no label/default disambiguates it
+    — the caller then errors with the ambiguity (there is no fallback instance).
 
     This is what lets `sb <cmd>` (no --instance) target the project you're
     standing in — mirroring how the MCP tools route by project_dir."""
@@ -258,16 +261,29 @@ def _cwd_instance() -> str | None:
         root = sc.find_project_root(Path.cwd())
     except Exception:
         return None
-    entry = sc.registry_get(str(root))
+    entry = sc.registry_get(str(root), label=label)
     return entry.get("instance") if entry else None
 
 
-def _derive_instance_name(root: str, taken: set) -> str:
-    """A valid, unique instance name from a project dir basename."""
+def _derive_instance_name(root: str, taken: set, label: str = "default") -> str:
+    """A valid, unique instance name from a project dir basename. The default
+    label reuses today's plain basename. A non-default label is APPENDED
+    AFTER truncating the basename (reserving room for the `-<label>` suffix),
+    not folded in before truncation — otherwise a basename that already fills
+    the 24-char budget (common with long plugin-repo names) eats the whole
+    suffix, two labels of the same root collide on the same truncated name,
+    and the label silently disappears into an anonymous `-2` (multi-instance-
+    per-root)."""
+    base_norm = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower()).strip("-") or "proj"
+    if label == "default":
+        seed = base_norm[:24]
+    else:
+        suffix = f"-{re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')}"
+        seed = base_norm[:max(24 - len(suffix), 1)] + suffix
     # Truncate to 24 first, THEN strip dashes, so a cut that lands on a hyphen
     # (e.g. "templately-nav-menu-url-replace"[:24] → "templately-nav-menu-url-")
     # doesn't leave an invalid trailing hyphen in the instance name / domain.
-    base = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower())[:24].strip("-") or "proj"
+    base = seed[:24].strip("-") or "proj"
     if not re.match(r"^[a-z0-9]", base):
         base = "p-" + base
     name, i = base, 2
@@ -465,18 +481,51 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
-def ensure_instance(cfg: dict, project_dir: str) -> dict:
+def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
+                    create: bool = False, php_version: str | None = None,
+                    wp_version: str | None = None,
+                    config_label: str | None = None) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_install
     """Create-if-missing: boot a per-directory instance for the project at
-    `project_dir`, keyed by its canonical root in the registry. Idempotent — a
-    second call for a ready project returns the existing record."""
+    `project_dir`, keyed by its canonical root + `label` in the registry.
+    Idempotent — a second call for a ready (root, label) returns the existing
+    record.
+
+    `label` distinguishes multiple simultaneous instances of the SAME project
+    root (multi-instance-per-root) — e.g. a `qa` label alongside `default`.
+    Minting a NEW non-default label requires `create=True` (a mistyped label
+    would otherwise silently build a whole extra stack); the `default` label
+    always creates on first call, matching pre-multi-instance behavior.
+
+    `php_version`/`wp_version`: when given, OVERRIDE the project's own
+    sandbox.config.json `phpVersion`/`wpVersion` for this specific labelled
+    instance — this is how a CI matrix cell's requested version (e.g.
+    `strategy.matrix.php` or a `shivammathur/setup-php` step's
+    `with.php-version`) takes priority over the project's default config
+    (docs/ci-e2e-runner-spec.md §3.5/§3.6 "CI takes priority over
+    sandbox.config"). Omit for the normal case — the project's own config
+    applies unchanged.
+
+    `config_label`: the key used to look up an optional
+    `sandbox.config.<config_label>.json` override layer (docs/multi-instance-
+    spec.md — per-label config). Defaults to `label` itself when omitted,
+    which is right for durable labels (`qa`, `php81` ARE their own stable
+    config key). The CI runner passes a SEPARATE, run-independent value here
+    (a matrix-cell slug like `wp68-php84`) because its actual `label` is
+    randomized per run (`ci-<runid>-...`, for concurrency-safe isolation) and
+    a user could never pre-author a config file matching a random label."""
     import types
     sc = _core()
-    pconf = sc.load_project_config(project_dir)
+    pconf = sc.load_project_config(project_dir,
+                                   label=config_label if config_label is not None else label)
+    if php_version:
+        pconf = {**pconf, "phpVersion": php_version}
+    if wp_version:
+        pconf = {**pconf, "wpVersion": wp_version}
     root = pconf["root"]
 
     with sc.project_lock(root):
-        existing = sc.registry_get(root)
+        existing = sc.registry_get(root, label=label)
         if existing and existing.get("status") == "ready" \
                 and _instance_reachable(existing):
             # Already up. If the config's version pins no longer match the
@@ -487,10 +536,17 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             _warn_version_drift(cfg, existing.get("instance"), pconf)
             return existing
 
-        # Resume a prior record for this root (a partial/failed boot, or a
-        # stopped instance) by REUSING its name + ports rather than deriving a
-        # fresh `<name>-2` and orphaning the half-built stack. Only when there's
-        # no record at all do we allocate a new name + ports.
+        if not existing and label != "default" and not create:
+            known = [e["label"] for e in sc.registry_list_for_root(root)]
+            raise sc.ConfigError(
+                f"no instance labelled '{label}' for {root} "
+                f"(existing labels: {known or 'none'}). Pass create=True / "
+                f"`--label {label}` deliberately to mint a new one.")
+
+        # Resume a prior record for this (root, label) (a partial/failed boot,
+        # or a stopped instance) by REUSING its name + ports rather than
+        # deriving a fresh `<name>-2` and orphaning the half-built stack. Only
+        # when there's no record at all do we allocate a new name + ports.
         if existing and existing.get("instance"):
             name = existing["instance"]
             ports = {
@@ -502,7 +558,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             taken = set(resolve_instances(cfg).keys())
             taken |= {e.get("instance") for e in sc.registry_all().values()
                       if e.get("instance")}
-            name = _derive_instance_name(root, taken)
+            name = _derive_instance_name(root, taken, label=label)
             ports = _pick_instance_ports(cfg)
 
         server = _valid_server(pconf.get("server") or "nginx")
@@ -521,7 +577,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
         # Record a 'pending' mapping BEFORE booting so a mid-boot crash leaves a
         # resumable record (the reuse branch above finds it) instead of an
         # orphan that forces the next run to a duplicate `<name>-2`.
-        sc.registry_put(root, instance=name, status="pending",
+        sc.registry_put(root, label=label, instance=name, status="pending",
                         wordpress_port=ports["wordpress_port"],
                         db_port=ports["db_port"],
                         mailpit_port=ports["mailpit_port"],
@@ -572,6 +628,7 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
 
         return sc.registry_put(
             root,
+            label=label,
             instance=name,
             url=_base_url,
             login_url=_login_url,
@@ -580,13 +637,14 @@ def ensure_instance(cfg: dict, project_dir: str) -> dict:
             db_port=ports["db_port"],
             mailpit_port=ports["mailpit_port"],
             server=server,
+            php_version=pconf.get("phpVersion"),
             wp_version=pconf.get("wpVersion"),
             source=pconf.get("source"),
             status="ready",
         )
 
 
-def apply_config(cfg: dict, project_dir: str) -> dict:
+def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
     """Reconcile a RUNNING instance with its project config — WITHOUT dropping
     the DB or uploads. This is the in-place counterpart to recreate_instance
     (which wipes data). Use it after editing sandbox.config.json (toggling
@@ -616,11 +674,21 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
     root = pconf["root"]
 
     with sc.project_lock(root):
-        existing = sc.registry_get(root)
+        existing = sc.registry_get(root, label=label)
         if not (existing and existing.get("instance")):
+            if label is None and len(sc.registry_list_for_root(root)) > 1:
+                known = [e["label"] for e in sc.registry_list_for_root(root)]
+                raise sc.ConfigError(
+                    f"'{root}' has multiple instances ({', '.join(known)}); "
+                    f"pass label= to disambiguate.")
             raise sc.ConfigError(
                 f"no instance for {root} yet — run ensure_instance first.")
         name = existing["instance"]
+        label = existing["label"]
+        # Re-load with the RESOLVED label now known, so a per-label
+        # sandbox.config.<label>.json layer (if present) applies correctly —
+        # the first load above (label-less) only existed to find `root`.
+        pconf = sc.load_project_config(project_dir, label=label)
         ports = {
             "wordpress_port": existing["wordpress_port"],
             "db_port": existing["db_port"],
@@ -697,10 +765,12 @@ def apply_config(cfg: dict, project_dir: str) -> dict:
         base_url = existing.get("url") or f"http://localhost:{ports['wordpress_port']}"
         return sc.registry_put(
             root,
+            label=label,
             instance=name,
             url=base_url,
             status="ready",
             server=server,
+            php_version=pconf.get("phpVersion"),
             wp_version=pconf.get("wpVersion"),
             source=pconf.get("source"),
         )

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import re
 import secrets
 import shlex
@@ -142,6 +143,43 @@ def cmd_job(cfg, args) -> None:
         print(s["stdout"], end="")
 
 
+def cmd_async_job(cfg, args) -> None:
+    """`./sb async-job <job_id> [--follow] [--kill] [--json]` — poll/follow/
+    kill a background e2e/ci run started with `--async` (sandbox/core/
+    _asyncjobs.py). NOT instance-scoped — e2e/ci jobs mint multiple instances
+    themselves, so they don't fit commands/jobs.py's per-instance `job`/`jobs`
+    (one wp-cli command in one container)."""
+    jid = args.job_id
+    if not valid_async_job_id(jid):
+        die("invalid job id (expected 16 hex chars)")
+    if getattr(args, "kill", False):
+        r = kill_background_job(jid)
+        if getattr(args, "json", False):
+            print(json.dumps(r))
+        else:
+            ok(f"job {jid}: {'killed' if r.get('killed') else 'already finished'}")
+        return
+    if getattr(args, "follow", False) and not getattr(args, "json", False):
+        offset = 0
+        while True:
+            s = background_job_status(jid, offset=offset)
+            chunk = s.get("stdout", "")
+            if chunk:
+                print(chunk, end="")
+                offset += s.get("bytes_read", 0)
+            if s["status"] != "running":
+                print(f"\n[{s['status']} exit={s.get('exit_code', '?')}]")
+                return
+            time.sleep(1)
+    s = background_job_status(jid, offset=int(getattr(args, "offset", 0) or 0))
+    if getattr(args, "json", False):
+        print(json.dumps(s))
+        return
+    print(f"job {jid}: {s['status']}" + (f" (exit {s['exit_code']})" if "exit_code" in s else ""))
+    if s.get("stdout"):
+        print(s["stdout"], end="")
+
+
 def cmd_jobs(cfg, args) -> None:
     inst = args.resolved_instance
     if getattr(args, "prune", False):
@@ -158,4 +196,4 @@ def cmd_jobs(cfg, args) -> None:
         print(f"  {jid}  {s['status']:<10}" + (f" exit={s['exit_code']}" if "exit_code" in s else ""))
 
 
-register({'job': cmd_job, 'jobs': cmd_jobs})
+register({'job': cmd_job, 'jobs': cmd_jobs, 'async-job': cmd_async_job})

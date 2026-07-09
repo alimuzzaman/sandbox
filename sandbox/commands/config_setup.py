@@ -375,8 +375,9 @@ def cmd_apply_config(cfg, args) -> None:
     tool wraps this."""
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
+    label = getattr(args, "label", None)
     try:
-        entry = apply_config(cfg, pd)
+        entry = apply_config(cfg, pd, label=label)
     except sc.ConfigError as e:
         die(str(e))
     if getattr(args, "json", False):

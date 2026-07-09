@@ -15,7 +15,7 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def db_query(sql: str, mutate: bool = False, *, project_dir: str) -> dict:
+def db_query(sql: str, mutate: bool = False, *, project_dir: str, label: str | None = None) -> dict:
     """Run a SQL query against the WP database.
 
     Reads (SELECT/SHOW/DESCRIBE/EXPLAIN) run freely.
@@ -24,7 +24,7 @@ def db_query(sql: str, mutate: bool = False, *, project_dir: str) -> dict:
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     head = sql.strip().split(None, 1)[0].upper() if sql.strip() else ""
@@ -42,9 +42,9 @@ def db_query(sql: str, mutate: bool = False, *, project_dir: str) -> dict:
 
 @mcp.tool()
 def import_content(seed_file: str, authors: str = "create",
-                   *, project_dir: str) -> dict:
+                   *, project_dir: str, label: str | None = None) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     # Containers mount runtime/seeds at /seeds; herd reads the host path.
@@ -55,7 +55,7 @@ def import_content(seed_file: str, authors: str = "create",
 
 
 @mcp.tool()
-def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: str) -> dict:
+def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: str, label: str | None = None) -> dict:
     """Reset the instance DB to the post-install @install baseline (spec 008) — a fast
     in-place rollback (keeps uploads/containers/ports). Requires confirm=true (it
     drops the current DB). rebaseline=true re-captures the baseline from the current
@@ -63,7 +63,7 @@ def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: st
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     if rebaseline:

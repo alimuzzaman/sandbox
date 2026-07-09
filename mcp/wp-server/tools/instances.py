@@ -15,16 +15,23 @@ from app import *  # noqa: F401,F403
 
 
 @mcp.tool()
-def ensure_instance(project_dir: str) -> dict:
+def ensure_instance(project_dir: str, label: str = "default", create: bool = False) -> dict:
     """Ensure a sandbox WordPress instance exists for `project_dir`, creating it
-    on demand, and return {ok, instance, url, ports, status, root, source}.
+    on demand, and return {ok, instance, url, ports, status, root, source, label}.
 
     project_dir: the plugin's project root (or your cwd). The server reads its
     sandbox.config.* / .wp-env.json, boots an instance keyed by that directory
-    (one per worktree), installs WordPress, wires the plugin, and records it.
+    + `label`, installs WordPress, wires the plugin, and records it.
     **Call this FIRST** — other tools error until an instance exists. Idempotent:
-    a ready project returns instantly; a cold boot pulls images + installs WP and
-    can take ~1 minute.
+    a ready (project, label) returns instantly; a cold boot pulls images +
+    installs WP and can take ~1 minute.
+
+    label: distinguishes multiple SIMULTANEOUS instances of the SAME project
+    root (multi-instance-per-root) — e.g. a 'qa' label alongside 'default' to
+    test a different WP/PHP version or a zip install side-by-side with dev.
+    Leave as 'default' for the common single-instance case (unchanged
+    behavior). Minting a brand-new NON-default label requires create=True —
+    this guards against a typo'd label silently building a whole extra stack.
 
     When the clean-URL proxy is already set up (see setup_domains), a fresh
     single-site instance is SECURED AT CREATE — installed directly at its trusted
@@ -32,10 +39,14 @@ def ensure_instance(project_dir: str) -> dict:
     it falls back to http://localhost:<port>.
     """
     sb = SANDBOX_ROOT / "sb"
+    cmd = [str(sb), "ensure", "--project-dir", project_dir, "--json"]
+    if label and label != "default":
+        cmd += ["--label", label]
+        if create:
+            cmd.append("--create")
     try:
         res = subprocess.run(
-            [str(sb), "ensure", "--project-dir", project_dir, "--json"],
-            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+            cmd, capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "ensure_instance timed out after 600s"}
@@ -48,16 +59,19 @@ def ensure_instance(project_dir: str) -> dict:
             "error": (res.stderr or res.stdout or "ensure failed").strip()[:1000]}
 
 @mcp.tool()
-def destroy_instance(project_dir: str) -> dict:
-    """Stop and permanently delete the sandbox instance for `project_dir`.
+def destroy_instance(project_dir: str, label: str | None = None) -> dict:
+    """Stop and permanently delete the sandbox instance for `project_dir`
+    (+ `label`, when the root owns more than one).
 
     Removes containers, the DB volume, the wp dir, and the registry entry.
     This is irreversible — all database data and uploads are lost. Call
-    ensure_instance(project_dir=...) afterwards to recreate from scratch.
+    ensure_instance(project_dir=..., label=...) afterwards to recreate from
+    scratch. Deleting one label leaves any other instance of the same root
+    (e.g. its 'default') untouched and still running.
 
     project_dir: the plugin project whose instance to destroy.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     sb = SANDBOX_ROOT / "sb"
@@ -74,13 +88,14 @@ def destroy_instance(project_dir: str) -> dict:
     return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
 
 @mcp.tool()
-def recreate_instance(project_dir: str) -> dict:
-    """Destroy and immediately recreate the sandbox instance for `project_dir`.
+def recreate_instance(project_dir: str, label: str | None = None) -> dict:
+    """Destroy and immediately recreate the sandbox instance for `project_dir`
+    (+ `label`, when the root owns more than one).
 
     Equivalent to destroy_instance followed by ensure_instance — gives a clean
     WP install (fresh DB, fresh uploads) from the current sandbox.config.*
-    without a manual two-step. The recreated instance keeps the SAME port as
-    before so bookmarks and tool configs don't change.
+    without a manual two-step. The recreated instance keeps the SAME port and
+    label as before so bookmarks and tool configs don't change.
 
     project_dir: the plugin project to recreate.
     """
@@ -89,12 +104,13 @@ def recreate_instance(project_dir: str) -> dict:
         root = str(sc.find_project_root(project_dir))
     except Exception as e:
         return {"ok": False, "error": f"invalid project_dir {project_dir!r}: {e}"}
-    existing = sc.registry_get(root)
+    existing = sc.registry_get(root, label=label)
     if not existing or not existing.get("instance"):
         return {"ok": False,
                 "error": f"no sandbox instance for project '{root}'. "
                          f"Call ensure_instance(project_dir={project_dir!r}) first."}
     inst = existing["instance"]
+    resolved_label = existing["label"]
     # Snapshot the ports + server so ensure reuses them after destroy.
     saved_ports = {k: existing[k]
                    for k in ("wordpress_port", "db_port", "mailpit_port", "server")
@@ -112,10 +128,12 @@ def recreate_instance(project_dir: str) -> dict:
     if res.returncode != 0:
         return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
 
-    # Re-insert a pending registry entry with the same ports so ensure_instance
-    # picks them up (skipping _pick_instance_ports) and the URL stays the same.
+    # Re-insert a pending registry entry with the same ports + label so
+    # ensure_instance picks them up (skipping _pick_instance_ports) and the
+    # URL/label stay the same.
     sc.registry_put(
         root,
+        label=resolved_label,
         instance=inst,
         status="pending",
         wordpress_port=saved_ports.get("wordpress_port"),
@@ -125,10 +143,12 @@ def recreate_instance(project_dir: str) -> dict:
     )
 
     # recreate
+    cmd2 = [str(sb), "ensure", "--project-dir", project_dir, "--json"]
+    if resolved_label != "default":
+        cmd2 += ["--label", resolved_label]
     try:
         res2 = subprocess.run(
-            [str(sb), "ensure", "--project-dir", project_dir, "--json"],
-            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+            cmd2, capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "recreate_instance: ensure timed out after 600s"}
@@ -168,15 +188,17 @@ def setup_domains(tld: str = "") -> dict:
     return {"ok": res.returncode == 0, "code": res.returncode, "output": out[:2000]}
 
 @mcp.tool()
-def secure_instance(project_dir: str) -> dict:
+def secure_instance(project_dir: str, label: str | None = None) -> dict:
     """Give the project's instance a trusted https://<name>.<tld> URL without a
     recreate — assigns its domain (if missing), mints the cert, wires the proxy
     TLS route, and points WP at https. Use for an instance that came up on
     localhost (e.g. created before the proxy was set up, or multisite). Wraps
     `./sb domains setup` (idempotent; only the missing pieces are added) and
     returns the instance's resulting URL.
+
+    label: which of project_dir's instances, when it owns more than one.
     """
-    inst, err = _project_instance(project_dir)
+    inst, err = _project_instance(project_dir, label)
     if err:
         return err
     sb = SANDBOX_ROOT / "sb"
@@ -195,7 +217,7 @@ def secure_instance(project_dir: str) -> dict:
             "output": out}
 
 @mcp.tool()
-def apply_config(project_dir: str) -> dict:
+def apply_config(project_dir: str, label: str | None = None) -> dict:
     """Reconcile a RUNNING instance with its current project config WITHOUT
     dropping the database or uploads — the non-destructive alternative to
     recreate_instance.
@@ -212,12 +234,15 @@ def apply_config(project_dir: str) -> dict:
     multisite between subdirectory and subdomain also needs a recreate.
 
     project_dir: the plugin project to reconcile (call ensure_instance first).
+    label: which of project_dir's instances, when it owns more than one.
     """
     sb = SANDBOX_ROOT / "sb"
+    cmd = [str(sb), "apply", "--project-dir", project_dir, "--json"]
+    if label:
+        cmd += ["--label", label]
     try:
         res = subprocess.run(
-            [str(sb), "apply", "--project-dir", project_dir, "--json"],
-            capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
+            cmd, capture_output=True, text=True, timeout=600, cwd=str(SANDBOX_ROOT),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "apply_config timed out after 600s"}

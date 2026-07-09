@@ -118,7 +118,11 @@ snapshots`; deleting one removes it from both views.
 - **FR-008**: All input (snapshot name) MUST be validated/sanitized to the CLI's allowed
   character set; all output MUST be escaped.
 - **FR-009**: The feature MUST identify the current instance correctly so it acts on the
-  right snapshot store (consistent with the per-project model from spec 001).
+  right snapshot store (consistent with the per-project model from spec 001). (No change
+  under multi-instance-per-root: "current instance" is always the one physical WP install
+  the admin is logged into — each labelled instance of a root has its own mu-plugin,
+  `bridge_token`, and snapshot store, already isolated by instance *name*, not by root. See
+  `docs/multi-instance-spec.md` §7.)
 - **FR-010**: The host-bridge mechanism MUST NOT expose a way to execute arbitrary host
   commands from the browser; only the defined snapshot/restore/list/delete operations for
   the current instance are permitted.

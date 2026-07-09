@@ -25,6 +25,9 @@ import tools.cache  # noqa: F401
 import tools.abilities  # noqa: F401
 import tools.skills  # noqa: F401
 import tools.debug  # noqa: F401
+import tools.e2e  # noqa: F401
+import tools.ci  # noqa: F401
+import tools.asyncjobs  # noqa: F401
 
 
 

@@ -91,11 +91,17 @@ def cmd_claude(cfg, args) -> None:
     os.execv(claude_bin, cmd)
 
 def cmd_mcp(cfg, args) -> None:
-    """Run the sandbox MCP server over stdio. ONE server for all projects —
-    every tool resolves its target instance per call from `project_dir`.
+    """Run the sandbox MCP server. Default: stdio, ONE server for all local
+    projects — every tool resolves its target instance per call from
+    `project_dir`.
 
     Register once (then `cd` into any plugin and use the tools):
         claude mcp add --scope user sandbox -- ./sb mcp
+
+    `--transport streamable-http` (spec 014, remote VPS hosting) is started by
+    `./sb remote provision` on a VPS, never invoked directly for local use —
+    it binds to `--bind` (which MUST be a Tailscale interface address, never
+    `0.0.0.0` — spec FR-014) on `--port`, requiring `--token` on every request.
     """
     py = MCP_VENV / "bin" / "python"
     server = MCP_DIR / "server.py"
@@ -103,8 +109,24 @@ def cmd_mcp(cfg, args) -> None:
         die("MCP venv not built — run `./sb mcp-install` first.")
     if not server.exists():
         die(f"MCP server not found at {server}")
-    # Replace this process with the stdio server (FastMCP mcp.run()).
-    os.execv(str(py), [str(py), str(server)])
+    argv = [str(py), str(server)]
+    transport = getattr(args, "transport", "stdio")
+    if transport == "streamable-http":
+        bind = getattr(args, "bind", None)
+        port = getattr(args, "port", None)
+        token = getattr(args, "token", None)
+        if not bind or bind == "0.0.0.0":
+            die("--bind is required for --transport=streamable-http and must "
+                "be a specific Tailscale interface address, never 0.0.0.0 "
+                "(spec FR-014 — never expose this to the public internet)")
+        if not port:
+            die("--port is required for --transport=streamable-http")
+        if not token:
+            die("--token is required for --transport=streamable-http")
+        argv += ["--transport", "streamable-http", "--bind", bind,
+                 "--port", str(port), "--token", token]
+    # Replace this process with the server (FastMCP mcp.run()).
+    os.execv(str(py), argv)
 
 register({
     'mcp': cmd_mcp,

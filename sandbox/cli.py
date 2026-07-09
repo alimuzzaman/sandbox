@@ -41,6 +41,8 @@ import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 import sandbox.commands.e2e  # noqa: F401  (registers commands)
 import sandbox.commands.ci  # noqa: F401  (registers commands)
 import sandbox.commands.plugin_check  # noqa: F401  (registers commands)
+import sandbox.commands.remote  # noqa: F401  (registers commands)
+import sandbox.commands.deploy  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -248,8 +250,20 @@ Per-project (each plugin carries its own sandbox.config.json):
     web.add_argument("--open", action="store_true",
         help="open the dashboard in your browser on start")
 
-    sub.add_parser("mcp",
+    mcp_p = sub.add_parser("mcp",
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
+    mcp_p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio",
+        help="stdio (default, local use) or streamable-http (spec 014 remote "
+             "hosting -- started by `./sb remote provision` on the VPS, never "
+             "invoked directly for local use)")
+    mcp_p.add_argument("--bind", default=None,
+        help="(--transport=streamable-http only) address to bind, e.g. a "
+             "Tailscale interface IP — NEVER 0.0.0.0 (spec FR-014)")
+    mcp_p.add_argument("--port", type=int, default=None,
+        help="(--transport=streamable-http only) port to bind")
+    mcp_p.add_argument("--token", default=None,
+        help="(--transport=streamable-http only) bearer token required on every "
+             "request — minted by `./sb remote provision`, never echoed elsewhere")
 
     ts = sub.add_parser("test",
         help="Run the plugin's phpunit tests (externally-provisioned WP harness)")
@@ -343,6 +357,31 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="rewrite the baseline to match current findings exactly, "
              "instead of gating against it")
     pcheck.add_argument("--json", action="store_true",
+        help="print the result as JSON (for the MCP server)")
+
+    remote_p = sub.add_parser("remote",
+        help="Register/provision/manage remote VPS targets for sandbox instances "
+             "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove"],
+        help="add: register a VPS; list: show configured remotes + reachability; "
+             "provision: install everything needed on a registered remote (idempotent); "
+             "up/down: start/stop the remote MCP server; remove: forget a remote "
+             "locally (never touches the VPS itself)")
+    remote_p.add_argument("name", nargs="?", default=None,
+        help="remote name (required for every action except 'list')")
+    remote_p.add_argument("ssh_url", nargs="?", default=None,
+        help="ssh://user@host[:port] connection string (required for 'add')")
+    remote_p.add_argument("--json", action="store_true",
+        help="print the result as JSON (for the MCP server)")
+
+    deploy_p = sub.add_parser("deploy",
+        help="Deploy local project state (committed + uncommitted) to a remote "
+             "target on demand — one-way, no continuous sync (see docs/remote-hosting.md)")
+    deploy_p.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project to deploy (default: current directory)")
+    deploy_p.add_argument("--remote", dest="remote", required=True,
+        help="which registered, provisioned remote to deploy to")
+    deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
     en = sub.add_parser("ensure",
@@ -564,7 +603,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):

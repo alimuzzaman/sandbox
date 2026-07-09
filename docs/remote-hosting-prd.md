@@ -1,14 +1,62 @@
 # Remote runtime hosting — feasibility study & PRD
 
-Author: drafted 2026-07-09 (design-fidelity-diff session). **Status: RESEARCH / NOT
-APPROVED FOR IMPLEMENTATION.** This is a feasibility study and product-requirements
-sketch for a maintainer to read and decide on — it is deliberately *not* a
-ready-to-build spec (no FRs, no acceptance gate, no task list). If we pursue it, the
-next step is `speckit-specify`, not a PR.
+Author: drafted 2026-07-09 (design-fidelity-diff session). **Status: ARCHITECTURE
+DECIDED — ready for `speckit-specify`.** Section 0 below records a follow-up
+conversation that resolved every load-bearing open question from §7 (transport, VPS
+lifecycle, provisioning, and — critically — a simplified source-of-truth mechanism
+that replaces the mutagen-sync idea this doc originally floated). The rest of this
+document (§1–§8) is kept as-written: it's still the grounded technical research this
+decision rests on, but §7's open questions are now historical — see §0 for the actual
+answers before reading them as if still open. This is still not itself the spec (no
+FRs, no acceptance gate, no task list) — the next step is `speckit-specify`, not a PR.
 
 Companion reading: `docs/multi-instance-spec.md` (the labelled-instance primitive) and
 `docs/ci-e2e-runner-spec.md` (fan-out + async jobs). This doc reuses their vocabulary
 (instance, label, root, fan-out) and assumes you've read them.
+
+---
+
+## 0. Resolved follow-up decisions (post-research)
+
+A follow-up conversation, after this doc's initial research, resolved the questions in
+§7 and replaced §3/§6's "mutagen sync" idea with something simpler:
+
+- **Source of truth: local, deployed one-way and on-demand — no continuous sync.**
+  Rejects the mutagen/rsync bidirectional idea in §3/§6 entirely (its real risks —
+  conflict resolution, races between an edit and a stale sync, a daemon to keep
+  alive — are avoided by not having a sync daemon at all). Instead: `sb remote
+  provision <name>` sets up a plain (non-bare) git repo on the VPS with
+  `receive.denyCurrentBranch=updateInstead` (pushing directly updates its checked-out
+  working tree — no bare-repo dance). `sb deploy` then (1) `git push`es the current
+  local `HEAD` to it — works even for unpushed WIP branches, and only new git objects
+  transfer each time; (2) captures the local working tree's uncommitted changes
+  (tracked-file diff **plus** untracked files, since plain `git diff` misses those)
+  and applies them on top. Each deploy **replaces** the uncommitted layer rather than
+  stacking (reset the VPS tree to the just-pushed clean `HEAD` first, then apply the
+  *current* diff fresh) — a stale diff from an earlier deploy can never silently
+  survive underneath a new one. "Is my code live on the VPS" always has exactly one
+  answer: "as of my last `sb deploy`."
+- **Transport: Tailscale/WireGuard mesh**, not an SSH reverse tunnel (more robust
+  across network changes/sleep/multiple devices). The MCP server binds only to the
+  VPS's Tailscale interface, never `0.0.0.0` (§6's non-negotiable holds), plus a
+  per-remote bearer token as defense in depth.
+- **VPS lifecycle: persistent, user-managed.** The user provides SSH access to an
+  already-running server they manage themselves. Sandbox never powers the machine
+  on/off — no cloud-provider API integration, no on-demand start/stop. Answers §7 Q5
+  (persistent, not on-demand) and implicitly Q2 (one VPS per developer, user-owned).
+- **Provisioning: fully automated over SSH**, mirroring the existing
+  `scripts/install-macos.sh` / `scripts/install-ubuntu.sh` bootstrap pattern but run
+  remotely. `sb remote provision <name>` SSHes in and runs a new
+  `scripts/install-remote.sh`-style script: installs Tailscale (joins the tailnet),
+  Docker CE + compose plugin, the `sb` runtime, and the `visit` tools venv
+  (Playwright/headless Chromium) — one command, no manual copy-paste.
+
+§7's remaining open items (screenshot/artifact return format; whether this is the same
+need as the README's "remote API surface" idea) are still genuinely open — nothing
+above resolves those. Q1 (source of truth) and Q4 (editing surface) are answered by the
+deploy mechanism above: Claude Code's local `Read`/`Write`/`Edit` stays the *only*
+editing surface; the VPS is a deploy target, never edited directly. Q3 (transport) is
+answered above (Tailscale, not tunnel).
 
 ---
 
@@ -43,9 +91,9 @@ of truth for code lives — is the single biggest open question and needs a main
 call before this can become a spec.
 
 My recommendation is to pursue it in the narrow form first (Phase 1: one VPS, one
-developer, manual provisioning, source synced by mutagen) and treat the multi-tenant /
-team-shared VPS as a separate, later, much larger effort — the security and isolation
-story for a shared internet-reachable box is a project in itself.
+developer, automated provisioning, source deployed on-demand — see §0) and treat the
+multi-tenant / team-shared VPS as a separate, later, much larger effort — the security
+and isolation story for a shared internet-reachable box is a project in itself.
 
 ---
 
@@ -181,7 +229,9 @@ Trade-offs specific to this codebase:
   *on the VPS*. Options: (B1) a fast bidirectional sync daemon (mutagen or `rsync`/SSHFS)
   mirrors the local worktree → a VPS path that gets bind-mounted; (B2) the repo lives on
   the VPS and the user edits over Remote-SSH / a synced mount. B1 preserves today's UX best
-  and is what remote-docker dev setups converge on.
+  and is what remote-docker dev setups converge on. **RESOLVED (§0): neither — a THIRD
+  option, one-way on-demand `sb deploy` (git push + diff-apply), was chosen instead. It
+  keeps B1's "edit locally" UX without a continuous-sync daemon's failure modes.**
 - **`find_project_root` path-allowlisting** rejects non-`$HOME` paths; on the server the
   synced worktree lives under the VPS user's home, so this still holds — but the
   `project_dir` the *client* sends is a *local* path that must be translated to the *remote*
@@ -365,6 +415,9 @@ option for the transport if we ever move past a single tunnel.
 
 ### 5.3 First-time setup transcript (Phase 1, single VPS, single dev)
 
+**Superseded by §0's resolution** — updated below to match: Tailscale mesh (not an SSH
+tunnel) and `sb deploy` (not mutagen sync).
+
 ```
 $ ./sb remote add myvps ssh://ubuntu@203.0.113.10
   ✓ added remote 'myvps' (ssh://ubuntu@203.0.113.10) to sandbox.local.yml
@@ -372,30 +425,33 @@ $ ./sb remote add myvps ssh://ubuntu@203.0.113.10
 
 $ ./sb remote provision myvps
   ▸ checking SSH reachability … ok (key auth)
+  ▸ installing + joining Tailscale on the VPS … ok (tailnet address: myvps.tailnet.ts.net)
   ▸ installing Docker CE + compose plugin on the VPS … ok
   ▸ installing the sandbox runtime ($SANDBOX_HOME on the VPS) … ok
   ▸ provisioning the visit tools venv (Playwright + headless Chromium) … ok
-  ▸ starting the sandbox MCP server (streamable-HTTP, bound to 127.0.0.1 only) … ok
+  ▸ setting up a deploy-target git repo (receive.denyCurrentBranch=updateInstead) … ok
+  ▸ starting the sandbox MCP server (streamable-HTTP, bound to the Tailscale iface only) … ok
   ▸ minting a per-remote bearer token … stored (not shown)
-  ✓ 'myvps' ready. The server binds to loopback ONLY; reach it via the tunnel.
-
-$ ./sb remote up myvps
-  ▸ opening SSH reverse tunnel  localhost:9174 → vps:127.0.0.1:<mcp-port> … ok
-  ✓ tunnel up. Register with Claude:  ./sb setup --remote myvps
+  ✓ 'myvps' ready at myvps.tailnet.ts.net — reachable only over the tailnet.
 
 $ ./sb setup --remote myvps
-  ✓ registered MCP server 'sandbox-myvps' (transport: http, url: http://127.0.0.1:9174,
-    auth: bearer) at user scope.
+  ✓ registered MCP server 'sandbox-myvps' (transport: http,
+    url: http://myvps.tailnet.ts.net:<mcp-port>, auth: bearer) at user scope.
 ```
 
-Then, from a plugin dir, with source-sync running (Phase 1 uses mutagen under the hood):
+Then, from a plugin dir, deploying on-demand instead of continuously syncing:
 
 ```
 $ cd ~/Sites/git/embedpress
+$ ./sb deploy --remote myvps
+  ▸ pushing HEAD (a1b2c3d) → myvps:~/sandbox/src/embedpress … ok (git push, 0.4s)
+  ▸ resetting VPS working tree to a1b2c3d … ok
+  ▸ applying uncommitted changes (3 modified, 1 untracked) … ok
+  ✓ deployed. myvps now reflects your working tree as of this command.
+
 $ ./sb ensure --project-dir . --remote myvps
-  ▸ syncing worktree → myvps:~/sandbox/src/embedpress … ok (mutagen, 1.2s)
   ▸ ensure_instance on myvps … instance 'embedpress' (WP=8188 server=nginx)
-  ✓ ready → https://embedpress.<vps-tld>  (reachable through the tunnel)
+  ✓ ready → https://embedpress.<vps-tld>  (reachable over the tailnet)
 ```
 
 Every existing local command is unchanged: no `--remote`, no `remotes:` block → identical
@@ -405,20 +461,28 @@ to today. This is the release gate, same discipline as the multi-instance `--lab
 
 ## 6. Non-functional risks (honest)
 
-- **The plugin-source sync is the hard problem, not the daemon.** mutagen/rsync
-  bidirectional sync has real failure modes: conflict resolution when both sides change,
-  large `node_modules`/`vendor` trees, `.gitignore` divergence, symlink handling (the
-  sandbox relies on symlinked plugins at depth-1, CLAUDE.md gotcha #2), and the race where
-  Claude edits a file locally, the container hasn't seen the sync yet, and a test runs
-  against stale code. This needs a real design (probably: sync-then-verify before any
-  `run_tests`, and a visible sync-status indicator). It is the thing most likely to make
-  the feature feel flaky.
+- **The plugin-source transfer was the hard problem — largely defused by §0's `sb
+  deploy` resolution, not solved by brute force.** The original concern here was
+  mutagen/rsync bidirectional sync: conflict resolution when both sides change, large
+  `node_modules`/`vendor` trees, `.gitignore` divergence, and the race where Claude
+  edits a file locally, the container hasn't seen the sync yet, and a test runs against
+  stale code. Choosing one-way, on-demand `sb deploy` (git push + diff-apply) instead of
+  a continuous daemon removes the conflict-resolution and staleness-race classes of
+  failure entirely — there is no "both sides changed" because only one side (local) ever
+  changes, and `.gitignore`-respecting git tooling means large build-artifact trees
+  never transfer at all. What's left: symlink handling (the sandbox relies on symlinked
+  plugins at depth-1, CLAUDE.md gotcha #2) needs verifying against the VPS's own
+  deploy-target checkout, and — the one real remaining risk — a user forgetting to
+  `sb deploy` before testing and being confused why the VPS doesn't reflect their latest
+  edit. A visible "deployed as of commit X, Y uncommitted files ago" status line in
+  `sb remote list`/`sb ensure` output mitigates that.
 - **Never expose the raw Docker socket.** An internet-reachable Docker daemon is
   root-equivalent RCE — a well-known catastrophic mistake. The design must **never** publish
-  the daemon's TCP port or the MCP HTTP port to `0.0.0.0`. Bind the MCP server to
-  `127.0.0.1` on the VPS and reach it *only* through an SSH reverse tunnel or a Tailscale/
-  WireGuard private address. Validate the `Origin` header on the HTTP transport (MCP spec
-  guidance against DNS-rebinding). No exceptions for "just for testing."
+  the daemon's TCP port or the MCP HTTP port to `0.0.0.0`. Per §0's resolution, bind the
+  MCP server to the VPS's **Tailscale interface only** (never `0.0.0.0`, never plain
+  `127.0.0.1` alone since that wouldn't be reachable off-box at all) plus a per-remote
+  bearer token as defense in depth. Validate the `Origin` header on the HTTP transport
+  (MCP spec guidance against DNS-rebinding). No exceptions for "just for testing."
 - **Latency on wp-cli-heavy loops.** Model B puts wp-cli server-side (good), but the
   *control channel* still adds a per-tool-call RTT. A `fix` loop that fires 30 small
   `wp_cli`/`db_query` calls will feel each RTT. Mitigation: batch where possible, keep the
@@ -457,25 +521,38 @@ to today. This is the release gate, same discipline as the multi-instance `--lab
 
 ## 7. Open questions (need a maintainer decision before a spec)
 
-1. **Where does the source of truth for code live?** (a) Local worktree synced to the VPS
-   (mutagen), preserving today's edit-locally UX; or (b) the repo lives on the VPS and the
-   user edits over Remote-SSH. This is *the* decision — it shapes everything else.
-2. **One VPS per developer, or a shared team VPS?** Strongly recommend per-dev for Phase 1;
-   confirm we're not implicitly on the hook for multi-tenant isolation.
-3. **Transport: SSH reverse tunnel vs. Tailscale/WireGuard mesh?** Tunnel is
-   zero-extra-infra but flaky on network changes; mesh is more robust and multi-device but
-   adds a dependency. Which do we standardize on?
-4. **Does Claude Code's *local* `Read`/`Write`/`Edit` stay the editing surface,** with sync
-   pushing to the VPS — or do we accept a split where the agent edits locally and only the
-   *runtime* is remote? (Ties to Q1.)
-5. **Persistent vs. on-demand VPS** — is cold-start latency acceptable in exchange for
-   not paying 24/7?
+**RESOLVED, see §0** — Q1, Q2, Q3, Q4, Q5 below were all settled in a follow-up
+conversation; kept here verbatim as the original framing, each annotated with its
+resolution. Q6 and Q7 are still genuinely open.
+
+1. ~~**Where does the source of truth for code live?**~~ **RESOLVED (§0): local
+   worktree, deployed one-way/on-demand via `sb deploy` (git push + diff-apply) — NOT
+   mutagen sync, and NOT edit-on-the-VPS.** (a) Local worktree synced to the VPS
+   (mutagen), preserving today's edit-locally UX; or (b) the repo lives on the VPS and
+   the user edits over Remote-SSH. This is *the* decision — it shapes everything else.
+2. ~~**One VPS per developer, or a shared team VPS?**~~ **RESOLVED (§0): per-developer,
+   user-owned/managed, matching the Phase 1 recommendation below.** Strongly recommend
+   per-dev for Phase 1; confirm we're not implicitly on the hook for multi-tenant
+   isolation.
+3. ~~**Transport: SSH reverse tunnel vs. Tailscale/WireGuard mesh?**~~ **RESOLVED (§0):
+   Tailscale/WireGuard mesh.** Tunnel is zero-extra-infra but flaky on network changes;
+   mesh is more robust and multi-device but adds a dependency. Which do we standardize
+   on?
+4. ~~**Does Claude Code's *local* `Read`/`Write`/`Edit` stay the editing surface?**~~
+   **RESOLVED (§0): yes — it stays the only editing surface; `sb deploy` pushes to the
+   VPS, the agent never edits there.** With sync pushing to the VPS — or do we accept a
+   split where the agent edits locally and only the *runtime* is remote? (Ties to Q1.)
+5. ~~**Persistent vs. on-demand VPS**~~ — **RESOLVED (§0): persistent, user-managed; no
+   cold-start/hibernate logic in scope.** Is cold-start latency acceptable in exchange
+   for not paying 24/7?
 6. **Screenshot/artifact return** — inline base64 (simple, bloats tool results) vs. a
-   fetch-by-id endpoint (cleaner, more transport surface)?
+   fetch-by-id endpoint (cleaner, more transport surface)? **Still open** — not
+   addressed in the follow-up conversation; needs a decision during `speckit-plan`.
 7. **Is this actually cheaper/better than the status quo** for the target user? The README
    roadmap already lists "remote API surface (trigger from phone / Slack / FluentBoards
    webhook)" as a *different* remote-access idea — is remote *runtime hosting* the same need
-   or a distinct one? Worth confirming the actual user story before building.
+   or a distinct one? **Still open** — worth confirming the actual user story before
+   building.
 
 ---
 
@@ -483,18 +560,22 @@ to today. This is the release gate, same discipline as the multi-instance `--lab
 
 - **Phase 0 — spike (no product).** Manually stand up a VPS, `DOCKER_HOST=ssh` a single
   `ensure_instance` to prove the bind-mount breakage first-hand, then run the MCP server
-  *on* the VPS over streamable-HTTP through an SSH tunnel and confirm `fs_read`/`visit`/
+  *on* the VPS over streamable-HTTP through Tailscale and confirm `fs_read`/`visit`/
   `wp_cli` work co-located. Goal: validate Model B's core claim (co-location makes the tool
   surface work unchanged) before writing any product code. Live-verify, in the spirit of
   `docs/ci-e2e-runner-spec.md` §3.8.
-- **Phase 1 — single VPS, single dev, manual provisioning.** `./sb remote add/provision/up`;
-  the `RuntimeBackend` seam (§4.1) + registry `runtime` field (§4.2, v2→v3 migration);
-  streamable-HTTP transport with bearer auth bound to loopback + tunnel; mutagen source
-  sync; `visit`/tools-venv provisioned server-side; artifact return. Release gate:
-  *zero behavior change when no remote is configured.*
+- **Phase 1 — single VPS, single dev, automated provisioning (§0).**
+  `./sb remote add/provision/up`, provisioning fully scripted over SSH (Tailscale join +
+  Docker + sandbox runtime + tools venv + deploy-target git repo); the `RuntimeBackend`
+  seam (§4.1) + registry `runtime` field (§4.2, v2→v3 migration); streamable-HTTP
+  transport with bearer auth bound to the Tailscale interface; `sb deploy` (git push +
+  diff-apply, §0) in place of mutagen; `visit`/tools-venv provisioned server-side;
+  artifact return (still open, §7 Q6). Release gate: *zero behavior change when no
+  remote is configured.*
 - **Phase 2 — durability & fit-and-finish.** Snapshot fetch-to-local / object-store backup;
-  on-demand VPS start/stop; sync-status UX + sync-then-verify before `run_tests`; CI/e2e
-  fan-out dispatched server-side end-to-end; `./sb doctor --remote`.
+  deploy-status UX (a visible "deployed as of commit X" indicator, §6); CI/e2e fan-out
+  dispatched server-side end-to-end; `./sb doctor --remote`. (On-demand VPS start/stop
+  is explicitly OUT of scope per §0 — the VPS is persistent and user-managed.)
 - **Phase 3 (separate effort, gated on real demand) — multi-tenant / team VPS.** Per-user
   auth (mTLS or per-user tokens), per-project container/network isolation, resource quotas,
   secret isolation. This is effectively "we built a small Coder" and should be its own

@@ -64,13 +64,20 @@ def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
 
 def _pkg_manager() -> tuple[str, str] | tuple[None, None]:
     """Detect the platform package manager. Returns (name, sudo_prefix) where
-    sudo_prefix is '' for brew (never sudo) or 'sudo ' for apt/dnf."""
+    sudo_prefix is '' for brew (never sudo) or 'sudo ' for apt/dnf/pacman/zypper.
+    Checked in an order that matters on a machine with more than one present
+    (e.g. Homebrew on Linux) — brew first since it never needs sudo and is
+    what a user who installed it clearly wants used."""
     if shutil.which("brew"):
         return ("brew", "")
     if shutil.which("apt-get"):
         return ("apt", "sudo ")
     if shutil.which("dnf"):
         return ("dnf", "sudo ")
+    if shutil.which("pacman"):
+        return ("pacman", "sudo ")
+    if shutil.which("zypper"):
+        return ("zypper", "sudo ")
     return (None, None)
 
 

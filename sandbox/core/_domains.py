@@ -29,14 +29,31 @@ def _distinct_tlds(cfg: dict) -> set:
 
 def _lo0_alias_present() -> bool:
     """True if the proxy's loopback alias is already on lo0 — checkable WITHOUT
-    sudo, so we can skip an unnecessary `sudo alias-up`."""
+    sudo, so we can skip an unnecessary `sudo alias-up`.
+
+    On Linux there is no alias to check for: the whole 127.0.0.0/8 range
+    already routes to loopback with zero setup (verified live —
+    `nc -l 127.0.0.77` accepted connections with no prior `ip addr add` at
+    all), so `tools/proxy-helper.sh`'s `alias-up`/`alias-down` are no-ops
+    there. Reporting "already present" here skips calling `alias-up` at all,
+    which also avoids depending on `ifconfig` — not guaranteed to exist on
+    minimal Linux installs (`ip addr` is the modern replacement)."""
+    if sys.platform != "darwin":
+        return True
     r = subprocess.run(["ifconfig", "lo0"], capture_output=True, text=True)
     return PROXY_BIND_IP in (r.stdout or "")
 
 
 def _resolver_present(tld: str) -> bool:
-    """True if /etc/resolver/<tld> exists (written by dns-up). Existence needs no
-    read permission, so this is checkable WITHOUT sudo."""
+    """True if this TLD's wildcard DNS is already configured — checkable
+    WITHOUT sudo, so we can skip an unnecessary `sudo dns-up`.
+
+    macOS: /etc/resolver/<tld> (written by dns-up). Linux: our own
+    dnsmasq's conf.d/<tld>.conf (tools/proxy-helper.sh's linux_dns_up) — a
+    DIFFERENT on-disk marker since Linux has no /etc/resolver/ mechanism at
+    all. Existence needs no read permission on either path."""
+    if sys.platform != "darwin":
+        return Path(f"/etc/sandbox-dnsmasq/conf.d/{tld}.conf").exists()
     return Path(f"/etc/resolver/{tld}").exists()
 
 
@@ -535,6 +552,16 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
             info("Docker not found — clean URLs need it. Using localhost:<port>.")
         return False, cfg
 
+    # Linux has its own working implementation now (tools/proxy-helper.sh:
+    # a self-managed dnsmasq + /etc/resolv.conf override, live-verified —
+    # see docs/cross-platform-support.md §4) — no platform gate needed here
+    # anymore. proxy-helper.sh itself declines (exit 3, caught below as a
+    # nonzero returncode) on the ONE case that couldn't be verified safely:
+    # a symlinked /etc/resolv.conf (systemd-resolved/NetworkManager-managed),
+    # or port 53 already held by something that isn't our own dnsmasq — both
+    # fall through to the existing "could not set up ... using localhost"
+    # message below, same as any other proxy-setup failure.
+
     # 1. Passwordless sudoers rule for proxy-helper.sh (alias + dnsmasq). One
     #    sudo prompt, once. Skipped if already installed.
     if not _proxy_sudoers_installed():
@@ -618,15 +645,33 @@ def proxy_setup(cfg, tld=None) -> bool:
     up, cfg = _ensure_url_proxy(cfg, tld=tld)
     if not up:
         return False
-    if shutil.which("brew") is None:
-        info("Homebrew not found — needed to install mkcert. See brew.sh.")
-        return False
 
     # 2. mkcert + trust the CA (interactive), and VERIFY the OS really trusts it.
     if shutil.which("mkcert") is None:
-        info("installing mkcert + nss via Homebrew\u2026")
-        if subprocess.run(["brew", "install", "mkcert", "nss"]).returncode != 0:
-            info("brew install mkcert failed.")
+        pm, sudo = _pkg_manager()
+        # Package + command per manager — verified live against real images,
+        # not guessed: `apt-get install mkcert` (Ubuntu 22.04+/Debian 12+,
+        # universe repo) needs `libnss3-tools` alongside it for `certutil`
+        # (mkcert's own Linux requirement for the OS/browser trust store) —
+        # apt does NOT pull it in as a dependency, unlike dnf. `dnf install
+        # mkcert` (Fedora) pulls in nss-tools transitively on its own. Arch's
+        # `pacman -S mkcert nss` mirrors the original brew command ("mkcert
+        # nss") since pacman doesn't auto-pull nss either.
+        install_cmd = {
+            "brew": ["brew", "install", "mkcert", "nss"],
+            "apt": ["sudo", "apt-get", "install", "-y", "mkcert", "libnss3-tools"],
+            "dnf": ["sudo", "dnf", "install", "-y", "mkcert"],
+            "pacman": ["sudo", "pacman", "-S", "--noconfirm", "mkcert", "nss"],
+            "zypper": ["sudo", "zypper", "install", "-y", "mkcert", "mozilla-nss-tools"],
+        }.get(pm)
+        if install_cmd is None:
+            info("no supported package manager found (brew/apt/dnf/pacman/zypper) "
+                 "— install mkcert yourself: "
+                 "https://github.com/FiloSottile/mkcert#installation")
+            return False
+        info(f"installing mkcert (+ NSS tools) via {pm}\u2026")
+        if subprocess.run(install_cmd).returncode != 0:
+            info(f"{pm} install of mkcert failed.")
             return False
     if sys.platform == "darwin":
         info("macOS will ask for Touch ID (or your password) to trust the local "
@@ -776,8 +821,14 @@ def proxy_teardown(cfg) -> None:
         "Sandbox is cleaning up its clean-URL setup — removing the startup item "
         "and the local DNS rule it added. Your Mac password confirms this final "
         "step.")
-    _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
-          reason=_UNINSTALL_REASON, capture_output=True, text=True)
+    if sys.platform == "darwin":
+        # `launchctl` doesn't exist on Linux at all — calling it there raises
+        # FileNotFoundError unconditionally (unlike a nonzero exit code,
+        # capture_output doesn't shield a missing executable). The LaunchDaemon
+        # is only ever installed on macOS (_install_alias_launchd, gated in
+        # _ensure_url_proxy), so this step is meaningless on Linux anyway.
+        _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
+              reason=_UNINSTALL_REASON, capture_output=True, text=True)
     _sudo(["rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS)],
           reason=_UNINSTALL_REASON, capture_output=True, text=True)
     ok("HTTPS proxy torn down (certs left in runtime/proxy/certs — delete "

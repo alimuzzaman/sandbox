@@ -334,13 +334,23 @@ def _configure_node_extra_ca() -> None:
         text.append("\n")
     bundle.write_text("".join(text))
 
-    subprocess.run(["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", str(bundle)],
-                   check=False)
+    if sys.platform == "darwin":
+        # `launchctl setenv` persists this for GUI apps launched from the Dock/
+        # Spotlight, which don't inherit a shell's env the way a terminal-
+        # launched process does. `launchctl` doesn't exist at all on Linux —
+        # calling it there raises FileNotFoundError regardless of check=False
+        # (that flag only covers a nonzero exit, not a missing executable).
+        subprocess.run(["launchctl", "setenv", "NODE_EXTRA_CA_CERTS", str(bundle)],
+                       check=False)
     os.environ["NODE_EXTRA_CA_CERTS"] = str(bundle)
     ok(f"NODE_EXTRA_CA_CERTS → {bundle}")
     for src in sources:
         print(f"  included: {src}")
-    print("  Restart GUI MCP clients/Codex/Cursor/VS Code so they inherit it.")
+    if sys.platform == "darwin":
+        print("  Restart GUI MCP clients/Codex/Cursor/VS Code so they inherit it.")
+    else:
+        print("  Add to your shell rc so GUI-launched apps inherit it too:")
+        print(f'    export NODE_EXTRA_CA_CERTS="{bundle}"')
 
 def cmd_onboard(cfg, args) -> None:
     """Run the guided onboarding against an existing instance (default: main).

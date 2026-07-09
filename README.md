@@ -24,7 +24,17 @@ bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop
 
 # Ubuntu / Debian
 bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE
+
+# Arch Linux (and derivatives: Manjaro, EndeavourOS)
+bash scripts/install-arch.sh    # pacman → python → docker + docker-compose
 ```
+
+Other Linux distros (Fedora/RHEL, openSUSE, etc.) work too — `./sb setup`
+detects `dnf`/`zypper` and offers the right install commands automatically;
+there's just no dedicated one-shot bootstrap script for them yet. **Windows**
+isn't supported natively (the CLI is a POSIX shell + Python tool, and relies
+on Docker Unix sockets and process groups/signals) — run it inside **WSL2**
+instead, where it behaves exactly like the Ubuntu path above.
 
 **Clone and set up:**
 

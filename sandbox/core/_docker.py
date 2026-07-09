@@ -591,7 +591,9 @@ def _docker_preflight() -> int:
         print(f"  ✗ Python {py_ver.major}.{py_ver.minor} is too old (need 3.9+)")
         cmd = ({"brew": "brew install python@3.12",
                 "apt": "sudo apt-get install -y python3.12 python3.12-venv",
-                "dnf": "sudo dnf install -y python3.12"}.get(pm))
+                "dnf": "sudo dnf install -y python3.12",
+                "pacman": "sudo pacman -S --noconfirm python",
+                "zypper": "sudo zypper install -y python3"}.get(pm))
         if cmd:
             print("      A newer python3 lives alongside the old one — install it,")
             print("      then re-run `./sb setup` (it'll use the newer version).")
@@ -625,6 +627,17 @@ def _docker_preflight() -> int:
             print("      (accept the license) before `docker` works.")
             if _offer_install("Docker Desktop", "brew install --cask docker"):
                 print("      → now OPEN Docker Desktop once, then re-run `./sb setup`.")
+        elif pm == "pacman":
+            # docker + docker-compose are official Arch `extra` packages —
+            # verified live (pacman -Si docker / docker-compose, both present).
+            if _offer_install("docker + docker-compose",
+                              "sudo pacman -S --noconfirm docker docker-compose "
+                              "&& sudo systemctl enable --now docker.service"):
+                user = os.environ.get("USER", "$USER")
+                print(f"      → add yourself to the docker group, then re-login:")
+                print(f"          sudo usermod -aG docker {user}")
+                print(f"          newgrp docker   # or log out/in")
+                print(f"        then re-run:  ./sb setup")
         else:
             print("      → install Docker: https://docs.docker.com/get-docker/")
         return problems

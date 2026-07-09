@@ -28,6 +28,7 @@ import tools.debug  # noqa: F401
 import tools.e2e  # noqa: F401
 import tools.ci  # noqa: F401
 import tools.asyncjobs  # noqa: F401
+import tools.plugin_check  # noqa: F401
 
 
 

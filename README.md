@@ -224,6 +224,7 @@ and resolves the target instance from the registry — booting one if needed.
 | `destroy_instance` | Permanently delete an instance (containers, DB volume, wp dir, registry) |
 | `recreate_instance` | Destroy then immediately recreate — clean WP install from current config |
 | `run_tests` | Run the plugin's phpunit tests on the external WP harness → pass/fail + failures |
+| `run_plugin_check` | Run WordPress.org's Plugin Check, gated by a committed baseline → pass/fail + new findings (see `docs/plugin-check.md`) |
 | `wp_cli` | Run any `wp` command |
 | `wp_exec` | Arbitrary shell in any container (composer, npm, php, …) |
 | `wp_rest` | Call the WordPress REST API (pre-wired app password) |

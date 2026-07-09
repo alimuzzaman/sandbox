@@ -87,6 +87,12 @@ DEFAULTS: dict = {
     "config": {},              # wp-config constants -> WORDPRESS_CONFIG_EXTRA
     "port": None,              # preferred port; None = auto-assign
     "tests": {"suite": "auto"},  # auto | unit | integration
+    "pluginCheck": {           # ./sb plugin-check (spec 013) — opt-in, no default slug
+        "slug": None,              # REQUIRED for the feature to run; no reasonable default
+        "excludeDirectories": [],  # dirs to skip, relative to project root (mirrors .distignore)
+        "versionFile": None,       # None -> resolved at run time to "<slug>.php"
+        "baselineFile": "plugin-check-baseline.json",  # git-tracked by convention
+    },
 }
 
 

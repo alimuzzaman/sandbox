@@ -40,6 +40,7 @@ import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 import sandbox.commands.e2e  # noqa: F401  (registers commands)
 import sandbox.commands.ci  # noqa: F401  (registers commands)
+import sandbox.commands.plugin_check  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -333,6 +334,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="(action=run only) run detached; prints {job_id} immediately — "
              "poll with `./sb async-job <job_id>`")
 
+    pcheck = sub.add_parser("plugin-check",
+        help="Run WordPress.org's Plugin Check, gated by a committed baseline "
+             "(see docs/plugin-check.md, specs/013-plugin-check/)")
+    pcheck.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project to check (default: current directory)")
+    pcheck.add_argument("--update", action="store_true",
+        help="rewrite the baseline to match current findings exactly, "
+             "instead of gating against it")
+    pcheck.add_argument("--json", action="store_true",
+        help="print the result as JSON (for the MCP server)")
+
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
     en.add_argument("--project-dir", dest="project_dir", default=None,
@@ -552,7 +564,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
-    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci"}
+    PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check"}
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):

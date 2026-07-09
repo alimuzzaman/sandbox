@@ -7,6 +7,11 @@
 **Tests**: Included — spec FR-017 explicitly requires the parsing/baseline-diff logic be
 independently testable without docker, mirroring `tests/test_ci.py`'s existing pattern.
 
+**Status (2026-07-09 review)**: Implemented and unit-tested. The task ledger below was
+updated after implementation to reflect two design amendments: Plugin Check now resolves
+the project's own slug (no `pluginCheck.slug` field), and `.distignore` is auto-read for
+default excludes. The remaining release gate is a live re-run after those fixes together.
+
 **Organization**: Grouped by user story (spec.md P1-P4), per Constitution-aligned
 incremental delivery.
 
@@ -16,20 +21,20 @@ incremental delivery.
 
 **Purpose**: Config schema + file scaffolding shared by every story.
 
-- [ ] T001 Add `pluginCheck` key to `DEFAULTS` in `sandbox_core.py` (see
-  `data-model.md`'s `PluginCheckConfig` table: `slug: None`, `excludeDirectories: []`,
+- [x] T001 Add `pluginCheck` key/default handling to project config (see
+  `data-model.md`'s `PluginCheckConfig` table: no slug field, `excludeDirectories: []`,
   `versionFile: None`, `baselineFile: "plugin-check-baseline.json"`)
-- [ ] T002 [P] Create `sandbox/commands/plugin_check.py` with module docstring
+- [x] T002 [P] Create `sandbox/commands/plugin_check.py` with module docstring
   (mirror `sandbox/commands/ci.py`'s header style — cite `docs/plugin-check.md`)
-- [ ] T003 [P] Create `sandbox/core/_plugin_check_report.py` (empty scaffold + module
+- [x] T003 [P] Create `sandbox/core/_plugin_check_report.py` (empty scaffold + module
   docstring, ported content comes in Foundational)
-- [ ] T004 [P] Create `mcp/wp-server/tools/plugin_check.py` (empty scaffold + module
+- [x] T004 [P] Create `mcp/wp-server/tools/plugin_check.py` (empty scaffold + module
   docstring, mirroring `mcp/wp-server/tools/ci.py`'s import style)
-- [ ] T005 Add `'plugin_check'` to `sandbox/core/__init__.py`'s `_SUBMODS` list IF
+- [x] T005 Add `'plugin_check'` to `sandbox/core/__init__.py`'s `_SUBMODS` list IF
   `_plugin_check_report.py`'s helpers need back-filling into other command modules
   (check whether `sandbox/commands/plugin_check.py` needs bare-name access to report
-  functions the way `ci.py` uses back-filled `_core()`-adjacent helpers — if not needed,
-  skip this task and import `_plugin_check_report` directly instead)
+  functions the way `ci.py` uses back-filled `_core()`-adjacent helpers — not needed;
+  implementation imports `_plugin_check_report` directly)
 
 ---
 
@@ -40,24 +45,24 @@ HTML report renderer. No user-facing command works until this phase is done.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T006 Implement `_parse_findings(output: str) -> list[dict]` in
+- [x] T006 Implement `_parse_findings(output: str) -> list[dict]` in
   `sandbox/commands/plugin_check.py` — parse `wp plugin check --format=json`'s
   `FILE: <path>` + JSON-array-per-file output shape (reference:
   `templately-modular-rewrite/scripts/plugin-check.js`'s `parseFindings`, read-only) into
   a flat list of `{file, type, code, line, column, message}` dicts (see `data-model.md`'s
   `Finding` entity)
-- [ ] T007 Implement `_count_by_key(findings: list[dict]) -> dict[str, int]` in
+- [x] T007 Implement `_count_by_key(findings: list[dict]) -> dict[str, int]` in
   `sandbox/commands/plugin_check.py` — key is `f"{file}::{code}"`, counting `ERROR`-type
   findings only (see `data-model.md`'s `Baseline` shape; reference: `countByKey`)
-- [ ] T008 Implement `_load_baseline(path: Path) -> dict[str, int]` and
+- [x] T008 Implement `_load_baseline(path: Path) -> dict[str, int]` and
   `_write_baseline(path: Path, counts: dict) -> None` in `sandbox/commands/plugin_check.py`
   (missing file → `{}`, matching spec FR-016's "no baseline yet" case — this function
   does NOT decide how to report that; the caller in US1 does)
-- [ ] T009 Implement `_diff_against_baseline(current: dict, baseline: dict) -> list[dict]`
+- [x] T009 Implement `_diff_against_baseline(current: dict, baseline: dict) -> list[dict]`
   in `sandbox/commands/plugin_check.py` — returns violations
   `[{key, current, baseline, delta}]` only where `current > baseline` for that key (see
   `contracts/cli-and-mcp.md`'s JSON `violations` shape; spec FR-006/FR-007)
-- [ ] T010 [P] Port `renderReport` from
+- [x] T010 [P] Port `renderReport` from
   `templately-modular-rewrite/scripts/lib/plugin-check-report.js` (read-only reference)
   to `render_report(findings: list[dict], meta: dict) -> str` in
   `sandbox/core/_plugin_check_report.py` — preserve structure/CSS/dark-light theming/
@@ -66,12 +71,12 @@ HTML report renderer. No user-facing command works until this phase is done.
   directories sentence is generated from `meta["exclude_directories"]` instead of a
   hardcoded list; drop the base64 font asset, use the existing system sans-serif stack
   for headline text instead (see `research.md`'s HTML-report decision)
-- [ ] T011 [P] Unit tests for T006-T009 in `tests/test_plugin_check.py` (mock-based, no
+- [x] T011 [P] Unit tests for T006-T009 in `tests/test_plugin_check.py` (mock-based, no
   docker — mirror `tests/test_ci.py`'s shape): parsing a multi-file
   `FILE:`+JSON-array sample matching the real tool's output shape; `_count_by_key`
   ignoring line/column; `_diff_against_baseline` with baseline-exceeded, baseline-exact,
   and baseline-absent (empty dict) cases
-- [ ] T012 [P] Unit test for T010 in `tests/test_plugin_check.py` — `render_report`
+- [x] T012 [P] Unit test for T010 in `tests/test_plugin_check.py` — `render_report`
   produces valid HTML containing the passed plugin slug and NOT containing the literal
   string `"Templately"` anywhere in its output (regression guard for FR-013)
 
@@ -91,27 +96,27 @@ findings vs. the committed baseline, and always writes a report.
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Implement `_resolve_plugin_check_config(pconf: dict) -> dict` in
-  `sandbox/commands/plugin_check.py` — reads `pconf["pluginCheck"]`, `die()`s with a
-  clear message naming the missing key if `slug` is unset/empty (spec FR-002/edge case)
-- [ ] T014 [US1] Implement `_run_wp_plugin_check(instance, slug, exclude_dirs) -> str` in
+- [x] T013 [US1] Implement `_resolve_plugin_check_config(pconf: dict) -> dict` in
+  `sandbox/commands/plugin_check.py` — reads `pconf["pluginCheck"]` options and resolves
+  the project's own slug per amended FR-002; no `pluginCheck.slug` field exists.
+- [x] T014 [US1] Implement `_run_wp_plugin_check(instance, slug, exclude_dirs) -> str` in
   `sandbox/commands/plugin_check.py` — shells `sb wp plugin check <slug>
   --format=json --exclude-directories=<joined list>`; distinguishes "command never ran"
   (empty captured stdout — infrastructure failure, spec FR-010) from "ran, found nothing
   gate-relevant" (real empty JSON output) by checking captured output emptiness, not
   exit code (see `research.md`'s infra-failure decision, ported from `runPluginCheck`)
-- [ ] T015 [US1] Implement `_read_version_header(path: Path) -> str` in
+- [x] T015 [US1] Implement `_read_version_header(path: Path) -> str` in
   `sandbox/commands/plugin_check.py` for report metadata (default `versionFile`
   resolves to `<slug>.php` per spec FR-004 — implement that default resolution here)
-- [ ] T016 [US1] Implement `cmd_plugin_check(cfg, args)` in
+- [x] T016 [US1] Implement `cmd_plugin_check(cfg, args)` in
   `sandbox/commands/plugin_check.py` wiring T013-T015 + Phase 2's T006-T010 together:
   ensure instance → resolve config → run check → parse → load baseline (report clearly,
   don't gate, if absent — spec FR-016) → diff → write report (always) → print
   human-readable or `--json` output (see `contracts/cli-and-mcp.md`) → exit 0/1
   accordingly; `register({'plugin-check': cmd_plugin_check})` at module bottom
-- [ ] T017 [US1] Add `plugin-check` subparser to `sandbox/cli.py` (`--project-dir`
+- [x] T017 [US1] Add `plugin-check` subparser to `sandbox/cli.py` (`--project-dir`
   required like `ci`/`e2e`, `--json` flag; `--update` flag wired but inert until Phase 4)
-- [ ] T018 [P] [US1] Unit tests for T013-T016 in `tests/test_plugin_check.py`
+- [x] T018 [P] [US1] Unit tests for T013-T016 in `tests/test_plugin_check.py`
   (mock `subprocess.run`, no docker): missing-slug `die()` path; infra-failure path
   (empty captured stdout); full happy-path gate-pass and gate-fail flows producing the
   `contracts/cli-and-mcp.md` JSON shape exactly
@@ -130,11 +135,11 @@ counts drop and a plain subsequent run passes — see `quickstart.md` Run 2.
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Wire the `--update` branch in `cmd_plugin_check`
+- [x] T019 [US2] Wire the `--update` branch in `cmd_plugin_check`
   (`sandbox/commands/plugin_check.py`): when set, skip the baseline-diff gate entirely,
   call `_write_baseline` with current counts, still render the report (spec FR-008), and
   report the new baseline totals instead of a pass/fail violation list
-- [ ] T020 [P] [US2] Unit test in `tests/test_plugin_check.py`: `--update` overwrites an
+- [x] T020 [P] [US2] Unit test in `tests/test_plugin_check.py`: `--update` overwrites an
   existing baseline to exactly the current counts (including a case where a count
   DROPS, proving it's a full overwrite, not a merge that only grows)
 
@@ -154,14 +159,14 @@ Run 6.
 
 ### Implementation for User Story 3
 
-- [ ] T021 [US3] Implement `run_plugin_check(project_dir: str, update: bool = False) ->
+- [x] T021 [US3] Implement `run_plugin_check(project_dir: str, update: bool = False) ->
   dict` in `mcp/wp-server/tools/plugin_check.py` — thin wrapper shelling to
   `./sb plugin-check --project-dir <dir> --json [--update]`, parsing the last JSON line
   of stdout (mirror `mcp/wp-server/tools/ci.py`'s `ci_run` subprocess/timeout/parse
   pattern exactly, per `contracts/cli-and-mcp.md`)
-- [ ] T022 Register the new tools module in `mcp/wp-server/server.py` (add
+- [x] T022 Register the new tools module in `mcp/wp-server/server.py` (add
   `import tools.plugin_check  # noqa: F401` alongside the existing tool imports)
-- [ ] T023 [P] [US3] Unit test in `tests/test_plugin_check.py` (or a new
+- [x] T023 [P] [US3] Unit test in `tests/test_plugin_check.py` (or a new
   `tests/test_mcp_plugin_check.py` if that better matches how other MCP tools are
   tested in this repo — check for precedent first): `run_plugin_check` parses a mocked
   subprocess JSON line correctly and surfaces a timeout as `{"ok": false, "error": ...}`
@@ -182,12 +187,12 @@ see `quickstart.md` Run 5.
 
 ### Implementation for User Story 4
 
-- [ ] T024 [US4] Verify/finish wiring report metadata in `cmd_plugin_check`
+- [x] T024 [US4] Verify/finish wiring report metadata in `cmd_plugin_check`
   (`sandbox/commands/plugin_check.py`): `plugin_slug`, `plugin_version` (from T015),
   `checker_version` (parsed from the resolved `plugin-check` entry in the project's
   plugin map — see `data-model.md`'s `Report` metadata table), `wp_version`/`php_version`
   (already resolved elsewhere in `sandbox_core`), `baseline_total`, `new_count`
-- [ ] T025 [P] [US4] Unit test in `tests/test_plugin_check.py`: render reports for two
+- [x] T025 [P] [US4] Unit test in `tests/test_plugin_check.py`: render reports for two
   different fake plugin slugs/metadata and assert each report's content differs
   accordingly (no leaked state between renders — regression guard for FR-013's
   "no content hardcoded to one specific plugin")
@@ -201,18 +206,19 @@ see `quickstart.md` Run 5.
 **Purpose**: Docs-with-code (Constitution Principle V) and final live verification
 (Constitution Principle IV).
 
-- [ ] T026 [P] Write `docs/plugin-check.md` (mirror `docs/ci-e2e-runner-spec.md`'s
+- [x] T026 [P] Write `docs/plugin-check.md` (mirror `docs/ci-e2e-runner-spec.md`'s
   depth/shape: design recap, config schema, CLI/MCP surface, what's generic vs.
   project-specific, known limitations)
-- [ ] T027 [P] Add a short Plugin Check mention to `README.md` (near existing
+- [x] T027 [P] Add a short Plugin Check mention to `README.md` (near existing
   test-running documentation, matching how `run_tests`/e2e are already introduced there)
-- [ ] T028 Run the full test suite (`.cli-venv/bin/python -m unittest discover -s
+- [x] T028 Run the full test suite (`.cli-venv/bin/python -m unittest discover -s
   tests`) and confirm it stays green including all new `test_plugin_check.py` cases
-- [ ] T029 Execute `quickstart.md` end-to-end against a REAL sandbox instance in a
+- [~] T029 Execute `quickstart.md` end-to-end against a REAL sandbox instance in a
   scratch project under the session scratchpad (never a real repo) — all 6 runs,
   per Constitution Principle IV; fix anything quickstart surfaces that unit tests
   couldn't catch (mirroring this session's own established pattern of live-verification
-  catching real bugs unit tests miss)
+  catching real bugs unit tests miss). Pending post-fix live re-run after the
+  absolute-path and `.distignore` fixes described in `docs/plugin-check.md` §6.
 - [ ] T030 Clean up all scratch Docker/state created during T029 before considering
   this feature done
 

@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-09
 
-**Status**: Draft
+**Status**: Implemented (code/docs/unit surface in place), pending post-fix live re-verification
 
 **Input**: User description: "Make WordPress Plugin Check support first-class in the sandbox tool (not project-specific hand-rolled scripts). Bring the baseline-gated `wp plugin check` + HTML report pattern (currently a one-off Node script in a single plugin repo) into sandbox itself as a reusable command/tool any project can opt into via sandbox.config.json, with a CLI command mirroring `./sb e2e`/`./sb ci`, an MCP tool mirroring `run_tests`, and a committed per-project baseline file so only NEW findings fail a run."
 

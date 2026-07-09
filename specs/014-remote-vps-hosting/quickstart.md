@@ -12,8 +12,10 @@ remote": the whole point under test is the network boundary itself.
 - A real, reachable VPS the tester has SSH access to (a cheap short-lived cloud VPS is
   fine — this is a spike, not a permanent fixture). Ubuntu 24.04 or similar recommended
   to match `scripts/install-remote.sh`'s tested path.
-- A Tailscale account (free tier is sufficient) for both the tester's machine and the
-  VPS to join the same tailnet.
+- A DNS hostname that points at the VPS for the default HTTPS control endpoint, e.g.
+  `sandbox-control.example.com`.
+- Optional: a Tailscale account if you want to verify the alternate private-mesh control
+  path with `--control tailscale`.
 - Never point this at a real user-facing production server — treat the VPS as fully
   disposable test infrastructure for this verification pass.
 
@@ -22,14 +24,14 @@ remote": the whole point under test is the network boundary itself.
 This is the PRD's own Phase 0 recommendation (§8) — validate Model B's core claim before
 writing more product code on top of it:
 
-1. Manually install Tailscale + join the tailnet on both the tester's machine and the
-   VPS (`tailscale up`).
-2. On the VPS: install Docker, clone this repo, run `./sb mcp --transport=streamable-http
-   --bind <vps-tailscale-ip> --port 9174 --token <a-test-token>` (or whatever the actual
-   flag surface ends up being per implementation — the point of the spike is proving the
-   MECHANISM, flag names can still be in flux).
+1. Point a disposable hostname at the VPS.
+2. On the VPS: install Docker + Caddy, clone this repo, run `./sb mcp
+   --transport=streamable-http --bind 127.0.0.1 --port 9174 --token <a-test-token>
+   --public-url https://<control-host>` (or use `./sb remote provision` once the CLI path
+   is under test). Configure Caddy to reverse proxy the hostname to
+   `127.0.0.1:9174`.
 3. On the tester's local machine, register a temporary MCP server pointed at
-   `http://<vps-tailscale-ip>:9174` with the matching bearer token.
+   `https://<control-host>` with the matching bearer token.
 4. From that connection: call `ensure_instance` for a small test project already present
    on the VPS (a `git clone` of any small WP plugin is fine for this spike), then
    `fs_read` a file inside it, `visit` its URL and confirm a real screenshot comes back
@@ -43,13 +45,23 @@ writing more product code on top of it:
 ```bash
 ./sb remote add spike-vps ssh://ubuntu@<vps-ip>
 ./sb remote list          # shows spike-vps, reachable, not yet provisioned
-./sb remote provision spike-vps
+./sb remote provision spike-vps --control-host sandbox-control.example.com
 ./sb remote list          # shows spike-vps, reachable, provisioned: true
 ```
 
 Expected: provisioning completes without manual SSH steps; a second `provision` run
 (idempotency check, spec FR-005) succeeds cleanly rather than erroring or duplicating
 state.
+
+Optional Tailscale variant:
+
+```bash
+./sb remote provision spike-vps --control tailscale
+```
+
+Expected: provisioning asks Tailscale to join via `TAILSCALE_AUTHKEY` when present, or
+fails with a clear "join Tailscale and rerun" message when the VPS is not yet in the
+tailnet.
 
 ## Scenario 2: deploy a real project, including uncommitted changes
 

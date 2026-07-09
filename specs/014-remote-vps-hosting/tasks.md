@@ -69,10 +69,10 @@ per `plan.md`'s Project Structure section — no placeholders below.
 ### Implementation for User Story 1
 
 - [x] T015 [US1] Implement `cmd_remote_add` in `sandbox/commands/remote.py` (depends on T006, T007)
-- [x] T016 [US1] Implement `cmd_remote_list` in `sandbox/commands/remote.py` — live SSH/Tailscale reachability ping per remote (depends on T008)
+- [x] T016 [US1] Implement `cmd_remote_list` in `sandbox/commands/remote.py` — live SSH reachability ping per remote (depends on T008)
 - [x] T017 [US1] Implement `cmd_remote_remove` in `sandbox/commands/remote.py` — local-config-only, with an explicit confirmation message that any VPS-side instance is unaffected (spec FR-003, Edge Cases)
-- [x] T018 [US1] Write `scripts/install-remote.sh`: install/join Tailscale, install Docker CE + compose plugin (reuse the package-manager-detection logic already in `sandbox/core/_docker.py` for apt/dnf/pacman/zypper), install the `sb` runtime, provision the `visit` tools venv (Playwright + headless Chromium)
-- [x] T019 [US1] Implement `cmd_remote_provision` in `sandbox/commands/remote.py` — SSH in, run `scripts/install-remote.sh`, mint a bearer token, record `tailscale_host`/`mcp_port`/`bearer_token`/`provisioned: true` via T006's write function (depends on T008, T018)
+- [x] T018 [US1] Write `scripts/install-remote.sh`: install Docker CE + compose plugin (reuse the package-manager-detection logic already in `sandbox/core/_docker.py` for apt/dnf/pacman/zypper), optionally install/join Tailscale when `--control tailscale` is selected, install the `sb` runtime, provision the `visit` tools venv (Playwright + headless Chromium)
+- [x] T019 [US1] Implement `cmd_remote_provision` in `sandbox/commands/remote.py` — SSH in, ask/default to public HTTPS unless `--control tailscale` is selected, run `scripts/install-remote.sh`, mint a bearer token, record `control_transport`/`control_url`/`mcp_port`/`bearer_token`/`provisioned: true` via T006's write function (depends on T008, T018)
 - [x] T020 [US1] Implement `cmd_remote_up` / `cmd_remote_down` in `sandbox/commands/remote.py` (start/stop the remote MCP server process over SSH; does not touch WordPress instances)
 - [x] T021 [US1] `register()` all `remote` subcommands at the bottom of `sandbox/commands/remote.py`, per the existing command-registry pattern
 
@@ -122,10 +122,10 @@ per `plan.md`'s Project Structure section — no placeholders below.
 
 ### Implementation for User Story 3
 
-- [x] T037 [US3] Implement the transport-selection branch in `mcp/wp-server/server.py` — default unchanged `mcp.run()` over stdio; a new remote-server-mode path calling `mcp.run(transport="streamable-http", host=<tailscale-bound-address>, port=<port>)` with bearer-token auth, binding ONLY to the Tailscale interface (never `0.0.0.0`, per FR-014)
+- [x] T037 [US3] Implement the transport-selection branch in `mcp/wp-server/server.py` — default unchanged `mcp.run()` over stdio; a new remote-server-mode path serving streamable HTTP with bearer-token auth, binding to `127.0.0.1` behind public HTTPS by default or to a Tailscale address when explicitly selected (never `0.0.0.0`, per FR-014)
 - [x] T038 [US3] Wire remote-server-mode startup into `cmd_remote_provision` in `sandbox/commands/remote.py` — starts the remote MCP server in streamable-http mode as part of provisioning (depends on T037, T019)
 - [x] T039 [US3] Implement the Herd hard-error (FR-013) — reject cleanly when a project configured for `server: herd` is targeted with any remote command, in `sandbox/core/_remote.py`
-- [x] T040 [US3] Document the second-MCP-server registration step (how a user adds `sandbox-<remote-name>` as a Claude Code MCP server pointed at the Tailscale address + bearer token) in `docs/remote-hosting.md`
+- [x] T040 [US3] Document the second-MCP-server registration step (how a user adds `sandbox-<remote-name>` as a Claude Code MCP server pointed at the HTTPS control URL or optional Tailscale address + bearer token) in `docs/remote-hosting.md`
 
 **Checkpoint**: all 3 user stories independently functional — a remote instance behaves exactly like a local one from the user's perspective.
 
@@ -136,7 +136,7 @@ per `plan.md`'s Project Structure section — no placeholders below.
 - [x] T041 [P] Write `docs/remote-hosting.md` (quick-reference design doc companion, matches `docs/plugin-check.md`'s pattern; does NOT replace `docs/remote-hosting-prd.md`, which stays as the deeper research/rationale doc)
 - [x] T042 [P] Add a `README.md` mention of remote hosting (`./sb remote`/`./sb deploy`), matching this session's existing per-feature README rows
 - [x] T043 Run the full local test suite (`.cli-venv/bin/python -m unittest discover -s tests`) and confirm zero regressions — this is the FR-015/SC-004 release gate
-- [ ] T044 Run `quickstart.md`'s Phase 0 spike + all 5 scenarios against a REAL, disposable VPS — Constitution Principle IV; this feature is not "done" without this regardless of how much the unit suite passes
+- [~] T044 Run `quickstart.md`'s Phase 0 spike + all 5 scenarios against a REAL, disposable VPS — Constitution Principle IV. Partial live run on fresh Ubuntu 24.04 VPS reached Docker/Caddy/runtime/MCP/tools install and provisioned HTTPS control at `https://sandbox-control.asb.bd` with MCP bound to `127.0.0.1:9174`; remaining proof is registering the second MCP server and exercising `fs_read`/`visit`/`wp_cli`/`run_tests` through it.
 
 ---
 

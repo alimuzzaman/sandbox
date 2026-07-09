@@ -12,7 +12,8 @@ full sandbox instance there — using the exact same CLI/MCP surface as a local 
 with zero behavior change for anyone who never opts in. The technical approach (fully
 resolved in `docs/remote-hosting-prd.md` §0 before this plan) is **co-location, not a
 network-transparent daemon**: the MCP server, `sb`, `$SANDBOX_HOME`, Docker, and all
-containers move onto the VPS together, reached over a Tailscale mesh, so every existing
+containers move onto the VPS together, reached through a second MCP server exposed over
+public HTTPS by default (or Tailscale when explicitly selected), so every existing
 filesystem/localhost-assuming tool (`fs_read`, `visit`, `db_query`, bind mounts,
 snapshots) keeps working with **zero code change**, because on the VPS they're all local
 again. Local↔VPS code transfer is a one-way, on-demand `sb deploy` (git push + a
@@ -41,8 +42,8 @@ read/write, SSH command construction, and deploy-mechanism logic — mirrors
 `tests/test_ci.py`'s pattern. Per Constitution Principle IV, this feature is NOT
 considered done on unit tests alone: a live-verification pass against a REAL VPS is
 required (see quickstart.md), specifically the Phase 0 spike already scoped in the PRD
-(§8) — prove `fs_read`/`visit`/`wp_cli` genuinely work through a Tailscale-reached,
-VPS-hosted MCP server before trusting the rest of the design.
+(§8) — prove `fs_read`/`visit`/`wp_cli` genuinely work through the VPS-hosted MCP server
+over the selected control transport before trusting the rest of the design.
 
 **Target Platform**: the local side is unchanged (macOS/Linux, wherever `sb` already
 runs); the new remote side targets a Linux VPS (Ubuntu/Debian assumed for the
@@ -60,9 +61,9 @@ already calls out as needing staged, live-smoke-tested commits when changed).
 service. `sb deploy`'s speed depends on the user's own network/VPS and is not a target
 this feature optimizes beyond "only transfer new git objects, never the whole tree."
 
-**Constraints**: the MCP server's HTTP transport MUST bind only to the VPS's Tailscale
-interface, never `0.0.0.0` (FR-014 — exposing an unauthenticated Docker-adjacent
-management surface to the public internet is a non-negotiable never-do); existing
+**Constraints**: the MCP server's HTTP transport MUST never bind to `0.0.0.0`. In the
+default HTTPS mode it binds to `127.0.0.1` behind a Caddy virtual host and bearer-token
+auth; in optional Tailscale mode it binds only to the VPS's tailnet address. Existing
 local-only command behavior MUST be provably unchanged when no remote is configured
 (FR-015, the release gate — same discipline already used for the `--label` axis and the
 cross-platform work this session).
@@ -117,8 +118,8 @@ directly (the same way any MCP client would), not by reading local state about i
 - **IV. Live-Stack Verification Is the Only Proof of Done** — PASS, tracked explicitly.
   Unit tests cover config/SSH-construction/deploy-mechanism logic without a real VPS, but
   this feature is NOT done until live-verified against a real VPS (quickstart.md's Phase
-  0 spike: prove `fs_read`/`visit`/`wp_cli` work through the Tailscale-reached, VPS-hosted
-  MCP server end-to-end).
+  0 spike: prove `fs_read`/`visit`/`wp_cli` work through the HTTPS or explicitly selected
+  Tailscale VPS-hosted MCP server end-to-end).
 - **V. Idempotency and Docs-With-Code** — PASS. `sb remote provision` MUST be safe to
   re-run (spec FR-005); `sb deploy` is idempotent by construction (git push + reset-then-
   apply-fresh-diff, never an incremental stack). Docs land with code:
@@ -168,8 +169,9 @@ mcp/wp-server/
                                    #        beyond CLI parity (see contracts/cli-and-mcp.md)
 
 scripts/
-└── install-remote.sh            # NEW — VPS-side provisioning script (Tailscale join,
-                                  #       Docker CE + compose plugin, sb runtime, tools venv,
+└── install-remote.sh            # NEW — VPS-side provisioning script (Docker CE +
+                                  #       compose plugin, optional Tailscale join,
+                                  #       sb runtime, tools venv,
                                   #       per-project deploy-target git repo setup helper),
                                   #       run over SSH by `sb remote provision`, mirroring
                                   #       install-macos.sh/install-ubuntu.sh's existing shape

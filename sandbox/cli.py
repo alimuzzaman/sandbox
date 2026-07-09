@@ -258,12 +258,16 @@ Per-project (each plugin carries its own sandbox.config.json):
              "invoked directly for local use)")
     mcp_p.add_argument("--bind", default=None,
         help="(--transport=streamable-http only) address to bind, e.g. a "
-             "Tailscale interface IP — NEVER 0.0.0.0 (spec FR-014)")
+             "Tailscale interface IP or 127.0.0.1 behind HTTPS — NEVER "
+             "0.0.0.0 (spec FR-014)")
     mcp_p.add_argument("--port", type=int, default=None,
         help="(--transport=streamable-http only) port to bind")
     mcp_p.add_argument("--token", default=None,
         help="(--transport=streamable-http only) bearer token required on every "
              "request — minted by `./sb remote provision`, never echoed elsewhere")
+    mcp_p.add_argument("--public-url", default=None,
+        help="(--transport=streamable-http only) public HTTPS URL when the "
+             "server is behind a reverse proxy")
 
     ts = sub.add_parser("test",
         help="Run the plugin's phpunit tests (externally-provisioned WP harness)")
@@ -371,6 +375,13 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
         help="ssh://user@host[:port] connection string (required for 'add')")
+    remote_p.add_argument("--control", choices=["https", "tailscale"], default=None,
+        help="control-plane transport for 'provision'/'up' (default: ask in "
+             "interactive use, HTTPS in --json/non-interactive mode)")
+    remote_p.add_argument("--control-host", default=None,
+        help="public hostname for HTTPS control, e.g. sandbox-control.example.com")
+    remote_p.add_argument("--yes", action="store_true",
+        help="accept the default HTTPS control-plane choice without prompting")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

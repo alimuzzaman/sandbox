@@ -409,8 +409,10 @@ and can usually diagnose itself.
   externally-provisioned phpunit harness (`sandbox test` / `run_tests`);
   `sandbox init`; server-aware version pins; headless Chromium with auto-login
   (`visit`); size-scaled `build-feature` workflow; one-pass `fix` skill;
-  FluentBoards integration; npm + Homebrew + curl distribution.
-- **Next** — remote API surface (trigger from phone / Slack / FluentBoards
-  webhook); `figma-mcp` so designers pull from Figma straight into a page.
+  FluentBoards integration; Plugin Check; schema catalog fallback; first-pass
+  remote VPS hosting; npm + Homebrew + curl distribution.
+- **Next** — prove the recent work live (remote VPS, Plugin Check post-fix
+  re-run, schema fidelity), then move into remote automation and Figma-to-
+  WordPress authoring. See [`docs/future-roadmap.md`](docs/future-roadmap.md).
 
 Re-run `./sb setup` after a global config change — it's idempotent.

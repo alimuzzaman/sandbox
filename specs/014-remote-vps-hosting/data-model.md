@@ -10,8 +10,11 @@ every other `sandbox_core`-adjacent config section.
 |---|---|---|---|
 | `name` | `str` | — | User-chosen identifier (the `remotes:` block's key), used in `--remote <name>` and the second MCP server's registered name `sandbox-<name>`. Must be a valid identifier (same character class as `_project_slug`'s validation — lowercase letters, numbers, hyphen, underscore). |
 | `ssh` | `str` | — | `user@host[:port]` connection string, required at registration (spec FR-001). |
-| `tailscale_host` | `str \| None` | `None` | The VPS's tailnet address (e.g. `myvps.tailnet-name.ts.net`), recorded by `provision`, not set at registration time. |
-| `mcp_port` | `int \| None` | `None` | Port the remote MCP server binds to on the Tailscale interface; assigned at provision time. |
+| `control_transport` | `"https" \| "tailscale"` | `"https"` | Control-plane transport selected during `provision`. HTTPS is the default; Tailscale is opt-in. |
+| `control_host` | `str \| None` | `None` | Bare public hostname for HTTPS mode, e.g. `sandbox-control.example.com`. Required for HTTPS provisioning. |
+| `control_url` | `str \| None` | `None` | URL users register as their second MCP server, e.g. `https://sandbox-control.example.com` or `http://100.64.1.2:9174`. |
+| `tailscale_host` | `str \| None` | `None` | The VPS's tailnet address, recorded only when `control_transport=tailscale`. |
+| `mcp_port` | `int \| None` | `None` | Port the remote MCP server listens on locally; assigned at provision time. In HTTPS mode Caddy proxies the public hostname to loopback on this port. |
 | `bearer_token` | `str \| None` | `None` | Minted at provision time, stored. Shown to the user exactly ONCE, in `provision`'s own success output (needed to register the second MCP server) — same "reveal once" pattern as an AWS access key or GitHub PAT. Never echoed again afterward by any OTHER command that reads the stored entry back (`remote list`, etc.) — corrected via `/speckit-analyze`, which caught that the original "never echoed back... in any output" phrasing here was too strict and left no way to actually complete setup. |
 | `provisioned` | `bool` | `False` | Whether `provision` has completed successfully at least once. |
 

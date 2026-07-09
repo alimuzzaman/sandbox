@@ -18,13 +18,56 @@ def active_project_file(instance: str) -> Path:
     return ROOT / f".active-project.{instance}"
 
 
+def _ensure_muplugins_dir(instance: str) -> Path:
+    """Create wp-content/mu-plugins, repairing Docker-created host ownership
+    when needed.
+
+    On a fresh remote VPS the official WordPress image can create the bind
+    mount as www-data:www-data before host-side `sb` writes its sandbox
+    mu-plugins. Local dev machines usually don't need privilege repair, so
+    only try `sudo -n chown` after the normal mkdir path fails."""
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    try:
+        mu_dir.mkdir(parents=True, exist_ok=True)
+        return mu_dir
+    except PermissionError:
+        root = wp_dir(instance)
+        res = subprocess.run(
+            ["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(root)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if res.returncode != 0:
+            raise PermissionError(
+                f"cannot write sandbox mu-plugins under {root}; tried normal mkdir "
+                f"and sudo -n chown, but chown failed: "
+                f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            )
+        for p in [root, *root.rglob("*")]:
+            try:
+                if p.is_dir():
+                    p.chmod(p.stat().st_mode | 0o055)
+                else:
+                    p.chmod(p.stat().st_mode | 0o044)
+            except OSError:
+                pass
+        for sub in ("wp-content/uploads", "wp-content/cache", "wp-content/upgrade"):
+            d = root / sub
+            d.mkdir(parents=True, exist_ok=True)
+            for p in [d, *d.rglob("*")]:
+                try:
+                    p.chmod(p.stat().st_mode | 0o022)
+                except OSError:
+                    pass
+        mu_dir.mkdir(parents=True, exist_ok=True)
+        return mu_dir
+
+
 def _write_ssl_muplugin(instance: str) -> None:
     """Drop a mu-plugin so WP trusts the proxy's TLS termination. Without it WP
     sees plain http inside the container, mismatches its https siteurl, and
     redirect-loops. mu-plugins auto-load with no activation; path is the same
     across apache/nginx/litespeed."""
-    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
-    mu_dir.mkdir(parents=True, exist_ok=True)
+    mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-ssl.php").write_text(
         "<?php\n"
         "/* Sandbox: trust the reverse proxy's TLS termination. "
@@ -52,8 +95,7 @@ def _write_mail_muplugin(instance: str) -> None:
     (e.g. `./sb wp eval`, cron, tests) is captured too. mu-plugins auto-load
     with no activation and survive container restarts (unlike `wp config set`,
     which the entrypoint wipes). Image-agnostic; mirrors _write_ssl_muplugin."""
-    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
-    mu_dir.mkdir(parents=True, exist_ok=True)
+    mu_dir = _ensure_muplugins_dir(instance)
     (mu_dir / "00-sandbox-mail.php").write_text(
         "<?php\n"
         "/* Sandbox: route all PHP mail to the Mailpit container so it can be\n"
@@ -83,8 +125,7 @@ def _write_debug_muplugins(instance: str) -> None:
     wp-content/debug-dump.log; the QM capture writes wp-content/qm.jsonl on
     shutdown. Copied from sandbox/assets/dump/. Idempotent; both self-gate."""
     asset = Path(__file__).resolve().parent.parent / "assets" / "dump"
-    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
-    mu_dir.mkdir(parents=True, exist_ok=True)
+    mu_dir = _ensure_muplugins_dir(instance)
     for fn in ("00-sandbox-dump.php", "00-sandbox-qm.php"):
         src = asset / fn
         if src.exists():
@@ -436,7 +477,9 @@ def _write_licensing_state(instance: str) -> None:
             state["elementor_license_data"] = cap["data"]
     (mu_dir / "sandbox-licensing.json").write_text(json.dumps(state, indent=2))
     try:
-        (mu_dir / "sandbox-licensing.json").chmod(0o600)  # holds secrets
+        # PHP inside the container must be able to read this host-written file.
+        # Secrets still stay in gitignored runtime state and are never echoed.
+        (mu_dir / "sandbox-licensing.json").chmod(0o644)
     except OSError:
         pass
 

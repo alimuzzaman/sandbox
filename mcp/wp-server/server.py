@@ -44,14 +44,17 @@ def _parse_transport_args(argv):
     p.add_argument("--bind", default=None)
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--token", default=None)
+    p.add_argument("--public-url", default=None)
     ns, _ = p.parse_known_args(argv)
     return vars(ns)
 
 
-def _run_streamable_http(bind: str, port: int, token: str) -> None:
+def _run_streamable_http(bind: str, port: int, token: str,
+                         public_url: str | None = None) -> None:
     """Spec 014 remote hosting: co-located Model B -- this same server.py,
-    running ON the VPS with its own local $SANDBOX_HOME, reached over a
-    Tailscale mesh. FastMCP's built-in `auth=`/`token_verifier=` mechanism is
+    running ON the VPS with its own local $SANDBOX_HOME. In public-HTTPS mode
+    it binds to loopback behind Caddy; in Tailscale mode it binds to the
+    tailnet interface. FastMCP's built-in `auth=`/`token_verifier=` mechanism is
     an OAuth-resource-server flow (AuthSettings requires issuer_url +
     resource_server_url) -- real overkill for a single pre-shared bearer
     token between one client and one server on a private mesh. So: get the
@@ -67,7 +70,7 @@ def _run_streamable_http(bind: str, port: int, token: str) -> None:
     if not bind or bind == "0.0.0.0":
         raise SystemExit(
             f"refusing to bind streamable-http transport to {bind!r} -- must "
-            "be a specific (Tailscale) address, never 0.0.0.0 (spec FR-014)"
+            "be a specific address, never 0.0.0.0 (spec FR-014)"
         )
     if not port:
         raise SystemExit("a port is required for streamable-http transport")
@@ -87,10 +90,18 @@ def _run_streamable_http(bind: str, port: int, token: str) -> None:
     mcp.settings.host = bind
     mcp.settings.port = port
     # DNS-rebinding protection (transport_security) defaults to localhost-only
-    # allowed_hosts/allowed_origins -- ADD the bind address rather than
-    # replacing the defaults, so the protection stays meaningful.
+    # allowed_hosts/allowed_origins -- ADD the bind/public addresses rather
+    # than replacing the defaults, so the protection stays meaningful.
     mcp.settings.transport_security.allowed_hosts.append(f"{bind}:*")
     mcp.settings.transport_security.allowed_origins.append(f"http://{bind}:*")
+    if public_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(public_url)
+        if parsed.netloc:
+            mcp.settings.transport_security.allowed_hosts.append(parsed.netloc)
+            mcp.settings.transport_security.allowed_origins.append(
+                f"{parsed.scheme}://{parsed.netloc}"
+            )
 
     app = mcp.streamable_http_app()
     app.add_middleware(_BearerAuthMiddleware)
@@ -102,6 +113,8 @@ if __name__ == "__main__":
 
     opts = _parse_transport_args(_sys.argv[1:])
     if opts["transport"] == "streamable-http":
-        _run_streamable_http(opts["bind"], opts["port"], opts["token"])
+        _run_streamable_http(
+            opts["bind"], opts["port"], opts["token"], opts.get("public_url")
+        )
     else:
         mcp.run()

@@ -5,18 +5,37 @@ import subprocess
 from app import *  # noqa: F401,F403
 
 
+def _plugin_check_error(message: str, *, action: str = "check",
+                        code: int | None = None) -> dict:
+    result = {
+        "ok": False,
+        "action": action,
+        "plugin_slug": None,
+        "errors": 0,
+        "warnings": 0,
+        "baseline_total": 0,
+        "new_count": 0,
+        "violations": [],
+        "report_path": None,
+        "error": message,
+    }
+    if code is not None:
+        result["code"] = code
+    return result
+
+
 @mcp.tool()
 def run_plugin_check(project_dir: str, update: bool = False) -> dict:
     """Run WordPress.org's official Plugin Check against a project's configured
     plugin, gated by a committed baseline — only NEW ERROR-level findings beyond
     the baseline fail the run. See docs/plugin-check.md, specs/013-plugin-check/.
 
-    Which plugin to check defaults to the project's own resolved slug (its
-    sandbox.config.json's top-level `slug`, or the project directory name — the
-    same resolution legacy `plugins: ["."]` self-entries already use); set
-    `pluginCheck.slug` explicitly only to check a DIFFERENT plugin than the
-    project's own. WARNING-level findings are included in the result and the
-    rendered report for visibility but never gate the run.
+    Which plugin to check is always the project's own resolved slug (its
+    sandbox.config.json's top-level `slug`, or the project directory name -- the
+    same resolution legacy `plugins: ["."]` self-entries already use). There is
+    no `pluginCheck.slug` override; Plugin Check is intentionally a self-check
+    tool. WARNING-level findings are included in the result and the rendered
+    report for visibility but never gate the run.
 
     project_dir: the plugin project to check.
     update: rewrite the baseline to match current findings exactly, instead of
@@ -36,10 +55,16 @@ def run_plugin_check(project_dir: str, update: bool = False) -> dict:
             cmd, capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "run_plugin_check timed out after 300s"}
+        return _plugin_check_error(
+            "run_plugin_check timed out after 300s",
+            action="update" if update else "check",
+        )
     lines = (res.stdout or "").strip().splitlines()
     result = _safe_json(lines[-1]) if lines else None
     if isinstance(result, dict) and "plugin_slug" in result:
         return result
-    return {"ok": False, "code": res.returncode,
-            "error": (res.stderr or res.stdout or "plugin check failed").strip()[:2000]}
+    return _plugin_check_error(
+        (res.stderr or res.stdout or "plugin check failed").strip()[:2000],
+        action="update" if update else "check",
+        code=res.returncode,
+    )

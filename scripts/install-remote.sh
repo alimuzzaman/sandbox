@@ -5,10 +5,10 @@
 # sandbox/commands/remote.py's _cmd_provision) -- no confirmation prompts,
 # unlike scripts/install-ubuntu.sh's interactive local flow.
 #
-# Installs: Tailscale (joins the tailnet if TAILSCALE_AUTHKEY is set in the
-# environment; otherwise installs the package and leaves joining as a manual
-# `tailscale up` step, since a non-interactive join genuinely needs a key),
-# Docker CE + compose plugin, and the sandbox `sb` runtime itself.
+# Installs: Docker CE + compose plugin and the sandbox `sb` runtime itself.
+# If SANDBOX_CONTROL_TRANSPORT=tailscale, also installs Tailscale and joins the
+# tailnet when TAILSCALE_AUTHKEY is set. Public HTTPS is the default control
+# plane and does not require Tailscale.
 #
 # Tested on: Ubuntu 22.04 LTS, Ubuntu 24.04 LTS.
 set -euo pipefail
@@ -22,19 +22,24 @@ else
     SUDO="sudo"
 fi
 
-# --- Tailscale ---------------------------------------------------------
-log "installing Tailscale"
-if ! command -v tailscale >/dev/null 2>&1; then
-    curl -fsSL https://tailscale.com/install.sh | $SUDO sh
-fi
-if tailscale status >/dev/null 2>&1; then
-    ok "Tailscale already joined to a tailnet"
-elif [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
-    $SUDO tailscale up --authkey="${TAILSCALE_AUTHKEY}" --ssh
-    ok "Tailscale joined the tailnet"
+# --- Optional Tailscale ------------------------------------------------
+SANDBOX_CONTROL_TRANSPORT="${SANDBOX_CONTROL_TRANSPORT:-https}"
+if [[ "$SANDBOX_CONTROL_TRANSPORT" == "tailscale" ]]; then
+    log "installing Tailscale"
+    if ! command -v tailscale >/dev/null 2>&1; then
+        curl -fsSL https://tailscale.com/install.sh | $SUDO sh
+    fi
+    if tailscale status >/dev/null 2>&1; then
+        ok "Tailscale already joined to a tailnet"
+    elif [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+        $SUDO tailscale up --authkey="${TAILSCALE_AUTHKEY}" --ssh
+        ok "Tailscale joined the tailnet"
+    else
+        log "TAILSCALE_AUTHKEY not set -- installed but NOT joined; run "
+        log "'sudo tailscale up' on this host manually, then re-run provision"
+    fi
 else
-    log "TAILSCALE_AUTHKEY not set -- installed but NOT joined; run "
-    log "'sudo tailscale up' on this host manually, then re-run provision"
+    ok "Tailscale skipped (public HTTPS control plane)"
 fi
 
 # --- Docker CE + compose plugin -----------------------------------------
@@ -70,12 +75,23 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
     $SUDO apt-get update -qq
     $SUDO apt-get install -y python3 python3-venv
 fi
+if command -v apt-get >/dev/null 2>&1; then
+    PY_MM="$(python3 - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y "python${PY_MM}-venv" python3-venv
+fi
 ok "python3 + venv present"
 
 # --- sandbox runtime -----------------------------------------------------
 SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}"
 mkdir -p "$SANDBOX_HOME"
-if [[ ! -d "$SANDBOX_HOME/sb-src/.git" ]]; then
+if [[ -x "$SANDBOX_HOME/sb-src/sb" ]]; then
+    ok "sandbox runtime already present at $SANDBOX_HOME/sb-src"
+elif [[ ! -d "$SANDBOX_HOME/sb-src/.git" ]]; then
     log "cloning the sandbox runtime into $SANDBOX_HOME/sb-src"
     git clone --depth 1 https://github.com/templately/sandbox.git "$SANDBOX_HOME/sb-src"
 else
@@ -90,7 +106,12 @@ log "provisioning the CLI + visit tools venvs"
 export SANDBOX_HOME
 (
     cd "$SANDBOX_HOME/sb-src"
-    ./sb --help >/dev/null 2>&1 || true   # bootstraps the CLI venv on first run
+    if [[ ! -x "$SANDBOX_HOME/sb-src/.cli-venv/bin/python" ]]; then
+        python3 -m venv "$SANDBOX_HOME/sb-src/.cli-venv"
+        "$SANDBOX_HOME/sb-src/.cli-venv/bin/pip" install --quiet \
+            --disable-pip-version-check pyyaml
+    fi
+    ./sb mcp-install >/dev/null
     "$SANDBOX_HOME/sb-src/.cli-venv/bin/python" -c \
         "from sandbox.core._config import ensure_tools_venv; ensure_tools_venv()"
 )

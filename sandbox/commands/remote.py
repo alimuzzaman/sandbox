@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import sys
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
@@ -96,6 +97,86 @@ def _cmd_remove(args, as_json: bool) -> None:
         info(f"no remote named '{name}' was registered")
 
 
+def _upload_runtime_source(ssh_target: str) -> None:
+    """Stage this checkout onto the VPS so provisioning never depends on
+    GitHub reachability or repo visibility. Fresh VPS validation caught that
+    cloning templately/sandbox anonymously can fail for private/internal repos."""
+    excludes = [
+        ".git",
+        ".cli-venv",
+        "mcp/wp-server/.venv",
+        "runtime",
+        "tmp",
+        "__pycache__",
+        ".pytest_cache",
+    ]
+    tar_cmd = ["tar"]
+    for item in excludes:
+        tar_cmd.extend(["--exclude", item])
+    tar_cmd.extend(["-czf", "-", "."])
+    remote_cmd = (
+        "set -e; sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
+        "rm -rf \"$sandbox_home/sb-src\"; "
+        "mkdir -p \"$sandbox_home/sb-src\"; "
+        "tar -xzf - -C \"$sandbox_home/sb-src\""
+    )
+    import subprocess
+    tar_res = subprocess.run(
+        tar_cmd, cwd=str(ROOT), capture_output=True, timeout=300, check=False,
+    )
+    if tar_res.returncode != 0:
+        raise RuntimeError(
+            f"could not package the local sandbox runtime: "
+            f"{tar_res.stderr.decode(errors='replace').strip()[:500]}"
+        )
+    ssh_res = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, remote_cmd],
+        input=tar_res.stdout, capture_output=True, text=False, timeout=300, check=False,
+    )
+    if ssh_res.returncode != 0:
+        detail = (ssh_res.stderr or ssh_res.stdout or b"").decode(errors="replace")
+        raise RuntimeError(f"could not upload sandbox runtime: {detail.strip()[:500]}")
+
+
+def _arg_str(args, name: str) -> str | None:
+    value = getattr(args, name, None)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _arg_true(args, name: str) -> bool:
+    return getattr(args, name, None) is True
+
+
+def _choose_control_transport(args, as_json: bool) -> str:
+    explicit = _arg_str(args, "control")
+    if explicit in {"https", "tailscale"}:
+        return explicit
+    if as_json or _arg_true(args, "yes") or not sys.stdin.isatty():
+        return "https"
+    ans = input("Use Tailscale private control plane instead of public HTTPS? [y/N] ")
+    return "tailscale" if ans.strip().lower() in {"y", "yes"} else "https"
+
+
+def _ssh_host(ssh_target: str) -> str:
+    host = ssh_target.rsplit("@", 1)[-1]
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    return host.split(":", 1)[0]
+
+
+def _control_host(args, entry: dict, ssh_target: str, as_json: bool) -> str:
+    host = _arg_str(args, "control_host") or entry.get("control_host")
+    if isinstance(host, str) and host.strip():
+        return host.strip()
+    if as_json or _arg_true(args, "yes") or not sys.stdin.isatty():
+        die("public HTTPS control requires --control-host, e.g. "
+            "`./sb remote provision myvps --control-host sandbox.example.com`")
+    default = _ssh_host(ssh_target)
+    prompt = f"Public HTTPS hostname for this remote [{default}]: "
+    entered = input(prompt).strip()
+    return entered or default
+
+
 def _cmd_provision(args, as_json: bool) -> None:
     name = _require_name(args)
     entry = sr.get_remote(name)
@@ -114,7 +195,18 @@ def _cmd_provision(args, as_json: bool) -> None:
     ssh_target = entry.get("ssh") or ""
     if not ssh_target:
         die(f"remote '{name}' has no ssh connection string configured")
-    cmd = f"echo {encoded} | base64 -d | bash -s"
+    control_transport = _choose_control_transport(args, as_json)
+    public_host = None
+    if control_transport == "https":
+        public_host = _control_host(args, entry, ssh_target, as_json)
+    try:
+        _upload_runtime_source(ssh_target)
+    except RuntimeError as e:
+        die(f"could not stage the sandbox runtime on '{name}': {e}")
+    cmd = (
+        f"echo {encoded} | base64 -d | "
+        f"SANDBOX_CONTROL_TRANSPORT={control_transport} bash -s"
+    )
     res = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, cmd],
         capture_output=True, text=True, timeout=1800, check=False,
@@ -122,23 +214,30 @@ def _cmd_provision(args, as_json: bool) -> None:
     if res.returncode != 0:
         die(f"provisioning '{name}' failed: "
             f"{(res.stderr or res.stdout or '').strip()[:1000]}")
-    entry = sr.get_remote(name)
-    try:
-        tailscale_ip = sr.resolve_tailscale_ip(entry)
-    except RuntimeError as e:
-        die(f"'{name}' installed OK but Tailscale isn't joined yet: {e}\n"
-            f"join it manually (see scripts/install-remote.sh's "
-            f"TAILSCALE_AUTHKEY note), then re-run `./sb remote provision {name}`")
-        return
     token = sr.mint_bearer_token()
     port = sr.DEFAULT_MCP_PORT
+    entry = sr.get_remote(name)
     try:
-        sr.start_remote_mcp_server(entry, tailscale_ip, port, token)
-    except RuntimeError as e:
+        if control_transport == "tailscale":
+            tailscale_ip = sr.resolve_tailscale_ip(entry)
+            control_url = f"http://{tailscale_ip}:{port}"
+            bind = tailscale_ip
+            sr.start_remote_mcp_server(entry, bind, port, token)
+            sr.put_remote(name, control_transport="tailscale",
+                          control_url=control_url, tailscale_host=tailscale_ip,
+                          mcp_port=port, bearer_token=token, provisioned=True)
+        else:
+            control_url = f"https://{public_host}"
+            sr.configure_https_proxy(entry, public_host, port)
+            sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
+                                       public_url=control_url)
+            sr.put_remote(name, control_transport="https",
+                          control_host=public_host, control_url=control_url,
+                          mcp_port=port, bearer_token=token, provisioned=True)
+            tailscale_ip = None
+    except (RuntimeError, ValueError) as e:
         die(f"could not start the remote MCP server on '{name}': {e}")
         return
-    sr.put_remote(name, provisioned=True, bearer_token=token,
-                  tailscale_host=tailscale_ip, mcp_port=port)
     # The token is shown here ONCE, at mint time only -- same pattern as an
     # AWS access key or GitHub PAT. It's never echoed again after this: not
     # by `remote list`, not by any other command that reads the stored
@@ -146,16 +245,16 @@ def _cmd_provision(args, as_json: bool) -> None:
     # message used to claim "bearer token minted above" while never actually
     # printing it, leaving no way to complete the second-MCP-server setup).
     result = {"ok": True, "name": name, "provisioned": True,
+             "control_transport": control_transport, "control_url": control_url,
              "tailscale_host": tailscale_ip, "mcp_port": port,
              "bearer_token": token, "error": None}
     if as_json:
         print(json.dumps(result))
     else:
-        ok(f"'{name}' provisioned and its MCP server is running at "
-           f"{tailscale_ip}:{port}")
+        ok(f"'{name}' provisioned and its MCP server is reachable at {control_url}")
         print(f"  bearer token (shown once, save it now): {token}")
         print(f"  register it in Claude Code as a second MCP server "
-              f"(transport: http, url: http://{tailscale_ip}:{port}) "
+              f"(transport: http, url: {control_url}) "
               f"— see docs/remote-hosting.md")
 
 
@@ -165,23 +264,38 @@ def _cmd_up(args, as_json: bool) -> None:
     if not entry or not entry.get("provisioned"):
         die(f"remote '{name}' is not provisioned yet — run "
             f"`./sb remote provision {name}` first")
-    tailscale_ip = entry.get("tailscale_host")
+    control_transport = entry.get("control_transport") or (
+        "tailscale" if entry.get("tailscale_host") else "https"
+    )
+    control_url = entry.get("control_url")
     port = entry.get("mcp_port") or sr.DEFAULT_MCP_PORT
     token = entry.get("bearer_token")
-    if not tailscale_ip or not token:
+    if not token:
         die(f"remote '{name}' is missing recorded connection details — "
             f"re-run `./sb remote provision {name}`")
     try:
-        sr.start_remote_mcp_server(entry, tailscale_ip, port, token)
-    except RuntimeError as e:
+        if control_transport == "tailscale":
+            tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
+            control_url = control_url or f"http://{tailscale_ip}:{port}"
+            sr.start_remote_mcp_server(entry, tailscale_ip, port, token)
+        else:
+            public_host = entry.get("control_host")
+            if not public_host:
+                die(f"remote '{name}' is missing its HTTPS control host — "
+                    f"re-run `./sb remote provision {name} --control-host <host>`")
+            control_url = control_url or f"https://{public_host}"
+            sr.configure_https_proxy(entry, public_host, port)
+            sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
+                                       public_url=control_url)
+    except (RuntimeError, ValueError) as e:
         die(f"could not start '{name}''s MCP server: {e}")
         return
-    result = {"ok": True, "name": name, "tailscale_host": tailscale_ip,
-             "mcp_port": port, "error": None}
+    result = {"ok": True, "name": name, "control_transport": control_transport,
+             "control_url": control_url, "mcp_port": port, "error": None}
     if as_json:
         print(json.dumps(result))
     else:
-        ok(f"'{name}' MCP server is up at {tailscale_ip}:{port}")
+        ok(f"'{name}' MCP server is up at {control_url}")
 
 
 def _cmd_down(args, as_json: bool) -> None:

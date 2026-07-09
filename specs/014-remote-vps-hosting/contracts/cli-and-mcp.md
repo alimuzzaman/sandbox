@@ -5,14 +5,20 @@
 | Command | Purpose |
 |---|---|
 | `./sb remote add <name> ssh://user@host[:port]` | Register a VPS target (stored in `sandbox.local.yml`'s `remotes:` block). Idempotent — re-running for an existing name updates it. |
-| `./sb remote list` | Show configured remotes, each with reachability (a live SSH/Tailscale ping) and provisioned status. |
-| `./sb remote provision <name>` | SSH in and run `scripts/install-remote.sh`: install/join Tailscale, install Docker CE + compose plugin, install the `sb` runtime, provision the `visit` tools venv, start the remote MCP server (streamable-HTTP, bound to the Tailscale interface only), mint a bearer token. Safe to re-run (spec FR-005). |
-| `./sb remote up <name>` / `./sb remote down <name>` | Start/stop the remote MCP server process on the VPS (over SSH) — does NOT affect running WordPress instances or the Tailscale connection itself. |
+| `./sb remote list` | Show configured remotes, each with SSH reachability and provisioned status. |
+| `./sb remote provision <name> --control-host <host>` | SSH in and run `scripts/install-remote.sh`: install Docker CE + compose plugin, Caddy, the `sb` runtime, provision the `visit` tools venv, start the loopback-bound remote MCP server behind public HTTPS, mint a bearer token. Safe to re-run (spec FR-005). |
+| `./sb remote provision <name> --control tailscale` | Same provisioning flow, but install/join Tailscale and bind the remote MCP server to the Tailscale interface instead of using Caddy/HTTPS. |
+| `./sb remote up <name>` / `./sb remote down <name>` | Start/stop the remote MCP server process on the VPS (over SSH) — does NOT affect running WordPress instances or the selected control transport itself. |
 | `./sb remote remove <name>` | Forget the remote locally. MUST NOT touch anything on the VPS itself (spec FR-003) — existing instances there keep running; the user is told this explicitly in the confirmation message. |
 
 Exit codes: `0` on success; `1` on any failure, with a human-readable `die()`-style
 message naming the actual cause (unreachable host, SSH auth failure, install-step
 failure) — never a bare stack trace.
+
+Interactive `remote provision` asks whether the user wants Tailscale instead of the
+default public HTTPS control endpoint. `--json` and non-interactive invocations default
+to HTTPS and require `--control-host <host>` unless the host is already stored on that
+remote.
 
 ## `./sb deploy` command
 

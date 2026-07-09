@@ -3,7 +3,8 @@
 ## 1. What this is
 
 `./sb remote` + `./sb deploy` let you run a sandbox instance on a VPS you already own
-and manage, instead of on your local machine — reached over Tailscale, with the exact
+and manage, instead of on your local machine — reached over a public HTTPS control
+endpoint by default, with Tailscale available as an explicit opt-in, and with the exact
 same CLI/MCP surface as a local instance. This is a first-class capability
 (`specs/014-remote-vps-hosting/`), grounded in a deeper feasibility study at
 `docs/remote-hosting-prd.md` (read that doc's §0 for the resolved architecture
@@ -15,32 +16,50 @@ multi-tenant/shared-VPS story. See §5 for what's explicitly out of scope.
 ## 2. The model in one sentence
 
 **Co-location, not remote-control.** The MCP server, `sb`, `$SANDBOX_HOME`, Docker, and
-all containers move onto the VPS together — you reach them over a Tailscale mesh through
-a SECOND, separately registered MCP server (`sandbox-<remote-name>`), not by adding a
-`--remote` flag to your existing local tools. Your local `sandbox` MCP server and all
-your local instances are completely unaffected.
+all containers move onto the VPS together — you reach them through a SECOND, separately
+registered MCP server (`sandbox-<remote-name>`), not by adding a `--remote` flag to your
+existing local tools. By default that second MCP server is exposed as
+`https://<control-host>` through Caddy, while the MCP process itself stays bound to
+`127.0.0.1`. Your local `sandbox` MCP server and all your local instances are completely
+unaffected.
 
 ## 3. First-time setup
 
 ```bash
 ./sb remote add myvps ssh://ubuntu@203.0.113.10
-./sb remote provision myvps
+./sb remote provision myvps --control-host sandbox-control.example.com
 ```
 
-`provision` SSHes in and, non-interactively, installs Tailscale (joining the tailnet if
-`TAILSCALE_AUTHKEY` is set in your shell environment before running provision — otherwise
-it installs the package and you `tailscale up` on the VPS manually once, then re-run
-provision), Docker CE + compose plugin, the `sb` runtime itself, and the `visit` tools
-venv (Playwright + headless Chromium — needed server-side, since `visit` must reach
-`localhost:<port>` and the VPS's own `.tst` proxy). It then starts the remote MCP server
-(streamable-HTTP, bound ONLY to the VPS's Tailscale interface — never `0.0.0.0`) and
-prints the Tailscale address + port to register.
+`provision` asks whether you want Tailscale instead of public HTTPS when run
+interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
+`--control tailscale` to opt into Tailscale explicitly.
+
+For HTTPS mode, `provision` SSHes in and, non-interactively, installs Docker CE +
+compose plugin, Caddy, the `sb` runtime itself, the MCP server venv, and the `visit`
+tools venv (Playwright + headless Chromium — needed server-side, since `visit` must
+reach `localhost:<port>` and the VPS's own `.tst` proxy). It stages the current local
+sandbox checkout onto the VPS rather than assuming the sandbox GitHub repo is
+anonymously cloneable. It then starts the remote MCP server (streamable-HTTP, bound to
+`127.0.0.1`, never `0.0.0.0`) and configures a Caddy virtual host that proxies
+`https://<control-host>` to it.
+
+For Tailscale mode, `provision` also installs Tailscale (joining the tailnet if
+`TAILSCALE_AUTHKEY` is set in your shell environment before running provision —
+otherwise it installs the package and you `tailscale up` on the VPS manually once, then
+re-run provision). The remote MCP server binds to the VPS's Tailscale interface instead
+of loopback.
+
+The SSH user must be able to run `sudo` non-interactively for package installs. On a
+fresh VPS, either provision as a sudo-capable user with NOPASSWD configured, or do a
+one-time root bootstrap to grant that user package-install rights. HTTPS mode also needs
+the `--control-host` DNS name to resolve to the VPS; Tailscale mode needs either
+`TAILSCALE_AUTHKEY` or a one-time manual `tailscale up`.
 
 Register the second MCP server in Claude Code:
 
 ```bash
 claude mcp add --scope user --transport http sandbox-myvps \
-  http://<tailscale-ip-printed-above>:9174 \
+  https://sandbox-control.example.com \
   --header "Authorization: Bearer <token-printed-above>"
 ```
 
@@ -82,6 +101,13 @@ ssh ubuntu@203.0.113.10 "cd \$SANDBOX_HOME/deploy-src/<project-slug> && ./sb ens
 Then use `wp_cli`, `fs_read`, `visit`, `run_tests`, etc. through the `sandbox-myvps` MCP
 connection exactly as you would through `sandbox` locally.
 
+On a shared VPS that will also host other apps (for example, Next.js), route every public
+app by hostname through Caddy. Sandbox's control endpoint should get its own hostname
+(`sandbox-control.example.com`), and your Next.js app should get another
+(`app.example.com`). Plain sandbox WordPress instances still use high ports; avoid
+`domains setup` unless you intend sandbox to add public hostname routes for those sites
+too.
+
 ## 6. Explicitly out of scope (Phase 1)
 
 - **No continuous sync daemon.** Deploy is deliberate and on-demand.
@@ -94,11 +120,11 @@ connection exactly as you would through `sandbox` locally.
 
 ## 7. Security
 
-- The remote MCP server binds ONLY to the VPS's Tailscale interface, never `0.0.0.0` —
-  it is unreachable from the public internet by construction, reachable only from
-  devices on the same tailnet.
-- A per-remote bearer token (minted at `provision` time) is required on every request as
-  defense in depth on top of the network boundary — enforced via a small Starlette
+- In HTTPS mode, the remote MCP server binds only to `127.0.0.1`; Caddy exposes it as a
+  TLS virtual host. In Tailscale mode, it binds only to the VPS's Tailscale address. It
+  never binds to `0.0.0.0`.
+- A per-remote bearer token (minted at `provision` time) is required on every request —
+  enforced via a small Starlette
   middleware wrapping FastMCP's `streamable_http_app()` (FastMCP's own OAuth-oriented
   `auth=`/`token_verifier=` mechanism needs an issuer/resource-server setup that's real
   overkill for a single pre-shared secret between one client and one server).
@@ -116,7 +142,8 @@ reference. Summary:
 |---|---|
 | `./sb remote add <name> <ssh_url>` | Register a VPS target |
 | `./sb remote list` | Show configured remotes + reachability + provisioned status |
-| `./sb remote provision <name>` | Fully automated install + start the remote MCP server |
+| `./sb remote provision <name> --control-host <host>` | Fully automated install + start the remote MCP server over public HTTPS |
+| `./sb remote provision <name> --control tailscale` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote up` / `down <name>` | Start/stop the remote MCP server process |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
@@ -126,12 +153,12 @@ MCP tool: `remote_deploy(project_dir: str, remote: str) -> dict` — thin wrappe
 
 ## 9. Known limitation / next step
 
-**Not yet live-verified against a real VPS** (Constitution Principle IV — unit tests
-alone aren't proof of done). `specs/014-remote-vps-hosting/quickstart.md` documents the
-required Phase 0 spike (prove `fs_read`/`visit`/`wp_cli` genuinely work through a
-Tailscale-reached, VPS-hosted MCP server) plus 5 verification scenarios, to run against
-a real, disposable VPS before this feature is considered fully done. 243 unit tests pass,
-covering config read/write, SSH/git command construction, the deploy replace-not-stack
-mechanism, and the MCP transport-selection branch's safety gates — but the live pipeline
-(a real `sb remote provision` + `sb deploy` + booted instance, reached over an actual
-Tailscale connection) has not yet been exercised end-to-end.
+**Partially live-verified against a fresh Ubuntu 24.04 VPS.** A real run against
+`alim@212.47.72.49` installed Docker CE + compose, Caddy, the staged sandbox runtime, the
+MCP venv, and the Playwright/Chromium tools venv. The remote now reports provisioned at
+`https://sandbox-control.asb.bd`; Caddy owns public `80/443` by hostname, while the MCP
+process itself binds only to `127.0.0.1:9174`. Bearer-auth probing reaches the app (auth
+failures return `401`; the verified token now reaches MCP-level responses instead).
+The remaining Phase 0 proof is to register this as a second MCP server and run
+`fs_read`/`visit`/`wp_cli` through it. `specs/014-remote-vps-hosting/quickstart.md`
+remains the completion gate.

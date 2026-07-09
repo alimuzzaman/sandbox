@@ -14,8 +14,10 @@ pro-license keys. Layout:
     remotes:
       myvps:
         ssh: "ubuntu@203.0.113.10"
-        tailscale_host: "myvps.tailnet-name.ts.net"   # recorded by `provision`
-        mcp_port: 9174                                 # recorded by `provision`
+        control_transport: "https"                     # https (default) or tailscale
+        control_url: "https://sandbox.example.com"      # recorded by `provision`
+        tailscale_host: "myvps.tailnet-name.ts.net"     # only for tailscale mode
+        mcp_port: 9174                                  # recorded by `provision`
         bearer_token: "<secret, never echoed>"         # minted by `provision`
         provisioned: false
 
@@ -30,6 +32,8 @@ whether it's provisioned -- never what instances it has.
 from __future__ import annotations
 import re
 import secrets
+import shlex
+import posixpath
 import subprocess
 from pathlib import Path
 
@@ -295,43 +299,65 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
 
 def apply_uncommitted(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str]) -> int:
-    """Applies the tracked-file diff (via `git apply` fed over SSH) and
-    transfers untracked files (via `scp`, creating parent directories first)
-    on top of a just-reset clean tree. Returns the total number of files
-    touched, for the user-facing confirmation message."""
+    """Applies the dirty working tree on top of a just-reset clean tree by
+    copying exact file bytes for changed tracked files and untracked files.
+
+    This deliberately avoids replaying `git diff` through `git apply`: a live
+    deploy against a plugin with a CRLF->LF rewrite in `assets/admin.css`
+    proved text patches are too brittle for the promise here. The contract is
+    "remote reflects the local working tree", so copying the current file
+    content is both simpler and more correct. Deleted tracked files are removed
+    explicitly. Returns the total number of paths touched."""
     ssh_target = (remote or {}).get("ssh") or ""
     if not ssh_target:
         raise ValueError("remote has no ssh connection string configured")
     applied = 0
+    to_copy: list[str] = []
+    deleted: list[str] = []
     if diff_text.strip():
-        name_res = subprocess.run(
+        changed_res = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
-        changed_names = [n for n in (name_res.stdout or "").splitlines() if n.strip()]
-        import base64
-        encoded = base64.b64encode(diff_text.encode()).decode()
-        cmd = f"cd {target_path} && echo {encoded} | base64 -d | git apply -"
-        res = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, cmd],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
-        if res.returncode != 0:
+        if changed_res.returncode != 0:
             raise RuntimeError(
-                f"could not apply uncommitted diff on remote: "
-                f"{(res.stderr or res.stdout or '').strip()[:500]}"
+                f"could not list changed tracked files: "
+                f"{(changed_res.stderr or changed_res.stdout or '').strip()[:500]}"
             )
-        applied += len(changed_names)
-    for relpath in untracked:
+        deleted_res = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=D", "HEAD"],
+            cwd=str(project_root), capture_output=True, text=True, check=False,
+        )
+        if deleted_res.returncode != 0:
+            raise RuntimeError(
+                f"could not list deleted tracked files: "
+                f"{(deleted_res.stderr or deleted_res.stdout or '').strip()[:500]}"
+            )
+        changed_names = [n for n in (changed_res.stdout or "").splitlines() if n.strip()]
+        deleted = [n for n in (deleted_res.stdout or "").splitlines() if n.strip()]
+        deleted_set = set(deleted)
+        to_copy.extend([n for n in changed_names if n not in deleted_set])
+    to_copy.extend(untracked)
+    for relpath in deleted:
+        remote_path = f"{target_path.rstrip('/')}/{relpath}"
+        rm_res = ssh_run(remote, f"rm -f -- {shlex.quote(remote_path)}", timeout=15)
+        if rm_res.returncode != 0:
+            raise RuntimeError(
+                f"could not remove deleted file {relpath} on remote: "
+                f"{(rm_res.stderr or rm_res.stdout or '').strip()[:500]}"
+            )
+        applied += 1
+    for relpath in to_copy:
         local_path = Path(project_root) / relpath
         if not local_path.is_file():
             continue
-        remote_path = f"{target_path}/{relpath}"
-        parent_cmd = f"mkdir -p \"$(dirname '{remote_path}')\""
+        remote_path = f"{target_path.rstrip('/')}/{relpath}"
+        parent = posixpath.dirname(remote_path)
+        parent_cmd = f"mkdir -p -- {shlex.quote(parent)}"
         mk_res = ssh_run(remote, parent_cmd, timeout=15)
         if mk_res.returncode != 0:
             raise RuntimeError(
-                f"could not prepare directory for untracked file {relpath}: "
+                f"could not prepare directory for dirty file {relpath}: "
                 f"{(mk_res.stderr or mk_res.stdout or '').strip()[:500]}"
             )
         res = subprocess.run(
@@ -341,7 +367,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         )
         if res.returncode != 0:
             raise RuntimeError(
-                f"could not transfer untracked file {relpath}: "
+                f"could not transfer dirty file {relpath}: "
                 f"{(res.stderr or res.stdout or '').strip()[:500]}"
             )
         applied += 1
@@ -365,20 +391,79 @@ def resolve_tailscale_ip(remote: dict) -> str:
     return ip
 
 
-def start_remote_mcp_server(remote: dict, tailscale_ip: str, port: int, token: str) -> None:
+def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
+    """Install/configure Caddy so the public HTTPS control endpoint routes by
+    hostname to the loopback-bound MCP server. This intentionally uses a named
+    virtual host rather than raw public ports so the VPS can also host Next.js
+    or other apps through their own Caddy site blocks."""
+    public_host = (public_host or "").strip()
+    if (
+        not public_host or "/" in public_host or ":" in public_host
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", public_host)
+        or public_host.startswith(".") or public_host.endswith(".")
+    ):
+        raise ValueError("public HTTPS control host must be a bare hostname")
+    host_q = shlex.quote(public_host)
+    site_q = shlex.quote(
+        f"{public_host} {{\n"
+        f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+        f"}}\n"
+    )
+    cmd = (
+        "set -e; "
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        "if ! command -v caddy >/dev/null 2>&1; then "
+        "$SUDO apt-get update -qq && $SUDO apt-get install -y caddy; "
+        "fi; "
+        "$SUDO install -d -m 0755 /etc/caddy/conf.d; "
+        "if [ ! -f /etc/caddy/Caddyfile ]; then "
+        "printf '%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
+        "$SUDO tee /etc/caddy/Caddyfile >/dev/null; "
+        "elif ! $SUDO grep -q 'import /etc/caddy/conf.d/\\*.caddy' "
+        "/etc/caddy/Caddyfile; then "
+        "printf '\n%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
+        "$SUDO tee -a /etc/caddy/Caddyfile >/dev/null; "
+        "fi; "
+        f"printf '%s' {site_q} | $SUDO tee "
+        f"/etc/caddy/conf.d/sandbox-mcp-{host_q}.caddy >/dev/null; "
+        "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
+        "$SUDO systemctl enable --now caddy; "
+        "$SUDO systemctl reload caddy"
+    )
+    res = ssh_run(remote, cmd, timeout=180)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not configure HTTPS control proxy: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+
+
+def start_remote_mcp_server(remote: dict, bind: str, port: int, token: str,
+                            public_url: str | None = None) -> None:
     """Start `sb mcp --transport streamable-http ...` on the VPS as a
     detached background process, recording its PID in a pidfile so
     stop_remote_mcp_server / a later start can find and manage it. Safe to
     call when already running -- stops any prior instance first (idempotent,
     matches spec FR-005's expectation applied to the server process too)."""
     stop_remote_mcp_server(remote)
-    cmd = (
-        f"cd $SANDBOX_HOME/sb-src && "
-        f"nohup ./sb mcp --transport streamable-http --bind {tailscale_ip} "
-        f"--port {port} --token {token} "
-        f"> /tmp/sandbox-mcp-remote.log 2>&1 & echo $! > {_MCP_PIDFILE}"
+    public_arg = f" --public-url {shlex.quote(public_url)}" if public_url else ""
+    mcp_cmd = (
+        f"./sb mcp --transport streamable-http --bind {shlex.quote(bind)} "
+        f"--port {int(port)} --token {shlex.quote(token)}{public_arg}"
     )
-    res = ssh_run(remote, cmd, timeout=30)
+    child_cmd = (
+        f"echo $$ > {_MCP_PIDFILE}; "
+        f"exec {mcp_cmd} </dev/null > /tmp/sandbox-mcp-remote.log 2>&1"
+    )
+    cmd = (
+        "sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
+        "mkdir -p \"$sandbox_home/sb-src\"; "
+        f"cd \"$sandbox_home/sb-src\" && setsid -f sh -c {shlex.quote(child_cmd)}"
+    )
+    try:
+        res = ssh_run(remote, cmd, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("timed out starting the remote MCP server")
     if res.returncode != 0:
         raise RuntimeError(
             f"could not start the remote MCP server: "
@@ -394,7 +479,25 @@ def stop_remote_mcp_server(remote: dict) -> None:
     process."""
     cmd = (
         f"if [ -f {_MCP_PIDFILE} ]; then "
-        f"kill \"$(cat {_MCP_PIDFILE})\" 2>/dev/null; rm -f {_MCP_PIDFILE}; fi"
+        f"kill \"$(cat {_MCP_PIDFILE})\" 2>/dev/null || true; "
+        f"rm -f {_MCP_PIDFILE}; fi; "
+        "python3 - <<'PY'\n"
+        "import os, pathlib, signal\n"
+        "me = os.getpid()\n"
+        "for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):\n"
+        "    try:\n"
+        "        pid = int(path.parent.name)\n"
+        "        parts = path.read_bytes().split(b'\\0')\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if pid == me:\n"
+        "        continue\n"
+        "    if b'--transport' in parts and b'streamable-http' in parts and b'--token' in parts:\n"
+        "        try:\n"
+        "            os.kill(pid, signal.SIGTERM)\n"
+        "        except ProcessLookupError:\n"
+        "            pass\n"
+        "PY"
     )
     ssh_run(remote, cmd, timeout=15)
 

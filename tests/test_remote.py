@@ -282,22 +282,43 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
     @patch("subprocess.run")
     def test_apply_counts_tracked_and_untracked_files(self, mock_run, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
-        # subprocess.run is used for: git diff --name-only, the ssh apply call,
-        # the mkdir-parent ssh call (goes through ssh_run, mocked separately),
-        # and scp for each untracked file.
+        # subprocess.run is used for: git diff --name-only, git diff deleted,
+        # and scp for each dirty file. mkdir-parent goes through ssh_run,
+        # mocked separately.
         with tempfile.TemporaryDirectory() as d:
             proj = Path(d)
             (proj / "a.php").write_text("x")
+            (proj / "b.php").write_text("y")
             mock_run.side_effect = [
                 _completed(returncode=0, stdout="a.php\n"),  # git diff --name-only
-                _completed(returncode=0),                      # ssh | git apply
+                _completed(returncode=0, stdout=""),           # git diff deleted
                 _completed(returncode=0),                      # scp a.php
+                _completed(returncode=0),                      # scp b.php
             ]
             applied = sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4"}, "/home/ubuntu/sandbox/deploy-src/proj",
-                str(proj), "diff --git a/x b/x\n+y\n", ["a.php"],
+                str(proj), "diff --git a/x b/x\n+y\n", ["b.php"],
             )
             self.assertEqual(applied, 2)  # 1 tracked-diff file + 1 untracked file
+            self.assertIn("a.php", mock_run.call_args_list[2][0][0][-1])
+            self.assertIn("b.php", mock_run.call_args_list[3][0][0][-1])
+
+    @patch("sandbox.core._remote.ssh_run")
+    @patch("subprocess.run")
+    def test_apply_removes_deleted_tracked_files(self, mock_run, mock_ssh_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="gone.php\n"),  # git diff --name-only
+            _completed(returncode=0, stdout="gone.php\n"),  # git diff deleted
+        ]
+        mock_ssh_run.return_value = _completed(returncode=0)
+        applied = sr.apply_uncommitted(
+            {"ssh": "ubuntu@1.2.3.4"}, "/home/ubuntu/sandbox/deploy-src/proj",
+            "/local/proj", "diff --git a/gone.php b/gone.php\n", [],
+        )
+        self.assertEqual(applied, 1)
+        rm_cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("rm -f --", rm_cmd)
+        self.assertIn("gone.php", rm_cmd)
 
     @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")
@@ -358,6 +379,41 @@ class TestCmdRemoteRemove(unittest.TestCase):
                 self.assertIsNone(sr.get_remote("myvps"))
 
 
+class TestUploadRuntimeSource(unittest.TestCase):
+    @patch("subprocess.run")
+    def test_streams_this_checkout_to_remote_sandbox_home(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=b"tarball", stderr=b""),
+            _completed(returncode=0, stdout=b"", stderr=b""),
+        ]
+        remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+
+        tar_args = mock_run.call_args_list[0][0][0]
+        self.assertEqual(tar_args[0], "tar")
+        self.assertIn("--exclude", tar_args)
+        self.assertIn(".git", tar_args)
+        self.assertIn(".cli-venv", tar_args)
+        self.assertIn("mcp/wp-server/.venv", tar_args)
+        self.assertIn("runtime", tar_args)
+        self.assertEqual(mock_run.call_args_list[0][1]["cwd"], str(ROOT))
+
+        ssh_args = mock_run.call_args_list[1][0][0]
+        self.assertEqual(ssh_args[0], "ssh")
+        self.assertIn("ubuntu@1.2.3.4", ssh_args)
+        self.assertIn("sb-src", ssh_args[-1])
+        self.assertEqual(mock_run.call_args_list[1][1]["input"], b"tarball")
+        self.assertFalse(mock_run.call_args_list[1][1]["text"])
+
+    @patch("subprocess.run")
+    def test_raises_when_tar_fails_before_ssh(self, mock_run):
+        mock_run.return_value = _completed(
+            returncode=2, stdout=b"", stderr=b"tar failed"
+        )
+        with self.assertRaisesRegex(RuntimeError, "could not package"):
+            remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+        self.assertEqual(mock_run.call_count, 1)
+
+
 class TestCmdRemoteProvisionSurfacesTheToken(unittest.TestCase):
     # Real bug caught by /speckit-analyze: cmd_remote_provision's own
     # success message claimed "bearer token minted above" while never
@@ -369,8 +425,10 @@ class TestCmdRemoteProvisionSurfacesTheToken(unittest.TestCase):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
                 args = MagicMock()
                 args.name = "myvps"
+                args.control = "https"
+                args.control_host = "sandbox.example.com"
                 with patch("subprocess.run", return_value=_completed(returncode=0)), \
-                     patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
+                     patch.object(sr, "configure_https_proxy"), \
                      patch.object(sr, "start_remote_mcp_server"), \
                      patch("builtins.print") as mock_print:
                     remote_cmd._cmd_provision(args, as_json=True)
@@ -378,6 +436,102 @@ class TestCmdRemoteProvisionSurfacesTheToken(unittest.TestCase):
                 result = json.loads(printed)
                 self.assertTrue(result["bearer_token"])
                 self.assertEqual(len(result["bearer_token"]), 64)  # secrets.token_hex(32)
+                self.assertEqual(result["control_transport"], "https")
+                self.assertEqual(result["control_url"], "https://sandbox.example.com")
+
+    def test_provision_can_explicitly_use_tailscale(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = MagicMock()
+                args.name = "myvps"
+                args.control = "tailscale"
+                args.control_host = None
+                with patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
+                     patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
+                     patch.object(sr, "start_remote_mcp_server"), \
+                     patch("builtins.print") as mock_print:
+                    remote_cmd._cmd_provision(args, as_json=True)
+                provision_ssh_cmd = mock_run.call_args_list[2][0][0][-1]
+                self.assertIn("SANDBOX_CONTROL_TRANSPORT=tailscale", provision_ssh_cmd)
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertEqual(result["control_transport"], "tailscale")
+                self.assertEqual(result["control_url"], "http://100.64.1.2:9174")
+
+    def test_https_json_provision_requires_control_host(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = MagicMock()
+                args.name = "myvps"
+                args.control = "https"
+                args.control_host = None
+                with self.assertRaises(SystemExit):
+                    remote_cmd._cmd_provision(args, as_json=True)
+
+
+class TestStartRemoteMcpServer(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_start_remote_mcp_server_defaults_sandbox_home(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        entry = {"ssh": "ubuntu@1.2.3.4"}
+        sr.start_remote_mcp_server(entry, "100.64.1.2", 9174, "token123")
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}", cmd)
+        self.assertIn("mkdir -p \"$sandbox_home/sb-src\"", cmd)
+        self.assertIn("cd \"$sandbox_home/sb-src\"", cmd)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_start_remote_mcp_server_passes_public_url(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        entry = {"ssh": "ubuntu@1.2.3.4"}
+        sr.start_remote_mcp_server(
+            entry, "127.0.0.1", 9174, "token123",
+            public_url="https://sandbox.example.com",
+        )
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("--bind 127.0.0.1", cmd)
+        self.assertIn("--public-url https://sandbox.example.com", cmd)
+        self.assertIn("</dev/null", cmd)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_start_remote_mcp_server_timeout_is_redacted(self, mock_ssh_run):
+        mock_ssh_run.side_effect = [
+            _completed(returncode=0),
+            subprocess.TimeoutExpired(cmd="ssh", timeout=30),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            sr.start_remote_mcp_server(
+                {"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174,
+                "secret-token", public_url="https://sandbox.example.com",
+            )
+
+
+class TestConfigureHttpsProxy(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_configures_caddy_virtual_host(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.configure_https_proxy({"ssh": "ubuntu@1.2.3.4"}, "sandbox.example.com", 9174)
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("apt-get install -y caddy", cmd)
+        self.assertIn("reverse_proxy 127.0.0.1:9174", cmd)
+        self.assertIn("/etc/caddy/conf.d/sandbox-mcp-sandbox.example.com.caddy", cmd)
+
+    def test_rejects_non_hostname(self):
+        with self.assertRaises(ValueError):
+            sr.configure_https_proxy({"ssh": "ubuntu@1.2.3.4"}, "bad/host", 9174)
+
+
+class TestStopRemoteMcpServer(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_stop_kills_pidfile_and_stale_streamable_http_processes(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("/tmp/sandbox-mcp-remote.pid", cmd)
+        self.assertIn("/proc", cmd)
+        self.assertIn("streamable-http", cmd)
+        self.assertIn("--token", cmd)
 
 
 class TestDeployRequiresProvisionedRemote(unittest.TestCase):

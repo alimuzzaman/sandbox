@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-09
 
-**Status**: Draft
+**Status**: Implemented (all code/spec artifacts in place), pending live VPS validation
 
 **Input**: User description: "Bring remote VPS hosting for sandbox instances into the
 tool as a first-class, opt-in capability, per docs/remote-hosting-prd.md's now-resolved
@@ -38,10 +38,13 @@ on it.
    sandbox installs everything the remote needs to run instances (without the developer
    manually running install commands themselves) and reports success or a clear,
    actionable failure.
-3. **Given** a provisioned remote target, **When** the developer asks to see their
+3. **Given** the developer provisions interactively, **When** sandbox asks which control
+   plane to use, **Then** public HTTPS is the default and Tailscale is offered as an
+   explicit opt-in choice.
+4. **Given** a provisioned remote target, **When** the developer asks to see their
    configured remotes, **Then** sandbox lists each one along with whether it's currently
    reachable.
-4. **Given** a remote target the developer no longer needs, **When** they remove it,
+5. **Given** a remote target the developer no longer needs, **When** they remove it,
    **Then** sandbox stops treating it as a valid deploy/instance target (existing
    instances already running there are unaffected by the removal itself — the developer
    is responsible for tearing those down first).
@@ -188,11 +191,18 @@ operations available for a local instance (a WP-CLI command, a log read, a scree
 - **FR-015**: Existing local-only usage of sandbox (no remote registered or targeted)
   MUST behave identically to today — this feature MUST introduce zero behavior change
   for users who never opt into a remote.
+- **FR-016**: Remote provisioning MUST use a public HTTPS control endpoint by default,
+  requiring a user-provided control hostname for TLS routing, and MUST offer Tailscale as
+  an explicit opt-in transport rather than a required external dependency.
+- **FR-017**: In HTTPS mode, the remote MCP process MUST bind only to loopback behind a
+  reverse proxy, require the per-remote bearer token on every request, and route by
+  hostname so the VPS can also host other applications such as Next.js.
 
 ### Key Entities
 
 - **Remote target**: A named, user-registered VPS that sandbox can provision and deploy
-  to. Attributes: a user-chosen name, connection details, and whether it has been
+  to. Attributes: a user-chosen name, SSH connection details, control transport
+  (`https` by default or explicit `tailscale`), control URL, and whether it has been
   successfully provisioned. Secrets/credentials associated with it are never displayed
   back to the user once stored.
 - **Deploy**: A one-time, on-demand action that transfers a local project's current

@@ -79,7 +79,7 @@ Inputs: the full `Finding` list for this run, plus run metadata:
 
 | Metadata field | Source |
 |---|---|
-| `pluginSlug` | `PluginCheckConfig.slug` |
+| `pluginSlug` | The project's resolved top-level `slug` or project directory fallback |
 | `pluginVersion` | Parsed `Version:` header from `versionFile` (or `"unknown"` if unreadable) |
 | `checkerVersion` | Parsed from the `plugin-check` entry in the project's resolved plugin map (mirrors reference's own approach of reading the pinned zip URL/version) |
 | `wpVersion` / `phpVersion` | From the resolved project config (already available — same fields `ensure_instance` already reads) |

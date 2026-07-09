@@ -30,10 +30,21 @@ def remote_deploy(project_dir: str, remote: str) -> dict:
             cmd, capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "remote_deploy timed out after 300s"}
+        return {
+            "ok": False,
+            "remote": remote,
+            "pushed_commit": None,
+            "uncommitted_files_applied": 0,
+            "error": "remote_deploy timed out after 300s",
+        }
     lines = (res.stdout or "").strip().splitlines()
     result = _safe_json(lines[-1]) if lines else None
     if isinstance(result, dict) and "remote" in result:
         return result
-    return {"ok": False, "code": res.returncode,
-            "error": (res.stderr or res.stdout or "deploy failed").strip()[:2000]}
+    return {
+        "ok": False,
+        "remote": remote,
+        "pushed_commit": None,
+        "uncommitted_files_applied": 0,
+        "error": (res.stderr or res.stdout or "deploy failed").strip()[:2000],
+    }

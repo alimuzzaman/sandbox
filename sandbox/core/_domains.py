@@ -526,7 +526,13 @@ def _ensure_proxy_up(cfg: dict) -> None:
 
 def _proxy_sudoers_installed() -> bool:
     """True if the passwordless rule for proxy-helper.sh is installed."""
-    if not PROXY_SUDOERS.exists():
+    try:
+        if not PROXY_SUDOERS.exists():
+            return False
+    except PermissionError:
+        # Some VPS images make /etc/sudoers.d searchable only by root. If we
+        # cannot even stat the file, treat the proxy helper as unavailable
+        # instead of crashing unrelated remote instance creation.
         return False
     try:
         return str(PROXY_HELPER) in PROXY_SUDOERS.read_text()

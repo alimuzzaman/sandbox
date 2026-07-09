@@ -4,9 +4,13 @@ Stdlib `unittest` only, no docker — pure parsing/baseline-diff/report-renderin
 logic (spec FR-017). Run from the repo root:
 
     .cli-venv/bin/python -m unittest discover -s tests -v
-"""
+""" 
+import importlib.util
+import json
+import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -393,6 +397,59 @@ class TestRenderReport(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertNotIn("<script src=", html)  # no external script tags
         self.assertNotIn('<link ', html)  # no external stylesheet links
+
+
+class TestRunPluginCheckMcpWrapper(unittest.TestCase):
+    def _load_tool_module(self):
+        class _Mcp:
+            def tool(self):
+                def decorator(fn):
+                    return fn
+                return decorator
+
+        fake_app = types.ModuleType("app")
+        fake_app.mcp = _Mcp()
+        fake_app.SANDBOX_ROOT = ROOT
+        fake_app._safe_json = json.loads
+        old_app = sys.modules.get("app")
+        sys.modules["app"] = fake_app
+        try:
+            path = ROOT / "mcp" / "wp-server" / "tools" / "plugin_check.py"
+            spec = importlib.util.spec_from_file_location("plugin_check_tool_under_test", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        finally:
+            if old_app is None:
+                sys.modules.pop("app", None)
+            else:
+                sys.modules["app"] = old_app
+
+    def test_parse_failure_returns_documented_contract_shape(self):
+        module = self._load_tool_module()
+        fake = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="boom")
+        with patch.object(module.subprocess, "run", return_value=fake):
+            result = module.run_plugin_check("/tmp/project")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["action"], "check")
+        self.assertIsNone(result["plugin_slug"])
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["warnings"], 0)
+        self.assertEqual(result["violations"], [])
+        self.assertIsNone(result["report_path"])
+        self.assertEqual(result["error"], "boom")
+
+    def test_timeout_keeps_update_action_in_error_contract(self):
+        module = self._load_tool_module()
+        with patch.object(
+            module.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="plugin-check", timeout=300),
+        ):
+            result = module.run_plugin_check("/tmp/project", update=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["action"], "update")
+        self.assertIn("timed out", result["error"])
 
 
 if __name__ == "__main__":

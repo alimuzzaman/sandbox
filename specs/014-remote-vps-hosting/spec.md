@@ -119,6 +119,11 @@ operations available for a local instance (a WP-CLI command, a log read, a scree
 4. **Given** a project configured to use sandbox's macOS-native, Docker-less local mode,
    **When** the developer attempts to target a remote with it, **Then** sandbox refuses
    clearly rather than attempting something that cannot work remotely.
+5. **Given** an agent deploys a plugin to a provisioned remote, **When** it requests the
+   one-shot remote path, **Then** sandbox deploys the code, boots or refreshes the
+   remote WordPress instance, activates the deployed plugin, configures the requested
+   public HTTPS hostname, updates WordPress URLs, and returns the public URL in the same
+   tool result.
 
 ---
 
@@ -175,26 +180,30 @@ operations available for a local instance (a WP-CLI command, a log read, a scree
   provisioned, deployed remote target, with the same set of operations (running
   commands, reading logs/files, taking screenshots, running tests) available as for a
   local instance.
-- **FR-011**: Every such operation against a remote instance MUST reflect that
+- **FR-011**: A single deploy action MUST be able to optionally continue past code
+  transfer to ensure the remote WordPress instance, activate the deployed plugin slug,
+  expose a public HTTPS hostname, set the instance's WordPress URLs to that hostname,
+  and return both instance metadata and the public URL for MCP/agent callers.
+- **FR-012**: Every such operation against a remote instance MUST reflect that
   instance's actual current state on the remote — operations MUST NOT silently return
   stale, empty, or local-machine data when targeting a remote instance.
-- **FR-012**: A single project MUST be able to have a local instance and a remote
+- **FR-013**: A single project MUST be able to have a local instance and a remote
   instance running at the same time ONLY when the user has explicitly asked for two
   distinctly-identified instances; the system MUST NEVER silently run or conflate a
   local and a remote instance under what looks like a single, unqualified identity.
-- **FR-013**: The system MUST refuse cleanly, with a clear explanation, when a user
+- **FR-014**: The system MUST refuse cleanly, with a clear explanation, when a user
   attempts to target a remote with a project configured for a local-only runtime mode
   that has no remote equivalent.
-- **FR-014**: The system MUST NOT expose the remote VPS's container-management socket,
+- **FR-015**: The system MUST NOT expose the remote VPS's container-management socket,
   or any unauthenticated management interface, to the public internet at any point in
   registration, provisioning, or normal use.
-- **FR-015**: Existing local-only usage of sandbox (no remote registered or targeted)
+- **FR-016**: Existing local-only usage of sandbox (no remote registered or targeted)
   MUST behave identically to today — this feature MUST introduce zero behavior change
   for users who never opt into a remote.
-- **FR-016**: Remote provisioning MUST use a public HTTPS control endpoint by default,
+- **FR-017**: Remote provisioning MUST use a public HTTPS control endpoint by default,
   requiring a user-provided control hostname for TLS routing, and MUST offer Tailscale as
   an explicit opt-in transport rather than a required external dependency.
-- **FR-017**: In HTTPS mode, the remote MCP process MUST bind only to loopback behind a
+- **FR-018**: In HTTPS mode, the remote MCP process MUST bind only to loopback behind a
   reverse proxy, require the per-remote bearer token on every request, and route by
   hostname so the VPS can also host other applications such as Next.js.
 

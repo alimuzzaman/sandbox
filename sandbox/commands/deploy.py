@@ -51,9 +51,32 @@ def cmd_deploy(cfg, args) -> None:
         sr.reset_target_to(entry, target, pushed_sha)
         diff_text, untracked = sr.capture_uncommitted(root)
         applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
+        instance = None
+        public_url = None
+        if getattr(args, "ensure", False) or getattr(args, "expose", False):
+            instance = sr.ensure_remote_instance(entry, target)
+            plugin_slug = (
+                getattr(args, "plugin_slug", None)
+                or pconf.get("slug")
+                or sr.deploy_target_slug(root)
+            )
+            sr.activate_remote_plugin(entry, target, instance["instance"], plugin_slug)
+        if getattr(args, "expose", False):
+            label = instance.get("label") or "default"
+            domain = (
+                getattr(args, "domain", None)
+                or sr.default_instance_domain(label, sr.deploy_target_slug(root))
+            )
+            public_url = f"https://{domain}"
+            sr.configure_instance_https_route(entry, domain, int(instance["wordpress_port"]))
+            sr.set_remote_instance_url(entry, target, public_url)
+            instance["url"] = public_url
+            instance["login_url"] = None
+            instance["admin_url"] = f"{public_url}/wp-admin/"
     except (RuntimeError, ValueError) as e:
         result = {"ok": False, "remote": remote_name, "pushed_commit": None,
-                 "uncommitted_files_applied": 0, "error": str(e)}
+                 "uncommitted_files_applied": 0, "instance": None, "url": None,
+                 "error": str(e)}
         if as_json:
             print(json.dumps(result))
             import sys as _sys
@@ -62,13 +85,18 @@ def cmd_deploy(cfg, args) -> None:
         return
 
     result = {"ok": True, "remote": remote_name, "pushed_commit": pushed_sha,
-             "uncommitted_files_applied": applied, "error": None}
+             "uncommitted_files_applied": applied, "instance": instance,
+             "url": public_url, "error": None}
     if as_json:
         print(json.dumps(result))
     else:
         print(f"Deploying to '{remote_name}'...")
         print(f"  pushed HEAD ({pushed_sha[:7]}) -> {remote_name}")
         print(f"  applied {applied} uncommitted file(s)")
+        if instance:
+            print(f"  remote instance: {instance.get('instance')}")
+        if public_url:
+            print(f"  public URL: {public_url}")
         ok(f"Deployed. {remote_name} now reflects your working tree as of this command.")
 
 

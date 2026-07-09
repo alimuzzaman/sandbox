@@ -105,9 +105,9 @@ command, a `fs_read`, a `visit` with screenshot, and `run_tests`. Compare agains
 the identical operations locally for the same project — results should differ only in
 WHERE they ran, never in correctness.
 
-## Scenario 4b: a local AND a remote instance for the same project never collide (FR-012)
+## Scenario 4b: a local AND a remote instance for the same project never collide (FR-013)
 
-Flagged by `/speckit-analyze`: FR-012's "never silently conflated" guarantee currently
+Flagged by `/speckit-analyze`: FR-013's "never silently conflated" guarantee currently
 rests entirely on the architectural argument in `plan.md` (separate registries, separate
 MCP servers) — nothing exercises it directly. Prove it here:
 
@@ -127,7 +127,7 @@ MCP servers) — nothing exercises it directly. Prove it here:
 
 With no remote targeted at all, run the existing local test suite and a normal local
 `ensure`/`wp_cli` session. Confirm zero behavior difference from before this feature
-existed (spec FR-015/SC-004) — this is the release gate.
+existed (spec FR-016/SC-004) — this is the release gate.
 
 ## Cleanup
 

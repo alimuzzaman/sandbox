@@ -34,6 +34,7 @@ import re
 import secrets
 import shlex
 import posixpath
+import json
 import subprocess
 from pathlib import Path
 
@@ -178,6 +179,11 @@ def deploy_target_path(remote: dict, project_root) -> str:
     return f"{home}/deploy-src/{slug}"
 
 
+def remote_sb_path(remote: dict) -> str:
+    """Path to the staged sandbox runtime's `sb` on the VPS."""
+    return f"{resolve_sandbox_home(remote)}/sb-src/sb"
+
+
 def ensure_deploy_repo(remote: dict, project_root) -> str:
     """Lazily create the deploy-target git repo on first deploy to this remote
     (NOT during `provision`, which is machine-level, not project-level). Safe
@@ -199,6 +205,122 @@ def ensure_deploy_repo(remote: dict, project_root) -> str:
             f"{(res.stderr or res.stdout or '').strip()[:500]}"
         )
     return target
+
+
+def _last_json(stdout: str) -> dict | None:
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def ensure_remote_instance(remote: dict, target_path: str) -> dict:
+    """Run remote `sb ensure` for the deployed project and parse its JSON
+    result. This is the missing second half after code deploy: it creates or
+    refreshes the WordPress instance on the VPS itself."""
+    sb = remote_sb_path(remote)
+    cmd = f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)} --json"
+    res = ssh_run(remote, cmd, timeout=900)
+    data = _last_json(res.stdout or "")
+    if res.returncode != 0 or not data:
+        raise RuntimeError(
+            f"could not ensure remote instance: "
+            f"{(res.stderr or res.stdout or '').strip()[:2000]}"
+        )
+    return data
+
+
+def activate_remote_plugin(remote: dict, target_path: str, instance: str,
+                           plugin_slug: str) -> None:
+    """Make the deployed project the active plugin inside the remote instance.
+
+    Projects with a sandbox.config.json may eventually wire this automatically,
+    but ad-hoc plugin repos still need a reliable fallback. We symlink the
+    deploy target into the instance's plugin directory and activate the slug."""
+    home = resolve_sandbox_home(remote)
+    wp_plugins = f"{home}/runtime/wp-{instance}/wp-content/plugins"
+    plugin_path = f"{wp_plugins}/{plugin_slug}"
+    sb = remote_sb_path(remote)
+    cmd = (
+        "set -e; "
+        f"mkdir -p {shlex.quote(wp_plugins)}; "
+        f"rm -rf {shlex.quote(plugin_path)}; "
+        f"ln -s {shlex.quote(target_path)} {shlex.quote(plugin_path)}; "
+        f"cd {shlex.quote(target_path)}; "
+        f"{shlex.quote(sb)} wp plugin activate {shlex.quote(plugin_slug)}"
+    )
+    res = ssh_run(remote, cmd, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not activate remote plugin {plugin_slug}: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+
+
+def default_instance_domain(label: str, project_slug: str,
+                            base_domain: str = "sandbox.asb.bd") -> str:
+    """Public per-instance hostname. Uses hyphens only between label and slug
+    as requested: default-templately-ai-builder.sandbox.asb.bd."""
+    safe_label = re.sub(r"[^a-z0-9-]+", "-", (label or "default").lower()).strip("-")
+    safe_slug = re.sub(r"[^a-z0-9-]+", "-", (project_slug or "project").lower()).strip("-")
+    safe_label = safe_label or "default"
+    safe_slug = safe_slug or "project"
+    base = (base_domain or "sandbox.asb.bd").strip().strip(".")
+    return f"{safe_label}-{safe_slug}.{base}"
+
+
+def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
+    """Route a public instance hostname through Caddy to the remote WP port."""
+    domain = (domain or "").strip()
+    if (
+        not domain or "/" in domain or ":" in domain
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", domain)
+        or domain.startswith(".") or domain.endswith(".")
+    ):
+        raise ValueError("remote instance domain must be a bare hostname")
+    site_q = shlex.quote(
+        f"{domain} {{\n"
+        f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+        f"}}\n"
+    )
+    file_q = shlex.quote(f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy")
+    cmd = (
+        "set -e; "
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        "$SUDO install -d -m 0755 /etc/caddy/conf.d; "
+        f"printf '%s' {site_q} | $SUDO tee {file_q} >/dev/null; "
+        "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
+        "$SUDO systemctl reload caddy"
+    )
+    res = ssh_run(remote, cmd, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not configure remote instance HTTPS route: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+
+
+def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
+    """Set WordPress home/siteurl for the remote project."""
+    sb = remote_sb_path(remote)
+    cmd = (
+        f"cd {shlex.quote(target_path)} && "
+        f"{shlex.quote(sb)} wp option update home {shlex.quote(url)} && "
+        f"{shlex.quote(sb)} wp option update siteurl {shlex.quote(url)}"
+    )
+    res = ssh_run(remote, cmd, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not set remote instance URL: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
 
 
 def current_branch(project_root) -> str:

@@ -591,5 +591,69 @@ class TestRejectHerdProjects(unittest.TestCase):
                         mock_run.assert_not_called()
 
 
+class TestDeployEnsureExpose(unittest.TestCase):
+    def test_default_instance_domain_uses_hyphenated_label_and_slug(self):
+        self.assertEqual(
+            sr.default_instance_domain("default", "templately.ai.builder"),
+            "default-templately-ai-builder.sandbox.asb.bd",
+        )
+        self.assertEqual(
+            sr.default_instance_domain("!!!", "!!!"),
+            "default-project.sandbox.asb.bd",
+        )
+
+    def test_deploy_can_ensure_activate_and_expose_remote_instance(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                inst = {
+                    "instance": "demo",
+                    "label": "default",
+                    "wordpress_port": 8188,
+                    "url": "http://localhost:8188",
+                }
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": str(root), "slug": "demo"}), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
+                     patch.object(sr, "activate_remote_plugin") as mock_activate, \
+                     patch.object(sr, "configure_instance_https_route") as mock_route, \
+                     patch.object(sr, "set_remote_instance_url") as mock_url, \
+                     patch("builtins.print") as mock_print:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
+                self.assertEqual(result["instance"]["admin_url"],
+                                 "https://default-demo.sandbox.asb.bd/wp-admin/")
+                mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
+                mock_activate.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo", "demo", "demo"
+                )
+                mock_route.assert_called_once_with(
+                    sr.get_remote("myvps"), "default-demo.sandbox.asb.bd", 8188
+                )
+                mock_url.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo",
+                    "https://default-demo.sandbox.asb.bd"
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

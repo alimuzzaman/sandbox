@@ -23,19 +23,24 @@ remote.
 ## `./sb deploy` command
 
 ```
-./sb deploy --project-dir DIR --remote NAME [--json]
+./sb deploy --project-dir DIR --remote NAME [--ensure] [--expose] [--domain HOST] [--plugin-slug SLUG] [--json]
 ```
 
 | Flag | Purpose |
 |---|---|
 | `--project-dir DIR` | The project to deploy (same convention as `./sb e2e`/`./sb ci`). |
 | `--remote NAME` | Which registered, provisioned remote to deploy to. Required — no default remote is inferred, since a project could reasonably have zero or several. |
+| `--ensure` | After code deploy succeeds, run `sb ensure` on the VPS-side deploy target and return the remote instance metadata. |
+| `--expose` | Implies the remote instance must be ensured; add/update a Caddy public HTTPS route, set WordPress `home`/`siteurl`, and return the public URL. |
+| `--domain HOST` | Public hostname for `--expose`. If omitted, defaults to `default-<project-slug>.sandbox.asb.bd`. DNS must already point at the VPS. |
+| `--plugin-slug SLUG` | Plugin slug to symlink into the remote instance and activate after `--ensure`. Defaults to the project config slug, then the deploy target slug. |
 | `--json` | Print the result as JSON on stdout, for scripting/the MCP tool. |
 
 **Exit codes**: `0` on a fully successful deploy; `1` on any failure (remote not
-provisioned, unreachable, push rejected, diff-apply failure) — per spec FR-009, a
-partial failure must never leave the VPS half-updated; a failed deploy is always safely
-retryable by simply running `sb deploy` again.
+provisioned, unreachable, push rejected, diff-apply failure, instance boot failure,
+plugin activation failure, route failure) — per spec FR-009, a partial failure must
+never leave the VPS half-updated; a failed deploy is always safely retryable by simply
+running `sb deploy` again.
 
 **JSON output shape**:
 
@@ -45,9 +50,21 @@ retryable by simply running `sb deploy` again.
   "remote": "myvps",
   "pushed_commit": "a1b2c3d",
   "uncommitted_files_applied": 4,
+  "instance": {
+    "instance": "my-plugin",
+    "label": "default",
+    "wordpress_port": 8188,
+    "url": "https://default-my-plugin.sandbox.asb.bd",
+    "admin_url": "https://default-my-plugin.sandbox.asb.bd/wp-admin/",
+    "login_url": null
+  },
+  "url": "https://default-my-plugin.sandbox.asb.bd",
   "error": null
 }
 ```
+
+When neither `--ensure` nor `--expose` is set, `instance` and `url` are `null`, and the
+command behaves as a code-transfer-only deploy.
 
 **Human-readable output** (no `--json`): a short confirmation naming the pushed commit
 and how many uncommitted files were applied, e.g.:
@@ -56,6 +73,8 @@ and how many uncommitted files were applied, e.g.:
 Deploying to 'myvps'…
   pushed HEAD (a1b2c3d) -> myvps
   applied 3 modified + 1 untracked file(s)
+  remote instance: my-plugin
+  public URL: https://default-my-plugin.sandbox.asb.bd
 Deployed. myvps now reflects your working tree as of this command.
 ```
 
@@ -66,17 +85,26 @@ No new PER-CALL tool parameters are added to existing tools (`wp_cli`, `fs_read`
 instance is reached by calling those SAME tool names against the SECOND, separately
 registered MCP server (`sandbox-<remote-name>`), not by passing a `remote=` argument to
 the existing `sandbox` server's tools. This keeps every existing tool's contract
-byte-identical (spec FR-015).
+byte-identical (spec FR-016).
 
 The only genuinely new MCP-facing surface is local-side, mirroring the CLI:
 
 ```python
-def remote_deploy(project_dir: str, remote: str) -> dict
+def remote_deploy(
+    project_dir: str,
+    remote: str,
+    ensure: bool = True,
+    expose: bool = True,
+    domain: str | None = None,
+    plugin_slug: str | None = None,
+) -> dict
 ```
 
 Thin wrapper matching `run_tests`/`run_plugin_check`'s existing calling convention —
-shells to `./sb deploy --project-dir <dir> --remote <name> --json` and parses the last
-JSON line of stdout. Returns the same shape as the CLI's `--json` output above.
+shells to `./sb deploy --project-dir <dir> --remote <name> --json`, adds
+`--ensure`/`--expose` by default, forwards `domain` and `plugin_slug` when provided, and
+parses the last JSON line of stdout. Returns the same shape as the CLI's `--json` output
+above, including `instance` and `url` for the one-shot public instance path.
 
 `./sb remote add/list/provision/up/down/remove` are NOT exposed as MCP tools in Phase 1 —
 registering/provisioning a VPS is a deliberate, infrequent, credential-bearing action a

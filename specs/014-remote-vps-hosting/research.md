@@ -19,7 +19,7 @@ VPS with its own local `$SANDBOX_HOME`. A remote instance is therefore already f
 described by the VPS's own registry — there's nothing to reconcile into a shared one.
 Users disambiguate local vs. remote by which of the TWO registered MCP servers they call
 (`sandbox` vs `sandbox-<remote-name>`), not by a field on a shared record. This also
-satisfies spec FR-012 (local and remote instances for the same project can never be
+satisfies spec FR-013 (local and remote instances for the same project can never be
 silently conflated) by construction, not by additional enforcement code.
 
 **Alternative considered**: the PRD's original shared-registry-with-`runtime`-field

@@ -392,6 +392,15 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="project to deploy (default: current directory)")
     deploy_p.add_argument("--remote", dest="remote", required=True,
         help="which registered, provisioned remote to deploy to")
+    deploy_p.add_argument("--ensure", action="store_true",
+        help="after deploying, boot/refresh the remote WordPress instance")
+    deploy_p.add_argument("--expose", action="store_true",
+        help="after ensuring, expose the remote instance through public HTTPS")
+    deploy_p.add_argument("--domain", default=None,
+        help="public hostname for --expose; default is "
+             "default-<project-slug>.sandbox.asb.bd")
+    deploy_p.add_argument("--plugin-slug", default=None,
+        help="plugin slug to activate after --ensure; default is the project slug")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

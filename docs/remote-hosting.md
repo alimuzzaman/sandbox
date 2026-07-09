@@ -88,6 +88,29 @@ There is no project-level config for this — you always pass `--remote <name>`
 explicitly (unlike `plugin-check`'s slug, there's no single obviously-correct default
 remote for a project, so no default is guessed).
 
+### One-shot deploy + public instance
+
+For agent workflows, use the one-shot form. It deploys the current working tree, boots or
+refreshes the remote WordPress instance, activates the deployed plugin slug, configures a
+public HTTPS hostname through Caddy, updates WordPress `home`/`siteurl`, and returns the
+URL in the JSON result:
+
+```bash
+./sb deploy \
+  --project-dir /path/to/plugin \
+  --remote myvps \
+  --ensure \
+  --expose \
+  --domain default-templately-ai-builder.sandbox.asb.bd \
+  --plugin-slug templately-ai-builder \
+  --json
+```
+
+If `--domain` is omitted, sandbox uses `default-<project-slug>.sandbox.asb.bd`.
+DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)`
+defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
+public URL path unless they explicitly opt out.
+
 ## 5. Using a remote instance
 
 Once deployed, boot and use it exactly like a local project — but by running commands
@@ -116,7 +139,7 @@ too.
 - **No multi-tenant / shared VPS.** One developer per remote target. Per-user isolation
   is a separate, much larger future effort (see `docs/remote-hosting-prd.md` §6).
 - **No Herd.** Sandbox's macOS-native, Docker-less runtime has no remote equivalent —
-  targeting a remote with a Herd-configured project fails cleanly (spec FR-013).
+  targeting a remote with a Herd-configured project fails cleanly (spec FR-014).
 
 ## 7. Security
 
@@ -147,9 +170,12 @@ reference. Summary:
 | `./sb remote up` / `down <name>` | Start/stop the remote MCP server process |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
+| `./sb deploy --remote <name> --ensure --expose [--domain <host>]` | One-shot deploy, boot/refresh the remote WP instance, activate the plugin, and expose a public HTTPS URL |
 
-MCP tool: `remote_deploy(project_dir: str, remote: str) -> dict` — thin wrapper mirroring
-`run_tests`/`run_plugin_check`'s calling convention.
+MCP tool:
+`remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.
+It mirrors `run_tests`/`run_plugin_check`'s calling convention and returns `instance`
+plus `url` when exposure succeeds.
 
 ## 9. Known limitation / next step
 
@@ -159,6 +185,7 @@ MCP venv, and the Playwright/Chromium tools venv. The remote now reports provisi
 `https://sandbox-control.asb.bd`; Caddy owns public `80/443` by hostname, while the MCP
 process itself binds only to `127.0.0.1:9174`. Bearer-auth probing reaches the app (auth
 failures return `401`; the verified token now reaches MCP-level responses instead).
-The remaining Phase 0 proof is to register this as a second MCP server and run
-`fs_read`/`visit`/`wp_cli` through it. `specs/014-remote-vps-hosting/quickstart.md`
-remains the completion gate.
+The same VPS has also hosted a one-shot exposed WordPress instance at
+`https://default-templately-ai-builder.sandbox.asb.bd`. The remaining Phase 0 proof is
+to register this as a second MCP server and run `fs_read`/`visit`/`wp_cli` through it.
+`specs/014-remote-vps-hosting/quickstart.md` remains the completion gate.

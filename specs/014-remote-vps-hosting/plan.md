@@ -65,7 +65,7 @@ this feature optimizes beyond "only transfer new git objects, never the whole tr
 default HTTPS mode it binds to `127.0.0.1` behind a Caddy virtual host and bearer-token
 auth; in optional Tailscale mode it binds only to the VPS's tailnet address. Existing
 local-only command behavior MUST be provably unchanged when no remote is configured
-(FR-015, the release gate — same discipline already used for the `--label` axis and the
+(FR-016, the release gate — same discipline already used for the `--label` axis and the
 cross-platform work this session).
 
 **Scale/Scope**: Phase 1 only, per the spec's Assumptions — one persistent, user-managed
@@ -85,7 +85,7 @@ independent `registry.json` — there is no second registry entry to reconcile, 
 `runtime` field to add, no v2→v3 migration. The two registries (local, and each remote's)
 are simply never merged; a user targets one or the other by which of the TWO registered
 MCP servers they call (`sandbox` vs `sandbox-<remote-name>`), not by a field on a shared
-record. This directly satisfies spec FR-012 (a local and a remote instance for the same
+record. This directly satisfies spec FR-013 (a local and a remote instance for the same
 project can never collide or be silently conflated) *by construction* — they physically
 live in different files on different machines — rather than needing code to enforce it.
 

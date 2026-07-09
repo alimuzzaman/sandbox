@@ -104,6 +104,7 @@ per `plan.md`'s Project Structure section — no placeholders below.
 - [x] T032 [US2] Implement deploy failure handling in `sandbox/commands/deploy.py` per spec FR-009 — any failure before the VPS reset leaves the VPS untouched; any failure after is safely recoverable by re-running deploy
 - [x] T033 [US2] `register()` `cmd_deploy` at the bottom of `sandbox/commands/deploy.py`
 - [x] T034 [US2] Implement the `remote_deploy(project_dir, remote)` MCP tool in `mcp/wp-server/tools/remote.py` — thin subprocess wrapper mirroring `run_tests`/`run_plugin_check`'s exact calling convention (shells to `./sb deploy --project-dir ... --remote ... --json`, parses the last JSON line)
+- [x] T034A [US2/US3] Extend `sb deploy` and `remote_deploy` with one-shot `ensure`/`expose` support — after deploy, boot/refresh the remote WP instance, activate the plugin slug, configure the public HTTPS route, update WordPress URLs, and return `instance` + `url` in JSON (spec FR-011)
 
 **Checkpoint**: User Stories 1 AND 2 both independently functional — register, provision, and deploy code to a remote.
 
@@ -111,20 +112,20 @@ per `plan.md`'s Project Structure section — no placeholders below.
 
 ## Phase 5: User Story 3 - Run a full sandbox instance on the remote (Priority: P2)
 
-**Goal**: a booted remote instance is reachable via a second, separately-registered MCP server and behaves identically to a local instance for every existing operation, with zero change to existing MCP tool files (spec FR-010, FR-011, FR-012, FR-013; SC-003).
+**Goal**: a booted remote instance is reachable via a second, separately-registered MCP server and behaves identically to a local instance for every existing operation, with zero change to existing MCP tool files (spec FR-010, FR-011, FR-012, FR-013, FR-014; SC-003).
 
 **Independent Test**: boot an instance on a provisioned, deployed remote and successfully run a representative operation set (a WP-CLI command, a log read, a screenshot) against it.
 
 ### Tests for User Story 3
 
-- [x] T035 [P] [US3] Unit test: targeting a remote with a project configured for the Docker-less local-only runtime mode fails cleanly (FR-013) in `tests/test_remote.py`
-- [x] T036 [P] [US3] Unit test: `mcp/wp-server/server.py`'s transport-selection branch defaults to stdio when invoked without remote-server-mode flags (zero behavior change, FR-015) in `tests/test_remote.py` or a new `tests/test_server_transport.py`, matching wherever `server.py`'s existing tests (if any) live
+- [x] T035 [P] [US3] Unit test: targeting a remote with a project configured for the Docker-less local-only runtime mode fails cleanly (FR-014) in `tests/test_remote.py`
+- [x] T036 [P] [US3] Unit test: `mcp/wp-server/server.py`'s transport-selection branch defaults to stdio when invoked without remote-server-mode flags (zero behavior change, FR-016) in `tests/test_remote.py` or a new `tests/test_server_transport.py`, matching wherever `server.py`'s existing tests (if any) live
 
 ### Implementation for User Story 3
 
-- [x] T037 [US3] Implement the transport-selection branch in `mcp/wp-server/server.py` — default unchanged `mcp.run()` over stdio; a new remote-server-mode path serving streamable HTTP with bearer-token auth, binding to `127.0.0.1` behind public HTTPS by default or to a Tailscale address when explicitly selected (never `0.0.0.0`, per FR-014)
+- [x] T037 [US3] Implement the transport-selection branch in `mcp/wp-server/server.py` — default unchanged `mcp.run()` over stdio; a new remote-server-mode path serving streamable HTTP with bearer-token auth, binding to `127.0.0.1` behind public HTTPS by default or to a Tailscale address when explicitly selected (never `0.0.0.0`, per FR-015)
 - [x] T038 [US3] Wire remote-server-mode startup into `cmd_remote_provision` in `sandbox/commands/remote.py` — starts the remote MCP server in streamable-http mode as part of provisioning (depends on T037, T019)
-- [x] T039 [US3] Implement the Herd hard-error (FR-013) — reject cleanly when a project configured for `server: herd` is targeted with any remote command, in `sandbox/core/_remote.py`
+- [x] T039 [US3] Implement the Herd hard-error (FR-014) — reject cleanly when a project configured for `server: herd` is targeted with any remote command, in `sandbox/core/_remote.py`
 - [x] T040 [US3] Document the second-MCP-server registration step (how a user adds `sandbox-<remote-name>` as a Claude Code MCP server pointed at the HTTPS control URL or optional Tailscale address + bearer token) in `docs/remote-hosting.md`
 
 **Checkpoint**: all 3 user stories independently functional — a remote instance behaves exactly like a local one from the user's perspective.
@@ -135,7 +136,7 @@ per `plan.md`'s Project Structure section — no placeholders below.
 
 - [x] T041 [P] Write `docs/remote-hosting.md` (quick-reference design doc companion, matches `docs/plugin-check.md`'s pattern; does NOT replace `docs/remote-hosting-prd.md`, which stays as the deeper research/rationale doc)
 - [x] T042 [P] Add a `README.md` mention of remote hosting (`./sb remote`/`./sb deploy`), matching this session's existing per-feature README rows
-- [x] T043 Run the full local test suite (`.cli-venv/bin/python -m unittest discover -s tests`) and confirm zero regressions — this is the FR-015/SC-004 release gate
+- [x] T043 Run the full local test suite (`.cli-venv/bin/python -m unittest discover -s tests`) and confirm zero regressions — this is the FR-016/SC-004 release gate
 - [~] T044 Run `quickstart.md`'s Phase 0 spike + all 5 scenarios against a REAL, disposable VPS — Constitution Principle IV. Partial live run on fresh Ubuntu 24.04 VPS reached Docker/Caddy/runtime/MCP/tools install and provisioned HTTPS control at `https://sandbox-control.asb.bd` with MCP bound to `127.0.0.1:9174`; remaining proof is registering the second MCP server and exercising `fs_read`/`visit`/`wp_cli`/`run_tests` through it.
 
 ---

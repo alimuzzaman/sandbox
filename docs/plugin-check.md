@@ -39,8 +39,8 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
 ```jsonc
 // sandbox.config.json
 {
+  "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
   "pluginCheck": {
-    "slug": "my-plugin",                        // REQUIRED — no default is possible
     "excludeDirectories": ["tests", "docs"],     // optional, default: none
     "versionFile": "my-plugin.php",              // optional, default: "<slug>.php"
     "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
@@ -48,13 +48,18 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
 }
 ```
 
-`slug` has no reasonable default — a project with it unset gets a clear `die()` message
-naming exactly what's missing, rather than a guess or a silent no-op.
+There is no `pluginCheck.slug` key — the checked plugin is ALWAYS the project's own
+resolved slug (the top-level `slug`, or the project directory name if that's unset), the
+same resolution legacy `plugins: ["."]` self-entries already use. Plugin Check is a
+self-check tool only, matching the reference implementation this was ported from (which
+hardcodes its own plugin's name as a literal, with no config concept of checking a
+different plugin at all). A directory name/slug that doesn't look like a valid WP plugin
+slug still gets a clear `die()` message rather than a silent guess.
 
 The `plugin-check` WordPress.org plugin itself installs the same way any other plugin
 dependency does — it's already in sandbox's own default scaffold plugin list
-(`sandbox_core.py`'s `DEFAULTS["plugins"]`), so most projects need no extra step beyond
-declaring `pluginCheck.slug`.
+(`sandbox_core.py`'s `DEFAULTS["plugins"]`), so most projects need no extra step at all
+beyond having a resolvable `slug` (which most already have, for spec 010's plugin map).
 
 ## 4. CLI + MCP surface
 
@@ -68,7 +73,7 @@ finding). Every run — plain or `--update` — regenerates the HTML report.
 
 Exit codes: `0` on gate pass (or successful `--update`); `1` on gate failure (new
 finding(s) beyond baseline) OR an infrastructure failure (instance unreachable, plugin
-not installed/active, `pluginCheck.slug` unset).
+not installed/active, or an unresolvable plugin slug).
 
 MCP tool, mirroring `run_tests`'s calling convention:
 
@@ -115,15 +120,58 @@ Both interfaces return the identical JSON shape:
   changes nothing functional (the report is still one self-contained file, zero
   external requests either way), and avoids shipping a font binary as a new sandbox
   dependency for a decorative-only difference.
+- **No `pluginCheck.slug` key** (design revised twice, post-implementation, via code
+  review — see spec.md's FR-002 amendment and research.md for the full history): the
+  first version required a dedicated `pluginCheck.slug` setting with no default.
+  Review caught that most projects already declare a root-level `slug` for unrelated
+  reasons (spec 010's plugin map) — real example, `templately-modular-rewrite`'s own
+  `sandbox.config.json` already has `"slug": "templately"` — making a second, separate
+  slug setting pure duplication for the common case. A follow-up question went
+  further: the reference implementation has no concept of checking a plugin other
+  than its own at all (it hardcodes its own plugin's name as a literal). Kept adding
+  speculative override capability for a scenario nothing actually needs would have
+  been unjustified complexity, so the key was removed entirely — Plugin Check always
+  checks the project's own resolved slug (top-level `slug`, or the project directory
+  name), full stop.
+- **`.distignore` auto-detection** (found via a real live run, see §6): the reference
+  hardcoded its own `EXCLUDE_DIRECTORIES` list, commented as mirroring `.distignore` —
+  meaning it was already being kept in sync BY HAND with a file that could have been
+  read directly. This port reads a project's own `.distignore` (when present) as the
+  default `excludeDirectories` when a project hasn't set its own list explicitly,
+  removing that manual-sync burden.
 
-## 6. Known limitation / next step
+## 6. Live verification — real bugs found via a real run
 
-**Not yet live-verified against a real sandbox instance** (Constitution Principle IV —
-unit tests alone aren't proof of done). `specs/013-plugin-check/quickstart.md`
-documents the exact verification scenario (6 runs: first-run-no-baseline,
-establish-baseline, plain-pass, simulated-regression, report-content-inspection,
-MCP-parity) to execute against a scratch project before this feature is considered
-fully done. 198 unit tests pass (32 new for this feature), covering every pure-logic
-path (parsing, baseline-diff, report rendering, config resolution) without requiring
-docker — but the live pipeline (real `wp plugin check` invocation through a real
-instance) has not yet been exercised end-to-end.
+A live run against `templately-modular-rewrite` (a real plugin repo, via the MCP tool
+after the sandbox-side merge/restart) surfaced two real gaps unit tests couldn't have
+caught, both now fixed:
+
+1. **Path-format mismatch (a real bug in this port, not a design question).** `wp
+   plugin check` reports each finding's file as an ABSOLUTE path — and because sandbox
+   bind-mounts plugin source at the SAME absolute path inside the container as on the
+   host, that path looks like a normal host path (e.g.
+   `/Users/you/project/includes/Admin.php`), not something container-specific. The
+   reference implementation converts this to a project-relative path
+   (`path.relative(REPO_ROOT, ...)`) before using it as a baseline key; this port's
+   initial translation of `parseFindings` DROPPED that conversion. The practical effect:
+   the committed baseline (built with relative paths) never matched ANY current
+   finding, so every genuine, already-accounted-for violation looked "new" — the live
+   run reported 364 new violations against a 198-entry baseline, almost all of them
+   this single bug. Fixed: `_parse_findings` now takes the project `root` and converts
+   via `os.path.relpath` (matching JS's `path.relative` semantics exactly — it computes
+   a relative path with `../` segments as needed rather than raising, unlike Python's
+   `Path.relative_to`).
+2. **No `.distignore` awareness** (see §5's design note above) — without it, the SAME
+   live run scanned dev-only directories (`.claude/`, `.specify/`, `tests/`, `scripts/`,
+   etc.) that never ship, producing a large amount of additional noise on top of bug
+   #1. Fixed by the `.distignore` auto-detection described in §5.
+
+Both fixes are unit-tested (`tests/test_plugin_check.py`: `TestParseFindings`'s
+`test_root_converts_host_absolute_paths_to_relative` and
+`test_root_relpath_never_raises_for_unrelated_paths`; the new `TestReadDistignoreDirectories`
+class and `TestResolvePluginCheckConfig`'s fallback-priority tests). **Not yet
+re-verified live** with both fixes together against a real repo — the original report
+should be re-run to confirm the noise drops and the remaining signal (the genuine
+`includes/`/`modules/*` findings) roughly matches the old baseline's ~198, per
+Constitution Principle IV (unit tests alone aren't proof of done). `specs/013-plugin-check
+/quickstart.md` documents the from-scratch scratch-project verification scenario.

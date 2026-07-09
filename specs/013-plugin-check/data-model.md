@@ -6,16 +6,26 @@ Per-project settings, read from `sandbox.config.json`'s `pluginCheck` key (see
 `research.md`'s config-schema decision). Not a runtime object with behavior — a plain
 resolved dict, same as every other `sandbox_core.load_project_config()` section.
 
+There is no `slug` field in this config — the checked plugin is ALWAYS the project's own
+resolved slug (see below), not a separately-configured value.
+
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `slug` | `str \| None` | `None` | The WordPress plugin slug to check. **No default** (spec FR-002) — `None` at run time is a hard, actionable error, not a silent no-op. |
 | `excludeDirectories` | `list[str]` | `[]` | Directories excluded from the check, relative to the project root. Passed verbatim to `wp plugin check --exclude-directories=`. |
 | `versionFile` | `str \| None` | `None` | Path (relative to project root) to read a `Version:` header from for report metadata. `None` resolves at run time to `<slug>.php` at the project root (spec FR-004's stated default). |
 | `baselineFile` | `str` | `"plugin-check-baseline.json"` | Path (relative to project root) to the committed baseline file (spec FR-005). |
 
+**Which plugin is checked** (spec FR-002, amended twice — see spec.md and research.md for
+the full history): always `_project_slug(pconf.get("slug"), root.name)` — the project's
+resolved top-level `slug` (already used elsewhere for legacy `plugins: ["."]`
+self-entries), falling back to the project directory name. No separate
+`pluginCheck.slug` setting exists to override this; Plugin Check is a self-check tool
+only, matching the reference implementation's own hardcoded-self-name behavior.
+
 Validation rules:
-- `slug` empty/`None` → `die()` with a message naming the missing `pluginCheck.slug` key
-  and a one-line example, before any instance/docker work happens (fail fast, cheap).
+- An unresolvable slug (the project directory name doesn't look like a valid WP plugin
+  slug, and neither does an explicit top-level `slug`) → `die()` with `_project_slug`'s
+  own validation message, before any instance/docker work happens (fail fast, cheap).
 - `excludeDirectories` entries are joined with `,` for the `--exclude-directories` flag,
   exactly as the reference implementation does (no per-entry validation beyond being
   strings — an invalid directory name is the underlying tool's problem to report, not

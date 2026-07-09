@@ -12,23 +12,20 @@ mkdir -p "$SCRATCH"
 cat > "$SCRATCH/sandbox.config.json" << 'EOF'
 {
   "slug": "plugin-check-proj",
-  "plugins": {"plugin-check": true},
-  "pluginCheck": {"slug": "hello-dolly"}
+  "plugins": {"plugin-check": true}
 }
 EOF
 ```
 
-(`hello-dolly` — a real, tiny, always-available WordPress.org plugin, used here only
-because it's guaranteed installable without depending on a real Templately-sized
-codebase; a real project would name its OWN slug.)
-
-Actually: `hello-dolly` ships with WordPress core by default and isn't a separately
-installable plugin — for this quickstart, install a small real plugin instead (e.g.
-`query-monitor`, already a sandbox default) and point `pluginCheck.slug` at that, OR
+There is no `pluginCheck.slug` to set (see data-model.md — that key doesn't exist).
+Plugin Check always checks the project's OWN resolved slug: the top-level `slug` above
+(`"plugin-check-proj"` here), or the project directory name if that's unset. Either
 scaffold a minimal throwaway plugin directory under the scratch project with a single
-PHP file bearing a proper plugin header. Either is fine; the point is exercising the
-FULL pipeline (ensure instance → activate plugin-check → run `wp plugin check` → parse →
-baseline-diff → render report), not validating findings against any particular plugin.
+PHP file bearing a proper plugin header at `plugin-check-proj.php` (matching the
+default `versionFile` guess), or set `"slug"` to a real, already-installed plugin's slug
+(e.g. `"query-monitor"`, already a sandbox default) to exercise the FULL pipeline
+(ensure instance → activate plugin-check → run `wp plugin check` → parse →
+baseline-diff → render report) without needing a real Templately-sized codebase.
 
 ## Run 1 — first-ever run, no baseline
 

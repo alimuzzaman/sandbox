@@ -87,8 +87,12 @@ DEFAULTS: dict = {
     "config": {},              # wp-config constants -> WORDPRESS_CONFIG_EXTRA
     "port": None,              # preferred port; None = auto-assign
     "tests": {"suite": "auto"},  # auto | unit | integration
-    "pluginCheck": {           # ./sb plugin-check (spec 013) — opt-in, no default slug
-        "slug": None,              # REQUIRED for the feature to run; no reasonable default
+    "pluginCheck": {           # ./sb plugin-check (spec 013) — opt-in
+        # No slug key: always checks THIS project's own resolved plugin slug
+        # (the top-level `slug` above, or the project dir name) via
+        # _project_slug — the same resolution legacy plugins:["."] self-
+        # entries already use. Self-check only, no override — see
+        # sandbox/commands/plugin_check.py's _resolve_plugin_check_config.
         "excludeDirectories": [],  # dirs to skip, relative to project root (mirrors .distignore)
         "versionFile": None,       # None -> resolved at run time to "<slug>.php"
         "baselineFile": "plugin-check-baseline.json",  # git-tracked by convention

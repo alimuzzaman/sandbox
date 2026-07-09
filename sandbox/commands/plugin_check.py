@@ -18,21 +18,69 @@ from sandbox.core._plugin_check_report import render_report
 # project-local reference implementation (a Node script in a real plugin repo) rather
 # than designed from scratch — see research.md's decisions for what changed and why.
 
+def _read_distignore_directories(root: Path) -> list[str]:
+    """Auto-detect exclude-directories from a project's own `.distignore` (the
+    WordPress.org SVN-deploy ignore file most real plugins already have —
+    used by e.g. the 10up deploy action) when `pluginCheck.excludeDirectories`
+    isn't set explicitly. Avoids requiring a project to hand-duplicate the
+    same directory list in a second, sandbox-specific place — the reference
+    implementation this was ported from hardcoded its own such list (a
+    comment on it says it "mirrors .distignore's directory entries", i.e. it
+    was already manually kept in sync with a file exactly like this one).
+
+    `.distignore` mixes directory entries (`tests/`, `.claude`,
+    `modules/developer-tools`), bare filenames (`composer.json`, `README.md`),
+    and glob patterns (`*.sql`) — this does not try to distinguish them.
+    Passing a non-directory entry to `wp plugin check --exclude-directories`
+    is harmless (it silently matches nothing); the real risk this exists to
+    avoid is UNDER-inclusion (a genuine directory Plugin Check scans that
+    never actually ships), so over-inclusion from the unfiltered file is an
+    acceptable, safe default."""
+    path = root / ".distignore"
+    if not path.is_file():
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in path.read_text(errors="replace").splitlines():
+        entry = line.strip().strip("/")
+        if not entry or line.strip().startswith("#"):
+            continue
+        if entry not in seen:
+            seen.add(entry)
+            out.append(entry)
+    return out
+
+
 def _resolve_plugin_check_config(pconf: dict) -> dict:
     """Read + validate the `pluginCheck` section of a project's resolved config.
-    `slug` has NO reasonable default (spec FR-002) — dies loud with an actionable
-    message rather than guessing or silently no-op'ing."""
+
+    There is no `pluginCheck.slug` override key — Plugin Check always checks
+    the project's OWN resolved plugin slug, via the exact same `_project_slug`
+    resolution legacy `plugins: ["."]` self-entries already use
+    (sandbox.config.json's root-level `slug`, or the project directory name).
+    This is inherently a self-check tool (the reference implementation this
+    was ported from hardcodes its own plugin's name as a literal, not a
+    config value); a project checking a DIFFERENT plugin than its own isn't a
+    real scenario this needs to support, so there's no override to add.
+
+    `excludeDirectories` falls back to `.distignore` (see
+    `_read_distignore_directories`) when the project hasn't set its own list
+    explicitly — an empty/unset `excludeDirectories` is treated as "not
+    customized," not as "explicitly zero exclusions" (a project that
+    genuinely wants zero exclusions despite having a `.distignore` is an
+    edge case rare enough not to need a dedicated escape hatch yet)."""
+    sc = _core()
     pc = pconf.get("pluginCheck") or {}
-    slug = (pc.get("slug") or "").strip()
-    if not slug:
-        die(
-            "no `pluginCheck.slug` configured — add it to sandbox.config.json, e.g.:\n"
-            '  "pluginCheck": { "slug": "your-plugin-slug" }\n'
-            "(no default is possible — this is the plugin `wp plugin check` inspects)"
-        )
+    try:
+        slug = sc._project_slug(pconf.get("slug"), Path(pconf["root"]).name)
+    except sc.ConfigError as e:
+        die(f"could not resolve a plugin slug for Plugin Check: {e}")
+    exclude_directories = list(pc.get("excludeDirectories") or [])
+    if not exclude_directories:
+        exclude_directories = _read_distignore_directories(Path(pconf["root"]))
     return {
         "slug": slug,
-        "exclude_directories": list(pc.get("excludeDirectories") or []),
+        "exclude_directories": exclude_directories,
         "version_file": pc.get("versionFile") or f"{slug}.php",
         "baseline_file": pc.get("baselineFile") or "plugin-check-baseline.json",
     }
@@ -61,18 +109,31 @@ def _run_wp_plugin_check(instance: str, slug: str, exclude_dirs: list[str]) -> s
     return out
 
 
-def _parse_findings(output: str) -> list[dict]:
+def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
     """`wp plugin check --format=json` prints one `FILE: <path>` line followed by a
     JSON array line, repeated per file with findings — not a single JSON document.
     Parse that into a flat findings list, each tagged with its file. Ported from the
     reference implementation's `parseFindings` (identical shape, translated to
-    Python)."""
+    Python).
+
+    `root`, when given, converts each reported path to PROJECT-RELATIVE via
+    `os.path.relpath` (matching the reference's own `path.relative(REPO_ROOT,
+    ...)` — a step this port initially dropped, a real bug: sandbox bind-mounts
+    plugin source at the SAME absolute host path inside the container, so `wp
+    plugin check` reports real host-absolute paths like
+    `/Users/you/project/includes/Foo.php`. Without stripping `root`, those
+    never match a baseline keyed on relative paths like `includes/Foo.php` —
+    every genuine finding would look "new" on every run. `os.path.relpath`
+    (not `Path.relative_to`) matches JS's `path.relative` exactly: it never
+    raises even when the reported path isn't actually under `root`, unlike
+    `Path.relative_to`, which would."""
     findings: list[dict] = []
     current_file: str | None = None
     for line in output.splitlines():
         m = re.match(r"^FILE:\s*(.+)$", line)
         if m:
-            current_file = m.group(1).strip()
+            raw = m.group(1).strip()
+            current_file = os.path.relpath(raw, str(root)) if root else raw
             continue
         trimmed = line.strip()
         if not trimmed.startswith("[") or current_file is None:
@@ -165,7 +226,7 @@ def cmd_plugin_check(cfg, args) -> None:
     instance = entry["instance"]
 
     raw = _run_wp_plugin_check(instance, pc["slug"], pc["exclude_directories"])
-    findings = _parse_findings(raw)
+    findings = _parse_findings(raw, root=root)
 
     results_dir = root / "tests" / "test-results"
     results_dir.mkdir(parents=True, exist_ok=True)

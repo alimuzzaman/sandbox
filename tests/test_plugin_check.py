@@ -51,6 +51,39 @@ class TestParseFindings(unittest.TestCase):
     def test_empty_output_yields_no_findings(self):
         self.assertEqual(pc._parse_findings(""), [])
 
+    def test_root_converts_host_absolute_paths_to_relative(self):
+        # Real bug found via live testing: sandbox bind-mounts plugin source at
+        # the SAME absolute host path inside the container, so `wp plugin
+        # check` reports real host-absolute paths (e.g.
+        # /Users/you/project/includes/Foo.php), not container-namespaced ones.
+        # Without converting to project-relative, these never match a
+        # baseline keyed on relative paths -- every genuine finding looks new.
+        output = (
+            "FILE: /Users/dev/my-project/includes/Foo.php\n"
+            '[{"line":1,"column":1,"type":"ERROR","code":"some_rule","message":"m"}]\n'
+        )
+        findings = pc._parse_findings(output, root="/Users/dev/my-project")
+        self.assertEqual(findings[0]["file"], "includes/Foo.php")
+
+    def test_root_none_leaves_paths_as_reported(self):
+        output = (
+            "FILE: /Users/dev/my-project/includes/Foo.php\n"
+            '[{"line":1,"column":1,"type":"ERROR","code":"some_rule","message":"m"}]\n'
+        )
+        findings = pc._parse_findings(output, root=None)
+        self.assertEqual(findings[0]["file"], "/Users/dev/my-project/includes/Foo.php")
+
+    def test_root_relpath_never_raises_for_unrelated_paths(self):
+        # os.path.relpath (not Path.relative_to) matches JS's path.relative --
+        # it computes a relative path with ../ segments as needed rather than
+        # raising, even when the reported path isn't actually under root.
+        output = (
+            "FILE: /somewhere/else/Foo.php\n"
+            '[{"line":1,"column":1,"type":"ERROR","code":"some_rule","message":"m"}]\n'
+        )
+        findings = pc._parse_findings(output, root="/Users/dev/my-project")
+        self.assertTrue(findings[0]["file"])  # doesn't raise; some relative path is produced
+
 
 class TestCountByKey(unittest.TestCase):
     def test_counts_error_findings_by_file_and_code(self):
@@ -124,16 +157,49 @@ class TestDiffAgainstBaseline(unittest.TestCase):
 
 
 class TestResolvePluginCheckConfig(unittest.TestCase):
-    def test_missing_slug_dies(self):
-        with self.assertRaises(SystemExit):
-            pc._resolve_plugin_check_config({"pluginCheck": {}})
+    # There is no `pluginCheck.slug` override key -- Plugin Check always
+    # checks the project's OWN resolved plugin slug (self-check only,
+    # matching the reference implementation, which hardcodes its own
+    # plugin's name as a literal rather than reading it from ANY config
+    # key). "slug" always comes from the top-level `slug` / project dir
+    # name via _project_slug, same as legacy plugins:["."] self-entries.
 
-    def test_missing_pluginCheck_key_entirely_dies(self):
-        with self.assertRaises(SystemExit):
-            pc._resolve_plugin_check_config({})
+    def test_uses_the_root_level_slug_when_present(self):
+        # Real example: templately-modular-rewrite/sandbox.config.json
+        # already has "slug": "templately" at the root for other reasons
+        # (spec 010's plugin map) -- Plugin Check reuses that directly.
+        resolved = pc._resolve_plugin_check_config(
+            {"slug": "templately", "root": "/some/project", "pluginCheck": {}})
+        self.assertEqual(resolved["slug"], "templately")
 
-    def test_defaults_applied_when_only_slug_given(self):
-        resolved = pc._resolve_plugin_check_config({"pluginCheck": {"slug": "my-plugin"}})
+    def test_no_root_level_slug_falls_back_to_directory_name(self):
+        resolved = pc._resolve_plugin_check_config(
+            {"root": "/some/project/my-plugin-dir", "pluginCheck": {}})
+        self.assertEqual(resolved["slug"], "my-plugin-dir")
+
+    def test_missing_pluginCheck_key_entirely_still_resolves(self):
+        resolved = pc._resolve_plugin_check_config(
+            {"slug": "templately", "root": "/some/project"})
+        self.assertEqual(resolved["slug"], "templately")
+
+    def test_a_pluginCheck_slug_key_is_ignored_if_present(self):
+        # No override key exists -- an old/misremembered config setting it
+        # has zero effect, the root-level slug still wins.
+        resolved = pc._resolve_plugin_check_config({
+            "slug": "templately", "root": "/some/project",
+            "pluginCheck": {"slug": "something-else"}})
+        self.assertEqual(resolved["slug"], "templately")
+
+    def test_invalid_slug_dies_with_an_actionable_message(self):
+        # A directory name (or root slug) that doesn't look like a valid WP
+        # plugin slug -- _project_slug's own validation.
+        with self.assertRaises(SystemExit):
+            pc._resolve_plugin_check_config(
+                {"root": "/some/Not A Valid Slug!", "pluginCheck": {}})
+
+    def test_defaults_applied_with_only_root_slug(self):
+        resolved = pc._resolve_plugin_check_config(
+            {"slug": "my-plugin", "root": "/some/project", "pluginCheck": {}})
         self.assertEqual(resolved, {
             "slug": "my-plugin",
             "exclude_directories": [],
@@ -141,16 +207,89 @@ class TestResolvePluginCheckConfig(unittest.TestCase):
             "baseline_file": "plugin-check-baseline.json",
         })
 
-    def test_explicit_overrides_are_honored(self):
-        resolved = pc._resolve_plugin_check_config({"pluginCheck": {
-            "slug": "my-plugin",
-            "excludeDirectories": ["tests", "docs"],
-            "versionFile": "custom-main-file.php",
-            "baselineFile": "custom-baseline.json",
-        }})
+    def test_explicit_pluginCheck_overrides_are_honored(self):
+        resolved = pc._resolve_plugin_check_config({
+            "slug": "my-plugin", "root": "/some/project",
+            "pluginCheck": {
+                "excludeDirectories": ["tests", "docs"],
+                "versionFile": "custom-main-file.php",
+                "baselineFile": "custom-baseline.json",
+            }})
         self.assertEqual(resolved["exclude_directories"], ["tests", "docs"])
         self.assertEqual(resolved["version_file"], "custom-main-file.php")
         self.assertEqual(resolved["baseline_file"], "custom-baseline.json")
+
+    def test_falls_back_to_distignore_when_excludeDirectories_unset(self):
+        # Real gap found via live testing against templately-modular-rewrite:
+        # with no excludeDirectories configured, the tool scanned the WHOLE
+        # repo (tests/, .claude/, .specify/, scripts/, etc.) producing mostly
+        # noise findings that never ship. A project's own .distignore (the
+        # WordPress.org SVN-deploy ignore file) already lists exactly this.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".distignore").write_text(
+                "# comment\ntests/\n.claude/\nscripts\n\ncomposer.json\n")
+            resolved = pc._resolve_plugin_check_config(
+                {"slug": "my-plugin", "root": str(root), "pluginCheck": {}})
+            self.assertEqual(resolved["exclude_directories"],
+                             ["tests", ".claude", "scripts", "composer.json"])
+
+    def test_explicit_excludeDirectories_takes_priority_over_distignore(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".distignore").write_text("tests/\n.claude/\n")
+            resolved = pc._resolve_plugin_check_config({
+                "slug": "my-plugin", "root": str(root),
+                "pluginCheck": {"excludeDirectories": ["only-this"]}})
+            self.assertEqual(resolved["exclude_directories"], ["only-this"])
+
+    def test_no_distignore_and_no_excludeDirectories_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            resolved = pc._resolve_plugin_check_config(
+                {"slug": "my-plugin", "root": d, "pluginCheck": {}})
+            self.assertEqual(resolved["exclude_directories"], [])
+
+
+class TestReadDistignoreDirectories(unittest.TestCase):
+    def test_missing_distignore_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(pc._read_distignore_directories(Path(d)), [])
+
+    def test_parses_real_shaped_distignore(self):
+        # Modeled on a real .distignore's shape: comments, blank lines,
+        # trailing-slash directories, bare directories, files, and globs.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".distignore").write_text(
+                "# A set of files you probably don't want in your distribution\n"
+                ".git\n"
+                "node_modules\n"
+                "*.sql\n"
+                "\n"
+                "docs/\n"
+                "tests/\n"
+                "modules/developer-tools\n"
+                "# a comment line\n"
+                "dist-types/\n"
+            )
+            result = pc._read_distignore_directories(root)
+            self.assertEqual(result, [
+                ".git", "node_modules", "*.sql", "docs", "tests",
+                "modules/developer-tools", "dist-types",
+            ])
+
+    def test_dedupes_repeated_entries(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".distignore").write_text("tests/\ntests\n.claude/\n.claude\n")
+            result = pc._read_distignore_directories(root)
+            self.assertEqual(result, ["tests", ".claude"])
+
+    def test_blank_and_comment_only_file_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".distignore").write_text("# just a comment\n\n\n")
+            self.assertEqual(pc._read_distignore_directories(root), [])
 
 
 class TestReadVersionHeader(unittest.TestCase):

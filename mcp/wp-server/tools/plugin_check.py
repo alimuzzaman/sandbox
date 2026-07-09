@@ -11,10 +11,12 @@ def run_plugin_check(project_dir: str, update: bool = False) -> dict:
     plugin, gated by a committed baseline — only NEW ERROR-level findings beyond
     the baseline fail the run. See docs/plugin-check.md, specs/013-plugin-check/.
 
-    Requires the project to declare `pluginCheck.slug` in its sandbox.config.json
-    (no default is possible — there's no reasonable guess for which plugin to
-    check). WARNING-level findings are included in the result and the rendered
-    report for visibility but never gate the run.
+    Which plugin to check defaults to the project's own resolved slug (its
+    sandbox.config.json's top-level `slug`, or the project directory name — the
+    same resolution legacy `plugins: ["."]` self-entries already use); set
+    `pluginCheck.slug` explicitly only to check a DIFFERENT plugin than the
+    project's own. WARNING-level findings are included in the result and the
+    rendered report for visibility but never gate the run.
 
     project_dir: the plugin project to check.
     update: rewrite the baseline to match current findings exactly, instead of

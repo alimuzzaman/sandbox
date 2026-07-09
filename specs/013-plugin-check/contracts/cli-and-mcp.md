@@ -14,7 +14,8 @@
 
 **Exit codes**: `0` on gate pass (or successful `--update`), `1` on gate failure (new
 finding(s) beyond baseline) OR on infrastructure failure (instance unreachable, plugin
-not installed/active, `pluginCheck.slug` not configured).
+not installed/active, or an unresolvable plugin slug — see data-model.md's
+`PluginCheckConfig`).
 
 **Human-readable output** (no `--json`): a one-line pass/fail summary, the list of any
 new-vs-baseline violations (file, code, current count, baselined count) on failure, and
@@ -58,8 +59,8 @@ on timeout/parse failure).
 
 ```jsonc
 {
+  "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
   "pluginCheck": {
-    "slug": "my-plugin",                        // REQUIRED — no default
     "excludeDirectories": ["tests", "docs"],     // optional, default []
     "versionFile": "my-plugin.php",              // optional, default "<slug>.php"
     "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
@@ -67,6 +68,9 @@ on timeout/parse failure).
 }
 ```
 
-A project with no `pluginCheck` key at all (or `pluginCheck.slug` unset/empty) gets a
-clear `die()` message from `./sb plugin-check` naming exactly what's missing — the
-command must never guess a plugin slug or silently no-op.
+There is no `pluginCheck.slug` key — the checked plugin is ALWAYS the project's own
+resolved slug (the top-level `slug` above, or the project directory name if that's
+unset), the same resolution legacy `plugins: ["."]` self-entries already use. A project
+whose directory name (and top-level `slug`, if set) doesn't look like a valid WP plugin
+slug gets a clear `die()` message — the command must never guess or silently no-op, but
+it also never asks for a value the project has typically already declared elsewhere.

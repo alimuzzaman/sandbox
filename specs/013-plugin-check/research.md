@@ -8,11 +8,11 @@ considered.
 
 ## Decision: config schema shape
 
-**Decision**: add a nested `pluginCheck` object to `sandbox_core.py`'s `DEFAULTS` dict:
+**Decision**: add a nested `pluginCheck` object to `sandbox_core.py`'s `DEFAULTS` dict —
+with NO `slug` key at all:
 
 ```python
 "pluginCheck": {
-    "slug": None,                              # required, no default
     "excludeDirectories": [],                   # default: no exclusions
     "versionFile": None,                        # default: guessed "<slug>.php"
     "baselineFile": "plugin-check-baseline.json",
@@ -22,9 +22,25 @@ considered.
 **Rationale**: matches the existing `"tests": {"suite": "auto"}` precedent exactly — a
 nested settings object for one feature area, picked up automatically by the existing
 generic `_deep_merge` (project config overrides these per-key, no new merge logic
-needed). `slug` has no default per spec FR-002 ("no reasonable default exists") — a
-project with no `pluginCheck.slug` set gets a clear, actionable error (spec edge case),
-not a guess.
+needed).
+
+**Revised, twice, after initial implementation** (see spec.md's FR-002 amendment for the
+full story): the FIRST design had `pluginCheck.slug` as a required key with no default.
+Review caught that this was redundant — most projects (verified:
+`templately-modular-rewrite/sandbox.config.json`) already declare a root-level `slug` for
+unrelated reasons (spec 010's plugin map), and that's the correct default target in the
+overwhelming common case. So `pluginCheck.slug` became an OPTIONAL override, falling back
+to `_project_slug(pconf.get("slug"), root.name)` — the exact same resolution legacy
+`plugins: ["."]` self-entries already use.
+
+A second review question went further: does the override capability need to exist at
+all? Checking the reference implementation settled it — it hardcodes its own plugin's
+name as a literal string in the script, with no config concept of checking a *different*
+plugin whatsoever. Plugin Check is inherently a self-check tool; "check some other
+plugin" isn't a real scenario in the feature this was ported from or in this spec's user
+stories. Kept adding it would have been speculative capability for a need nothing
+actually has. Removed the override key entirely — `pluginCheck.slug` no longer exists;
+the checked plugin is unconditionally the project's own resolved slug.
 
 **Alternative considered**: flat top-level keys (`pluginCheckSlug`,
 `pluginCheckExcludeDirectories`, …). Rejected — pollutes the top-level namespace for a

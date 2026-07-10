@@ -10,9 +10,11 @@ own -- see specs/014-remote-vps-hosting/quickstart.md for the required
 live-verification pass against a real VPS.
 """
 import json
+import importlib.util
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -135,6 +137,29 @@ class TestSshRun(unittest.TestCase):
         self.assertIn("ubuntu@1.2.3.4", args)
         self.assertIn("true", args)
 
+    @patch("subprocess.run")
+    def test_builds_expected_ssh_command_with_custom_port(self, mock_run):
+        mock_run.return_value = _completed(returncode=0)
+        sr.ssh_run({"ssh": "ubuntu@1.2.3.4:2222"}, "true", timeout=10)
+        args = mock_run.call_args[0][0]
+        self.assertIn("-p", args)
+        self.assertIn("2222", args)
+        self.assertIn("ubuntu@1.2.3.4", args)
+
+    def test_parses_ssh_url_with_custom_port(self):
+        parts = sr.remote_ssh_parts("ssh://ubuntu@1.2.3.4:2222")
+        self.assertEqual(parts["target"], "ubuntu@1.2.3.4")
+        self.assertEqual(parts["host"], "1.2.3.4")
+        self.assertEqual(parts["port"], 2222)
+
+    def test_redacts_ssh_target_from_user_visible_error(self):
+        error = sr.redact_ssh_connection(
+            "ssh://ubuntu@1.2.3.4:2222: connection refused",
+            {"ssh": "ubuntu@1.2.3.4:2222"},
+        )
+        self.assertNotIn("ubuntu@1.2.3.4", error)
+        self.assertIn("[redacted SSH target]", error)
+
 
 class TestCheckReachable(unittest.TestCase):
     @patch("subprocess.run")
@@ -185,6 +210,18 @@ class TestPushCommits(unittest.TestCase):
         self.assertEqual(push_args[1], "push")
         self.assertIn("ssh://ubuntu@1.2.3.4/home/ubuntu/sandbox/deploy-src/proj", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
+
+    @patch("subprocess.run")
+    def test_push_url_preserves_custom_ssh_port(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0),
+            _completed(returncode=0, stdout="abc1234\n"),
+        ]
+        sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
+                         "/home/ubuntu/sandbox/deploy-src/proj", "main")
+        push_args = mock_run.call_args_list[0][0][0]
+        self.assertIn("ssh://ubuntu@1.2.3.4:2222/home/ubuntu/sandbox/deploy-src/proj",
+                      push_args)
 
     @patch("subprocess.run")
     def test_raises_on_push_failure(self, mock_run):
@@ -305,6 +342,25 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
 
     @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")
+    def test_scp_uses_custom_ssh_port(self, mock_run, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d)
+            (proj / "b.php").write_text("y")
+            mock_run.return_value = _completed(returncode=0)
+            sr.apply_uncommitted(
+                {"ssh": "ubuntu@1.2.3.4:2222"},
+                "/home/ubuntu/sandbox/deploy-src/proj",
+                str(proj), "", ["b.php"],
+            )
+            scp_args = mock_run.call_args[0][0]
+            self.assertIn("-P", scp_args)
+            self.assertIn("2222", scp_args)
+            self.assertIn("ubuntu@1.2.3.4:/home/ubuntu/sandbox/deploy-src/proj/b.php",
+                          scp_args)
+
+    @patch("sandbox.core._remote.ssh_run")
+    @patch("subprocess.run")
     def test_apply_removes_deleted_tracked_files(self, mock_run, mock_ssh_run):
         mock_run.side_effect = [
             _completed(returncode=0, stdout="gone.php\n"),  # git diff --name-only
@@ -365,6 +421,38 @@ class TestCmdRemoteAdd(unittest.TestCase):
                 self.assertEqual(len(sr.list_remotes()), 1)
                 self.assertEqual(sr.get_remote("myvps")["ssh"], "ubuntu@1.2.3.4")
 
+    def test_add_preserves_custom_ssh_port_in_normalized_form(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                args = MagicMock()
+                args.name = "myvps"
+                args.ssh_url = "ssh://ubuntu@1.2.3.4:2222"
+                remote_cmd._cmd_add(args, as_json=False)
+                self.assertEqual(sr.get_remote("myvps")["ssh"], "ubuntu@1.2.3.4:2222")
+
+    def test_add_json_does_not_return_ssh_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                args = MagicMock(ssh_url="ssh://ubuntu@1.2.3.4", json=True)
+                args.name = "myvps"
+                with patch("builtins.print") as mock_print:
+                    remote_cmd._cmd_add(args, as_json=True)
+                output = mock_print.call_args[0][0]
+                self.assertNotIn("ubuntu@1.2.3.4", output)
+                self.assertTrue(json.loads(output)["ssh_configured"])
+
+    def test_list_never_returns_ssh_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                with patch.object(sr, "check_reachable", return_value=True), \
+                     patch("builtins.print") as mock_print:
+                    remote_cmd._cmd_list(args, as_json=True)
+                output = mock_print.call_args[0][0]
+                self.assertNotIn("ubuntu@1.2.3.4", output)
+                self.assertTrue(json.loads(output)["remotes"][0]["ssh_configured"])
+
 
 class TestCmdRemoteRemove(unittest.TestCase):
     def test_remove_never_calls_ssh(self):
@@ -403,6 +491,17 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertIn("sb-src", ssh_args[-1])
         self.assertEqual(mock_run.call_args_list[1][1]["input"], b"tarball")
         self.assertFalse(mock_run.call_args_list[1][1]["text"])
+
+    @patch("subprocess.run")
+    def test_upload_runtime_source_uses_custom_ssh_port(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=b"tarball", stderr=b""),
+            _completed(returncode=0, stdout=b"", stderr=b""),
+        ]
+        remote_cmd._upload_runtime_source("ubuntu@1.2.3.4:2222")
+        ssh_args = mock_run.call_args_list[1][0][0]
+        self.assertIn("-p", ssh_args)
+        self.assertIn("2222", ssh_args)
 
     @patch("subprocess.run")
     def test_raises_when_tar_fails_before_ssh(self, mock_run):
@@ -516,10 +615,27 @@ class TestConfigureHttpsProxy(unittest.TestCase):
         self.assertIn("apt-get install -y caddy", cmd)
         self.assertIn("reverse_proxy 127.0.0.1:9174", cmd)
         self.assertIn("/etc/caddy/conf.d/sandbox-mcp-sandbox.example.com.caddy", cmd)
+        self.assertIn("import /etc/caddy/conf.d/*.caddy", cmd)
 
     def test_rejects_non_hostname(self):
         with self.assertRaises(ValueError):
             sr.configure_https_proxy({"ssh": "ubuntu@1.2.3.4"}, "bad/host", 9174)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_instance_route_bootstraps_caddy_like_control_proxy(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.configure_instance_https_route(
+            {"ssh": "ubuntu@1.2.3.4"}, "default-demo.sandbox.asb.bd", 8188
+        )
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("apt-get install -y caddy", cmd)
+        self.assertIn("import /etc/caddy/conf.d/*.caddy", cmd)
+        self.assertIn("systemctl enable --now caddy", cmd)
+        self.assertIn("reverse_proxy 127.0.0.1:8188", cmd)
+        self.assertIn(
+            "/etc/caddy/conf.d/sandbox-instance-default-demo.sandbox.asb.bd.caddy",
+            cmd,
+        )
 
 
 class TestStopRemoteMcpServer(unittest.TestCase):
@@ -562,6 +678,24 @@ class TestDeployRequiresProvisionedRemote(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         deploy_cmd.cmd_deploy(None, args)
 
+    def test_json_deploy_to_unregistered_remote_returns_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                args = MagicMock()
+                args.project_dir = d
+                args.remote = "does-not-exist"
+                args.json = True
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": d, "slug": "proj"}), \
+                     patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["remote"], "does-not-exist")
+                self.assertIn("no remote named", result["error"])
+
 
 class TestRejectHerdProjects(unittest.TestCase):
     def test_herd_configured_project_raises(self):
@@ -602,6 +736,15 @@ class TestDeployEnsureExpose(unittest.TestCase):
             "default-project.sandbox.asb.bd",
         )
 
+    def test_rewrite_instance_url_preserves_autologin_query(self):
+        self.assertEqual(
+            sr.rewrite_instance_url(
+                "http://localhost:8188/?sandbox_autologin=abc123",
+                "https://default-demo.sandbox.asb.bd",
+            ),
+            "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
+        )
+
     def test_deploy_can_ensure_activate_and_expose_remote_instance(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -621,6 +764,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     "label": "default",
                     "wordpress_port": 8188,
                     "url": "http://localhost:8188",
+                    "login_url": "http://localhost:8188/?sandbox_autologin=abc123",
                 }
                 sc = deploy_cmd._core()
                 with patch.object(sc, "load_project_config",
@@ -642,6 +786,10 @@ class TestDeployEnsureExpose(unittest.TestCase):
                 self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
                 self.assertEqual(result["instance"]["admin_url"],
                                  "https://default-demo.sandbox.asb.bd/wp-admin/")
+                self.assertEqual(
+                    result["instance"]["login_url"],
+                    "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
+                )
                 mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
                 mock_activate.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo", "demo", "demo"
@@ -653,6 +801,114 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
+
+    def test_malformed_ensure_result_returns_actionable_json_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": str(root), "slug": "demo"}), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value={"status": "ready"}), \
+                     patch("builtins.print") as mock_print:
+                    with self.assertRaises(SystemExit):
+                        deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                self.assertFalse(result["ok"])
+                self.assertIn("remote ensure returned no 'instance'", result["error"])
+
+
+class TestRemoteDeployMcpWrapper(unittest.TestCase):
+    def _load_tool_module(self):
+        class _Mcp:
+            def tool(self):
+                def decorator(fn):
+                    return fn
+                return decorator
+
+        fake_app = types.ModuleType("app")
+        fake_app.mcp = _Mcp()
+        fake_app.SANDBOX_ROOT = ROOT
+        fake_app._safe_json = json.loads
+        old_app = sys.modules.get("app")
+        sys.modules["app"] = fake_app
+        try:
+            path = ROOT / "mcp" / "wp-server" / "tools" / "remote.py"
+            spec = importlib.util.spec_from_file_location("remote_tool_under_test", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        finally:
+            if old_app is None:
+                sys.modules.pop("app", None)
+            else:
+                sys.modules["app"] = old_app
+
+    def test_remote_deploy_defaults_to_ensure_and_expose(self):
+        module = self._load_tool_module()
+        payload = {
+            "ok": True,
+            "remote": "myvps",
+            "pushed_commit": "abc123",
+            "uncommitted_files_applied": 0,
+            "instance": {"instance": "demo"},
+            "url": "https://default-demo.sandbox.asb.bd",
+            "error": None,
+        }
+        fake = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(payload) + "\n", stderr=""
+        )
+        with patch.object(module.subprocess, "run", return_value=fake) as mock_run:
+            result = module.remote_deploy("/tmp/project", "myvps")
+        self.assertTrue(result["ok"])
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--ensure", cmd)
+        self.assertIn("--expose", cmd)
+
+    def test_remote_deploy_forwards_domain_and_plugin_slug(self):
+        module = self._load_tool_module()
+        fake = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"ok": True, "remote": "myvps"}) + "\n",
+            stderr="",
+        )
+        with patch.object(module.subprocess, "run", return_value=fake) as mock_run:
+            module.remote_deploy(
+                "/tmp/project", "myvps",
+                domain="default-demo.sandbox.asb.bd",
+                plugin_slug="demo",
+            )
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--domain", cmd)
+        self.assertIn("default-demo.sandbox.asb.bd", cmd)
+        self.assertIn("--plugin-slug", cmd)
+        self.assertIn("demo", cmd)
+
+    def test_remote_deploy_redacts_ssh_target_in_error(self):
+        module = self._load_tool_module()
+        fake = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ssh: ubuntu@1.2.3.4 refused"
+        )
+        with patch.object(module.subprocess, "run", return_value=fake):
+            result = module.remote_deploy("/tmp/project", "myvps")
+        self.assertNotIn("ubuntu@1.2.3.4", result["error"])
+        self.assertIn("[redacted SSH target]", result["error"])
 
 
 if __name__ == "__main__":

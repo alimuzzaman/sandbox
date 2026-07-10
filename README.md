@@ -415,3 +415,6 @@ and can usually diagnose itself.
   [`docs/future-roadmap.md`](docs/future-roadmap.md).
 
 Re-run `./sb setup` after a global config change — it's idempotent.
+## Hermes Agent
+
+Remote Hermes control is documented in [docs/hermes-agent.md](docs/hermes-agent.md).

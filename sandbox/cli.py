@@ -44,6 +44,7 @@ import sandbox.commands.remote  # noqa: F401  (registers commands)
 import sandbox.commands.deploy  # noqa: F401  (registers commands)
 import sandbox.commands.hosting  # noqa: F401  (registers commands)
 import sandbox.commands.preview  # noqa: F401  (registers commands)
+import sandbox.commands.hermes  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -428,6 +429,29 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--ttl-hours", type=int, default=24, help="expiry for a created preview (default: 24)")
     preview_p.add_argument("--confirm", action="store_true", help="allow remote, DNS, and container mutation")
     preview_p.add_argument("--json", action="store_true", help="print JSON")
+
+    hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "repo", "gateway", "dashboard"],
+        help="core action, or repo/gateway/dashboard subcommand group")
+    hermes_p.add_argument("subaction", nargs="?", default=None,
+        help="repo: auth|clone|list; gateway: setup|install|start|stop|restart|status|logs")
+    hermes_p.add_argument("target", nargs="?", default=None,
+        help="repo auth provider, or an optional subcommand target")
+    hermes_p.add_argument("--remote", required=True, help="configured remote name")
+    hermes_p.add_argument("--version", default=None, help="immutable Hermes release tag")
+    hermes_p.add_argument("--commit", default=None, help="full commit expected for --version")
+    hermes_p.add_argument("--repo", default=None, help="managed repository name")
+    hermes_p.add_argument("--url", default=None, help="repository URL for `hermes repo clone`")
+    hermes_p.add_argument("--name", default=None, help="managed repository name for clone")
+    hermes_p.add_argument("--ref", default=None, help="branch, tag, or ref to clone")
+    hermes_p.add_argument("--prompt", default=None, help="one-shot Hermes prompt")
+    hermes_p.add_argument("--no-worktree", action="store_true", help="run against the primary checkout")
+    hermes_p.add_argument("--async", dest="run_async", action="store_true", help="return a detached job id")
+    hermes_p.add_argument("--timeout", type=int, default=1200, help="one-shot timeout in seconds")
+    hermes_p.add_argument("--allow", dest="allowlist", action="append", default=None,
+        help="explicit gateway allowlist entry (repeatable)")
+    hermes_p.add_argument("--lines", type=int, default=200, help="maximum gateway log lines")
+    hermes_p.add_argument("--json", action="store_true", help="print a stable JSON envelope")
 
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")

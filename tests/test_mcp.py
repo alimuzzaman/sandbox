@@ -21,10 +21,12 @@ os.environ.setdefault("SANDBOX_ROOT", os.getcwd() + "/../..")
 import server                      # thin entry: imports app + all tools.* groups
 from app import mcp
 async def go():
-    return len(await mcp.list_tools()), len(await mcp.list_prompts())
-t, p = asyncio.run(go())
+    tools = await mcp.list_tools()
+    return len(tools), len(await mcp.list_prompts()), {tool.name for tool in tools}
+t, p, names = asyncio.run(go())
 print("TOOLS", t)
 print("PROMPTS", p)
+print("HERMES", int('hermes_status' in names and 'hermes_run' in names))
 """
 
 
@@ -38,10 +40,11 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         out = dict(
             line.split() for line in r.stdout.split("\n")
-            if line.startswith(("TOOLS", "PROMPTS")))
+            if line.startswith(("TOOLS", "PROMPTS", "HERMES")))
         # The pre-split server had 26 @mcp.tool + 8 @mcp.prompt; require parity.
         self.assertGreaterEqual(int(out["TOOLS"]), 26, r.stdout)
         self.assertGreaterEqual(int(out["PROMPTS"]), 8, r.stdout)
+        self.assertEqual(out.get("HERMES"), "1", r.stdout)
 
 
 if __name__ == "__main__":

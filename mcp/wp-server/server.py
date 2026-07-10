@@ -30,6 +30,7 @@ import tools.ci  # noqa: F401
 import tools.asyncjobs  # noqa: F401
 import tools.plugin_check  # noqa: F401
 import tools.remote  # noqa: F401
+import tools.hermes  # noqa: F401
 
 
 

@@ -446,3 +446,18 @@ the dump, so without the pre-reset those newer tables would survive.
 
 Machine/global defaults (ports base, admin creds, image defaults) live in
 `sandbox.yml`; per-machine overrides in the gitignored `sandbox.local.yml`.
+
+## Hermes remote defaults
+
+`sb hermes` stores no provider credentials in project configuration. It uses an
+explicit configured `remote` from the existing `sandbox.local.yml` `remotes:`
+mapping, and creates remote runtime metadata at
+`$SANDBOX_HOME/runtime/hermes.json`. The remote account owns Hermes under
+`$HOME/.hermes` and managed Git checkouts under
+`$SANDBOX_HOME/hermes-repos`.
+
+The generated profile runs the absolute remote `sb mcp` command with the same
+`SANDBOX_HOME`, keeps MCP calls sequential, enables the complete Sandbox MCP
+catalog, and uses manual terminal approval with dangerous cron commands denied.
+See [hermes-agent.md](hermes-agent.md) for the operator workflow and trust
+boundary.

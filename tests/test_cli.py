@@ -43,6 +43,16 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("--help")
         self.assertIn("selftest", r.stdout + r.stderr)
 
+    def test_help_lists_hermes_control_plane(self):
+        r = run_sb("--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hermes", r.stdout + r.stderr)
+
+    def test_hermes_requires_explicit_remote(self):
+        r = run_sb("hermes", "status")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--remote", r.stderr + r.stdout)
+
     def test_no_main_in_help_command_list(self):
         # The phantom `main` instance is gone; it must not appear as guidance.
         r = run_sb("instances")

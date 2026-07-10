@@ -151,10 +151,10 @@ too.
   middleware wrapping FastMCP's `streamable_http_app()` (FastMCP's own OAuth-oriented
   `auth=`/`token_verifier=` mechanism needs an issuer/resource-server setup that's real
   overkill for a single pre-shared secret between one client and one server).
-- Secrets (SSH connection strings live in plaintext since they're not secret; the bearer
-  token IS secret) are stored in `sandbox.local.yml`'s `remotes:` block — gitignored,
-  `chmod 0600`, never echoed — the same store already used for pro-license keys and the
-  snapshot-bridge token.
+- SSH connection strings are stored in `sandbox.local.yml`'s `remotes:` block — gitignored
+  and `chmod 0600`. They are write-only: `remote add` accepts one, but CLI and MCP output
+  never reveal it. The bearer token is also stored there and is shown once at provision
+  time; neither value is returned by later commands.
 
 ## 8. CLI + MCP surface
 

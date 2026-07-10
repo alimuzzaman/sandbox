@@ -374,7 +374,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")
     remote_p.add_argument("ssh_url", nargs="?", default=None,
-        help="ssh://user@host[:port] connection string (required for 'add')")
+        help="SSH connection string (required for 'add')")
     remote_p.add_argument("--control", choices=["https", "tailscale"], default=None,
         help="control-plane transport for 'provision'/'up' (default: ask in "
              "interactive use, HTTPS in --json/non-interactive mode)")

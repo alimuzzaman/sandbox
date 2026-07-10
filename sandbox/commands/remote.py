@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import subprocess
 import sys
 
 from sandbox.core import *  # noqa: F401,F403
@@ -35,7 +36,7 @@ def _require_name(args) -> str:
     name = getattr(args, "name", None)
     if not name:
         die("a remote name is required for this action, e.g. "
-            "`./sb remote add myvps ssh://user@host`")
+            "`./sb remote add myvps <ssh-connection>`")
     return name
 
 
@@ -44,18 +45,24 @@ def _cmd_add(args, as_json: bool) -> None:
     ssh_url = getattr(args, "ssh_url", None)
     if not ssh_url:
         die("`./sb remote add <name> <ssh_url>` requires an ssh_url, "
-            "e.g. `./sb remote add myvps ssh://ubuntu@203.0.113.10`")
+            "e.g. `./sb remote add myvps <ssh-connection>`")
     try:
         name = sr.validate_remote_name(name)
     except ValueError as e:
         die(str(e))
-    ssh_target = ssh_url.removeprefix("ssh://")
+    try:
+        ssh_target = sr.remote_ssh_parts(ssh_url)["target"]
+        port = sr.remote_ssh_parts(ssh_url)["port"]
+    except ValueError as e:
+        die(str(e))
+    if port:
+        ssh_target = f"{ssh_target}:{port}"
     entry = sr.put_remote(name, ssh=ssh_target, provisioned=False)
-    result = {"ok": True, "name": name, "ssh": entry.get("ssh"), "error": None}
+    result = {"ok": True, "name": name, "ssh_configured": bool(entry.get("ssh")), "error": None}
     if as_json:
         print(json.dumps(result))
     else:
-        ok(f"registered remote '{name}' ({entry.get('ssh')})")
+        ok(f"registered remote '{name}'")
         print("  next: ./sb remote provision " + name)
 
 
@@ -66,7 +73,7 @@ def _cmd_list(args, as_json: bool) -> None:
         reachable = sr.check_reachable(entry)
         rows.append({
             "name": name,
-            "ssh": entry.get("ssh"),
+            "ssh_configured": bool(entry.get("ssh")),
             "reachable": reachable,
             "provisioned": bool(entry.get("provisioned")),
         })
@@ -79,7 +86,7 @@ def _cmd_list(args, as_json: bool) -> None:
     for r in rows:
         reach = "reachable" if r["reachable"] else "unreachable"
         prov = "provisioned" if r["provisioned"] else "not provisioned"
-        print(f"  {r['name']}  ({r['ssh']})  {reach}, {prov}")
+        print(f"  {r['name']}  {reach}, {prov}")
 
 
 def _cmd_remove(args, as_json: bool) -> None:
@@ -120,7 +127,6 @@ def _upload_runtime_source(ssh_target: str) -> None:
         "mkdir -p \"$sandbox_home/sb-src\"; "
         "tar -xzf - -C \"$sandbox_home/sb-src\""
     )
-    import subprocess
     tar_res = subprocess.run(
         tar_cmd, cwd=str(ROOT), capture_output=True, timeout=300, check=False,
     )
@@ -130,7 +136,7 @@ def _upload_runtime_source(ssh_target: str) -> None:
             f"{tar_res.stderr.decode(errors='replace').strip()[:500]}"
         )
     ssh_res = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, remote_cmd],
+        sr.ssh_command_args(ssh_target, remote_cmd),
         input=tar_res.stdout, capture_output=True, text=False, timeout=300, check=False,
     )
     if ssh_res.returncode != 0:
@@ -158,10 +164,7 @@ def _choose_control_transport(args, as_json: bool) -> str:
 
 
 def _ssh_host(ssh_target: str) -> str:
-    host = ssh_target.rsplit("@", 1)[-1]
-    if host.startswith("[") and "]" in host:
-        return host[1:host.index("]")]
-    return host.split(":", 1)[0]
+    return sr.ssh_host(ssh_target)
 
 
 def _control_host(args, entry: dict, ssh_target: str, as_json: bool) -> str:
@@ -182,7 +185,7 @@ def _cmd_provision(args, as_json: bool) -> None:
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}' — register it first with "
-            f"`./sb remote add {name} <ssh_url>`")
+            f"`./sb remote add {name} <ssh-connection>`")
     script_path = os.path.join(ROOT, "scripts", "install-remote.sh")
     with open(script_path) as f:
         script = f.read()
@@ -190,7 +193,6 @@ def _cmd_provision(args, as_json: bool) -> None:
     # command string (no stdin piping), so transfer the script inline as
     # base64 over the SSH argument to avoid quoting issues with its content.
     import base64
-    import subprocess
     encoded = base64.b64encode(script.encode()).decode()
     ssh_target = entry.get("ssh") or ""
     if not ssh_target:
@@ -201,19 +203,26 @@ def _cmd_provision(args, as_json: bool) -> None:
         public_host = _control_host(args, entry, ssh_target, as_json)
     try:
         _upload_runtime_source(ssh_target)
-    except RuntimeError as e:
-        die(f"could not stage the sandbox runtime on '{name}': {e}")
+    except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+        die(f"could not stage the sandbox runtime on '{name}': "
+            f"{sr.redact_ssh_connection(str(e), entry)}")
     cmd = (
         f"echo {encoded} | base64 -d | "
         f"SANDBOX_CONTROL_TRANSPORT={control_transport} bash -s"
     )
-    res = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, cmd],
-        capture_output=True, text=True, timeout=1800, check=False,
-    )
-    if res.returncode != 0:
+    try:
+        res = subprocess.run(
+            sr.ssh_command_args(ssh_target, cmd),
+            capture_output=True, text=True, timeout=1800, check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
         die(f"provisioning '{name}' failed: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}")
+            f"{sr.redact_ssh_connection(str(e), entry)}")
+    if res.returncode != 0:
+        detail = sr.redact_ssh_connection(
+            (res.stderr or res.stdout or "").strip()[:1000], entry
+        )
+        die(f"provisioning '{name}' failed: {detail}")
     token = sr.mint_bearer_token()
     port = sr.DEFAULT_MCP_PORT
     entry = sr.get_remote(name)
@@ -235,8 +244,9 @@ def _cmd_provision(args, as_json: bool) -> None:
                           control_host=public_host, control_url=control_url,
                           mcp_port=port, bearer_token=token, provisioned=True)
             tailscale_ip = None
-    except (RuntimeError, ValueError) as e:
-        die(f"could not start the remote MCP server on '{name}': {e}")
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
+        die(f"could not start the remote MCP server on '{name}': "
+            f"{sr.redact_ssh_connection(str(e), entry)}")
         return
     # The token is shown here ONCE, at mint time only -- same pattern as an
     # AWS access key or GitHub PAT. It's never echoed again after this: not
@@ -287,8 +297,9 @@ def _cmd_up(args, as_json: bool) -> None:
             sr.configure_https_proxy(entry, public_host, port)
             sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
                                        public_url=control_url)
-    except (RuntimeError, ValueError) as e:
-        die(f"could not start '{name}''s MCP server: {e}")
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
+        die(f"could not start '{name}''s MCP server: "
+            f"{sr.redact_ssh_connection(str(e), entry)}")
         return
     result = {"ok": True, "name": name, "control_transport": control_transport,
              "control_url": control_url, "mcp_port": port, "error": None}
@@ -305,8 +316,9 @@ def _cmd_down(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     try:
         sr.stop_remote_mcp_server(entry)
-    except (RuntimeError, ValueError) as e:
-        die(f"could not stop '{name}''s MCP server: {e}")
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
+        die(f"could not stop '{name}''s MCP server: "
+            f"{sr.redact_ssh_connection(str(e), entry)}")
         return
     result = {"ok": True, "name": name, "error": None}
     if as_json:

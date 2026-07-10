@@ -5,7 +5,7 @@
 | Command | Purpose |
 |---|---|
 | `./sb remote add <name> ssh://user@host[:port]` | Register a VPS target (stored in `sandbox.local.yml`'s `remotes:` block). Idempotent — re-running for an existing name updates it. |
-| `./sb remote list` | Show configured remotes, each with SSH reachability and provisioned status. |
+| `./sb remote list` | Show configured remotes, each with SSH reachability and provisioned status; SSH targets are write-only and never returned. |
 | `./sb remote provision <name> --control-host <host>` | SSH in and run `scripts/install-remote.sh`: install Docker CE + compose plugin, Caddy, the `sb` runtime, provision the `visit` tools venv, start the loopback-bound remote MCP server behind public HTTPS, mint a bearer token. Safe to re-run (spec FR-005). |
 | `./sb remote provision <name> --control tailscale` | Same provisioning flow, but install/join Tailscale and bind the remote MCP server to the Tailscale interface instead of using Caddy/HTTPS. |
 | `./sb remote up <name>` / `./sb remote down <name>` | Start/stop the remote MCP server process on the VPS (over SSH) — does NOT affect running WordPress instances or the selected control transport itself. |
@@ -56,7 +56,7 @@ running `sb deploy` again.
     "wordpress_port": 8188,
     "url": "https://default-my-plugin.sandbox.asb.bd",
     "admin_url": "https://default-my-plugin.sandbox.asb.bd/wp-admin/",
-    "login_url": null
+    "login_url": "https://default-my-plugin.sandbox.asb.bd/?sandbox_autologin=..."
   },
   "url": "https://default-my-plugin.sandbox.asb.bd",
   "error": null

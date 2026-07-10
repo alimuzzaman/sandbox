@@ -1,8 +1,25 @@
 from __future__ import annotations
 import json
+import re
 import subprocess
 
 from app import *  # noqa: F401,F403
+
+
+def _json_or_text(text: str):
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return text
+
+
+_SSH_CONNECTION_RE = re.compile(
+    r"(?:ssh://)?[^\s/@:]+@(?:\[[^\]\s]+\]|[^\s/:]+)(?::\d+)?"
+)
+
+
+def _redact_ssh_connection(value: str) -> str:
+    return _SSH_CONNECTION_RE.sub("[redacted SSH target]", value or "")
 
 
 @mcp.tool()
@@ -57,8 +74,10 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
             "error": "remote_deploy timed out after 1200s",
         }
     lines = (res.stdout or "").strip().splitlines()
-    result = _safe_json(lines[-1]) if lines else None
+    result = _json_or_text(lines[-1]) if lines else None
     if isinstance(result, dict) and "remote" in result:
+        if isinstance(result.get("error"), str):
+            result["error"] = _redact_ssh_connection(result["error"])
         return result
     return {
         "ok": False,
@@ -67,5 +86,7 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         "uncommitted_files_applied": 0,
         "instance": None,
         "url": None,
-        "error": (res.stderr or res.stdout or "deploy failed").strip()[:2000],
+        "error": _redact_ssh_connection(
+            (res.stderr or res.stdout or "deploy failed").strip()[:2000]
+        ),
     }

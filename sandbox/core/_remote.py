@@ -35,8 +35,10 @@ import secrets
 import shlex
 import posixpath
 import json
+import re
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._config import ensure_pyyaml, _local_yaml
@@ -120,17 +122,102 @@ def mint_bearer_token() -> str:
     return secrets.token_hex(32)
 
 
+_SSH_CONNECTION_RE = re.compile(
+    r"(?:ssh://)?[^\s/@:]+@(?:\[[^\]\s]+\]|[^\s/:]+)(?::\d+)?"
+)
+
+
+def redact_ssh_connection(value: str, remote: dict | None = None) -> str:
+    """Remove SSH connection targets from user-visible CLI/MCP errors."""
+    text = str(value or "")
+    if remote and remote.get("ssh"):
+        text = text.replace(str(remote["ssh"]), "[redacted SSH target]")
+        text = text.replace(f"ssh://{remote['ssh']}", "[redacted SSH target]")
+    return _SSH_CONNECTION_RE.sub("[redacted SSH target]", text)
+
+
+def parse_ssh_target(ssh_value: str) -> dict:
+    """Normalize ssh://user@host[:port] or user@host[:port] into command parts."""
+    raw = (ssh_value or "").strip()
+    if not raw:
+        raise ValueError("remote has no ssh connection string configured")
+    if raw.startswith("ssh://"):
+        parsed = urlsplit(raw)
+        if not parsed.hostname:
+            raise ValueError("invalid SSH connection string")
+        user = parsed.username or ""
+        host = parsed.hostname
+        port = parsed.port
+    else:
+        user = ""
+        hostport = raw
+        if "@" in hostport:
+            user, hostport = hostport.rsplit("@", 1)
+        port = None
+        if hostport.startswith("[") and "]" in hostport:
+            host = hostport[1:hostport.index("]")]
+            rest = hostport[hostport.index("]") + 1:]
+            if rest.startswith(":") and rest[1:].isdigit():
+                port = int(rest[1:])
+        elif ":" in hostport and hostport.rsplit(":", 1)[1].isdigit():
+            host, port_s = hostport.rsplit(":", 1)
+            port = int(port_s)
+        else:
+            host = hostport
+    if not host:
+        raise ValueError("invalid SSH connection string")
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    target = f"{user}@{display_host}" if user else display_host
+    return {"target": target, "host": host, "port": port}
+
+
+def remote_ssh_parts(remote_or_target) -> dict:
+    ssh_value = (
+        remote_or_target.get("ssh")
+        if isinstance(remote_or_target, dict)
+        else remote_or_target
+    )
+    return parse_ssh_target(ssh_value or "")
+
+
+def ssh_command_args(remote_or_target, command: str) -> list[str]:
+    parts = remote_ssh_parts(remote_or_target)
+    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if parts["port"]:
+        args.extend(["-p", str(parts["port"])])
+    args.extend([parts["target"], command])
+    return args
+
+
+def scp_command_args(remote_or_target, local_path: str, remote_path: str) -> list[str]:
+    parts = remote_ssh_parts(remote_or_target)
+    args = ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if parts["port"]:
+        args.extend(["-P", str(parts["port"])])
+    args.extend([local_path, f"{parts['target']}:{remote_path}"])
+    return args
+
+
+def git_ssh_url(remote: dict, path: str) -> str:
+    parts = remote_ssh_parts(remote)
+    push_path = path if path.startswith("/") else f"/{path}"
+    if parts["port"]:
+        return f"ssh://{parts['target']}:{parts['port']}{push_path}"
+    return f"ssh://{parts['target']}{push_path}"
+
+
+def ssh_host(ssh_value: str) -> str:
+    return remote_ssh_parts(ssh_value)["host"]
+
+
 def ssh_run(remote: dict, command: str, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run `command` on the remote over SSH. Shells to the system `ssh` binary
     using the remote's stored connection string -- no new pip dependency, same
     pattern as shelling to `docker`/`wp` elsewhere in this codebase. check=False:
     callers interpret returncode/stdout/stderr themselves, never a bare
     exception on a nonzero remote exit."""
-    ssh_target = (remote or {}).get("ssh") or ""
-    if not ssh_target:
-        raise ValueError("remote has no ssh connection string configured")
     return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ssh_target, command],
+        ssh_command_args(remote, command),
         capture_output=True, text=True, timeout=timeout, check=False,
     )
 
@@ -276,29 +363,65 @@ def default_instance_domain(label: str, project_slug: str,
     return f"{safe_label}-{safe_slug}.{base}"
 
 
-def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
-    """Route a public instance hostname through Caddy to the remote WP port."""
-    domain = (domain or "").strip()
+def rewrite_instance_url(original_url: str | None, public_url: str,
+                         default_path: str = "/") -> str:
+    """Rewrite an instance URL (including query string) onto its public base URL."""
+    public = urlsplit(public_url)
+    original = urlsplit(original_url or "")
+    path = original.path or default_path
+    return urlunsplit((
+        public.scheme,
+        public.netloc,
+        path,
+        original.query,
+        original.fragment,
+    ))
+
+
+def _validate_hostname(hostname: str, what: str) -> str:
+    hostname = (hostname or "").strip()
     if (
-        not domain or "/" in domain or ":" in domain
-        or not re.fullmatch(r"[A-Za-z0-9.-]+", domain)
-        or domain.startswith(".") or domain.endswith(".")
+        not hostname or "/" in hostname or ":" in hostname
+        or not re.fullmatch(r"[A-Za-z0-9.-]+", hostname)
+        or hostname.startswith(".") or hostname.endswith(".")
     ):
-        raise ValueError("remote instance domain must be a bare hostname")
+        raise ValueError(f"{what} must be a bare hostname")
+    return hostname
+
+
+def _caddy_proxy_command(hostname: str, port: int, conf_prefix: str) -> str:
     site_q = shlex.quote(
-        f"{domain} {{\n"
+        f"{hostname} {{\n"
         f"    reverse_proxy 127.0.0.1:{int(port)}\n"
         f"}}\n"
     )
-    file_q = shlex.quote(f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy")
-    cmd = (
+    file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")
+    return (
         "set -e; "
         "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        "if ! command -v caddy >/dev/null 2>&1; then "
+        "$SUDO apt-get update -qq && $SUDO apt-get install -y caddy; "
+        "fi; "
         "$SUDO install -d -m 0755 /etc/caddy/conf.d; "
+        "if [ ! -f /etc/caddy/Caddyfile ]; then "
+        "printf '%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
+        "$SUDO tee /etc/caddy/Caddyfile >/dev/null; "
+        "elif ! $SUDO grep -q 'import /etc/caddy/conf.d/\\*.caddy' "
+        "/etc/caddy/Caddyfile; then "
+        "printf '\n%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
+        "$SUDO tee -a /etc/caddy/Caddyfile >/dev/null; "
+        "fi; "
         f"printf '%s' {site_q} | $SUDO tee {file_q} >/dev/null; "
         "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
+        "$SUDO systemctl enable --now caddy; "
         "$SUDO systemctl reload caddy"
     )
+
+
+def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
+    """Route a public instance hostname through Caddy to the remote WP port."""
+    domain = _validate_hostname(domain, "remote instance domain")
+    cmd = _caddy_proxy_command(domain, port, "sandbox-instance")
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:
         raise RuntimeError(
@@ -344,11 +467,7 @@ def push_commits(remote: dict, project_root, target_path: str, branch: str) -> s
     branch never pushed anywhere else (spec FR-008), since this is a direct
     git-to-git push over the SAME SSH connection already registered, not
     dependent on GitHub/origin at all. Returns the pushed commit SHA."""
-    ssh_target = (remote or {}).get("ssh") or ""
-    if not ssh_target:
-        raise ValueError("remote has no ssh connection string configured")
-    push_path = target_path if target_path.startswith("/") else f"/{target_path}"
-    push_url = f"ssh://{ssh_target}{push_path}"
+    push_url = git_ssh_url(remote, target_path)
     res = subprocess.run(
         ["git", "push", push_url, f"HEAD:refs/heads/{branch}"],
         cwd=str(project_root), capture_output=True, text=True, timeout=120, check=False,
@@ -430,9 +549,6 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
     "remote reflects the local working tree", so copying the current file
     content is both simpler and more correct. Deleted tracked files are removed
     explicitly. Returns the total number of paths touched."""
-    ssh_target = (remote or {}).get("ssh") or ""
-    if not ssh_target:
-        raise ValueError("remote has no ssh connection string configured")
     applied = 0
     to_copy: list[str] = []
     deleted: list[str] = []
@@ -483,8 +599,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
                 f"{(mk_res.stderr or mk_res.stdout or '').strip()[:500]}"
             )
         res = subprocess.run(
-            ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             str(local_path), f"{ssh_target}:{remote_path}"],
+            scp_command_args(remote, str(local_path), remote_path),
             capture_output=True, text=True, timeout=60, check=False,
         )
         if res.returncode != 0:
@@ -518,40 +633,8 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
     hostname to the loopback-bound MCP server. This intentionally uses a named
     virtual host rather than raw public ports so the VPS can also host Next.js
     or other apps through their own Caddy site blocks."""
-    public_host = (public_host or "").strip()
-    if (
-        not public_host or "/" in public_host or ":" in public_host
-        or not re.fullmatch(r"[A-Za-z0-9.-]+", public_host)
-        or public_host.startswith(".") or public_host.endswith(".")
-    ):
-        raise ValueError("public HTTPS control host must be a bare hostname")
-    host_q = shlex.quote(public_host)
-    site_q = shlex.quote(
-        f"{public_host} {{\n"
-        f"    reverse_proxy 127.0.0.1:{int(port)}\n"
-        f"}}\n"
-    )
-    cmd = (
-        "set -e; "
-        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
-        "if ! command -v caddy >/dev/null 2>&1; then "
-        "$SUDO apt-get update -qq && $SUDO apt-get install -y caddy; "
-        "fi; "
-        "$SUDO install -d -m 0755 /etc/caddy/conf.d; "
-        "if [ ! -f /etc/caddy/Caddyfile ]; then "
-        "printf '%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
-        "$SUDO tee /etc/caddy/Caddyfile >/dev/null; "
-        "elif ! $SUDO grep -q 'import /etc/caddy/conf.d/\\*.caddy' "
-        "/etc/caddy/Caddyfile; then "
-        "printf '\n%s\n' 'import /etc/caddy/conf.d/*.caddy' | "
-        "$SUDO tee -a /etc/caddy/Caddyfile >/dev/null; "
-        "fi; "
-        f"printf '%s' {site_q} | $SUDO tee "
-        f"/etc/caddy/conf.d/sandbox-mcp-{host_q}.caddy >/dev/null; "
-        "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
-        "$SUDO systemctl enable --now caddy; "
-        "$SUDO systemctl reload caddy"
-    )
+    public_host = _validate_hostname(public_host, "public HTTPS control host")
+    cmd = _caddy_proxy_command(public_host, port, "sandbox-mcp")
     res = ssh_run(remote, cmd, timeout=180)
     if res.returncode != 0:
         raise RuntimeError(

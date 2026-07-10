@@ -30,7 +30,7 @@ invalid aliases, wildcards, and policies without a token or remote.
 mutation when confirmation is absent.
 
 - [X] T011 [US2] Implement remote state, Compose rendering, and guarded apply helpers in `sandbox/core/_hosting.py`
-- [X] T012 [US2] Implement read-only Cloudflare drift plan and confirmation gate in `sandbox/commands/hosting.py`
+- [X] T012 [US2] Implement Cloudflare drift planning and confirmation-gated apply in `sandbox/commands/hosting.py`
 
 ## Phase 5: User Story 3 - Describe real hosted projects (P3)
 
@@ -47,6 +47,13 @@ renders isolated routes and runtime names.
 - [X] T018 Run targeted Python tests and all offline host validation commands
 - [X] T019 Run safe Compose configuration/build checks and local WordPress network verification
 - [X] T020 Confirm no Cloudflare credential, DNS, container, or production mutation was performed
+
+## Phase 7: Permanent deployment readiness
+
+- [X] T021 Add owner-only personal secret-file migration and host secret status/generation.
+- [X] T022 Implement guarded remote Compose/Caddy/Origin CA/DNS apply with rollback state.
+- [X] T023 Harden the static and WordPress production image/configuration paths.
+- [X] T024 Save the permanent deployment plan and Lenzora-agent Dockerization handoff prompt.
 
 ## Dependencies
 

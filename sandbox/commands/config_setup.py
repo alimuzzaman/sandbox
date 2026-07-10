@@ -11,6 +11,7 @@ import types as _types
 from contextlib import contextmanager
 import io
 import threading
+from getpass import getpass
 from contextlib import redirect_stdout, redirect_stderr
 
 
@@ -52,11 +53,11 @@ def cmd_connect(cfg, args) -> None:
         _connect_github(cfg, non_interactive=ni)
     elif canonical == "cloudflare":
         from sandbox.core._cloudflare import save_cloudflare_token
-        token = os.environ.get("CLOUDFLARE_API_TOKEN", "") if ni else input(
+        token = os.environ.get("CLOUDFLARE_API_TOKEN", "") if ni else getpass(
             "Cloudflare API token (stored locally, not echoed): "
         )
         save_cloudflare_token(token)
-        ok("Cloudflare token stored in sandbox.local.yml")
+        ok("Cloudflare token stored in ~/.zshrc.secrets")
 
 def cmd_setup(cfg, args) -> None:
     from sandbox.commands.lifecycle import cmd_up, cmd_install, cmd_doctor, wp_is_installed

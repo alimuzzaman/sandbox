@@ -18,6 +18,7 @@ class HostingError(ValueError):
 
 
 _SERVICE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _STATE_FILE = RUNTIME_DIR / "hosts.json"
 _PORT_START = 18000
 _PORT_COUNT = 1000
@@ -74,6 +75,39 @@ def _environment(manifest: dict, name: str | None) -> tuple[str, dict]:
     if not isinstance(env, dict):
         raise HostingError(f"unknown hosting environment {name!r}")
     return name, env
+
+
+def _environment_values(value: object, name: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise HostingError(f"secrets.{name} must be a mapping")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not _ENV_RE.fullmatch(key):
+            raise HostingError(f"secrets.{name} contains an invalid environment key")
+        if not isinstance(item, (str, int, float, bool)):
+            raise HostingError(f"secrets.{name}.{key} must be a scalar")
+        result[key] = str(item)
+    return result
+
+
+def _secrets(env: dict) -> dict:
+    raw = env.get("secrets")
+    if raw is None:
+        return {"values": {}, "required": {}, "generated": {}}
+    if not isinstance(raw, dict):
+        raise HostingError("secrets must be a mapping")
+    values = _environment_values(raw.get("values"), "values")
+    required = _environment_values(raw.get("required"), "required")
+    generated = _environment_values(raw.get("generated"), "generated")
+    duplicate = (set(values) & set(required)) | (set(values) & set(generated)) | (set(required) & set(generated))
+    if duplicate:
+        raise HostingError(f"secret environment keys may only appear once: {', '.join(sorted(duplicate))}")
+    for source in [*required.values(), *generated.values()]:
+        if not _ENV_RE.fullmatch(source):
+            raise HostingError("secret source names must be environment variable names")
+    return {"values": values, "required": required, "generated": generated}
 
 
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
@@ -141,7 +175,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
         raise HostingError("cloudflare must require proxied Origin CA with strict SSL")
     return {"project_root": str(root), "project": project, "environment": env_name,
             "compose": compose, "healthcheck": healthcheck, "routes": routes,
-            "deploy": deploy, "cloudflare": cf}
+            "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env)}
 
 
 def state_key(remote_name: str, validated: dict) -> str:
@@ -224,6 +258,18 @@ def compose_override(validated: dict, loopback_port: int) -> str:
     )
 
 
+def render_env_file(validated: dict, source_values: dict[str, str]) -> str:
+    """Render the exact environment passed to Compose, without persisting secrets locally."""
+    values = dict(validated["secrets"]["values"])
+    for container_key, source_key in {**validated["secrets"]["required"],
+                                      **validated["secrets"]["generated"]}.items():
+        value = source_values.get(source_key)
+        if not value:
+            raise HostingError(f"required hosting secret is missing: {source_key}")
+        values[container_key] = value
+    return "".join(f"{key}={shlex.quote(value)}\n" for key, value in sorted(values.items()))
+
+
 def render_compose_command(validated: dict, source_dir: str, override_path: str) -> str:
     """Render a shell-safe remote Compose command for the declared services only."""
     compose = validated["compose"]
@@ -248,6 +294,8 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
         "compose_override": compose_override(validated, port),
         "caddyfile": caddyfile(validated, port),
         "routes": validated["routes"],
+        "records": [],
+        "certificate_hostnames": [route["hostname"] for route in validated["routes"]],
         "healthcheck": validated["healthcheck"],
     }
 

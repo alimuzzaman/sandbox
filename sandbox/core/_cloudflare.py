@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 
 from sandbox.core._config import _local_yaml, _write_local_yaml
-from sandbox.core._paths import CONFIG_LOCAL
+from sandbox.core._secrets import resolve_secret, write_secret
 
 API_BASE = "https://api.cloudflare.com/client/v4"
 
@@ -21,20 +21,32 @@ class CloudflareError(RuntimeError):
 
 
 def cloudflare_token() -> str:
-    return str(((_local_yaml().get("cloudflare") or {}).get("api_token") or "").strip())
+    return str(resolve_secret("CLOUDFLARE_API_TOKEN") or
+               ((_local_yaml().get("cloudflare") or {}).get("api_token") or "")).strip()
 
 
 def save_cloudflare_token(token: str) -> None:
     token = (token or "").strip()
     if not token:
         raise CloudflareError("Cloudflare API token cannot be empty")
+    write_secret("CLOUDFLARE_API_TOKEN", token)
+
+
+def migrate_legacy_token() -> bool:
+    """Move the legacy local token into the personal secret file once."""
     local = _local_yaml()
-    local["cloudflare"] = {**(local.get("cloudflare") or {}), "api_token": token}
+    token = str((local.get("cloudflare") or {}).get("api_token") or "").strip()
+    if not token or resolve_secret("CLOUDFLARE_API_TOKEN"):
+        return False
+    write_secret("CLOUDFLARE_API_TOKEN", token)
+    cloudflare = dict(local.get("cloudflare") or {})
+    cloudflare.pop("api_token", None)
+    if cloudflare:
+        local["cloudflare"] = cloudflare
+    else:
+        local.pop("cloudflare", None)
     _write_local_yaml(local)
-    try:
-        CONFIG_LOCAL.chmod(0o600)
-    except OSError:
-        pass
+    return True
 
 
 class Client:
@@ -84,6 +96,18 @@ class Client:
     def delete_record(self, zone_id: str, record_id: str) -> None:
         """Delete one explicitly identified record; never broad-delete a zone."""
         self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
+
+    def restore_record(self, zone_id: str, previous: dict | None, created_id: str | None = None) -> None:
+        """Restore one captured record, or remove only an identified created record."""
+        if previous:
+            record_id = str(previous.get("id") or "")
+            if not record_id:
+                raise CloudflareError("cannot restore DNS record without an id")
+            body = {key: previous[key] for key in ("type", "name", "content", "proxied", "ttl", "comment")
+                    if key in previous}
+            self._request("PUT", f"/zones/{zone_id}/dns_records/{record_id}", body)
+        elif created_id:
+            self.delete_record(zone_id, created_id)
 
     def ssl_mode(self, zone_id: str, value: str = "strict") -> dict:
         return self._request("PATCH", f"/zones/{zone_id}/settings/ssl", {"value": value})["result"]

@@ -25,7 +25,7 @@ Caddy primitives rather than creating a second deployment system.
 **Primary Dependencies**: Python standard library, existing PyYAML availability helper,
 Docker Compose, Caddy, Cloudflare REST API
 
-**Storage**: Project manifests; local secrets in `sandbox.local.yml`; remote deployment
+**Storage**: Project manifests; local secrets in `~/.zshrc.secrets`; remote deployment
 state in `$SANDBOX_HOME/runtime/hosts.json`
 
 **Testing**: `unittest`, mocked urllib and SSH calls, Compose config checks, Sandbox MCP

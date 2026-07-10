@@ -44,6 +44,7 @@ import sandbox.commands.remote  # noqa: F401  (registers commands)
 import sandbox.commands.deploy  # noqa: F401  (registers commands)
 import sandbox.commands.hosting  # noqa: F401  (registers commands)
 import sandbox.commands.preview  # noqa: F401  (registers commands)
+import sandbox.commands.secrets  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -408,7 +409,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the result as JSON (for the MCP server)")
 
     host_p = sub.add_parser("host", help="Validate, plan, or apply a project hosting manifest")
-    host_p.add_argument("action", choices=["validate", "plan", "apply"])
+    host_p.add_argument("action", choices=["validate", "plan", "apply", "secrets"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -416,7 +417,15 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
+    host_p.add_argument("--set", dest="set_secret", default=None, metavar="SECRET_KEY",
+        help="set one declared hosting secret through a hidden prompt")
+    host_p.add_argument("--generate", dest="generate_secrets", action="store_true",
+        help="generate any declared generated secrets that are missing")
     host_p.add_argument("--json", action="store_true", help="print JSON")
+
+    secrets_p = sub.add_parser("secrets", help="Manage the personal Sandbox secret file")
+    secrets_p.add_argument("action", choices=["migrate-zshrc"])
+    secrets_p.add_argument("--json", action="store_true", help="print names only as JSON")
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")
     preview_p.add_argument("action", choices=["create", "list", "destroy", "cleanup"])

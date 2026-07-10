@@ -123,8 +123,8 @@ ssh ubuntu@203.0.113.10 "cd \$SANDBOX_HOME/deploy-src/<project-slug> && ./sb ens
 
 ## Managed Compose hosts
 
-Projects that are not WordPress plugins can carry a project-local
-`sandbox.hosting.yml`. It describes a Compose web service, deployment policy,
+Any Docker Compose project can carry a project-local `sandbox.hosting.yml`. It describes
+a Compose web service, deployment policy,
 primary hostname, aliases, redirects, and the required Cloudflare policy.
 
 ```bash
@@ -134,10 +134,16 @@ primary hostname, aliases, redirects, and the required Cloudflare policy.
 ```
 
 `validate` is offline. `plan` is read-only and lists only the declared hostnames;
-it never prunes unrelated DNS records. `apply` is deliberately confirmation-gated and
-remains disabled until a separately approved live migration. Configure a future
-Cloudflare API token with `./sb connect cloudflare` and record the VPS's public address
-with `./sb remote set-origin myvps --ipv4 <address>`; both values stay outside Git.
+it never prunes unrelated DNS records. `apply` is confirmation-gated: it transfers the
+approved checkout, runs Compose/init health checks, validates Caddy, and then updates
+only declared DNS records. Configure Cloudflare with `./sb connect cloudflare`, which
+stores the token in `~/.zshrc.secrets` (owner-only and outside Git), and record the VPS
+public address with `./sb remote set-origin myvps --ipv4 <address>`.
+
+Permanent projects may declare public values plus required/generated secret mappings in
+`sandbox.hosting.yml`. `./sb host secrets --project-dir /path --environment production`
+reports names only; `--generate` creates declared generated values and `--set KEY`
+stores a required value through a hidden prompt.
 
 The selected policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.

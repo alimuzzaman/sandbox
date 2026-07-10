@@ -408,7 +408,8 @@ and can usually diagnose itself.
   `sandbox init`; server-aware version pins; headless Chromium with auto-login
   (`visit`); size-scaled `build-feature` workflow; one-pass `fix` skill;
   FluentBoards integration; Plugin Check; first-pass remote VPS hosting; managed
-  Compose-host validation with Cloudflare DNS/TLS planning; npm +
+  Compose-host validation and confirmation-gated permanent Cloudflare DNS/TLS deployment;
+  personal `~/.zshrc.secrets` support; npm +
   Homebrew + curl distribution.
 - **Next** — prove the recent work live (remote VPS and Plugin Check post-fix
   re-run), then move into remote automation. See

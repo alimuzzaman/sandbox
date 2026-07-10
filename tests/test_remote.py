@@ -637,6 +637,31 @@ class TestConfigureHttpsProxy(unittest.TestCase):
             cmd,
         )
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_removes_only_the_named_instance_route(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.remove_instance_https_route(
+            {"ssh": "ubuntu@1.2.3.4"}, "preview-demo.sandbox.asb.bd"
+        )
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("rm -f /etc/caddy/conf.d/sandbox-instance-preview-demo.sandbox.asb.bd.caddy", cmd)
+        self.assertIn("caddy validate", cmd)
+
+
+class TestRemotePreviewInstances(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ensure_remote_instance_uses_new_label(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout='{"instance":"preview-a","wordpress_port":8123}\n')
+        result = sr.ensure_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a")
+        self.assertEqual(result["instance"], "preview-a")
+        self.assertIn("--label preview-a --create", mock_ssh_run.call_args[0][1])
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_delete_remote_instance_is_scoped_to_name(self, mock_ssh_run):
+        mock_ssh_run.side_effect = [_completed(stdout="/home/ubuntu/sandbox\n"), _completed(returncode=0)]
+        sr.delete_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "preview-a")
+        self.assertIn("instance delete preview-a --yes", mock_ssh_run.call_args[0][1])
+
 
 class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")

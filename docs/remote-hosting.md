@@ -152,6 +152,27 @@ app by hostname through Caddy. Sandbox's control endpoint should get its own hos
 `domains setup` unless you intend sandbox to add public hostname routes for those sites
 too.
 
+### Disposable remote previews
+
+`./sb preview` creates a separate, public WordPress Sandbox instance for a
+temporary branch check. It uses a generated `preview-…` instance label, isolated
+Docker containers/volume, a generated subdomain below `sandbox.asb.bd`, and an
+expiry record stored only under `$SANDBOX_HOME/runtime/remote-previews.json`.
+
+```bash
+./sb preview create --remote myvps --project-dir /path/to/plugin --name fix-login \
+  --ttl-hours 24 --confirm
+./sb preview list
+./sb preview destroy --remote myvps --id fix-login-<id> --confirm
+./sb preview cleanup --remote myvps --confirm
+```
+
+Creation is confirmation-gated because it deploys the selected checkout, creates
+one Cloudflare-proxied A record, configures a Caddy route, and starts a remote
+container. `destroy` removes only the recorded Caddy fragment, named Sandbox
+instance, and exact DNS record. `cleanup` removes previews whose recorded expiry
+has passed; it is intentionally an explicit command, not a background reaper.
+
 ## 6. Explicitly out of scope (Phase 1)
 
 - **No continuous sync daemon.** Deploy is deliberate and on-demand.

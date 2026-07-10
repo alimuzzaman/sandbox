@@ -308,12 +308,13 @@ def _last_json(stdout: str) -> dict | None:
     return None
 
 
-def ensure_remote_instance(remote: dict, target_path: str) -> dict:
+def ensure_remote_instance(remote: dict, target_path: str, label: str | None = None) -> dict:
     """Run remote `sb ensure` for the deployed project and parse its JSON
     result. This is the missing second half after code deploy: it creates or
     refreshes the WordPress instance on the VPS itself."""
     sb = remote_sb_path(remote)
-    cmd = f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)} --json"
+    label_arg = f" --label {shlex.quote(label)} --create" if label else ""
+    cmd = f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)}{label_arg} --json"
     res = ssh_run(remote, cmd, timeout=900)
     data = _last_json(res.stdout or "")
     if res.returncode != 0 or not data:
@@ -426,6 +427,38 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure remote instance HTTPS route: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+
+
+def remove_instance_https_route(remote: dict, domain: str) -> None:
+    """Remove only Sandbox's Caddy fragment for one public instance route."""
+    domain = _validate_hostname(domain, "remote instance domain")
+    path = f"/etc/caddy/conf.d/sandbox-instance-{domain}.caddy"
+    cmd = (
+        "set -e; "
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO rm -f {shlex.quote(path)}; "
+        "$SUDO caddy validate --config /etc/caddy/Caddyfile; "
+        "$SUDO systemctl reload caddy"
+    )
+    res = ssh_run(remote, cmd, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not remove remote instance HTTPS route: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+
+
+def delete_remote_instance(remote: dict, instance_name: str) -> None:
+    """Delete precisely one named remote Sandbox instance and its Docker data."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):
+        raise ValueError("invalid remote Sandbox instance name")
+    sb = remote_sb_path(remote)
+    res = ssh_run(remote, f"{shlex.quote(sb)} instance delete {shlex.quote(instance_name)} --yes", timeout=300)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"could not delete remote Sandbox instance: "
             f"{(res.stderr or res.stdout or '').strip()[:1000]}"
         )
 

@@ -43,6 +43,7 @@ import sandbox.commands.plugin_check  # noqa: F401  (registers commands)
 import sandbox.commands.remote  # noqa: F401  (registers commands)
 import sandbox.commands.deploy  # noqa: F401  (registers commands)
 import sandbox.commands.hosting  # noqa: F401  (registers commands)
+import sandbox.commands.preview  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -416,6 +417,17 @@ Per-project (each plugin carries its own sandbox.config.json):
     host_p.add_argument("--allow-zone-ssl-change", action="store_true",
         help="acknowledge a zone-wide Cloudflare SSL mode change")
     host_p.add_argument("--json", action="store_true", help="print JSON")
+
+    preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")
+    preview_p.add_argument("action", choices=["create", "list", "destroy", "cleanup"])
+    preview_p.add_argument("--remote", default=None, help="registered provisioned remote")
+    preview_p.add_argument("--project-dir", default=None, help="project to deploy (default: current directory)")
+    preview_p.add_argument("--name", default=None, help="optional stable preview name")
+    preview_p.add_argument("--id", default=None, help="preview id for destroy")
+    preview_p.add_argument("--base-domain", default="sandbox.asb.bd", help="Cloudflare-managed preview domain suffix")
+    preview_p.add_argument("--ttl-hours", type=int, default=24, help="expiry for a created preview (default: 24)")
+    preview_p.add_argument("--confirm", action="store_true", help="allow remote, DNS, and container mutation")
+    preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")

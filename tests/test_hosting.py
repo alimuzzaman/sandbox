@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 import sandbox.core._cloudflare as cloudflare  # noqa: E402
 import sandbox.core._hosting as hosting  # noqa: E402
+import sandbox.commands.preview as preview  # noqa: E402
 
 
 def _manifest(aliases=None):
@@ -166,3 +167,28 @@ class TestCloudflareClient(unittest.TestCase):
         with self.assertRaisesRegex(cloudflare.CloudflareError, "denied") as raised:
             cloudflare.Client("sensitive-token").zone("example.com")
         self.assertNotIn("sensitive-token", str(raised.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_delete_addresses_one_record_only(self, mock_open):
+        mock_open.return_value = _Response({"success": True, "result": {"id": "rec-1"}})
+        cloudflare.Client("token").delete_record("zone-1", "rec-1")
+        request = mock_open.call_args.args[0]
+        self.assertEqual(request.get_method(), "DELETE")
+        self.assertTrue(request.full_url.endswith("/zones/zone-1/dns_records/rec-1"))
+
+
+class TestRemotePreviewIdentity(unittest.TestCase):
+    def test_preview_identity_is_stable_and_namespaced(self):
+        first = preview.preview_identity("/tmp/example", "fix/login", "login")
+        second = preview.preview_identity("/tmp/example", "fix/login", "login")
+        self.assertEqual(first, second)
+        self.assertTrue(first[0].startswith("login-"))
+        self.assertTrue(first[1].startswith("preview-"))
+
+    def test_preview_domain_is_dns_safe(self):
+        domain = preview.preview_domain("login-1234abcd", "My Plugin", "sandbox.asb.bd")
+        self.assertEqual(domain, "login-1234abcd-my-plugin.sandbox.asb.bd")
+
+    def test_preview_domain_rejects_invalid_base(self):
+        with self.assertRaisesRegex(ValueError, "base domain"):
+            preview.preview_domain("login-1234abcd", "plugin", "bad/domain")

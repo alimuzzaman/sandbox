@@ -81,6 +81,10 @@ class Client:
             return self._request("PUT", f"/zones/{zone_id}/dns_records/{existing[0]['id']}", body)["result"]
         return self._request("POST", f"/zones/{zone_id}/dns_records", body)["result"]
 
+    def delete_record(self, zone_id: str, record_id: str) -> None:
+        """Delete one explicitly identified record; never broad-delete a zone."""
+        self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
+
     def ssl_mode(self, zone_id: str, value: str = "strict") -> dict:
         return self._request("PATCH", f"/zones/{zone_id}/settings/ssl", {"value": value})["result"]
 

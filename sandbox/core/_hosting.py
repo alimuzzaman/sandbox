@@ -324,7 +324,8 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None, key_path
 
 def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | None = None) -> dict:
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
-    records = [{"hostname": r["hostname"], "address": a, "proxied": True}
+    records = [{"hostname": r["hostname"], "address": a, "proxied": True,
+                "mode": r["mode"], "target": r.get("target")}
                for r in validated["routes"] for a in addresses]
     return {"project": validated["project"], "environment": validated["environment"],
             "routes": validated["routes"], "records": records,

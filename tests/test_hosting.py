@@ -114,6 +114,27 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--remove-orphans", command)
         self.assertTrue(command.endswith("web"))
 
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_init_service_is_built_before_its_one_shot_run(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      init_services: [setup]"
+            ))
+            validated = hosting.validate_manifest(directory)
+        runtime = {
+            "compose_override": "services: {}\n",
+            "environment": "EXAMPLE=value\n",
+        }
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertIn("--force-recreate", commands[0])
+        self.assertIn("--renew-anon-volumes", commands[0])
+        build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
+        run_index = next(i for i, command in enumerate(commands) if command.endswith("run --rm setup"))
+        self.assertLess(build_index, run_index)
+
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hosts.json"
@@ -188,6 +209,16 @@ class TestCloudflareClient(unittest.TestCase):
         request = mock_open.call_args.args[0]
         self.assertEqual(request.get_method(), "PUT")
         self.assertTrue(request.full_url.endswith("/zones/zone-1/dns_records/rec-1"))
+
+    @patch("urllib.request.urlopen")
+    def test_update_cname_keeps_target_and_enables_proxy(self, mock_open):
+        mock_open.return_value = _Response({"success": True, "result": {"id": "rec-1"}})
+        cloudflare.Client("token").update_record("zone-1", {
+            "id": "rec-1", "type": "CNAME", "name": "www.example.com", "content": "example.com", "ttl": 1,
+        }, proxied=True)
+        body = json.loads(mock_open.call_args.args[0].data.decode())
+        self.assertEqual(body["content"], "example.com")
+        self.assertTrue(body["proxied"])
 
 
 class TestRemotePreviewIdentity(unittest.TestCase):
@@ -279,3 +310,9 @@ class TestHostingSecrets(unittest.TestCase):
             command = hosting_cmd._compose_prefix(validated, "/srv/site", "/runtime/override.yml", "/runtime/env")
             self.assertIn("SANDBOX_HOST_ENV_FILE=/runtime/env", command)
             self.assertIn("--env-file /runtime/env", command)
+
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_host_source_uses_manifest_project_not_wordpress_slug(self, mocked):
+        target = hosting_cmd._ensure_host_source({"ssh": "ubuntu@example.test"}, "/srv/sandbox", "alimuzzaman-me")
+        self.assertEqual(target, "/srv/sandbox/deploy-src/hosts/alimuzzaman-me")
+        self.assertIn("deploy-src/hosts/alimuzzaman-me", mocked.call_args.args[1])

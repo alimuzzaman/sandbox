@@ -5,7 +5,9 @@ import subprocess
 import base64
 import shlex
 import time
+import urllib.error
 import urllib.request
+import urllib.parse
 from getpass import getpass
 
 from sandbox.core import die, info, ok
@@ -56,12 +58,18 @@ def _cloudflare_drift(plan: dict) -> dict:
             record_type = "AAAA" if ":" in wanted["address"] else "A"
             existing = [record for record in client.records(zone["id"], hostname)
                         if record.get("type") == record_type]
+            cname_ok = False
+            if wanted.get("mode") == "redirect" and wanted.get("target"):
+                target_host = hosting.normalize_hostname(urllib.parse.urlsplit(wanted["target"]).hostname or "", wildcard=False)
+                cname_ok = any(record.get("type") == "CNAME" and record.get("proxied") is True and
+                               hosting.normalize_hostname(str(record.get("content") or ""), wildcard=False) == target_host
+                               for record in client.records(zone["id"], hostname))
             records.append({
                 "hostname": hostname,
                 "type": record_type,
                 "desired_address": wanted["address"],
-                "exists": any(record.get("content") == wanted["address"] and
-                              record.get("proxied") is True for record in existing),
+                "exists": cname_ok or any(record.get("content") == wanted["address"] and
+                                             record.get("proxied") is True for record in existing),
             })
         ssl = {zone["name"]: client.current_ssl_mode(zone["id"])
                for zone in {entry["id"]: entry for entry in zones.values()}.values()}
@@ -184,25 +192,32 @@ def _read_remote_optional(entry: dict, path: str) -> str | None:
 
 def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry: dict,
                         client: cloudflare.Client, home: str) -> tuple[str, str, dict]:
-    base = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}/certs"
+    name = f"sandbox-host-{validated['project']}-{validated['environment']}"
+    base = f"/etc/caddy/certs/{name}"
     cert_path, key_path, csr_path = f"{base}/origin.pem", f"{base}/origin.key", f"{base}/origin.csr"
     certificate = state_entry.get("certificate") if isinstance(state_entry, dict) else None
     present = remote.ssh_run(entry, f"test -s {shlex.quote(cert_path)} -a -s {shlex.quote(key_path)}", timeout=30)
-    if certificate and present.returncode == 0:
-        return cert_path, key_path, certificate
+    if present.returncode == 0:
+        return cert_path, key_path, certificate or {"id": None, "hostnames": runtime["certificate_hostnames"]}
     primary = next(route["hostname"] for route in validated["routes"] if route.get("primary"))
     command = (
-        f"mkdir -p {shlex.quote(base)}; chmod 0700 {shlex.quote(base)}; "
-        f"if [ ! -s {shlex.quote(key_path)} ]; then openssl ecparam -name prime256v1 -genkey -noout -out {shlex.quote(key_path)}; chmod 0600 {shlex.quote(key_path)}; fi; "
-        f"openssl req -new -key {shlex.quote(key_path)} -subj {shlex.quote('/CN=' + primary)} -out {shlex.quote(csr_path)}; "
-        f"cat {shlex.quote(csr_path)}"
+        "set -e; if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO install -d -o root -g caddy -m 0750 {shlex.quote(base)}; "
+        f"if [ ! -s {shlex.quote(key_path)} ]; then $SUDO openssl ecparam -name prime256v1 -genkey -noout -out {shlex.quote(key_path)}; $SUDO chown root:caddy {shlex.quote(key_path)}; $SUDO chmod 0640 {shlex.quote(key_path)}; fi; "
+        f"$SUDO openssl req -new -key {shlex.quote(key_path)} -subj {shlex.quote('/CN=' + primary)} -out {shlex.quote(csr_path)}; "
+        f"$SUDO cat {shlex.quote(csr_path)}"
     )
     csr = _remote_checked(entry, command, timeout=60)
     issued = client.create_origin_certificate(csr, runtime["certificate_hostnames"])
     certificate_text = issued.get("certificate")
     if not isinstance(certificate_text, str) or not certificate_text.strip():
         raise cloudflare.CloudflareError("Cloudflare did not return an Origin CA certificate")
-    _write_remote_text(entry, cert_path, certificate_text, "0644")
+    temporary = f"/tmp/{name}-origin.pem"
+    _write_remote_text(entry, temporary, certificate_text, "0644")
+    _remote_checked(entry, (
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO install -o root -g caddy -m 0644 {shlex.quote(temporary)} {shlex.quote(cert_path)}; rm -f {shlex.quote(temporary)}"
+    ))
     return cert_path, key_path, {"id": issued.get("id"), "hostnames": runtime["certificate_hostnames"]}
 
 
@@ -214,10 +229,28 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     _write_remote_text(entry, env_file, runtime["environment"], "0600")
     prefix = _compose_prefix(validated, source_dir, override, env_file)
     service = shlex.quote(validated["compose"]["service"])
-    _remote_checked(entry, f"{prefix} up -d --build --remove-orphans {service}", timeout=900)
+    # Replace the image's anonymous application volume on each deployment so
+    # code/config changes are not shadowed by a previous container. Persistent
+    # data must be declared as named volumes (for WordPress: database/uploads).
+    _remote_checked(entry, f"{prefix} up -d --build --force-recreate --renew-anon-volumes --remove-orphans {service}", timeout=900)
     for init_service in validated["compose"].get("init_services", []):
+        # `compose up --build <web>` does not build a distinct image tagged for
+        # a one-shot job service. Build it explicitly so an updated initializer
+        # is never run from a previous deployment's image.
+        _remote_checked(entry, f"{prefix} build {shlex.quote(init_service)}", timeout=900)
         _remote_checked(entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}", timeout=900)
     _remote_checked(entry, f"{prefix} up -d {service}", timeout=300)
+
+
+def _ensure_host_source(entry: dict, home: str, project: str) -> str:
+    """Create a remote Git worktree for a hosted Compose project, not a WP plugin."""
+    target = f"{home}/deploy-src/hosts/{project}"
+    command = (
+        f"mkdir -p {shlex.quote(target)}; cd {shlex.quote(target)}; "
+        "if [ ! -d .git ]; then git init -q; git config receive.denyCurrentBranch updateInstead; fi"
+    )
+    _remote_checked(entry, command, timeout=60)
+    return target
 
 
 def _verify_remote_health(entry: dict, runtime: dict) -> None:
@@ -234,20 +267,41 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
 
 
 def _verify_edge(routes: list[dict]) -> None:
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        """Treat a redirect response as a successful reachable route.
+
+        The deploy verifier validates edge reachability, not an application's
+        redirect destination. Following a WordPress network redirect can loop
+        before content has been configured and would mask a healthy edge.
+        """
+        def redirect_request(self, request, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
     for route in routes:
         if route["hostname"].startswith("*."):
             continue
-        request = urllib.request.Request(f"https://{route['hostname']}/", method="GET")
+        request = urllib.request.Request(
+            f"https://{route['hostname']}/", method="GET",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)"},
+        )
         last_error = None
-        for _ in range(5):
+        # Cloudflare can need several minutes to activate edge certificates after
+        # proxying a previously DNS-only alias for the first time.
+        for _ in range(30):
             try:
-                with urllib.request.urlopen(request, timeout=15) as response:
+                with opener.open(request, timeout=15) as response:
                     if 200 <= response.status < 400:
                         last_error = None
                         break
+            except urllib.error.HTTPError as exc:
+                if 300 <= exc.code < 400:
+                    last_error = None
+                    break
+                last_error = exc
             except Exception as exc:  # Edge propagation is external and transient.
                 last_error = exc
-                time.sleep(2)
+            time.sleep(10)
         if last_error:
             raise RuntimeError(f"edge verification failed for {route['hostname']}: {last_error}")
 
@@ -260,7 +314,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     runtime["environment"] = hosting.render_env_file(validated, secret_values)
     client = cloudflare.Client()
     home = remote.resolve_sandbox_home(entry)
-    target = remote.ensure_deploy_repo(entry, validated["project_root"])
+    target = _ensure_host_source(entry, home, validated["project"])
     branch = remote.current_branch(validated["project_root"])
     sha = remote.push_commits(entry, validated["project_root"], target, branch)
     remote.reset_target_to(entry, target, sha)
@@ -303,7 +357,17 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
                 ssl_previous[zone["id"]] = current
                 client.ssl_mode(zone["id"], "strict")
             kind = "AAAA" if ":" in wanted["address"] else "A"
-            previous = next((record for record in client.records(zone["id"], hostname) if record.get("type") == kind), None)
+            all_records = client.records(zone["id"], hostname)
+            cname = next((record for record in all_records if record.get("type") == "CNAME"), None)
+            if cname and wanted.get("mode") == "redirect" and wanted.get("target"):
+                target_host = hosting.normalize_hostname(urllib.parse.urlsplit(wanted["target"]).hostname or "", wildcard=False)
+                cname_target = hosting.normalize_hostname(str(cname.get("content") or ""), wildcard=False)
+                if cname_target == target_host:
+                    updated = client.update_record(zone["id"], cname, proxied=True)
+                    changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id")})
+                    continue
+                raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
+            previous = next((record for record in all_records if record.get("type") == kind), None)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=True)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
         _verify_edge(validated["routes"])

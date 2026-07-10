@@ -65,7 +65,15 @@ class Client:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 data = json.loads(response.read().decode())
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as exc:
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                payload = json.loads(exc.read().decode())
+                detail = "; ".join(str(item.get("message", item)) for item in payload.get("errors", []))
+            except (ValueError, OSError):
+                pass
+            raise CloudflareError(f"Cloudflare request failed: HTTP {exc.code}{': ' + detail if detail else ''}") from exc
+        except (urllib.error.URLError, ValueError) as exc:
             raise CloudflareError(f"Cloudflare request failed: {exc}") from exc
         if not data.get("success"):
             messages = "; ".join(str(e.get("message", e)) for e in data.get("errors", []))
@@ -108,6 +116,15 @@ class Client:
             self._request("PUT", f"/zones/{zone_id}/dns_records/{record_id}", body)
         elif created_id:
             self.delete_record(zone_id, created_id)
+
+    def update_record(self, zone_id: str, record: dict, *, proxied: bool) -> dict:
+        """Update only an existing declared record while preserving its type/content."""
+        record_id = str(record.get("id") or "")
+        if not record_id:
+            raise CloudflareError("cannot update DNS record without an id")
+        body = {key: record[key] for key in ("type", "name", "content", "ttl", "comment") if key in record}
+        body["proxied"] = proxied
+        return self._request("PUT", f"/zones/{zone_id}/dns_records/{record_id}", body)["result"]
 
     def ssl_mode(self, zone_id: str, value: str = "strict") -> dict:
         return self._request("PATCH", f"/zones/{zone_id}/settings/ssl", {"value": value})["result"]

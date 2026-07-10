@@ -717,6 +717,8 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         info(f"apply_config: reconciling '{name}' in place (no data loss)…")
         if server == "herd":
             _pin_wp_constants_in_config(name, inst_cfg)
+            if wp_dir(name).exists():
+                _remove_obsolete_builder_authoring_assets(name)
         else:
             compose("up", "-d", "--force-recreate",
                     *_web_services(inst_cfg.get("server", "nginx")),
@@ -730,7 +732,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
                 _write_ondemand_muplugin(name)   # spec 010 — on-demand local plugin sourcing
                 _write_abilities_muplugin(name)  # spec 003 — in-instance WP Abilities
                 _write_licensing_muplugin(name)  # spec 013 — cross-instance Pro license activation
-                _write_schema_catalog(name)  # spec 012 — bundled schema catalog
+                _remove_obsolete_builder_authoring_assets(name)
 
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
         _wire_project_plugins(name, root, pconf)

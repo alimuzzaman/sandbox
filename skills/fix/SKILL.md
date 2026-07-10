@@ -159,8 +159,8 @@ evidence the *actual* bug fired against the *actual* code path.
 - Snapshot before destructive DB work: `./sb snapshot fix-<short-name>`
   before mass UPDATE/DELETE, migrations, or license-flow changes.
 - Never edit `runtime/wp/` core files or `vendor/`. Both get clobbered.
-- Editor-dependent authoring goes through wp-pilot (real headless
-  wp-admin), not hand-authored PHP — see `skills/wp-pilot/SKILL.md`.
+- Use `wp-pilot` only for browser-driven admin testing or UI verification; do
+  not hand-author browser state when a focused plugin API is available.
 - Never commit, push, tag, or open a PR. The loop ends at "verified
   fixed in the working tree." The human decides what to do next.
 

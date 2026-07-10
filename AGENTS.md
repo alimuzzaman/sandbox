@@ -8,7 +8,6 @@
 - **Anything WP-touching →** MCP tool first. `wp_cli` not `docker compose exec`. `wp_rest` not `curl`. `db_query` not `mysql`. Bash for `git`, `grep`, `find` only.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
-- **Page-builder authoring →** `load_skill('gutenberg-eb')` or `load_skill('elementor-ea')`. Don't hand-write markup.
 - **"Add" / "build" / "implement" →** `load_workflow('build-feature')`.
 - **About to commit / push / tag / open or merge a PR →** stop, stage diff, name what changed, wait for explicit approval. Approval for one action is never approval for the next.
 
@@ -152,10 +151,8 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 17. WP Abilities: categories register on `wp_abilities_api_categories_init` (before `wp_abilities_api_init`).
 18. wp-cli via `docker compose exec` on web; falls back to `compose run --rm wpcli` when web is down.
 19. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
-20. Schema catalog: regenerate after Pro update — visit admin dump page, then `./sb schema-catalog generate --instance <gen>`.
-
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/012-bundled-schema-catalog/plan.md
+at specs/015-managed-hosting-cloudflare/plan.md
 <!-- SPECKIT END -->

@@ -25,11 +25,6 @@ if (!function_exists('wp_register_ability')) {
 
 define('SANDBOX_ABILITIES_MAX_EXEC', 30); // hard execution-time cap (seconds), spec FR-003.
 
-// spec 005 — editor-authoring helpers (Gutenberg/EB + Elementor/EA).
-if (is_readable(__DIR__ . '/sandbox-editor.php')) {
-    require_once __DIR__ . '/sandbox-editor.php';
-}
-
 /** Per-instance enable flag (default on for disposable Sandbox instances). */
 function sandbox_abilities_enabled(): bool
 {
@@ -128,11 +123,7 @@ function sandbox_abilities_register_mcp_server($adapter): void
 }
 
 /**
- * The ability IDs exposed as MCP tools. The editor-authoring set is gated on the
- * same condition used to REGISTER it (the helper file having loaded) — NOT on
- * wp_get_ability(), because create_server() can run before
- * wp_abilities_api_init registers the abilities (an ordering trap that would
- * silently expose zero tools).
+ * The ability IDs exposed as MCP tools.
  */
 function sandbox_abilities_mcp_tool_ids(): array
 {
@@ -143,20 +134,6 @@ function sandbox_abilities_mcp_tool_ids(): array
         'sandbox/edit-file',
         'sandbox/list-directory',
     ];
-    if (function_exists('sandbox_editor_gutenberg_insert')) {
-        $ids = array_merge($ids, [
-            'sandbox/gutenberg-insert',
-            'sandbox/gutenberg-get',
-            'sandbox/gutenberg-update',
-            'sandbox/gutenberg-delete',
-            'sandbox/gutenberg-finalize',
-            'sandbox/elementor-insert',
-            'sandbox/elementor-get',
-            'sandbox/elementor-update',
-            'sandbox/elementor-delete',
-            'sandbox/editor-schema',
-        ]);
-    }
     return $ids;
 }
 
@@ -267,65 +244,6 @@ function sandbox_abilities_register(): void
         'meta' => $rest_meta + ['annotations' => ['readonly' => true, 'destructive' => false, 'idempotent' => true]],
     ]);
 
-    // spec 005 — editor authoring abilities (if the helpers loaded).
-    if (function_exists('sandbox_editor_gutenberg_insert')) {
-        $rw  = $rest_meta + ['annotations' => ['readonly' => false, 'destructive' => false, 'idempotent' => false]];
-        $ro  = $rest_meta + ['annotations' => ['readonly' => true, 'destructive' => false, 'idempotent' => true]];
-        // destructive ops carry a confirmationMessage (Angie-style annotation, T018).
-        $del = $rest_meta + ['annotations' => ['readonly' => false, 'destructive' => true, 'idempotent' => false,
-            'confirmationMessage' => 'This permanently removes the targeted block/element. Pass confirm:true.']];
-
-        wp_register_ability('sandbox/gutenberg-insert', [
-            'label' => __('Insert Gutenberg block', 'sandbox'), 'description' => __('Append a Gutenberg/Essential Blocks block (incl. nested inner_blocks) to a post (parse→serialize, unique blockId).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_gutenberg_insert', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
-        ]);
-        wp_register_ability('sandbox/gutenberg-get', [
-            'label' => __('Get Gutenberg blocks', 'sandbox'), 'description' => __('Return a post\'s parsed block tree + state hash (read-before-write).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_gutenberg_get', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $ro,
-        ]);
-        wp_register_ability('sandbox/gutenberg-update', [
-            'label' => __('Update Gutenberg block', 'sandbox'), 'description' => __('Merge attributes into a block located by blockId; re-serialize.', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_gutenberg_update', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
-        ]);
-        wp_register_ability('sandbox/gutenberg-delete', [
-            'label' => __('Delete Gutenberg block', 'sandbox'), 'description' => __('Remove a block by blockId (requires confirm:true).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_gutenberg_delete', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $del,
-        ]);
-        wp_register_ability('sandbox/gutenberg-finalize', [
-            'label' => __('Finalize Gutenberg block', 'sandbox'), 'description' => __('Queue a static/third-party block spec for the headless real-editor finalizer (valid + styled save markup).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_gutenberg_finalize', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
-        ]);
-        wp_register_ability('sandbox/elementor-insert', [
-            'label' => __('Insert Elementor widget', 'sandbox'), 'description' => __('Insert an Elementor/Essential Addons widget via Document::save (7-hex ids, auto-enable EA widget, CSS regen, full-width canvas).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_elementor_insert', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
-        ]);
-        wp_register_ability('sandbox/elementor-get', [
-            'label' => __('Get Elementor elements', 'sandbox'), 'description' => __('Return a post\'s Elementor element tree (id/elType/widgetType) + state hash (read-before-write).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_elementor_get', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $ro,
-        ]);
-        wp_register_ability('sandbox/elementor-update', [
-            'label' => __('Update Elementor element', 'sandbox'), 'description' => __('Merge settings into an element located by id; re-save; regen CSS.', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_elementor_update', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $rw,
-        ]);
-        wp_register_ability('sandbox/elementor-delete', [
-            'label' => __('Delete Elementor element', 'sandbox'), 'description' => __('Remove an element by id (requires confirm:true).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_elementor_delete', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $del,
-        ]);
-        wp_register_ability('sandbox/editor-schema', [
-            'label' => __('Editor schema', 'sandbox'), 'description' => __('Introspect registered Gutenberg blocks / Elementor widgets (full list or per-item attributes/controls).', 'sandbox'),
-            'category' => 'sandbox', 'input_schema' => ['type' => 'object'], 'output_schema' => ['type' => 'object'],
-            'execute_callback' => 'sandbox_editor_schema', 'permission_callback' => 'sandbox_abilities_permission_callback', 'meta' => $ro,
-        ]);
-    }
 }
 
 /**

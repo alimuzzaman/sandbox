@@ -27,6 +27,8 @@ def cmd_up(cfg: dict, args) -> None:
     if inst_cfg.get("server") == "herd":
         # Host-served by Herd — nothing to boot; Herd serves linked sites
         # whenever it's running.
+        if wp_dir(inst).exists():
+            _remove_obsolete_builder_authoring_assets(inst)
         ok(f"WordPress: {site_url(inst_cfg)}  (host-served by Herd)")
         return
     # If this instance uses the HTTPS proxy, make sure the loopback alias is
@@ -35,7 +37,12 @@ def cmd_up(cfg: dict, args) -> None:
     dom = inst_cfg.get("domain")
     if dom and dom.endswith(f".{_tld(inst_cfg)}") and proxy_available():
         _ensure_proxy_up(cfg)
-    compose("up", "-d", *_web_services(inst_cfg.get("server", "nginx")),
+    # Reconcile the declared service set on every boot.  In particular, this
+    # removes stale sidecars left behind after switching web-server modes
+    # (for example an old nginx service), so repeated setup cannot accumulate
+    # orphan containers.
+    compose("up", "-d", "--remove-orphans",
+            *_web_services(inst_cfg.get("server", "nginx")),
             instance=inst)
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
@@ -46,7 +53,7 @@ def cmd_up(cfg: dict, args) -> None:
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
         _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
-        _write_schema_catalog(inst)  # spec 012 — bundled schema catalog
+        _remove_obsolete_builder_authoring_assets(inst)
         # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
         # explicit on/off survives recreate / db-reset (which wipes the WP option,
         # default-on). Only touches wpcli when the mirror is explicitly set.
@@ -266,11 +273,25 @@ def cmd_install(cfg, args) -> None:
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
         _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
-        _write_schema_catalog(inst)  # spec 012 — bundled schema catalog
+        _remove_obsolete_builder_authoring_assets(inst)
+    elif wp_dir(inst).exists():
+        _remove_obsolete_builder_authoring_assets(inst)
 
     base = site_url(inst_cfg)  # https://<name>.<tld> when secured, else localhost:<port>
     ok(f"Admin: {base}/wp-admin"
        f"  •  Login: {base}/?sandbox_autologin={autologin_token}")
+
+
+def wp_is_installed(instance: str) -> bool:
+    """Return whether WordPress has completed its database install.
+
+    ``core version`` only proves that files exist; the base image can contain
+    those files before the database is initialized.  ``core is-installed`` is
+    the idempotency gate needed by ``sb setup``.
+    """
+    result = wpcli(["core", "is-installed"], instance=instance,
+                   check=False, capture=True)
+    return result.returncode == 0
 
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""

@@ -17,7 +17,7 @@ import sandbox.core._remote as sr
 # independent registry, never here (see _remote.py's module docstring).
 
 def cmd_remote(cfg, args) -> None:
-    """`./sb remote <add|list|provision|up|down|remove> [name] [ssh_url] [--json]`
+    """`./sb remote <add|list|provision|up|down|remove|set-origin> [name] [ssh_url] [--json]`
     -- register and manage remote VPS targets. See docs/remote-hosting.md."""
     action = args.action
     as_json = bool(getattr(args, "json", False))
@@ -28,6 +28,7 @@ def cmd_remote(cfg, args) -> None:
         "up": _cmd_up,
         "down": _cmd_down,
         "remove": _cmd_remove,
+        "set-origin": _cmd_set_origin,
     }
     dispatch[action](args, as_json)
 
@@ -87,6 +88,24 @@ def _cmd_list(args, as_json: bool) -> None:
         reach = "reachable" if r["reachable"] else "unreachable"
         prov = "provisioned" if r["provisioned"] else "not provisioned"
         print(f"  {r['name']}  {reach}, {prov}")
+
+
+def _cmd_set_origin(args, as_json: bool) -> None:
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    ipv4 = getattr(args, "ipv4", None)
+    ipv6 = getattr(args, "ipv6", None)
+    if not ipv4 and not ipv6:
+        die("remote set-origin requires --ipv4 and/or --ipv6")
+    entry = sr.put_remote(name, origin_ipv4=ipv4, origin_ipv6=ipv6)
+    result = {"ok": True, "name": name, "origin_ipv4_configured": bool(entry.get("origin_ipv4")),
+              "origin_ipv6_configured": bool(entry.get("origin_ipv6")), "error": None}
+    if as_json:
+        print(json.dumps(result))
+    else:
+        ok(f"stored public origin address for '{name}'")
 
 
 def _cmd_remove(args, as_json: bool) -> None:

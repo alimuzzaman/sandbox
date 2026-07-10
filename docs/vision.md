@@ -43,13 +43,13 @@ Run regression checks across multiple plugins
 🌐 Real Environment Navigation
 “Travel” through WordPress like a real user
 Navigate admin panels, plugin settings, editor screens
-Interact with Gutenberg blocks and Elementor widgets in real time
+Interact with plugin admin interfaces in real time
 🎨 AI-Powered Design System (Figma → WordPress)
 
 I also want the system to bridge design and implementation:
 
 Import designs from Figma or screenshots
-Convert them into Gutenberg blocks or Elementor widgets
+Compare them against rendered plugin interfaces
 Match existing plugin components visually
 Auto-generate UI improvements based on design systems
 Ensure consistency across all plugins

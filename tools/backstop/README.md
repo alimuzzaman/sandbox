@@ -25,7 +25,7 @@ npm --prefix tools/backstop install    # pulls backstopjs + a headless Chromium
 
 ```bash
 # reference URL first, build URL second
-sb vrdiff https://agency.blocks.templately.com/flexigency/ https://sandbox.tst/flexigency-home/ \
+sb vrdiff https://reference.example.test/ https://sandbox.tst/build/ \
    --label home --viewport 1280x900
 
 # multiple viewports, no auto-open, raw JSON

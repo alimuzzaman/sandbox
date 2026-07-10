@@ -356,6 +356,7 @@ ENV_LOCAL = SECRETS_ENV  # spec-009 canonical name (alias of SECRETS_ENV)
 CONNECT_TARGETS = {
     "fb": "fluentboards", "fluentboards": "fluentboards",
     "gh": "github", "github": "github",
+    "cloudflare": "cloudflare",
 }
 
 

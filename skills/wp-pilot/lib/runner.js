@@ -6,18 +6,11 @@
  *   const { runInEditor } = require('<absolute-path-to>/runner.js');
  *
  *   const result = await runInEditor({
- *     // Where to land. Defaults to a clean dashboard.
- *     url: 'http://localhost:8188/wp-admin/post.php?post=123&action=edit',
- *     // Code to run inside the page (gets passed `input` as its argument).
- *     evaluate: async (input) => {
- *       const blocks = [
- *         wp.blocks.createBlock('core/heading', { content: input.title }),
- *       ];
- *       const html = wp.blocks.serialize(blocks);
- *       await wp.apiFetch({ path: `/wp/v2/pages/${input.postId}`, method: 'POST', data: { content: html } });
- *       return { ok: true, length: html.length };
+ *     url: 'http://localhost:8188/wp-admin/admin.php?page=my-plugin',
+ *     drive: async (page) => {
+ *       await page.click('button[type="submit"]');
+ *       return { ok: true };
  *     },
- *     input: { postId: 123, title: 'Hello' },
  *   });
  *
  *   console.log(result); // { ok: true, length: 47 }
@@ -66,8 +59,8 @@ async function runInEditor(opts) {
         const url = settings.url || `${settings.site}/wp-admin/`;
         await page.goto(url, { waitUntil: 'domcontentloaded' });
 
-        // Editor / Elementor / Customizer need a beat to wire up their JS surface.
-        // Caller can override with settleMs: 0 for plain admin pages.
+        // Rich admin screens need a beat to wire up their JS surface. Caller can
+        // override with settleMs: 0 for plain admin pages.
         if (settings.settleMs > 0) await page.waitForTimeout(settings.settleMs);
 
         // Two modes:

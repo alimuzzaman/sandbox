@@ -47,8 +47,7 @@ Other known slug↔repo mismatches from the old catalog/notes (verify before use
 Projects that need extra wp.org plugins installed alongside (from the old
 `install_from_wporg`):
 
-- **EmbedPress**: `elementor`, `safe-svg` (sanitizes SVG uploads — required for any
-  design work; see `skills/wp-pilot/gotchas.md`).
+- **EmbedPress**: `elementor`, `safe-svg` (sanitizes SVG uploads).
 - **Essential Addons**: `elementor`, `safe-svg`.
 
 ## Pro plugins — shared declaration

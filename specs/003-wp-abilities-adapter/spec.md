@@ -41,8 +41,8 @@ value, echoed output, captured warnings/notices, and timing — without writing 
 file or rebuilding anything.
 
 **Why this priority**: Live-runtime execution is the irreplaceable capability this
-layer exists to add; everything else (file abilities, the editor engine in spec
-005) builds on it, and it is the single most-used agent affordance.
+layer exists to add; file abilities build on it, and it is the single most-used
+agent affordance.
 
 **Independent Test**: With one instance running and the layer enabled, call the
 code-execution ability and confirm it returns a structured result for a simple
@@ -237,7 +237,6 @@ caller is still refused.
   and multi-instance routing; this layer is additive.
 - The WordPress-native Abilities API + MCP adapter are available on supported WP
   versions; older versions degrade to a no-op.
-- Spec 005 (editor authoring) depends on this layer and is a primary consumer of it.
 - Application-password REST auth is available per the Sandbox's local-environment
   configuration.
 - The enable flag is a site-scoped option; multisite network-wide option scope is

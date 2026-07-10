@@ -35,7 +35,6 @@ import sandbox.commands.integ  # noqa: F401  (registers commands)
 import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
 import sandbox.commands.cache  # noqa: F401  (registers commands)
 import sandbox.commands.license  # noqa: F401  (registers commands)
-import sandbox.commands.schema_catalog  # noqa: F401  (registers commands)
 import sandbox.commands.migrate  # noqa: F401  (registers commands)
 import sandbox.commands.uninstall  # noqa: F401  (registers commands)
 import sandbox.commands.e2e  # noqa: F401  (registers commands)
@@ -43,6 +42,7 @@ import sandbox.commands.ci  # noqa: F401  (registers commands)
 import sandbox.commands.plugin_check  # noqa: F401  (registers commands)
 import sandbox.commands.remote  # noqa: F401  (registers commands)
 import sandbox.commands.deploy  # noqa: F401  (registers commands)
+import sandbox.commands.hosting  # noqa: F401  (registers commands)
 
 
 class _KVAction(argparse.Action):
@@ -366,7 +366,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "up/down: start/stop the remote MCP server; remove: forget a remote "
@@ -380,6 +380,8 @@ Per-project (each plugin carries its own sandbox.config.json):
              "interactive use, HTTPS in --json/non-interactive mode)")
     remote_p.add_argument("--control-host", default=None,
         help="public hostname for HTTPS control, e.g. sandbox-control.example.com")
+    remote_p.add_argument("--ipv4", default=None, help="public IPv4 address for hosted DNS records")
+    remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",
         help="accept the default HTTPS control-plane choice without prompting")
     remote_p.add_argument("--json", action="store_true",
@@ -403,6 +405,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="plugin slug to activate after --ensure; default is the project slug")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
+
+    host_p = sub.add_parser("host", help="Validate, plan, or apply a project hosting manifest")
+    host_p.add_argument("action", choices=["validate", "plan", "apply"])
+    host_p.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project containing sandbox.hosting.yml (default: current directory)")
+    host_p.add_argument("--environment", default=None, help="manifest environment name")
+    host_p.add_argument("--remote", default=None, help="registered remote for plan/apply")
+    host_p.add_argument("--confirm", action="store_true", help="allow the protected apply action")
+    host_p.add_argument("--allow-zone-ssl-change", action="store_true",
+        help="acknowledge a zone-wide Cloudflare SSL mode change")
+    host_p.add_argument("--json", action="store_true", help="print JSON")
 
     en = sub.add_parser("ensure",
         help="Boot the instance for a project dir (create-if-missing); per-project / MCP-first")
@@ -503,13 +516,6 @@ Per-project (each plugin carries its own sandbox.config.json):
     lic.add_argument("--from", dest="from_instance", default=None,
         help="for elementor-sync: the instance you connected Elementor Pro on "
              "(default: auto-detect the connected instance)")
-
-    sc = sub.add_parser("schema-catalog",
-        help="Generate/inspect the bundled editor-schema catalog (Pro-inclusive)")
-    sc.add_argument("action", nargs="?", choices=["status", "generate"], default="status",
-        help="status (default — counts + size); generate (dump registries → committed catalog)")
-    sc.add_argument("--instance", dest="gen_instance", default=None,
-        help="for generate: the instance to dump from (free + Pro plugins active)")
 
     px = sub.add_parser("pxdiff",
         help="Pixel-diff two PNG screenshots (reference vs build) + locate the drift")

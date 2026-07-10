@@ -10,8 +10,8 @@ current implementation is intentionally marked as pending live proof.
 
 Sandbox has already crossed the main architectural line: a single MCP server routes by
 `project_dir`; projects carry their own `sandbox.config.*`; the registry is per root;
-the live WordPress tool surface includes PHPUnit, Plugin Check, editor-schema catalog
-fallbacks, debugging tools, snapshots/reset, CI/e2e fan-out, and a first remote VPS path.
+the live WordPress tool surface includes PHPUnit, Plugin Check, debugging tools,
+snapshots/reset, CI/e2e fan-out, and a first remote VPS path.
 
 Green local evidence from the latest review pass:
 
@@ -49,32 +49,22 @@ enough for "done."
    Next work: re-run `run_plugin_check` or `./sb plugin-check` against the original real
    plugin repo and confirm the noise drops to the expected baseline-sized signal.
 
-3. **Editor-schema remaining proof**
-
-   Evidence: `specs/011-eb-attribute-schema/tasks.md` leaves EB Pro full-fidelity proof
-   and final evidence assembly qualified. `specs/012-bundled-schema-catalog/tasks.md`
-   leaves optional sampled validation unbuilt.
-
-   Next work: map a full EB Pro source checkout and prove a Pro block resolves at full
-   fidelity; then decide whether `schema-catalog validate --sample <n>` should move from
-   optional to release-gate for catalog refreshes.
-
 ## P1 - Reliability And Release Readiness
 
 1. **Turn deferred live checks into a single release checklist**
 
    Evidence: pending or partial verification is spread across specs 003, 004, 008, 009,
-   011, 012, 013, and 014. This makes "are we ready?" harder to answer than it should be.
+   013, and 014. This makes "are we ready?" harder to answer than it should be.
 
    Next work: create one release-gate document or command that reports all deferred
    validations: Herd parity, runtime relocation, dashboard reset/snapshot UI, Plugin
-   Check live run, remote VPS live run, and schema-catalog drift.
+   Check live run, and remote VPS live run.
 
 2. **Doctor should know more about modern features**
 
    Evidence: roadmap/readiness docs already treat `doctor` as the health surface, while
    new features added hidden dependencies: MCP venv freshness, Plugin Check installability,
-   schema catalog presence/version drift, HTTPS/Tailscale control reachability, and
+   HTTPS/Tailscale control reachability, and
    remote config shape.
 
    Next work: extend `./sb doctor` with feature probes and actionable messages.
@@ -129,26 +119,7 @@ enough for "done."
    Next work: spec an authenticated automation surface for triggering safe sandbox jobs
    from Slack/FluentBoards/mobile, with explicit allowlisted actions and audit logs.
 
-## P3 - Authoring And Design Automation
-
-1. **Stateful Gutenberg/Elementor finalization**
-
-   Evidence: spec 011 found that correct schema alone does not guarantee non-empty static
-   block rendering; static blocks need finalizer/editor save behavior.
-
-   Next work: re-home the render-proof work to spec 005/editor authoring and make
-   `gutenberg-finalize` / Elementor stateful authoring the canonical path for blocks that
-   cannot be represented by attributes alone.
-
-2. **Figma-to-WordPress pipeline**
-
-   Evidence: `docs/vision.md` names Figma/screenshot-to-Gutenberg/Elementor as a core
-   product goal; README still lists Figma MCP as a future item.
-
-   Next work: start with a narrow spec: import a Figma frame, map it to known block/widget
-   primitives using editor-schema, render in a sandbox page, and verify via screenshot diff.
-
-## P4 - Dashboard And Product Polish
+## P3 - Dashboard And Product Polish
 
 1. **Dashboard parity for snapshots/reset**
 

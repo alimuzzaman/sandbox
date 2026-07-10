@@ -121,6 +121,27 @@ your local `sb`/MCP tools:
 ssh ubuntu@203.0.113.10 "cd \$SANDBOX_HOME/deploy-src/<project-slug> && ./sb ensure --project-dir ."
 ```
 
+## Managed Compose hosts
+
+Projects that are not WordPress plugins can carry a project-local
+`sandbox.hosting.yml`. It describes a Compose web service, deployment policy,
+primary hostname, aliases, redirects, and the required Cloudflare policy.
+
+```bash
+./sb host validate --project-dir /path/to/site
+./sb host plan --project-dir /path/to/site --environment production --remote myvps
+./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+```
+
+`validate` is offline. `plan` is read-only and lists only the declared hostnames;
+it never prunes unrelated DNS records. `apply` is deliberately confirmation-gated and
+remains disabled until a separately approved live migration. Configure a future
+Cloudflare API token with `./sb connect cloudflare` and record the VPS's public address
+with `./sb remote set-origin myvps --ipv4 <address>`; both values stay outside Git.
+
+The selected policy is Cloudflare-proxied DNS with Origin CA certificates and Full
+(strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.
+
 Then use `wp_cli`, `fs_read`, `visit`, `run_tests`, etc. through the `sandbox-myvps` MCP
 connection exactly as you would through `sandbox` locally.
 

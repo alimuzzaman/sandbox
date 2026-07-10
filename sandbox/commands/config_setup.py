@@ -22,11 +22,12 @@ from sandbox.registry import register
 
 
 def cmd_connect(cfg, args) -> None:
-    """Save credentials for an external integration (FluentBoards, GitHub).
+    """Save credentials for an external integration (FluentBoards, GitHub, Cloudflare).
 
     Usage:
       ./sb connect fb           # or: fluentboards
       ./sb connect gh           # or: github
+      ./sb connect cloudflare   # API token (stored locally only)
       ./sb connect              # list available targets
     """
     target = getattr(args, "target", None)
@@ -35,6 +36,7 @@ def cmd_connect(cfg, args) -> None:
         print("\nAvailable targets:")
         print("  fb, fluentboards   FluentBoards URL + email + app password")
         print("  gh, github         GitHub org/user + gh CLI auth (private repos)")
+        print("  cloudflare         Cloudflare API token for managed hosting")
         print()
         return
 
@@ -48,9 +50,16 @@ def cmd_connect(cfg, args) -> None:
         _connect_fluentboards(cfg, non_interactive=ni)
     elif canonical == "github":
         _connect_github(cfg, non_interactive=ni)
+    elif canonical == "cloudflare":
+        from sandbox.core._cloudflare import save_cloudflare_token
+        token = os.environ.get("CLOUDFLARE_API_TOKEN", "") if ni else input(
+            "Cloudflare API token (stored locally, not echoed): "
+        )
+        save_cloudflare_token(token)
+        ok("Cloudflare token stored in sandbox.local.yml")
 
 def cmd_setup(cfg, args) -> None:
-    from sandbox.commands.lifecycle import cmd_up, cmd_install, cmd_doctor
+    from sandbox.commands.lifecycle import cmd_up, cmd_install, cmd_doctor, wp_is_installed
     from sandbox.commands.integ import cmd_mcp_install
     from sandbox.commands.ui_dash import cmd_web
     """One command: boot the stack, install WP, build MCP, wire Claude.
@@ -88,7 +97,6 @@ def cmd_setup(cfg, args) -> None:
 
     instances = {} if no_instances else resolve_instances(cfg)
     import types
-    import urllib.request, time
     for inst_name, inst_cfg in instances.items():
         print(f"\n▸ Instance '{inst_name}': booting docker stack (wp + db + mailpit)…")
         sub_args = types.SimpleNamespace(**vars(args), resolved_instance=inst_name) \
@@ -97,16 +105,19 @@ def cmd_setup(cfg, args) -> None:
         cmd_up(cfg, sub_args)
 
         # Wait for WP to be reachable before `wp core install` to avoid races.
-        port = inst_cfg["wordpress_port"]
-        for _ in range(30):
-            try:
-                urllib.request.urlopen(f"http://localhost:{port}", timeout=2)
-                break
-            except Exception:
-                time.sleep(1)
+        # Use the canonical URL: secured/multisite instances do not resolve
+        # correctly through localhost:<port>.
+        _wait_reachable(inst_cfg)
 
-        print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
-        cmd_install(cfg, sub_args)
+        if wp_is_installed(inst_name):
+            # setup is intentionally safe to repeat: installation rotates
+            # credentials and tokens, and can re-download pinned core.  Those
+            # actions belong to an explicit recreate/apply flow, not a normal
+            # stack reconciliation.
+            ok(f"Instance '{inst_name}': WordPress already installed — skipping installation")
+        else:
+            print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
+            cmd_install(cfg, sub_args)
 
     # Clean URLs: give every instance a http://<name>.tst (no port) via the URL
     # proxy. Local + interactive + Docker only. Skipped in server mode (the box

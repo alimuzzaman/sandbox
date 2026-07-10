@@ -172,7 +172,7 @@ and hands it the keys.
   loads on demand via `load_context` / `load_skill(name)`.
 - **Skills + workflows** for the patterns that repeat: `fix` for bugs (one-pass
   loop with paired before/after evidence), `build-feature` for new features
-  (three-phase, size-scaled gates), `wp-pilot` for editor-stateful authoring,
+  (three-phase, size-scaled gates), `wp-pilot` for browser-driven admin testing,
   `fluentboards` for task management.
 
 ### What that means on three tasks you actually do
@@ -196,10 +196,8 @@ verified by an MCP call; non-negotiables — auth, sanitize-in/escape-out, slug
 prefixing — enforced per Edit). Final `STATUS: SHIPPED` block pairs every
 success criterion with live evidence + rollout notes.
 
-**Design a page.** `wp_rest` POST creates the page; block JSON written via
-`fs_write` (or `load_skill('wp-pilot')` drives real wp-admin headlessly for
-stateful blocks/Elementor); `visit` returns a screenshot + DOM + console errors
-to verify rendering without you switching tabs.
+**Verify a UI flow.** `visit` opens a real admin or frontend URL and returns a
+screenshot, DOM, and console errors without you switching tabs.
 
 ### The two underlying patterns
 
@@ -409,10 +407,11 @@ and can usually diagnose itself.
   externally-provisioned phpunit harness (`sandbox test` / `run_tests`);
   `sandbox init`; server-aware version pins; headless Chromium with auto-login
   (`visit`); size-scaled `build-feature` workflow; one-pass `fix` skill;
-  FluentBoards integration; Plugin Check; schema catalog fallback; first-pass
-  remote VPS hosting; npm + Homebrew + curl distribution.
-- **Next** — prove the recent work live (remote VPS, Plugin Check post-fix
-  re-run, schema fidelity), then move into remote automation and Figma-to-
-  WordPress authoring. See [`docs/future-roadmap.md`](docs/future-roadmap.md).
+  FluentBoards integration; Plugin Check; first-pass remote VPS hosting; managed
+  Compose-host validation with Cloudflare DNS/TLS planning; npm +
+  Homebrew + curl distribution.
+- **Next** — prove the recent work live (remote VPS and Plugin Check post-fix
+  re-run), then move into remote automation. See
+  [`docs/future-roadmap.md`](docs/future-roadmap.md).
 
 Re-run `./sb setup` after a global config change — it's idempotent.

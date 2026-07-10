@@ -35,7 +35,7 @@ DEFAULT_EXTRACTOR = REPO_ROOT / "skills" / "design-fidelity-diff" / "extract-web
 # (native loading="lazy" AND the common data-src lazyload schemes), and dwell-scroll top→bottom
 # so viewport-gated media starts fetching + the layout reflows. Image DOWNLOAD is then awaited
 # on the Python side (network-idle + a bounded completeness poll) — a fixed JS decode() race is
-# too short for a heavy page of remote images (measured: 49/56 unloaded on the flexigency demo).
+# too short for a heavy page of remote images.
 PREP_JS = r"""
 async ({ freeze, dwellMs }) => {
   // transition:none is safe to force immediately — a class-toggled reveal then applies its
@@ -71,7 +71,7 @@ async ({ freeze, dwellMs }) => {
     // library (not a one-time class toggle) ties inline transform/opacity directly to scroll
     // position, so scrollTo(0,0) below would snap it back to its off-screen starting value.
     // Bake the CURRENT computed transform/opacity into an inline !important override so the
-    // scroll-back can't move it again (measured: flexigency's stat-card row read x=-249 while
+    // scroll-back can't move it again (a horizontally scrolling row can read a negative x while
     // visually rendered at x=52 — a mid-parallax frame captured after an unconditional scroll-up).
     document.querySelectorAll('body *').forEach(el => {
       const cs = getComputedStyle(el);

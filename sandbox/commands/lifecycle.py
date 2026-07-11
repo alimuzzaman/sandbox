@@ -149,18 +149,43 @@ def cmd_install(cfg, args) -> None:
     #    errors from non-existent patch-level image tags (e.g. 6.9.4-php8.1).
     #  - When a wp_version is pinned, always force-download it so the container
     #    runs the exact requested version, not whatever ships in the base image.
-    #  - Without a pin, skip the download if WP is already present (the base
-    #    image ships WP latest, which is fine for unpinned instances).
+    #  - Without a pin, ask WordPress.org whether a newer stable release is
+    #    available before deciding whether the bundled core can be reused.
     wp_v = inst_cfg.get("wp_version")
     if wp_v:
         info(f"downloading WordPress {wp_v}…")
         wpcli(["core", "download", "--force", f"--version={wp_v}"],
               instance=inst, check=False)
     else:
-        ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
-        if ver.returncode != 0:
-            info("downloading WordPress core (latest)…")
-            wpcli(["core", "download", "--force"], instance=inst, check=False)
+        latest = None
+        update = wpcli(
+            ["core", "check-update", "--format=json"],
+            instance=inst,
+            check=False,
+            capture=True,
+        )
+        if update.returncode == 0 and update.stdout:
+            try:
+                offers = json.loads(update.stdout)
+            except (TypeError, ValueError):
+                offers = []
+            if isinstance(offers, list) and offers:
+                candidate = offers[0].get("version")
+                if isinstance(candidate, str) and candidate:
+                    latest = candidate
+
+        if latest:
+            info(f"WordPress.org reports WordPress {latest}; downloading it…")
+            wpcli(
+                ["core", "download", "--force", f"--version={latest}"],
+                instance=inst,
+                check=False,
+            )
+        else:
+            ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
+            if ver.returncode != 0:
+                info("downloading WordPress core (latest)…")
+                wpcli(["core", "download", "--force"], instance=inst, check=False)
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:
         info("generating wp-config.php…")

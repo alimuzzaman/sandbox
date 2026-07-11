@@ -31,6 +31,10 @@ Interactive provider setup is operator-owned:
 ./sb hermes doctor --remote scaleway-sandbox --json
 ```
 
+Sandbox-owned setup selects `openai-codex` with default model
+`gpt-5.3-codex-spark`; the operator must still complete the provider OAuth
+login on the remote account.
+
 Doctor must confirm:
 
 - the Hermes launcher and pinned commit;

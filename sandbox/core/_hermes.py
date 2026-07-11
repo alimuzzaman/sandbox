@@ -26,6 +26,8 @@ import sandbox.core._remote as remote
 SUPPORTED_TAG = "v2026.7.7.2"
 SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
+HERMES_DEFAULT_PROVIDER = "openai-codex"
+HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
 HERMES_RELEASE_SIGNER = "teknium1"
 # Pinned after verifying the upstream release tag signer fingerprint
 # SHA256:x9xNOpeJhoEAY2gWhmWHZROC3QF3VjOEbmNo9vQ8y2A.
@@ -342,6 +344,7 @@ def _record_v2_evidence(entry: dict, paths: dict, check: str, details: dict | No
 def render_profile(sandbox_home: str, sb_path: str) -> dict:
     """Return the integration-owned Hermes config values without secrets."""
     return {
+        "model": {"default": HERMES_DEFAULT_MODEL, "provider": HERMES_DEFAULT_PROVIDER},
         "terminal": {"backend": "local", "home_mode": "real", "cwd": f"{sandbox_home}/hermes-repos"},
         "approvals": {
             "mode": "manual", "cron_mode": "deny", "mcp_reload_confirm": True,
@@ -448,6 +451,8 @@ fi
 {paths['launcher']} config set mcp_servers.sandbox.supports_parallel_tool_calls false >/dev/null
 {paths['launcher']} config set mcp_servers.sandbox.tools.resources true >/dev/null
 {paths['launcher']} config set mcp_servers.sandbox.tools.prompts true >/dev/null
+{paths['launcher']} config set model.default {shlex.quote(HERMES_DEFAULT_MODEL)} >/dev/null
+{paths['launcher']} config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null
 {paths['launcher']} config set terminal.backend local >/dev/null
 {paths['launcher']} config set terminal.home_mode real >/dev/null
 {paths['launcher']} config set terminal.cwd {shlex.quote(paths['repo_root'])} >/dev/null

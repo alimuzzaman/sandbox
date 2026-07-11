@@ -67,7 +67,9 @@ Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
 instead use the upstream OpenAI Codex OAuth provider on the remote:
 `hermes auth add openai-codex --type oauth`. The subscription login remains
 isolated in that Hermes account and is separate from the fine-grained GitHub
-repository token above.
+repository token above. Sandbox-owned setup defaults the model to
+`gpt-5.3-codex-spark` with provider `openai-codex`; authentication is still an
+explicit operator action.
 
 Create that fine-grained token in GitHub with the repository's owner as its
 resource owner, **Only select repositories** set to the one repository Hermes

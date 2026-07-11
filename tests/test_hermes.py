@@ -172,6 +172,7 @@ class TestProfileRendering(unittest.TestCase):
     def test_profile_snapshot_has_expected_non_secret_owned_settings(self):
         rendered = hermes.render_profile("/home/u/sandbox", "/home/u/sandbox/sb-src/sb")
         self.assertEqual(rendered, {
+            "model": {"default": "gpt-5.3-codex-spark", "provider": "openai-codex"},
             "terminal": {"backend": "local", "home_mode": "real", "cwd": "/home/u/sandbox/hermes-repos"},
             "approvals": {"mode": "manual", "cron_mode": "deny", "mcp_reload_confirm": True,
                           "destructive_slash_confirm": True},
@@ -433,6 +434,8 @@ class TestRemoteCommands(unittest.TestCase):
         persisted = write_state.call_args.args[2]
         self.assertEqual(persisted["installation"], {"release_tag": "v2026.7.7.2", "commit": "a" * 40, "status": "configured"})
         self.assertIn("sandbox-integration.json.backup", ssh_run.call_args_list[1].args[1])
+        self.assertIn("config set model.default gpt-5.3-codex-spark", ssh_run.call_args_list[1].args[1])
+        self.assertIn("config set model.provider openai-codex", ssh_run.call_args_list[1].args[1])
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")

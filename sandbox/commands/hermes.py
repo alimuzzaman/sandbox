@@ -197,7 +197,6 @@ def cmd_hermes(cfg, args) -> None:
                 fqdn=args.fqdn,
                 confirm=args.confirm,
                 plan=args.plan,
-                insecure=args.insecure,
                 lines=args.lines,
             )
         else:  # argparse choices guard this, but keep a safe future boundary.

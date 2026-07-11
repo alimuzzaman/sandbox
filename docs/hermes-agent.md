@@ -90,7 +90,8 @@ The local Sandbox MCP server also exposes `hermes_status(remote)` and
 `hermes_job_status(remote, job_id, offset=0)` and
 `hermes_job_kill(remote, job_id)`. Async runs return a Hermes job ID; the
 equivalent CLI operations are `sb hermes job status|kill`. Returned output is
-bounded and sanitized.
+bounded and sanitized, including labelled and common bare provider/API,
+OAuth, and cookie credential forms.
 
 ## V2 and V3 gates
 
@@ -115,8 +116,9 @@ planned and never uses insecure mode.
 `acceptance v2` is read-only: it reports the revision-bound evidence written by
 the approved live recovery suite. It never offers an override or a way to set a
 passing gate manually. Until every required check is recorded against the
-currently installed Hermes commit, every dashboard action refuses without
-changing the remote.
+currently installed Hermes commit and integration schema, every dashboard action
+refuses without changing the remote. The wrapper exposes no `--insecure`
+option.
 
 After V2 passes, the dashboard wrapper creates an isolated remote virtualenv
 for the pinned upstream Hermes web/PTY extras and manages a loopback-only user

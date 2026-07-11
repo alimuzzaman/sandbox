@@ -33,7 +33,16 @@ STATE_SCHEMA = 1
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _JOB_RE = re.compile(r"^[0-9a-f]{16}$")
-_SECRET_RE = re.compile(r"(?i)\b(token|password|secret|authorization)\b\s*[=:]\s*(?:bearer\s+)?[^\s,]+")
+_SECRET_RE = re.compile(r"(?i)\b(token|password|secret|authorization|cookie|session)\b\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
+_BARE_SECRET_RE = re.compile(
+    r"(?ix)(?:"
+    r"github_pat_[a-z0-9_]{20,}|"
+    r"gh[pousr]_[a-z0-9]{20,}|"
+    r"sk-(?:proj-)?[a-z0-9_-]{20,}|"
+    r"xox[baprs]-[a-z0-9-]{20,}|"
+    r"ya29\.[a-z0-9._-]{20,}"
+    r")"
+)
 _DEFAULT_POLICY = {"max_jobs": 2, "max_worktrees": 8, "min_free_disk_mb": 1024, "min_free_memory_mb": 512}
 _BACKUP_RETENTION_COUNT = 10
 _BACKUP_MIN_FREE_MB = 512
@@ -58,7 +67,21 @@ class HermesError(RuntimeError):
 
 def _redact(value: str, entry: dict | None = None) -> str:
     text = remote.redact_ssh_connection(str(value or ""), entry)
-    return _SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", text)
+    text = _SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", text)
+    return _BARE_SECRET_RE.sub("[redacted]", text)
+
+
+def _redact_public(value):
+    """Recursively protect result-envelope strings from remote output leaks."""
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, list):
+        return [_redact_public(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_public(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_public(item) for key, item in value.items()}
+    return value
 
 
 def result(ok: bool, action: str, remote_name: str, *, version: str | None = None,
@@ -71,13 +94,13 @@ def result(ok: bool, action: str, remote_name: str, *, version: str | None = Non
         "ok": ok,
         "action": action,
         "remote": remote_name,
-        "version": version,
-        "commit": commit,
-        "status": status,
-        "repo": repo,
-        "path": path,
-        "job_id": job_id,
-        "data": data or {},
+        "version": _redact_public(version),
+        "commit": _redact_public(commit),
+        "status": _redact_public(status),
+        "repo": _redact_public(repo),
+        "path": _redact_public(path),
+        "job_id": _redact_public(job_id),
+        "data": _redact_public(data or {}),
         "error": None if error is None else {
             "code": error.code,
             "message": _redact(str(error)),
@@ -587,12 +610,16 @@ def _v2_gate(state: dict) -> dict:
         evidence = {}
     missing = [name for name in _V2_ACCEPTANCE_CHECKS if evidence.get(name) != "passed"]
     revision_matches = bool(current_commit and record.get("commit") == current_commit)
-    status = "passed" if record.get("status") == "passed" and revision_matches and not missing else "pending"
+    integration_schema_matches = record.get("integration_schema") == STATE_SCHEMA
+    if not integration_schema_matches:
+        missing.append("integration_schema")
+    status = "passed" if record.get("status") == "passed" and revision_matches and integration_schema_matches and not missing else "pending"
     return {
         "status": status,
         "commit": current_commit,
         "recorded_at": record.get("recorded_at"),
         "revision_matches": revision_matches,
+        "integration_schema_matches": integration_schema_matches,
         "missing_checks": missing,
     }
 
@@ -1304,12 +1331,9 @@ def _dashboard_forward(remote_name: str, port: int) -> str:
 
 def dashboard_action(remote_name: str, action: str, *, port: int | str | None = None,
                      fqdn: str | None = None, confirm: bool = False,
-                     plan: bool = False, insecure: bool = False, **_kwargs) -> dict:
+                     plan: bool = False, lines: int = 200) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
-    # Validate the unsafe bypass before any mutation, even when V2 is already passed.
-    if insecure:
-        raise HermesError("insecure dashboard authentication is never supported", "insecure_dashboard_rejected")
     selected_port = validate_dashboard_port(port)
     gate = _dashboard_gate(entry, paths)
     state = _remote_state_read(entry, paths)
@@ -1363,7 +1387,7 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
                       commit=gate["commit"], data=status_data,
                       error=None if ok else HermesError("dashboard loopback/authentication checks failed", "dashboard_health_failed"))
     if action == "logs":
-        lines = int(_kwargs.get("lines", 200) or 200)
+        lines = int(lines or 200)
         if lines < 1 or lines > 1000:
             raise HermesError("log lines must be between 1 and 1000", "invalid_log_limit")
         logs = _checked(entry, f"journalctl --user -u {DASHBOARD_UNIT} -n {lines} --no-pager", timeout=60,

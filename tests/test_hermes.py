@@ -69,6 +69,19 @@ class TestValidation(unittest.TestCase):
         self.assertNotIn("secret-bearer", json.dumps(data))
         self.assertNotIn("user@host", json.dumps(data))
 
+    def test_result_recursively_redacts_bare_provider_and_cookie_values(self):
+        github = "github_pat_" + "a" * 30
+        openai = "sk-proj-" + "b" * 30
+        slack = "xoxb-" + "c" * 30
+        payload = hermes.result(True, "logs", "test", data={
+            "output": f"{github} {openai} {slack} cookie=session-value",
+            "nested": ["ya29." + "d" * 30],
+        })
+        rendered = json.dumps(payload)
+        for secret in (github, openai, slack, "session-value", "ya29." + "d" * 30):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("[redacted]", rendered)
+
     @patch("sandbox.core._hermes.remote.ssh_run")
     def test_remote_timeout_becomes_a_retryable_sanitized_error(self, ssh_run):
         ssh_run.side_effect = subprocess.TimeoutExpired(["ssh"], 30)
@@ -211,6 +224,7 @@ class TestProfileRendering(unittest.TestCase):
             "schema_version": 1,
             "installation": {"commit": hermes.SUPPORTED_COMMIT},
             "gates": {"v2_operations": {"status": "passed", "commit": hermes.SUPPORTED_COMMIT,
+                "integration_schema": hermes.STATE_SCHEMA,
                 "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS}}},
         }
         hermes.dashboard_action("test", "install")
@@ -225,6 +239,7 @@ class TestProfileRendering(unittest.TestCase):
         get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
         state = {"schema_version": 1, "installation": {"commit": hermes.SUPPORTED_COMMIT},
                  "gates": {"v2_operations": {"status": "passed", "commit": hermes.SUPPORTED_COMMIT,
+                    "integration_schema": hermes.STATE_SCHEMA,
                     "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS}}},
                  "dashboard": {"installed": True, "auth_mode": "upstream"}}
         ssh_run.side_effect = [_completed(stdout="/home/ubuntu/sandbox\n"), _completed(stdout=json.dumps(state)),
@@ -474,6 +489,7 @@ class TestRemoteCommands(unittest.TestCase):
             "installation": {"commit": "a" * 40},
             "gates": {"v2_operations": {
                 "status": "passed", "commit": "a" * 40,
+                "integration_schema": hermes.STATE_SCHEMA,
                 "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS},
             }},
         }
@@ -482,6 +498,20 @@ class TestRemoteCommands(unittest.TestCase):
         gate = hermes._v2_gate(state)
         self.assertEqual(gate["status"], "pending")
         self.assertFalse(gate["revision_matches"])
+
+    def test_v2_gate_requires_current_integration_schema(self):
+        state = {
+            "schema_version": 1,
+            "installation": {"commit": "a" * 40},
+            "gates": {"v2_operations": {
+                "status": "passed", "commit": "a" * 40,
+                "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS},
+            }},
+        }
+        gate = hermes._v2_gate(state)
+        self.assertEqual(gate["status"], "pending")
+        self.assertIn("integration_schema", gate["missing_checks"])
+        self.assertFalse(gate["integration_schema_matches"])
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

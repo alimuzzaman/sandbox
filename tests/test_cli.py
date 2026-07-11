@@ -69,7 +69,12 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("--port", r.stdout)
         self.assertIn("--fqdn", r.stdout)
         self.assertIn("--plan", r.stdout)
-        self.assertIn("--insecure", r.stdout)
+        self.assertNotIn("--insecure", r.stdout)
+
+    def test_dashboard_insecure_option_is_not_accepted_by_the_parser(self):
+        r = run_sb("hermes", "dashboard", "status", "--remote", "test", "--insecure")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unrecognized arguments: --insecure", r.stderr)
 
     def test_dashboard_refuses_before_v2_without_remote_mutation(self):
         r = run_sb("hermes", "dashboard", "install", "--remote", "missing-dashboard-remote", "--json")

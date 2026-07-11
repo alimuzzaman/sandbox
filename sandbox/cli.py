@@ -442,10 +442,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list; job: status|kill; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2")
+        help="repo: auth|clone|list; job: status|kill; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")
@@ -453,6 +453,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--commit", default=None, help="full commit expected for --version")
     hermes_p.add_argument("--repo", default=None, help="managed repository name")
     hermes_p.add_argument("--url", default=None, help="repository URL for `hermes repo clone`")
+    hermes_p.add_argument("--state-repo", default=None, help="private GitHub state repository URL for `hermes state setup`")
+    hermes_p.add_argument("--drive-destination", default=None, help="rclone Drive destination for `hermes drive setup`, e.g. gdrive:hermes-backups")
+    hermes_p.add_argument("--passphrase-stdin", action="store_true", help="read a Drive recovery passphrase from standard input")
     hermes_p.add_argument("--token-stdin", action="store_true",
         help="read a fine-grained GitHub repository token from stdin for `repo auth github`")
     hermes_p.add_argument("--name", default=None, help="managed repository name for clone")

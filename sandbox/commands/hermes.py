@@ -199,6 +199,36 @@ def cmd_hermes(cfg, args) -> None:
                 plan=args.plan,
                 lines=args.lines,
             )
+        elif action == "state":
+            if args.subaction == "setup":
+                if not args.state_repo:
+                    raise hermes.HermesError("hermes state setup requires --state-repo", "missing_state_repo")
+                payload = hermes.state_setup(args.remote, args.state_repo)
+            elif args.subaction == "sync":
+                payload = hermes.state_sync(args.remote, args.confirm)
+            elif args.subaction == "restore":
+                payload = hermes.state_restore(args.remote, args.confirm)
+            else:
+                raise hermes.HermesError("state action must be setup, sync, or restore", "invalid_state_action")
+        elif action == "drive":
+            if args.subaction == "setup":
+                if not args.drive_destination:
+                    raise hermes.HermesError("hermes drive setup requires --drive-destination", "missing_drive_destination")
+                payload = hermes.drive_setup(args.remote, args.drive_destination)
+            elif args.subaction == "backup":
+                if not args.passphrase_stdin or sys.stdin.isatty():
+                    raise hermes.HermesError("Drive backup requires --passphrase-stdin", "recovery_passphrase_required")
+                payload = hermes.drive_backup(args.remote, sys.stdin.buffer.read(), args.confirm)
+            elif args.subaction == "list":
+                payload = hermes.drive_list(args.remote)
+            elif args.subaction == "restore":
+                if not args.backup_id:
+                    raise hermes.HermesError("Drive restore requires --backup-id", "missing_backup_id")
+                if not args.passphrase_stdin or sys.stdin.isatty():
+                    raise hermes.HermesError("Drive restore requires --passphrase-stdin", "recovery_passphrase_required")
+                payload = hermes.drive_restore(args.remote, args.backup_id, sys.stdin.buffer.read(), args.confirm)
+            else:
+                raise hermes.HermesError("drive action must be setup, backup, list, or restore", "invalid_drive_action")
         else:  # argparse choices guard this, but keep a safe future boundary.
             raise hermes.HermesError("unknown Hermes action", "invalid_action")
     except hermes.HermesError as exc:

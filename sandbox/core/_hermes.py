@@ -15,6 +15,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -28,6 +29,8 @@ SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
+HERMES_STATE_REPO_KEY = "hermes_state_repo"
+HERMES_DRIVE_DESTINATION_KEY = "hermes_drive_destination"
 HERMES_RELEASE_SIGNER = "teknium1"
 # Pinned after verifying the upstream release tag signer fingerprint
 # SHA256:x9xNOpeJhoEAY2gWhmWHZROC3QF3VjOEbmNo9vQ8y2A.
@@ -194,9 +197,51 @@ def _require_remote(name: str) -> dict:
     return entry
 
 
+def validate_state_repo(value: str) -> str:
+    """Accept only credential-free GitHub repository URLs."""
+    value = (value or "").strip()
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or parsed.username or parsed.password:
+        raise HermesError("state repository must be an HTTPS GitHub URL without credentials", "invalid_state_repo")
+    path = parsed.path.strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", path):
+        raise HermesError("state repository must be github.com/OWNER/REPOSITORY", "invalid_state_repo")
+    return urlunsplit(("https", "github.com", "/" + path.removesuffix(".git") + ".git", "", ""))
+
+
 def _ssh(entry: dict, command: str, timeout: int = 60) -> subprocess.CompletedProcess:
     try:
         return remote.ssh_run(entry, command, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
+
+
+def _ssh_stdin(entry: dict, command: str, data: bytes, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run a remote command with sensitive input over SSH stdin, never argv."""
+    try:
+        return subprocess.run(remote.ssh_command_args(entry, command), input=data,
+                              capture_output=True, text=False, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
+
+
+def _ssh_stdin_with_progress(entry: dict, command: str, data: bytes, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Relay sanitized remote stderr progress while preserving stdout for JSON results."""
+    try:
+        proc = subprocess.Popen(remote.ssh_command_args(entry, command), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
+        assert proc.stdin and proc.stdout and proc.stderr
+        proc.stdin.write(data)
+        proc.stdin.close()
+        progress = []
+        for raw in iter(proc.stderr.readline, b""):
+            line = _redact(raw.decode(errors="replace"), entry)
+            progress.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        stdout = proc.stdout.read()
+        returncode = proc.wait(timeout=timeout)
+        return subprocess.CompletedProcess(proc.args, returncode, stdout, "".join(progress).encode())
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
 
@@ -366,6 +411,204 @@ def render_profile(sandbox_home: str, sb_path: str) -> dict:
     }
 
 
+def state_setup(remote_name: str, repository: str) -> dict:
+    entry = _require_remote(remote_name)
+    repo_url = validate_state_repo(repository)
+    remote.put_remote(remote_name, **{HERMES_STATE_REPO_KEY: repo_url})
+    return result(True, "state_setup", remote_name, status="configured",
+                  data={"repository": repo_url, "credentials": "operator-owned"})
+
+
+def _state_repo(entry: dict) -> str:
+    value = entry.get(HERMES_STATE_REPO_KEY)
+    if not value:
+        raise HermesError("no Hermes state repository configured", "state_repo_unconfigured")
+    return validate_state_repo(value)
+
+
+def _state_restore_command(paths: dict, repository: str) -> str:
+    repo = shlex.quote(repository)
+    return (
+        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
+        f"git clone --quiet --depth=1 {repo} \"$stage/repo\"; "
+        "test -f \"$stage/repo/manifest.json\"; "
+        "grep -q 'schema_version' \"$stage/repo/manifest.json\"; "
+        "for forbidden in auth.json credentials cookies sessions checkpoints state.db; do "
+        "if find \"$stage/repo\" -type f -iname \"$forbidden\" | grep -q .; then exit 42; fi; done; "
+        "mkdir -p \"$stage/new-hermes\" \"$stage/new-runtime\"; "
+        "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json SOUL.md; do "
+        "test ! -e \"$stage/repo/hermes/$safe\" || cp -p \"$stage/repo/hermes/$safe\" \"$stage/new-hermes/$safe\"; done; "
+        "test ! -d \"$stage/repo/hermes/memories\" || cp -R \"$stage/repo/hermes/memories\" \"$stage/new-hermes/memories\"; "
+        f"test ! -e \"$stage/repo/sandbox/hermes.json\" || cp -p \"$stage/repo/sandbox/hermes.json\" \"$stage/new-runtime/hermes.json\"; "
+        f"mkdir -p \"$HOME/.hermes\" {shlex.quote(paths['sandbox_home'])}/runtime; "
+        "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json SOUL.md; do "
+        "test ! -e \"$stage/new-hermes/$safe\" || install -m 600 \"$stage/new-hermes/$safe\" \"$HOME/.hermes/$safe\"; done; "
+        "test ! -d \"$stage/new-hermes/memories\" || { rm -rf \"$HOME/.hermes/memories.new\"; cp -R \"$stage/new-hermes/memories\" \"$HOME/.hermes/memories.new\"; mv \"$HOME/.hermes/memories.new\" \"$HOME/.hermes/memories\"; }; "
+        f"test ! -e \"$stage/new-runtime/hermes.json\" || install -m 600 \"$stage/new-runtime/hermes.json\" {shlex.quote(paths['state'])}; "
+        "printf '%s\\n' restored"
+    )
+
+
+def state_restore(remote_name: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("state restore requires --confirm", "confirmation_required")
+    entry = _require_remote(remote_name)
+    repository = _state_repo(entry)
+    paths = _paths(entry)
+    res = _checked(entry, _state_restore_command(paths, repository), timeout=300,
+                   what="Hermes state restore failed")
+    return result(True, "state_restore", remote_name, status="restored",
+                  data={"repository": repository, "result": (res.stdout or "").strip()})
+
+
+def _state_sync_command(paths: dict, repository: str) -> str:
+    repo = shlex.quote(repository)
+    return (
+        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
+        f"git clone --quiet {repo} \"$stage/repo\"; mkdir -p \"$stage/repo/hermes\" \"$stage/repo/sandbox\"; "
+        "for src in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json; do "
+        "test ! -e \"$HOME/.hermes/$src\" || cp -p \"$HOME/.hermes/$src\" \"$stage/repo/hermes/$src\"; done; "
+        "test ! -e \"$HOME/.hermes/SOUL.md\" || cp -p \"$HOME/.hermes/SOUL.md\" \"$stage/repo/hermes/SOUL.md\"; "
+        "test ! -d \"$HOME/.hermes/memories\" || cp -R \"$HOME/.hermes/memories\" \"$stage/repo/hermes/memories\"; "
+        f"test ! -e {shlex.quote(paths['state'])} || cp -p {shlex.quote(paths['state'])} \"$stage/repo/sandbox/hermes.json\"; "
+        "if find \"$stage/repo\" -type f \\( -iname 'auth.json' -o -iname 'credentials*' -o -iname 'cookies*' -o -iname 'sessions*' -o -iname 'checkpoints*' -o -iname '*.pem' -o -iname '*.key' -o -iname 'state.db*' \\) | grep -q .; then exit 42; fi; "
+        "if grep -RIEq 'github_pat_[A-Za-z0-9_]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9_-]{30,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY' \"$stage/repo/hermes\" \"$stage/repo/sandbox\" 2>/dev/null; then exit 43; fi; "
+        "cd \"$stage/repo\"; git add -A; if git diff --cached --quiet; then echo unchanged; else git -c user.name='Hermes State Backup' -c user.email='hermes-state@users.noreply.github.com' commit -qm 'chore: sync sanitized Hermes state'; git push -q origin HEAD; echo pushed; fi"
+    )
+
+
+def state_sync(remote_name: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("state sync requires --confirm", "confirmation_required")
+    entry = _require_remote(remote_name)
+    repository = _state_repo(entry)
+    res = _checked(entry, _state_sync_command(_paths(entry), repository), timeout=300,
+                   what="Hermes state sync failed")
+    status = (res.stdout or "").strip().splitlines()[-1:] or ["unknown"]
+    return result(True, "state_sync", remote_name, status=status[0],
+                  data={"repository": repository})
+
+
+def validate_drive_destination(value: str) -> str:
+    """Validate an rclone destination without allowing shell syntax or URLs."""
+    value = (value or "").strip()
+    path = value.split(":", 1)[1] if ":" in value else ""
+    if (not re.fullmatch(r"[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]*", value)
+            or (path and any(part in {"", ".", ".."} for part in path.split("/")))):
+        raise HermesError("Drive destination must be an rclone remote path, e.g. gdrive:hermes-backups", "invalid_drive_destination")
+    return value.rstrip("/")
+
+
+def drive_setup(remote_name: str, destination: str) -> dict:
+    _require_remote(remote_name)
+    destination = validate_drive_destination(destination)
+    remote.put_remote(remote_name, **{HERMES_DRIVE_DESTINATION_KEY: destination})
+    return result(True, "drive_setup", remote_name, status="configured",
+                  data={"destination": destination, "scope": "full"})
+
+
+def _drive_destination(entry: dict) -> str:
+    destination = entry.get(HERMES_DRIVE_DESTINATION_KEY)
+    if not destination:
+        raise HermesError("no Google Drive destination configured", "drive_unconfigured")
+    return validate_drive_destination(destination)
+
+
+def _drive_backup_command(paths: dict, destination: str, backup_id: str) -> str:
+    """Create a full encrypted recovery point; passphrase arrives only on stdin."""
+    home = shlex.quote(paths["sandbox_home"])
+    dest = shlex.quote(destination)
+    registry_script = (
+        "import json,pathlib; p=pathlib.Path(" + repr(paths["sandbox_home"]) + ") / 'runtime' / 'registry.json'; "
+        "d=json.loads(p.read_text()) if p.exists() else {}; entries=(d.get('instances') or d).values(); "
+        "print(' '.join(sorted(str(v.get('instance')) for v in entries if isinstance(v,dict) and v.get('instance'))))"
+    )
+    return (
+        "set -eu; umask 077; stage=$(mktemp -d); passfile=\"$stage/passphrase\"; "
+        "trap 'rm -rf \"$stage\"' EXIT; cat > \"$passfile\"; test -s \"$passfile\"; "
+        "command -v rclone >/dev/null 2>&1; command -v gpg >/dev/null 2>&1; "
+        f"archive=\"$stage/{backup_id}.tar.gz\"; cipher=\"$stage/{backup_id}.tar.gz.gpg\"; manifest=\"$stage/{backup_id}.manifest.json\"; fallback={home}/runtime/.drive-volume-fallbacks-{backup_id}; mkdir -p \"$fallback\"; printf '%s\\n' 'Hermes Drive: snapshotting WordPress instances' >&2; "
+        f"for instance in $(python3 -c {shlex.quote(registry_script)}); do if ! SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} snapshot drive-{backup_id} --force >/dev/null; then docker cp \"sandbox-$instance-db-1:/var/lib/mysql\" - > \"$fallback/$instance-mysql.tar\"; fi; done; "
+        f"printf '%s\\n' 'Hermes Drive: archiving full state' >&2; tar --ignore-failed-read --absolute-names --exclude=\"$HOME/.hermes/hermes-agent\" --exclude=\"$HOME/.hermes/hermes-agent.restore.*\" --exclude=\"$HOME/.hermes/node\" --exclude={home}/runtime/dl-cache --exclude={home}/runtime/hermes-jobs -czf \"$archive\" \"$HOME/.hermes\" \"$HOME/.config/gh\" \"$HOME/.config/rclone\" {home}; "
+        "rm -rf \"$fallback\"; plain_sha=$(sha256sum \"$archive\" | awk '{print $1}'); printf '%s\\n' 'Hermes Drive: encrypting archive' >&2; "
+        "gpg --batch --yes --pinentry-mode loopback --passphrase-file \"$passfile\" --symmetric --cipher-algo AES256 --output \"$cipher\" \"$archive\"; "
+        "cipher_sha=$(sha256sum \"$cipher\" | awk '{print $1}'); "
+        f"printf '{{\"schema_version\":1,\"id\":\"{backup_id}\",\"scope\":\"full\",\"archive\":\"{backup_id}.tar.gz.gpg\",\"plain_sha256\":\"%s\",\"cipher_sha256\":\"%s\",\"excluded\":[\"container-images\",\"package-caches\",\"runtime-sockets\"]}}\\n' \"$plain_sha\" \"$cipher_sha\" > \"$manifest\"; "
+        f"printf '%s\\n' 'Hermes Drive: uploading encrypted archive' >&2; rclone copyto --stats-one-line --stats=10s \"$cipher\" {dest}/{backup_id}.tar.gz.gpg; printf '%s\\n' 'Hermes Drive: publishing manifest' >&2; rclone copyto \"$manifest\" {dest}/{backup_id}.manifest.json; "
+        f"printf 'backup_id={backup_id}\\narchive_bytes=%s\\n' \"$(wc -c < \"$cipher\")\""
+    )
+
+
+def drive_backup(remote_name: str, passphrase: bytes, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("Drive backup requires --confirm", "confirmation_required")
+    if not passphrase or len(passphrase.rstrip(b"\r\n")) < 12:
+        raise HermesError("recovery passphrase must be at least 12 bytes", "invalid_recovery_passphrase")
+    entry = _require_remote(remote_name)
+    backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
+    completed = _ssh_stdin_with_progress(entry, _drive_backup_command(_paths(entry), _drive_destination(entry), backup_id),
+                                         passphrase.rstrip(b"\r\n") + b"\n", timeout=3600)
+    if completed.returncode != 0:
+        stderr = (completed.stderr or b"").decode(errors="replace")
+        stdout = (completed.stdout or b"").decode(errors="replace")
+        raise HermesError(_redact(stderr or stdout or "Drive backup failed", entry)[:1000], "drive_backup_failed", True)
+    values = dict(line.split("=", 1) for line in (completed.stdout or b"").decode(errors="replace").splitlines() if "=" in line)
+    return result(True, "drive_backup", remote_name, status="backed_up",
+                  data={"backup_id": backup_id, "scope": "full", "archive_bytes": int(values.get("archive_bytes", "0"))})
+
+
+def drive_list(remote_name: str) -> dict:
+    entry = _require_remote(remote_name)
+    destination = _drive_destination(entry)
+    res = _checked(entry, f"command -v rclone >/dev/null 2>&1 && rclone lsf --files-only {shlex.quote(destination)}", timeout=120,
+                   what="could not list Google Drive backups")
+    manifests = sorted(line for line in (res.stdout or "").splitlines() if line.endswith(".manifest.json"))
+    return result(True, "drive_list", remote_name, status="ready", data={"backups": manifests})
+
+
+def _drive_restore_command(paths: dict, destination: str, backup_id: str) -> str:
+    dest = shlex.quote(destination)
+    home = shlex.quote(paths["sandbox_home"])
+    return (
+        "set -eu; umask 077; stage=$(mktemp -d \"$HOME/.hermes-restore.XXXXXX\"); passfile=\"$stage/passphrase\"; "
+        "trap 'rm -rf \"$stage\"' EXIT; cat > \"$passfile\"; test -s \"$passfile\"; "
+        "command -v rclone >/dev/null 2>&1; command -v gpg >/dev/null 2>&1; "
+        f"rclone copyto {dest}/{backup_id}.manifest.json \"$stage/manifest.json\"; rclone copyto {dest}/{backup_id}.tar.gz.gpg \"$stage/archive.gpg\"; "
+        f"python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get(\"schema_version\") == 1 and d.get(\"id\") == sys.argv[2] and d.get(\"scope\") == \"full\"' \"$stage/manifest.json\" {shlex.quote(backup_id)}; "
+        "expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"cipher_sha256\"])' \"$stage/manifest.json\"); actual=$(sha256sum \"$stage/archive.gpg\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; "
+        "gpg --batch --yes --pinentry-mode loopback --passphrase-file \"$passfile\" --decrypt --output \"$stage/archive.tar.gz\" \"$stage/archive.gpg\"; "
+        "expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"plain_sha256\"])' \"$stage/manifest.json\"); actual=$(sha256sum \"$stage/archive.tar.gz\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; "
+        f"tar -tzf \"$stage/archive.tar.gz\" | python3 -c 'import sys; home=sys.argv[1].rstrip(\"/\")+\"/\"; sandbox=sys.argv[2].rstrip(\"/\")+\"/\"; paths=[p.lstrip(\"/\") for p in sys.stdin.read().splitlines()]; assert all(not p.startswith(\"../\") and (\"/\"+p).startswith(home) or (\"/\"+p).startswith(sandbox) for p in paths)' \"$HOME\" {home}; "
+        "mkdir -p \"$stage/extract\"; tar -C \"$stage/extract\" --transform='s,^/,,' -xzf \"$stage/archive.tar.gz\"; "
+        f"new_home=\"$stage/extract$HOME\"; new_sandbox=\"$stage/extract{paths['sandbox_home']}\"; test -d \"$new_home/.hermes\"; test -d \"$new_sandbox\"; "
+        "systemctl --user stop hermes-gateway-sandbox.service hermes-dashboard-sandbox.service 2>/dev/null || true; "
+        f"previous_home=\"$HOME/.hermes.pre-restore\"; previous_sandbox={home}.pre-restore; previous_gh=\"$HOME/.config/gh.pre-restore\"; previous_rclone=\"$HOME/.config/rclone.pre-restore\"; rm -rf \"$previous_home\" \"$previous_sandbox\" \"$previous_gh\" \"$previous_rclone\"; "
+        "test ! -e \"$HOME/.hermes\" || mv \"$HOME/.hermes\" \"$previous_home\"; "
+        "test ! -e \"$HOME/.config/gh\" || mv \"$HOME/.config/gh\" \"$previous_gh\"; test ! -e \"$HOME/.config/rclone\" || mv \"$HOME/.config/rclone\" \"$previous_rclone\"; "
+        f"test ! -e {home} || mv {home} \"$previous_sandbox\"; mv \"$new_home/.hermes\" \"$HOME/.hermes\"; mkdir -p \"$HOME/.config\"; test ! -d \"$new_home/.config/gh\" || mv \"$new_home/.config/gh\" \"$HOME/.config/gh\"; test ! -d \"$new_home/.config/rclone\" || mv \"$new_home/.config/rclone\" \"$HOME/.config/rclone\"; mv \"$new_sandbox\" {home}; "
+        f"fallback={home}/runtime/.drive-volume-fallbacks-{backup_id}; if test -d \"$fallback\"; then for file in \"$fallback\"/*-mysql.tar; do test -f \"$file\" || continue; instance=$(basename \"$file\" -mysql.tar); SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; container=\"sandbox-$instance-db-1\"; docker stop \"$container\" >/dev/null; image=$(docker inspect \"$container\" --format '{{{{.Config.Image}}}}'); volume=$(docker inspect \"$container\" --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/var/lib/mysql\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'); test -n \"$volume\"; docker run --rm --entrypoint /bin/sh -v \"$volume:/dest\" -v \"$file:/backup.tar:ro\" \"$image\" -c 'find /dest -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +; tar -C /dest --strip-components=1 -xf /backup.tar'; SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; done; fi; "
+        "systemctl --user daemon-reload 2>/dev/null || true; systemctl --user start hermes-gateway-sandbox.service 2>/dev/null || true; systemctl --user start hermes-dashboard-sandbox.service 2>/dev/null || true; "
+        "printf '%s\\n' restored"
+    )
+
+
+def drive_restore(remote_name: str, backup_id: str, passphrase: bytes, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("Drive restore requires --confirm", "confirmation_required")
+    if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", backup_id or ""):
+        raise HermesError("invalid Drive backup id", "invalid_backup_id")
+    if not passphrase or len(passphrase.rstrip(b"\r\n")) < 12:
+        raise HermesError("recovery passphrase must be at least 12 bytes", "invalid_recovery_passphrase")
+    entry = _require_remote(remote_name)
+    completed = _ssh_stdin(entry, _drive_restore_command(_paths(entry), _drive_destination(entry), backup_id),
+                           passphrase.rstrip(b"\r\n") + b"\n", timeout=3600)
+    if completed.returncode != 0:
+        stderr = (completed.stderr or b"").decode(errors="replace")
+        stdout = (completed.stdout or b"").decode(errors="replace")
+        raise HermesError(_redact(stderr or stdout or "Drive restore failed", entry)[:1000], "drive_restore_failed", True)
+    return result(True, "drive_restore", remote_name, status="restored", data={"backup_id": backup_id, "scope": "full"})
+
+
 def _resolve_commit(entry: dict, tag: str, expected: str | None) -> str:
     res = _checked(entry,
                    f"git ls-remote {shlex.quote(HERMES_REPOSITORY_URL)} refs/tags/{shlex.quote(tag)}^{{}}",
@@ -429,6 +672,9 @@ def install(remote_name: str, version: str = SUPPORTED_TAG, commit: str | None =
 def setup(remote_name: str) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
+    if entry.get(HERMES_STATE_REPO_KEY):
+        _checked(entry, _state_restore_command(paths, _state_repo(entry)), timeout=300,
+                 what="Hermes state restore during setup failed")
     profile = render_profile(paths["sandbox_home"], paths["sb"])
     payload = base64.b64encode(json.dumps(profile).encode()).decode()
     # Hermes' managed virtualenv supplies PyYAML; use it remotely so unrelated
@@ -468,12 +714,18 @@ p.chmod(0o600)
 PY
 """
     _checked(entry, command, timeout=180, what="Hermes setup failed")
+    state_sync_status = None
+    if entry.get(HERMES_STATE_REPO_KEY):
+        synced = _checked(entry, _state_sync_command(paths, _state_repo(entry)), timeout=300,
+                          what="Hermes state sync during setup failed")
+        state_sync_status = (synced.stdout or "").strip().splitlines()[-1:] or ["unknown"]
     state = _remote_state_read(entry, paths)
     state.setdefault("installation", {})["status"] = "configured"
     state["profile"] = {"sandbox_home": paths["sandbox_home"], "sandbox_sb": paths["sb"]}
     _remote_state_write(entry, paths, state)
     return result(True, "setup", remote_name, status="configured",
-                  data={"mcp_server": "sandbox", "parallel_calls": False, "full_catalog": True})
+                  data={"mcp_server": "sandbox", "parallel_calls": False, "full_catalog": True,
+                        "state_sync": state_sync_status[0] if state_sync_status else None})
 
 
 def status(remote_name: str) -> dict:
@@ -1460,7 +1712,7 @@ def _dashboard_lifecycle_command(action: str, port: int) -> str:
         "for attempt in $(seq 1 30); do "
         f"if systemctl --user is-active --quiet {unit} && command -v ss >/dev/null 2>&1 && "
         f"ss -ltnH | awk -v port={port} '$4 ~ (\":\" port \"$\") {{ "
-        "if ($4 == \"127.0.0.1:\" port || $4 == \"[::1]:\" port) local_listener=1; else public_listener=1 }} "
+        "if ($4 == \"127.0.0.1:\" port || $4 == \"[::1]:\" port) local_listener=1; else public_listener=1 } "
         "END { exit (local_listener && !public_listener) ? 0 : 1 }'; then exit 0; fi; "
         "sleep 2; done; "
         f"systemctl --user stop {unit} >/dev/null 2>&1 || true; exit 1"

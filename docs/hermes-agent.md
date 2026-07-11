@@ -14,6 +14,62 @@ effective `sandbox` policy (resolved home, enabled resource/prompt utilities,
 sequential calls, and no filters) using remote-only boolean checks; neither
 check prints the remote configuration or provider credentials.
 
+## Private state repository
+
+Hermes can keep a rebuildable, sanitized harness snapshot in a private GitHub
+repository. Configure it once; subsequent setup runs restore the latest snapshot
+and automatically publish any allowed local changes. Explicit sync is also
+available:
+
+```bash
+./sb hermes state setup --remote scaleway-sandbox \
+  --state-repo https://github.com/alimuzzaman/hermes-agent-state.git --json
+./sb hermes setup --remote scaleway-sandbox --json
+./sb hermes state sync --remote scaleway-sandbox --confirm --json
+./sb hermes state restore --remote scaleway-sandbox --confirm --json
+```
+
+The snapshot includes the Sandbox Hermes integration metadata, resource policy,
+Hermes state manifest, model/profile defaults, `SOUL.md`, and memory files when
+present. It never includes provider or GitHub credentials, OAuth/session data,
+cookies, private keys, checkpoints, logs, databases, worktrees, or runtime
+binaries. Setup fails closed if the configured repository is unreachable or its
+manifest contains forbidden paths. Authentication must be completed separately
+on a rebuilt remote.
+
+## Google Drive full recovery
+
+Google Drive is the full recovery target; Git state sync remains the smaller,
+sanitized configuration mirror. `drive backup` defaults to **full** scope:
+Hermes chats, sessions, checkpoints, profiles, memories, skills, provider, Git,
+and Drive credentials, managed repositories/worktrees (including uncommitted files),
+Sandbox metadata, fresh WordPress database snapshots, and uploads. Docker image
+layers, package caches, Hermes source/virtualenv runtimes, and sockets are
+rebuilt rather than archived.
+
+Configure `rclone` with a private Google Drive remote on the server. The
+`drive.file` OAuth scope restricts it to files that rclone creates, including
+its `hermes-full-recovery` folder. Rclone's interactive setup must complete the
+Google OAuth login; then save only the remote name (not its token) in Sandbox:
+
+```bash
+ssh -tt alim@212.47.72.49 \
+  'rclone config create gdrive drive config_is_local=false \
+    scope=drive.file'
+
+./sb hermes drive setup --remote scaleway-sandbox \
+  --drive-destination gdrive:hermes-full-recovery --json
+printf '%s' "$RECOVERY_PASSPHRASE" | ./sb hermes drive backup \
+  --remote scaleway-sandbox --passphrase-stdin --confirm --json
+./sb hermes drive list --remote scaleway-sandbox --json
+```
+
+The archive is compressed then encrypted with GPG symmetric AES-256 before
+upload. The passphrase travels over SSH standard input and is never persisted,
+logged, or sent to Drive. Keep it in a password manager: neither Drive nor the
+server can recover a lost passphrase. Restore is deliberately confirmation-gated
+and must first be exercised on a disposable replacement remote.
+
 ## Trust boundary
 
 This is a trusted single-operator profile. Full Sandbox MCP access includes

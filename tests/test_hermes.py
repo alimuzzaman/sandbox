@@ -51,6 +51,26 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(hermes.HermesError):
             hermes.validate_repo_url("https://user:token@github.com/acme/example.git")
 
+    def test_state_repository_is_credential_free_github_url(self):
+        self.assertEqual(
+            hermes.validate_state_repo("https://github.com/alimuzzaman/hermes-agent-state.git"),
+            "https://github.com/alimuzzaman/hermes-agent-state.git",
+        )
+        for value in (
+            "git@github.com:alimuzzaman/hermes-agent-state.git",
+            "https://user:token@github.com/alimuzzaman/hermes-agent-state.git",
+            "https://gitlab.com/alimuzzaman/hermes-agent-state.git",
+        ):
+            with self.assertRaises(hermes.HermesError):
+                hermes.validate_state_repo(value)
+
+    def test_drive_destination_is_bounded_rclone_path(self):
+        self.assertEqual(hermes.validate_drive_destination("gdrive:hermes-backups"), "gdrive:hermes-backups")
+        self.assertEqual(hermes.validate_drive_destination("gdrive:"), "gdrive:")
+        for value in ("https://drive.google.com/x", "gdrive:../escape", "gdrive:folder;rm", "gdrive:folder space"):
+            with self.assertRaises(hermes.HermesError):
+                hermes.validate_drive_destination(value)
+
     def test_release_requires_immutable_tag_and_full_commit(self):
         self.assertEqual(hermes.validate_release("v2026.7.7.2", "a" * 40),
                          ("v2026.7.7.2", "a" * 40))
@@ -242,6 +262,38 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("seq 1 30", command)
         self.assertIn("127.0.0.1", command)
         self.assertIn("systemctl --user stop", command)
+        self.assertNotIn("public_listener=1 }}", command)
+
+    def test_drive_backup_command_is_full_and_passphrase_stdin_only(self):
+        command = hermes._drive_backup_command(
+            {"sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb", "state": "/home/u/sandbox/runtime/hermes.json"},
+            "gdrive:hermes-backups", "20260711T000000Z-deadbeef",
+        )
+        self.assertIn("$HOME/.hermes", command)
+        self.assertIn("$HOME/.config/gh", command)
+        self.assertIn("$HOME/.config/rclone", command)
+        self.assertIn("--exclude=\"$HOME/.hermes/hermes-agent\"", command)
+        self.assertIn("gpg --batch", command)
+        self.assertIn("rclone copyto", command)
+        self.assertIn("entries=", command)
+        self.assertIn("instance", command)
+        self.assertIn("docker cp", command)
+        self.assertIn("drive-volume-fallbacks", command)
+        self.assertIn("snapshotting WordPress instances", command)
+        self.assertIn("uploading encrypted archive", command)
+        self.assertNotIn("passphrase=", command)
+
+    def test_drive_restore_reinstates_github_auth_and_services(self):
+        command = hermes._drive_restore_command(
+            {"sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb", "state": "/home/u/sandbox/runtime/hermes.json"},
+            "gdrive:hermes-full-recovery", "20260711T000000Z-deadbeef",
+        )
+        self.assertIn(".config/gh", command)
+        self.assertIn(".config/rclone", command)
+        self.assertIn("gpg --batch", command)
+        self.assertIn("drive-volume-fallbacks", command)
+        self.assertIn("docker run --rm", command)
+        self.assertIn("systemctl --user start hermes-gateway-sandbox.service", command)
 
     @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._dashboard_listeners")

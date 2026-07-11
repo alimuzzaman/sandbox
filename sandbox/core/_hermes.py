@@ -25,6 +25,11 @@ import sandbox.core._remote as remote
 
 SUPPORTED_TAG = "v2026.7.7.2"
 SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
+HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
+HERMES_RELEASE_SIGNER = "teknium1"
+# Pinned after verifying the upstream release tag signer fingerprint
+# SHA256:x9xNOpeJhoEAY2gWhmWHZROC3QF3VjOEbmNo9vQ8y2A.
+HERMES_RELEASE_SIGNER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPpWPAE2WMbZ0fAZ8xsqiTIJqA28qDBfGru8kPrpNyUb"
 GATEWAY_UNIT = "hermes-gateway-sandbox.service"
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
@@ -337,7 +342,7 @@ def render_profile(sandbox_home: str, sb_path: str) -> dict:
 
 def _resolve_commit(entry: dict, tag: str, expected: str | None) -> str:
     res = _checked(entry,
-                   f"git ls-remote https://github.com/NousResearch/hermes-agent.git refs/tags/{shlex.quote(tag)}^{{}}",
+                   f"git ls-remote {shlex.quote(HERMES_REPOSITORY_URL)} refs/tags/{shlex.quote(tag)}^{{}}",
                    what="could not resolve Hermes release")
     commit = (res.stdout or "").split()[0].lower() if (res.stdout or "").split() else ""
     if not _COMMIT_RE.fullmatch(commit):
@@ -358,14 +363,29 @@ def install(remote_name: str, version: str = SUPPORTED_TAG, commit: str | None =
     paths = _paths(entry)
     resolved = _resolve_commit(entry, version, _expected_commit(version, commit))
     tag, resolved = validate_release(version, resolved)
+    allowed_signer = f"{HERMES_RELEASE_SIGNER} {HERMES_RELEASE_SIGNER_KEY}"
     command = (
-        "set -eu; "
-        f"mkdir -p {shlex.quote(paths['repo_root'])}; "
-        "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- "
+        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; repo=\"$stage/repo\"; "
+        "git init -q \"$repo\"; "
+        f"git -C \"$repo\" remote add origin {shlex.quote(HERMES_REPOSITORY_URL)}; "
+        f"git -C \"$repo\" fetch -q --depth=1 origin refs/tags/{shlex.quote(tag)}:refs/tags/{shlex.quote(tag)}; "
+        f"printf '%s\\n' {shlex.quote(allowed_signer)} > \"$stage/allowed_signers\"; chmod 600 \"$stage/allowed_signers\"; "
+        f"if ! git -C \"$repo\" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=\"$stage/allowed_signers\" verify-tag {shlex.quote(tag)}; then "
+        "echo HERMES_RELEASE_PROVENANCE_FAILED >&2; exit 42; fi; "
+        f"actual=$(git -C \"$repo\" rev-parse refs/tags/{shlex.quote(tag)}^{{}}); "
+        f"if test \"$actual\" != {shlex.quote(resolved)}; then echo HERMES_RELEASE_PROVENANCE_FAILED >&2; exit 42; fi; "
+        f"git -C \"$repo\" show {shlex.quote(resolved)}:scripts/install.sh > \"$stage/install.sh\"; chmod 700 \"$stage/install.sh\"; "
+        f"mkdir -p {shlex.quote(paths['repo_root'])}; bash \"$stage/install.sh\" "
         f"--branch {shlex.quote(tag)} --commit {shlex.quote(resolved)} --skip-setup --non-interactive "
-        f"--dir \"$HOME/.hermes/hermes-agent\" --hermes-home \"$HOME/.hermes\""
+        f"--dir \"$HOME/.hermes/hermes-agent\" --hermes-home \"$HOME/.hermes\"; "
+        f"test \"$(git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD)\" = {shlex.quote(resolved)}"
     )
-    _checked(entry, command, timeout=1800, what="Hermes installation failed")
+    installed = _ssh(entry, command, timeout=1800)
+    if installed.returncode != 0:
+        detail = _redact(installed.stderr or installed.stdout or "Hermes installation failed", entry)[:1000]
+        if "HERMES_RELEASE_PROVENANCE_FAILED" in (installed.stderr or "") + (installed.stdout or ""):
+            raise HermesError("Hermes release signature or revision verification failed", "release_provenance_failed")
+        raise HermesError(f"Hermes installation failed: {detail}", "remote_command_failed", True)
     version_res = _checked(entry, f"{paths['launcher']} --version", what="Hermes version check failed")
     state = _remote_state_read(entry, paths)
     state["installation"] = {"release_tag": tag, "commit": resolved, "status": "installed"}
@@ -760,6 +780,8 @@ def backup_restore(remote_name: str, backup_id: str, confirm: bool) -> dict:
         "elif test -d \"$stage/.hermes\"; then source=\"$stage\"; else exit 1; fi; "
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user stop hermes-gateway-sandbox.service 2>/dev/null || true; fi; "
         "tar -C \"$source\" -cf - .hermes | tar -C \"$HOME\" -xf -; "
+        "if test -d \"$stage/units\"; then mkdir -p \"$HOME/.config/systemd/user\"; cp \"$stage/units/\"*.service \"$HOME/.config/systemd/user/\" 2>/dev/null || true; fi; "
+        "if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi; "
         f"if test -f \"$stage/runtime/hermes.json\"; then tmp={shlex.quote(paths['state'])}.restore.$$; cp \"$stage/runtime/hermes.json\" \"$tmp\"; chmod 600 \"$tmp\"; mv \"$tmp\" {shlex.quote(paths['state'])}; fi; "
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user start hermes-gateway-sandbox.service 2>/dev/null || true; fi"
     )
@@ -816,12 +838,18 @@ def backup_create(remote_name: str) -> dict:
     digest_file = archive + ".sha256"
     command = (
         f"set -eu; mkdir -p {shlex.quote(backup_root)}; chmod 700 {shlex.quote(backup_root)}; "
-        "test -d \"$HOME/.hermes\"; "
-        "stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; mkdir -p \"$stage/home\" \"$stage/runtime\"; "
-        "tar -C \"$HOME\" --exclude='.hermes/auth.json' --exclude='.hermes/sessions' "
-        "--exclude='.hermes/checkpoints' -cf - .hermes | tar -C \"$stage/home\" -xf -; "
+        "repo=\"$HOME/.hermes/hermes-agent\"; test -d \"$repo/.git\"; "
+        "stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
+        "mkdir -p \"$stage/home/.hermes/hermes-agent\" \"$stage/runtime\" \"$stage/units\"; "
+        "git -C \"$repo\" archive --format=tar HEAD | tar -C \"$stage/home/.hermes/hermes-agent\" -xf -; "
+        "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json; do "
+        "if test -f \"$HOME/.hermes/$safe\"; then cp \"$HOME/.hermes/$safe\" \"$stage/home/.hermes/$safe\"; fi; done; "
+        "for unit in hermes-gateway-sandbox.service hermes-dashboard-sandbox.service; do "
+        "if test -f \"$HOME/.config/systemd/user/$unit\"; then cp \"$HOME/.config/systemd/user/$unit\" \"$stage/units/$unit\"; fi; done; "
         f"if test -f {shlex.quote(paths['state'])}; then cp {shlex.quote(paths['state'])} \"$stage/runtime/hermes.json\"; fi; "
-        f"tar -C \"$stage\" -czf {shlex.quote(archive)} home runtime; chmod 600 {shlex.quote(archive)}; "
+        f"tar -C \"$stage\" -czf {shlex.quote(archive)} home runtime units; "
+        f"if tar -tzf {shlex.quote(archive)} | grep -E '(^|/)(auth\\.json|sessions/|checkpoints/|\\.env$|credentials?($|/)|cookies?($|/))' >/dev/null; then rm -f {shlex.quote(archive)}; exit 1; fi; "
+        f"chmod 600 {shlex.quote(archive)}; "
         f"sha256sum {shlex.quote(archive)} | tee {shlex.quote(digest_file)}; chmod 600 {shlex.quote(digest_file)}; "
         f"find {shlex.quote(backup_root)} -maxdepth 1 -type f -name '*.tar.gz' -printf '%T@ %p\\n' | sort -nr | "
         f"tail -n +{_BACKUP_RETENTION_COUNT + 1} | cut -d' ' -f2- | while IFS= read -r old; do rm -f \"$old\" \"$old.sha256\"; done"

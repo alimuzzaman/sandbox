@@ -28,6 +28,14 @@ private SSH key to the remote. The broad GitHub CLI browser OAuth flow is
 intentionally rejected because its minimum scopes include account-level
 organization access.
 
+Hermes installation fetches the selected annotated tag into a temporary Git
+repository, verifies its SSH signature against the pinned upstream release
+signer, confirms the exact commit, and executes the installer script extracted
+from that verified commit. It never pipes a network response directly into a
+shell. V2 backups archive only tracked Hermes source plus Sandbox-owned,
+non-secret integration state and service units; provider configuration,
+credentials, sessions, checkpoints, and untracked files are excluded.
+
 ## V1 workflow
 
 ```bash

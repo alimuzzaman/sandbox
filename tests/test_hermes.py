@@ -343,6 +343,24 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("--commit " + "a" * 40, command)
         self.assertIn("--non-interactive", command)
         self.assertIn("--skip-setup", command)
+        self.assertIn("verify-tag", command)
+        self.assertIn("allowed_signers", command)
+        self.assertNotIn("curl -fsSL", command)
+        self.assertIn("rev-parse HEAD", command)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_install_rejects_failed_release_provenance_before_launcher_check(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout="a" * 40 + "\n"),
+            _completed(returncode=42, stderr="HERMES_RELEASE_PROVENANCE_FAILED\n"),
+        ]
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.install("test", "v2026.7.7.2", "a" * 40)
+        self.assertEqual(caught.exception.code, "release_provenance_failed")
+        self.assertEqual(ssh_run.call_count, 3)
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")
@@ -669,9 +687,14 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(out["data"]["sha256"], "a" * 64)
         self.assertEqual(out["data"]["free_mb"], 2048)
         self.assertEqual(ssh_run.call_count, 3)
-        self.assertIn(".sha256", ssh_run.call_args_list[2].args[1])
-        self.assertIn("tail -n +11", ssh_run.call_args_list[2].args[1])
-        self.assertIn("runtime/hermes.json", ssh_run.call_args_list[2].args[1])
+        command = ssh_run.call_args_list[2].args[1]
+        self.assertIn(".sha256", command)
+        self.assertIn("tail -n +11", command)
+        self.assertIn("runtime/hermes.json", command)
+        self.assertIn("git -C \"$repo\" archive --format=tar HEAD", command)
+        self.assertNotIn("tar -C \"$HOME\"", command)
+        self.assertIn("auth\\.json", command)
+        self.assertIn("credentials?", command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

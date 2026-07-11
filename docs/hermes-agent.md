@@ -123,8 +123,9 @@ option.
 After V2 passes, the dashboard wrapper creates an isolated remote virtualenv
 for the pinned upstream Hermes web/PTY extras and manages a loopback-only user
 service. Setup enables systemd user lingering so the dashboard survives SSH
-session exit and reboot. It does not create a custom frontend or accept
-`--insecure`:
+session exit and reboot. Start/restart preflights an inactive port, waits for a
+healthy loopback-only listener, and stops a failed launch. It does not create a
+custom frontend or accept `--insecure`:
 
 ```bash
 ./sb hermes dashboard install --remote scaleway-sandbox --json

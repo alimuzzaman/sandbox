@@ -325,6 +325,6 @@ T061: Managed-hosting/OAuth/rollback tests in tests/test_hermes.py after coordin
 - [ ] T082 Enforce authentic, immutable Hermes installer provenance before remote execution and reject unsigned or revision-mismatched releases per FR-001 and FR-023 (partial)
 - [X] T083 Redact bare provider, OAuth, cookie, and API-key values from every public Hermes result and bounded log path per FR-010, FR-011, FR-015b, and FR-022 (contradicts)
 - [X] T084 Require the current integration schema as well as the Hermes revision and all evidence before V2 acceptance unlocks dashboard operations per plan V3 gate decision and FR-030 (partial)
-- [ ] T085 Preflight dashboard port availability, verify post-start loopback-only health, and stop failed services per FR-033, FR-034, FR-037, and the dashboard service contract (partial)
+- [X] T085 Preflight dashboard port availability, verify post-start loopback-only health, and stop failed services per FR-033, FR-034, FR-037, and the dashboard service contract (partial)
 - [ ] T086 Restrict Hermes backups to an audited non-secret allowlist and prove secret-bearing files never enter archives per FR-011, FR-024, and FR-025 (contradicts)
 - [X] T087 Remove the unsupported `--insecure` dashboard CLI option and preserve rejection through the stable command contract per FR-035 and the CLI/dashboard contracts (contradicts)

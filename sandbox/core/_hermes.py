@@ -1324,6 +1324,47 @@ def _dashboard_status(entry: dict, paths: dict, port: int) -> dict:
             "host": DASHBOARD_LOOPBACK_HOST, "last_health": "healthy" if active else "unknown"}
 
 
+def _dashboard_listeners(entry: dict, port: int) -> dict:
+    """Inspect only TCP listeners for the selected port without exposing them."""
+    res = _ssh(entry, "command -v ss >/dev/null 2>&1 && ss -ltnH", timeout=30)
+    if res.returncode != 0:
+        raise HermesError("dashboard listener probe is unavailable", "dashboard_listener_probe_failed", True)
+    suffix = f":{port}"
+    listeners = []
+    for line in (res.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[3].endswith(suffix):
+            listeners.append(fields[3])
+    loopback = {f"127.0.0.1:{port}", f"[::1]:{port}"}
+    return {
+        "listeners": listeners,
+        "expected_loopback": any(item in loopback for item in listeners),
+        "public_listener": any(item not in loopback for item in listeners),
+    }
+
+
+def _dashboard_port_preflight(entry: dict, port: int) -> None:
+    if _dashboard_listeners(entry, port)["listeners"]:
+        raise HermesError("dashboard port is already in use", "dashboard_port_in_use")
+
+
+def _dashboard_lifecycle_command(action: str, port: int) -> str:
+    """Wait for the expected private listener and stop a failed launch."""
+    unit = shlex.quote(DASHBOARD_UNIT)
+    if action == "stop":
+        return f"systemctl --user stop {unit}"
+    return (
+        f"set -eu; systemctl --user {action} {unit}; "
+        "for attempt in $(seq 1 30); do "
+        f"if systemctl --user is-active --quiet {unit} && command -v ss >/dev/null 2>&1 && "
+        f"ss -ltnH | awk -v port={port} '$4 ~ (\":\" port \"$\") {{ "
+        "if ($4 == \"127.0.0.1:\" port || $4 == \"[::1]:\" port) local_listener=1; else public_listener=1 }} "
+        "END { exit (local_listener && !public_listener) ? 0 : 1 }'; then exit 0; fi; "
+        "sleep 2; done; "
+        f"systemctl --user stop {unit} >/dev/null 2>&1 || true; exit 1"
+    )
+
+
 def _dashboard_forward(remote_name: str, port: int) -> str:
     """Return a safe operator instruction without exposing SSH target details."""
     return f"ssh -N -L {port}:127.0.0.1:{port} <configured-{remote_name}-ssh-target>"
@@ -1367,10 +1408,19 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
     if action in {"start", "stop", "restart"}:
         if not dashboard.get("installed"):
             raise HermesError("dashboard dependencies are not installed", "dashboard_not_installed")
-        command = f"systemctl --user {action} {DASHBOARD_UNIT}"
+        before = _dashboard_status(entry, paths, selected_port)
+        if action in {"start", "restart"} and not before["active"]:
+            _dashboard_port_preflight(entry, selected_port)
+        command = _dashboard_lifecycle_command(action, selected_port)
         _checked(entry, command, timeout=90, what=f"dashboard {action} failed")
+        after = _dashboard_status(entry, paths, selected_port)
+        if action != "stop":
+            listeners = _dashboard_listeners(entry, selected_port)
+            if not after["active"] or not listeners["expected_loopback"] or listeners["public_listener"]:
+                _ssh(entry, f"systemctl --user stop {shlex.quote(DASHBOARD_UNIT)} >/dev/null 2>&1 || true", timeout=30)
+                raise HermesError("dashboard did not reach a healthy loopback listener", "dashboard_start_failed", True)
         return result(True, f"dashboard_{action}", remote_name, status="active" if action != "stop" else "inactive",
-                      commit=gate["commit"], data={**_dashboard_status(entry, paths, selected_port),
+                      commit=gate["commit"], data={**after,
                                                   "ssh_forward": _dashboard_forward(remote_name, selected_port)})
     if action == "status":
         return result(True, "dashboard_status", remote_name, status="ready", commit=gate["commit"],
@@ -1378,11 +1428,11 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
                             "ssh_forward": _dashboard_forward(remote_name, selected_port)})
     if action == "doctor":
         status_data = _dashboard_status(entry, paths, selected_port)
-        probe = _ssh(entry, f"ss -ltn 2>/dev/null | grep -E '[.:]{selected_port} ' | grep -F '127.0.0.1'", timeout=30)
-        status_data["loopback_only"] = probe.returncode == 0 or not status_data["active"]
+        listeners = _dashboard_listeners(entry, selected_port)
+        status_data["loopback_only"] = bool(status_data["active"] and listeners["expected_loopback"] and not listeners["public_listener"])
         status_data["auth_mode"] = dashboard.get("auth_mode", "upstream")
         status_data["ssh_forward"] = _dashboard_forward(remote_name, selected_port)
-        ok = status_data["loopback_only"] and status_data["auth_mode"] == "upstream"
+        ok = status_data["active"] and status_data["loopback_only"] and status_data["auth_mode"] == "upstream"
         return result(ok, "dashboard_doctor", remote_name, status="healthy" if ok else "degraded",
                       commit=gate["commit"], data=status_data,
                       error=None if ok else HermesError("dashboard loopback/authentication checks failed", "dashboard_health_failed"))

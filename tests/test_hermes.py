@@ -212,6 +212,70 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("systemctl --user enable", command)
         self.assertIn("loginctl enable-linger", command)
 
+    @patch("sandbox.core._hermes._ssh")
+    def test_dashboard_listener_probe_distinguishes_loopback_and_public(self, ssh):
+        ssh.return_value = _completed(stdout=(
+            "LISTEN 0 2048 127.0.0.1:9119 0.0.0.0:*\n"
+            "LISTEN 0 2048 0.0.0.0:9222 0.0.0.0:*\n"
+        ))
+        observed = hermes._dashboard_listeners({"ssh": "ubuntu@example.test"}, 9119)
+        self.assertTrue(observed["expected_loopback"])
+        self.assertFalse(observed["public_listener"])
+        ssh.return_value = _completed(stdout="LISTEN 0 2048 0.0.0.0:9119 0.0.0.0:*\n")
+        observed = hermes._dashboard_listeners({"ssh": "ubuntu@example.test"}, 9119)
+        self.assertFalse(observed["expected_loopback"])
+        self.assertTrue(observed["public_listener"])
+
+    def test_dashboard_lifecycle_waits_for_loopback_and_stops_on_failure(self):
+        command = hermes._dashboard_lifecycle_command("start", 9119)
+        self.assertIn("seq 1 30", command)
+        self.assertIn("127.0.0.1", command)
+        self.assertIn("systemctl --user stop", command)
+
+    @patch("sandbox.core._hermes._ssh")
+    @patch("sandbox.core._hermes._dashboard_listeners")
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._dashboard_port_preflight")
+    @patch("sandbox.core._hermes._dashboard_status")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._dashboard_gate")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote")
+    def test_dashboard_start_rolls_back_when_service_is_not_healthy(
+            self, require_remote, paths, gate, read_state, status, preflight, checked, listeners, ssh):
+        require_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        paths.return_value = {"state": "/tmp/hermes.json"}
+        gate.return_value = {"commit": hermes.SUPPORTED_COMMIT}
+        read_state.return_value = {"dashboard": {"installed": True}}
+        status.side_effect = [
+            {"active": False, "port": 9119},
+            {"active": False, "port": 9119},
+        ]
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.dashboard_action("test", "start")
+        self.assertEqual(caught.exception.code, "dashboard_start_failed")
+        preflight.assert_called_once()
+        self.assertIn("seq 1 30", checked.call_args.args[1])
+        self.assertIn("systemctl --user stop", ssh.call_args.args[1])
+
+    @patch("sandbox.core._hermes._dashboard_listeners")
+    @patch("sandbox.core._hermes._dashboard_status")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._dashboard_gate")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote")
+    def test_dashboard_doctor_rejects_public_listener(
+            self, require_remote, paths, gate, read_state, status, listeners):
+        require_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        paths.return_value = {"state": "/tmp/hermes.json"}
+        gate.return_value = {"commit": hermes.SUPPORTED_COMMIT}
+        read_state.return_value = {"dashboard": {"installed": True, "auth_mode": "upstream"}}
+        status.return_value = {"active": True, "port": 9119}
+        listeners.return_value = {"expected_loopback": True, "public_listener": True, "listeners": ["0.0.0.0:9119"]}
+        out = hermes.dashboard_action("test", "doctor")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "dashboard_health_failed")
+
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")

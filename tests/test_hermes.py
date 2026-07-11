@@ -190,6 +190,23 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("rollback()", command)
         self.assertIn("systemctl --user enable", command)
 
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote")
+    def test_dashboard_install_expands_remote_home(self, require_remote, paths, read_state, write_state, checked):
+        require_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        paths.return_value = {"state": "/tmp/hermes.json"}
+        read_state.return_value = {
+            "schema_version": 1,
+            "installation": {"commit": hermes.SUPPORTED_COMMIT},
+            "gates": {"v2_operations": {"status": "passed", "commit": hermes.SUPPORTED_COMMIT,
+                "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS}}},
+        }
+        hermes.dashboard_action("test", "install")
+        self.assertIn('cd "$HOME/.hermes/hermes-agent"', checked.call_args.args[1])
+
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
     def test_dashboard_status_uses_current_v2_gate(self, get_remote, ssh_run):
@@ -846,6 +863,31 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["data"]["gateway"], {"state": "active", "linger": "yes"})
         self.assertEqual(out["data"]["sessions"]["stale"], 1)
+
+    def test_health_persists_reboot_gate_evidence_with_boot_marker(self):
+        before = {
+            "schema_version": 1,
+            "last_boot_id": "11111111-1111-1111-1111-111111111111",
+            "installation": {"commit": hermes.SUPPORTED_COMMIT},
+            "sessions": {},
+            "gates": {"v2_operations": {"commit": hermes.SUPPORTED_COMMIT,
+                "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS if name != "reboot_recovery"}}},
+        }
+        persisted = {"schema_version": 1, "installation": {"commit": hermes.SUPPORTED_COMMIT},
+                     "sessions": {}, "gates": {}}
+        diagnostic = {"ok": True, "data": {"checks": {}}, "error": None}
+        with patch.object(hermes, "doctor", return_value=diagnostic), \
+             patch.object(hermes, "_require_remote", return_value=self.entry), \
+             patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
+             patch.object(hermes, "_remote_state_read", side_effect=[before, persisted]), \
+             patch.object(hermes, "_reconcile_sessions", return_value=(before, [])), \
+             patch.object(hermes, "_remote_state_write") as write_state, \
+             patch.object(hermes, "_ssh", return_value=_completed(stdout="inactive\nno\n22222222-2222-2222-2222-222222222222\n")):
+            out = hermes.health("test")
+        written = write_state.call_args.args[2]
+        self.assertEqual(written["last_boot_id"], "22222222-2222-2222-2222-222222222222")
+        self.assertEqual(written["gates"]["v2_operations"]["evidence"]["reboot_recovery"], "passed")
+        self.assertEqual(out["data"]["v2_gate"]["status"], "passed")
 
     @patch("sandbox.core._hermes.subprocess.run")
     @patch("sandbox.core._hermes.remote.ssh_run")

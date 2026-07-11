@@ -304,3 +304,21 @@ Local regression for this acceptance/fix phase passed:
 `python -m unittest discover -s tests -q` (399 tests, one existing skip).
 The full suite emitted its existing subprocess warnings and intentional
 negative-path fixture diagnostics but exited successfully.
+
+## Disposable clean-account recovery verification (2026-07-11)
+
+The resettable `hermes-acceptance` remote was created as a separate Linux user
+with its own `$SANDBOX_HOME`, Docker-group access, and no Hermes state or
+launcher. A clean signed install/setup/doctor established the pinned launcher,
+direct Sandbox CLI, and complete Sandbox MCP contract without copying provider
+credentials from the live account. A verified backup was then restored after
+removing that account's Hermes runtime and launcher; the exact commit and
+runnable virtualenv returned, the Sandbox-owned profile was reapplied, and
+`doctor` was healthy. The final local verification was 83 focused Hermes tests
+and 413 full tests (one existing skip), plus `git diff --check` and Python
+compilation.
+
+This is recovery and clean-install infrastructure for T023, not the final T023
+acceptance: an operator must still authenticate a provider on this isolated
+account, run the one-shot prompt, and have it create a disposable WordPress
+instance on demand.

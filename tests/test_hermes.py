@@ -33,6 +33,16 @@ class TestValidation(unittest.TestCase):
             with self.assertRaises(hermes.HermesError):
                 hermes.validate_repo_name(value)
 
+    def test_backup_source_policy_rejects_nested_runtime_credentials(self):
+        forbidden = (
+            "config/auth.json", "secrets/.env.local", "app/credentials.json",
+            "nested/cookies.txt", "tls/private.key", "tls/cert.pem",
+        )
+        for path in forbidden:
+            self.assertTrue(hermes._backup_forbidden_source_path(path), path)
+        for path in (".env.example", "hermes_cli/dashboard_auth/cookies.py", "docs/credentials.md"):
+            self.assertFalse(hermes._backup_forbidden_source_path(path), path)
+
     def test_repository_url_rejects_userinfo_and_sanitizes(self):
         self.assertEqual(
             hermes.validate_repo_url("https://github.com/acme/example.git"),
@@ -347,6 +357,9 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("allowed_signers", command)
         self.assertNotIn("curl -fsSL", command)
         self.assertIn("rev-parse HEAD", command)
+        self.assertIn("venv/bin/hermes", command)
+        self.assertIn("launcher_tmp", command)
+        self.assertIn("$HOME/.local/bin/hermes", command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
@@ -646,7 +659,23 @@ class TestRemoteCommands(unittest.TestCase):
             with self.assertRaises(hermes.HermesError) as caught:
                 hermes.update_apply("test", "v2026.7.7.2", "b" * 40, True)
         self.assertEqual(caught.exception.code, "update_rolled_back")
-        restore.assert_called_once_with("test", "20260711T000000Z-deadbeef", True)
+        restore.assert_called_once_with("test", "20260711T000000Z-deadbeef", True,
+                                        create_pre_restore_backup=False)
+
+    def test_update_rollback_resumes_a_previously_active_gateway(self):
+        plan = {"status": "update_available", "commit": "b" * 40}
+        with patch.object(hermes, "update_plan", return_value=plan), \
+             patch.object(hermes, "backup_create", return_value={"data": {"backup_id": "20260711T000000Z-deadbeef"}}), \
+             patch.object(hermes, "install", side_effect=hermes.HermesError("broken", "install_failed")), \
+             patch.object(hermes, "backup_restore") as restore, \
+             patch.object(hermes, "_require_remote", return_value=self.entry), \
+             patch("sandbox.core._hermes.remote.ssh_run", return_value=_completed(stdout="active\n")) as ssh_run:
+            with self.assertRaises(hermes.HermesError) as caught:
+                hermes.update_apply("test", "v2026.7.7.2", "b" * 40, True)
+        self.assertEqual(caught.exception.code, "update_rolled_back")
+        restore.assert_called_once_with("test", "20260711T000000Z-deadbeef", True,
+                                        create_pre_restore_backup=False)
+        self.assertIn("systemctl --user start", ssh_run.call_args_list[1].args[1])
 
     def test_update_apply_attempts_restore_after_health_failure(self):
         plan = {"status": "update_available", "commit": "b" * 40}
@@ -660,7 +689,8 @@ class TestRemoteCommands(unittest.TestCase):
             with self.assertRaises(hermes.HermesError) as caught:
                 hermes.update_apply("test", "v2026.7.7.2", "b" * 40, True)
         self.assertEqual(caught.exception.code, "update_rolled_back")
-        restore.assert_called_once_with("test", "20260711T000000Z-deadbeef", True)
+        restore.assert_called_once_with("test", "20260711T000000Z-deadbeef", True,
+                                        create_pre_restore_backup=False)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
@@ -691,7 +721,15 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn(".sha256", command)
         self.assertIn("tail -n +11", command)
         self.assertIn("runtime/hermes.json", command)
-        self.assertIn("git -C \"$repo\" archive --format=tar HEAD", command)
+        self.assertIn("git -C \"$repo\" pack-objects --stdout --revs", command)
+        self.assertIn("hermes-agent.pack", command)
+        self.assertIn("hermes-agent.commit", command)
+        self.assertIn("tar -C \"$repo\" -cf - venv", command)
+        self.assertIn("tar -C \"$repo\" -cf - .venv", command)
+        self.assertIn("$stage/launcher/hermes", command)
+        self.assertIn("home runtime units launcher", command)
+        self.assertIn("_backup_forbidden_source_path", command)
+        self.assertIn("PYTHONPATH=", command)
         self.assertNotIn("tar -C \"$HOME\"", command)
         self.assertIn("auth\\.json", command)
         self.assertIn("credentials?", command)
@@ -712,24 +750,77 @@ class TestRemoteCommands(unittest.TestCase):
         get_remote.return_value = self.entry
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(),
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout="2048\n"),
             _completed(stdout="a" * 64 + "  archive.tar.gz\n"),
             _completed(),
         ]
-        out = hermes.backup_restore("test", "20260711T000000Z-deadbeef", True)
+        with patch.object(hermes, "setup") as setup:
+            out = hermes.backup_restore("test", "20260711T000000Z-deadbeef", True)
+        setup.assert_called_once_with("test")
         self.assertIn("pre_restore_backup_id", out["data"])
-        command = ssh_run.call_args_list[4].args[1]
+        command = ssh_run.call_args_list[5].args[1]
         self.assertIn(".sha256", command)
         self.assertIn("sha256sum", command)
         self.assertIn("tar -tzf", command)
         self.assertIn("$stage/home/.hermes", command)
+        self.assertIn("hermes-agent.pack", command)
+        self.assertIn("index-pack --stdin --fix-thin", command)
+        self.assertIn("$restore/.git/shallow", command)
+        self.assertIn("checkout -q --detach", command)
+        self.assertIn("tar -C \"$source/.hermes/hermes-agent\" -cf - venv", command)
+        self.assertIn("hermes-agent.previous", command)
+        self.assertIn("launcher_previous", command)
+        self.assertIn("if test -f \"$stage/launcher/hermes\"", command)
+        self.assertIn("exec \"$HOME/.hermes/hermes-agent/venv/bin/hermes\"", command)
+        self.assertIn("dashboard_active", command)
+        self.assertIn("$restore/venv/bin/hermes", command)
+        self.assertNotIn("pip install", command)
         self.assertIn("runtime/hermes.json", command)
 
     def test_restore_requires_confirmation_before_remote_access(self):
         with self.assertRaises(hermes.HermesError) as caught:
             hermes.backup_restore("test", "20260711T000000Z-deadbeef", False)
         self.assertEqual(caught.exception.code, "confirmation_required")
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_rollback_restore_skips_pre_restore_backup_when_runtime_is_missing(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(),
+        ]
+        with patch.object(hermes, "backup_create") as create, \
+             patch.object(hermes, "setup") as setup:
+            out = hermes.backup_restore("test", "20260711T000000Z-deadbeef", True,
+                                        create_pre_restore_backup=False)
+        create.assert_not_called()
+        setup.assert_called_once_with("test")
+        self.assertIsNone(out["data"]["pre_restore_backup_id"])
+        command = ssh_run.call_args_list[1].args[1]
+        self.assertIn("had_previous=0", command)
+        self.assertIn("had_launcher=0", command)
+        self.assertNotIn('test -d "$HOME/.hermes/hermes-agent"; test -f', command)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_public_restore_skips_pre_restore_backup_when_runtime_is_missing(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(returncode=1),
+            _completed(),
+        ]
+        with patch.object(hermes, "backup_create") as create, \
+             patch.object(hermes, "_record_v2_evidence"), \
+             patch.object(hermes, "setup") as setup:
+            out = hermes.backup_restore("test", "20260711T000000Z-deadbeef", True)
+        create.assert_not_called()
+        setup.assert_called_once_with("test")
+        self.assertIsNone(out["data"]["pre_restore_backup_id"])
+        self.assertIn("hermes-agent.restore", ssh_run.call_args_list[2].args[1])
 
     def test_update_apply_requires_confirmation_before_remote_access(self):
         with self.assertRaises(hermes.HermesError) as caught:

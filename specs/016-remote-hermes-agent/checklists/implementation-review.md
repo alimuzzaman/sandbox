@@ -1,7 +1,29 @@
-# Hermes implementation review (preliminary)
+# Hermes implementation review
 
-**Review type:** author self-review; this is not the independent review
-required by T075.
+**Review type:** independent read-only security/data/API-simplicity review,
+following the preliminary author review below. T075 passed on 2026-07-11 with
+no actionable P1/P2 findings.
+
+## Independent review resolution
+
+The reviewer verified the final recovery and security controls in
+`sandbox/core/_hermes.py` and `tests/test_hermes.py`: signed installer
+provenance; recursive public-result redaction; revision/schema-bound V2
+gating; loopback dashboard checks; exact source/virtualenv/launcher backup and
+restore; automatic and public missing-runtime recovery; active-gateway
+resumption; and nested forbidden source-path rejection. New archives contain
+the launcher; compatible restore regenerates it from the restored virtualenv
+for earlier archives. Post-restore setup reapplies only the Sandbox MCP/profile
+integration and does not restore provider credentials.
+
+Evidence: focused Hermes tests (83), full unit suite (413 passed, one existing
+skip), `git diff --check`, Python compilation, and disposable-remote verified
+backup/restore plus healthy doctor output. The reviewer found no new secret
+output or public exposure path.
+
+---
+
+## Preliminary author review
 
 **Scope reviewed:** the uncommitted implementation of the V1/V2 local control
 plane in `sandbox/core/_hermes.py`, CLI presentation/parsing, MCP wrappers,
@@ -40,15 +62,12 @@ of scope while the V2 acceptance gate is pending.
 
 ## Required follow-up
 
-1. T023: run the approved clean-install, catalog, direct-CLI, worktree, and
-   disposable-instance smoke on the supported remote.
-2. T057: run the separately approved destructive V2 fault-injection and reboot
-   procedure, then record only actual, revision-specific evidence.
-3. T075: obtain an independent security/data/API-simplicity review. This
-   preliminary author review must not be used to mark T075 complete.
+1. T023: complete the clean-account provider-authenticated one-shot prompt and
+   on-demand disposable-instance smoke. Clean install/setup/doctor and recovery
+   evidence now exists on the resettable `hermes-acceptance` remote, but no
+   provider credential was copied into that account.
 
 ## Conclusion
 
-No unaddressed local implementation defect was identified in this preliminary
-review. The implementation is not release-ready: V1 live smoke, V2 live
-recovery/reboot evidence, and independent review remain mandatory gates.
+T075 is complete. The remaining release gate is T023's deliberately isolated,
+operator-authenticated V1 one-shot and on-demand-instance smoke.

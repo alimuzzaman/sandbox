@@ -32,9 +32,18 @@ Hermes installation fetches the selected annotated tag into a temporary Git
 repository, verifies its SSH signature against the pinned upstream release
 signer, confirms the exact commit, and executes the installer script extracted
 from that verified commit. It never pipes a network response directly into a
-shell. V2 backups archive only tracked Hermes source plus Sandbox-owned,
-non-secret integration state and service units; provider configuration,
-credentials, sessions, checkpoints, and untracked files are excluded.
+shell. V2 backups archive the exact tracked Git commit object, its runnable
+`venv` (and dashboard `.venv` when present), the integration-owned launcher,
+and Sandbox-owned non-secret integration state and service units. Every tracked
+source path is checked for credential-bearing filenames before packing; provider
+configuration, credentials, sessions, checkpoints, and untracked files are
+excluded. A normal restore creates a pre-restore recovery point; automatic
+update rollback restores directly from its verified pre-update archive so a
+partial failed installer cannot block recovery.
+
+After a restore, Sandbox reapplies only its owned MCP/profile settings. This
+returns direct `sb` and complete Sandbox MCP access without restoring provider
+credentials, session history, or upstream authentication files.
 
 ## V1 workflow
 

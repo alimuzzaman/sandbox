@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
 
 import sandbox.core._remote as remote
@@ -87,6 +87,29 @@ def _redact_public(value):
     if isinstance(value, dict):
         return {key: _redact_public(item) for key, item in value.items()}
     return value
+
+
+def _backup_forbidden_source_path(path: str) -> bool:
+    """Whether a tracked Hermes source path may contain runtime credentials.
+
+    The source pack is opaque to archive inspection, so this policy evaluates
+    every tracked path before packing. It deliberately permits source modules
+    such as ``cookies.py`` while rejecting credential-bearing data filenames at
+    any directory depth.
+    """
+    name = PurePosixPath(path).name.lower()
+    if name == ".env.example":
+        return False
+    return (
+        name == ".env"
+        or name.startswith(".env.")
+        or name == "auth.json"
+        or name == "credentials"
+        or re.fullmatch(r"credentials\.(json|ya?ml|toml|ini|txt)", name) is not None
+        or name == "cookies"
+        or re.fullmatch(r"cookies\.(json|ya?ml|toml|txt)", name) is not None
+        or name.endswith((".pem", ".key"))
+    )
 
 
 def result(ok: bool, action: str, remote_name: str, *, version: str | None = None,
@@ -378,7 +401,13 @@ def install(remote_name: str, version: str = SUPPORTED_TAG, commit: str | None =
         f"mkdir -p {shlex.quote(paths['repo_root'])}; bash \"$stage/install.sh\" "
         f"--branch {shlex.quote(tag)} --commit {shlex.quote(resolved)} --skip-setup --non-interactive "
         f"--dir \"$HOME/.hermes/hermes-agent\" --hermes-home \"$HOME/.hermes\"; "
-        f"test \"$(git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD)\" = {shlex.quote(resolved)}"
+        f"test \"$(git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD)\" = {shlex.quote(resolved)}; "
+        "test -x \"$HOME/.hermes/hermes-agent/venv/bin/hermes\"; mkdir -p \"$HOME/.local/bin\"; "
+        "launcher_tmp=\"$HOME/.local/bin/hermes.install.$$\"; "
+        "printf '%s\\n' '#!/usr/bin/env bash' 'unset PYTHONPATH' 'unset PYTHONHOME' "
+        "'exec \"$HOME/.hermes/hermes-agent/venv/bin/hermes\" \"$@\"' > \"$launcher_tmp\"; "
+        "chmod 700 \"$launcher_tmp\"; mv \"$launcher_tmp\" \"$HOME/.local/bin/hermes\"; "
+        "\"$HOME/.local/bin/hermes\" --version >/dev/null"
     )
     installed = _ssh(entry, command, timeout=1800)
     if installed.returncode != 0:
@@ -757,7 +786,8 @@ def _ensure_backup_space(entry: dict, paths: dict) -> int:
     return free_mb
 
 
-def backup_restore(remote_name: str, backup_id: str, confirm: bool) -> dict:
+def backup_restore(remote_name: str, backup_id: str, confirm: bool,
+                   *, create_pre_restore_backup: bool = True) -> dict:
     if not confirm:
         raise HermesError("backup restore requires --confirm", "confirmation_required")
     entry = _require_remote(remote_name)
@@ -766,7 +796,20 @@ def backup_restore(remote_name: str, backup_id: str, confirm: bool) -> dict:
     # A pre-restore snapshot is deliberately taken before stopping services or
     # replacing files, so a bad but syntactically valid archive remains
     # recoverable.  Its credentials exclusions match ordinary V2 backups.
-    pre_restore = backup_create(remote_name)
+    # A normal operator restore takes a new recovery point first. Automatic
+    # update rollback already has the verified pre-update archive, and the
+    # failed installer may have removed the checkout/launcher needed to make
+    # another backup, so it must restore directly from that known-good point.
+    # The same exception is necessary for an operator restoring a genuinely
+    # missing runtime: do not turn the absent runtime into a restore blocker.
+    pre_restore_id = None
+    if create_pre_restore_backup:
+        current_runtime = _ssh(entry, (
+            "test -d \"$HOME/.hermes/hermes-agent/.git\" && "
+            "test -x \"$HOME/.hermes/hermes-agent/venv/bin/hermes\" && "
+            "test -f \"$HOME/.local/bin/hermes\""), timeout=30)
+        if current_runtime.returncode == 0:
+            pre_restore_id = backup_create(remote_name)["data"]["backup_id"]
     digest_file = archive + ".sha256"
     command = (
         f"set -eu; test -s {shlex.quote(archive)}; test -s {shlex.quote(digest_file)}; "
@@ -778,17 +821,32 @@ def backup_restore(remote_name: str, backup_id: str, confirm: bool) -> dict:
         "stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -C \"$stage\" -xzf " + shlex.quote(archive) + "; "
         "if test -d \"$stage/home/.hermes\"; then source=\"$stage/home\"; "
         "elif test -d \"$stage/.hermes\"; then source=\"$stage\"; else exit 1; fi; "
-        "if command -v systemctl >/dev/null 2>&1; then systemctl --user stop hermes-gateway-sandbox.service 2>/dev/null || true; fi; "
-        "tar -C \"$source\" -cf - .hermes | tar -C \"$HOME\" -xf -; "
+        "commit=$(cat \"$source/.hermes/hermes-agent.commit\"); case \"$commit\" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) exit 1;; esac; "
+        "test -s \"$source/.hermes/hermes-agent.pack\"; restore=\"$HOME/.hermes/hermes-agent.restore.$$\"; previous=\"$HOME/.hermes/hermes-agent.previous.$$\"; launcher_previous=\"$HOME/.local/bin/hermes.previous.$$\"; launcher_tmp=\"$HOME/.local/bin/hermes.restore.$$\"; "
+        "rm -rf \"$restore\" \"$previous\"; rm -f \"$launcher_previous\" \"$launcher_tmp\"; git init -q \"$restore\"; printf '%s\\n' \"$commit\" > \"$restore/.git/shallow\"; git -C \"$restore\" index-pack --stdin --fix-thin < \"$source/.hermes/hermes-agent.pack\" >/dev/null; git -C \"$restore\" update-ref refs/heads/hermes-backup \"$commit\"; "
+        "git -C \"$restore\" checkout -q --detach \"$commit\"; test \"$(git -C \"$restore\" rev-parse HEAD)\" = \"$commit\"; tar -C \"$source/.hermes/hermes-agent\" -cf - venv | tar -C \"$restore\" -xf -; "
+        "if test -d \"$source/.hermes/hermes-agent/.venv\"; then tar -C \"$source/.hermes/hermes-agent\" -cf - .venv | tar -C \"$restore\" -xf -; fi; test -x \"$restore/venv/bin/hermes\"; "
+        "gateway_active=0; dashboard_active=0; if command -v systemctl >/dev/null 2>&1; then "
+        "if systemctl --user is-active --quiet hermes-gateway-sandbox.service; then gateway_active=1; systemctl --user stop hermes-gateway-sandbox.service; fi; "
+        "if systemctl --user is-active --quiet hermes-dashboard-sandbox.service; then dashboard_active=1; systemctl --user stop hermes-dashboard-sandbox.service; fi; fi; "
+        "had_previous=0; had_launcher=0; if test -d \"$HOME/.hermes/hermes-agent\"; then mv \"$HOME/.hermes/hermes-agent\" \"$previous\"; had_previous=1; fi; if test -f \"$HOME/.local/bin/hermes\"; then cp \"$HOME/.local/bin/hermes\" \"$launcher_previous\"; had_launcher=1; fi; if test -f \"$stage/launcher/hermes\"; then cp \"$stage/launcher/hermes\" \"$launcher_tmp\"; else printf '%s\\n' '#!/usr/bin/env bash' 'unset PYTHONPATH' 'unset PYTHONHOME' 'exec \"$HOME/.hermes/hermes-agent/venv/bin/hermes\" \"$@\"' > \"$launcher_tmp\"; fi; chmod 700 \"$launcher_tmp\"; mv \"$restore\" \"$HOME/.hermes/hermes-agent\"; mv \"$launcher_tmp\" \"$HOME/.local/bin/hermes\"; "
+        "if ! \"$HOME/.local/bin/hermes\" --version >/dev/null 2>&1; then rm -rf \"$HOME/.hermes/hermes-agent\"; if test \"$had_previous\" = 1; then mv \"$previous\" \"$HOME/.hermes/hermes-agent\"; fi; if test \"$had_launcher\" = 1; then mv \"$launcher_previous\" \"$HOME/.local/bin/hermes\"; else rm -f \"$HOME/.local/bin/hermes\"; fi; if command -v systemctl >/dev/null 2>&1; then if test \"$gateway_active\" = 1; then systemctl --user start hermes-gateway-sandbox.service || true; fi; if test \"$dashboard_active\" = 1; then systemctl --user start hermes-dashboard-sandbox.service || true; fi; fi; exit 1; fi; rm -rf \"$previous\"; rm -f \"$launcher_previous\"; "
+        "mkdir -p \"$HOME/.hermes\"; for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json; do "
+        "if test -f \"$source/.hermes/$safe\"; then cp \"$source/.hermes/$safe\" \"$HOME/.hermes/$safe\"; fi; done; "
         "if test -d \"$stage/units\"; then mkdir -p \"$HOME/.config/systemd/user\"; cp \"$stage/units/\"*.service \"$HOME/.config/systemd/user/\" 2>/dev/null || true; fi; "
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi; "
         f"if test -f \"$stage/runtime/hermes.json\"; then tmp={shlex.quote(paths['state'])}.restore.$$; cp \"$stage/runtime/hermes.json\" \"$tmp\"; chmod 600 \"$tmp\"; mv \"$tmp\" {shlex.quote(paths['state'])}; fi; "
-        "if command -v systemctl >/dev/null 2>&1; then systemctl --user start hermes-gateway-sandbox.service 2>/dev/null || true; fi"
+        "if command -v systemctl >/dev/null 2>&1; then if test \"$gateway_active\" = 1; then systemctl --user start hermes-gateway-sandbox.service; fi; if test \"$dashboard_active\" = 1; then systemctl --user start hermes-dashboard-sandbox.service; fi; fi"
     )
     _checked(entry, command, timeout=300, what="Hermes backup restore failed")
+    # Provider configuration is deliberately excluded from archives. Reapply
+    # only the integration-owned MCP/profile settings so a recovered launcher
+    # immediately regains direct Sandbox CLI and MCP access without restoring
+    # credentials or upstream session state.
+    setup(remote_name)
     _record_v2_evidence(entry, paths, "backup_restore", {"backup_id": backup_id})
     return result(True, "backup_restore", remote_name, status="restored",
-                  data={"backup_id": backup_id, "pre_restore_backup_id": pre_restore["data"]["backup_id"]})
+                  data={"backup_id": backup_id, "pre_restore_backup_id": pre_restore_id})
 
 
 def update_apply(remote_name: str, version: str, commit: str | None, confirm: bool) -> dict:
@@ -817,7 +875,10 @@ def update_apply(remote_name: str, version: str, commit: str | None, confirm: bo
                      what="could not resume Hermes gateway")
     except HermesError as exc:
         try:
-            backup_restore(remote_name, backup_id, True)
+            backup_restore(remote_name, backup_id, True, create_pre_restore_backup=False)
+            if gateway_was_active:
+                _checked(entry, "systemctl --user start hermes-gateway-sandbox.service", timeout=60,
+                         what="could not resume Hermes gateway after rollback")
         except HermesError:
             pass
         _record_v2_evidence(entry, _paths(entry), "update_rollback", {"reason": exc.code})
@@ -836,19 +897,28 @@ def backup_create(remote_name: str) -> dict:
     backup_root = f"{paths['sandbox_home']}/runtime/hermes-backups"
     archive = f"{backup_root}/{backup_id}.tar.gz"
     digest_file = archive + ".sha256"
+    source_policy = (
+        "from sandbox.core._hermes import _backup_forbidden_source_path as forbidden; "
+        "import sys; raise SystemExit(0 if any(forbidden(path.strip()) for path in sys.stdin if path.strip()) else 1)"
+    )
     command = (
         f"set -eu; mkdir -p {shlex.quote(backup_root)}; chmod 700 {shlex.quote(backup_root)}; "
         "repo=\"$HOME/.hermes/hermes-agent\"; test -d \"$repo/.git\"; "
         "stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
-        "mkdir -p \"$stage/home/.hermes/hermes-agent\" \"$stage/runtime\" \"$stage/units\"; "
-        "git -C \"$repo\" archive --format=tar HEAD | tar -C \"$stage/home/.hermes/hermes-agent\" -xf -; "
+        "mkdir -p \"$stage/home/.hermes/hermes-agent\" \"$stage/runtime\" \"$stage/units\" \"$stage/launcher\"; "
+        f"if git -C \"$repo\" ls-tree -r --name-only HEAD | PYTHONPATH={shlex.quote(paths['sandbox_home'] + '/sb-src')} python3 -c {shlex.quote(source_policy)}; then exit 1; fi; "
+        "git -C \"$repo\" rev-parse HEAD > \"$stage/home/.hermes/hermes-agent.commit\"; "
+        "commit=$(cat \"$stage/home/.hermes/hermes-agent.commit\"); printf '%s\\n' \"$commit\" | git -C \"$repo\" pack-objects --stdout --revs > \"$stage/home/.hermes/hermes-agent.pack\"; "
+        "test -x \"$repo/venv/bin/hermes\"; tar -C \"$repo\" -cf - venv | tar -C \"$stage/home/.hermes/hermes-agent\" -xf -; "
+        "if test -d \"$repo/.venv\"; then tar -C \"$repo\" -cf - .venv | tar -C \"$stage/home/.hermes/hermes-agent\" -xf -; fi; "
+        "test -f \"$HOME/.local/bin/hermes\"; cp -L \"$HOME/.local/bin/hermes\" \"$stage/launcher/hermes\"; chmod 700 \"$stage/launcher/hermes\"; "
         "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json; do "
         "if test -f \"$HOME/.hermes/$safe\"; then cp \"$HOME/.hermes/$safe\" \"$stage/home/.hermes/$safe\"; fi; done; "
         "for unit in hermes-gateway-sandbox.service hermes-dashboard-sandbox.service; do "
         "if test -f \"$HOME/.config/systemd/user/$unit\"; then cp \"$HOME/.config/systemd/user/$unit\" \"$stage/units/$unit\"; fi; done; "
         f"if test -f {shlex.quote(paths['state'])}; then cp {shlex.quote(paths['state'])} \"$stage/runtime/hermes.json\"; fi; "
-        f"tar -C \"$stage\" -czf {shlex.quote(archive)} home runtime units; "
-        f"if tar -tzf {shlex.quote(archive)} | grep -E '(^|/)(auth\\.json|sessions/|checkpoints/|\\.env$|credentials?($|/)|cookies?($|/))' >/dev/null; then rm -f {shlex.quote(archive)}; exit 1; fi; "
+        f"tar -C \"$stage\" -czf {shlex.quote(archive)} home runtime units launcher; "
+        f"if tar -tzf {shlex.quote(archive)} | grep -E '^home/\\.hermes/(auth\\.json|sessions/|checkpoints/|\\.env$|credentials?($|/)|cookies?($|/))' >/dev/null; then rm -f {shlex.quote(archive)}; exit 1; fi; "
         f"chmod 600 {shlex.quote(archive)}; "
         f"sha256sum {shlex.quote(archive)} | tee {shlex.quote(digest_file)}; chmod 600 {shlex.quote(digest_file)}; "
         f"find {shlex.quote(backup_root)} -maxdepth 1 -type f -name '*.tar.gz' -printf '%T@ %p\\n' | sort -nr | "

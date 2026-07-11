@@ -190,7 +190,7 @@
 - [X] T072 [P] Add durable Hermes operating/reflex rules only where justified by implementation evidence in `AGENTS.md`
 - [X] T073 Add full-catalog MCP, Docker-equivalent privilege, Git credential, prompt-history, gateway, OAuth, and public exposure threat-model findings to `docs/hermes-agent.md`
 - [X] T074 Run focused and full unit suites plus `git diff --check`, and record exact results in `specs/016-remote-hermes-agent/quickstart.md`
-- [ ] T075 Perform an independent security/data/API simplicity review and record findings/resolutions in `specs/016-remote-hermes-agent/checklists/implementation-review.md`
+- [X] T075 Perform an independent security/data/API simplicity review and record findings/resolutions in `specs/016-remote-hermes-agent/checklists/implementation-review.md`
 - [X] T076 Record task class, model/effort, scope, retries, commands, test/review evidence, outcome, residual risk, and learning delta in `tmp/task-traces/016-remote-hermes-agent.md`
 - [X] T080 [US2] Keep managed worktrees in the integration-owned runtime root, count only their roots for resource policy, preserve legacy cleanup, and prove the primary checkout remains clean in `sandbox/core/_hermes.py`, `tests/test_hermes.py`, and `docs/hermes-agent.md`
 - [X] T081 [US2] Replace broad GitHub browser OAuth with an explicit fine-grained repository-token stdin flow, reject broad OAuth before remote mutation, use HTTPS Git, and document/test the no-token-leak contract in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `tests/test_hermes.py`, `tests/test_cli.py`, `docs/hermes-agent.md`, and `specs/016-remote-hermes-agent/contracts/cli.md`
@@ -328,3 +328,17 @@ T061: Managed-hosting/OAuth/rollback tests in tests/test_hermes.py after coordin
 - [X] T085 Preflight dashboard port availability, verify post-start loopback-only health, and stop failed services per FR-033, FR-034, FR-037, and the dashboard service contract (partial)
 - [X] T086 Restrict Hermes backups to an audited non-secret allowlist and prove secret-bearing files never enter archives per FR-011, FR-024, and FR-025 (contradicts)
 - [X] T087 Remove the unsupported `--insecure` dashboard CLI option and preserve rejection through the stable command contract per FR-035 and the CLI/dashboard contracts (contradicts)
+
+## Phase 12: Convergence
+
+- [X] T088 Restore the exact archived Hermes source revision and runnable launcher atomically after a failed update, without mixing old source with a new Git/virtualenv state, per FR-024 and FR-025 (partial)
+
+## Phase 13: Convergence
+
+- [X] T089 Restore and verify the integration-owned Hermes launcher atomically with the archived source/runtime per FR-024 and FR-025 (partial)
+- [X] T090 Resume a gateway that was active before a failed update after successful automatic rollback per FR-024 and FR-028 (partial)
+- [X] T091 Validate every tracked source path against the backup forbidden-path policy before packing and prove prohibited paths are rejected per FR-011 and FR-025 (partial)
+
+## Phase 14: Convergence
+
+- [X] T092 Create and verify the integration-owned Hermes launcher after a clean non-interactive upstream install, because upstream installation may leave only the runnable virtualenv, per FR-001 and FR-024 (partial)

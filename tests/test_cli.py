@@ -63,6 +63,20 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("acceptance", r.stdout)
         self.assertIn("--confirm", r.stdout)
 
+    def test_hermes_dashboard_options_are_listed_in_help(self):
+        r = run_sb("hermes", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--port", r.stdout)
+        self.assertIn("--fqdn", r.stdout)
+        self.assertIn("--plan", r.stdout)
+        self.assertIn("--insecure", r.stdout)
+
+    def test_dashboard_refuses_before_v2_without_remote_mutation(self):
+        r = run_sb("hermes", "dashboard", "install", "--remote", "missing-dashboard-remote", "--json")
+        self.assertNotEqual(r.returncode, 0)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["error"]["code"], "unknown_remote")
+
     def test_hermes_protected_v2_actions_refuse_before_remote_lookup(self):
         remote = "missing-remote-for-confirmation-test"
         cases = [

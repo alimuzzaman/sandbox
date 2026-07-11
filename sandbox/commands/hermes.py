@@ -190,7 +190,16 @@ def cmd_hermes(cfg, args) -> None:
                 raise hermes.HermesError("acceptance action must be v2", "invalid_acceptance_action")
             payload = hermes.acceptance_v2(args.remote)
         elif action == "dashboard":
-            payload = hermes.dashboard_action(args.remote, args.subaction or "status")
+            payload = hermes.dashboard_action(
+                args.remote,
+                args.subaction or "status",
+                port=args.port,
+                fqdn=args.fqdn,
+                confirm=args.confirm,
+                plan=args.plan,
+                insecure=args.insecure,
+                lines=args.lines,
+            )
         else:  # argparse choices guard this, but keep a safe future boundary.
             raise hermes.HermesError("unknown Hermes action", "invalid_action")
     except hermes.HermesError as exc:

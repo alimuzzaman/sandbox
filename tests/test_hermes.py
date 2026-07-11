@@ -172,6 +172,45 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("loginctl enable-linger", command)
         self.assertIn("mv \"$backup\" \"$target\"", command)
 
+    def test_dashboard_validators_and_loopback_unit(self):
+        self.assertEqual(hermes.validate_dashboard_port(None), 9119)
+        self.assertEqual(hermes.validate_dashboard_fqdn("Hermes.Example.com."), "hermes.example.com")
+        for port in (80, 65536, "not-a-port"):
+            with self.assertRaises(hermes.HermesError):
+                hermes.validate_dashboard_port(port)
+        with self.assertRaises(hermes.HermesError):
+            hermes.validate_dashboard_fqdn("https://hermes.example.com")
+        unit = hermes._dashboard_unit(9120)
+        self.assertIn("--host 127.0.0.1 --port 9120 --no-open --tui", unit)
+        self.assertNotIn("--insecure", unit)
+        self.assertIn("NoNewPrivileges=true", unit)
+
+    def test_dashboard_install_command_has_rollback(self):
+        command = hermes._dashboard_install_command(hermes.DASHBOARD_UNIT, hermes._dashboard_unit(9119))
+        self.assertIn("rollback()", command)
+        self.assertIn("systemctl --user enable", command)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_dashboard_status_uses_current_v2_gate(self, get_remote, ssh_run):
+        get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        state = {"schema_version": 1, "installation": {"commit": hermes.SUPPORTED_COMMIT},
+                 "gates": {"v2_operations": {"status": "passed", "commit": hermes.SUPPORTED_COMMIT,
+                    "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS}}},
+                 "dashboard": {"installed": True, "auth_mode": "upstream"}}
+        ssh_run.side_effect = [_completed(stdout="/home/ubuntu/sandbox\n"), _completed(stdout=json.dumps(state)),
+                               _completed(stdout=json.dumps(state)),
+                               _completed(stdout="active=active\nenabled=enabled\npid=123\nport=9119\n")]
+        out = hermes.dashboard_action("test", "status")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["data"]["host"], "127.0.0.1")
+        self.assertIn("<configured-test-ssh-target>", out["data"]["ssh_forward"])
+
+    def test_dashboard_exposure_plan_requires_feature_015(self):
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.validate_dashboard_fqdn("bad host")
+        self.assertEqual(caught.exception.code, "invalid_dashboard_fqdn")
+
 
 class TestRemoteCommands(unittest.TestCase):
     def setUp(self):

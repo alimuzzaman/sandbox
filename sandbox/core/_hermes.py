@@ -26,6 +26,7 @@ import sandbox.core._remote as remote
 SUPPORTED_TAG = "v2026.7.7.2"
 SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 GATEWAY_UNIT = "hermes-gateway-sandbox.service"
+DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
 STATE_SCHEMA = 1
@@ -1168,12 +1169,158 @@ def gateway(remote_name: str, action: str, allowlist: list[str] | None = None, l
                   data={"output": output[-4000:], "truncated": len(output) > 4000} if action == "logs" else {})
 
 
-def dashboard_action(remote_name: str, action: str, **_kwargs) -> dict:
-    """V3 is intentionally unavailable until a real V2 acceptance gate exists."""
-    entry = _require_remote(remote_name)
-    paths = _paths(entry)
+def validate_dashboard_port(port: int | str | None) -> int:
+    try:
+        value = int(port or DASHBOARD_PORT)
+    except (TypeError, ValueError) as exc:
+        raise HermesError("dashboard port must be an integer", "invalid_dashboard_port") from exc
+    if value < 1024 or value > 65535:
+        raise HermesError("dashboard port must be between 1024 and 65535", "invalid_dashboard_port")
+    return value
+
+
+def validate_dashboard_fqdn(fqdn: str) -> str:
+    value = (fqdn or "").strip().lower().rstrip(".")
+    if not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", value):
+        raise HermesError("dashboard FQDN must be a normalized hostname", "invalid_dashboard_fqdn")
+    return value
+
+
+def _dashboard_unit(port: int) -> str:
+    """Render the upstream dashboard as a loopback-only user service."""
+    return (
+        "[Unit]\nDescription=Hermes Sandbox dashboard\nAfter=network-online.target\n"
+        "[Service]\n"
+        "Environment=HERMES_HOME=%h/.hermes\n"
+        f"ExecStart=%h/.local/bin/hermes dashboard --host {DASHBOARD_LOOPBACK_HOST} --port {port} --no-open --tui\n"
+        "Restart=on-failure\nRestartSec=5\n"
+        "NoNewPrivileges=true\nPrivateTmp=true\n"
+        "[Install]\nWantedBy=default.target\n"
+    )
+
+
+def _dashboard_install_command(unit: str, body: str) -> str:
+    encoded = base64.b64encode(body.encode()).decode()
+    return (
+        "set -eu; mkdir -p $HOME/.config/systemd/user; "
+        f"target=\"$HOME/.config/systemd/user/{unit}\"; tmp=\"$target.tmp.$$\"; backup=\"$target.backup.$$\"; had=0; "
+        "if test -f \"$target\"; then cp \"$target\" \"$backup\"; had=1; fi; "
+        f"echo {shlex.quote(encoded)} | base64 -d > \"$tmp\"; chmod 600 \"$tmp\"; mv \"$tmp\" \"$target\"; "
+        "rollback() { if test \"$had\" = 1; then mv \"$backup\" \"$target\"; else rm -f \"$target\"; fi; systemctl --user daemon-reload >/dev/null 2>&1 || true; }; "
+        f"if systemctl --user daemon-reload && systemctl --user enable {shlex.quote(unit)}; then rm -f \"$backup\"; else rc=$?; rollback; exit \"$rc\"; fi"
+    )
+
+
+def _dashboard_gate(entry: dict, paths: dict) -> dict:
     gate = _v2_gate(_remote_state_read(entry, paths))
     if gate["status"] != "passed":
         missing = ", ".join(gate["missing_checks"]) or "a current acceptance record"
         raise HermesError(f"dashboard is blocked until V2 acceptance passes ({missing})", "v2_gate_required")
-    raise HermesError("dashboard implementation has not started", "dashboard_not_implemented")
+    return gate
+
+
+def _dashboard_status(entry: dict, paths: dict, port: int) -> dict:
+    res = _ssh(entry, (
+        f"active=$(systemctl --user is-active {DASHBOARD_UNIT} 2>/dev/null || true); "
+        f"enabled=$(systemctl --user is-enabled {DASHBOARD_UNIT} 2>/dev/null || true); "
+        f"pid=$(systemctl --user show {DASHBOARD_UNIT} -p MainPID --value 2>/dev/null || true); "
+        f"printf 'active=%s\\nenabled=%s\\npid=%s\\nport=%s\\n' \"$active\" \"$enabled\" \"$pid\" {port}"
+    ), timeout=30)
+    values = dict(line.split("=", 1) for line in (res.stdout or "").splitlines() if "=" in line)
+    active = values.get("active") == "active"
+    return {"installed": values.get("enabled") in {"enabled", "static"} or active,
+            "enabled": values.get("enabled") in {"enabled", "static"},
+            "active": active, "substate": values.get("active", "unknown"),
+            "pid": int(values.get("pid", "0") or 0), "port": port,
+            "host": DASHBOARD_LOOPBACK_HOST, "last_health": "healthy" if active else "unknown"}
+
+
+def _dashboard_forward(remote_name: str, port: int) -> str:
+    """Return a safe operator instruction without exposing SSH target details."""
+    return f"ssh -N -L {port}:127.0.0.1:{port} <configured-{remote_name}-ssh-target>"
+
+
+def dashboard_action(remote_name: str, action: str, *, port: int | str | None = None,
+                     fqdn: str | None = None, confirm: bool = False,
+                     plan: bool = False, insecure: bool = False, **_kwargs) -> dict:
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    # Validate the unsafe bypass before any mutation, even when V2 is already passed.
+    if insecure:
+        raise HermesError("insecure dashboard authentication is never supported", "insecure_dashboard_rejected")
+    selected_port = validate_dashboard_port(port)
+    gate = _dashboard_gate(entry, paths)
+    state = _remote_state_read(entry, paths)
+    dashboard = state.setdefault("dashboard", {})
+    if action == "install":
+        command = (
+            f"set -eu; cd {shlex.quote(paths['hermes_home'].replace('$HOME', '$HOME') + '/hermes-agent')}; "
+            "if test -x .venv/bin/pip; then .venv/bin/pip install --disable-pip-version-check -e '.[web,pty]'; "
+            "elif command -v pip3 >/dev/null 2>&1; then pip3 install --user --disable-pip-version-check '.[web,pty]'; "
+            "else echo dashboard dependency installer unavailable >&2; exit 127; fi"
+        )
+        _checked(entry, command, timeout=1800, what="Hermes dashboard dependency installation failed")
+        dashboard.update({"installed": True, "port": selected_port, "host": DASHBOARD_LOOPBACK_HOST,
+                          "unit": DASHBOARD_UNIT, "auth_mode": "upstream"})
+        state["dashboard"] = dashboard
+        _remote_state_write(entry, paths, state)
+        return result(True, "dashboard_install", remote_name, status="installed", commit=gate["commit"],
+                      data={"extras": ["web", "pty"], "host": DASHBOARD_LOOPBACK_HOST, "port": selected_port})
+    if action == "setup":
+        if not dashboard.get("installed"):
+            raise HermesError("dashboard dependencies are not installed", "dashboard_not_installed")
+        dashboard.update({"port": selected_port, "host": DASHBOARD_LOOPBACK_HOST, "unit": DASHBOARD_UNIT,
+                          "auth_mode": "upstream"})
+        body = _dashboard_unit(selected_port)
+        _checked(entry, _dashboard_install_command(DASHBOARD_UNIT, body), timeout=90,
+                 what="could not install dashboard service")
+        state["dashboard"] = dashboard
+        _remote_state_write(entry, paths, state)
+        return result(True, "dashboard_setup", remote_name, status="configured", commit=gate["commit"],
+                      data={"unit": DASHBOARD_UNIT, "host": DASHBOARD_LOOPBACK_HOST, "port": selected_port,
+                            "auth_mode": "upstream", "ssh_forward": _dashboard_forward(remote_name, selected_port)})
+    if action in {"start", "stop", "restart"}:
+        if not dashboard.get("installed"):
+            raise HermesError("dashboard dependencies are not installed", "dashboard_not_installed")
+        command = f"systemctl --user {action} {DASHBOARD_UNIT}"
+        _checked(entry, command, timeout=90, what=f"dashboard {action} failed")
+        return result(True, f"dashboard_{action}", remote_name, status="active" if action != "stop" else "inactive",
+                      commit=gate["commit"], data={**_dashboard_status(entry, paths, selected_port),
+                                                  "ssh_forward": _dashboard_forward(remote_name, selected_port)})
+    if action == "status":
+        return result(True, "dashboard_status", remote_name, status="ready", commit=gate["commit"],
+                      data={**_dashboard_status(entry, paths, selected_port),
+                            "ssh_forward": _dashboard_forward(remote_name, selected_port)})
+    if action == "doctor":
+        status_data = _dashboard_status(entry, paths, selected_port)
+        probe = _ssh(entry, f"ss -ltn 2>/dev/null | grep -E '[.:]{selected_port} ' | grep -F '127.0.0.1'", timeout=30)
+        status_data["loopback_only"] = probe.returncode == 0 or not status_data["active"]
+        status_data["auth_mode"] = dashboard.get("auth_mode", "upstream")
+        status_data["ssh_forward"] = _dashboard_forward(remote_name, selected_port)
+        ok = status_data["loopback_only"] and status_data["auth_mode"] == "upstream"
+        return result(ok, "dashboard_doctor", remote_name, status="healthy" if ok else "degraded",
+                      commit=gate["commit"], data=status_data,
+                      error=None if ok else HermesError("dashboard loopback/authentication checks failed", "dashboard_health_failed"))
+    if action == "logs":
+        lines = int(_kwargs.get("lines", 200) or 200)
+        if lines < 1 or lines > 1000:
+            raise HermesError("log lines must be between 1 and 1000", "invalid_log_limit")
+        logs = _checked(entry, f"journalctl --user -u {DASHBOARD_UNIT} -n {lines} --no-pager", timeout=60,
+                        what="could not read dashboard logs")
+        return result(True, "dashboard_logs", remote_name, status="ready", commit=gate["commit"],
+                      data={"output": _redact(logs.stdout, entry)[-4000:]})
+    if action in {"expose", "unexpose"}:
+        if action == "expose":
+            host = validate_dashboard_fqdn(fqdn or "")
+            exposure = {"fqdn": host, "tls": True, "oauth": True, "managed_hosting": False,
+                        "status": "blocked", "reason": "feature_015_required"}
+            if plan or not confirm:
+                return result(False, "dashboard_expose", remote_name, status="plan", commit=gate["commit"],
+                              data={"plan": exposure},
+                              error=HermesError("managed-hosting feature 015 is required before public exposure", "feature_015_required"))
+            raise HermesError("managed-hosting feature 015 is required before public exposure", "feature_015_required")
+        if plan or not confirm:
+            return result(True, "dashboard_unexpose", remote_name, status="dry_run", commit=gate["commit"],
+                          data={"managed_hosting": False, "requires_confirm": True})
+        raise HermesError("no integration-owned public route exists", "dashboard_not_exposed")
+    raise HermesError("unknown dashboard action", "invalid_dashboard_action")

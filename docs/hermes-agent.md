@@ -118,6 +118,26 @@ passing gate manually. Until every required check is recorded against the
 currently installed Hermes commit, every dashboard action refuses without
 changing the remote.
 
+After V2 passes, the dashboard wrapper manages the upstream Hermes web/PTY
+extras and a loopback-only user service. It does not create a custom frontend or
+accept `--insecure`:
+
+```bash
+./sb hermes dashboard install --remote scaleway-sandbox --json
+./sb hermes dashboard setup --remote scaleway-sandbox --port 9119 --json
+./sb hermes dashboard start --remote scaleway-sandbox --json
+./sb hermes dashboard doctor --remote scaleway-sandbox --json
+ssh -N -L 9119:127.0.0.1:9119 alim@212.47.72.49
+```
+
+The service uses the same `$HOME/.hermes` profile and Sandbox MCP binding as
+CLI Hermes. `status`, `logs`, `stop`, and `restart` are bounded systemd-user
+operations. Public exposure is read-only by default and requires a normalized
+FQDN, current V2 evidence, feature 015 managed-hosting support, OAuth/TLS
+preflight, and explicit confirmation. Until those preconditions exist,
+`dashboard expose --plan` reports `feature_015_required` and no route or DNS
+state is changed. `unexpose --plan` is likewise read-only.
+
 ## Security and operating boundaries
 
 - The Sandbox MCP catalog is intentionally unfiltered for this trusted,

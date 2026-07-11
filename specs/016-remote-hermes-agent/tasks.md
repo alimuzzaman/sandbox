@@ -162,20 +162,20 @@
 ### Tests for User Story 5
 
 - [X] T058 [P] [US5] Add universal V2-gate refusal, stale-gate invalidation, and no-mutation dashboard tests in `tests/test_hermes.py`
-- [ ] T059 [P] [US5] Add upstream web/PTY dependency, loopback command, port conflict, same-profile, systemd lifecycle, health, and `--insecure` rejection tests in `tests/test_hermes.py`
-- [ ] T060 [P] [US5] Add dashboard lifecycle/expose/unexpose parser, plan, confirmation-before-SSH, and JSON contract tests in `tests/test_cli.py`
-- [ ] T061 [P] [US5] Add feature-015 dependency, FQDN, OAuth preflight, TLS route, unauthenticated rejection, authenticated health, and rollback tests in `tests/test_hermes.py`
+- [X] T059 [P] [US5] Add upstream web/PTY dependency, loopback command, port conflict, same-profile, systemd lifecycle, health, and `--insecure` rejection tests in `tests/test_hermes.py`
+- [X] T060 [P] [US5] Add dashboard lifecycle/expose/unexpose parser, plan, confirmation-before-SSH, and JSON contract tests in `tests/test_cli.py`
+- [X] T061 [P] [US5] Add feature-015 dependency, FQDN, OAuth preflight, TLS route, unauthenticated rejection, authenticated health, and rollback tests in `tests/test_hermes.py`
 
 ### Implementation for User Story 5
 
 - [X] T062 [US5] Implement mandatory current V2 gate evaluation for every dashboard operation in `sandbox/core/_hermes.py`
-- [ ] T063 [US5] Implement pinned upstream web/PTY dependency installation and loopback dashboard systemd unit rendering in `sandbox/core/_hermes.py`
-- [ ] T064 [US5] Implement dashboard setup/start/stop/restart/status/logs/doctor state and bounded health probes in `sandbox/core/_hermes.py`
-- [ ] T065 [US5] Implement SSH-forward access instructions without credential or raw target leakage in `sandbox/commands/hermes.py`
-- [ ] T066 [US5] Implement read-only public exposure planning, OAuth/TLS preflight, confirmed apply/unexpose, authenticated health, and managed-hosting rollback in `sandbox/core/_hermes.py`
-- [ ] T067 [US5] Implement dashboard install/setup/lifecycle/doctor/expose/unexpose dispatch in `sandbox/commands/hermes.py`
-- [ ] T068 [US5] Add V3 dashboard argument trees without an insecure bypass in `sandbox/cli.py`
-- [ ] T069 [US5] Document upstream dashboard scope, V2 gate, SSH forwarding, OAuth public mode, exposure confirmation, and rollback in `docs/hermes-agent.md`
+- [X] T063 [US5] Implement pinned upstream web/PTY dependency installation and loopback dashboard systemd unit rendering in `sandbox/core/_hermes.py`
+- [X] T064 [US5] Implement dashboard setup/start/stop/restart/status/logs/doctor state and bounded health probes in `sandbox/core/_hermes.py`
+- [X] T065 [US5] Implement SSH-forward access instructions without credential or raw target leakage in `sandbox/commands/hermes.py`
+- [X] T066 [US5] Implement read-only public exposure planning, OAuth/TLS preflight, confirmed apply/unexpose, authenticated health, and managed-hosting rollback in `sandbox/core/_hermes.py`
+- [X] T067 [US5] Implement dashboard install/setup/lifecycle/doctor/expose/unexpose dispatch in `sandbox/commands/hermes.py`
+- [X] T068 [US5] Add V3 dashboard argument trees without an insecure bypass in `sandbox/cli.py`
+- [X] T069 [US5] Document upstream dashboard scope, V2 gate, SSH forwarding, OAuth public mode, exposure confirmation, and rollback in `docs/hermes-agent.md`
 - [ ] T070 [US5] Execute the separately approved V3 loopback and optional public rollback acceptance procedure from `specs/016-remote-hermes-agent/quickstart.md`
 
 **Checkpoint**: V3 is complete only when default access is loopback/SSH-authenticated, public access is OAuth/TLS-authenticated, and failed exposure leaves no unauthenticated endpoint.

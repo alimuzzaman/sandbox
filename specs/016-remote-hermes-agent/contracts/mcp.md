@@ -84,9 +84,9 @@ Rules:
 - `repo` is a managed repository name, never a path.
 - `prompt` is passed directly to the child process and is not written to `hermes.json` or included in diagnostic output.
 - `worktree` defaults true. Setting false is explicit in the returned metadata.
-- `async_` defaults true to avoid holding MCP transport calls across model execution. It returns an existing Sandbox async job ID.
+- `async_` defaults true to avoid holding MCP transport calls across model execution. It returns a remote Hermes job ID.
 - Synchronous execution has a bounded timeout and bounded sanitized result.
-- Cancellation uses the existing `async_job_kill` contract and targets the full process group.
+- Cancellation uses `hermes_job_kill(remote, job_id)` and targets the detached Hermes process group; bounded incremental output is read through `hermes_job_status(remote, job_id, offset=0)`.
 - Repository locks and V2 resource policies apply before launch.
 
 Asynchronous launch result:

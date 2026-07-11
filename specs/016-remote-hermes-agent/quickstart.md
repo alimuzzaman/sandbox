@@ -27,7 +27,7 @@ The result must include a full verified commit. Re-run the same command and conf
 Interactive provider setup is operator-owned:
 
 ```bash
-./sb hermes setup --remote scaleway-sandbox --portal
+./sb hermes setup --remote scaleway-sandbox
 ./sb hermes doctor --remote scaleway-sandbox --json
 ```
 
@@ -36,7 +36,8 @@ Doctor must confirm:
 - the Hermes launcher and pinned commit;
 - direct remote `sb` execution;
 - the remote `$SANDBOX_HOME` path;
-- the `sandbox` stdio MCP server;
+- the effective registered `sandbox` stdio MCP server and a successful
+  initialization of that server;
 - complete Sandbox tool/resource/prompt discovery;
 - sequential MCP calls;
 - manual terminal approvals and denied dangerous cron commands;
@@ -46,8 +47,8 @@ Doctor must confirm:
 
 ```bash
 ./sb hermes repo auth github --remote scaleway-sandbox
-./sb hermes repo clone git@github.com:OWNER/REPO.git \
-  --remote scaleway-sandbox \
+./sb hermes repo clone --remote scaleway-sandbox \
+  --url git@github.com:OWNER/REPO.git \
   --name repo
 ./sb hermes repo list --remote scaleway-sandbox --json
 ```
@@ -72,7 +73,10 @@ One-shot asynchronous:
   --async \
   --json
 
-./sb async-job JOB_ID --json
+./sb hermes job status \
+  --remote scaleway-sandbox \
+  --job-id JOB_ID \
+  --json
 ```
 
 Start two sessions and confirm their worktree paths/branches differ and the primary checkout's status/diff remain unchanged. Use `--no-worktree` only for an intentionally non-isolated session.
@@ -90,7 +94,7 @@ Verify the instance appears in the remote Sandbox registry exactly once for that
 ## 7. Configure the gateway (V1)
 
 ```bash
-./sb hermes gateway setup --remote scaleway-sandbox
+./sb hermes gateway setup --remote scaleway-sandbox --allow operator-id-or-channel
 ./sb hermes gateway install --remote scaleway-sandbox
 ./sb hermes gateway start --remote scaleway-sandbox
 ./sb hermes gateway status --remote scaleway-sandbox --json
@@ -120,6 +124,34 @@ Before a successful start, configure at least one explicit allowed identity/chan
 ```
 
 The gate passes only after injected update failure/rollback, restore, configured resource-limit rejection, stale-state reconciliation, log rotation, and reboot recovery have all produced passing evidence.
+
+### V2 fault-injection and reboot procedure (separately approved)
+
+Run the following only in an approved disposable or recovery-tested remote
+window. Do not create a passing acceptance record by hand. Record the current
+Sandbox commit, full Hermes commit, UTC timestamps, command exit status, and
+sanitized observations in `$SANDBOX_HOME/runtime/hermes.json`.
+
+1. Capture `doctor`, `health`, `policy show`, `backup list`, and `update plan`
+   output. Confirm the target is an immutable signed tag and full commit.
+2. Create a backup and verify its SHA-256 sidecar. In a disposable fixture,
+   corrupt a copy of the archive and confirm restore refuses it; restore only
+   the intact archive with separate `--confirm` approval and verify `health`.
+3. Inject a post-update health failure against an approved test target. Verify
+   `update apply --confirm` reports rollback, then verify the original launcher
+   revision, profile, and gateway service are healthy.
+4. Temporarily lower one policy limit at a time (job count, worktree count,
+   free disk, and free memory) and submit a harmless one-shot job. Verify the
+   request is rejected before launch, then restore the original policy.
+5. End a disposable detached process without writing its completion marker and
+   leave both a clean and a dirty worktree. Verify status identifies stale
+   state; cleanup may remove only the clean inactive worktree after `--confirm`.
+6. Verify bounded job/gateway logs and configured retention. Reboot only after
+   explicit approval, then verify Sandbox registry entries are intact, enabled
+   services recover, and `doctor` reports stale sessions requiring manual work.
+7. Run `./sb hermes acceptance v2 --remote scaleway-sandbox --json`. It must
+   remain pending unless all five pieces of evidence are current and recorded
+   against the installed Hermes commit. A stale revision invalidates the gate.
 
 ## 9. Install the dashboard only after V2 (V3)
 
@@ -193,3 +225,30 @@ environment-dependent skips. The shared MCP virtual environment also confirmed
 that `hermes_status` and `hermes_run` are registered. The remote install,
 provider authentication, repository clone, instance creation, gateway service,
 and V2/V3 acceptance steps were not run.
+
+## Implementation verification (2026-07-11)
+
+```bash
+/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest tests.test_cli tests.test_hermes -q
+/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests -q
+git diff --check
+```
+
+Results: 75 focused tests and 385 full-suite tests passed; one existing test
+was skipped. The suite emits pre-existing subprocess `ResourceWarning`s and
+intentional negative-path diagnostic messages, but exited successfully. No V2
+destructive recovery action, reboot, provider authentication, or dashboard
+operation was run in this implementation pass.
+
+Remote V1 configuration verification on `scaleway-sandbox` also passed. An
+idempotent install/setup invocation was followed by an immutable update plan:
+the installed and target Hermes commits both resolved to
+`9de9c25f620ff7f1ce0fd5457d596052d5159596`, with no update required.
+`doctor` confirmed direct Sandbox CLI access, a registered effective Sandbox
+MCP entry, a complete Sandbox MCP catalog, the owner-only integration profile,
+locking/session utilities, disk, and memory; `status` reported Hermes Agent
+v0.18.2 as configured with zero active sessions. Provider authentication,
+repository clone/worktree execution,
+on-demand instance creation, gateway start, and every V2 destructive recovery
+or reboot check remain unrun. The V2 gate remains pending because its required
+evidence was not fabricated.

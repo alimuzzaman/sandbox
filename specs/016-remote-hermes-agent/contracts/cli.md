@@ -45,7 +45,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 ./sb hermes install --remote NAME
                     [--version TAG] [--commit SHA] [--json]
 
-./sb hermes setup --remote NAME [--portal] [--json]
+./sb hermes setup --remote NAME [--json]
 ./sb hermes doctor --remote NAME [--json]
 ./sb hermes status --remote NAME [--json]
 
@@ -57,7 +57,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 ./sb hermes run --remote NAME --repo NAME --prompt TEXT
                 [--no-worktree] [--async] [--timeout SECONDS] [--json]
 
-./sb hermes gateway setup --remote NAME
+./sb hermes gateway setup --remote NAME --allow ID [--allow ID ...]
 ./sb hermes gateway install --remote NAME [--json]
 ./sb hermes gateway start|stop|restart|status --remote NAME [--json]
 ./sb hermes gateway logs --remote NAME [--lines N] [--json]
@@ -74,7 +74,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 ### Setup
 
 - Writes or reconciles only the Sandbox-managed Hermes profile/config section.
-- `--portal` launches the upstream interactive provider flow; it is invalid with non-interactive JSON automation.
+- Setup never accepts provider credentials or an interactive portal flag. Provider authentication is an explicit `repo auth github` operator action.
 - Setup does not accept provider tokens as command-line arguments.
 - Successful setup verifies direct `sb`, MCP initialization, complete catalog discovery, profile selection, and file permissions.
 
@@ -94,7 +94,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 - Worktree isolation is enabled by default. `--no-worktree` is an explicit per-invocation override and is reported prominently.
 - `chat` requires a TTY and transfers terminal control through SSH.
 - Synchronous `run` returns the bounded final result or a timeout error without abandoning an untracked process.
-- `run --async` returns a Sandbox host-level job ID immediately. Existing `async-job` CLI/MCP operations poll or cancel it.
+- `run --async` returns a remote Hermes job ID immediately. `hermes job status|kill` poll or cancel it.
 - `--prompt` is accepted for the requested V1 interface but must not be copied into logs/state. A future stdin/file option may reduce shell-history exposure without changing this contract.
 
 ### Gateway
@@ -112,7 +112,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 
 ./sb hermes backup create --remote NAME [--json]
 ./sb hermes backup list --remote NAME [--json]
-./sb hermes backup restore ID --remote NAME --confirm [--json]
+./sb hermes backup restore --backup-id ID --remote NAME --confirm [--json]
 
 ./sb hermes cleanup --remote NAME [--dry-run] [--confirm] [--json]
 ./sb hermes health --remote NAME [--json]

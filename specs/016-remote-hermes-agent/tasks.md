@@ -18,7 +18,7 @@
 
 **Purpose**: Establish upstream compatibility evidence, configuration defaults, and test fixtures before adding a public command.
 
-- [ ] T001 Record the supported Hermes tag, resolved full commit, installer flags, config keys, gateway commands, and dashboard flags in `sandbox/core/_hermes.py`
+- [X] T001 Record the supported Hermes tag, resolved full commit, installer flags, config keys, gateway commands, and dashboard flags in `sandbox/core/_hermes.py`
 - [X] T002 [P] Add non-secret Hermes defaults and documented override keys to `docs/sandbox-config-reference.md`
 - [X] T003 [P] Add reusable fake remote, fake Hermes installer, and disposable Git repository fixtures to `tests/fixtures/hermes.py`
 - [X] T004 [P] Add Hermes command import and parser smoke expectations to `tests/test_cli.py`
@@ -31,12 +31,12 @@
 
 **CRITICAL**: No story implementation starts until this phase passes focused tests.
 
-- [ ] T005 Implement Hermes state schema, restrictive permissions, migrations, locking, and atomic writes in `sandbox/core/_hermes.py`
-- [ ] T006 Implement remote resolution, capability preflight, absolute Sandbox/Hermes path discovery, and redacted SSH execution wrappers in `sandbox/core/_hermes.py`
+- [X] T005 Implement Hermes state schema, restrictive permissions, migrations, locking, and atomic writes in `sandbox/core/_hermes.py`
+- [X] T006 Implement remote resolution, capability preflight, absolute Sandbox/Hermes path discovery, and redacted SSH execution wrappers in `sandbox/core/_hermes.py`
 - [X] T007 Implement managed-name, canonical-path containment, repository URL, immutable revision, port, timeout, and confirmation validators in `sandbox/core/_hermes.py`
 - [X] T008 Implement the stable human/JSON result envelope and structured sanitized errors in `sandbox/commands/hermes.py`
-- [ ] T009 Register Hermes core exports and command-module loading in `sandbox/core/__init__.py` and `sandbox/cli.py`
-- [ ] T010 Add focused tests for state migration, atomicity, permissions, locks, validation, timeouts, and redaction in `tests/test_hermes.py`
+- [X] T009 Register Hermes core exports and command-module loading in `sandbox/core/__init__.py` and `sandbox/cli.py`
+- [X] T010 Add focused tests for state migration, atomicity, permissions, locks, validation, timeouts, and redaction in `tests/test_hermes.py`
 
 **Checkpoint**: State and SSH helpers reject unsafe inputs before remote mutation and emit no secrets.
 
@@ -50,16 +50,16 @@
 
 ### Tests for User Story 1
 
-- [ ] T011 [P] [US1] Add CLI contract tests for install, setup, doctor, status, chat, run, immutable revision mismatch, and JSON output in `tests/test_cli.py`
-- [ ] T012 [P] [US1] Add generated Hermes YAML snapshot tests for direct `sb`, complete stdio MCP discovery, sequential calls, approvals, checkpoints, and secret exclusion in `tests/test_hermes.py`
-- [ ] T013 [P] [US1] Add mocked remote tests for clean install, identical reinstall, partial-install recovery, setup preservation, catalog mismatch, and direct CLI failure in `tests/test_hermes.py`
-- [ ] T014 [P] [US1] Add MCP/instance integration assertions for `ensure_instance` reuse by canonical worktree and no implicit non-WordPress instance in `tests/test_mcp.py`
+- [X] T011 [P] [US1] Add CLI contract tests for install, setup, doctor, status, chat, run, immutable revision mismatch, and JSON output in `tests/test_cli.py`
+- [X] T012 [P] [US1] Add generated Hermes YAML snapshot tests for direct `sb`, complete stdio MCP discovery, sequential calls, approvals, checkpoints, and secret exclusion in `tests/test_hermes.py`
+- [X] T013 [P] [US1] Add mocked remote tests for clean install, identical reinstall, partial-install recovery, setup preservation, catalog mismatch, and direct CLI failure in `tests/test_hermes.py`
+- [X] T014 [P] [US1] Add MCP/instance integration assertions for `ensure_instance` reuse by canonical worktree and no implicit non-WordPress instance in `tests/test_mcp.py`
 
 ### Implementation for User Story 1
 
 - [X] T015 [US1] Implement signed-tag/full-commit resolution and official non-interactive installer orchestration in `sandbox/core/_hermes.py`
-- [ ] T016 [US1] Implement integration-owned Hermes profile merge, backup, file-permission checks, and Sandbox stdio MCP rendering in `sandbox/core/_hermes.py`
-- [ ] T017 [US1] Implement direct `sb`, MCP initialize/catalog, release, path, Docker, disk, memory, and configuration diagnostic probes in `sandbox/core/_hermes.py`
+- [X] T016 [US1] Implement integration-owned Hermes profile merge, backup, file-permission checks, and Sandbox stdio MCP rendering in `sandbox/core/_hermes.py`
+- [X] T017 [US1] Implement direct `sb`, MCP initialize/catalog, release, path, Docker, disk, memory, and configuration diagnostic probes in `sandbox/core/_hermes.py`
 - [X] T018 [US1] Implement install, setup, doctor, and status CLI dispatch and output in `sandbox/commands/hermes.py`
 - [X] T019 [US1] Implement interactive chat and synchronous/async one-shot launch with bounded prompt/result handling in `sandbox/core/_hermes.py`
 - [X] T020 [US1] Add `hermes install|setup|doctor|status|chat|run` argument trees and confirmation-safe defaults in `sandbox/cli.py`
@@ -79,16 +79,16 @@
 
 ### Tests for User Story 2
 
-- [ ] T024 [P] [US2] Add repository auth/clone/list CLI contract and JSON redaction tests in `tests/test_cli.py`
-- [ ] T025 [P] [US2] Add repository URL, temporary clone, canonical rename, duplicate origin, provider failure, submodule, and Git LFS tests in `tests/test_hermes.py`
-- [ ] T026 [P] [US2] Add worktree branch collision, concurrent lock, dirty retention, cleanup refusal, and no-worktree override tests in `tests/test_hermes.py`
+- [X] T024 [P] [US2] Add repository auth/clone/list CLI contract and JSON redaction tests in `tests/test_cli.py`
+- [X] T025 [P] [US2] Add repository URL, temporary clone, canonical rename, duplicate origin, provider failure, submodule, and Git LFS tests in `tests/test_hermes.py`
+- [X] T026 [P] [US2] Add worktree branch collision, concurrent lock, dirty retention, cleanup refusal, and no-worktree override tests in `tests/test_hermes.py`
 
 ### Implementation for User Story 2
 
-- [ ] T027 [US2] Implement provider device-auth launch and authentication-status probing without token output in `sandbox/core/_hermes.py`
+- [X] T027 [US2] Implement provider device-auth launch and authentication-status probing without token output in `sandbox/core/_hermes.py`
 - [X] T028 [US2] Implement atomic managed clone, sanitized origin storage, repository verification, and repository listing in `sandbox/core/_hermes.py`
-- [ ] T029 [US2] Implement per-repository locks and worktree-first session creation with collision-resistant branches in `sandbox/core/_hermes.py`
-- [ ] T030 [US2] Implement conservative session completion metadata and dirty/active worktree retention in `sandbox/core/_hermes.py`
+- [X] T029 [US2] Implement per-repository locks and worktree-first session creation with collision-resistant branches in `sandbox/core/_hermes.py`
+- [X] T030 [US2] Implement conservative session completion metadata and dirty/active worktree retention in `sandbox/core/_hermes.py`
 - [X] T031 [US2] Implement `hermes repo auth|clone|list` and worktree/no-worktree presentation in `sandbox/commands/hermes.py`
 - [X] T032 [US2] Add repository subcommands, URL/name/ref options, and explicit `--no-worktree` parsing in `sandbox/cli.py`
 - [X] T033 [US2] Document provider authentication, managed repository rules, concurrent worktrees, retention, and recovery in `docs/hermes-agent.md`
@@ -105,16 +105,16 @@
 
 ### Tests for User Story 3
 
-- [ ] T034 [P] [US3] Add gateway service rendering, unsafe allowlist, idempotent lifecycle, reboot-start, and bounded log tests in `tests/test_hermes.py`
-- [ ] T035 [P] [US3] Add `hermes_status` and `hermes_run` registration, validation, sync/async, cancellation, timeout, and redaction tests in `tests/test_mcp.py`
-- [ ] T036 [P] [US3] Add gateway and Hermes async CLI parser/JSON contract tests in `tests/test_cli.py`
+- [X] T034 [P] [US3] Add gateway service rendering, unsafe allowlist, idempotent lifecycle, reboot-start, and bounded log tests in `tests/test_hermes.py`
+- [X] T035 [P] [US3] Add `hermes_status` and `hermes_run` registration, validation, sync/async, cancellation, timeout, and redaction tests in `tests/test_mcp.py`
+- [X] T036 [P] [US3] Add gateway and Hermes async CLI parser/JSON contract tests in `tests/test_cli.py`
 
 ### Implementation for User Story 3
 
-- [ ] T037 [US3] Implement allowlist validation, profile-scoped systemd unit rendering, service observation, bounded journald reads, and rollback in `sandbox/core/_hermes.py`
-- [ ] T038 [US3] Implement gateway setup/install/start/stop/restart/status/logs dispatch in `sandbox/commands/hermes.py`
-- [ ] T039 [US3] Add gateway lifecycle argument trees and bounded log options in `sandbox/cli.py`
-- [ ] T040 [US3] Implement thin validated `hermes_status` and `hermes_run` tools using shared orchestration and the existing async job runner in `mcp/wp-server/tools/hermes.py`
+- [X] T037 [US3] Implement allowlist validation, profile-scoped systemd unit rendering, service observation, bounded journald reads, and rollback in `sandbox/core/_hermes.py`
+- [X] T038 [US3] Implement gateway setup/install/start/stop/restart/status/logs dispatch in `sandbox/commands/hermes.py`
+- [X] T039 [US3] Add gateway lifecycle argument trees and bounded log options in `sandbox/cli.py`
+- [X] T040 [US3] Implement thin validated `hermes_status` and `hermes_run` tools using shared orchestration and the existing async job runner in `mcp/wp-server/tools/hermes.py`
 - [X] T041 [US3] Register the Hermes MCP tool group and preserve catalog initialization behavior in `mcp/wp-server/server.py`
 - [X] T042 [US3] Document gateway pairing/allowlists, MCP job polling/cancellation, output limits, and reboot expectations in `docs/hermes-agent.md`
 
@@ -130,23 +130,23 @@
 
 ### Tests for User Story 4
 
-- [ ] T043 [P] [US4] Add immutable update plan/confirm, moving-branch rejection, backup preflight, health failure, and automatic rollback tests in `tests/test_hermes.py`
-- [ ] T044 [P] [US4] Add backup digest, compatibility, disk-space, pre-restore backup, restore rollback, and retention tests in `tests/test_hermes.py`
-- [ ] T045 [P] [US4] Add concurrent job/worktree, disk/memory threshold, lock timeout, queue/refusal, and bounded retention tests in `tests/test_hermes.py`
-- [ ] T046 [P] [US4] Add stale PID/job/worktree, dirty ambiguity, dry-run cleanup, log rotation, service recovery, and acceptance-record invalidation tests in `tests/test_hermes.py`
-- [ ] T047 [P] [US4] Add update/backup/cleanup/health/acceptance CLI contract and confirmation-before-SSH tests in `tests/test_cli.py`
+- [X] T043 [P] [US4] Add immutable update plan/confirm, moving-branch rejection, backup preflight, health failure, and automatic rollback tests in `tests/test_hermes.py`
+- [X] T044 [P] [US4] Add backup digest, compatibility, disk-space, pre-restore backup, restore rollback, and retention tests in `tests/test_hermes.py`
+- [X] T045 [P] [US4] Add concurrent job/worktree, disk/memory threshold, lock timeout, queue/refusal, and bounded retention tests in `tests/test_hermes.py`
+- [X] T046 [P] [US4] Add stale PID/job/worktree, dirty ambiguity, dry-run cleanup, log rotation, service recovery, and acceptance-record invalidation tests in `tests/test_hermes.py`
+- [X] T047 [P] [US4] Add update/backup/cleanup/health/acceptance CLI contract and confirmation-before-SSH tests in `tests/test_cli.py`
 
 ### Implementation for User Story 4
 
-- [ ] T048 [US4] Implement integrity-checked backup creation/listing/retention and compatibility-validated restore in `sandbox/core/_hermes.py`
-- [ ] T049 [US4] Implement immutable update planning, confirmation, service quiescing, install verification, health checks, and automatic rollback in `sandbox/core/_hermes.py`
-- [ ] T050 [US4] Implement configurable job/worktree/disk/memory resource policy and preflight enforcement in `sandbox/core/_hermes.py`
-- [ ] T051 [US4] Implement conservative stale job/worktree reconciliation, dry-run cleanup, and completed artifact retention in `sandbox/core/_hermes.py`
-- [ ] T052 [US4] Implement structured health aggregation, log rotation configuration, reboot recovery checks, and revision-specific acceptance records in `sandbox/core/_hermes.py`
-- [ ] T053 [US4] Implement update plan/apply, backup create/list/restore, cleanup, health, and V2 acceptance dispatch in `sandbox/commands/hermes.py`
-- [ ] T054 [US4] Add V2 argument trees with explicit `--confirm`, default dry-run, and JSON options in `sandbox/cli.py`
-- [ ] T055 [US4] Document V2 update, rollback, restore, resource configuration, cleanup, health, and recovery procedures in `docs/hermes-agent.md`
-- [ ] T056 [US4] Add the V2 fault-injection and reboot acceptance procedure to `specs/016-remote-hermes-agent/quickstart.md`
+- [X] T048 [US4] Implement integrity-checked backup creation/listing/retention and compatibility-validated restore in `sandbox/core/_hermes.py`
+- [X] T049 [US4] Implement immutable update planning, confirmation, service quiescing, install verification, health checks, and automatic rollback in `sandbox/core/_hermes.py`
+- [X] T050 [US4] Implement configurable job/worktree/disk/memory resource policy and preflight enforcement in `sandbox/core/_hermes.py`
+- [X] T051 [US4] Implement conservative stale job/worktree reconciliation, dry-run cleanup, and completed artifact retention in `sandbox/core/_hermes.py`
+- [X] T052 [US4] Implement structured health aggregation, log rotation configuration, reboot recovery checks, and revision-specific acceptance records in `sandbox/core/_hermes.py`
+- [X] T053 [US4] Implement update plan/apply, backup create/list/restore, cleanup, health, and V2 acceptance dispatch in `sandbox/commands/hermes.py`
+- [X] T054 [US4] Add V2 argument trees with explicit `--confirm`, default dry-run, and JSON options in `sandbox/cli.py`
+- [X] T055 [US4] Document V2 update, rollback, restore, resource configuration, cleanup, health, and recovery procedures in `docs/hermes-agent.md`
+- [X] T056 [US4] Add the V2 fault-injection and reboot acceptance procedure to `specs/016-remote-hermes-agent/quickstart.md`
 - [ ] T057 [US4] Execute the separately approved V2 live acceptance suite and record revision-specific sanitized evidence through `$SANDBOX_HOME/runtime/hermes.json`
 
 **Checkpoint**: V3 remains locked unless T057 records an actual passing V2 gate for compatible Hermes/Sandbox revisions.
@@ -161,14 +161,14 @@
 
 ### Tests for User Story 5
 
-- [ ] T058 [P] [US5] Add universal V2-gate refusal, stale-gate invalidation, and no-mutation dashboard tests in `tests/test_hermes.py`
+- [X] T058 [P] [US5] Add universal V2-gate refusal, stale-gate invalidation, and no-mutation dashboard tests in `tests/test_hermes.py`
 - [ ] T059 [P] [US5] Add upstream web/PTY dependency, loopback command, port conflict, same-profile, systemd lifecycle, health, and `--insecure` rejection tests in `tests/test_hermes.py`
 - [ ] T060 [P] [US5] Add dashboard lifecycle/expose/unexpose parser, plan, confirmation-before-SSH, and JSON contract tests in `tests/test_cli.py`
 - [ ] T061 [P] [US5] Add feature-015 dependency, FQDN, OAuth preflight, TLS route, unauthenticated rejection, authenticated health, and rollback tests in `tests/test_hermes.py`
 
 ### Implementation for User Story 5
 
-- [ ] T062 [US5] Implement mandatory current V2 gate evaluation for every dashboard operation in `sandbox/core/_hermes.py`
+- [X] T062 [US5] Implement mandatory current V2 gate evaluation for every dashboard operation in `sandbox/core/_hermes.py`
 - [ ] T063 [US5] Implement pinned upstream web/PTY dependency installation and loopback dashboard systemd unit rendering in `sandbox/core/_hermes.py`
 - [ ] T064 [US5] Implement dashboard setup/start/stop/restart/status/logs/doctor state and bounded health probes in `sandbox/core/_hermes.py`
 - [ ] T065 [US5] Implement SSH-forward access instructions without credential or raw target leakage in `sandbox/commands/hermes.py`
@@ -186,12 +186,12 @@
 
 **Purpose**: Finish documentation, compatibility, regression, security review, and the repository-required work trace.
 
-- [ ] T071 [P] Add the Hermes quick-start entry and roadmap links to `README.md`
-- [ ] T072 [P] Add durable Hermes operating/reflex rules only where justified by implementation evidence in `AGENTS.md`
-- [ ] T073 Add full-catalog MCP, Docker-equivalent privilege, Git credential, prompt-history, gateway, OAuth, and public exposure threat-model findings to `docs/hermes-agent.md`
-- [ ] T074 Run focused and full unit suites plus `git diff --check`, and record exact results in `specs/016-remote-hermes-agent/quickstart.md`
+- [X] T071 [P] Add the Hermes quick-start entry and roadmap links to `README.md`
+- [X] T072 [P] Add durable Hermes operating/reflex rules only where justified by implementation evidence in `AGENTS.md`
+- [X] T073 Add full-catalog MCP, Docker-equivalent privilege, Git credential, prompt-history, gateway, OAuth, and public exposure threat-model findings to `docs/hermes-agent.md`
+- [X] T074 Run focused and full unit suites plus `git diff --check`, and record exact results in `specs/016-remote-hermes-agent/quickstart.md`
 - [ ] T075 Perform an independent security/data/API simplicity review and record findings/resolutions in `specs/016-remote-hermes-agent/checklists/implementation-review.md`
-- [ ] T076 Record task class, model/effort, scope, retries, commands, test/review evidence, outcome, residual risk, and learning delta in `tmp/task-traces/016-remote-hermes-agent.md`
+- [X] T076 Record task class, model/effort, scope, retries, commands, test/review evidence, outcome, residual risk, and learning delta in `tmp/task-traces/016-remote-hermes-agent.md`
 
 ---
 
@@ -308,3 +308,12 @@ T061: Managed-hosting/OAuth/rollback tests in tests/test_hermes.py after coordin
 - **US5**: 13
 - **Polish**: 6
 - **Suggested MVP**: Setup + Foundation + US1 (T001-T023)
+
+## Phase 9: Convergence
+
+- [X] T077 Persist the resolved absolute `SANDBOX_HOME` in the effective Hermes `mcp_servers.sandbox.env` configuration and preserve unrelated Hermes config during setup per FR-004 and FR-005 (partial)
+- [X] T078 Prove diagnostics validate the effective unfiltered Sandbox MCP configuration, including tools, resources, prompts, sequential execution, and the resolved `SANDBOX_HOME`, per FR-004 and FR-006 (partial)
+
+## Phase 10: Convergence
+
+- [X] T079 Validate the scoped effective `mcp_servers.sandbox` configuration without emitting configuration contents, rejecting missing resolved paths, parallel calls, disabled resources/prompts, and include/exclude filters per FR-004 and FR-006 (partial)

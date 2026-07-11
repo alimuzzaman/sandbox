@@ -62,12 +62,12 @@ of scope while the V2 acceptance gate is pending.
 
 ## Required follow-up
 
-1. T023: complete the clean-account provider-authenticated one-shot prompt and
-   on-demand disposable-instance smoke. Clean install/setup/doctor and recovery
-   evidence now exists on the resettable `hermes-acceptance` remote, but no
-   provider credential was copied into that account.
+No remaining Spec-Kit acceptance follow-up is open. The clean-account
+provider-authenticated one-shot prompt and on-demand disposable-instance smoke
+completed on `hermes-acceptance`; no provider credential was copied from the
+live account.
 
 ## Conclusion
 
-T075 is complete. The remaining release gate is T023's deliberately isolated,
-operator-authenticated V1 one-shot and on-demand-instance smoke.
+T023 and T075 are complete. V2 and V3 live gates remain revision-bound and
+passed on the supported remote.

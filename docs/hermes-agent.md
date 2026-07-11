@@ -63,6 +63,12 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes job status --remote scaleway-sandbox --job-id JOB_ID --json
 ```
 
+Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
+instead use the upstream OpenAI Codex OAuth provider on the remote:
+`hermes auth add openai-codex --type oauth`. The subscription login remains
+isolated in that Hermes account and is separate from the fine-grained GitHub
+repository token above.
+
 Create that fine-grained token in GitHub with the repository's owner as its
 resource owner, **Only select repositories** set to the one repository Hermes
 may use, no organization permissions, and only the required repository

@@ -300,8 +300,9 @@ endpoint. Public OAuth/TLS deployment and rollback remain conditional on the
 separate feature-015 managed-hosting capability and a future explicit approval.
 
 Local regression for this acceptance/fix phase passed:
-`python -m unittest tests.test_hermes tests.test_cli -q` (87 tests) and
-`python -m unittest discover -s tests -q` (399 tests, one existing skip).
+`python -m unittest tests.test_hermes tests.test_cli -q` (83 Hermes tests in
+the focused recovery suite) and `python -m unittest discover -s tests -q`
+(413 tests, one existing skip).
 The full suite emitted its existing subprocess warnings and intentional
 negative-path fixture diagnostics but exited successfully.
 
@@ -318,7 +319,10 @@ runnable virtualenv returned, the Sandbox-owned profile was reapplied, and
 and 413 full tests (one existing skip), plus `git diff --check` and Python
 compilation.
 
-This is recovery and clean-install infrastructure for T023, not the final T023
-acceptance: an operator must still authenticate a provider on this isolated
-account, run the one-shot prompt, and have it create a disposable WordPress
-instance on demand.
+T023 is complete on this isolated account. Hermes authenticated through
+OpenAI Codex OAuth, the pinned install was reconciled repeatedly, the full MCP
+catalog and direct `sb` CLI passed doctor, and a Hermes worktree session called
+Sandbox `ensure_instance` successfully. The final session exited 0, returned
+`http://localhost:8189`, created exactly one ready instance for its worktree,
+and left the primary repository checkout clean. Sanitized V1 evidence is stored
+under `gates.v1_core` in `$SANDBOX_HOME/runtime/hermes.json`.

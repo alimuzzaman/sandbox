@@ -65,7 +65,7 @@
 - [X] T020 [US1] Add `hermes install|setup|doctor|status|chat|run` argument trees and confirmation-safe defaults in `sandbox/cli.py`
 - [X] T021 [US1] Add the full-access trust boundary, `ensure_instance`-first workflow, and non-WordPress behavior to `docs/hermes-agent.md`
 - [X] T022 [US1] Run focused V1 tests and record exact commands/results in `specs/016-remote-hermes-agent/quickstart.md`
-- [ ] T023 [US1] Execute the approved clean-install/idempotency/MCP/direct-CLI/on-demand-instance smoke and record sanitized V1 gate evidence through `$SANDBOX_HOME/runtime/hermes.json`
+- [X] T023 [US1] Execute the approved clean-install/idempotency/MCP/direct-CLI/on-demand-instance smoke and record sanitized V1 gate evidence through `$SANDBOX_HOME/runtime/hermes.json`
 
 **Checkpoint**: US1 alone delivers a usable remote Hermes installation with direct Sandbox CLI, the full Sandbox MCP catalog, and on-demand instance access.
 
@@ -342,3 +342,7 @@ T061: Managed-hosting/OAuth/rollback tests in tests/test_hermes.py after coordin
 ## Phase 14: Convergence
 
 - [X] T092 Create and verify the integration-owned Hermes launcher after a clean non-interactive upstream install, because upstream installation may leave only the runnable virtualenv, per FR-001 and FR-024 (partial)
+
+## Phase 15: Convergence
+
+- [X] T093 Preserve the verified Hermes upstream URL and release tag refs during backup restore so repeated pinned installation remains idempotent after recovery, per FR-023 and FR-024 (partial)

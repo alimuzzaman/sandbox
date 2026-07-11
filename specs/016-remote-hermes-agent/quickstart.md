@@ -46,14 +46,24 @@ Doctor must confirm:
 ## 4. Authenticate and clone a repository
 
 ```bash
-./sb hermes repo auth github --remote scaleway-sandbox
+# Create a fine-grained GitHub token scoped to only the selected repository.
+# Do not grant organization permissions or use the browser OAuth flow.
+read -r -s GH_FINE_GRAINED_TOKEN
+printf '\n'
+printf '%s' "$GH_FINE_GRAINED_TOKEN" | ./sb hermes repo auth github \
+  --remote scaleway-sandbox --token-stdin
+unset GH_FINE_GRAINED_TOKEN
 ./sb hermes repo clone --remote scaleway-sandbox \
-  --url git@github.com:OWNER/REPO.git \
+  --url https://github.com/OWNER/REPO.git \
   --name repo
 ./sb hermes repo list --remote scaleway-sandbox --json
 ```
 
-Also verify that a URL containing `user:token@host`, a traversal name, and a duplicate conflicting name are rejected before clone.
+For the token, choose the repository owner, **Only select repositories**, the
+one intended repository, no organization permissions, and only the required
+`Contents` access (`Read and write` for code changes; `Read-only` for
+inspection). Also verify that a URL containing `user:token@host`, a traversal
+name, and a duplicate conflicting name are rejected before clone.
 
 ## 5. Start worktree-isolated sessions
 

@@ -49,7 +49,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 ./sb hermes doctor --remote NAME [--json]
 ./sb hermes status --remote NAME [--json]
 
-./sb hermes repo auth github --remote NAME
+./sb hermes repo auth github --remote NAME --token-stdin < FINE_GRAINED_TOKEN_FILE
 ./sb hermes repo clone URL --remote NAME [--name NAME] [--ref REF] [--json]
 ./sb hermes repo list --remote NAME [--json]
 
@@ -74,7 +74,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 ### Setup
 
 - Writes or reconciles only the Sandbox-managed Hermes profile/config section.
-- Setup never accepts provider credentials or an interactive portal flag. Provider authentication is an explicit `repo auth github` operator action.
+- Setup never accepts provider credentials or an interactive portal flag. Provider authentication is an explicit `repo auth github --token-stdin` operator action.
 - Setup does not accept provider tokens as command-line arguments.
 - Successful setup verifies direct `sb`, MCP initialization, complete catalog discovery, profile selection, and file permissions.
 
@@ -84,7 +84,7 @@ The envelope never contains secret values, repository URL userinfo, prompt text,
 
 ### Repository commands
 
-- `repo auth github` uses an interactive remote provider/device flow. It never copies a local private key or prints a token.
+- `repo auth github` rejects the broad browser OAuth flow. It accepts only a GitHub fine-grained token from standard input, verifies that it is never placed in the SSH command or result envelope, configures HTTPS Git, and never copies a local private key or prints a token.
 - `repo clone` accepts `https`, `ssh`, or provider shorthand only after parsing; URL userinfo is rejected.
 - Omitted `--name` derives a validated final path segment. Existing destinations fail unless they already match the exact registered repository and origin, in which case the result is idempotent.
 - `repo list` reports logical name, sanitized origin host/path, state, and active worktree count.

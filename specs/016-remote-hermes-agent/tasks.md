@@ -193,6 +193,7 @@
 - [ ] T075 Perform an independent security/data/API simplicity review and record findings/resolutions in `specs/016-remote-hermes-agent/checklists/implementation-review.md`
 - [X] T076 Record task class, model/effort, scope, retries, commands, test/review evidence, outcome, residual risk, and learning delta in `tmp/task-traces/016-remote-hermes-agent.md`
 - [X] T080 [US2] Keep managed worktrees in the integration-owned runtime root, count only their roots for resource policy, preserve legacy cleanup, and prove the primary checkout remains clean in `sandbox/core/_hermes.py`, `tests/test_hermes.py`, and `docs/hermes-agent.md`
+- [X] T081 [US2] Replace broad GitHub browser OAuth with an explicit fine-grained repository-token stdin flow, reject broad OAuth before remote mutation, use HTTPS Git, and document/test the no-token-leak contract in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `tests/test_hermes.py`, `tests/test_cli.py`, `docs/hermes-agent.md`, and `specs/016-remote-hermes-agent/contracts/cli.md`
 
 ---
 

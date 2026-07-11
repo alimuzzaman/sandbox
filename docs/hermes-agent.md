@@ -23,11 +23,10 @@ authorization boundary. Ask for explicit user intent before deleting, resetting,
 restoring, exposing, or otherwise mutating Sandbox resources.
 
 Secrets, provider credentials, OAuth values, and Git tokens are never passed as
-`sb hermes` arguments and must never be printed. Use remote interactive device
-authentication for Git providers; do not copy a workstation private SSH key to
-the remote. GitHub device authentication requires `gh` on the remote; on the
-supported Ubuntu host, install it once as the remote operator with
-`sudo apt-get install -y gh`.
+`sb hermes` arguments and must never be printed. Do not copy a workstation
+private SSH key to the remote. The broad GitHub CLI browser OAuth flow is
+intentionally rejected because its minimum scopes include account-level
+organization access.
 
 ## V1 workflow
 
@@ -36,11 +35,25 @@ supported Ubuntu host, install it once as the remote operator with
 ./sb hermes install --remote scaleway-sandbox --version v2026.7.7.2 --json
 ./sb hermes setup --remote scaleway-sandbox
 
-./sb hermes repo auth github --remote scaleway-sandbox
+# Read a fine-grained token from stdin; it is not a command-line argument.
+read -r -s GH_FINE_GRAINED_TOKEN
+printf '\n'
+printf '%s' "$GH_FINE_GRAINED_TOKEN" | ./sb hermes repo auth github \
+  --remote scaleway-sandbox --token-stdin
+unset GH_FINE_GRAINED_TOKEN
 ./sb hermes repo clone --remote scaleway-sandbox --url git@github.com:OWNER/REPO.git --name repo
 ./sb hermes run --remote scaleway-sandbox --repo repo --prompt "Inspect the test command" --async --json
 ./sb hermes job status --remote scaleway-sandbox --job-id JOB_ID --json
 ```
+
+Create that fine-grained token in GitHub with the repository's owner as its
+resource owner, **Only select repositories** set to the one repository Hermes
+may use, no organization permissions, and only the required repository
+permissions. `Contents: Read and write` permits commits and pushes; choose
+`Contents: Read-only` when Hermes only needs to inspect or test code. The
+remote requires `gh` for this flow; on the supported Ubuntu host install it
+once with `sudo apt-get install -y gh`. Git operations use HTTPS so this setup
+does not upload or manage an SSH key.
 
 Every coding invocation creates an isolated worktree by default under
 `$SANDBOX_HOME/runtime/hermes-worktrees/<repository>/`, never inside the

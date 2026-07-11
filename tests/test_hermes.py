@@ -6,6 +6,7 @@ without installing Hermes, authenticating a Git provider, or changing a VPS.
 from __future__ import annotations
 
 import json
+import io
 import subprocess
 import sys
 import tempfile
@@ -89,26 +90,41 @@ class TestValidation(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertEqual(missing["error"]["code"], "job_not_found")
 
+    @patch("sandbox.commands.hermes.sys.stdin")
     @patch("sandbox.commands.hermes.subprocess.run")
     @patch("sandbox.commands.hermes.remote.get_remote")
-    def test_provider_auth_avoids_device_flow_when_remote_is_authenticated(self, get_remote, run):
+    def test_provider_auth_reports_missing_github_cli(self, get_remote, run, stdin):
         get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
-        run.side_effect = [_completed(), _completed()]
-        out = _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test"))
-        self.assertTrue(out["data"]["existing"])
-        self.assertEqual(run.call_count, 2)
-        self.assertIn("command -v gh", run.call_args_list[0].args[0][-1])
-        self.assertIn("gh auth status", run.call_args_list[1].args[0][-1])
-
-    @patch("sandbox.commands.hermes.subprocess.run")
-    @patch("sandbox.commands.hermes.remote.get_remote")
-    def test_provider_auth_reports_missing_github_cli(self, get_remote, run):
-        get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        stdin.isatty.return_value = False
+        stdin.buffer = io.BytesIO(b"github_pat_repository_scoped_token")
         run.return_value = _completed(returncode=127)
         with self.assertRaises(hermes.HermesError) as caught:
-            _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test"))
+            _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test", token_stdin=True))
         self.assertEqual(caught.exception.code, "github_cli_missing")
         self.assertIn("command -v gh", run.call_args.args[0][-1])
+
+    @patch("sandbox.commands.hermes.remote.get_remote")
+    def test_provider_auth_rejects_broad_browser_oauth_before_remote_lookup(self, get_remote):
+        with self.assertRaises(hermes.HermesError) as caught:
+            _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test", token_stdin=False))
+        self.assertEqual(caught.exception.code, "fine_grained_token_required")
+        get_remote.assert_not_called()
+
+    @patch("sandbox.commands.hermes.sys.stdin")
+    @patch("sandbox.commands.hermes.subprocess.run")
+    @patch("sandbox.commands.hermes.remote.get_remote")
+    def test_provider_auth_accepts_fine_grained_token_only_on_stdin(self, get_remote, run, stdin):
+        get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        stdin.isatty.return_value = False
+        stdin.buffer = io.BytesIO(b"github_pat_repository_scoped_token")
+        run.side_effect = [_completed(), _completed(), _completed()]
+        out = _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test", token_stdin=True))
+        self.assertFalse(out["data"]["existing"])
+        self.assertEqual(run.call_count, 3)
+        login = run.call_args_list[1]
+        self.assertIn("gh auth login --hostname github.com --git-protocol https --with-token", login.args[0][-1])
+        self.assertNotIn("github_pat_repository_scoped_token", " ".join(login.args[0]))
+        self.assertEqual(login.kwargs["input"], b"github_pat_repository_scoped_token")
 
 
 class TestProfileRendering(unittest.TestCase):

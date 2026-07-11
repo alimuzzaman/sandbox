@@ -127,6 +127,16 @@ class TestResolutionGate(unittest.TestCase):
                 self.assertEqual(payload["remote"], remote)
                 self.assertEqual(payload["error"]["code"], expected_code)
 
+    def test_hermes_repository_auth_rejects_broad_oauth_and_advertises_token_stdin(self):
+        remote = "missing-remote-for-least-privilege-auth"
+        r = run_sb("hermes", "repo", "auth", "github", "--remote", remote, "--json")
+        self.assertNotEqual(r.returncode, 0)
+        payload = json.loads(r.stdout)
+        self.assertEqual(payload["error"]["code"], "fine_grained_token_required")
+        help_output = run_sb("hermes", "--help")
+        self.assertEqual(help_output.returncode, 0, help_output.stderr)
+        self.assertIn("--token-stdin", help_output.stdout)
+
     def test_hermes_v1_command_contracts_are_json_safe(self):
         remote = "missing-remote-for-v1-contract"
         cases = [

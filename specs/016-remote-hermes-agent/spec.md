@@ -43,6 +43,10 @@ A developer can authenticate the remote host with a Git provider, clone any auth
 2. **Given** two sessions for the same repository, **When** both use the default isolation mode, **Then** each session operates in a distinct worktree and neither changes the primary checkout.
 3. **Given** a traversal path, embedded URL credential, duplicate managed name, or non-Git directory, **When** it is supplied to a repository command, **Then** the command rejects it before remote mutation and returns an actionable sanitized error.
 4. **Given** an explicit no-worktree override, **When** the developer starts Hermes, **Then** the command clearly reports that isolation is disabled and uses the primary checkout only for that session.
+5. **Given** the developer wants access to only one private repository,
+   **When** they authenticate GitHub for Hermes, **Then** the system rejects
+   the broad browser OAuth flow and accepts only a fine-grained token scoped to
+   the selected repository without organization permissions.
 
 ---
 
@@ -134,6 +138,7 @@ Only after the V2 operational acceptance gate passes, an operator can install an
 
 - **FR-014**: The system MUST maintain managed repositories below one configured remote repository root and MUST prevent paths from escaping that root.
 - **FR-015**: Repository commands MUST support provider authentication, clone, list, and selection without accepting credentials embedded in a repository URL.
+- **FR-015b**: GitHub authentication MUST reject the account-wide browser OAuth flow and accept only a fine-grained, repository-scoped token over standard input; the token MUST never appear in command arguments, state, logs, or output, and HTTPS Git transport MUST be used for that credential.
 - **FR-016**: Each coding session MUST create an isolated Git worktree by default and MUST provide an explicit per-session override to use the primary checkout.
 - **FR-017**: Worktree creation MUST preserve existing uncommitted user changes and MUST never delete a dirty or active worktree automatically.
 - **FR-018**: Concurrent repository and worktree mutations MUST be serialized per affected repository.

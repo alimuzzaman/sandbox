@@ -453,6 +453,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--commit", default=None, help="full commit expected for --version")
     hermes_p.add_argument("--repo", default=None, help="managed repository name")
     hermes_p.add_argument("--url", default=None, help="repository URL for `hermes repo clone`")
+    hermes_p.add_argument("--token-stdin", action="store_true",
+        help="read a fine-grained GitHub repository token from stdin for `repo auth github`")
     hermes_p.add_argument("--name", default=None, help="managed repository name for clone")
     hermes_p.add_argument("--ref", default=None, help="branch, tag, or ref to clone")
     hermes_p.add_argument("--prompt", default=None, help="one-shot Hermes prompt")

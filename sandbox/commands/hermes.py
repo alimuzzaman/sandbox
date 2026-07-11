@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 import sandbox.core._hermes as hermes
 import sandbox.core._remote as remote
@@ -50,16 +51,32 @@ def _repo_action(args) -> dict:
         provider = (args.target or "").lower()
         if provider != "github":
             raise hermes.HermesError("only `hermes repo auth github` is supported", "unsupported_provider")
+        if not getattr(args, "token_stdin", False):
+            raise hermes.HermesError(
+                "GitHub browser OAuth has account-wide minimum scopes; use a repository-scoped fine-grained token with `--token-stdin`",
+                "fine_grained_token_required",
+            )
+        if sys.stdin.isatty():
+            raise hermes.HermesError(
+                "--token-stdin requires a fine-grained GitHub token piped on standard input",
+                "fine_grained_token_required",
+            )
         entry = remote.get_remote(args.remote)
         if not entry or not entry.get("provisioned"):
             raise hermes.HermesError("a provisioned remote is required", "remote_not_provisioned")
-        # Device authentication needs a TTY; do not try to tunnel a token or
-        # turn it into a non-interactive command.
+        token = sys.stdin.buffer.read()
+        if not token.startswith(b"github_pat_"):
+            raise hermes.HermesError(
+                "--token-stdin accepts only a GitHub fine-grained token",
+                "fine_grained_token_required",
+            )
         parts = remote.remote_ssh_parts(entry)
         cmd = ["ssh"]
         if parts["port"]:
             cmd += ["-p", str(parts["port"])]
         availability_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "command -v gh"]
+        login_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"],
+                     "gh auth login --hostname github.com --git-protocol https --with-token"]
         status_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "gh auth status --hostname github.com"]
         try:
             if subprocess.run(availability_cmd, check=False, capture_output=True).returncode != 0:
@@ -67,16 +84,16 @@ def _repo_action(args) -> dict:
                     "GitHub CLI is not installed on the remote; install `gh` before `hermes repo auth github`",
                     "github_cli_missing",
                 )
-            if subprocess.run(status_cmd, check=False, capture_output=True).returncode == 0:
-                return hermes.result(True, "repo_auth", args.remote, status="authenticated",
-                                     data={"provider": "github", "existing": True})
-            rc = subprocess.run([*cmd, "-t", parts["target"], "gh auth login --web --git-protocol ssh"], check=False).returncode
+            rc = subprocess.run(login_cmd, input=token, check=False, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL).returncode
+            if rc == 0:
+                rc = subprocess.run(status_cmd, check=False, capture_output=True).returncode
         except OSError as exc:
             raise hermes.HermesError(str(exc), "provider_auth_failed", True) from exc
         if rc != 0:
-            raise hermes.HermesError("GitHub device authentication did not complete", "provider_auth_failed", True)
+            raise hermes.HermesError("GitHub fine-grained token authentication did not complete", "provider_auth_failed", True)
         return hermes.result(True, "repo_auth", args.remote, status="authenticated",
-                             data={"provider": "github", "existing": False})
+                             data={"provider": "github", "existing": False, "credential": "fine_grained"})
     raise hermes.HermesError("repo action must be auth, clone, or list", "invalid_repo_action")
 
 

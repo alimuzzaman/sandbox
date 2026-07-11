@@ -118,9 +118,11 @@ passing gate manually. Until every required check is recorded against the
 currently installed Hermes commit, every dashboard action refuses without
 changing the remote.
 
-After V2 passes, the dashboard wrapper manages the upstream Hermes web/PTY
-extras and a loopback-only user service. It does not create a custom frontend or
-accept `--insecure`:
+After V2 passes, the dashboard wrapper creates an isolated remote virtualenv
+for the pinned upstream Hermes web/PTY extras and manages a loopback-only user
+service. Setup enables systemd user lingering so the dashboard survives SSH
+session exit and reboot. It does not create a custom frontend or accept
+`--insecure`:
 
 ```bash
 ./sb hermes dashboard install --remote scaleway-sandbox --json

@@ -1264,6 +1264,7 @@ def _dashboard_install_command(unit: str, body: str) -> str:
     encoded = base64.b64encode(body.encode()).decode()
     return (
         "set -eu; mkdir -p $HOME/.config/systemd/user; "
+        "if command -v loginctl >/dev/null 2>&1; then loginctl enable-linger \"$USER\"; fi; "
         f"target=\"$HOME/.config/systemd/user/{unit}\"; tmp=\"$target.tmp.$$\"; backup=\"$target.backup.$$\"; had=0; "
         "if test -f \"$target\"; then cp \"$target\" \"$backup\"; had=1; fi; "
         f"echo {shlex.quote(encoded)} | base64 -d > \"$tmp\"; chmod 600 \"$tmp\"; mv \"$tmp\" \"$target\"; "
@@ -1316,9 +1317,8 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
     if action == "install":
         command = (
             "set -eu; cd \"$HOME/.hermes/hermes-agent\"; "
-            "if test -x .venv/bin/pip; then .venv/bin/pip install --disable-pip-version-check -e '.[web,pty]'; "
-            "elif command -v pip3 >/dev/null 2>&1; then pip3 install --user --disable-pip-version-check '.[web,pty]'; "
-            "else echo dashboard dependency installer unavailable >&2; exit 127; fi"
+            "if ! test -x .venv/bin/pip; then python3 -m venv .venv; fi; "
+            ".venv/bin/pip install --disable-pip-version-check -e '.[web,pty]'"
         )
         _checked(entry, command, timeout=1800, what="Hermes dashboard dependency installation failed")
         dashboard.update({"installed": True, "port": selected_port, "host": DASHBOARD_LOOPBACK_HOST,

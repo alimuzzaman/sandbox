@@ -189,6 +189,7 @@ class TestProfileRendering(unittest.TestCase):
         command = hermes._dashboard_install_command(hermes.DASHBOARD_UNIT, hermes._dashboard_unit(9119))
         self.assertIn("rollback()", command)
         self.assertIn("systemctl --user enable", command)
+        self.assertIn("loginctl enable-linger", command)
 
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._remote_state_write")
@@ -205,7 +206,10 @@ class TestProfileRendering(unittest.TestCase):
                 "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS}}},
         }
         hermes.dashboard_action("test", "install")
-        self.assertIn('cd "$HOME/.hermes/hermes-agent"', checked.call_args.args[1])
+        command = checked.call_args.args[1]
+        self.assertIn('cd "$HOME/.hermes/hermes-agent"', command)
+        self.assertIn("python3 -m venv .venv", command)
+        self.assertIn(".venv/bin/pip install", command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

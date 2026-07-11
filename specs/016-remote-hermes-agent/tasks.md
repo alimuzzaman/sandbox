@@ -147,7 +147,7 @@
 - [X] T054 [US4] Add V2 argument trees with explicit `--confirm`, default dry-run, and JSON options in `sandbox/cli.py`
 - [X] T055 [US4] Document V2 update, rollback, restore, resource configuration, cleanup, health, and recovery procedures in `docs/hermes-agent.md`
 - [X] T056 [US4] Add the V2 fault-injection and reboot acceptance procedure to `specs/016-remote-hermes-agent/quickstart.md`
-- [ ] T057 [US4] Execute the separately approved V2 live acceptance suite and record revision-specific sanitized evidence through `$SANDBOX_HOME/runtime/hermes.json`
+- [X] T057 [US4] Execute the separately approved V2 live acceptance suite and record revision-specific sanitized evidence through `$SANDBOX_HOME/runtime/hermes.json`
 
 **Checkpoint**: V3 remains locked unless T057 records an actual passing V2 gate for compatible Hermes/Sandbox revisions.
 
@@ -176,7 +176,7 @@
 - [X] T067 [US5] Implement dashboard install/setup/lifecycle/doctor/expose/unexpose dispatch in `sandbox/commands/hermes.py`
 - [X] T068 [US5] Add V3 dashboard argument trees without an insecure bypass in `sandbox/cli.py`
 - [X] T069 [US5] Document upstream dashboard scope, V2 gate, SSH forwarding, OAuth public mode, exposure confirmation, and rollback in `docs/hermes-agent.md`
-- [ ] T070 [US5] Execute the separately approved V3 loopback and optional public rollback acceptance procedure from `specs/016-remote-hermes-agent/quickstart.md`
+- [X] T070 [US5] Execute the separately approved V3 loopback and optional public rollback acceptance procedure from `specs/016-remote-hermes-agent/quickstart.md`
 
 **Checkpoint**: V3 is complete only when default access is loopback/SSH-authenticated, public access is OAuth/TLS-authenticated, and failed exposure leaves no unauthenticated endpoint.
 

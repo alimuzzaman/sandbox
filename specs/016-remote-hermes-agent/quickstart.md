@@ -263,6 +263,44 @@ WordPress plugin clone was isolated in
 remained clean, and `sb ensure` plus `sb doctor` confirmed a reachable,
 REST-authenticated WordPress instance for that worktree. GitHub CLI is now a
 documented prerequisite for the separate interactive GitHub device flow.
-The clean-install gate, gateway start, and every V2 destructive recovery or
-reboot check remain unrun. The V2 gate remains pending because its required
-evidence was not fabricated.
+At the time of that earlier implementation pass, the clean-install gate,
+gateway start, and V2 destructive recovery/reboot checks remained unrun; the
+current live V2/V3 evidence is recorded below.
+
+## Live V2/V3 acceptance (2026-07-11)
+
+The separately approved recovery window on `scaleway-sandbox` completed
+against Hermes commit `9de9c25f620ff7f1ce0fd5457d596052d5159596`. The remote
+state records successful revision-bound evidence for update rollback, verified
+backup restore, resource preflight rejection, stale-session reconciliation,
+and reboot recovery. The authoritative command below returned `ok: true` with
+no missing checks:
+
+```bash
+./sb hermes acceptance v2 --remote scaleway-sandbox --json
+```
+
+V3 was then exercised with the V2 gate in force:
+
+```bash
+./sb hermes dashboard install --remote scaleway-sandbox --port 9119 --json
+./sb hermes dashboard setup --remote scaleway-sandbox --port 9119 --json
+./sb hermes dashboard restart --remote scaleway-sandbox --port 9119 --json
+./sb hermes dashboard doctor --remote scaleway-sandbox --port 9119 --json
+```
+
+The installer created the isolated Hermes virtualenv with the upstream
+`web`/`pty` extras. The service is enabled with user lingering, listens only on
+`127.0.0.1:9119` after the controlling SSH session closes, and the remote
+loopback HTTP probe returned `200`; `dashboard doctor` returned healthy.
+The optional public path was exercised only through its fail-closed preflight:
+`dashboard expose --fqdn hermes.sandbox.example.com --json` returned
+`feature_015_required` and did not create a route, DNS record, or public
+endpoint. Public OAuth/TLS deployment and rollback remain conditional on the
+separate feature-015 managed-hosting capability and a future explicit approval.
+
+Local regression for this acceptance/fix phase passed:
+`python -m unittest tests.test_hermes tests.test_cli -q` (87 tests) and
+`python -m unittest discover -s tests -q` (399 tests, one existing skip).
+The full suite emitted its existing subprocess warnings and intentional
+negative-path fixture diagnostics but exited successfully.

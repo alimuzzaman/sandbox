@@ -55,6 +55,16 @@ renders isolated routes and runtime names.
 - [X] T023 Harden the static and WordPress production image/configuration paths.
 - [X] T024 Save the permanent deployment plan and Lenzora-agent Dockerization handoff prompt.
 
+## Phase 8: WordPress direct-update filesystem ownership
+
+**Independent Test**: render the WordPress Compose configuration, verify the
+permissions job precedes the non-root initializer, and confirm the image and existing
+uploads volume are owned by Apache's runtime identity after deployment.
+
+- [X] T025 Add a root-only, idempotent WordPress permissions job that repairs core and named uploads-volume ownership before initialization.
+- [X] T026 Run the WordPress initializer as the Apache runtime identity and bake the application image with that identity's ownership.
+- [X] T027 Validate the Compose configuration and perform a disposable direct-filesystem writability check without changing WordPress content.
+
 ## Dependencies
 
 T003-T008 block all user stories. User Story 1 precedes live planning. User Story 2

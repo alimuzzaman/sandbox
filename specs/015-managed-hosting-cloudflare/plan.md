@@ -12,6 +12,12 @@ only with explicit confirmation, apply a Caddy/Cloudflare-backed deployment to
 an existing remote target. The implementation reuses Sandbox's remote SSH and
 Caddy primitives rather than creating a second deployment system.
 
+Managed WordPress deployments additionally require a filesystem-ownership policy:
+the web-server runtime user owns the updateable WordPress tree and persistent uploads
+volume. A root-only, idempotent permissions job runs before the non-root WordPress
+initializer on every deployment, so WordPress can use direct filesystem updates without
+collecting FTP credentials.
+
 ## Technical Context
 
 <!--
@@ -88,6 +94,11 @@ tests/
 
 specs/015-managed-hosting-cloudflare/
 └── contracts/cli.md          # public CLI and manifest contract
+
+/Users/alim/Sites/git/amarsonar-bangla/
+├── Dockerfile                 # bakes core and project files as www-data
+├── docker-compose.yml         # runs permissions before WordPress initialization
+└── scripts/wp-permissions.sh  # repairs named-volume ownership idempotently
 ```
 
 **Structure Decision**: Keep public command parsing in `sandbox/cli.py`, with all

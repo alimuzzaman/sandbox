@@ -159,7 +159,7 @@ def _checked(entry: dict, command: str, timeout: int = 60, *, what: str) -> subp
 def _sandbox_home(entry: dict) -> str:
     try:
         return remote.resolve_sandbox_home(entry)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise HermesError(_redact(str(exc), entry), "sandbox_home_unavailable", True) from exc
 
 

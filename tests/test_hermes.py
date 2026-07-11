@@ -77,6 +77,14 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(caught.exception.code, "remote_unavailable")
         self.assertTrue(caught.exception.retryable)
 
+    @patch("sandbox.core._hermes.remote.resolve_sandbox_home")
+    def test_sandbox_home_timeout_becomes_a_retryable_sanitized_error(self, resolve_home):
+        resolve_home.side_effect = subprocess.TimeoutExpired(["ssh"], 15)
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes._sandbox_home({"ssh": "ubuntu@example.test"})
+        self.assertEqual(caught.exception.code, "sandbox_home_unavailable")
+        self.assertTrue(caught.exception.retryable)
+
     def test_job_payload_keeps_the_public_result_envelope(self):
         payload = _job_payload("test", "status", {
             "job_id": "0123456789abcdef", "status": "running", "stdout": "safe",

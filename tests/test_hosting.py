@@ -1,7 +1,9 @@
 """Offline coverage for managed Compose hosting and Cloudflare intent."""
 import json
+import hashlib
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -96,6 +98,34 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(runtime["compose_project"], "sandbox-host-example-site-production")
         self.assertIn('127.0.0.1:', runtime["compose_override"])
         self.assertIn(f"reverse_proxy 127.0.0.1:{runtime['loopback_port']}", runtime["caddyfile"])
+
+    def test_accepts_opt_in_hosted_wordpress_autologin(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      container_path: /var/www/html/wp-content/mu-plugins/99-autologin.php\n      ttl_seconds: 600\n    cloudflare:\n"
+            ))
+            validated = hosting.validate_manifest(directory)
+        self.assertEqual(validated["autologin"]["user"], "admin")
+        self.assertEqual(validated["autologin"]["ttl_seconds"], 600)
+
+    def test_rejects_unsafe_autologin_container_path(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "    cloudflare:\n", "    autologin:\n      user: admin\n      container_path: ../wp-config.php\n    cloudflare:\n"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "container_path"):
+                hosting.validate_manifest(directory)
+
+    def test_autologin_plugin_has_hash_expiry_and_single_use_guard(self):
+        token = "not-written-to-the-server"
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        plugin = hosting.render_autologin_mu_plugin(token_hash, "admin", int(time.time()) + 600)
+        self.assertIn(token_hash, plugin)
+        self.assertNotIn(token, plugin)
+        self.assertIn("add_site_option", plugin)
+        self.assertIn("SANDBOX_HOST_AUTOLOGIN_EXPIRES_AT", plugin)
 
     def test_existing_host_keeps_its_allocated_loopback_port(self):
         with self._write(_manifest()) as directory:

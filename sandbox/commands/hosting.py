@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
 import subprocess
 import base64
 import shlex
@@ -242,6 +244,46 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     _remote_checked(entry, f"{prefix} up -d {service}", timeout=300)
 
 
+def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
+                          state: dict, ttl_seconds: int | None) -> dict:
+    config = validated.get("autologin")
+    if not config:
+        raise hosting.HostingError("this hosting environment does not declare autologin")
+    ttl = config["ttl_seconds"] if ttl_seconds is None else ttl_seconds
+    if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
+        raise hosting.HostingError("--ttl-seconds must be between 60 and 3600")
+    key = hosting.state_key(remote_name, validated)
+    host_state = state.get("hosts", {}).get(key)
+    if not isinstance(host_state, dict):
+        raise hosting.HostingError("host is not deployed; run `./sb host apply` before issuing a login URL")
+    token = secrets.token_urlsafe(32)
+    expires_at = int(time.time()) + ttl
+    plugin = hosting.render_autologin_mu_plugin(
+        hashlib.sha256(token.encode()).hexdigest(), config["user"], expires_at,
+    )
+    home = remote.resolve_sandbox_home(entry)
+    source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    prefix = _compose_prefix(validated, source_dir, f"{runtime_dir}/compose.override.yml",
+                             f"{runtime_dir}/environment.env")
+    payload = base64.b64encode(plugin.encode()).decode()
+    target = config["container_path"]
+    install = (
+        f"set -eu; mkdir -p {shlex.quote(str(__import__('posixpath').dirname(target)))}; "
+        f"cat > {shlex.quote(target)}; chmod 0644 {shlex.quote(target)}"
+    )
+    service = shlex.quote(validated["compose"]["service"])
+    _remote_checked(entry, (
+        f"printf %s {shlex.quote(payload)} | base64 -d | {prefix} exec -T {service} "
+        f"sh -c {shlex.quote(install)}"
+    ), timeout=60)
+    _remote_checked(entry, f"{prefix} exec -T {service} test -s {shlex.quote(target)}", timeout=30)
+    host_state["autologin"] = {"user": config["user"], "expires_at": expires_at}
+    hosting.save_host_state(state)
+    return {"url": hosting.autologin_url(validated, token, expires_at), "expires_at": expires_at,
+            "one_time": True, "user": config["user"]}
+
+
 def _ensure_host_source(entry: dict, home: str, project: str) -> str:
     """Create a remote Git worktree for a hosted Compose project, not a WP plugin."""
     target = f"{home}/deploy-src/hosts/{project}"
@@ -391,12 +433,27 @@ def cmd_host(cfg, args) -> None:
         _emit({"ok": True, **validated}, args.json)
         return
     if not args.remote:
-        die("--remote is required for host plan and host apply")
+        die("--remote is required for host plan, apply, and login-url")
     entry = remote.get_remote(args.remote)
     if not entry:
         die(f"no remote named '{args.remote}'")
-    plan = hosting.desired_plan(validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
     state = hosting.load_host_state()
+    if args.action == "login-url":
+        if not args.confirm:
+            die("host login-url is protected; pass --confirm to issue a one-time admin link")
+        if not entry.get("provisioned"):
+            die(f"remote '{args.remote}' is not provisioned")
+        try:
+            result = _issue_host_autologin(validated, entry, args.remote, state,
+                                           getattr(args, "ttl_seconds", None))
+        except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            die(str(exc))
+        if args.json:
+            print(json.dumps({"ok": True, **result}))
+        else:
+            print(result["url"])
+        return
+    plan = hosting.desired_plan(validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
     plan["runtime"] = hosting.desired_runtime(validated, args.remote, state)
     plan["runtime"]["records"] = plan["records"]
     _, missing = _secret_status(validated)

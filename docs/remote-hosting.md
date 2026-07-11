@@ -145,6 +145,30 @@ Permanent projects may declare public values plus required/generated secret mapp
 reports names only; `--generate` creates declared generated values and `--set KEY`
 stores a required value through a hidden prompt.
 
+### One-time hosted WordPress login URLs
+
+A WordPress hosting environment can opt in to a short-lived admin login link by
+declaring its target MU-plugin path and login user in `sandbox.hosting.yml`:
+
+```yaml
+autologin:
+  user: admin
+  container_path: /var/www/html/wp-content/mu-plugins/99-sandbox-host-autologin.php
+  ttl_seconds: 900
+```
+
+After a successful deployment, issue a link explicitly:
+
+```bash
+./sb host login-url --project-dir /path/to/wordpress --environment production \
+  --remote myvps --confirm
+```
+
+The returned `?sandbox_autologin=` URL expires after the requested lifetime (or the
+manifest default) and can set an admin session once. Sandbox stores only a SHA-256
+hash in the running container, never records the token in Git or host state, and a
+new link replaces the previous unused link. Treat the returned URL like a password.
+
 The selected policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.
 

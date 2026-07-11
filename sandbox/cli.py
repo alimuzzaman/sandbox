@@ -409,8 +409,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
-    host_p = sub.add_parser("host", help="Validate, plan, or apply a project hosting manifest")
-    host_p.add_argument("action", choices=["validate", "plan", "apply", "secrets"])
+    host_p = sub.add_parser("host", help="Validate, plan, apply, or issue a one-time hosting login URL")
+    host_p.add_argument("action", choices=["validate", "plan", "apply", "secrets", "login-url"])
     host_p.add_argument("--project-dir", dest="project_dir", default=None,
         help="project containing sandbox.hosting.yml (default: current directory)")
     host_p.add_argument("--environment", default=None, help="manifest environment name")
@@ -422,6 +422,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="set one declared hosting secret through a hidden prompt")
     host_p.add_argument("--generate", dest="generate_secrets", action="store_true",
         help="generate any declared generated secrets that are missing")
+    host_p.add_argument("--ttl-seconds", type=int, default=None,
+        help="one-time login URL lifetime (60-3600 seconds; manifest default when omitted)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
     secrets_p = sub.add_parser("secrets", help="Manage the personal Sandbox secret file")

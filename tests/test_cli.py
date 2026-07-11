@@ -5,6 +5,7 @@ read happen before any container work), so they exercise the actual bootstrap,
 package import, registry dispatch, and the no-`main` resolution behavior.
 """
 import os
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -52,6 +53,98 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("hermes", "status")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--remote", r.stderr + r.stdout)
+
+    def test_hermes_v2_actions_are_listed_in_help(self):
+        r = run_sb("hermes", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("backup", r.stdout)
+        self.assertIn("update", r.stdout)
+        self.assertIn("policy", r.stdout)
+        self.assertIn("acceptance", r.stdout)
+        self.assertIn("--confirm", r.stdout)
+
+    def test_hermes_protected_v2_actions_refuse_before_remote_lookup(self):
+        remote = "missing-remote-for-confirmation-test"
+        cases = [
+            ("backup", "restore", "--backup-id", "20260711T000000Z-deadbeef"),
+            ("update", "apply", "--version", "v2026.7.7.2"),
+        ]
+        for action, subaction, option, value in cases:
+            with self.subTest(action=action):
+                r = run_sb("hermes", action, subaction, "--remote", remote, option, value, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                payload = json.loads(r.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "confirmation_required")
+
+    def test_hermes_v2_read_commands_keep_the_json_envelope(self):
+        remote = "missing-remote-for-v2-read-contract"
+        cases = [
+            ("update", "plan", "--version", "v2026.7.7.2"),
+            ("backup", "list"),
+            ("cleanup",),
+            ("health",),
+            ("acceptance", "v2"),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                r = run_sb("hermes", *case, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                payload = json.loads(r.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["remote"], remote)
+                self.assertEqual(payload["error"]["code"], "unknown_remote")
+
+    def test_hermes_gateway_and_async_parser_failures_are_json_safe_before_remote_access(self):
+        remote = "missing-remote-for-parser-contract"
+        cases = [
+            ("gateway",),
+            ("job", "status"),
+            ("run", "--async"),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                r = run_sb("hermes", *case, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                payload = json.loads(r.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["remote"], remote)
+                self.assertIn(payload["error"]["code"], {"missing_gateway_action", "missing_job_id", "missing_run_input"})
+
+    def test_hermes_repository_subcommands_have_stable_json_failures(self):
+        remote = "missing-remote-for-repository-contract"
+        cases = [
+            (("repo", "auth", "gitlab"), "unsupported_provider"),
+            (("repo", "clone"), "missing_repo_url"),
+            (("repo", "list"), "unknown_remote"),
+        ]
+        for command, expected_code in cases:
+            with self.subTest(command=command):
+                r = run_sb("hermes", *command, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                payload = json.loads(r.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["remote"], remote)
+                self.assertEqual(payload["error"]["code"], expected_code)
+
+    def test_hermes_v1_command_contracts_are_json_safe(self):
+        remote = "missing-remote-for-v1-contract"
+        cases = [
+            (("install", "--version", "main"), "invalid_release"),
+            (("setup",), "unknown_remote"),
+            (("doctor",), "unknown_remote"),
+            (("status",), "unknown_remote"),
+            (("chat",), "missing_repo"),
+            (("run",), "missing_run_input"),
+        ]
+        for command, expected_code in cases:
+            with self.subTest(command=command):
+                r = run_sb("hermes", *command, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                payload = json.loads(r.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["remote"], remote)
+                self.assertEqual(payload["error"]["code"], expected_code)
 
     def test_no_main_in_help_command_list(self):
         # The phantom `main` instance is gone; it must not appear as guidance.

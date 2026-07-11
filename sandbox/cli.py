@@ -442,10 +442,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "repo", "gateway", "dashboard"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list; gateway: setup|install|start|stop|restart|status|logs")
+        help="repo: auth|clone|list; job: status|kill; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")
@@ -462,6 +462,15 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--allow", dest="allowlist", action="append", default=None,
         help="explicit gateway allowlist entry (repeatable)")
     hermes_p.add_argument("--lines", type=int, default=200, help="maximum gateway log lines")
+    hermes_p.add_argument("--confirm", action="store_true", help="confirm a protected Hermes operation")
+    hermes_p.add_argument("--backup-id", default=None, help="backup identifier for a protected restore")
+    hermes_p.add_argument("--dry-run", action="store_true", help="show Hermes cleanup candidates without removing them")
+    hermes_p.add_argument("--max-jobs", type=int, default=None, help="maximum concurrent Hermes jobs")
+    hermes_p.add_argument("--max-worktrees", type=int, default=None, help="maximum active Hermes worktrees")
+    hermes_p.add_argument("--min-free-disk-mb", type=int, default=None, help="minimum free disk before launching Hermes")
+    hermes_p.add_argument("--min-free-memory-mb", type=int, default=None, help="minimum free memory before launching Hermes")
+    hermes_p.add_argument("--job-id", default=None, help="Hermes detached job identifier")
+    hermes_p.add_argument("--offset", type=int, default=0, help="byte offset for incremental Hermes job output")
     hermes_p.add_argument("--json", action="store_true", help="print a stable JSON envelope")
 
     en = sub.add_parser("ensure",

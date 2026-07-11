@@ -329,14 +329,14 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
     proxies to the same instance port. dnsmasq already wildcards `.tst`, and
     the secured cert carries a matching `*.<domain>` SAN (see _mint_cert)."""
     cert, key = _cert_paths(domain)
-    # Space-separated address list — Caddy serves all of them from one block.
-    hosts = f"{domain} {_wildcard_san(domain)}" if wildcard else domain
+    hosts = [domain, _wildcard_san(domain)] if wildcard else [domain]
     if cert.exists() and key.exists():
-        return f"""http://{hosts} {{
+        return "\n".join(
+            f"""http://{host} {{
     redir https://{{host}}{{uri}} 308
 }}
 
-{hosts} {{
+{host} {{
     tls /certs/{cert.name} /certs/{key.name}
     reverse_proxy host.docker.internal:{port} {{
         header_up X-Forwarded-Proto https
@@ -344,12 +344,17 @@ def _caddy_block(domain: str, port: int, wildcard: bool = False) -> str:
     }}
 }}
 """
-    return f"""http://{hosts} {{
+            for host in hosts
+        )
+    return "\n".join(
+        f"""http://{host} {{
     reverse_proxy host.docker.internal:{port} {{
         header_up Host {{host}}
     }}
 }}
 """
+        for host in hosts
+    )
 
 
 def regen_caddyfile(cfg: dict) -> None:

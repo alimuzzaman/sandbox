@@ -16,12 +16,14 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import sandbox.cli  # noqa: E402  (registers command modules on import)
 import sandbox.core as core  # noqa: E402
+import sandbox.core._domains as domains_core  # noqa: E402
 from sandbox.registry import COMMANDS  # noqa: E402
 import sandbox_core  # noqa: E402
 
@@ -176,6 +178,24 @@ class TestSiteUrl(unittest.TestCase):
             core.site_url({"server": "herd", "domain": "x.test",
                            "wordpress_port": 8080}),
             "https://x.test")
+
+
+class TestCaddyBlocks(unittest.TestCase):
+    def test_wildcard_domain_uses_separate_site_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = Path(td) / "example.tst.pem"
+            key = Path(td) / "example.tst-key.pem"
+            cert.write_text("cert")
+            key.write_text("key")
+            with mock.patch.object(domains_core, "_cert_paths", return_value=(cert, key)):
+                rendered = core._caddy_block("example.tst", 8123, wildcard=True)
+
+        self.assertIn("http://example.tst {", rendered)
+        self.assertIn("http://*.example.tst {", rendered)
+        self.assertIn("\nexample.tst {\n", rendered)
+        self.assertIn("\n*.example.tst {\n", rendered)
+        self.assertNotIn("example.tst *.example.tst", rendered)
+        self.assertNotIn("http://example.tst *.example.tst", rendered)
 
 
 class TestDomainValidation(unittest.TestCase):

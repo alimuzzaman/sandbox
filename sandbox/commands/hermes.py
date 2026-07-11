@@ -59,8 +59,14 @@ def _repo_action(args) -> dict:
         cmd = ["ssh"]
         if parts["port"]:
             cmd += ["-p", str(parts["port"])]
+        availability_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "command -v gh"]
         status_cmd = [*cmd, "-o", "BatchMode=yes", parts["target"], "gh auth status --hostname github.com"]
         try:
+            if subprocess.run(availability_cmd, check=False, capture_output=True).returncode != 0:
+                raise hermes.HermesError(
+                    "GitHub CLI is not installed on the remote; install `gh` before `hermes repo auth github`",
+                    "github_cli_missing",
+                )
             if subprocess.run(status_cmd, check=False, capture_output=True).returncode == 0:
                 return hermes.result(True, "repo_auth", args.remote, status="authenticated",
                                      data={"provider": "github", "existing": True})

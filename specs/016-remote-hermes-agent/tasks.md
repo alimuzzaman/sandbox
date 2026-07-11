@@ -192,6 +192,7 @@
 - [X] T074 Run focused and full unit suites plus `git diff --check`, and record exact results in `specs/016-remote-hermes-agent/quickstart.md`
 - [ ] T075 Perform an independent security/data/API simplicity review and record findings/resolutions in `specs/016-remote-hermes-agent/checklists/implementation-review.md`
 - [X] T076 Record task class, model/effort, scope, retries, commands, test/review evidence, outcome, residual risk, and learning delta in `tmp/task-traces/016-remote-hermes-agent.md`
+- [X] T080 [US2] Keep managed worktrees in the integration-owned runtime root, count only their roots for resource policy, preserve legacy cleanup, and prove the primary checkout remains clean in `sandbox/core/_hermes.py`, `tests/test_hermes.py`, and `docs/hermes-agent.md`
 
 ---
 

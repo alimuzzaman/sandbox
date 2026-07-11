@@ -171,6 +171,7 @@ def _paths(entry: dict) -> dict:
         "state": f"{sandbox_home}/runtime/hermes.json",
         "jobs": f"{sandbox_home}/runtime/hermes-jobs",
         "locks": f"{sandbox_home}/runtime/hermes-locks",
+        "worktrees": f"{sandbox_home}/runtime/hermes-worktrees",
         "hermes_home": "$HOME/.hermes",
         "launcher": "$HOME/.local/bin/hermes",
         "policy": "$HOME/.hermes/sandbox-resource-policy.json",
@@ -595,7 +596,9 @@ def _resource_preflight(entry: dict, paths: dict) -> dict:
         f"df -Pm {shlex.quote(paths['sandbox_home'])} | tail -n1 | awk '{{print \"disk_mb=\" $4}}'; "
         "awk '/MemAvailable:/ {print \"memory_mb=\" int($2 / 1024)}' /proc/meminfo; "
         f"find {shlex.quote(paths['jobs'])} -type f -name '*.log' ! -exec sh -c 'test -f \"${{1%.log}}.status\"' sh {{}} \\; 2>/dev/null | wc -l | awk '{{print \"jobs=\" $1}}'; "
-        f"find {shlex.quote(paths['repo_root'])} -type d -path '*/.worktrees/*' 2>/dev/null | wc -l | awk '{{print \"worktrees=\" $1}}'"), timeout=30)
+        f"(find {shlex.quote(paths['worktrees'])} -mindepth 2 -maxdepth 2 -type d -print 2>/dev/null; "
+        f"find {shlex.quote(paths['repo_root'])} -type d -path '*/.worktrees/*' -prune -print 2>/dev/null) | "
+        "wc -l | awk '{print \"worktrees=\" $1}'"), timeout=30)
     values = dict(line.split("=", 1) for line in (probe.stdout or "").splitlines() if "=" in line)
     try:
         metrics = {key: int(values.get(key, "0")) for key in ("disk_mb", "memory_mb", "jobs", "worktrees")}
@@ -777,39 +780,42 @@ def cleanup(remote_name: str, confirm: bool, dry_run: bool = False) -> dict:
         if session.get("state") in {"running", "stale"} and session.get("worktree_path")
     }
     command = (
+        f"worktree_root={shlex.quote(paths['worktrees'])}; "
         f"if test -d {shlex.quote(paths['repo_root'])}; then "
         f"for repo in {shlex.quote(paths['repo_root'])}/*; do test -d \"$repo/.git\" || continue; "
         "git -C \"$repo\" worktree list --porcelain | awk '/^worktree / {print $2}' | "
-        "while IFS= read -r wt; do case \"$wt\" in \"$repo\"/.worktrees/*) ;; *) continue;; esac; "
-        "if test -n \"$(git -C \"$wt\" status --porcelain)\"; then printf 'dirty\\t%s\\n' \"$wt\"; "
-        "else printf 'clean\\t%s\\n' \"$wt\"; fi; done; done; fi"
+        "while IFS= read -r wt; do case \"$wt\" in \"$worktree_root\"/*|\"$repo\"/.worktrees/*) ;; *) continue;; esac; "
+        "if test -n \"$(git -C \"$wt\" status --porcelain)\"; then printf 'dirty\\t%s\\t%s\\n' \"$repo\" \"$wt\"; "
+        "else printf 'clean\\t%s\\t%s\\n' \"$repo\" \"$wt\"; fi; done; done; fi"
     )
     res = _ssh(entry, command, timeout=60)
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or "could not inspect worktrees", entry), "cleanup_scan_failed", True)
     clean, dirty, active = [], [], []
     for line in (res.stdout or "").splitlines():
-        kind, _, path = line.partition("\t")
+        kind, _, remainder = line.partition("\t")
+        repo, _, path = remainder.partition("\t")
         if kind == "clean" and path:
-            (active if path in active_worktrees else clean).append(path)
+            (active if path in active_worktrees else clean).append((repo, path))
         elif kind == "dirty" and path:
             dirty.append(path)
+    clean_paths = [path for _, path in clean]
+    active_paths = [path for _, path in active]
     if not confirm:
         return result(True, "cleanup", remote_name, status="dry_run",
-                      data={"clean_candidates": clean, "dirty_retained": dirty,
-                            "active_retained": active, "stale_jobs": stale_jobs,
-                            "requires_confirm": bool(clean)})
+                      data={"clean_candidates": clean_paths, "dirty_retained": dirty,
+                            "active_retained": active_paths, "stale_jobs": stale_jobs,
+                            "requires_confirm": bool(clean_paths)})
     if dry_run:
         return result(True, "cleanup", remote_name, status="dry_run",
-                      data={"clean_candidates": clean, "dirty_retained": dirty,
-                            "active_retained": active, "stale_jobs": stale_jobs,
+                      data={"clean_candidates": clean_paths, "dirty_retained": dirty,
+                            "active_retained": active_paths, "stale_jobs": stale_jobs,
                             "requires_confirm": False})
     removed = []
-    for path in clean:
+    for repo, path in clean:
         # Worktree removal is executed from its own containing repository and
         # never passes --force; Git independently rechecks cleanliness.
-        parent = path.split("/.worktrees/", 1)[0]
-        remove = _ssh(entry, f"git -C {shlex.quote(parent)} worktree remove {shlex.quote(path)}")
+        remove = _ssh(entry, f"git -C {shlex.quote(repo)} worktree remove {shlex.quote(path)}")
         if remove.returncode == 0:
             removed.append(path)
     prune = _ssh(entry, (
@@ -878,10 +884,11 @@ def _worktree_setup(paths: dict, repo_name: str) -> str:
     """Create one worktree while holding a repository-scoped advisory lock."""
     repo = f"{paths['repo_root']}/{repo_name}"
     lock = f"{paths['locks']}/{repo_name}.lock"
+    worktree_root = f"{paths['worktrees']}/{repo_name}"
     return (
-        f"mkdir -p {shlex.quote(paths['locks'])}; exec 9>{shlex.quote(lock)}; flock -w 30 9; "
-        f"cd {shlex.quote(repo)}; mkdir -p .worktrees; attempt=0; while :; do "
-        "id=$(python3 -c 'import secrets; print(secrets.token_hex(8))'); branch=hermes/hermes-$id; cwd=\"$PWD/.worktrees/$id\"; "
+        f"mkdir -p {shlex.quote(paths['locks'])} {shlex.quote(worktree_root)}; exec 9>{shlex.quote(lock)}; flock -w 30 9; "
+        f"cd {shlex.quote(repo)}; attempt=0; while :; do "
+        f"id=$(python3 -c 'import secrets; print(secrets.token_hex(8))'); branch=hermes/hermes-$id; cwd={shlex.quote(worktree_root)}/$id; "
         "if git worktree add -b \"$branch\" \"$cwd\" HEAD; then break; fi; "
         "attempt=$((attempt + 1)); if test \"$attempt\" -ge 3; then exit 1; fi; done; "
         "flock -u 9; worktree=true"
@@ -930,7 +937,7 @@ def run(remote_name: str, repo: str, prompt: str, *, worktree: bool = True,
         job_id, _, launched_worktree = launch.partition("\t")
         if not _JOB_RE.fullmatch(job_id):
             raise HermesError("Hermes launch did not return a valid job id", "invalid_job_response")
-        expected_prefix = f"{paths['repo_root']}/{repo_name}/.worktrees/"
+        expected_prefix = f"{paths['worktrees']}/{repo_name}/"
         if worktree and not launched_worktree.startswith(expected_prefix):
             raise HermesError("Hermes launch returned an invalid worktree path", "invalid_worktree_response")
         state = _remote_state_read(entry, paths)

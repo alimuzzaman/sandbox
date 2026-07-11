@@ -25,7 +25,9 @@ restoring, exposing, or otherwise mutating Sandbox resources.
 Secrets, provider credentials, OAuth values, and Git tokens are never passed as
 `sb hermes` arguments and must never be printed. Use remote interactive device
 authentication for Git providers; do not copy a workstation private SSH key to
-the remote.
+the remote. GitHub device authentication requires `gh` on the remote; on the
+supported Ubuntu host, install it once as the remote operator with
+`sudo apt-get install -y gh`.
 
 ## V1 workflow
 
@@ -40,13 +42,15 @@ the remote.
 ./sb hermes job status --remote scaleway-sandbox --job-id JOB_ID --json
 ```
 
-Every coding invocation creates an isolated worktree by default. Use
-`--no-worktree` only when deliberately working in the primary checkout. Dirty
-or active worktrees are never removed automatically. Worktree creation holds a
-repository-scoped remote advisory lock; detached sessions retain their
-worktree path and terminal status so cleanup can distinguish clean completed
-work from active work. Confirmed cleanup also removes only completed job
-artifacts older than seven days; stale or dirty sessions remain for review.
+Every coding invocation creates an isolated worktree by default under
+`$SANDBOX_HOME/runtime/hermes-worktrees/<repository>/`, never inside the
+primary checkout. Use `--no-worktree` only when deliberately working in the
+primary checkout. Dirty or active worktrees are never removed automatically.
+Worktree creation holds a repository-scoped remote advisory lock; detached
+sessions retain their worktree path and terminal status so cleanup can
+distinguish clean completed work from active work. Confirmed cleanup also
+removes only completed job artifacts older than seven days; stale or dirty
+sessions remain for review.
 Managed clones initialize Git submodules recursively and pull Git LFS objects
 when the remote has Git LFS available.
 

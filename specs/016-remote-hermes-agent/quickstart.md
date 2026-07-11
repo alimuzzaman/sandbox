@@ -234,11 +234,11 @@ and V2/V3 acceptance steps were not run.
 git diff --check
 ```
 
-Results: 75 focused tests and 385 full-suite tests passed; one existing test
+Results: 78 focused tests and 389 full-suite tests passed; one existing test
 was skipped. The suite emits pre-existing subprocess `ResourceWarning`s and
 intentional negative-path diagnostic messages, but exited successfully. No V2
-destructive recovery action, reboot, provider authentication, or dashboard
-operation was run in this implementation pass.
+destructive recovery action, reboot, or dashboard operation was run in this
+implementation pass.
 
 Remote V1 configuration verification on `scaleway-sandbox` also passed. An
 idempotent install/setup invocation was followed by an immutable update plan:
@@ -246,9 +246,13 @@ the installed and target Hermes commits both resolved to
 `9de9c25f620ff7f1ce0fd5457d596052d5159596`, with no update required.
 `doctor` confirmed direct Sandbox CLI access, a registered effective Sandbox
 MCP entry, a complete Sandbox MCP catalog, the owner-only integration profile,
-locking/session utilities, disk, and memory; `status` reported Hermes Agent
-v0.18.2 as configured with zero active sessions. Provider authentication,
-repository clone/worktree execution,
-on-demand instance creation, gateway start, and every V2 destructive recovery
-or reboot check remain unrun. The V2 gate remains pending because its required
+locking/session utilities, disk, and memory. An operator-owned model login then
+completed a read-only Hermes smoke against a managed repository. A public
+WordPress plugin clone was isolated in
+`$SANDBOX_HOME/runtime/hermes-worktrees/<repository>/`; its primary checkout
+remained clean, and `sb ensure` plus `sb doctor` confirmed a reachable,
+REST-authenticated WordPress instance for that worktree. GitHub CLI is now a
+documented prerequisite for the separate interactive GitHub device flow.
+The clean-install gate, gateway start, and every V2 destructive recovery or
+reboot check remain unrun. The V2 gate remains pending because its required
 evidence was not fabricated.

@@ -93,11 +93,22 @@ class TestValidation(unittest.TestCase):
     @patch("sandbox.commands.hermes.remote.get_remote")
     def test_provider_auth_avoids_device_flow_when_remote_is_authenticated(self, get_remote, run):
         get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
-        run.return_value = _completed()
+        run.side_effect = [_completed(), _completed()]
         out = _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test"))
         self.assertTrue(out["data"]["existing"])
-        self.assertEqual(run.call_count, 1)
-        self.assertIn("gh auth status", run.call_args.args[0][-1])
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("command -v gh", run.call_args_list[0].args[0][-1])
+        self.assertIn("gh auth status", run.call_args_list[1].args[0][-1])
+
+    @patch("sandbox.commands.hermes.subprocess.run")
+    @patch("sandbox.commands.hermes.remote.get_remote")
+    def test_provider_auth_reports_missing_github_cli(self, get_remote, run):
+        get_remote.return_value = {"ssh": "ubuntu@example.test", "provisioned": True}
+        run.return_value = _completed(returncode=127)
+        with self.assertRaises(hermes.HermesError) as caught:
+            _repo_action(SimpleNamespace(subaction="auth", target="github", remote="test"))
+        self.assertEqual(caught.exception.code, "github_cli_missing")
+        self.assertIn("command -v gh", run.call_args.args[0][-1])
 
 
 class TestProfileRendering(unittest.TestCase):
@@ -328,7 +339,7 @@ class TestRemoteCommands(unittest.TestCase):
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout=""),
             _completed(stdout="disk_mb=4096\nmemory_mb=4096\njobs=0\nworktrees=0\n"),
-            _completed(stdout="0123456789abcdef\t/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/abcd\n"),
+            _completed(stdout="0123456789abcdef\t/home/ubuntu/sandbox/runtime/hermes-worktrees/repo/abcd\n"),
             _completed(),
             _completed(),
         ]
@@ -349,6 +360,16 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("worktree=false", command)
         self.assertNotIn("git worktree add", command)
         self.assertNotIn("ensure_instance", command)
+
+    def test_worktree_setup_uses_integration_owned_root(self):
+        command = hermes._worktree_setup({
+            "repo_root": "/home/ubuntu/sandbox/hermes-repos",
+            "locks": "/home/ubuntu/sandbox/runtime/hermes-locks",
+            "worktrees": "/home/ubuntu/sandbox/runtime/hermes-worktrees",
+        }, "repo")
+        self.assertIn("/home/ubuntu/sandbox/runtime/hermes-worktrees/repo", command)
+        self.assertNotIn("mkdir -p .worktrees", command)
+        self.assertNotIn('cwd="$PWD/.worktrees/', command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
@@ -577,11 +598,11 @@ class TestRemoteCommands(unittest.TestCase):
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout=json.dumps({"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {
-                "0123456789abcdef": {"state": "running", "worktree_path": "/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/a"},
+                "0123456789abcdef": {"state": "running", "worktree_path": "/home/ubuntu/sandbox/runtime/hermes-worktrees/repo/a"},
             }})),
             _completed(stdout="running\t0123456789abcdef\n"),
-            _completed(stdout="clean\t/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/a\n"
-                              "dirty\t/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/b\n"),
+            _completed(stdout="clean\t/home/ubuntu/sandbox/hermes-repos/repo\t/home/ubuntu/sandbox/runtime/hermes-worktrees/repo/a\n"
+                              "dirty\t/home/ubuntu/sandbox/hermes-repos/repo\t/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/b\n"),
         ]
         out = hermes.cleanup("test", confirm=False)
         self.assertEqual(out["status"], "dry_run")
@@ -606,7 +627,8 @@ class TestRemoteCommands(unittest.TestCase):
     @patch("sandbox.core._hermes.remote.ssh_run")
     def test_resource_preflight_refuses_concurrent_job_limit(self, ssh_run):
         paths = {"policy": "/home/ubuntu/.hermes/policy.json", "sandbox_home": "/home/ubuntu/sandbox",
-                 "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "repo_root": "/home/ubuntu/sandbox/hermes-repos"}
+                 "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "repo_root": "/home/ubuntu/sandbox/hermes-repos",
+                 "worktrees": "/home/ubuntu/sandbox/runtime/hermes-worktrees"}
         ssh_run.side_effect = [
             _completed(stdout=json.dumps({"max_jobs": 1, "max_worktrees": 8, "min_free_disk_mb": 1024, "min_free_memory_mb": 512})),
             _completed(stdout="disk_mb=4096\nmemory_mb=4096\njobs=1\nworktrees=0\n"),
@@ -616,9 +638,25 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(caught.exception.code, "resource_limit")
 
     @patch("sandbox.core._hermes.remote.ssh_run")
+    def test_resource_preflight_counts_only_worktree_roots(self, ssh_run):
+        paths = {"policy": "/home/ubuntu/.hermes/policy.json", "sandbox_home": "/home/ubuntu/sandbox",
+                 "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "repo_root": "/home/ubuntu/sandbox/hermes-repos",
+                 "worktrees": "/home/ubuntu/sandbox/runtime/hermes-worktrees"}
+        ssh_run.side_effect = [
+            _completed(stdout="{}"),
+            _completed(stdout="disk_mb=4096\nmemory_mb=4096\njobs=0\nworktrees=1\n"),
+        ]
+        preflight = hermes._resource_preflight(self.entry, paths)
+        self.assertEqual(preflight["metrics"]["worktrees"], 1)
+        probe = ssh_run.call_args_list[1].args[1]
+        self.assertIn("/home/ubuntu/sandbox/runtime/hermes-worktrees -mindepth 2 -maxdepth 2", probe)
+        self.assertIn("-path '*/.worktrees/*' -prune -print", probe)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
     def test_resource_preflight_refuses_disk_and_memory_thresholds(self, ssh_run):
         paths = {"policy": "/home/ubuntu/.hermes/policy.json", "sandbox_home": "/home/ubuntu/sandbox",
-                 "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "repo_root": "/home/ubuntu/sandbox/hermes-repos"}
+                 "jobs": "/home/ubuntu/sandbox/runtime/hermes-jobs", "repo_root": "/home/ubuntu/sandbox/hermes-repos",
+                 "worktrees": "/home/ubuntu/sandbox/runtime/hermes-worktrees"}
         ssh_run.side_effect = [
             _completed(stdout="{}"),
             _completed(stdout="disk_mb=100\nmemory_mb=100\njobs=0\nworktrees=0\n"),
@@ -634,7 +672,7 @@ class TestRemoteCommands(unittest.TestCase):
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout=json.dumps({"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {}})),
-            _completed(stdout="clean\t/home/ubuntu/sandbox/hermes-repos/repo/.worktrees/a\n"),
+            _completed(stdout="clean\t/home/ubuntu/sandbox/hermes-repos/repo\t/home/ubuntu/sandbox/runtime/hermes-worktrees/repo/a\n"),
             _completed(),
             _completed(),
         ]

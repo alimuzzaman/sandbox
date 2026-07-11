@@ -8,7 +8,7 @@
 | Remote `$SANDBOX_HOME/runtime/hermes.json` | Sandbox Hermes integration | Install metadata, managed repositories, sessions/jobs, backups, services, limits, acceptance gates | Raw secrets, prompt bodies, unbounded logs |
 | Remote `$HOME/.hermes` | Upstream Hermes | Hermes config, profiles, sessions, checkpoints, provider auth, gateway/dashboard state | Sandbox instance identity duplication |
 | Remote `$SANDBOX_HOME/runtime/registry.json` | Existing Sandbox instance layer | WordPress instance records keyed by project/worktree | Hermes installs, repos, sessions, or gates |
-| Remote `$SANDBOX_HOME/hermes-repos` | Git | Managed primary checkouts and their `.worktrees` | Paths escaping the root or URL credentials |
+| Remote `$SANDBOX_HOME/hermes-repos` + `$SANDBOX_HOME/runtime/hermes-worktrees` | Git + Sandbox Hermes integration | Managed primary checkouts and integration-owned isolated worktrees | Paths escaping managed roots or URL credentials |
 | Remote system secret environment files | systemd/operator | Gateway/dashboard secrets and supported OAuth values | World-readable permissions or committed values |
 
 `hermes.json` uses an integer `schema_version`, atomic replace, a process lock, owner-only write permissions, and additive migrations. Unknown fields are preserved where safe so rolling back Sandbox does not erase newer non-secret metadata.

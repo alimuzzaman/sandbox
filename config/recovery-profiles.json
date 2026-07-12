@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "control-plane", "scope": "infrastructure", "source_type": "control-plane",
+      "allowed_roots": ["sandbox-home", "hermes-home", "user-config"],
+      "sources": ["sandbox-state", "hermes-safe-state", "cloudflare-declarations", "approved-credentials"],
+      "capture_mode": "declarative", "consistency": "locked-state-read",
+      "excludes": ["sessions", "jobs", "logs", "caches", "downloaded-runtimes", "wordpress-snapshots"],
+      "sensitivity": "encrypted", "restore_target": "fresh-control-plane",
+      "verification": "sandbox-hermes-cloudflare-acceptance", "retention_class": "critical",
+      "dependencies": [], "metadata": {"rationale": "rebuild Sandbox, Hermes, and declared Cloudflare state"}
+    },
+    {
+      "id": "lenzora-prod", "scope": "production", "source_type": "database",
+      "allowed_roots": ["host-manifest:lenzora"], "sources": ["postgresql-production-database"],
+      "capture_mode": "logical", "consistency": "pg-dump-consistent-snapshot",
+      "excludes": ["git-owned-code", "containers", "images", "caches", "logs"],
+      "sensitivity": "encrypted", "restore_target": "lenzora-production-database",
+      "verification": "database-import-and-health", "retention_class": "production",
+      "dependencies": ["control-plane"], "metadata": {"rationale": "production PostgreSQL database has business value"}
+    },
+    {
+      "id": "lenzora-prod-storage", "scope": "production", "source_type": "filesystem",
+      "allowed_roots": ["host-manifest:lenzora"], "sources": ["production-storage-volume"],
+      "capture_mode": "full", "consistency": "stable-file-scan",
+      "excludes": ["development-storage", "next-cache", "node-modules", "containers", "images", "logs"],
+      "sensitivity": "encrypted", "restore_target": "lenzora-production-storage",
+      "verification": "file-manifest-and-application-health", "retention_class": "production",
+      "dependencies": ["lenzora-prod"], "metadata": {"rationale": "production /app/storage is persistent application data"}
+    },
+    {
+      "id": "alimuzzaman-site", "scope": "production", "source_type": "git",
+      "allowed_roots": ["host-manifest:alimuzzaman-me"], "sources": ["git-remote-and-pinned-revision"],
+      "capture_mode": "provenance", "consistency": "clean-git-checkout",
+      "excludes": ["duplicate-source-archive", "containers", "images", "caches", "logs"],
+      "sensitivity": "encrypted", "restore_target": "alimuzzaman-site-files",
+      "verification": "file-manifest-and-site-health", "retention_class": "production",
+      "dependencies": ["control-plane"], "metadata": {"rationale": "discovery found no persistent mount and a clean Git checkout; recover files from Git"}
+    },
+    {
+      "id": "amarsonar-bangla-prod", "scope": "production", "source_type": "filesystem",
+      "allowed_roots": ["host-manifest:amarsonar-bangla"],
+      "sources": ["full-wordpress-directory", "production-database"],
+      "capture_mode": "full", "consistency": "database-consistent-plus-stable-file-scan",
+      "excludes": ["reviewed-transient-caches", "containers", "images", "logs"],
+      "sensitivity": "encrypted", "restore_target": "amarsonar-bangla-wordpress",
+      "verification": "database-import-file-manifest-and-site-health", "retention_class": "production",
+      "dependencies": ["control-plane"], "metadata": {"rationale": "full WordPress tree and database contain valuable local state"}
+    }
+  ]
+}

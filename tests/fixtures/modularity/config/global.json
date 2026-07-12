@@ -1,0 +1,10 @@
+{
+  "plugins": {
+    "query-monitor": true,
+    "global-inactive": false
+  },
+  "config": {
+    "GLOBAL_VALUE": "global",
+    "OVERRIDDEN_VALUE": "global"
+  }
+}

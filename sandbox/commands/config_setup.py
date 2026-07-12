@@ -19,6 +19,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
+from sandbox.application.context import wordpress_runtime_service
+from sandbox.runtimes.base import OperationError, OperationRequest
 
 
 
@@ -399,9 +401,16 @@ def cmd_apply_config(cfg, args) -> None:
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)
     try:
-        entry = apply_config(cfg, pd, label=label)
+        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+            project_root=pd,
+            operation="apply",
+            label=label or "default",
+        ))
     except sc.ConfigError as e:
         die(str(e))
+    if isinstance(result, OperationError):
+        die(result.message)
+    entry = dict(result.data)
     if getattr(args, "json", False):
         print(json.dumps(entry))
     else:

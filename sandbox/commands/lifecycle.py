@@ -18,6 +18,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
+from sandbox.application.context import wordpress_runtime_service
+from sandbox.runtimes.base import OperationError, OperationRequest
 
 
 
@@ -97,8 +99,17 @@ def cmd_down(cfg, args) -> None:
 
 def cmd_status(cfg, args) -> None:
     inst = args.resolved_instance
+    owner = _core().registry_find_instance(inst)
+    if owner and owner.get("root"):
+        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+            project_root=owner["root"],
+            operation="status",
+            label=owner.get("label", "default"),
+        ))
+        if isinstance(result, OperationError):
+            die(result.message)
     if _is_herd_instance(inst):
-        entry = _core().registry_find_instance(inst) or {}
+        entry = owner or {}
         up = _instance_reachable(entry)
         ok(f"Instance: {inst}  (host-served by Herd — "
            f"{'reachable' if up else 'NOT reachable'} at {entry.get('url')})")
@@ -109,7 +120,6 @@ def cmd_status(cfg, args) -> None:
     srv = mcp_server_name(inst)
     ok(f"Instance: {inst}  (Claude tools: mcp__{srv}__*)")
     ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'nginx')}")
-    owner = _core().registry_find_instance(inst)
     if owner and owner.get("root"):
         ok(f"Project: {owner['root']}")
     else:

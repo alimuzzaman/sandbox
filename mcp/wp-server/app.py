@@ -10,7 +10,7 @@ import re as _re
 
 
 
-__all__ = ['COMPOSE_DIR', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_PROJECT', 'PROXY_TLD', 'SANDBOX_CLAUDE_MD', 'SANDBOX_INSTRUCTIONS', 'SANDBOX_ROOT', 'SANDBOX_SKILLS_DIR', 'SANDBOX_WORKFLOWS_DIR', 'TOOLS_VENV_PY', 'VISIT_SCRIPT', '_HERD_BIN_DIR', '_active_file', '_admin_creds', '_compose', '_compose_file', '_core', '_find_focus_instances', '_focus_file', '_herd_host_env', '_herd_php_bin', '_host_php_bin', '_host_run', '_host_wp_bin', '_instance_php_version', '_instance_server', '_is_herd', '_list_sandbox_skills', '_list_sandbox_workflows', '_load_sandbox_yml', '_log_path', '_mailpit_url', '_parse_skill_metadata', '_project_instance', '_project_name', '_proxy_container_running', '_resolve_instance', '_safe_json', '_safe_resolve', '_sandbox_proxy_active', '_site_url', '_skill_prompt_body', '_valet_proxy_active', '_wp_root', '_wpcli', '_wpcli_shell', 'mcp']
+__all__ = ['COMPOSE_DIR', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_PROJECT', 'PROXY_TLD', 'SANDBOX_CLAUDE_MD', 'SANDBOX_INSTRUCTIONS', 'SANDBOX_ROOT', 'SANDBOX_SKILLS_DIR', 'SANDBOX_WORKFLOWS_DIR', 'TOOLS_VENV_PY', 'VISIT_SCRIPT', '_HERD_BIN_DIR', '_active_file', '_admin_creds', '_compose', '_compose_file', '_core', '_find_focus_instances', '_focus_file', '_herd_host_env', '_herd_php_bin', '_host_php_bin', '_host_run', '_host_wp_bin', '_instance_php_version', '_instance_server', '_is_herd', '_list_sandbox_skills', '_list_sandbox_workflows', '_load_sandbox_yml', '_log_path', '_mailpit_url', '_parse_skill_metadata', '_project_instance', '_project_name', '_proxy_container_running', '_require_project_capability', '_resolve_instance', '_safe_json', '_safe_resolve', '_sandbox_proxy_active', '_site_url', '_skill_prompt_body', '_valet_proxy_active', '_wp_root', '_wpcli', '_wpcli_shell', 'mcp']
 
 
 
@@ -125,7 +125,30 @@ def _project_instance(project_dir: str, label: str | None = None):
                 "error": f"no instance labelled '{label}' for '{root}'. "
                          f"Labels: {[e['label'] for e in entries]}",
             }
-        return entry["instance"], None
+    return entry["instance"], None
+
+
+def _require_project_capability(project_dir: str, label: str | None, capability: str):
+    """Return an MCP error before tool-specific helpers run, or None."""
+    from sandbox.application.context import wordpress_runtime_service
+    from sandbox.core._config import load_config
+
+    try:
+        error = wordpress_runtime_service(load_config()).check(
+            project_dir, capability, label=label or "default"
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"project capability resolution failed: {exc}"}
+    if error is None:
+        return None
+    return {
+        "ok": False,
+        "error": error.message,
+        "code": error.code,
+        "project_kind": error.project_kind,
+        "required_capability": capability,
+        "available_capabilities": list(error.available_capabilities),
+    }
     if len(entries) == 1:
         return entries[0]["instance"], None
     default = next((e for e in entries if e.get("is_default")), None)
@@ -366,14 +389,9 @@ def _instance_server(instance: str) -> str:
     """The instance's web server (apache|nginx|litespeed|herd). Read from the
     registry (written by ensure_instance); falls back to the sandbox.local.yml
     instance block. 'herd' means HOST-served (Herd + host MySQL, no docker)."""
-    try:
-        reg = json.loads(
-            (RUNTIME_DIR / "registry.json").read_text())
-        for e in reg.get("instances", {}).values():
-            if e.get("instance") == instance:
-                return e.get("server") or "nginx"
-    except (OSError, json.JSONDecodeError):
-        pass
+    entry = _core().registry_find_instance(instance)
+    if entry:
+        return entry.get("server") or "nginx"
     blk = (_load_sandbox_yml().get("instances", {}) or {}).get(instance, {}) or {}
     return blk.get("server", "nginx")
 
@@ -411,14 +429,9 @@ def _host_php_bin() -> str:
 def _instance_php_version(instance: str):
     """The pinned php_version for an instance (from registry/sandbox.local.yml),
     or None when unpinned."""
-    try:
-        reg = json.loads(
-            (RUNTIME_DIR / "registry.json").read_text())
-        for e in reg.get("instances", {}).values():
-            if e.get("instance") == instance and e.get("php_version"):
-                return e["php_version"]
-    except (OSError, json.JSONDecodeError, KeyError):
-        pass
+    entry = _core().registry_find_instance(instance)
+    if entry and entry.get("php_version"):
+        return entry["php_version"]
     blk = (_load_sandbox_yml().get("instances", {}) or {}).get(instance, {}) or {}
     return blk.get("php_version")
 

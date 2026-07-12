@@ -18,6 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
+from sandbox.application.context import preflight_instance_capability
 
 
 
@@ -28,6 +29,9 @@ def cmd_snapshot(cfg, args) -> None:
     Restore with `./sb restore <name>`.
     """
     inst = args.resolved_instance
+    error = preflight_instance_capability(cfg, inst, "wordpress.snapshot")
+    if error is not None:
+        die(error.message)
     name = _slug_snapshot_name(args.name)
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "

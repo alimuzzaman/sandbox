@@ -11,26 +11,11 @@ import re as _re
 
 
 from app import mcp
+from dependencies import ToolDependencies
+from tools.manifest import built_in_tool_registry
 
 
-
-import tools.instances  # noqa: F401
-import tools.wp  # noqa: F401
-import tools.net  # noqa: F401
-import tools.data  # noqa: F401
-import tools.fs  # noqa: F401
-import tools.mail  # noqa: F401
-import tools.context  # noqa: F401
-import tools.cache  # noqa: F401
-import tools.abilities  # noqa: F401
-import tools.skills  # noqa: F401
-import tools.debug  # noqa: F401
-import tools.e2e  # noqa: F401
-import tools.ci  # noqa: F401
-import tools.asyncjobs  # noqa: F401
-import tools.plugin_check  # noqa: F401
-import tools.remote  # noqa: F401
-import tools.hermes  # noqa: F401
+built_in_tool_registry().compose(mcp, ToolDependencies())
 
 
 

@@ -18,6 +18,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
+from sandbox.application.context import wordpress_runtime_service
+from sandbox.runtimes.base import OperationError, OperationRequest
 
 
 
@@ -70,13 +72,24 @@ def cmd_ensure(cfg, args) -> None:
     label = getattr(args, "label", None)
     create = getattr(args, "create", False)
     try:
-        entry = ensure_instance(cfg, pd, label=label or "default", create=create)
+        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+            project_root=pd,
+            operation="ensure",
+            label=label or "default",
+            arguments={"create": create},
+        ))
     except sc.ConfigError as e:
         die(str(e))
+    if isinstance(result, OperationError):
+        die(result.message)
+    entry = dict(result.data)
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
         # parse it past any boot/progress output above.
-        print(json.dumps(entry))
+        public_entry = dict(entry)
+        public_entry.pop("login_url", None)
+        public_entry.pop("autologin_token", None)
+        print(json.dumps(public_entry))
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")

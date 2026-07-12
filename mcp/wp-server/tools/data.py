@@ -24,6 +24,9 @@ def db_query(sql: str, mutate: bool = False, *, project_dir: str, label: str | N
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.database")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

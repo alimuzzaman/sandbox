@@ -1,0 +1,6 @@
+{
+  "wpVersion": "6.7",
+  "config": {
+    "INSTANCE_LABEL": "qa"
+  }
+}

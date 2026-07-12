@@ -24,6 +24,9 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     project_dir: the plugin project to target (its instance must already exist —
     call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

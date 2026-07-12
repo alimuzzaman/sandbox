@@ -1,0 +1,9 @@
+{
+  "kind": "wordpress",
+  "slug": "fixture-plugin",
+  "plugins": {
+    "fixture-plugin": ".",
+    "query-monitor": true
+  },
+  "server": "nginx"
+}

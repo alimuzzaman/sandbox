@@ -1,0 +1,25 @@
+import sys
+import unittest
+
+from sandbox.services.process import BoundedProcessRunner
+
+
+class TestBoundedProcessRunner(unittest.TestCase):
+    def test_argument_list_cwd_environment_redaction_and_limit(self):
+        secret = "recovery-secret-sentinel"
+        runner = BoundedProcessRunner(max_output=20, secret_values=(secret,))
+        result = runner.run([
+            sys.executable, "-c",
+            "import os; print(os.getcwd()); print(os.environ['FIXTURE_SECRET']); print('x'*100)",
+        ], cwd="/tmp", env={"FIXTURE_SECRET": secret}, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn(secret, result.stdout)
+        self.assertLessEqual(len(result.stdout), 20)
+
+    def test_shell_string_is_rejected(self):
+        with self.assertRaises(ValueError):
+            BoundedProcessRunner().run("echo unsafe")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "instances": {
+    "/tmp/sandbox-fixture/project::default": {
+      "root": "/tmp/sandbox-fixture/project",
+      "label": "default",
+      "is_default": true,
+      "instance": "fixture-project",
+      "wordpress_port": 8200,
+      "status": "ready"
+    },
+    "/tmp/sandbox-fixture/project::qa": {
+      "root": "/tmp/sandbox-fixture/project",
+      "label": "qa",
+      "is_default": false,
+      "instance": "fixture-project-qa",
+      "wordpress_port": 8201,
+      "status": "stopped"
+    }
+  }
+}

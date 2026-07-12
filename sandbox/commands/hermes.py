@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 
-import sandbox.core._hermes as hermes
+from sandbox.hermes import facade as hermes
 import sandbox.core._remote as remote
 from sandbox.registry import register
 

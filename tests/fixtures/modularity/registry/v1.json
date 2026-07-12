@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "instances": {
+    "/tmp/sandbox-fixture/project": {
+      "instance": "fixture-project",
+      "wordpress_port": 8200,
+      "status": "ready",
+      "future_field": {
+        "preserve": true
+      }
+    }
+  }
+}

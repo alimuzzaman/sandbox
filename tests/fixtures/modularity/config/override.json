@@ -1,0 +1,6 @@
+{
+  "phpVersion": "8.3",
+  "config": {
+    "OVERRIDDEN_VALUE": "override"
+  }
+}

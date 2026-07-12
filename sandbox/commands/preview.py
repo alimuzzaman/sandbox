@@ -11,6 +11,7 @@ from pathlib import Path
 from sandbox.core import die, ok
 import sandbox.core as core
 from sandbox.registry import register
+from sandbox.application.context import preflight_project_capability
 from sandbox.core._paths import RUNTIME_DIR
 import sandbox.core._cloudflare as cloudflare
 import sandbox.core._remote as remote
@@ -150,6 +151,11 @@ def cmd_preview(cfg, args) -> None:
     try:
         project = core.load_project_config(args.project_dir or os.getcwd())
         root = Path(project["root"])
+        capability_error = preflight_project_capability(
+            cfg, str(root), "wordpress.remote-preview"
+        )
+        if capability_error is not None:
+            raise ValueError(capability_error.message)
         branch = remote.current_branch(root)
         preview_id, label = preview_identity(str(root), branch, args.name)
         if preview_id in state["previews"]:

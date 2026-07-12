@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "instances": {
+    "/tmp/sandbox-fixture/project::default": {
+      "root": "/tmp/sandbox-fixture/project",
+      "label": "default",
+      "is_default": true,
+      "instance": "fixture-project",
+      "kind": "wordpress",
+      "adapter": "wordpress",
+      "http_port": 8200,
+      "wordpress_port": 8200,
+      "unknown_compatible": "keep-me"
+    }
+  }
+}

@@ -51,6 +51,19 @@ class InstanceResult:
 instances.subprocess.run = lambda cmd, **kwargs: instance_calls.append([cmd, kwargs]) or InstanceResult()
 instance = instances.ensure_instance("/tmp/hermes-worktree")
 print("HERMES_INSTANCE", json.dumps([instance, instance_calls]))
+import tools.wp as wp_tools
+import tools.data as data_tools
+rejection = {"ok": False, "error": "blocked before side effects"}
+wp_side_effects = []
+wp_tools._require_project_capability = lambda *_args: rejection
+wp_tools._wpcli = lambda *_args, **_kwargs: wp_side_effects.append("wpcli")
+data_tools._require_project_capability = lambda *_args: rejection
+data_tools._compose = lambda *_args, **_kwargs: wp_side_effects.append("compose")
+print("CAPABILITY_REJECTION", json.dumps([
+    wp_tools.wp_cli("core version", project_dir="/tmp/project"),
+    data_tools.db_query("SELECT 1", project_dir="/tmp/project"),
+    wp_side_effects,
+]))
 """
 
 
@@ -85,6 +98,14 @@ class TestMcpServerSplit(unittest.TestCase):
         instance, instance_calls = __import__("json").loads(instance_line.removeprefix("HERMES_INSTANCE "))
         self.assertTrue(instance["ok"])
         self.assertEqual(instance_calls[0][0][-3:], ["--project-dir", "/tmp/hermes-worktree", "--json"])
+        rejection_line = next(line for line in r.stdout.splitlines()
+                              if line.startswith("CAPABILITY_REJECTION "))
+        wp_result, db_result, side_effects = __import__("json").loads(
+            rejection_line.removeprefix("CAPABILITY_REJECTION ")
+        )
+        self.assertFalse(wp_result["ok"])
+        self.assertFalse(db_result["ok"])
+        self.assertEqual(side_effects, [])
 
 
 if __name__ == "__main__":

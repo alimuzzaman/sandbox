@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
+from sandbox.application.context import preflight_project_capability
 import sandbox.core._remote as sr
 
 
@@ -59,6 +60,9 @@ def cmd_deploy(cfg, args) -> None:
     except ValueError as e:
         _fail(remote_name, str(e), as_json)
     root = Path(pconf["root"])
+    capability_error = preflight_project_capability(cfg, str(root), "wordpress.remote-deploy")
+    if capability_error is not None:
+        _fail(remote_name, capability_error.message, as_json)
 
     if not remote_name:
         _fail(

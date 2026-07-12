@@ -18,10 +18,14 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
+from sandbox.application.context import preflight_instance_capability
 
 
 
 def cmd_wp(cfg, args) -> None:
+    error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
+    if error is not None:
+        die(error.message)
     if not args.passthrough:
         die("usage: ./sb wp <wp-cli args>")
     pt = list(args.passthrough)

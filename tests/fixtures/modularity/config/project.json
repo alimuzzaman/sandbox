@@ -1,0 +1,10 @@
+{
+  "slug": "fixture-plugin",
+  "plugins": {
+    "fixture-plugin": "."
+  },
+  "config": {
+    "PROJECT_VALUE": "project",
+    "OVERRIDDEN_VALUE": "project"
+  }
+}

@@ -481,7 +481,7 @@ def _from_wp_env(raw: dict) -> dict:
     }
 
 
-def load_project_config(project_dir, label: str | None = None) -> dict:
+def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     """Resolve the effective config for a project directory.
 
     `label`: when given (and not "default"), also layers
@@ -568,6 +568,18 @@ def load_project_config(project_dir, label: str | None = None) -> dict:
         for slug, e in merged_map.items()
     }
     return merged
+
+
+def load_project_config(project_dir, label: str | None = None) -> dict:
+    """Resolve through the kind-first schema facade while preserving WordPress output."""
+    from sandbox.config.facade import resolve_project_config
+
+    return resolve_project_config(
+        project_dir,
+        label=label,
+        legacy_loader=_load_project_config_legacy,
+        root_finder=find_project_root,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -704,11 +716,23 @@ def _registry_write(data: dict) -> None:
     os.replace(tmp, path)  # atomic
 
 
+def _registry_repository():
+    """Build the repository at the current environment-resolved registry path."""
+    from sandbox.project_registry.json import JsonRegistryRepository
+
+    return JsonRegistryRepository(_registry_path())
+
+
 def registry_all() -> dict:
     """All registered instances, keyed by `<canonical-project-root>::<label>`.
     Every value carries its own `root` and `label` fields — read those, never
     the dict key, when you need the root or label (spec: multi-instance-per-root)."""
-    return _registry_read()["instances"]
+    from sandbox.project_registry.base import RegistryError
+
+    try:
+        return _registry_repository().all()
+    except RegistryError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def registry_list_for_root(root) -> list[dict]:
@@ -751,59 +775,24 @@ def registry_put(root, label="default", **fields) -> dict:
     """Create/update the entry for `root`+`label` (shallow-merged with existing)
     under lock. First entry ever written for a root is marked `is_default`.
     Returns the stored entry."""
-    key_root = _canonical(root)
-    key = f"{key_root}::{label}"
-    with _registry_lock():
-        data = _registry_read_raw()
-        if data["version"] < 2:
-            data = _migrate_registry_v1_to_v2(data)
-        prior = data["instances"].get(key)
-        is_default = fields.pop("is_default", None)
-        if is_default is None:
-            if prior is not None and "is_default" in prior:
-                # Updating an existing entry (e.g. ensure_instance's pending ->
-                # ready transition) — preserve its is_default, don't recompute.
-                # Recomputing here would count the entry itself as "already
-                # existing for this root" and wrongly flip a true default to
-                # False on its second write.
-                is_default = prior["is_default"]
-            else:
-                existing_for_root = [e for k, e in data["instances"].items()
-                                      if e.get("root") == key_root and k != key]
-                is_default = not existing_for_root
-        entry = {**data["instances"].get(key, {}), **fields,
-                 "root": key_root, "label": label, "is_default": is_default}
-        data["instances"][key] = entry
-        _registry_write(data)
-    return entry
+    from sandbox.project_registry.base import RegistryError
+
+    try:
+        return _registry_repository().put(root, label=label, **fields)
+    except RegistryError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def registry_remove(root, label=None) -> bool:
     """Remove one instance entry for `root`. label=None + exactly one entry ->
     remove it (back-compat). label=None + several entries -> raises (ambiguous
     — caller must pass label). label given -> remove that entry."""
-    key_root = _canonical(root)
-    with _registry_lock():
-        data = _registry_read_raw()
-        if data["version"] < 2:
-            data = _migrate_registry_v1_to_v2(data)
-        matches = [k for k, e in data["instances"].items() if e.get("root") == key_root]
-        if label is not None:
-            target = f"{key_root}::{label}"
-            existed = data["instances"].pop(target, None) is not None
-        elif len(matches) <= 1:
-            existed = False
-            for k in matches:
-                data["instances"].pop(k, None)
-                existed = True
-        else:
-            raise ConfigError(
-                f"'{root}' has {len(matches)} instances "
-                f"({', '.join(sorted(data['instances'][k]['label'] for k in matches))}); "
-                f"pass label= to registry_remove to disambiguate.")
-        if existed:
-            _registry_write(data)
-    return existed
+    from sandbox.project_registry.base import RegistryError
+
+    try:
+        return _registry_repository().remove(root, label=label)
+    except RegistryError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def registry_find_instance(instance_name: str) -> dict | None:

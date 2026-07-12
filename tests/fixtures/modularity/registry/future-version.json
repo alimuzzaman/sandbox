@@ -1,0 +1,10 @@
+{
+  "version": 99,
+  "instances": {
+    "/tmp/sandbox-fixture/project::default": {
+      "root": "/tmp/sandbox-fixture/project",
+      "label": "default",
+      "instance": "fixture-project"
+    }
+  }
+}

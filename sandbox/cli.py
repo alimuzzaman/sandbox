@@ -17,35 +17,12 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sandbox.core import *  # noqa: F401,F403
 
-from sandbox.registry import COMMANDS
+from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
+from sandbox.commands.manifest import load_builtin_commands
 
 
 
-import sandbox.commands.lifecycle  # noqa: F401  (registers commands)
-import sandbox.commands.instances_cmd  # noqa: F401  (registers commands)
-import sandbox.commands.config_setup  # noqa: F401  (registers commands)
-import sandbox.commands.data  # noqa: F401  (registers commands)
-import sandbox.commands.wp  # noqa: F401  (registers commands)
-import sandbox.commands.net  # noqa: F401  (registers commands)
-import sandbox.commands.debug  # noqa: F401  (registers commands)
-import sandbox.commands.abilities  # noqa: F401  (registers commands)
-import sandbox.commands.jobs  # noqa: F401  (registers commands)
-import sandbox.commands.skill  # noqa: F401  (registers commands)
-import sandbox.commands.integ  # noqa: F401  (registers commands)
-import sandbox.commands.ui_dash  # noqa: F401  (registers commands)
-import sandbox.commands.cache  # noqa: F401  (registers commands)
-import sandbox.commands.license  # noqa: F401  (registers commands)
-import sandbox.commands.migrate  # noqa: F401  (registers commands)
-import sandbox.commands.uninstall  # noqa: F401  (registers commands)
-import sandbox.commands.e2e  # noqa: F401  (registers commands)
-import sandbox.commands.ci  # noqa: F401  (registers commands)
-import sandbox.commands.plugin_check  # noqa: F401  (registers commands)
-import sandbox.commands.remote  # noqa: F401  (registers commands)
-import sandbox.commands.deploy  # noqa: F401  (registers commands)
-import sandbox.commands.hosting  # noqa: F401  (registers commands)
-import sandbox.commands.preview  # noqa: F401  (registers commands)
-import sandbox.commands.secrets  # noqa: F401  (registers commands)
-import sandbox.commands.hermes  # noqa: F401  (registers commands)
+load_builtin_commands()
 
 
 class _KVAction(argparse.Action):
@@ -644,6 +621,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     sg.add_argument("reference", help="reference DesignSpec JSON path")
     sg.add_argument("build", help="build DesignSpec JSON path")
     sg.add_argument("--json", action="store_true", help="emit raw JSON instead of a summary")
+
+    # Feature-owned commands are composed here. Existing parser definitions
+    # above are the explicit compatibility bridge and are never duplicated.
+    compose_missing_parsers(sub, COMMAND_SPECS.specs())
 
     # Global --instance flag accepted both BEFORE and AFTER the subcommand.
     # argparse can't natively share a global flag with all subparsers, so

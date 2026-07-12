@@ -1,0 +1,9 @@
+{
+  "slug": "fixture-plugin",
+  "plugins": [".", "query-monitor"],
+  "phpVersion": "8.2",
+  "wpVersion": "6.8",
+  "config": {
+    "WP_DEBUG": true
+  }
+}

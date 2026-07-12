@@ -84,6 +84,13 @@ This is a **one-way, on-demand** push — never a continuous sync. Every deploy:
    never stacks. "Is my code live on the VPS" always has one answer: "as of my last
    `./sb deploy`."
 
+Before the remote instance is considered ready, `ensure` reconciles each instance's
+published WordPress, database, and Mailpit ports against listeners already present on
+the host. If a stale container or unrelated process owns a recorded port, Sandbox moves
+the instance to a free trio and regenerates Compose before booting. This prevents a
+partial `compose up` from leaving WordPress reachable while its WP-CLI database path is
+broken.
+
 There is no project-level config for this — you always pass `--remote <name>`
 explicitly (unlike `plugin-check`'s slug, there's no single obviously-correct default
 remote for a project, so no default is guessed).

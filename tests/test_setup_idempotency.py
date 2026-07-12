@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from sandbox.commands import lifecycle
+from sandbox.core import _instances
 
 
 class TestSetupIdempotency(unittest.TestCase):
@@ -42,6 +43,32 @@ class TestSetupIdempotency(unittest.TestCase):
         compose.assert_called_once_with(
             "up", "-d", "--remove-orphans", "wp", "nginx", instance="demo"
         )
+
+    def test_port_conflicts_reassign_all_instance_ports(self):
+        cfg = {"instances": {"demo": {}}}
+        local = {"instances": {"demo": {}}}
+        resolved = {"demo": {
+            "wordpress_port": 8188,
+            "db_port": 3318,
+            "mailpit_port": 8125,
+        }}
+        with patch.object(_instances, "resolve_instances", return_value=resolved), \
+             patch.object(_instances, "_local_yaml", return_value=local), \
+             patch.object(_instances, "_port_busy_by_other",
+                          side_effect=[False, False, True]), \
+             patch.object(_instances, "_next_free_port",
+                          side_effect=[8190, 3320, 8127]), \
+             patch.object(_instances, "_write_local_yaml") as write_local, \
+             patch.object(_instances, "load_config", return_value=cfg), \
+             patch.object(_instances, "write_compose_files"):
+            _instances._resolve_port_conflicts(cfg)
+
+        self.assertEqual(local["instances"]["demo"], {
+            "wordpress_port": 8190,
+            "db_port": 3320,
+            "mailpit_port": 8127,
+        })
+        write_local.assert_called_once_with(local)
 
 
 if __name__ == "__main__":

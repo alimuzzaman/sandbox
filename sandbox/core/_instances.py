@@ -526,8 +526,24 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
 
     with sc.project_lock(root):
         existing = sc.registry_get(root, label=label)
+        # A remote or local host may retain a listener that is not represented
+        # in the registry (for example a stale Mailpit container). Reconcile
+        # ports before the ready fast path; otherwise ensure can report a
+        # healthy HTTP container while the next compose up partially fails and
+        # leaves WP's database network unusable.
+        cfg = _resolve_port_conflicts(cfg)
+        resolved_existing = (
+            resolve_instances(cfg).get(existing.get("instance"))
+            if existing and existing.get("instance") else None
+        )
+        ports_changed = bool(
+            existing and resolved_existing and any(
+                resolved_existing.get(key) != existing.get(key)
+                for key in ("wordpress_port", "db_port", "mailpit_port")
+            )
+        )
         if existing and existing.get("status") == "ready" \
-                and _instance_reachable(existing):
+                and not ports_changed and _instance_reachable(existing):
             # Already up. If the config's version pins no longer match the
             # running instance's image, say so loudly — silently returning the
             # stale record would let tests run against a different WP/PHP than
@@ -549,10 +565,11 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         # when there's no record at all do we allocate a new name + ports.
         if existing and existing.get("instance"):
             name = existing["instance"]
+            resolved = resolve_instances(cfg).get(name) or existing
             ports = {
-                "wordpress_port": existing["wordpress_port"],
-                "db_port": existing["db_port"],
-                "mailpit_port": existing["mailpit_port"],
+                "wordpress_port": resolved["wordpress_port"],
+                "db_port": resolved["db_port"],
+                "mailpit_port": resolved["mailpit_port"],
             }
         else:
             taken = set(resolve_instances(cfg).keys())

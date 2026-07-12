@@ -481,6 +481,28 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
+def _auto_heal_wp_url(name: str) -> bool:
+    """Restore a registered HTTPS instance URL if WP drifted to localhost."""
+    cfg = load_config()
+    ic = resolve_instances(cfg).get(name) or {}
+    expected = site_url(ic)
+    if not expected.startswith("https://"):
+        return False
+
+    current = wpcli(["option", "get", "siteurl"], instance=name,
+                    check=False, capture=True)
+    if (getattr(current, "stdout", "") or "").strip() == expected:
+        return False
+
+    _write_ssl_muplugin(name)
+    wpcli(["option", "update", "siteurl", expected], instance=name,
+          check=False)
+    wpcli(["option", "update", "home", expected], instance=name,
+          check=False)
+    info(f"{name}: auto-healed WP url → {expected}")
+    return True
+
+
 def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     create: bool = False, php_version: str | None = None,
                     wp_version: str | None = None,
@@ -550,6 +572,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # the live site. Re-versioning in place is a tracked follow-up; for
             # now the instance must be recreated to apply a changed pin.
             _warn_version_drift(cfg, existing.get("instance"), pconf)
+            _auto_heal_wp_url(existing["instance"])
             return existing
 
         if not existing and label != "default" and not create:
@@ -604,6 +627,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         write_compose_files(cfg)
 
         ns = types.SimpleNamespace(resolved_instance=name)
+        secured = False
         if server == "herd":
             # Host driver: link + isolate + secure replace the docker boot.
             _provision_herd(name, pconf)
@@ -615,8 +639,11 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # stores an http localhost URL (whose port leaks into redirects).
             # Single-site only; falls back to localhost otherwise.
             if _proxy_sudoers_installed() and _secure_at_create(cfg, name):
+                secured = True
                 cfg = load_config()
         cmd_install(cfg, ns)
+        if secured:
+            _auto_heal_wp_url(name)
         # Multisite goes live only when the web tier reboots WITH the MULTISITE
         # constants that multisite-convert's marker (written inside cmd_install)
         # just enabled — and, when secured, with DOMAIN_CURRENT_SITE = <name>.

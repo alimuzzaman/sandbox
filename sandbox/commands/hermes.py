@@ -198,6 +198,9 @@ def cmd_hermes(cfg, args) -> None:
                 confirm=args.confirm,
                 plan=args.plan,
                 lines=args.lines,
+                target=args.target,
+                basic_auth_user=args.basic_auth_user,
+                basic_auth_secret=args.basic_auth_secret,
             )
         elif action == "state":
             if args.subaction == "setup":

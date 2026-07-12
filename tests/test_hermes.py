@@ -27,6 +27,76 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 
 class TestValidation(unittest.TestCase):
+    def test_public_dashboard_is_exact_and_caddy_stays_loopback(self):
+        fragment = hermes._public_caddy_fragment("hermes.asb.bd", False)
+        self.assertIn("http://127.0.0.1:9120", fragment)
+        self.assertIn("reverse_proxy 127.0.0.1:9119", fragment)
+        self.assertNotIn("0.0.0.0", fragment)
+        with self.assertRaises(hermes.HermesError):
+            hermes._public_plan({}, {}, {}, "other.asb.bd")
+
+    def test_public_plan_reports_missing_configuration_without_network_access(self):
+        with patch("sandbox.core._hermes._public_config", return_value={}):
+            out = hermes._public_validate_cloudflare({}, "hermes.asb.bd")
+        self.assertFalse(out["configured"])
+        self.assertIn("account_id", out["missing"])
+        self.assertIn("dns_record_id", out["missing"])
+
+    @patch("sandbox.core._hermes._dashboard_listeners")
+    @patch("sandbox.core._hermes._dashboard_status")
+    @patch("sandbox.core._hermes._public_config")
+    def test_public_plan_is_attach_only_and_sanitized(self, config, status, listeners):
+        config.return_value = {}
+        status.return_value = {"active": True}
+        listeners.return_value = {"expected_loopback": True, "public_listener": False}
+        plan = hermes._public_plan({}, {}, {"public_exposure": {}}, "hermes.asb.bd")
+        self.assertTrue(plan["attach_only"])
+        self.assertTrue(plan["ready"] is False)
+        self.assertNotIn("eyj", json.dumps(plan).lower())
+
+
+class TestPublicExposureLifecycle(unittest.TestCase):
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._public_install_connector")
+    @patch("sandbox.core._hermes._public_caddy_apply")
+    @patch("sandbox.core._hermes._ssh")
+    @patch("sandbox.core._hermes._public_require_ready", return_value="connector-secret")
+    @patch("sandbox.core._hermes._public_config", return_value={})
+    @patch("sandbox.core._hermes._public_plan")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._dashboard_gate", return_value={"commit": "a" * 40})
+    @patch("sandbox.core._hermes._paths", return_value={"state": "/tmp/hermes.json"})
+    @patch("sandbox.core._hermes._require_remote", return_value={"ssh": "u@example.test"})
+    def test_confirmed_exposure_uses_local_proxy_and_redacts_connector(
+            self, require_remote, paths, gate, read_state, public_plan, config, require_ready,
+            ssh, caddy, connector, write_state):
+        state = {"dashboard": {}, "public_exposure": {"basic_auth": {"enabled": False}}}
+        read_state.return_value = state
+        public_plan.return_value = {"ready": True, "fqdn": "hermes.asb.bd"}
+        ssh.side_effect = [_completed(stdout=""), _completed()]
+        out = hermes.dashboard_action("test", "expose", fqdn="hermes.asb.bd", confirm=True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "public")
+        self.assertNotIn("connector-secret", json.dumps(out))
+        caddy.assert_called_once()
+        connector.assert_called_once_with(require_remote.return_value, "connector-secret")
+        write_state.assert_called_once()
+
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._public_caddy_remove")
+    @patch("sandbox.core._hermes._public_stop_connector")
+    @patch("sandbox.core._hermes._remote_state_read", return_value={"dashboard": {}, "public_exposure": {"fqdn": "hermes.asb.bd", "mode": "public"}})
+    @patch("sandbox.core._hermes._dashboard_gate", return_value={"commit": "a" * 40})
+    @patch("sandbox.core._hermes._paths", return_value={"state": "/tmp/hermes.json"})
+    @patch("sandbox.core._hermes._require_remote", return_value={"ssh": "u@example.test"})
+    def test_unexpose_only_removes_local_resources(self, require_remote, paths, gate, read_state,
+                                                    stop_connector, caddy_remove, write_state):
+        out = hermes.dashboard_action("test", "unexpose", confirm=True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "ssh-only")
+        stop_connector.assert_called_once()
+        caddy_remove.assert_called_once()
+        write_state.assert_called_once()
     def test_managed_repository_names_are_not_paths(self):
         self.assertEqual(hermes.validate_repo_name("my.repo_2"), "my.repo_2")
         for value in ("../escape", "/tmp/repo", "", "two words", ".hidden"):

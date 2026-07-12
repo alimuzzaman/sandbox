@@ -195,6 +195,14 @@ docs/
 - **V2 update/restore**: restore the pre-update installation/config backup and restart only services that were previously active.
 - **V3 dashboard**: stop/disable its service, restore prior managed routing, and retain Hermes CLI/gateway functionality.
 
+## Public exposure follow-up
+
+The original V3 contract intentionally stops at a fail-closed feature-015 dependency.
+The researched architecture and pre-spec input for implementing public access at
+`hermes.asb.bd` now lives in
+[`docs/hermes-public-access-prd.md`](../../docs/hermes-public-access-prd.md). Treat that
+work as a new feature specification rather than reopening completed feature-016 tasks.
+
 ## Complexity Tracking
 
 | Violation | Why Needed | Simpler Alternative Rejected Because |

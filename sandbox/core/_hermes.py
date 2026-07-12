@@ -22,6 +22,11 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
 
 import sandbox.core._remote as remote
+import sandbox.core._cloudflare as cloudflare_zone
+import sandbox.core._cloudflare_access as cloudflare_access
+import sandbox.core._cloudflare_tunnel as cloudflare_tunnel
+from sandbox.core._config import _local_yaml
+from sandbox.core._secrets import resolve_secret
 
 
 SUPPORTED_TAG = "v2026.7.7.2"
@@ -39,6 +44,13 @@ GATEWAY_UNIT = "hermes-gateway-sandbox.service"
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
+PUBLIC_DASHBOARD_FQDN = "hermes.asb.bd"
+PUBLIC_PROXY_PORT = 9120
+PUBLIC_TUNNEL_UNIT = "hermes-cloudflared.service"
+PUBLIC_CADDY_FRAGMENT = "/etc/caddy/conf.d/hermes-dashboard.caddy"
+PUBLIC_BASIC_FRAGMENT = "/etc/caddy/conf.d/hermes-dashboard-basic.caddy"
+PUBLIC_TUNNEL_TOKEN_FILE = "$HOME/.hermes/cloudflared-token"
+PUBLIC_TUNNEL_TOKEN_UNIT_FILE = "%h/.hermes/cloudflared-token"
 STATE_SCHEMA = 1
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1628,6 +1640,145 @@ def validate_dashboard_fqdn(fqdn: str) -> str:
     return value
 
 
+def _public_config() -> dict:
+    """Return non-secret attach-only references from the personal local config."""
+    local = _local_yaml()
+    value = ((local.get("hermes") or {}).get("public_access") or {})
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item).strip() for key, item in value.items() if item not in (None, "")}
+
+
+def _secret_reference(value: str | None, field: str) -> str:
+    name = (value or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise HermesError(f"public exposure requires a valid {field} secret reference", "public_exposure_secret_missing")
+    return name
+
+
+def _public_config_errors(config: dict) -> list[str]:
+    required = ("account_id", "access_application_id", "access_policy_id", "tunnel_id", "zone_id",
+                "dns_record_id", "access_token_secret", "tunnel_api_token_secret", "zone_token_secret",
+                "connector_token_secret")
+    return [key for key in required if not config.get(key)]
+
+
+def _public_caddy_fragment(fqdn: str, basic_enabled: bool) -> str:
+    auth = ""
+    if basic_enabled:
+        auth = f"    basic_auth argon2id {{\n        import {PUBLIC_BASIC_FRAGMENT}\n    }}\n"
+    return (
+        f"http://127.0.0.1:{PUBLIC_PROXY_PORT} {{\n"
+        f"    @dashboard host {fqdn}\n"
+        "    handle @dashboard {\n"
+        f"{auth}"
+        "        reverse_proxy 127.0.0.1:9119 {\n"
+        "            header_up Host {host}\n"
+        "            header_up X-Forwarded-Proto https\n"
+        "        }\n"
+        "    }\n"
+        "    respond 404\n"
+        "}\n"
+    )
+
+
+def _public_remote_write(entry: dict, path: str, text: str, mode: str = "0600") -> None:
+    encoded = base64.b64encode(text.encode()).decode()
+    command = (
+        f"tmp=/tmp/hermes-public.$$.tmp; echo {shlex.quote(encoded)} | base64 -d > \"$tmp\"; "
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO install -D -m {shlex.quote(mode)} \"$tmp\" {shlex.quote(path)}; rm -f \"$tmp\""
+    )
+    _checked(entry, command, what="could not write public exposure configuration")
+
+
+def _public_caddy_apply(entry: dict, fragment: str) -> None:
+    _public_remote_write(entry, PUBLIC_CADDY_FRAGMENT, fragment, "0644")
+    _checked(entry, "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; $SUDO caddy validate --config /etc/caddy/Caddyfile && $SUDO systemctl reload caddy",
+             what="could not validate public dashboard Caddy route")
+
+
+def _public_caddy_remove(entry: dict) -> None:
+    _checked(entry, f"if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; $SUDO rm -f {shlex.quote(PUBLIC_CADDY_FRAGMENT)} {shlex.quote(PUBLIC_BASIC_FRAGMENT)}; $SUDO caddy validate --config /etc/caddy/Caddyfile && $SUDO systemctl reload caddy",
+             what="could not remove public dashboard Caddy route")
+
+
+def _public_validate_cloudflare(config: dict, fqdn: str) -> dict:
+    missing = _public_config_errors(config)
+    if missing:
+        return {"configured": False, "missing": missing}
+    try:
+        access_token = resolve_secret(_secret_reference(config.get("access_token_secret"), "Access API"))
+        tunnel_token = resolve_secret(_secret_reference(config.get("tunnel_api_token_secret"), "Tunnel API"))
+        zone_token = resolve_secret(_secret_reference(config.get("zone_token_secret"), "zone DNS"))
+        if not access_token or not tunnel_token or not zone_token:
+            return {"configured": False, "missing": ["configured secret value"]}
+        access = cloudflare_access.Client(access_token)
+        app = cloudflare_access.validate_application(access.application(config["account_id"], config["access_application_id"]), fqdn)
+        policy = cloudflare_access.validate_policy(access.policy(config["account_id"], config["access_policy_id"]))
+        tunnel = cloudflare_tunnel.Client(tunnel_token)
+        target = f"http://127.0.0.1:{PUBLIC_PROXY_PORT}"
+        route = cloudflare_tunnel.validate_configuration(tunnel.configuration(config["account_id"], config["tunnel_id"]), fqdn, target)
+        dns = next((record for record in cloudflare_zone.Client(zone_token).records(config["zone_id"], fqdn)
+                    if str(record.get("id") or "") == config["dns_record_id"]), None)
+        if not dns or dns.get("name") != fqdn or dns.get("proxied") is not True:
+            raise HermesError("Cloudflare DNS reference must be the exact proxied dashboard hostname", "public_exposure_conflict")
+        return {"configured": True, "access": app, "policy": policy,
+                "tunnel": {"id": config["tunnel_id"], **route},
+                "dns": {"id": config["dns_record_id"], "name": fqdn, "proxied": True}}
+    except (cloudflare_access.AccessError, cloudflare_tunnel.TunnelError, cloudflare_zone.CloudflareError, HermesError) as exc:
+        return {"configured": True, "valid": False, "error": _redact(str(exc))}
+
+
+def _public_plan(entry: dict, paths: dict, state: dict, fqdn: str) -> dict:
+    if fqdn != PUBLIC_DASHBOARD_FQDN:
+        raise HermesError("only hermes.asb.bd is supported for public dashboard access", "invalid_dashboard_fqdn")
+    config = _public_config()
+    cloudflare = _public_validate_cloudflare(config, fqdn)
+    dashboard = _dashboard_status(entry, paths, DASHBOARD_PORT)
+    listeners = _dashboard_listeners(entry, DASHBOARD_PORT)
+    exposure = state.get("public_exposure") or {}
+    basic = exposure.get("basic_auth") or {}
+    ready = bool(dashboard["active"] and listeners["expected_loopback"] and not listeners["public_listener"] and cloudflare.get("configured") and cloudflare.get("valid", True))
+    return {"fqdn": fqdn, "mode": exposure.get("mode", "ssh-only"), "ready": ready,
+            "dashboard": {"active": dashboard["active"], "loopback_only": listeners["expected_loopback"] and not listeners["public_listener"]},
+            "cloudflare": cloudflare, "proxy": {"host": DASHBOARD_LOOPBACK_HOST, "port": PUBLIC_PROXY_PORT,
+            "target": f"127.0.0.1:{DASHBOARD_PORT}", "basic_auth_enabled": bool(basic.get("enabled"))},
+            "rollback": {"caddy_fragment": PUBLIC_CADDY_FRAGMENT, "connector_unit": PUBLIC_TUNNEL_UNIT},
+            "attach_only": True}
+
+
+def _public_require_ready(plan: dict, config: dict) -> str:
+    if not plan.get("ready"):
+        raise HermesError("public exposure prerequisites are not healthy", "public_exposure_failed")
+    name = _secret_reference(config.get("connector_token_secret"), "connector")
+    token = resolve_secret(name)
+    if not token:
+        raise HermesError("public exposure connector secret is missing", "public_exposure_secret_missing")
+    return token
+
+
+def _public_install_connector(entry: dict, token: str) -> None:
+    command = f"mkdir -p $HOME/.hermes; umask 077; cat > {PUBLIC_TUNNEL_TOKEN_FILE}; chmod 600 {PUBLIC_TUNNEL_TOKEN_FILE}"
+    res = _ssh_stdin(entry, command, token.encode(), timeout=60)
+    if res.returncode != 0:
+        raise HermesError("could not store Cloudflare Tunnel connector token", "public_exposure_failed", True)
+    _checked(entry, "test -x /usr/bin/cloudflared && /usr/bin/cloudflared tunnel run --help | grep -q -- --token-file",
+             what="cloudflared 2025.4.0 or newer with token-file support is required")
+    unit = cloudflare_tunnel.service_unit(PUBLIC_TUNNEL_UNIT, PUBLIC_TUNNEL_TOKEN_UNIT_FILE)
+    encoded = base64.b64encode(unit.encode()).decode()
+    _checked(entry, (
+        "mkdir -p $HOME/.config/systemd/user; "
+        f"echo {shlex.quote(encoded)} | base64 -d > $HOME/.config/systemd/user/{PUBLIC_TUNNEL_UNIT}; "
+        f"chmod 600 $HOME/.config/systemd/user/{PUBLIC_TUNNEL_UNIT}; systemctl --user daemon-reload; "
+        f"systemctl --user enable --now {PUBLIC_TUNNEL_UNIT}"
+    ), what="could not start Cloudflare Tunnel connector")
+
+
+def _public_stop_connector(entry: dict) -> None:
+    _ssh(entry, f"systemctl --user disable --now {PUBLIC_TUNNEL_UNIT} >/dev/null 2>&1 || true; rm -f $HOME/.config/systemd/user/{PUBLIC_TUNNEL_UNIT} $HOME/.hermes/cloudflared-token; systemctl --user daemon-reload", timeout=60)
+
+
 def _dashboard_unit(port: int) -> str:
     """Render the upstream dashboard as a loopback-only user service."""
     return (
@@ -1726,13 +1877,19 @@ def _dashboard_forward(remote_name: str, port: int) -> str:
 
 def dashboard_action(remote_name: str, action: str, *, port: int | str | None = None,
                      fqdn: str | None = None, confirm: bool = False,
-                     plan: bool = False, lines: int = 200) -> dict:
+                     plan: bool = False, lines: int = 200, target: str | None = None,
+                     basic_auth_user: str | None = None, basic_auth_secret: str | None = None) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     selected_port = validate_dashboard_port(port)
     gate = _dashboard_gate(entry, paths)
     state = _remote_state_read(entry, paths)
     dashboard = state.setdefault("dashboard", {})
+    if action == "exposure-status":
+        exposure = state.get("public_exposure") or {}
+        plan_data = _public_plan(entry, paths, state, exposure.get("fqdn", PUBLIC_DASHBOARD_FQDN))
+        return result(True, "dashboard_exposure_status", remote_name, status=exposure.get("mode", "ssh-only"),
+                      commit=gate["commit"], data=plan_data)
     if action == "install":
         command = (
             "set -eu; cd \"$HOME/.hermes/hermes-agent\"; "
@@ -1798,18 +1955,70 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
                         what="could not read dashboard logs")
         return result(True, "dashboard_logs", remote_name, status="ready", commit=gate["commit"],
                       data={"output": _redact(logs.stdout, entry)[-4000:]})
-    if action in {"expose", "unexpose"}:
-        if action == "expose":
-            host = validate_dashboard_fqdn(fqdn or "")
-            exposure = {"fqdn": host, "tls": True, "oauth": True, "managed_hosting": False,
-                        "status": "blocked", "reason": "feature_015_required"}
-            if plan or not confirm:
-                return result(False, "dashboard_expose", remote_name, status="plan", commit=gate["commit"],
-                              data={"plan": exposure},
-                              error=HermesError("managed-hosting feature 015 is required before public exposure", "feature_015_required"))
-            raise HermesError("managed-hosting feature 015 is required before public exposure", "feature_015_required")
+    if action == "expose":
+        host = validate_dashboard_fqdn(fqdn or "")
+        plan_data = _public_plan(entry, paths, state, host)
         if plan or not confirm:
-            return result(True, "dashboard_unexpose", remote_name, status="dry_run", commit=gate["commit"],
-                          data={"managed_hosting": False, "requires_confirm": True})
-        raise HermesError("no integration-owned public route exists", "dashboard_not_exposed")
+            return result(True, "dashboard_expose", remote_name, status="plan", commit=gate["commit"], data={"plan": plan_data})
+        config = _public_config()
+        connector_token = _public_require_ready(plan_data, config)
+        previous = _ssh(entry, f"if test -f {PUBLIC_CADDY_FRAGMENT}; then cat {PUBLIC_CADDY_FRAGMENT}; fi", timeout=30)
+        basic = (state.get("public_exposure") or {}).get("basic_auth") or {}
+        try:
+            _public_caddy_apply(entry, _public_caddy_fragment(host, bool(basic.get("enabled"))))
+            _public_install_connector(entry, connector_token)
+            probe = _ssh(entry, f"curl -fsS -H 'Host: {host}' http://127.0.0.1:{PUBLIC_PROXY_PORT}/ >/dev/null", timeout=30)
+            if probe.returncode != 0:
+                raise HermesError("loopback public proxy health check failed", "public_exposure_failed", True)
+        except HermesError:
+            _public_stop_connector(entry)
+            if previous.stdout:
+                _public_caddy_apply(entry, previous.stdout)
+            else:
+                _public_caddy_remove(entry)
+            raise
+        state["public_exposure"] = {"fqdn": host, "mode": "public", "proxy_port": PUBLIC_PROXY_PORT,
+                                    "basic_auth": basic, "attach_only": True,
+                                    "rollback": {"caddy_fragment_present": bool(previous.stdout)}}
+        _remote_state_write(entry, paths, state)
+        return result(True, "dashboard_expose", remote_name, status="public", commit=gate["commit"], data=plan_data)
+    if action == "unexpose":
+        exposure = state.get("public_exposure") or {}
+        if plan or not confirm:
+            return result(True, "dashboard_unexpose", remote_name, status="plan", commit=gate["commit"],
+                          data={"mode": exposure.get("mode", "ssh-only"), "removes": ["local_caddy", "local_connector"], "attach_only": True})
+        if exposure.get("mode") != "public":
+            raise HermesError("no integration-owned public route exists", "dashboard_not_exposed")
+        _public_stop_connector(entry)
+        _public_caddy_remove(entry)
+        state["public_exposure"] = {"fqdn": exposure.get("fqdn", PUBLIC_DASHBOARD_FQDN), "mode": "ssh-only", "attach_only": True}
+        _remote_state_write(entry, paths, state)
+        return result(True, "dashboard_unexpose", remote_name, status="ssh-only", commit=gate["commit"],
+                      data={"ssh_forward": _dashboard_forward(remote_name, selected_port)})
+    if action == "basic-auth":
+        if target not in {"set", "remove"}:
+            raise HermesError("dashboard basic-auth action must be set or remove", "invalid_dashboard_basic_auth")
+        if not confirm:
+            raise HermesError("dashboard Basic Auth changes require --confirm", "confirmation_required")
+        exposure = state.setdefault("public_exposure", {"fqdn": PUBLIC_DASHBOARD_FQDN, "mode": "ssh-only", "attach_only": True})
+        if target == "remove":
+            _ssh(entry, f"if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; $SUDO rm -f {PUBLIC_BASIC_FRAGMENT}", timeout=30)
+            exposure["basic_auth"] = {"enabled": False}
+        else:
+            user = (basic_auth_user or "").strip()
+            secret_name = _secret_reference(basic_auth_secret, "Basic Auth")
+            password = resolve_secret(secret_name)
+            if not user or not password:
+                raise HermesError("dashboard Basic Auth user or secret is missing", "public_exposure_secret_missing")
+            hashed = _ssh_stdin(entry, "caddy hash-password --algorithm argon2id", password.encode(), timeout=60)
+            if hashed.returncode != 0 or not (hashed.stdout or "").strip():
+                raise HermesError("could not generate Basic Auth verifier", "public_exposure_failed", True)
+            _public_remote_write(entry, PUBLIC_BASIC_FRAGMENT, f"{user} {(hashed.stdout or '').strip()}\n", "0640")
+            exposure["basic_auth"] = {"enabled": True, "user": user}
+        if exposure.get("mode") == "public":
+            _public_caddy_apply(entry, _public_caddy_fragment(exposure.get("fqdn", PUBLIC_DASHBOARD_FQDN), bool(exposure.get("basic_auth", {}).get("enabled"))))
+        state["public_exposure"] = exposure
+        _remote_state_write(entry, paths, state)
+        return result(True, "dashboard_basic_auth", remote_name, status="configured", commit=gate["commit"],
+                      data={"enabled": bool(exposure.get("basic_auth", {}).get("enabled"))})
     raise HermesError("unknown dashboard action", "invalid_dashboard_action")

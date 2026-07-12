@@ -221,8 +221,76 @@ CLI Hermes. `status`, `logs`, `stop`, and `restart` are bounded systemd-user
 operations. Public exposure is read-only by default and requires a normalized
 FQDN, current V2 evidence, feature 015 managed-hosting support, OAuth/TLS
 preflight, and explicit confirmation. Until those preconditions exist,
-`dashboard expose --plan` reports `feature_015_required` and no route or DNS
-state is changed. `unexpose --plan` is likewise read-only.
+## Public dashboard route (`hermes.asb.bd`)
+
+Public dashboard access is optional and uses this boundary:
+
+```text
+browser -> Cloudflare Access (exact identity + MFA) -> Cloudflare Tunnel
+        -> Caddy on 127.0.0.1:9120 -> Hermes on 127.0.0.1:9119
+```
+
+The first release is **attach-only**: create the exact Cloudflare Access application,
+narrow MFA policy, tunnel ingress, and DNS route outside Sandbox, then record their
+non-secret references in the local `sandbox.local.yml`:
+
+```yaml
+hermes:
+  public_access:
+    account_id: "..."
+    access_application_id: "..."
+    access_policy_id: "..."
+    tunnel_id: "..."
+    zone_id: "..."
+    dns_record_id: "..."
+    access_token_secret: HERMES_CLOUDFLARE_ACCESS_TOKEN
+    tunnel_api_token_secret: HERMES_CLOUDFLARE_TUNNEL_API_TOKEN
+    zone_token_secret: HERMES_CLOUDFLARE_ZONE_TOKEN
+    connector_token_secret: HERMES_CLOUDFLARE_TUNNEL_CONNECTOR_TOKEN
+```
+
+Secret values belong in the approved personal secret file, never this configuration,
+a command argument, Git, state, or output. The Access policy must match only
+`hermes.asb.bd`, contain an explicit narrow Allow rule, and require MFA. Tunnel ingress
+must route only that hostname to `http://127.0.0.1:9120` and end with
+`http_status:404`.
+
+Review first:
+
+```bash
+./sb hermes dashboard exposure-status --remote scaleway-sandbox --json
+./sb hermes dashboard expose --remote scaleway-sandbox \
+  --fqdn hermes.asb.bd --plan --json
+```
+
+Only after reviewing current V2 evidence, the policy, tunnel target, secret references,
+and rollback plan, and receiving explicit authorization for the remote change:
+
+```bash
+./sb hermes dashboard expose --remote scaleway-sandbox \
+  --fqdn hermes.asb.bd --confirm --json
+```
+
+This command creates only the local loopback Caddy fragment and user `cloudflared`
+connector service; it does not create, edit, or delete Cloudflare resources. If public
+access is suspected to be unsafe, remove the local connector/Caddy route first:
+
+```bash
+./sb hermes dashboard unexpose --remote scaleway-sandbox --plan --json
+./sb hermes dashboard unexpose --remote scaleway-sandbox --confirm --json
+```
+
+SSH forwarding remains the recovery route. Do not add `--insecure`, bind Hermes to a
+public address, or treat optional Basic Auth as a substitute for Cloudflare Access MFA.
+
+Optional Basic Auth is a second gate after Access. It is disabled by default and uses a
+secret reference, not a password argument:
+
+```bash
+./sb hermes dashboard basic-auth set --remote scaleway-sandbox \
+  --basic-auth-user operator --basic-auth-secret HERMES_DASHBOARD_BASIC_PASSWORD --confirm --json
+./sb hermes dashboard basic-auth remove --remote scaleway-sandbox --confirm --json
+```
 
 ## Security and operating boundaries
 

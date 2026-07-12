@@ -471,6 +471,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--port", type=int, default=None, help="loopback dashboard port (default 9119)")
     hermes_p.add_argument("--fqdn", default=None, help="public dashboard hostname for expose")
     hermes_p.add_argument("--plan", action="store_true", help="show a read-only dashboard exposure plan")
+    hermes_p.add_argument("--basic-auth-user", default=None, help="optional dashboard Basic Auth username")
+    hermes_p.add_argument("--basic-auth-secret", default=None, help="approved secret reference for dashboard Basic Auth")
     hermes_p.add_argument("--backup-id", default=None, help="backup identifier for a protected restore")
     hermes_p.add_argument("--dry-run", action="store_true", help="show Hermes cleanup candidates without removing them")
     hermes_p.add_argument("--max-jobs", type=int, default=None, help="maximum concurrent Hermes jobs")

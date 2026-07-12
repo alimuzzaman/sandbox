@@ -70,6 +70,19 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("--fqdn", r.stdout)
         self.assertIn("--plan", r.stdout)
         self.assertNotIn("--insecure", r.stdout)
+        self.assertIn("--basic-auth-secret", r.stdout)
+
+    def test_dashboard_public_subcommands_are_parser_safe(self):
+        remote = "missing-public-dashboard-remote"
+        for command, expected in (
+            (("dashboard", "exposure-status"), "unknown_remote"),
+            (("dashboard", "expose", "--fqdn", "other.asb.bd", "--plan"), "unknown_remote"),
+            (("dashboard", "basic-auth", "set"), "unknown_remote"),
+        ):
+            with self.subTest(command=command):
+                r = run_sb("hermes", *command, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(json.loads(r.stdout)["error"]["code"], expected)
 
     def test_dashboard_insecure_option_is_not_accepted_by_the_parser(self):
         r = run_sb("hermes", "dashboard", "status", "--remote", "test", "--insecure")

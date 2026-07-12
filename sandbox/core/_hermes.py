@@ -506,7 +506,10 @@ directly without delegation.
 def _routing_setup_command(paths: dict) -> str:
     """Render idempotent remote setup for the Sandbox-owned worker routing."""
     routing = render_routing_profile()
-    launcher = shlex.quote(paths["launcher"])
+    # ``_paths`` intentionally supplies a remote-shell expression using
+    # ``$HOME``. Quoting it would make the dollar sign literal and prevent the
+    # remote shell from locating Hermes. Quote only literal arguments below.
+    launcher = paths["launcher"]
     worker_commands = []
     for worker in routing["workers"]:
         name = shlex.quote(worker["name"])

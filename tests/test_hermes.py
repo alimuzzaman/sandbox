@@ -274,6 +274,11 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("Never call write, patch, or rename", luna["soul"])
         self.assertIn("SANDBOX_ROUTING_BEGIN", routing["coordinator_soul"])
 
+    def test_routing_setup_expands_the_remote_hermes_launcher(self):
+        command = hermes._routing_setup_command({"launcher": "$HOME/.local/bin/hermes"})
+        self.assertIn("$HOME/.local/bin/hermes config set delegation.provider", command)
+        self.assertNotIn("'$HOME/.local/bin/hermes'", command)
+
     def test_profile_has_full_sequential_sandbox_mcp_access(self):
         rendered = hermes.render_profile("/home/u/sandbox", "/home/u/sandbox/sb-src/sb")
         self.assertEqual(rendered["mcp_servers"]["sandbox"]["command"],

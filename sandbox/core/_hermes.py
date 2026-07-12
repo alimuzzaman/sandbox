@@ -539,6 +539,7 @@ def _routing_setup_command(paths: dict) -> str:
 {launcher} config set auxiliary.triage_specifier.provider {routing['auxiliary']['triage_specifier']['provider']} >/dev/null
 {launcher} config set auxiliary.triage_specifier.model {routing['auxiliary']['triage_specifier']['model']} >/dev/null
 {worker_setup}
+{launcher} kanban init >/dev/null
 routing_payload={shlex.quote(payload)}
 export routing_payload
 PYTHONPATH="$HOME/.hermes/hermes-agent" "$HOME/.hermes/hermes-agent/venv/bin/python" - <<'PY'
@@ -583,7 +584,6 @@ for worker in routing["workers"]:
         atomic_yaml_write(config_path, config, sort_keys=False)
     (profile / "SOUL.md").write_text(worker["soul"] + "\n")
 PY
-{launcher} kanban init >/dev/null
 """
 
 

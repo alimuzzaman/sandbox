@@ -572,7 +572,7 @@ root_soul = root / "SOUL.md"
 existing = root_soul.read_text() if root_soul.exists() else ""
 block = routing["coordinator_soul"].strip()
 pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
-updated = pattern.sub(block, existing, count=1) if pattern.search(existing) else (existing.rstrip() + "\n\n" + block + "\n")
+updated = pattern.sub(block, existing, count=1) if pattern.search(existing) else (existing.rstrip() + "\\n\\n" + block + "\\n")
 root_soul.write_text(updated)
 
 for worker in routing["workers"]:
@@ -582,7 +582,7 @@ for worker in routing["workers"]:
     if worker["toolsets"]:
         config["platform_toolsets"] = {{"cli": worker["toolsets"]}}
         atomic_yaml_write(config_path, config, sort_keys=False)
-    (profile / "SOUL.md").write_text(worker["soul"] + "\n")
+    (profile / "SOUL.md").write_text(worker["soul"] + "\\n")
 PY
 """
 

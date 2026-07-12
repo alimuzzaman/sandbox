@@ -166,6 +166,32 @@ reuse that stored allowlist and fail closed if it is missing or unsafe:
 Gateway installation enables systemd user lingering so an enabled gateway can
 recover after a remote reboot; `hermes health` reports its linger state.
 
+## Routed worker profile
+
+`./sb hermes setup --remote <name>` prepares a non-secret, multi-model Hermes
+profile on every fresh remote. It does not authenticate a provider, check model
+entitlement, install/start the gateway, or contact a messaging platform. Complete
+provider authentication first, then inspect the profile roster with `hermes profile list`.
+
+| Role | Profile/model | Responsibility |
+|---|---|---|
+| Coordinator | default / Spark | Classify, delegate, collect evidence, and report risk. |
+| Evidence worker | luna / Luna | Read and search files, logs, specifications, and public sources. |
+| Implementation worker | terra / Terra | Bounded implementation, tests, formatting, and routine debugging. |
+| High-judgment worker | sol / Sol | Architecture, specifications, security, authorization, data/API, and production-risk work. |
+
+Direct `delegate_task` work uses Terra. The coordinator's Kanban policy provides
+role-specific routing to the named worker profiles once the existing allowlisted
+gateway workflow above is explicitly installed and started. Sandbox setup only
+initializes the task board and its configuration; it never activates the dispatcher.
+
+Luna receives Hermes's `safe` and `file` toolsets so it can inspect local evidence.
+Upstream Hermes does not provide a read-only subset of the file toolset: `file` also
+contains mutation-capable operations. Luna's policy prohibits writes, patches,
+renames, commands, code execution, task creation, and external changes, but that is a
+behavioral guard rather than a technical permission boundary. Route any needed change
+to Terra or Sol.
+
 The local Sandbox MCP server also exposes `hermes_status(remote)` and
 `hermes_run(remote, repo, prompt, worktree=true, async_=true)`, plus
 `hermes_job_status(remote, job_id, offset=0)` and

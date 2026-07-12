@@ -34,6 +34,8 @@ SUPPORTED_COMMIT = "9de9c25f620ff7f1ce0fd5457d596052d5159596"
 HERMES_REPOSITORY_URL = "https://github.com/NousResearch/hermes-agent.git"
 HERMES_DEFAULT_PROVIDER = "openai-codex"
 HERMES_DEFAULT_MODEL = "gpt-5.3-codex-spark"
+HERMES_ROUTING_POLICY_START = "<!-- SANDBOX_ROUTING_BEGIN -->"
+HERMES_ROUTING_POLICY_END = "<!-- SANDBOX_ROUTING_END -->"
 HERMES_STATE_REPO_KEY = "hermes_state_repo"
 HERMES_DRIVE_DESTINATION_KEY = "hermes_drive_destination"
 HERMES_RELEASE_SIGNER = "teknium1"
@@ -423,6 +425,165 @@ def render_profile(sandbox_home: str, sb_path: str) -> dict:
     }
 
 
+def render_routing_profile() -> dict:
+    """Return the non-secret routed-worker policy owned by Sandbox setup."""
+    coordinator_soul = f"""{HERMES_ROUTING_POLICY_START}
+## Sandbox worker routing
+
+You run on Codex Spark and coordinate non-trivial work rather than performing it.
+Route read-only evidence and file review to Luna, bounded implementation and tests to
+Terra, and architecture, security, authorization, data/API, or production-risk work to
+Sol. Give workers a bounded goal, context, acceptance criteria, and tool scope. Gather
+their evidence, report residual risk, and require human approval before high-impact
+changes. Do not silently downgrade Sol-class work. Trivial questions may be answered
+directly without delegation.
+{HERMES_ROUTING_POLICY_END}"""
+    return {
+        "delegation": {
+            "provider": HERMES_DEFAULT_PROVIDER,
+            "model": "gpt-5.6-terra",
+            "max_concurrent_children": 1,
+            "max_spawn_depth": 1,
+            "orchestrator_enabled": False,
+        },
+        "kanban": {
+            "dispatch_in_gateway": True,
+            "auto_decompose": True,
+            "auto_decompose_per_tick": 1,
+            "orchestrator_profile": "default",
+            "default_assignee": "terra",
+            "max_in_progress": 1,
+            "max_in_progress_per_profile": 1,
+        },
+        "auxiliary": {
+            "kanban_decomposer": {"provider": HERMES_DEFAULT_PROVIDER, "model": HERMES_DEFAULT_MODEL},
+            "triage_specifier": {"provider": HERMES_DEFAULT_PROVIDER, "model": "gpt-5.6-sol"},
+        },
+        "coordinator_soul": coordinator_soul,
+        "workers": (
+            {
+                "name": "luna",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "low",
+                "description": "Read-only evidence worker for file review, logs, specifications, and research.",
+                "toolsets": ["safe", "file"],
+                "soul": (
+                    "You are Luna, the evidence worker. Read and search files, task context, logs, and public "
+                    "sources; gather and summarize evidence; state uncertainty; and finish with concise findings. "
+                    "Never call write, patch, or rename operations; never run commands, execute code, create tasks, "
+                    "or make external changes. If mutation is necessary, recommend routing the work to Terra or Sol."
+                ),
+            },
+            {
+                "name": "terra",
+                "model": "gpt-5.6-terra",
+                "reasoning_effort": "medium",
+                "description": "Implementation worker for bounded approved changes, tests, and routine debugging.",
+                "toolsets": [],
+                "soul": (
+                    "You are Terra, the implementation worker. Execute only a bounded assigned task with explicit "
+                    "acceptance criteria. Make minimal changes, run focused tests, and return evidence and residual "
+                    "risk. Escalate unresolved architecture, security, authorization, data/API, migration, or production "
+                    "decisions to Sol and a human reviewer."
+                ),
+            },
+            {
+                "name": "sol",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "description": "High-judgment worker for architecture, specifications, and sensitive boundaries.",
+                "toolsets": [],
+                "soul": (
+                    "You are Sol, the high-judgment architecture and risk worker. Handle architecture, specifications, "
+                    "security, authorization, data/API/production boundaries, and critical debugging. Before any "
+                    "high-impact mutation, require an explicit human checkpoint and do not claim completion without verification."
+                ),
+            },
+        ),
+    }
+
+
+def _routing_setup_command(paths: dict) -> str:
+    """Render idempotent remote setup for the Sandbox-owned worker routing."""
+    routing = render_routing_profile()
+    launcher = shlex.quote(paths["launcher"])
+    worker_commands = []
+    for worker in routing["workers"]:
+        name = shlex.quote(worker["name"])
+        worker_commands.extend((
+            f"if ! {launcher} profile show {name} >/dev/null 2>&1; then {launcher} profile create {name} --description {shlex.quote(worker['description'])} >/dev/null; fi",
+            f"{launcher} -p {name} config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null",
+            f"{launcher} -p {name} config set model.default {shlex.quote(worker['model'])} >/dev/null",
+            f"{launcher} -p {name} config set agent.reasoning_effort {shlex.quote(worker['reasoning_effort'])} >/dev/null",
+        ))
+    worker_setup = "\n".join(worker_commands)
+    payload = base64.b64encode(json.dumps(routing).encode()).decode()
+    return f"""
+{launcher} config set delegation.provider {shlex.quote(routing['delegation']['provider'])} >/dev/null
+{launcher} config set delegation.model {shlex.quote(routing['delegation']['model'])} >/dev/null
+{launcher} config set delegation.max_concurrent_children {routing['delegation']['max_concurrent_children']} >/dev/null
+{launcher} config set delegation.max_spawn_depth {routing['delegation']['max_spawn_depth']} >/dev/null
+{launcher} config set delegation.orchestrator_enabled false >/dev/null
+{launcher} config set kanban.dispatch_in_gateway true >/dev/null
+{launcher} config set kanban.auto_decompose true >/dev/null
+{launcher} config set kanban.auto_decompose_per_tick {routing['kanban']['auto_decompose_per_tick']} >/dev/null
+{launcher} config set kanban.orchestrator_profile {routing['kanban']['orchestrator_profile']} >/dev/null
+{launcher} config set kanban.default_assignee {routing['kanban']['default_assignee']} >/dev/null
+{launcher} config set kanban.max_in_progress {routing['kanban']['max_in_progress']} >/dev/null
+{launcher} config set kanban.max_in_progress_per_profile {routing['kanban']['max_in_progress_per_profile']} >/dev/null
+{launcher} config set auxiliary.kanban_decomposer.provider {routing['auxiliary']['kanban_decomposer']['provider']} >/dev/null
+{launcher} config set auxiliary.kanban_decomposer.model {routing['auxiliary']['kanban_decomposer']['model']} >/dev/null
+{launcher} config set auxiliary.triage_specifier.provider {routing['auxiliary']['triage_specifier']['provider']} >/dev/null
+{launcher} config set auxiliary.triage_specifier.model {routing['auxiliary']['triage_specifier']['model']} >/dev/null
+{worker_setup}
+routing_payload={shlex.quote(payload)}
+export routing_payload
+PYTHONPATH="$HOME/.hermes/hermes-agent" "$HOME/.hermes/hermes-agent/venv/bin/python" - <<'PY'
+import base64
+import json
+import os
+import re
+from pathlib import Path
+
+import yaml
+from hermes_cli.config import get_config_path, read_raw_config
+from utils import atomic_yaml_write
+
+routing = json.loads(base64.b64decode(os.environ["routing_payload"]).decode())
+root_config = read_raw_config()
+toolsets = root_config.setdefault("platform_toolsets", {{}})
+cli = toolsets.setdefault("cli", [])
+if not isinstance(cli, list):
+    raise SystemExit("platform_toolsets.cli must be a list")
+if "hermes-cli" not in cli:
+    cli.insert(0, "hermes-cli")
+if "kanban" not in cli:
+    cli.append("kanban")
+atomic_yaml_write(get_config_path(), root_config, sort_keys=False)
+
+root = Path.home() / ".hermes"
+start = "<!-- SANDBOX_ROUTING_BEGIN -->"
+end = "<!-- SANDBOX_ROUTING_END -->"
+root_soul = root / "SOUL.md"
+existing = root_soul.read_text() if root_soul.exists() else ""
+block = routing["coordinator_soul"].strip()
+pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
+updated = pattern.sub(block, existing, count=1) if pattern.search(existing) else (existing.rstrip() + "\n\n" + block + "\n")
+root_soul.write_text(updated)
+
+for worker in routing["workers"]:
+    profile = root / "profiles" / worker["name"]
+    config_path = profile / "config.yaml"
+    config = yaml.safe_load(config_path.read_text()) or {{}}
+    if worker["toolsets"]:
+        config["platform_toolsets"] = {{"cli": worker["toolsets"]}}
+        atomic_yaml_write(config_path, config, sort_keys=False)
+    (profile / "SOUL.md").write_text(worker["soul"] + "\n")
+PY
+{launcher} kanban init >/dev/null
+"""
+
+
 def state_setup(remote_name: str, repository: str) -> dict:
     entry = _require_remote(remote_name)
     repo_url = validate_state_repo(repository)
@@ -718,6 +879,7 @@ fi
 {paths['launcher']} config set approvals.cron_mode deny >/dev/null
 {paths['launcher']} config set approvals.mcp_reload_confirm true >/dev/null
 {paths['launcher']} config set approvals.destructive_slash_confirm true >/dev/null
+{_routing_setup_command(paths)}
 python3 - <<'PY'
 import base64, json, pathlib
 p = pathlib.Path.home() / '.hermes' / 'sandbox-integration.json'
@@ -1668,16 +1830,20 @@ def _public_caddy_fragment(fqdn: str, basic_enabled: bool) -> str:
     if basic_enabled:
         auth = f"    basic_auth argon2id {{\n        import {PUBLIC_BASIC_FRAGMENT}\n    }}\n"
     return (
-        f"http://127.0.0.1:{PUBLIC_PROXY_PORT} {{\n"
+        f"http://:{PUBLIC_PROXY_PORT} {{\n"
+        "    bind 127.0.0.1\n"
         f"    @dashboard host {fqdn}\n"
         "    handle @dashboard {\n"
         f"{auth}"
         "        reverse_proxy 127.0.0.1:9119 {\n"
-        "            header_up Host {host}\n"
+        "            header_up Host {upstream_hostport}\n"
+        "            header_up Origin http://127.0.0.1:9119\n"
         "            header_up X-Forwarded-Proto https\n"
         "        }\n"
         "    }\n"
-        "    respond 404\n"
+        "    handle {\n"
+        "        respond 404\n"
+        "    }\n"
         "}\n"
     )
 

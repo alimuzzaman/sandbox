@@ -29,8 +29,12 @@ def _completed(returncode=0, stdout="", stderr=""):
 class TestValidation(unittest.TestCase):
     def test_public_dashboard_is_exact_and_caddy_stays_loopback(self):
         fragment = hermes._public_caddy_fragment("hermes.asb.bd", False)
-        self.assertIn("http://127.0.0.1:9120", fragment)
+        self.assertIn("http://:9120", fragment)
+        self.assertIn("bind 127.0.0.1", fragment)
         self.assertIn("reverse_proxy 127.0.0.1:9119", fragment)
+        self.assertIn("header_up Host {upstream_hostport}", fragment)
+        self.assertIn("header_up Origin http://127.0.0.1:9119", fragment)
+        self.assertIn("handle {\n        respond 404", fragment)
         self.assertNotIn("0.0.0.0", fragment)
         with self.assertRaises(hermes.HermesError):
             hermes._public_plan({}, {}, {}, "other.asb.bd")
@@ -249,6 +253,27 @@ class TestPublicExposureLifecycle(unittest.TestCase):
 
 
 class TestProfileRendering(unittest.TestCase):
+    def test_routing_profile_declares_coordinator_and_specialist_workers(self):
+        routing = hermes.render_routing_profile()
+        self.assertEqual(routing["delegation"], {
+            "provider": "openai-codex",
+            "model": "gpt-5.6-terra",
+            "max_concurrent_children": 1,
+            "max_spawn_depth": 1,
+            "orchestrator_enabled": False,
+        })
+        self.assertEqual(routing["kanban"]["default_assignee"], "terra")
+        self.assertEqual(routing["auxiliary"]["kanban_decomposer"]["model"], "gpt-5.3-codex-spark")
+        self.assertEqual(routing["auxiliary"]["triage_specifier"]["model"], "gpt-5.6-sol")
+        self.assertEqual(
+            {worker["name"]: worker["model"] for worker in routing["workers"]},
+            {"luna": "gpt-5.6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+        )
+        luna = next(worker for worker in routing["workers"] if worker["name"] == "luna")
+        self.assertEqual(luna["toolsets"], ["safe", "file"])
+        self.assertIn("Never call write, patch, or rename", luna["soul"])
+        self.assertIn("SANDBOX_ROUTING_BEGIN", routing["coordinator_soul"])
+
     def test_profile_has_full_sequential_sandbox_mcp_access(self):
         rendered = hermes.render_profile("/home/u/sandbox", "/home/u/sandbox/sb-src/sb")
         self.assertEqual(rendered["mcp_servers"]["sandbox"]["command"],
@@ -581,6 +606,40 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("mcp_servers.sandbox.tools.prompts true", command)
         self.assertNotIn("mcp_servers.sandbox.tools.include", command)
         self.assertNotIn("mcp_servers.sandbox.tools.exclude", command)
+
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_setup_converges_worker_routing_without_auth_or_gateway_activation(
+            self, get_remote, ssh_run, read_state, write_state):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [_completed(stdout="/home/ubuntu/sandbox\n"), _completed()]
+        read_state.return_value = {"schema_version": 1, "repositories": {}, "sessions": {}, "gates": {}}
+
+        hermes.setup("test")
+
+        command = ssh_run.call_args_list[1].args[1]
+        for expected in (
+            "config set delegation.provider openai-codex",
+            "config set delegation.model gpt-5.6-terra",
+            "config set delegation.max_concurrent_children 1",
+            "config set delegation.max_spawn_depth 1",
+            "config set delegation.orchestrator_enabled false",
+            "config set kanban.default_assignee terra",
+            "config set auxiliary.kanban_decomposer.model gpt-5.3-codex-spark",
+            "config set auxiliary.triage_specifier.model gpt-5.6-sol",
+            "profile create luna",
+            "profile create terra",
+            "profile create sol",
+            "-p luna config set model.default gpt-5.6-luna",
+            "-p terra config set model.default gpt-5.6-terra",
+            "-p sol config set model.default gpt-5.6-sol",
+        ):
+            self.assertIn(expected, command)
+        self.assertNotIn("gateway install", command)
+        self.assertNotIn("gateway start", command)
+        self.assertNotIn(" auth add ", command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

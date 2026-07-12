@@ -421,3 +421,5 @@ Re-run `./sb setup` after a global config change — it's idempotent.
 Remote Hermes control is documented in [docs/hermes-agent.md](docs/hermes-agent.md).
 Its optional public dashboard route uses Cloudflare Access and Tunnel while keeping
 Hermes loopback-only; see the public-route section in that guide before any live apply.
+Fresh `sb hermes setup` also prepares the Spark/Luna/Terra/Sol routed-worker profile;
+provider authentication and gateway activation remain explicit operator steps.

@@ -1,5 +1,7 @@
 # Sandbox — agent guide
 
+> Recovery: use `sb recovery`; capture, restore apply, deletion, and timer activation are protected operations.
+
 ## Reflexes (fire automatically)
 
 - **First contact →** `focus_get`, skim `git log -10`, read the focused plugin's `CLAUDE.md` + relevant `.claude/skills/<area>/SKILL.md`. Once.

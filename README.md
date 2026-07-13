@@ -3,6 +3,11 @@
 A real WordPress environment for designers, developers, and QA at WPDeveloper —
 drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 
+## Scoped recovery
+
+Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,
+and schedule activation are protected; see [docs/recovery.md](docs/recovery.md).
+
 **MCP-first and per-project.** Each plugin repo carries its own
 `sandbox.config.json`. You `cd` into a plugin, and a single MCP server boots a
 WordPress instance for that directory on demand and runs the plugin's **real

@@ -1,5 +1,11 @@
 # `sandbox.config.*` reference
 
+## Recovery environment
+
+`RECOVERY_RCLONE_DESTINATION` selects the configured rclone destination for read-only recovery
+listing/verification. `RECOVERY_PASSPHRASE` is inherited only for protected capture operations;
+never write it to config or pass it as a CLI/MCP argument.
+
 A plugin repo becomes a **sandbox project** by carrying a `sandbox.config.json`
 (or `.yml`) at its root. This is the per-project source of truth in the
 MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /

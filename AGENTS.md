@@ -9,6 +9,7 @@
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
 - **"Add" / "build" / "implement" →** `load_workflow('build-feature')`.
+- **Recovery →** use `./sb recovery`; never substitute raw `gpg`, `rclone`, Docker, or SSH.
 - **About to commit / push / tag / open or merge a PR →** stop, stage diff, name what changed, wait for explicit approval. Approval for one action is never approval for the next.
 
 ---

@@ -170,9 +170,9 @@
 
 ## Phase 8: Final Safety, Documentation, and Protected Operations
 
-- [ ] T062 [P] Update recovery/module architecture and command references in `README.md`, `AGENTS.md`, `CLAUDE.md`, and `docs/sandbox-config-reference.md`
-- [ ] T063 [P] Add recovery workflow guidance under `.agents/skills/` or `workflows/` and verify it calls only Sandbox commands
-- [ ] T064 Add exact CLI/MCP inventories and no-central-growth guards in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_architecture_boundaries.py`
+- [X] T062 [P] Update recovery/module architecture and command references in `README.md`, `AGENTS.md`, `CLAUDE.md`, and `docs/sandbox-config-reference.md`
+- [X] T063 [P] Add recovery workflow guidance under `.agents/skills/` or `workflows/` and verify it calls only Sandbox commands
+- [X] T064 Add exact CLI/MCP inventories and no-central-growth guards in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_architecture_boundaries.py`
 - [ ] T065 Run focused recovery suites, full unit discovery, MCP tests, `./sb selftest`, `git diff --check`, and quickstart scenarios; record results in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T066 Perform fresh correctness/regression review and separate security/data-loss review; resolve findings in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T067 Re-run Spec-Kit analyze/converge and append any missing work to `specs/023-scoped-recovery-profiles/tasks.md`

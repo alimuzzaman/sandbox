@@ -35,6 +35,7 @@ class TestMcpComposition(unittest.TestCase):
         )
         self.assertEqual(BUILTIN_TOOL_GROUPS, expected)
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
+        self.assertIn("recovery", BUILTIN_TOOL_GROUPS)
 
     def test_test_group_composes_with_isolated_dependencies(self):
         from composition import ToolGroupRegistry, ToolGroupSpec

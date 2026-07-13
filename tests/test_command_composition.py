@@ -47,6 +47,13 @@ class TestCommandComposition(unittest.TestCase):
         self.assertEqual(len(BUILTIN_COMMAND_MODULES), len(set(BUILTIN_COMMAND_MODULES)))
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
         self.assertEqual(len(COMMANDS), 68)
+        self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
+
+    def test_recovery_stays_feature_owned(self):
+        from pathlib import Path
+        root = Path(__file__).parent.parent
+        self.assertIn("CommandSpec(", (root / "sandbox/commands/recovery.py").read_text())
+        self.assertNotIn('"recovery"', (root / "sandbox/cli.py").read_text())
 
 
 if __name__ == "__main__":

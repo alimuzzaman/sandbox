@@ -118,7 +118,7 @@
 
 - [X] T036 [P] Update the operator runbook, failure semantics, desired-job rationale, recovery, and fresh-server commands in `docs/hermes-agent.md`
 - [X] T037 [P] Update Sandbox setup/restore documentation and command help for catalog and gateway convergence in relevant `README.md`, `AGENTS.md`, and command help files
-- [ ] T038 Run focused scheduler, CLI, and MCP tests; then run the full test suite and `./sb selftest`, recording commands and results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
+- [X] T038 Run focused scheduler, CLI, and MCP tests; then run the full test suite and `./sb selftest`, recording commands and results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
 - [ ] T039 Perform a fresh independent review for correctness, security/redaction, destructive-action gates, CLI/MCP parity, and spec/task completeness; resolve every material finding
 - [X] T040 Commit and push validated Sandbox changes to the current explicit branch, preserving unrelated local files
 - [X] T041 Synchronize the remote Sandbox checkout through the Sandbox-managed update path and verify its commit matches the pushed branch

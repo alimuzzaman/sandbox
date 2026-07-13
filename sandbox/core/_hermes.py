@@ -533,6 +533,7 @@ Use the Sandbox `hermes cron` controls so routing is validated before activation
 def _routing_setup_command(paths: dict) -> str:
     """Render idempotent remote setup for the Sandbox-owned worker routing."""
     routing = render_routing_profile()
+    integration = render_profile(paths["sandbox_home"], paths["sb"])
     # ``_paths`` intentionally supplies a remote-shell expression using
     # ``$HOME``. Quoting it would make the dollar sign literal and prevent the
     # remote shell from locating Hermes. Quote only literal arguments below.
@@ -540,35 +541,19 @@ def _routing_setup_command(paths: dict) -> str:
     worker_commands = []
     for worker in routing["workers"]:
         name = shlex.quote(worker["name"])
-        worker_commands.extend((
-            f"if ! {launcher} profile show {name} >/dev/null 2>&1; then {launcher} profile create {name} --description {shlex.quote(worker['description'])} >/dev/null; fi",
-            f"{launcher} -p {name} config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null",
-            f"{launcher} -p {name} config set model.default {shlex.quote(worker['model'])} >/dev/null",
-            f"{launcher} -p {name} config set agent.reasoning_effort {shlex.quote(worker['reasoning_effort'])} >/dev/null",
-        ))
+        worker_commands.append(
+            f"if ! {launcher} profile show {name} >/dev/null 2>&1; then "
+            f"{launcher} profile create {name} --no-alias --description {shlex.quote(worker['description'])} >/dev/null; fi"
+        )
     worker_setup = "\n".join(worker_commands)
     payload = base64.b64encode(json.dumps(routing).encode()).decode()
+    integration_payload = base64.b64encode(json.dumps(integration).encode()).decode()
     return f"""
-{launcher} config set delegation.provider {shlex.quote(routing['delegation']['provider'])} >/dev/null
-{launcher} config set delegation.model {shlex.quote(routing['delegation']['model'])} >/dev/null
-{launcher} config set delegation.max_concurrent_children {routing['delegation']['max_concurrent_children']} >/dev/null
-{launcher} config set delegation.max_spawn_depth {routing['delegation']['max_spawn_depth']} >/dev/null
-{launcher} config set delegation.orchestrator_enabled false >/dev/null
-{launcher} config set kanban.dispatch_in_gateway true >/dev/null
-{launcher} config set kanban.auto_decompose true >/dev/null
-{launcher} config set kanban.auto_decompose_per_tick {routing['kanban']['auto_decompose_per_tick']} >/dev/null
-{launcher} config set kanban.orchestrator_profile {routing['kanban']['orchestrator_profile']} >/dev/null
-{launcher} config set kanban.default_assignee {routing['kanban']['default_assignee']} >/dev/null
-{launcher} config set kanban.max_in_progress {routing['kanban']['max_in_progress']} >/dev/null
-{launcher} config set kanban.max_in_progress_per_profile {routing['kanban']['max_in_progress_per_profile']} >/dev/null
-{launcher} config set auxiliary.kanban_decomposer.provider {routing['auxiliary']['kanban_decomposer']['provider']} >/dev/null
-{launcher} config set auxiliary.kanban_decomposer.model {routing['auxiliary']['kanban_decomposer']['model']} >/dev/null
-{launcher} config set auxiliary.triage_specifier.provider {routing['auxiliary']['triage_specifier']['provider']} >/dev/null
-{launcher} config set auxiliary.triage_specifier.model {routing['auxiliary']['triage_specifier']['model']} >/dev/null
 {worker_setup}
 {launcher} kanban init >/dev/null
 routing_payload={shlex.quote(payload)}
-export routing_payload
+integration_payload={shlex.quote(integration_payload)}
+export routing_payload integration_payload
 PYTHONPATH="$HOME/.hermes/hermes-agent" "$HOME/.hermes/hermes-agent/venv/bin/python" - <<'PY'
 import base64
 import json
@@ -581,7 +566,20 @@ from hermes_cli.config import get_config_path, read_raw_config
 from utils import atomic_yaml_write
 
 routing = json.loads(base64.b64decode(os.environ["routing_payload"]).decode())
+integration = json.loads(base64.b64decode(os.environ["integration_payload"]).decode())
+
+def merge_owned(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            merge_owned(target[key], value)
+        else:
+            target[key] = value
+
 root_config = read_raw_config()
+merge_owned(root_config, integration)
+root_config["delegation"] = routing["delegation"]
+root_config["kanban"] = routing["kanban"]
+root_config["auxiliary"] = routing["auxiliary"]
 toolsets = root_config.setdefault("platform_toolsets", {{}})
 cli = toolsets.setdefault("cli", [])
 if not isinstance(cli, list):
@@ -606,9 +604,12 @@ for worker in routing["workers"]:
     profile = root / "profiles" / worker["name"]
     config_path = profile / "config.yaml"
     config = yaml.safe_load(config_path.read_text()) or {{}}
+    merge_owned(config, integration)
+    config["model"] = {{"provider": {HERMES_DEFAULT_PROVIDER!r}, "default": worker["model"]}}
+    config.setdefault("agent", {{}})["reasoning_effort"] = worker["reasoning_effort"]
     if worker["toolsets"]:
         config["platform_toolsets"] = {{"cli": worker["toolsets"]}}
-        atomic_yaml_write(config_path, config, sort_keys=False)
+    atomic_yaml_write(config_path, config, sort_keys=False)
     (profile / "SOUL.md").write_text(worker["soul"] + "\\n")
 PY
 """
@@ -901,25 +902,7 @@ if test -f "$HOME/.hermes/sandbox-integration.json"; then
   cp "$HOME/.hermes/sandbox-integration.json" "$HOME/.hermes/sandbox-integration.json.backup"
   chmod 600 "$HOME/.hermes/sandbox-integration.json.backup"
 fi
-run_hermes mcp remove sandbox >/dev/null 2>&1 || true
-run_hermes mcp add sandbox --command {shlex.quote(paths['sb'])} --args mcp >/dev/null
-run_hermes config set mcp_servers.sandbox.env.SANDBOX_HOME {shlex.quote(paths['sandbox_home'])} >/dev/null
-run_hermes config set mcp_servers.sandbox.enabled true >/dev/null
-run_hermes config set mcp_servers.sandbox.connect_timeout 60 >/dev/null
-run_hermes config set mcp_servers.sandbox.timeout 1200 >/dev/null
-run_hermes config set mcp_servers.sandbox.supports_parallel_tool_calls false >/dev/null
-run_hermes config set mcp_servers.sandbox.tools.resources true >/dev/null
-run_hermes config set mcp_servers.sandbox.tools.prompts true >/dev/null
-run_hermes config set model.default {shlex.quote(HERMES_DEFAULT_MODEL)} >/dev/null
-run_hermes config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null
-run_hermes config set terminal.backend local >/dev/null
-run_hermes config set terminal.home_mode real >/dev/null
-run_hermes config set terminal.cwd {shlex.quote(paths['repo_root'])} >/dev/null
-run_hermes config set approvals.mode manual >/dev/null
-run_hermes config set approvals.cron_mode deny >/dev/null
-run_hermes config set approvals.mcp_reload_confirm true >/dev/null
-run_hermes config set approvals.destructive_slash_confirm true >/dev/null
-{_routing_setup_command({'launcher': 'run_hermes'})}
+{_routing_setup_command({'launcher': 'run_hermes', 'sandbox_home': paths['sandbox_home'], 'sb': paths['sb']})}
 python3 - <<'PY'
 import base64, json, pathlib
 p = pathlib.Path.home() / '.hermes' / 'sandbox-integration.json'

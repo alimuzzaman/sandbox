@@ -204,6 +204,8 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("HERMES_SETUP_STEP_FAILED", command)
         self.assertIn("run_hermes kanban init", command)
         self.assertNotIn("$HOME/.local/bin/hermes kanban init", command)
+        self.assertNotIn("run_hermes mcp add", command)
+        self.assertIn("merge_owned(config, integration)", command)
 
     @patch("sandbox.core._hermes._worktree_snapshot", return_value=[{
         "repository": "sandbox", "dirty": True, "dirty_paths": ["file.py"],
@@ -486,8 +488,15 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("SANDBOX_ROUTING_BEGIN", routing["coordinator_soul"])
 
     def test_routing_setup_expands_the_remote_hermes_launcher(self):
-        command = hermes._routing_setup_command({"launcher": "$HOME/.local/bin/hermes"})
-        self.assertIn("$HOME/.local/bin/hermes config set delegation.provider", command)
+        command = hermes._routing_setup_command({
+            "launcher": "$HOME/.local/bin/hermes",
+            "sandbox_home": "/home/u/sandbox",
+            "sb": "/home/u/sandbox/sb-src/sb",
+        })
+        self.assertNotIn(" config set ", command)
+        self.assertIn("merge_owned(root_config, integration)", command)
+        self.assertIn("merge_owned(config, integration)", command)
+        self.assertIn('config["model"]', command)
         self.assertNotIn("'$HOME/.local/bin/hermes'", command)
         self.assertLess(command.index("kanban init"), command.index('root_soul = root / "SOUL.md"'))
         self.assertIn('existing.rstrip() + "\\n\\n" + block + "\\n"', command)
@@ -851,8 +860,8 @@ class TestRemoteCommands(unittest.TestCase):
         persisted = write_state.call_args.args[2]
         self.assertEqual(persisted["installation"], {"release_tag": "v2026.7.7.2", "commit": "a" * 40, "status": "configured"})
         self.assertIn("sandbox-integration.json.backup", ssh_run.call_args_list[1].args[1])
-        self.assertIn("config set model.default gpt-5.3-codex-spark", ssh_run.call_args_list[1].args[1])
-        self.assertIn("config set model.provider openai-codex", ssh_run.call_args_list[1].args[1])
+        self.assertIn("merge_owned(root_config, integration)", ssh_run.call_args_list[1].args[1])
+        self.assertIn('config["model"]', ssh_run.call_args_list[1].args[1])
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")
@@ -867,16 +876,11 @@ class TestRemoteCommands(unittest.TestCase):
             hermes.setup("test")
 
         command = ssh_run.call_args_list[1].args[1]
-        self.assertIn("mcp add sandbox --command /home/ubuntu/sandbox/sb-src/sb --args mcp", command)
-        self.assertIn("mcp_servers.sandbox.env.SANDBOX_HOME /home/ubuntu/sandbox", command)
-        self.assertIn("mcp_servers.sandbox.enabled true", command)
-        self.assertIn("mcp_servers.sandbox.connect_timeout 60", command)
-        self.assertIn("mcp_servers.sandbox.timeout 1200", command)
-        self.assertIn("mcp_servers.sandbox.supports_parallel_tool_calls false", command)
-        self.assertIn("mcp_servers.sandbox.tools.resources true", command)
-        self.assertIn("mcp_servers.sandbox.tools.prompts true", command)
-        self.assertNotIn("mcp_servers.sandbox.tools.include", command)
-        self.assertNotIn("mcp_servers.sandbox.tools.exclude", command)
+        self.assertNotIn("mcp add", command)
+        self.assertNotIn("mcp remove", command)
+        self.assertIn("merge_owned(root_config, integration)", command)
+        self.assertIn("merge_owned(config, integration)", command)
+        self.assertIn("integration_payload=", command)
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")
@@ -893,20 +897,14 @@ class TestRemoteCommands(unittest.TestCase):
 
         command = ssh_run.call_args_list[1].args[1]
         for expected in (
-            "config set delegation.provider openai-codex",
-            "config set delegation.model gpt-5.6-terra",
-            "config set delegation.max_concurrent_children 1",
-            "config set delegation.max_spawn_depth 1",
-            "config set delegation.orchestrator_enabled false",
-            "config set kanban.default_assignee terra",
-            "config set auxiliary.kanban_decomposer.model gpt-5.3-codex-spark",
-            "config set auxiliary.triage_specifier.model gpt-5.6-sol",
             "profile create luna",
             "profile create terra",
             "profile create sol",
-            "-p luna config set model.default gpt-5.6-luna",
-            "-p terra config set model.default gpt-5.6-terra",
-            "-p sol config set model.default gpt-5.6-sol",
+            'root_config["delegation"] = routing["delegation"]',
+            'root_config["kanban"] = routing["kanban"]',
+            'root_config["auxiliary"] = routing["auxiliary"]',
+            'config["model"]',
+            'config.setdefault("agent", {})["reasoning_effort"]',
         ):
             self.assertIn(expected, command)
         self.assertNotIn("gateway install", command)

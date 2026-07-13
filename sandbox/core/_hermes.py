@@ -1112,33 +1112,41 @@ def cron_output(remote_name: str, job_id: str, lines: int = 200) -> dict:
 import json, re, sys
 from pathlib import Path
 job_id, line_limit = sys.argv[1], int(sys.argv[2])
-root = Path.home() / ".hermes" / "cron" / "output" / job_id
+cron_root = Path.home() / ".hermes" / "cron"
+root = cron_root / "output" / job_id
 files = sorted(root.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True) if root.is_dir() else []
 if not files:
-    print(json.dumps({"found": False, "file": None, "output": "", "truncated": False}))
-    raise SystemExit(0)
-path = files[0]
+    path = cron_root / f"sandbox-trigger-{job_id}.log"
+    if not path.is_file():
+        print(json.dumps({"found": False, "file": None, "output": "", "truncated": False}))
+        raise SystemExit(0)
+    trigger_log = True
+else:
+    path = files[0]
+    trigger_log = False
 with path.open("rb") as stream:
     stream.seek(max(0, path.stat().st_size - 131072))
     raw = stream.read().decode(errors="replace")
 selected = raw.splitlines()[-line_limit:]
 tail = "\n".join(selected)
-text = ""
-format_supported = False
-for marker in ("\n## Response\n", "\n## Error\n", "\n---\n"):
-    if marker in tail:
-        text = tail.rsplit(marker, 1)[1].strip()
-        format_supported = True
-        break
-if not format_supported:
-    status = re.search(r"(?m)^\*\*Status:\*\*\s*([^\n]+)$", tail)
-    if status:
-        text = "Status: " + status.group(1).strip()
-        format_supported = True
+text = tail.strip() if trigger_log else ""
+format_supported = trigger_log
+if not trigger_log:
+    for marker in ("\n## Response\n", "\n## Error\n", "\n---\n"):
+        if marker in tail:
+            text = tail.rsplit(marker, 1)[1].strip()
+            format_supported = True
+            break
+    if not format_supported:
+        status = re.search(r"(?m)^\*\*Status:\*\*\s*([^\n]+)$", tail)
+        if status:
+            text = "Status: " + status.group(1).strip()
+            format_supported = True
 secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|(?:api[_-]?key|token|password|passphrase|secret|authorization)\s*[:=]\s*['\"]?[^\s'\"]{8,})", text))
 print(json.dumps({"found": True, "file": path.name,
                   "output": "" if secret_like else text,
                   "format_supported": format_supported, "secret_like": secret_like,
+                  "source": "trigger-log" if trigger_log else "saved-output",
                   "truncated": path.stat().st_size > 131072 or len(raw.splitlines()) > line_limit}))
 '''
     res = _checked(

@@ -338,6 +338,8 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("## Response", command)
         self.assertIn("rsplit(marker, 1)", command)
         self.assertIn("secret_like", command)
+        self.assertIn("sandbox-trigger-{job_id}.log", command)
+        self.assertIn("trigger-log", command)
         with self.assertRaises(hermes.HermesError):
             hermes.cron_output("test", "../escape", 50)
 

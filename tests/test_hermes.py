@@ -96,11 +96,30 @@ class TestValidation(unittest.TestCase):
                                      workdir=None, profile="terra", confirm=True)
         self.assertTrue(out["ok"])
         command = ssh.call_args.args[1]
+        self.assertTrue(command.startswith("$HOME/.local/bin/hermes cron create "))
+        self.assertNotIn("'$HOME/.local/bin/hermes'", command)
         self.assertIn("cron create 'every 1h' bounded", command)
         self.assertNotIn("--schedule", command)
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    @patch("sandbox.core._hermes._set_cron_route", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    def test_catalog_create_expands_launcher_and_quotes_catalog_arguments(self, ssh, snapshot, route):
+        snapshot.side_effect = [{"jobs": []}, {"jobs": [{"id": "deadbeef1234"}]}]
+        desired = {
+            "kind": "agent", "schedule": "17 */4 * * *", "prompt": "one bounded task",
+            "name": "sandbox-approved-spec-task", "deliver": "local",
+            "workdir": "/home/u/work tree", "profile": "terra",
+        }
+        out = hermes._create_catalog_job({}, {"launcher": "$HOME/.local/bin/hermes"}, desired)
+        self.assertEqual(out, "deadbeef1234")
+        command = ssh.call_args.args[1]
+        self.assertTrue(command.startswith("$HOME/.local/bin/hermes cron create "))
+        self.assertNotIn("'$HOME/.local/bin/hermes'", command)
+        self.assertIn("'/home/u/work tree'", command)
+
     def test_repo_sync_requires_confirmation_before_remote_access(self):
         with patch("sandbox.core._hermes._require_remote") as require_remote:
             with self.assertRaises(hermes.HermesError) as caught:

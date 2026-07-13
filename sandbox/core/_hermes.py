@@ -1082,7 +1082,7 @@ for name, encoded in payload.items():
 
 def _create_catalog_job(entry: dict, paths: dict, desired: dict) -> str:
     before = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
-    args = [paths["launcher"], "cron", "create", desired["schedule"]]
+    args = ["cron", "create", desired["schedule"]]
     if desired["kind"] == "agent":
         args.append(desired["prompt"])
     args += ["--name", desired["name"], "--deliver", desired["deliver"]]
@@ -1090,7 +1090,11 @@ def _create_catalog_job(entry: dict, paths: dict, desired: dict) -> str:
         args += ["--workdir", desired["workdir"]]
     if desired["kind"] == "script":
         args += ["--script", desired["script"], "--no-agent"]
-    res = _ssh(entry, " ".join(shlex.quote(part) for part in args), timeout=45)
+    # ``launcher`` is a trusted remote-shell expression containing ``$HOME``;
+    # quoting it would turn the dollar sign literal and make the executable
+    # disappear. Every catalog-controlled argument remains shell-quoted.
+    command = paths["launcher"] + " " + " ".join(shlex.quote(part) for part in args)
+    res = _ssh(entry, command, timeout=45)
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or res.stdout or "cron create failed", entry)[:1000],
                           "cron_create_failed", True)
@@ -1290,12 +1294,12 @@ def cron_create(remote_name: str, schedule: str, prompt: str, *, name: str | Non
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     before = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
-    args = [paths["launcher"], "cron", "create", schedule, prompt, "--deliver", "local"]
+    args = ["cron", "create", schedule, prompt, "--deliver", "local"]
     if name:
         args += ["--name", name.strip()]
     if workdir:
         args += ["--workdir", workdir]
-    command = " ".join(shlex.quote(part) for part in args)
+    command = paths["launcher"] + " " + " ".join(shlex.quote(part) for part in args)
     res = _ssh(entry, command, timeout=30)
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron creation failed", entry)[:1000],

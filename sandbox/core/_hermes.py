@@ -1827,7 +1827,9 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
         raise HermesError("worktree diff contains secret-like material", "secret_like_content")
     if not data.get("diff_check_ok"):
         raise HermesError("worktree diff check failed", "invalid_worktree_diff")
-    has_untracked = any(str(line).startswith("?? ") for line in data.get("status", []))
+    has_untracked = any(
+        str(line).startswith(("?? ", "A ", " A ", "AM ")) for line in data.get("status", [])
+    )
     expected_branch = f"hermes/{name}"
     if data.get("branch") != expected_branch:
         raise HermesError("managed worktree is not on its expected branch", "unexpected_worktree_branch")

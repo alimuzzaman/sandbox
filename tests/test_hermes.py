@@ -469,7 +469,7 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertTrue(out["conflict"])
 
     @patch("sandbox.core._hermes._checked", return_value=_completed())
-    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._gateway_ownership")
     @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -481,19 +481,27 @@ class TestSchedulerReliability(unittest.TestCase):
             hermes.GATEWAY_UNIT: {"restart_count": 3},
             "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
         }}
-        ownership.side_effect = [unhealthy, healthy, healthy, healthy]
+        ownership.side_effect = [unhealthy, healthy]
+        samples = [{"managed": {"active_state": "active", "unit_file_state": "enabled", "restart_count": 3},
+                    "legacy": {"active_state": "inactive", "unit_file_state": "disabled", "restart_count": 0},
+                    "gateway_process_count": 1, "scheduler_ok": True} for _ in range(13)]
+        ssh.return_value = _completed(stdout=json.dumps({"samples": samples}))
         sleeps = []
-        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=60,
+        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=10,
                                       sleeper=sleeps.append)
         self.assertTrue(out["ok"])
-        self.assertEqual(sleeps, [60, 60])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(out["data"]["stability"]["sample_count"], 13)
         self.assertTrue(out["data"]["stability"]["scheduler_present"])
-        self.assertEqual(out["data"]["stability"]["restart_counts"], [3, 3, 3])
-        self.assertEqual(ssh.call_count, 3)
-        self.assertTrue(all("cron status" in call.args[1] for call in ssh.call_args_list))
+        self.assertEqual(out["data"]["stability"]["restart_counts"], [3] * 13)
+        ssh.assert_called_once()
+        self.assertEqual(ssh.call_args.kwargs["timeout"], 150)
+        self.assertIn("time.sleep", ssh.call_args.args[1])
+        self.assertIn("while elapsed < 120", ssh.call_args.args[1])
+        self.assertIn('[LAUNCHER, "cron", "status"]', ssh.call_args.args[1])
 
     @patch("sandbox.core._hermes._checked", return_value=_completed())
-    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._gateway_ownership")
     @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -504,15 +512,20 @@ class TestSchedulerReliability(unittest.TestCase):
             hermes.GATEWAY_UNIT: {"restart_count": 3},
             "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
         }}
-        restarted = {**healthy, "units": {**healthy["units"], hermes.GATEWAY_UNIT: {"restart_count": 4}}}
-        ownership.side_effect = [unhealthy, healthy, healthy, restarted]
-        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=60,
+        ownership.side_effect = [unhealthy, healthy]
+        samples = [{"managed": {"active_state": "active", "unit_file_state": "enabled", "restart_count": 3},
+                    "legacy": {"active_state": "inactive", "unit_file_state": "disabled", "restart_count": 0},
+                    "gateway_process_count": 1, "scheduler_ok": True} for _ in range(13)]
+        samples[-1]["managed"]["restart_count"] = 4
+        ssh.return_value = _completed(stdout=json.dumps({"samples": samples}))
+        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=10,
                                       sleeper=lambda _: None)
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"]["code"], "gateway_stability_failed")
-        self.assertEqual(out["data"]["stability"]["restart_counts"], [3, 3, 4])
+        self.assertEqual(out["data"]["stability"]["restart_counts"], [3] * 12 + [4])
+        ssh.assert_called_once()
 
-    @patch("sandbox.core._hermes._ssh", return_value=_completed(returncode=1))
+    @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._gateway_ownership")
     @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -522,12 +535,17 @@ class TestSchedulerReliability(unittest.TestCase):
             "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
         }}
         ownership.return_value = healthy
+        ssh.return_value = _completed(stdout=json.dumps({"samples": [{
+            "managed": {"active_state": "active", "unit_file_state": "enabled", "restart_count": 3},
+            "legacy": {"active_state": "inactive", "unit_file_state": "disabled", "restart_count": 0},
+            "gateway_process_count": 1, "scheduler_ok": False,
+        }]}))
         out = hermes.gateway_converge("test", True, stability_seconds=0)
         self.assertFalse(out["ok"])
         self.assertFalse(out["data"]["stability"]["scheduler_present"])
-        self.assertIn("cron status", ssh.call_args.args[1])
+        ssh.assert_called_once()
 
-    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._gateway_ownership")
     @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -537,14 +555,36 @@ class TestSchedulerReliability(unittest.TestCase):
             hermes.GATEWAY_UNIT: {"restart_count": 3},
             "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
         }}
-        ownership.side_effect = [healthy, hermes.HermesError(
-            "private command", "remote_unavailable", True)]
-        out = hermes.gateway_converge("test", True, stability_seconds=1, sample_interval=1,
-                                      sleeper=lambda _: None)
+        ownership.return_value = healthy
+        ssh.return_value = _completed(stdout=json.dumps({"samples": [{
+            "managed": {"active_state": "active", "unit_file_state": "enabled", "restart_count": 3},
+            "legacy": {"active_state": "active", "unit_file_state": "disabled", "restart_count": 0},
+            "gateway_process_count": 2, "scheduler_ok": True,
+        }]}))
+        out = hermes.gateway_converge("test", True, stability_seconds=0)
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"]["code"], "gateway_stability_failed")
         self.assertFalse(out["data"]["stability"]["ownership_present"])
-        self.assertNotIn("private command", json.dumps(out))
+        ssh.assert_called_once()
+
+    @patch("sandbox.core._hermes._ssh")
+    @patch("sandbox.core._hermes._gateway_ownership")
+    @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_gateway_convergence_rejects_malformed_remote_evidence_without_echoing_command(
+            self, require_remote, paths, ownership, ssh):
+        ownership.return_value = {"healthy": True, "gateway_process_count": 1, "units": {
+            hermes.GATEWAY_UNIT: {"restart_count": 3},
+            "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
+        }}
+        raw_command = "rm -rf /private/hermes --token should-not-appear"
+        ssh.return_value = _completed(stdout=json.dumps({"samples": [{"command": raw_command}]}))
+        out = hermes.gateway_converge("test", True, stability_seconds=0)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "gateway_stability_failed")
+        self.assertTrue(out["data"]["stability"]["malformed_evidence"])
+        self.assertNotIn(raw_command, json.dumps(out))
+        ssh.assert_called_once()
 
     @patch("sandbox.core._hermes._install_cron_scripts")
     @patch("sandbox.core._hermes._remote_state_write")

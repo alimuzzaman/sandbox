@@ -58,6 +58,7 @@
 6. The same review found preservation could miss bearer/JWT credentials and revalidate incompletely, while failed repository refresh could lose retained virtual environments. One shared credential detector, tick/worktree lock ordering, reviewed tree identity, `git diff --check HEAD`, and transactional staged runtime replacement now fail closed with regression coverage.
 7. Reconciliation previously compared only shallow metadata. Exact convergence now uses secret-safe canonical hashes for every controlled field, guarded prompt, delivery, route, workdir, script identity, and installed script content. Missing evidence blocks ordinary apply before deletion; an explicit force-replacement can replace unknown observed state, but final verification still requires exact hashes.
 8. The first captured 120-second gateway acceptance run encountered one transient SSH timeout. The timeout initially surfaced the full diagnostic command through `TimeoutExpired`; transport timeout errors now emit only a bounded duration, and stability sampling converts transient ownership/scheduler probe failures into `ownership_present=false` or `scheduler_present=false` evidence instead of leaking command text or aborting without a stability result. Regression coverage proves both behaviors.
+9. A second acceptance attempt kept all observed restart counters at zero but opened a separate SSH channel for every ownership and scheduler sample; intermittent channel setup timeouts made otherwise healthy observations unavailable. The 120-second acceptance probe is now one bounded remote sampler over one SSH connection. It emits exactly 13 strictly validated samples at the default interval and fails closed unless every sample proves one managed owner, an inactive legacy unit, scheduler availability, and no restart-count growth.
 
 ## Secure remote connection reuse
 
@@ -92,6 +93,7 @@ Evidence: Commands and live results above; final full-suite and post-worker revi
 - `./.cli-venv/bin/python -m unittest tests.test_remote tests.test_hermes_catalog_integrity tests.test_hermes tests.test_cli tests.test_mcp` passed after the final transport and scheduler changes.
 - `./sb selftest` passed after the final changes. Test discovery contains 534 tests; pre-existing subprocess `ResourceWarning` diagnostics remain non-failing.
 - `git diff --check` and Python compilation of `sandbox/core/_remote.py`, `sandbox/core/_hermes.py`, and `sandbox/hermes/scheduler.py` passed.
+- The final single-connection gateway sampler passed `tests.test_hermes.TestSchedulerReliability`; the combined Hermes, remote transport, and catalog-integrity suites passed 211 tests.
 
 Outcome, residual risk, and follow-up: Local implementation and review are complete. Remaining live work is to ship/synchronize this revision, replace the four observed jobs with the final three-job catalog, execute every recreated job, and retain final sanitized evidence. Unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
 

@@ -59,6 +59,8 @@ HERMES_RELEASE_SIGNER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPpWPAE2WMbZ0fA
 GATEWAY_UNIT = "hermes-gateway-sandbox.service"
 GATEWAY_STABILITY_SECONDS = 120
 GATEWAY_STABILITY_INTERVAL = 10
+GATEWAY_STABILITY_TIMEOUT_MARGIN = 30
+GATEWAY_STABILITY_MAX_SAMPLES = 48
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
@@ -2642,56 +2644,144 @@ print(json.dumps({"gateway_pids": sorted(processes),"units":units},sort_keys=Tru
             "conflict": conflict, "healthy": not conflict}
 
 
-def _gateway_stability(entry: dict, initial: dict, *, paths: dict, stability_seconds: int,
-                       sample_interval: int, sleeper) -> dict:
-    """Observe gateway ownership and a successful scheduler status probe."""
+def _gateway_stability(entry: dict, *, paths: dict, stability_seconds: int,
+                       sample_interval: int) -> dict:
+    """Collect bounded gateway and scheduler samples through one SSH session."""
     if not isinstance(stability_seconds, int) or stability_seconds < 0:
         raise HermesError("gateway stability seconds must be a non-negative integer", "invalid_stability_window")
     if not isinstance(sample_interval, int) or sample_interval < 1:
         raise HermesError("gateway sample interval must be a positive integer", "invalid_stability_interval")
 
-    observations = [initial]
+    expected_samples = 1 + ((stability_seconds + sample_interval - 1) // sample_interval)
+    if expected_samples > GATEWAY_STABILITY_MAX_SAMPLES:
+        raise HermesError("gateway stability window exceeds the bounded sample limit", "invalid_stability_window")
+    program = f'''
+import json, os, subprocess, time
+from pathlib import Path
+
+MANAGED = {GATEWAY_UNIT!r}
+LEGACY = "hermes-gateway.service"
+LAUNCHER = os.path.expandvars({paths["launcher"]!r})
+ACTIVE_STATES = {{"active", "activating", "deactivating", "failed", "inactive", "reloading"}}
+UNIT_FILE_STATES = {{"alias", "bad", "disabled", "enabled", "generated", "indirect", "linked", "linked-runtime", "masked", "static", "transient"}}
+
+def state(value, allowed):
+    return value if value in allowed else "unknown"
+
+def count(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return -1
+    return value if 0 <= value <= 1000000 else -1
+
+def unit(unit):
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "UnitFileState", "-p", "NRestarts"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2,
+        )
+        values = {{}}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                values[key] = value
+    except (OSError, subprocess.TimeoutExpired):
+        values = {{}}
+    return {{"active_state": state(values.get("ActiveState", "unknown"), ACTIVE_STATES),
+            "unit_file_state": state(values.get("UnitFileState", "unknown"), UNIT_FILE_STATES),
+            "restart_count": count(values.get("NRestarts", 1000000))}}
+
+def gateway_process_count():
+    processes = 0
+    try:
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit():
+                continue
+            try:
+                args = proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\\0")
+            except OSError:
+                continue
+            if any(arg.endswith("hermes") or "/hermes" in arg for arg in args) and "gateway" in args and "run" in args:
+                processes += 1
+    except OSError:
+        return -1
+    return min(processes, 1000000)
+
+def sample():
+    try:
+        scheduler_ok = subprocess.run([LAUNCHER, "cron", "status"], stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, timeout=2).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        scheduler_ok = False
+    return {{"managed": unit(MANAGED), "legacy": unit(LEGACY),
+            "gateway_process_count": gateway_process_count(), "scheduler_ok": scheduler_ok}}
+
+samples = [sample()]
+elapsed = 0
+while elapsed < {stability_seconds}:
+    delay = min({sample_interval}, {stability_seconds} - elapsed)
+    time.sleep(delay)
+    elapsed += delay
+    samples.append(sample())
+print(json.dumps({{"samples": samples}}, sort_keys=True, separators=(",", ":")))
+'''
+
+    def unavailable(*, malformed: bool = False) -> dict:
+        return {"stable": False, "observation_seconds": stability_seconds, "sample_count": 0,
+                "restart_counts": [], "ownership_present": False, "scheduler": {"available": False},
+                "scheduler_present": False, "malformed_evidence": malformed}
+
+    try:
+        response = _ssh(entry, f"python3 -c {shlex.quote(program)}",
+                        timeout=stability_seconds + GATEWAY_STABILITY_TIMEOUT_MARGIN)
+    except HermesError:
+        return unavailable()
+    if response.returncode != 0 or not isinstance(response.stdout, str) or len(response.stdout) > 16384:
+        return unavailable(malformed=True)
+    try:
+        evidence = json.loads(response.stdout)
+    except json.JSONDecodeError:
+        return unavailable(malformed=True)
+    samples = evidence.get("samples") if isinstance(evidence, dict) and set(evidence) == {"samples"} else None
+    if not isinstance(samples, list) or len(samples) != expected_samples:
+        return unavailable(malformed=True)
+
+    restart_counts = []
+    ownership = []
     scheduler = []
+    for sample in samples:
+        if not isinstance(sample, dict) or set(sample) != {"managed", "legacy", "gateway_process_count", "scheduler_ok"}:
+            return unavailable(malformed=True)
+        managed, legacy = sample["managed"], sample["legacy"]
+        if (not isinstance(managed, dict) or not isinstance(legacy, dict)
+                or set(managed) != {"active_state", "unit_file_state", "restart_count"}
+                or set(legacy) != {"active_state", "unit_file_state", "restart_count"}):
+            return unavailable(malformed=True)
+        restart_count = managed["restart_count"]
+        if (type(restart_count) is not int or not 0 <= restart_count <= 1000000
+                or type(legacy["restart_count"]) is not int or not 0 <= legacy["restart_count"] <= 1000000
+                or type(sample["gateway_process_count"]) is not int or not 0 <= sample["gateway_process_count"] <= 1000000
+                or type(sample["scheduler_ok"]) is not bool
+                or managed["active_state"] not in {"active", "activating", "deactivating", "failed", "inactive", "reloading", "unknown"}
+                or legacy["active_state"] not in {"active", "activating", "deactivating", "failed", "inactive", "reloading", "unknown"}
+                or managed["unit_file_state"] not in {"alias", "bad", "disabled", "enabled", "generated", "indirect", "linked", "linked-runtime", "masked", "static", "transient", "unknown"}
+                or legacy["unit_file_state"] not in {"alias", "bad", "disabled", "enabled", "generated", "indirect", "linked", "linked-runtime", "masked", "static", "transient", "unknown"}):
+            return unavailable(malformed=True)
+        restart_counts.append(restart_count)
+        ownership.append(managed["active_state"] == "active"
+                         and legacy["active_state"] in {"inactive", "failed"}
+                         and sample["gateway_process_count"] == 1)
+        scheduler.append(sample["scheduler_ok"])
 
-    def observe_scheduler() -> dict:
-        try:
-            status = _ssh(entry, f"{paths['launcher']} cron status", timeout=30)
-        except HermesError:
-            return {"available": False}
-        return {"available": status.returncode == 0}
-
-    def observe_ownership() -> dict:
-        try:
-            return _gateway_ownership(entry)
-        except HermesError:
-            return {"healthy": False, "units": {}, "gateway_process_count": 0,
-                    "available": False}
-
-    scheduler.append(observe_scheduler())
-    elapsed = 0
-    while elapsed < stability_seconds:
-        delay = min(sample_interval, stability_seconds - elapsed)
-        sleeper(delay)
-        elapsed += delay
-        observations.append(observe_ownership())
-        scheduler.append(observe_scheduler())
-
-    def restart_count(observation: dict) -> int:
-        value = (observation.get("units", {}).get(GATEWAY_UNIT, {}) or {}).get("restart_count", 0)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return -1
-
-    restart_counts = [restart_count(observation) for observation in observations]
-    ownership_present = all(observation.get("available", True) for observation in observations)
-    stable = (ownership_present and all(observation.get("healthy") for observation in observations)
-              and all(item["available"] for item in scheduler)
-              and all(count <= restart_counts[0] for count in restart_counts[1:]))
+    ownership_present = all(ownership)
+    scheduler_present = all(scheduler)
+    stable = (ownership_present and scheduler_present
+              and all(count == restart_counts[0] for count in restart_counts[1:]))
     return {"stable": stable, "observation_seconds": stability_seconds,
-            "sample_count": len(observations), "restart_counts": restart_counts,
-            "ownership_present": ownership_present, "scheduler": scheduler[-1],
-            "scheduler_present": all(item["available"] for item in scheduler)}
+            "sample_count": len(samples), "restart_counts": restart_counts,
+            "ownership_present": ownership_present, "scheduler": {"available": scheduler[-1]},
+            "scheduler_present": scheduler_present, "malformed_evidence": False}
 
 
 def gateway_converge(remote_name: str, confirm: bool = False, *,
@@ -2744,8 +2834,8 @@ for proc in Path("/proc").iterdir():
         return result(False, "gateway_converge", remote_name, status="degraded",
                       data={"before": before, "after": after, "actions": actions},
                       error=HermesError("gateway ownership did not converge", "gateway_conflict", True))
-    stability = _gateway_stability(entry, after, paths=paths, stability_seconds=stability_seconds,
-                                   sample_interval=sample_interval, sleeper=sleeper)
+    stability = _gateway_stability(entry, paths=paths, stability_seconds=stability_seconds,
+                                   sample_interval=sample_interval)
     if not stability["stable"]:
         return result(False, "gateway_converge", remote_name, status="degraded",
                       data={"before": before, "after": after, "actions": actions, "stability": stability},

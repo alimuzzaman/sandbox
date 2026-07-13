@@ -1147,6 +1147,47 @@ def _create_catalog_job(entry: dict, paths: dict, desired: dict) -> str:
     return created[0]
 
 
+def _prepare_catalog_workdir(entry: dict, paths: dict, desired: dict) -> str | None:
+    """Create or safely fast-forward the dedicated managed agent worktree."""
+    workdir = desired.get("workdir")
+    if not workdir:
+        return None
+    exists = _ssh(entry, f"test -d {shlex.quote(workdir)}", timeout=15)
+    managed_agent = desired.get("kind") == "agent" and desired.get("name") == "sandbox-approved-spec-task"
+    if exists.returncode == 0 and not managed_agent:
+        return None
+    if not managed_agent:
+        raise HermesError("catalog work directory is missing: " + desired["name"], "cron_workdir_missing")
+    source = f"{paths['repo_root']}/sandbox"
+    branch = "hermes/sandbox-approved-spec-task"
+    parent = str(PurePosixPath(workdir).parent)
+    if exists.returncode != 0:
+        command = (
+            f"set -eu; test -d {shlex.quote(source + '/.git')}; "
+            f"mkdir -p {shlex.quote(parent)}; "
+            f"if git -C {shlex.quote(source)} show-ref --verify --quiet refs/heads/{shlex.quote(branch)}; "
+            f"then git -C {shlex.quote(source)} worktree add {shlex.quote(workdir)} {shlex.quote(branch)}; "
+            f"else git -C {shlex.quote(source)} worktree add -b {shlex.quote(branch)} {shlex.quote(workdir)} HEAD; fi"
+        )
+        prepared = _ssh(entry, command, timeout=60)
+        if prepared.returncode != 0:
+            raise HermesError("could not create the managed cron worktree", "cron_workdir_prepare_failed", True)
+        return workdir
+    command = (
+        f"set -eu; git -C {shlex.quote(workdir)} diff --quiet; "
+        f"git -C {shlex.quote(workdir)} diff --cached --quiet; "
+        f"target=$(git -C {shlex.quote(source)} rev-parse HEAD); "
+        f"git -C {shlex.quote(workdir)} merge --ff-only \"$target\" >/dev/null"
+    )
+    prepared = _ssh(entry, command, timeout=60)
+    if prepared.returncode != 0:
+        raise HermesError(
+            "managed cron worktree is dirty, divergent, or could not be fast-forwarded; review it before reconciliation",
+            "cron_workdir_not_clean", True,
+        )
+    return workdir
+
+
 def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool = False) -> dict:
     """Preview or apply the committed cron catalog as one controlled replacement."""
     entry = _require_remote(remote_name)
@@ -1162,33 +1203,11 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
         return result(True, "cron_reconcile", remote_name,
                       status="planned" if plan["changes"] else "converged", data=plan)
 
-    missing = []
     prepared_workdirs = []
     for item in desired:
-        workdir = item.get("workdir")
-        if workdir:
-            probe = _ssh(entry, f"test -d {shlex.quote(workdir)}", timeout=15)
-            if probe.returncode != 0:
-                if item["kind"] == "agent" and item["name"] == "sandbox-approved-spec-task":
-                    source = f"{paths['repo_root']}/sandbox"
-                    branch = "hermes/sandbox-approved-spec-task"
-                    command = (
-                        f"set -eu; test -d {shlex.quote(source + '/.git')}; "
-                        f"mkdir -p {shlex.quote(str(PurePosixPath(workdir).parent))}; "
-                        f"if git -C {shlex.quote(source)} show-ref --verify --quiet refs/heads/{shlex.quote(branch)}; "
-                        f"then git -C {shlex.quote(source)} worktree add {shlex.quote(workdir)} {shlex.quote(branch)}; "
-                        f"else git -C {shlex.quote(source)} worktree add -b {shlex.quote(branch)} {shlex.quote(workdir)} HEAD; fi"
-                    )
-                    prepared = _ssh(entry, command, timeout=60)
-                    if prepared.returncode == 0:
-                        prepared_workdirs.append(workdir)
-                    else:
-                        missing.append(item["name"])
-                else:
-                    missing.append(item["name"])
-    if missing:
-        raise HermesError("catalog work directories are missing: " + ", ".join(missing),
-                          "cron_workdir_missing")
+        prepared = _prepare_catalog_workdir(entry, paths, item)
+        if prepared:
+            prepared_workdirs.append(prepared)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = f"$HOME/.hermes/cron/backups/jobs-{stamp}.json"

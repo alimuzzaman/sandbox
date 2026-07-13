@@ -10,9 +10,9 @@
 
 **Purpose**: Preserve the observed failure state and establish the feature skeleton without mutating the remote.
 
-- [ ] T001 Record the sanitized local and remote baseline, current five-job inventory, gateway ownership conflict, request rejection, and dirty worktrees in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
-- [ ] T002 [P] Add the desired catalog and committed-script directory skeleton at `sandbox/hermes/cron-catalog.json` and `sandbox/hermes/cron_scripts/`
-- [ ] T003 [P] Add scheduler reliability test fixtures for nominal success, false success, gateway conflict, and dirty worktrees in `tests/fixtures/hermes/`
+- [X] T001 Record the sanitized local and remote baseline, current five-job inventory, gateway ownership conflict, request rejection, and dirty worktrees in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
+- [X] T002 [P] Add the desired catalog and committed-script directory skeleton at `sandbox/hermes/cron-catalog.json` and `sandbox/hermes/cron_scripts/`
+- [X] T003 [P] Add scheduler reliability test fixtures for nominal success, false success, gateway conflict, and dirty worktrees in `tests/fixtures/hermes/`
 
 ---
 
@@ -20,14 +20,14 @@
 
 **Purpose**: Implement deterministic models and validation shared by every user story.
 
-- [ ] T004 Add failing tests for desired/observed cron entities, execution classification, route separation, catalog fingerprints, and safe target validation in `tests/test_hermes.py`
-- [ ] T005 Implement desired cron entries, observed evidence, verified outcomes, gateway ownership state, and worktree evidence in `sandbox/hermes/scheduler.py`
-- [ ] T006 Implement strict catalog loading and validation in `sandbox/hermes/scheduler.py`, including duplicate names, unsafe paths, missing scripts, unsupported profiles, and model identifiers containing effort suffixes
-- [ ] T007 Define the reviewed desired inventory in `sandbox/hermes/cron-catalog.json`, omitting obsolete paused work, separating monitor scripts from agent work, and including one Terra/Medium `sandbox-approved-spec-task` worker that executes at most one explicitly selected unchecked Spec-Kit task in an isolated worktree without commit/push authority while Luna remains read-only
-- [ ] T008 [P] Implement non-self-mutating TODO monitoring with truthful exits in `sandbox/hermes/cron_scripts/todo_md_monitor.py`
-- [ ] T009 [P] Implement truthful quota requeue inspection with nonzero operational failures in `sandbox/hermes/cron_scripts/codex_quota_requeue.py`
-- [ ] T010 [P] Implement truthful Lenzora dispatch with bounded timeout and nonzero operational failures in `sandbox/hermes/cron_scripts/lenzora_kanban_dispatch.py`
-- [ ] T011 Run the foundational test slice and record exact results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
+- [X] T004 Add failing tests for desired/observed cron entities, execution classification, route separation, catalog fingerprints, and safe target validation in `tests/test_hermes.py`
+- [X] T005 Implement desired cron entries, observed evidence, verified outcomes, gateway ownership state, and worktree evidence in `sandbox/hermes/scheduler.py`
+- [X] T006 Implement strict catalog loading and validation in `sandbox/hermes/scheduler.py`, including duplicate names, unsafe paths, missing scripts, unsupported profiles, and model identifiers containing effort suffixes
+- [X] T007 Define the reviewed desired inventory in `sandbox/hermes/cron-catalog.json`, omitting obsolete paused work, separating monitor scripts from agent work, and including one Terra/Medium `sandbox-approved-spec-task` worker that executes at most one explicitly selected unchecked Spec-Kit task in an isolated worktree without commit/push authority while Luna remains read-only
+- [X] T008 [P] Implement non-self-mutating TODO monitoring with truthful exits in `sandbox/hermes/cron_scripts/todo_md_monitor.py`
+- [X] T009 [P] Implement truthful quota requeue inspection with nonzero operational failures in `sandbox/hermes/cron_scripts/codex_quota_requeue.py`
+- [X] T010 [P] Implement truthful Lenzora dispatch with bounded timeout and nonzero operational failures in `sandbox/hermes/cron_scripts/lenzora_kanban_dispatch.py`
+- [X] T011 Run the foundational test slice and record exact results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
 
 **Checkpoint**: The desired state and all scheduler decisions are deterministic and independently testable.
 
@@ -39,12 +39,12 @@
 
 **Independent Test**: A fixture with nominal success plus a newer provider rejection is degraded and identifies the contradiction without exposing prompts or secrets.
 
-- [ ] T012 [P] [US1] Add failing health, redaction, bounded-evidence, and false-success precedence tests in `tests/test_hermes.py`
-- [ ] T013 [US1] Implement bounded cron/run/request evidence collection and false-success evaluation in `sandbox/core/_hermes.py` and `sandbox/hermes/scheduler.py`
-- [ ] T014 [US1] Implement aggregate gateway, scheduler, cron, and worktree health in `sandbox/core/_hermes.py`
-- [ ] T015 [P] [US1] Add `hermes health` CLI arguments and JSON contract tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, and `tests/test_cli.py`
-- [ ] T016 [P] [US1] Add `hermes_health` MCP parity and tests in `mcp/wp-server/tools/hermes.py` and `tests/test_mcp.py`
-- [ ] T017 [US1] Run the US1 test slice and verify all returned evidence is bounded and secret-safe
+- [X] T012 [P] [US1] Add failing health, redaction, bounded-evidence, and false-success precedence tests in `tests/test_hermes.py`
+- [X] T013 [US1] Implement bounded cron/run/request evidence collection and false-success evaluation in `sandbox/core/_hermes.py` and `sandbox/hermes/scheduler.py`
+- [X] T014 [US1] Implement aggregate gateway, scheduler, cron, and worktree health in `sandbox/core/_hermes.py`
+- [X] T015 [P] [US1] Add `hermes health` CLI arguments and JSON contract tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, and `tests/test_cli.py`
+- [X] T016 [P] [US1] Add `hermes_health` MCP parity and tests in `mcp/wp-server/tools/hermes.py` and `tests/test_mcp.py`
+- [X] T017 [US1] Run the US1 test slice and verify all returned evidence is bounded and secret-safe
 
 **Checkpoint**: Health distinguishes idle monitors, real work, provider rejection, false success, and gateway conflict.
 
@@ -56,12 +56,12 @@
 
 **Independent Test**: A drifted five-job fixture previews exact replacement, confirmed apply produces one copy of every desired entry, and a second apply is a no-op.
 
-- [ ] T018 [P] [US2] Add failing catalog rendering, exact-plan, confirmation, partial-failure, and idempotency tests in `tests/test_hermes.py`
-- [ ] T019 [US2] Implement deterministic reconciliation planning and catalog fingerprint comparison in `sandbox/hermes/scheduler.py`
-- [ ] T020 [US2] Implement remote script installation, protected inventory backup, remove-all/create-all apply, route verification, and partial-result reporting in `sandbox/core/_hermes.py`
-- [ ] T021 [P] [US2] Add cron catalog/reconcile CLI contracts and tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, and `tests/test_cli.py`
-- [ ] T022 [P] [US2] Add cron catalog/reconcile MCP parity and tests in `mcp/wp-server/tools/hermes.py` and `tests/test_mcp.py`
-- [ ] T023 [US2] Run the US2 test slice and prove preview is side-effect free and repeat apply is converged
+- [X] T018 [P] [US2] Add failing catalog rendering, exact-plan, confirmation, partial-failure, and idempotency tests in `tests/test_hermes.py`
+- [X] T019 [US2] Implement deterministic reconciliation planning and catalog fingerprint comparison in `sandbox/hermes/scheduler.py`
+- [X] T020 [US2] Implement remote script installation, protected inventory backup, remove-all/create-all apply, route verification, and partial-result reporting in `sandbox/core/_hermes.py`
+- [X] T021 [P] [US2] Add cron catalog/reconcile CLI contracts and tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, and `tests/test_cli.py`
+- [X] T022 [P] [US2] Add cron catalog/reconcile MCP parity and tests in `mcp/wp-server/tools/hermes.py` and `tests/test_mcp.py`
+- [X] T023 [US2] Run the US2 test slice and prove preview is side-effect free and repeat apply is converged
 
 **Checkpoint**: Cron state is fully reproducible from committed Sandbox configuration.
 
@@ -73,10 +73,10 @@
 
 **Independent Test**: Verified execution detects run-marker transition, terminal evidence, timeout, no-work, and metadata/error disagreement.
 
-- [ ] T024 [P] [US3] Add failing verified-run transition, timeout, no-work, provider-rejection, and contradiction tests in `tests/test_hermes.py`
-- [ ] T025 [US3] Implement bounded trigger/poll/evidence verification in `sandbox/core/_hermes.py`
-- [ ] T026 [P] [US3] Add verified-run CLI and MCP contracts with timeout and confirmation in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
-- [ ] T027 [US3] Run the US3 test slice and prove an asynchronous trigger acknowledgement alone cannot yield success
+- [X] T024 [P] [US3] Add failing verified-run transition, timeout, no-work, provider-rejection, and contradiction tests in `tests/test_hermes.py`
+- [X] T025 [US3] Implement bounded trigger/poll/evidence verification in `sandbox/core/_hermes.py`
+- [X] T026 [P] [US3] Add verified-run CLI and MCP contracts with timeout and confirmation in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
+- [X] T027 [US3] Run the US3 test slice and prove an asynchronous trigger acknowledgement alone cannot yield success
 
 **Checkpoint**: A scheduled agent run has an inspectable terminal result or an actionable failure.
 
@@ -88,10 +88,10 @@
 
 **Independent Test**: A manual process plus restarting legacy unit previews the required actions; confirmed convergence leaves one stable managed owner.
 
-- [ ] T028 [P] [US4] Add failing gateway conflict, preview, confirmation, idempotency, and stability-window tests in `tests/test_hermes.py`
-- [ ] T029 [US4] Implement gateway ownership discovery and deterministic convergence in `sandbox/core/_hermes.py`, stopping/disabling legacy ownership before starting the Sandbox unit
-- [ ] T030 [P] [US4] Add gateway convergence CLI and MCP parity with tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
-- [ ] T031 [US4] Update `scripts/install-remote.sh` and the existing Hermes update/restore integration in `sandbox/core/_hermes.py` so fresh setup, update, and recovery install the same managed gateway ownership and committed cron-script contract without implicitly applying destructive reconciliation
+- [X] T028 [P] [US4] Add failing gateway conflict, preview, confirmation, idempotency, and stability-window tests in `tests/test_hermes.py`
+- [X] T029 [US4] Implement gateway ownership discovery and deterministic convergence in `sandbox/core/_hermes.py`, stopping/disabling legacy ownership before starting the Sandbox unit
+- [X] T030 [P] [US4] Add gateway convergence CLI and MCP parity with tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
+- [X] T031 [US4] Update `scripts/install-remote.sh` and the existing Hermes update/restore integration in `sandbox/core/_hermes.py` so fresh setup, update, and recovery install the same managed gateway ownership and committed cron-script contract without implicitly applying destructive reconciliation
 
 **Checkpoint**: Repeated health checks show one owner and no restart-counter growth.
 
@@ -103,10 +103,10 @@
 
 **Independent Test**: Dirty, detached, clean, and invalid worktrees are classified; destructive cleanup remains blocked until each dirty tree is shipped or explicitly retained.
 
-- [ ] T032 [P] [US5] Add failing managed-repository/worktree inventory, redaction, and cleanup-block tests in `tests/test_hermes.py`
-- [ ] T033 [US5] Implement bounded repository/worktree inventory and preservation disposition in `sandbox/core/_hermes.py`
-- [ ] T034 [P] [US5] Add worktree-list CLI and MCP parity with tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
-- [ ] T035 [US5] Review the remote Sandbox, recovery, Lenzora, and smoke worktrees against their task scopes and repository instructions; ship only validated changes and record retained work in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
+- [X] T032 [P] [US5] Add failing managed-repository/worktree inventory, redaction, and cleanup-block tests in `tests/test_hermes.py`
+- [X] T033 [US5] Implement bounded repository/worktree inventory and preservation disposition in `sandbox/core/_hermes.py`
+- [X] T034 [P] [US5] Add worktree-list CLI and MCP parity with tests in `sandbox/cli.py`, `sandbox/commands/hermes.py`, `mcp/wp-server/tools/hermes.py`, `tests/test_cli.py`, and `tests/test_mcp.py`
+- [X] T035 [US5] Review the remote Sandbox, recovery, Lenzora, and smoke worktrees against their task scopes and repository instructions; ship only validated changes and record retained work in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
 
 **Checkpoint**: Every observed dirty worktree has a reviewable disposition and none is silently deleted.
 
@@ -116,16 +116,16 @@
 
 **Purpose**: Complete fresh-server parity, verify locally, then perform the explicitly authorized remote replacement.
 
-- [ ] T036 [P] Update the operator runbook, failure semantics, desired-job rationale, recovery, and fresh-server commands in `docs/hermes-agent.md`
-- [ ] T037 [P] Update Sandbox setup/restore documentation and command help for catalog and gateway convergence in relevant `README.md`, `AGENTS.md`, and command help files
+- [X] T036 [P] Update the operator runbook, failure semantics, desired-job rationale, recovery, and fresh-server commands in `docs/hermes-agent.md`
+- [X] T037 [P] Update Sandbox setup/restore documentation and command help for catalog and gateway convergence in relevant `README.md`, `AGENTS.md`, and command help files
 - [ ] T038 Run focused scheduler, CLI, and MCP tests; then run the full test suite and `./sb selftest`, recording commands and results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
 - [ ] T039 Perform a fresh independent review for correctness, security/redaction, destructive-action gates, CLI/MCP parity, and spec/task completeness; resolve every material finding
-- [ ] T040 Commit and push validated Sandbox changes to the current explicit branch, preserving unrelated local files
-- [ ] T041 Synchronize the remote Sandbox checkout through the Sandbox-managed update path and verify its commit matches the pushed branch
-- [ ] T042 Run read-only remote health, worktree inventory, gateway convergence preview, and cron reconciliation preview; retain sanitized evidence
-- [ ] T043 Run confirmed gateway convergence and verify one stable scheduler owner over the required observation window
-- [ ] T044 Back up the remote cron inventory, remove every existing job, recreate the complete reviewed catalog, and report exact partial state if any step fails
-- [ ] T045 Trigger the harmless acceptance job with verified execution, confirm evidence-backed terminal behavior, and rerun reconciliation to prove zero drift
+- [X] T040 Commit and push validated Sandbox changes to the current explicit branch, preserving unrelated local files
+- [X] T041 Synchronize the remote Sandbox checkout through the Sandbox-managed update path and verify its commit matches the pushed branch
+- [X] T042 Run read-only remote health, worktree inventory, gateway convergence preview, and cron reconciliation preview; retain sanitized evidence
+- [X] T043 Run confirmed gateway convergence and verify one stable scheduler owner over the required observation window
+- [X] T044 Back up the remote cron inventory, remove every existing job, recreate the complete reviewed catalog, and report exact partial state if any step fails
+- [X] T045 Trigger the harmless acceptance job with verified execution, confirm evidence-backed terminal behavior, and rerun reconciliation to prove zero drift
 - [ ] T046 Complete `implementation-evidence.md`, mark implemented tasks, rerun Spec-Kit analysis/convergence, and report residual risks and learning delta
 
 ---

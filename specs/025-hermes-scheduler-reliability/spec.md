@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-13
 
-**Status**: Draft
+**Status**: Approved for implementation
 
 **Input**: User description: "Deeply review why Hermes scheduled work does nothing, solve every discovered scheduler and gateway problem, recreate all cron jobs through repeatable Sandbox tools, preserve and ship valid Hermes work, and ensure Sandbox prevents recurrence."
 

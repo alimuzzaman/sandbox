@@ -103,6 +103,33 @@ class TestValidation(unittest.TestCase):
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    @patch("sandbox.core._hermes._ssh")
+    def test_managed_cron_worktree_fast_forwards_only_when_clean(self, ssh):
+        ssh.side_effect = [_completed(), _completed()]
+        desired = {
+            "kind": "agent", "name": "sandbox-approved-spec-task",
+            "workdir": "/home/u/worktrees/sandbox-approved-spec-task",
+        }
+        out = hermes._prepare_catalog_workdir(
+            {}, {"repo_root": "/home/u/repos"}, desired,
+        )
+        self.assertEqual(out, desired["workdir"])
+        command = ssh.call_args_list[1].args[1]
+        self.assertIn("diff --quiet", command)
+        self.assertIn("diff --cached --quiet", command)
+        self.assertIn('merge --ff-only "$target"', command)
+
+    @patch("sandbox.core._hermes._ssh")
+    def test_managed_cron_worktree_refuses_dirty_or_divergent_state(self, ssh):
+        ssh.side_effect = [_completed(), _completed(returncode=1)]
+        desired = {
+            "kind": "agent", "name": "sandbox-approved-spec-task",
+            "workdir": "/home/u/worktrees/sandbox-approved-spec-task",
+        }
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes._prepare_catalog_workdir({}, {"repo_root": "/home/u/repos"}, desired)
+        self.assertEqual(caught.exception.code, "cron_workdir_not_clean")
+
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._require_remote", return_value={})
     def test_cron_output_reads_only_latest_bounded_valid_job_output(self, require_remote, checked):

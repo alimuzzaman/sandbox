@@ -36,6 +36,24 @@
 - `./sb hermes health --remote scaleway-sandbox --json` → degraded as expected; false success, gateway conflict, and cron drift all detected in under 10 seconds.
 - `./sb hermes worktree list --remote scaleway-sandbox --json` → dirty worktrees retained and reported.
 
+## Live convergence and acceptance
+
+- Pushed Sandbox commits through `32877c473e881adf5c9a7729ddb68037d48f74f6` and synchronized the managed remote checkout/runtime to the same commit with `./sb hermes repo sync`.
+- Initial setup attempts exposed a reproducible hang in upstream `hermes mcp add`. Sandbox now bounds and labels every remaining Hermes CLI setup step and atomically merges its owned MCP/profile settings into the coordinator plus Luna, Terra, and Sol profiles. The live setup then completed in 23 seconds and sanitized state sync reported `unchanged`.
+- Gateway convergence stopped a legacy unit whose restart counter had reached 1,988, disabled it, terminated competing gateway processes, and established one `hermes-gateway-sandbox.service` process. Repeated checks after more than two minutes reported the managed unit active with zero restarts and the legacy unit inactive/disabled with zero restart growth.
+- Forced cron reconciliation removed all five old jobs. Its first creation attempt stopped in an explicit partial state because the generated command quoted `$HOME` literally; the pre-change jobs backup was retained. After the launcher-expansion fix and regression test, rerunning reconciliation created exactly four jobs and a repeat preview reported zero changes.
+- Installed job IDs at acceptance: `5bba87b3ff38` (`todo-md-monitor`), `531687c80a7b` (`codex-quota-requeue`), `215cacf74a89` (`lenzora-kanban-dispatch`), and `433ce28bea8b` (`sandbox-approved-spec-task`).
+- `./sb hermes cron verify 433ce28bea8b --timeout 1200 --confirm --json` reached an evidence-backed terminal result in 78.61 seconds with a valid `openai-codex` / `gpt-5.6-terra` route, no correlated provider failure, and no false success.
+- The corresponding bounded saved output reported `NO_APPROVED_WORK`: the worker correctly refused mutation because this specification was still marked Draft. The specification is now explicitly approved; the remaining bounded convergence task will be used to prove an actual scheduled change.
+- Latest aggregate health reported no cron drift, no false success, one healthy gateway owner, and no degraded reasons. Six dirty worktrees remain inventoried; reviewed invalid/unrelated changes remain preserved rather than force-committed.
+
+## Additional failures converted into safeguards
+
+1. Gateway convergence previously treated the legacy unit's `deactivating` state as healthy; every non-quiescent transitional state is now a conflict and has a regression test.
+2. Setup previously performed many lock-prone Hermes config mutations and omitted the Sandbox MCP contract from isolated worker profiles; setup now uses one schema-preserving atomic merge for all profiles.
+3. Cron command composition previously shell-quoted the trusted `$HOME` launcher expression; launcher expansion and catalog argument quoting now have dedicated tests.
+4. Sandbox previously could not inspect Hermes' saved cron response. `hermes cron output` now provides validated, bounded, redacted CLI/MCP access without allowing arbitrary paths.
+
 ## Trace
 
 Outcome / non-goals: Make Hermes scheduling truthful and reproducible; no unrelated production deployment.
@@ -46,8 +64,8 @@ Model(s), effort, and role: Sol/High architecture and research; Terra/High Spec-
 
 Workspace / commits / delegates: Local `codex/hermes-public-access`; remote Hermes worktrees reviewed individually. Commit IDs are recorded after shipping.
 
-Evidence: Commands and live results above; final full-suite, selftest, remote convergence, and verified-run evidence are appended after execution.
+Evidence: Commands and live results above; final full-suite and post-worker review evidence are appended after execution.
 
-Outcome, residual risk, and follow-up: Pending final review and live convergence.
+Outcome, residual risk, and follow-up: Gateway and cron state are converged. Remaining work is the approved scheduled-change proof, final full-suite rerun after the last tooling additions, and reviewed preservation of any resulting worktree change.
 
 Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, and bounded verified execution.

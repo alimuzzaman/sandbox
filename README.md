@@ -20,7 +20,7 @@ MCP client). On a fresh machine, run the OS bootstrap script first:
 
 ```bash
 # macOS
-bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop
+bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop → Reader.md
 
 # Ubuntu / Debian
 bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE
@@ -49,6 +49,34 @@ cd sandbox
 
 `setup` offers to install missing prerequisites (default always **No**)
 and never needs `sudo` for the base install.
+
+On macOS, the bootstrap also installs [Reader.md](https://github.com/jnahian/reader.md)
+by default when Homebrew is available. It provides the `reader` command for
+opening local Sandbox documentation and read-only remote documentation folders.
+Set `SANDBOX_SKIP_READER_MD=1` before running the bootstrap to opt out; a
+Reader.md failure only warns and never prevents Sandbox setup.
+
+Reader.md is maintained in its own Homebrew tap. The bootstrap scopes
+Homebrew's required trust grant to its `reader-md` cask before installation;
+review that upstream tap if your environment disallows third-party casks.
+
+### Reader.md for agents and operators
+
+Reader.md is an optional **local, visual reading surface**. An agent on the
+macOS workstation may open a known local Markdown file or folder when that
+helps the operator review documentation:
+
+```bash
+reader /absolute/path/to/spec.md
+reader /absolute/path/to/folder
+```
+
+It is not an MCP server and its window is not evidence an agent can inspect.
+Use `fs_read`, repository reads, or `ssh` for machine-readable evidence and
+tests. Do not use `reader remote` or `reader rm` from an agent: the former
+adds an SSH-backed application connection and the latter removes saved Reader
+configuration. Those remain explicit operator commands. `reader ls` is safe
+for an operator to inspect configured Reader roots.
 
 **`domains setup` asks which local TLD to use** (or pass it directly:
 `./sb domains setup tst`), defaulting to **`tst`**. Instances then serve at

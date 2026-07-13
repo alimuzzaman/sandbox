@@ -214,6 +214,21 @@ renames, commands, code execution, task creation, and external changes, but that
 behavioral guard rather than a technical permission boundary. Route any needed change
 to Terra or Sol.
 
+### Reader.md on the operator workstation
+
+Reader.md is installed only as an optional macOS operator aid, not as a Hermes
+tool or a server dependency. A local agent may use `reader /absolute/path` to
+open an already-known local Markdown file or folder for the operator to read.
+The GUI is not agent-readable and cannot be used as verification evidence;
+Hermes must continue using Sandbox file tools, repository reads, SSH output,
+and tests for evidence.
+
+Do not call `reader remote` from Hermes or an agent. It asks the local user to
+create an SSH-backed, persistent Reader connection, which is outside a bounded
+task. Do not call `reader rm`, which deletes that user configuration. Operators
+may run `reader ls` themselves to inspect configured roots and can explicitly
+run `reader remote user@host:/path` when they want a read-only remote folder.
+
 The local Sandbox MCP server also exposes `hermes_status(remote)` and
 `hermes_run(remote, repo, prompt, worktree=true, async_=true)`, plus
 `hermes_job_status(remote, job_id, offset=0)` and

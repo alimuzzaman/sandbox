@@ -2,7 +2,8 @@
 # Bootstrap Sandbox on macOS from zero.
 #
 # Installs (with your confirmation): Homebrew, python3, Docker Desktop.
-# Then hands off to ./install.sh which runs `./sb setup`.
+# Installs Reader.md by default when Homebrew is available, unless explicitly
+# skipped. Then hands off to ./install.sh which runs `./sb setup`.
 #
 # Usage (from the sandbox clone root):
 #   bash scripts/install-macos.sh
@@ -19,7 +20,7 @@ ask()  { printf '  Install %s now? [y/N] ' "$1"; read -r ans; [[ "$ans" =~ ^[yY]
 printf '\n%sWPDeveloper Sandbox — macOS bootstrap%s\n' "$B" "$N"
 
 # --- Homebrew ---------------------------------------------------------------
-step "1/3  Homebrew"
+step "1/4  Homebrew"
 if command -v brew >/dev/null 2>&1; then
     ok "Homebrew already installed"
 else
@@ -35,7 +36,7 @@ else
 fi
 
 # --- python3 ----------------------------------------------------------------
-step "2/3  Python 3"
+step "2/4  Python 3"
 if command -v python3 >/dev/null 2>&1; then
     VER="$(python3 --version 2>&1)"
     ok "python3 found ($VER)"
@@ -55,7 +56,7 @@ else
 fi
 
 # --- Docker Desktop ---------------------------------------------------------
-step "3/3  Docker Desktop"
+step "3/4  Docker Desktop"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     ok "Docker already running"
 elif command -v docker >/dev/null 2>&1; then
@@ -73,6 +74,28 @@ else
     else
         printf '  → install manually: https://www.docker.com/products/docker-desktop/\n'
     fi
+fi
+
+# --- Reader.md -------------------------------------------------------------
+step "4/4  Reader.md"
+if command -v reader >/dev/null 2>&1; then
+    ok "Reader.md command-line tool already installed"
+elif [[ "${SANDBOX_SKIP_READER_MD:-}" == "1" ]]; then
+    warn "Skipping Reader.md (SANDBOX_SKIP_READER_MD=1)"
+elif command -v brew >/dev/null 2>&1; then
+    # Reader.md's cask lives in its own tap.  Its cask pins the release
+    # archive checksum; Homebrew verifies it before installing the app.
+    if brew tap jnahian/reader.md https://github.com/jnahian/reader.md \
+        && brew trust --cask jnahian/reader.md/reader-md \
+        && brew install --cask reader-md; then
+        ok "Reader.md installed (open Sandbox docs with: reader .)"
+    else
+        warn "Reader.md could not be installed; continuing without it."
+        warn "Retry later: brew tap jnahian/reader.md https://github.com/jnahian/reader.md && brew trust --cask jnahian/reader.md/reader-md && brew install --cask reader-md"
+    fi
+else
+    warn "Reader.md needs Homebrew; skipping it."
+    warn "Install later: brew tap jnahian/reader.md https://github.com/jnahian/reader.md && brew trust --cask jnahian/reader.md/reader-md && brew install --cask reader-md"
 fi
 
 # --- Hand off to install.sh -------------------------------------------------

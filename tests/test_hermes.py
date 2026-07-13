@@ -70,6 +70,8 @@ class TestValidation(unittest.TestCase):
         worker = catalog["jobs"][-1]
         self.assertEqual(worker.profile, "terra")
         self.assertEqual(scheduled_route(worker.profile).effort, "medium")
+        self.assertIn("first actionable item", worker.prompt)
+        self.assertIn("NO_TODO_WORK", worker.prompt)
         rendered = render_entry(worker, {
             "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
             "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",

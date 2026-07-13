@@ -4,7 +4,7 @@
 
 ## Summary
 
-Replace idle Lenzora Kanban dispatch with one bounded Terra/Medium worker that reads root `TODO.md`, works on only the first unchecked Markdown task, verifies it, and leaves changes uncommitted in a dedicated Lenzora worktree. The worker is allowed to return `NO_TODO_WORK` when the file is absent or complete.
+Replace idle Lenzora Kanban dispatch with one bounded Terra/Medium worker that reads root `TODO.md`, works on only the first actionable Markdown task, verifies it, and leaves changes uncommitted in a dedicated Lenzora worktree. The worker returns `NO_TODO_WORK` when the file is absent or complete, and only bypasses items explicitly blocked by unmet prerequisites.
 
 ## Technical Context
 
@@ -31,8 +31,8 @@ Replace idle Lenzora Kanban dispatch with one bounded Terra/Medium worker that r
 
 1. Generalize the managed catalog-worktree preparation helper from the existing Sandbox agent to a named catalog agent with a repository field inferred from its workdir template. It must create or fast-forward only a clean dedicated worktree while holding existing tick/worktree locks.
 2. Set quota requeue, Kanban dispatch, and Sandbox task worker to disabled in the committed catalog. Add one enabled `lenzora-todo-task` Terra/Medium agent on the existing conservative four-hour cadence.
-3. Its guarded prompt checks root `TODO.md`, returns `NO_TODO_WORK` if absent/completed, selects the first `- [ ]` task otherwise, performs only that bounded task, runs task-relevant checks, marks the selected checkbox only after success, and leaves the isolated worktree uncommitted.
-4. Reconcile exactly once after server synchronization; verify the no-work terminal result because no Lenzora `TODO.md` is currently present.
+3. Its guarded prompt checks root `TODO.md`, returns `NO_TODO_WORK` if absent/completed, selects the first actionable `- [ ]` task while skipping only explicitly prerequisite-blocked tasks, performs only that bounded task, runs task-relevant checks, marks the selected checkbox only after success, and leaves the isolated worktree uncommitted.
+4. Reconcile after server synchronization; verify the saved terminal result. The first live run found a real TODO file and correctly reported that the former first task was blocked, which requires the actionable-selection refinement.
 
 ## Project Structure
 

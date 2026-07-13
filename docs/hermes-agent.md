@@ -161,9 +161,11 @@ A partial failure reports removed and created IDs and retains the protected
 backup so the same command can be rerun.
 
 The base catalog keeps one bounded Lenzora TODO worker active. It reads only
-repository-root `TODO.md`, advances at most one `- [ ]` task per run in a clean
-isolated Lenzora worktree, and reports `NO_TODO_WORK` when the file is absent or
-complete. The quota requeue, Kanban dispatcher, and Sandbox Terra worker remain
+repository-root `TODO.md`, advances at most one actionable `- [ ]` task per run
+in a clean isolated Lenzora worktree, and reports `NO_TODO_WORK` when the file
+is absent or complete. It can bypass an item only when the item explicitly says
+that an unmet prerequisite blocks it; if every item is blocked, it reports
+`REVIEW_REQUIRED` without a mutation. The quota requeue, Kanban dispatcher, and Sandbox Terra worker remain
 disabled reviewed definitions: enable each only when its respective source of
 work exists, then reconcile so its managed worktree is current. Spark remains
 orchestration only; Luna remains read-only.

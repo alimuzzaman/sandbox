@@ -20,9 +20,10 @@ As the Lenzora owner, I want Hermes to work through the unchecked tasks in the r
 
 **Acceptance Scenarios**:
 
-1. **Given** a root `TODO.md` with unchecked Markdown tasks, **When** the scheduled worker runs, **Then** it works on at most the first unchecked task and leaves all other tasks for later runs.
-2. **Given** the selected task's required checks pass, **When** the worker completes it, **Then** it marks only that task complete in its isolated worktree and leaves the change uncommitted for review.
-3. **Given** the worktree is dirty, **When** the worker runs, **Then** it reports `REVIEW_REQUIRED` and changes nothing.
+1. **Given** a root `TODO.md` with unchecked Markdown tasks, **When** the scheduled worker runs, **Then** it works on at most the first actionable task and leaves all other tasks for later runs.
+2. **Given** an earlier unchecked task explicitly blocked by a prerequisite, **When** a later unchecked task is actionable, **Then** the worker skips only the blocked item and works on the later actionable task.
+3. **Given** the selected task's required checks pass, **When** the worker completes it, **Then** it marks only that task complete in its isolated worktree and leaves the change uncommitted for review.
+4. **Given** the worktree is dirty, **When** the worker runs, **Then** it reports `REVIEW_REQUIRED` and changes nothing.
 
 ---
 
@@ -39,7 +40,8 @@ As the Lenzora owner, I want absent or empty TODO files to be a safe no-work out
 
 ## Edge Cases
 
-- A malformed checkbox, ambiguous task, unavailable dependency, or failed validation leaves the task unchecked and reports an actionable failure.
+- A malformed checkbox, unavailable dependency, or failed validation leaves the task unchecked and reports an actionable failure.
+- If every unchecked item is explicitly blocked, the worker reports the first blocking prerequisite and changes nothing.
 - A task that requires credentials, production deployment, deletion, external communication, payments, or an architectural decision is not executed autonomously and is reported for review.
 - Concurrent runs do not share a worktree or process more than one task per execution.
 
@@ -48,7 +50,7 @@ As the Lenzora owner, I want absent or empty TODO files to be a safe no-work out
 ### Functional Requirements
 
 - **FR-001**: The Lenzora scheduled worker MUST treat repository-root `TODO.md` as its sole automatic work source.
-- **FR-002**: The worker MUST recognize unchecked Markdown checklist items and select at most the first eligible item per run.
+- **FR-002**: The worker MUST recognize unchecked Markdown checklist items and select at most the first actionable item per run, skipping only items that explicitly state an unmet prerequisite.
 - **FR-003**: The worker MUST use a dedicated isolated Lenzora worktree and require that worktree to be clean before changing files.
 - **FR-004**: The worker MUST run task-relevant checks before marking its selected checklist item complete.
 - **FR-005**: The worker MUST not commit, push, deploy, remove worktrees, edit credentials, or perform external mutations.
@@ -58,7 +60,7 @@ As the Lenzora owner, I want absent or empty TODO files to be a safe no-work out
 
 ### Key Entities
 
-- **TODO task**: One unchecked Markdown checklist item in Lenzora's root `TODO.md`.
+- **TODO task**: One unchecked Markdown checklist item in Lenzora's root `TODO.md`, classified as actionable or explicitly prerequisite-blocked.
 - **Lenzora TODO worker**: A scheduled, bounded Terra run that can advance one TODO task in an isolated worktree.
 
 ## Success Criteria *(mandatory)*

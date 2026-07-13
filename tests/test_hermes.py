@@ -103,6 +103,21 @@ class TestValidation(unittest.TestCase):
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_cron_output_reads_only_latest_bounded_valid_job_output(self, require_remote, checked):
+        checked.return_value = _completed(stdout=json.dumps({
+            "found": True, "file": "2026-07-13.md", "output": "completed one task", "truncated": False,
+        }))
+        out = hermes.cron_output("test", "deadbeef1234", 50)
+        self.assertEqual(out["status"], "available")
+        self.assertEqual(out["data"]["output"], "completed one task")
+        command = checked.call_args.args[1]
+        self.assertIn("deadbeef1234", command)
+        self.assertTrue(command.endswith(" 50"))
+        with self.assertRaises(hermes.HermesError):
+            hermes.cron_output("test", "../escape", 50)
+
     @patch("sandbox.core._hermes._set_cron_route", return_value={})
     @patch("sandbox.core._hermes._cron_snapshot")
     @patch("sandbox.core._hermes._ssh", return_value=_completed())

@@ -1014,6 +1014,46 @@ def cron_list(remote_name: str) -> dict:
     return result(True, "cron_list", remote_name, status="ok", data=snapshot)
 
 
+def cron_output(remote_name: str, job_id: str, lines: int = 200) -> dict:
+    """Return the bounded latest saved output for one validated cron job."""
+    valid_id = _valid_cron_job_id(job_id)
+    if not isinstance(lines, int) or not 1 <= lines <= 2000:
+        raise HermesError("cron output lines must be between 1 and 2000", "invalid_lines")
+    entry = _require_remote(remote_name)
+    program = r'''
+import json, sys
+from pathlib import Path
+job_id, line_limit = sys.argv[1], int(sys.argv[2])
+root = Path.home() / ".hermes" / "cron" / "output" / job_id
+files = sorted(root.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True) if root.is_dir() else []
+if not files:
+    print(json.dumps({"found": False, "file": None, "output": "", "truncated": False}))
+    raise SystemExit(0)
+path = files[0]
+with path.open("rb") as stream:
+    stream.seek(max(0, path.stat().st_size - 131072))
+    raw = stream.read().decode(errors="replace")
+selected = raw.splitlines()[-line_limit:]
+text = "\n".join(selected)
+print(json.dumps({"found": True, "file": path.name, "output": text,
+                  "truncated": path.stat().st_size > 131072 or len(raw.splitlines()) > line_limit}))
+'''
+    res = _checked(
+        entry,
+        f"python3 -c {shlex.quote(program)} {shlex.quote(valid_id)} {lines}",
+        timeout=20,
+        what="Hermes cron output read failed",
+    )
+    try:
+        data = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("Hermes cron output was invalid", "invalid_cron_output") from exc
+    data["output"] = _redact(str(data.get("output") or ""), entry)
+    return result(True, "cron_output", remote_name,
+                  status="available" if data.get("found") else "never_run",
+                  job_id=valid_id, data=data)
+
+
 def cron_validate(remote_name: str) -> dict:
     entry = _require_remote(remote_name)
     snapshot = _cron_snapshot(entry)

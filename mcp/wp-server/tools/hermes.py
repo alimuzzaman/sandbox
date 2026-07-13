@@ -137,6 +137,15 @@ def hermes_cron_run(remote: str, job_id: str, confirm: bool = False) -> dict:
 
 
 @mcp.tool()
+def hermes_cron_output(remote: str, job_id: str, lines: int = 200) -> dict:
+    """Read the bounded latest saved output for one validated cron job."""
+    return _run_sb([
+        "hermes", "cron", "output", job_id, "--remote", remote,
+        "--lines", str(lines),
+    ], 30)
+
+
+@mcp.tool()
 def hermes_health(remote: str) -> dict:
     """Read aggregated gateway, scheduler, cron, and worktree health."""
     return _run_sb(["hermes", "health", "--remote", remote], 90)

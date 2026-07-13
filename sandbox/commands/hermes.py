@@ -157,6 +157,11 @@ def cmd_hermes(cfg, args) -> None:
         elif action == "cron":
             if args.subaction == "list":
                 payload = hermes.cron_list(args.remote)
+            elif args.subaction == "output":
+                job_id = args.target or args.job_id
+                if not job_id:
+                    raise hermes.HermesError("cron output requires a job id", "missing_cron_job_id")
+                payload = hermes.cron_output(args.remote, job_id, args.lines)
             elif args.subaction == "validate":
                 payload = hermes.cron_validate(args.remote)
             elif args.subaction == "create":
@@ -190,7 +195,7 @@ def cmd_hermes(cfg, args) -> None:
                 payload = hermes.cron_verify(args.remote, job_id, args.timeout, args.confirm)
             else:
                 raise hermes.HermesError(
-                    "cron action must be list, validate, create, route, run, catalog, reconcile, or verify",
+                    "cron action must be list, output, validate, create, route, run, catalog, reconcile, or verify",
                     "invalid_cron_action",
                 )
         elif action == "repo":

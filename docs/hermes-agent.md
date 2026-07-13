@@ -169,6 +169,12 @@ that an unmet prerequisite blocks it; if every item is blocked, it reports
 disabled reviewed definitions: enable each only when its respective source of
 work exists, then reconcile so its managed worktree is current. Spark remains
 orchestration only; Luna remains read-only.
+
+For the Lenzora TODO worker only, reconciliation makes Sandbox's committed
+Spec-Kit templates, scripts, and Codex skill workflows available in the isolated
+worktree when Lenzora's legacy `.Codex` command bundle is absent. These local
+tooling files are excluded from Git status and never alter Lenzora's tracked
+source merely to bootstrap the workflow.
 Monitor scripts return zero only after a valid inspection or legitimate no-work
 result. Missing files, malformed output, timeouts, and command failures return
 nonzero, and scripts never add/remove their own cron job.

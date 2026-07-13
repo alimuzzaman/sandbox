@@ -225,6 +225,19 @@ class TestSchedulerReliability(unittest.TestCase):
             hermes._prepare_catalog_workdir({}, {"repo_root": "/home/u/repos"}, desired)
         self.assertEqual(caught.exception.code, "cron_workdir_not_clean")
 
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    def test_lenzora_todo_bootstrap_uses_committed_skills_and_ignores_them(self, checked):
+        hermes._bootstrap_lenzora_speckit({}, {
+            "sandbox_home": "/home/u/sandbox", "worktrees": "/home/u/worktrees",
+        }, {"name": "lenzora-todo-task", "workdir": "/home/u/worktrees/lenzora-todo-task"})
+        command = checked.call_args.args[1]
+        self.assertIn("runtime=/home/u/sandbox/sb-src", command)
+        self.assertIn('"$runtime/skills/$skill/SKILL.md"', command)
+        self.assertIn('"$runtime/.specify/templates"', command)
+        self.assertIn("rev-parse --git-path info/exclude", command)
+        self.assertIn("/.agents/", command)
+        self.assertIn("/.specify/", command)
+
     @patch("sandbox.core._hermes._checked")
     def test_cron_snapshot_returns_only_safe_catalog_hashes(self, checked):
         raw_prompt = "Private task intent"

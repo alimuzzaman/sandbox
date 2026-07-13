@@ -23,7 +23,7 @@
 **Independent Test**: A live verified run either advances one actionable task or reports the explicitly blocking prerequisite with no mutation.
 
 - [X] T005 [US2] Document enabled-job policy, root TODO format, activation boundaries, and recovery in `docs/hermes-agent.md`.
-- [ ] T006 [US2] Run focused tests, full self-test, synchronized live reconciliation, verified no-work execution, and record sanitized evidence in `specs/026-lenzora-todo-worker/`.
+- [ ] T006 [US2] Bootstrap the canonical local Spec-Kit workflow only in the isolated Lenzora worktree; run focused tests, full self-test, synchronized live reconciliation, verified execution, and record sanitized evidence in `specs/026-lenzora-todo-worker/`.
 
 ## Dependencies and Execution Order
 

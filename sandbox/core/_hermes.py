@@ -65,6 +65,10 @@ _MANAGED_CATALOG_WORKTREES = {
     "sandbox-approved-spec-task": ("sandbox", "hermes/sandbox-approved-spec-task"),
     "lenzora-todo-task": ("lenzora", "hermes/lenzora-todo-task"),
 }
+_LENZORA_SPECKIT_SKILLS = (
+    "speckit-specify", "speckit-clarify", "speckit-plan", "speckit-tasks", "speckit-analyze",
+    "speckit-implement",
+)
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
@@ -1296,6 +1300,30 @@ def _prepare_catalog_workdir(entry: dict, paths: dict, desired: dict) -> str | N
     return workdir
 
 
+def _bootstrap_lenzora_speckit(entry: dict, paths: dict, desired: dict) -> None:
+    """Make the committed Sandbox Spec-Kit workflow available only in the TODO worktree."""
+    if desired.get("name") != "lenzora-todo-task":
+        return
+    workdir = desired.get("workdir")
+    if not isinstance(workdir, str) or not workdir.startswith(paths["worktrees"] + "/"):
+        raise HermesError("invalid Lenzora TODO worktree", "cron_workdir_prepare_failed")
+    runtime = f"{paths['sandbox_home']}/sb-src"
+    skills = " ".join(shlex.quote(name) for name in _LENZORA_SPECKIT_SKILLS)
+    command = (
+        f"set -eu; runtime={shlex.quote(runtime)}; worktree={shlex.quote(workdir)}; "
+        "test -d \"$worktree\"; test -d \"$runtime/.specify/templates\"; "
+        "test -d \"$runtime/.specify/scripts/bash\"; "
+        "mkdir -p \"$worktree/.agents/skills\" \"$worktree/.specify\"; "
+        f"for skill in {skills}; do test -f \"$runtime/skills/$skill/SKILL.md\"; "
+        "if test ! -e \"$worktree/.agents/skills/$skill\"; then cp -a \"$runtime/skills/$skill\" \"$worktree/.agents/skills/$skill\"; fi; done; "
+        "for part in templates scripts; do if test ! -e \"$worktree/.specify/$part\"; "
+        "then cp -a \"$runtime/.specify/$part\" \"$worktree/.specify/$part\"; fi; done; "
+        "exclude=$(git -C \"$worktree\" rev-parse --git-path info/exclude); mkdir -p \"$(dirname \"$exclude\")\"; touch \"$exclude\"; "
+        "for pattern in /.agents/ /.specify/; do grep -Fqx \"$pattern\" \"$exclude\" || printf '%s\\n' \"$pattern\" >> \"$exclude\"; done"
+    )
+    _checked(entry, command, timeout=60, what="Lenzora Spec-Kit bootstrap failed")
+
+
 def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool = False) -> dict:
     """Preview or apply the committed cron catalog as one controlled replacement."""
     entry = _require_remote(remote_name)
@@ -1319,6 +1347,7 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
         prepared = _prepare_catalog_workdir(entry, paths, item)
         if prepared:
             prepared_workdirs.append(prepared)
+            _bootstrap_lenzora_speckit(entry, paths, item)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = f"$HOME/.hermes/cron/backups/jobs-{stamp}.json"

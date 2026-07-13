@@ -34,6 +34,7 @@ Replace idle Lenzora Kanban dispatch with one bounded Terra/Medium worker that r
 3. Its guarded prompt checks root `TODO.md`, returns `NO_TODO_WORK` if absent/completed, selects the first actionable `- [ ]` task while skipping only explicitly prerequisite-blocked tasks, performs only that bounded task, runs task-relevant checks, marks the selected checkbox only after success, and leaves the isolated worktree uncommitted.
 4. Reconcile after server synchronization; verify the saved terminal result. The first live run found a real TODO file and correctly reported that the former first task was blocked, which requires the actionable-selection refinement.
 5. The subsequent actionable-selection run returned `[SILENT]` and made no change. The prompt now requires an explicit, non-empty completion/no-work/review result so a nominal success cannot obscure an idle or blocked run.
+6. The first explicit result exposed a stale Lenzora assumption: it requires slash-command files that are absent. The official Codex integration is skills-based, so reconciliation now provisions the committed Sandbox Spec-Kit skills/templates into the isolated worktree only and excludes them from Git status.
 
 ## Project Structure
 

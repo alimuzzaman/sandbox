@@ -1,6 +1,9 @@
 import unittest
 
 from sandbox.recovery.catalog import RecoveryCatalog
+from sandbox.recovery.capture import CaptureCoordinator
+from sandbox.recovery.crypto import FixtureCrypto
+from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError, result
 from sandbox.recovery.service import RecoveryService
 
@@ -18,3 +21,22 @@ class TestRecoveryService(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["action"], "plan")
         self.assertEqual(payload["error"]["code"], "unknown_profile")
+
+    def test_create_requires_confirmation_and_list_classifies_pending_objects(self):
+        drive = MemoryDrive()
+        service = RecoveryService(RecoveryCatalog(1, ()), drive=drive)
+        blocked = service.create("set", {}, (), confirm=False)
+        self.assertEqual(blocked["error"]["code"], "confirmation_required")
+        drive.put("sets/pending/archive.bin", b"cipher")
+        listed = service.list()
+        self.assertTrue(listed["ok"])
+        self.assertEqual(listed["data"]["pending"][0]["Path"], "sets/pending/archive.bin")
+
+    def test_verify_checks_manifest_and_ciphertext(self):
+        drive = MemoryDrive()
+        CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"artifact.txt": b"payload"})
+        payload = RecoveryService(RecoveryCatalog(1, ()), drive=drive).verify("set-1")
+        self.assertTrue(payload["ok"])
+        drive.objects["sets/set-1/archive.bin"] = b"tampered"
+        rejected = RecoveryService(RecoveryCatalog(1, ()), drive=drive).verify("set-1")
+        self.assertEqual(rejected["error"]["code"], "ciphertext_verification_failed")

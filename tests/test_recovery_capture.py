@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sandbox.recovery.capture import CaptureCoordinator
+from sandbox.recovery.capture import CaptureCoordinator, StagingCaptureCoordinator
 from sandbox.recovery.crypto import FixtureCrypto
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
@@ -32,3 +32,36 @@ class TestRecoveryCapture(unittest.TestCase):
         with self.assertRaises(RecoveryError):
             coordinator.publish("set-1", {"artifact.txt": b"payload"})
         self.assertNotIn("sets/set-1/manifest.json", drive.objects)
+
+    def test_existing_complete_set_is_never_overwritten_by_retry(self):
+        drive = MemoryDrive(); coordinator = CaptureCoordinator(FixtureCrypto(), drive)
+        coordinator.publish("set-1", {"artifact.txt": b"payload"})
+        with self.assertRaises(RecoveryError):
+            coordinator.publish("set-1", {"artifact.txt": b"changed"})
+        self.assertTrue(coordinator.verify("set-1"))
+
+    def test_file_capture_publishes_manifest_last_and_cleans_owner_staging(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(b"cipher:" + Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "database.dump"; source.write_bytes(b"database")
+            drive = MemoryDrive()
+            receipt = StagingCaptureCoordinator(FileCrypto(), drive, staging_root=root, clock=lambda: "2026-07-14T00:00:00Z").publish_files(
+                "fixture-set", {"database.dump": source}, profiles=("fixture",), provenance={"catalog": "test"},
+            )
+            self.assertEqual(receipt["profiles"], ["fixture"])
+            self.assertIn("sets/fixture-set/manifest.json", drive.objects)
+            self.assertEqual(list(root.glob("set-*")), [])
+
+    def test_file_capture_failure_leaves_no_complete_manifest_or_staging(self):
+        class BrokenCrypto:
+            def encrypt_file(self, source, target): raise RecoveryError("injected", "injected_failure")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            drive = MemoryDrive()
+            with self.assertRaises(RecoveryError):
+                StagingCaptureCoordinator(BrokenCrypto(), drive, staging_root=root).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+            self.assertNotIn("sets/fixture-set/manifest.json", drive.objects)
+            self.assertEqual(list(root.glob("set-*")), [])

@@ -45,4 +45,21 @@ Interface inventory: CLI 68 commands (one new feature-owned command); MCP 53 too
 
 ## Residual gates
 
-Capture, encryption, Drive publication, restore apply, scheduling, and retention deletion are not implemented at this checkpoint. No archive or manifest was created.
+## Fixture capture checkpoint
+
+The new recovery module now has fixture-only proof for the capture pipeline:
+
+- native PostgreSQL/MariaDB command construction rejects non-transactional logical dumps and never accepts credentials as arguments;
+- archive inputs and archive members are root-bounded and traversal/link-escape checked;
+- Git records remote/revision and classifies sensitive dirty state separately from eligible unpublished state;
+- GnuPG receives a fixture passphrase through an inherited descriptor (not argv), encrypts/decrypts a fixture payload, and verifies its SHA-256;
+- ciphertext is published first, downloaded and hash-checked, and only then receives the complete manifest; injected encryption/verification failures leave no complete manifest and remove owner-only staging.
+
+Evidence command (local, fixture-only; no remote rclone or production profile invoked):
+
+```text
+python3 -m unittest discover -s tests -p 'test_recovery*.py'
+Ran 44 tests — OK
+```
+
+No production archive, Drive object, schedule, deletion, or restore has been created/applied. Remote profile materialization, disposable restore application, scheduler/retention, and fresh-server proof remain gated by their later tasks.

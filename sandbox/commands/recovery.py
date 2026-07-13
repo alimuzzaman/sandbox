@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from sandbox.recovery.context import recovery_service
@@ -42,6 +43,24 @@ def cmd_recovery(_cfg, args) -> None:
         payload = service.profiles(args.remote)
     elif args.action == "plan":
         payload = service.plan(tuple(args.profile), args.remote)
+    elif args.action == "list":
+        payload = service.list(args.remote)
+    elif args.action == "verify":
+        from sandbox.recovery.errors import RecoveryError, result
+        payload = service.verify(args.backup_id, args.remote) if args.backup_id else result(
+            False, "verify", remote=args.remote,
+            error=RecoveryError("--backup-id is required", "missing_backup_id"))
+    elif args.action == "create":
+        from sandbox.recovery.errors import RecoveryError, result
+        if not args.confirm:
+            payload = result(False, "create", remote=args.remote,
+                             error=RecoveryError("recovery create requires --confirm", "confirmation_required"))
+        elif not os.environ.get("RECOVERY_PASSPHRASE"):
+            payload = result(False, "create", remote=args.remote,
+                             error=RecoveryError("RECOVERY_PASSPHRASE is not available", "missing_passphrase"))
+        else:
+            payload = result(False, "create", remote=args.remote, error=RecoveryError(
+                "profile capture requires a configured remote adapter", "recovery_not_configured"))
     else:
         from sandbox.recovery.errors import RecoveryError, result
         payload = result(False, args.action, remote=args.remote, error=RecoveryError(

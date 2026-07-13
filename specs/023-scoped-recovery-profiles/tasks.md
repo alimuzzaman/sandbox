@@ -73,25 +73,25 @@
 
 ### Tests for User Story 2
 
-- [ ] T023 [P] [US2] Add failing PostgreSQL/MariaDB consistency, empty dump, DDL/non-transactional warning, credential-channel, and validation tests in `tests/test_recovery_database.py`
-- [ ] T024 [P] [US2] Add failing full/partial tar membership, traversal, links, ownership, ACL/xattr fallback, and source-change tests in `tests/test_recovery_filesystem.py`
-- [ ] T025 [P] [US2] Add failing Git remote/revision, unpublished bundle/patch, ignored-secret, dirty-file classification, and bundle verification tests in `tests/test_recovery_git.py`
-- [ ] T026 [P] [US2] Add failing passphrase argv/output/process-list, encryption/decrypt/hash, plaintext cleanup, and interruption tests in `tests/test_recovery_crypto.py`
-- [ ] T027 [P] [US2] Add failing Drive upload/check/manifest-last/idempotency/pending retry/list classification tests in `tests/test_recovery_drive.py`
-- [ ] T028 [P] [US2] Add end-to-end capture failure matrix and prior-set preservation tests in `tests/test_recovery_capture.py`
+- [X] T023 [P] [US2] Add failing PostgreSQL/MariaDB consistency, empty dump, DDL/non-transactional warning, credential-channel, and validation tests in `tests/test_recovery_database.py`
+- [X] T024 [P] [US2] Add failing full/partial tar membership, traversal, links, ownership, ACL/xattr fallback, and source-change tests in `tests/test_recovery_filesystem.py`
+- [X] T025 [P] [US2] Add failing Git remote/revision, unpublished bundle/patch, ignored-secret, dirty-file classification, and bundle verification tests in `tests/test_recovery_git.py`
+- [X] T026 [P] [US2] Add failing passphrase argv/output/process-list, encryption/decrypt/hash, plaintext cleanup, and interruption tests in `tests/test_recovery_crypto.py`
+- [X] T027 [P] [US2] Add failing Drive upload/check/manifest-last/idempotency/pending retry/list classification tests in `tests/test_recovery_drive.py`
+- [X] T028 [P] [US2] Add end-to-end capture failure matrix and prior-set preservation tests in `tests/test_recovery_capture.py`
 
 ### Implementation for User Story 2
 
-- [ ] T029 [US2] Implement database capture adapter through bounded process services in `sandbox/recovery/database.py`
-- [ ] T030 [P] [US2] Implement allowlisted full/partial filesystem adapter in `sandbox/recovery/filesystem.py`
-- [ ] T031 [P] [US2] Implement Git provenance and critical unpublished-state adapter in `sandbox/recovery/git.py`
-- [ ] T032 [US2] Implement owner-only staging and artifact coordinator in `sandbox/recovery/capture.py`
-- [ ] T033 [US2] Implement GnuPG descriptor-based encrypt/decrypt verification in `sandbox/recovery/crypto.py`
-- [ ] T034 [US2] Implement immutable Drive object upload, remote verification, manifest-last publication, list, and pending retry in `sandbox/recovery/drive.py`
-- [ ] T035 [US2] Implement recovery-set create/list/verify orchestration in `sandbox/recovery/service.py`
-- [ ] T036 [US2] Add protected CLI create/list/verify operations in `sandbox/commands/recovery.py`
-- [ ] T037 [US2] Add MCP create/list/verify tools without passphrase arguments in `mcp/wp-server/tools/recovery.py`
-- [ ] T038 [US2] Run fixture capture/decrypt verification and record secret/redaction/failure evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T029 [US2] Implement database capture adapter through bounded process services in `sandbox/recovery/database.py`
+- [X] T030 [P] [US2] Implement allowlisted full/partial filesystem adapter in `sandbox/recovery/filesystem.py`
+- [X] T031 [P] [US2] Implement Git provenance and critical unpublished-state adapter in `sandbox/recovery/git.py`
+- [X] T032 [US2] Implement owner-only staging and artifact coordinator in `sandbox/recovery/capture.py`
+- [X] T033 [US2] Implement GnuPG descriptor-based encrypt/decrypt verification in `sandbox/recovery/crypto.py`
+- [X] T034 [US2] Implement immutable Drive object upload, remote verification, manifest-last publication, list, and pending retry in `sandbox/recovery/drive.py`
+- [X] T035 [US2] Implement recovery-set create/list/verify orchestration in `sandbox/recovery/service.py`
+- [X] T036 [US2] Add protected CLI create/list/verify operations in `sandbox/commands/recovery.py`
+- [X] T037 [US2] Add MCP create/list/verify tools without passphrase arguments in `mcp/wp-server/tools/recovery.py`
+- [X] T038 [US2] Run fixture capture/decrypt verification and record secret/redaction/failure evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 
 **Checkpoint**: A new encrypted fixture recovery set is verifiably restorable; no live production capture yet.
 

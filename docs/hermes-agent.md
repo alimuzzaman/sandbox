@@ -137,6 +137,10 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes gateway converge --remote scaleway-sandbox --confirm --json
 ./sb hermes cron reconcile --remote scaleway-sandbox --force-replace --confirm --json
 ./sb hermes cron verify JOB_ID --remote scaleway-sandbox --timeout 1200 --confirm --json
+./sb hermes cron output JOB_ID --remote scaleway-sandbox --lines 200 --json
+./sb hermes worktree inspect --remote scaleway-sandbox --name sandbox-approved-spec-task --json
+./sb hermes worktree preserve --remote scaleway-sandbox --name sandbox-approved-spec-task --json
+./sb hermes worktree preserve --remote scaleway-sandbox --name sandbox-approved-spec-task --confirm --json
 ```
 
 The scheduler interface accepts only the named Sandbox routes `luna`, `terra`,
@@ -172,6 +176,12 @@ bounded correlated request dumps, and dirty worktrees. A provider rejection wins
 over an upstream `last_status=ok` marker and is reported as `false_success`.
 `cron verify` likewise waits for a changed terminal run marker and rejects a
 nominal success when correlated request evidence records an error.
+`cron output` reads only the latest saved Markdown artifact for a validated job
+ID, bounds the response, and applies configured redaction. `worktree inspect`
+returns a bounded diff only after a secret-like-content screen. `worktree
+preserve` previews by default; confirmed preservation rejects untracked files,
+requires the expected `hermes/<name>` branch and a clean `git diff --check`,
+commits tracked reviewed changes, and pushes that explicit branch.
 
 Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
 instead use the upstream OpenAI Codex OAuth provider on the remote:
@@ -235,6 +245,10 @@ idempotent after convergence.
 profile on every fresh remote. It does not authenticate a provider, check model
 entitlement, install/start the gateway, or contact a messaging platform. Complete
 provider authentication first, then inspect the profile roster with `hermes profile list`.
+Sandbox-owned settings are merged atomically into the coordinator and every
+worker profile; setup does not call the lock-prone upstream `mcp add/remove`
+path. Remaining upstream CLI steps have named 45-second bounds so setup reports
+the exact failed step instead of hanging silently.
 
 | Role | Profile/model | Responsibility |
 |---|---|---|

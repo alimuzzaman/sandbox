@@ -10,6 +10,9 @@
 ./sb hermes cron catalog --remote NAME --json
 ./sb hermes cron reconcile --remote NAME [--confirm] [--force-replace] --json
 ./sb hermes cron verify JOB_ID --remote NAME [--timeout SECONDS] --confirm --json
+./sb hermes cron output JOB_ID --remote NAME [--lines N] --json
+./sb hermes worktree inspect --remote NAME --name MANAGED_NAME --json
+./sb hermes worktree preserve --remote NAME --name MANAGED_NAME [--confirm] --json
 ```
 
 - Read-only commands never require confirmation.
@@ -29,6 +32,9 @@ hermes_gateway_converge(remote, confirm=false)
 hermes_cron_catalog(remote)
 hermes_cron_reconcile(remote, confirm=false, force_replace=false)
 hermes_cron_verify(remote, job_id, timeout=600, confirm=false)
+hermes_cron_output(remote, job_id, lines=200)
+hermes_worktree_inspect(remote, name)
+hermes_worktree_preserve(remote, name, confirm=false)
 ```
 
 MCP wrappers call the same CLI/service path; they do not implement remote behavior independently.
@@ -38,4 +44,7 @@ MCP wrappers call the same CLI/service path; they do not implement remote behavi
 - No stored prompt, environment value, request body, authorization material, or raw unbounded log is returned.
 - Errors are classified and redacted before crossing the remote boundary.
 - Worktree paths must remain inside registered managed roots.
+- Cron output reads only a validated job ID's newest bounded artifact.
+- Worktree inspection withholds secret-like diffs; preservation rejects
+  untracked files, failed diff checks, and unexpected branches.
 - Destructive operations fail closed when dirty worktrees are unpreserved unless the operation cannot affect them (cron replacement itself records them but does not delete worktrees).

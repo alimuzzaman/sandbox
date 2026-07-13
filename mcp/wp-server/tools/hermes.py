@@ -158,6 +158,21 @@ def hermes_worktree_list(remote: str) -> dict:
 
 
 @mcp.tool()
+def hermes_worktree_inspect(remote: str, name: str) -> dict:
+    """Inspect a bounded, secret-screened managed worktree diff."""
+    return _run_sb(["hermes", "worktree", "inspect", "--remote", remote, "--name", name], 60)
+
+
+@mcp.tool()
+def hermes_worktree_preserve(remote: str, name: str, confirm: bool = False) -> dict:
+    """Commit tracked reviewed changes and push the explicit managed branch."""
+    args = ["hermes", "worktree", "preserve", "--remote", remote, "--name", name]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 240)
+
+
+@mcp.tool()
 def hermes_repo_sync(remote: str, repo: str, confirm: bool = False) -> dict:
     """Fast-forward a clean managed repo and refresh runtime for the Sandbox repo."""
     args = ["hermes", "repo", "sync", "--remote", remote, "--repo", repo]

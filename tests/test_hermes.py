@@ -103,6 +103,41 @@ class TestValidation(unittest.TestCase):
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={"worktrees": "/home/u/worktrees"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_worktree_inspect_returns_bounded_review_evidence(self, require_remote, paths, checked):
+        checked.return_value = _completed(stdout=json.dumps({
+            "path": "/home/u/worktrees/demo", "branch": "hermes/demo",
+            "status": [" M docs/file.md"], "diff_check_ok": True,
+            "stat": "docs/file.md | 1 +", "diff": "+safe", "secret_like": False,
+            "truncated": False,
+        }))
+        out = hermes.worktree_inspect("test", "demo")
+        self.assertEqual(out["status"], "reviewable")
+        self.assertEqual(out["data"]["diff"], "+safe")
+        with self.assertRaises(hermes.HermesError):
+            hermes.worktree_inspect("test", "../escape")
+
+    @patch("sandbox.core._hermes._checked", return_value=_completed(stdout="a" * 40 + "\n"))
+    @patch("sandbox.core._hermes._paths", return_value={"worktrees": "/home/u/worktrees"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes.worktree_inspect")
+    def test_worktree_preserve_requires_preview_then_pushes_expected_branch(
+            self, inspect, require_remote, paths, checked):
+        inspect.return_value = {"data": {
+            "path": "/home/u/worktrees/demo", "branch": "hermes/demo",
+            "status": [" M docs/file.md"], "diff_check_ok": True,
+            "secret_like": False,
+        }}
+        preview = hermes.worktree_preserve("test", "demo", False)
+        self.assertEqual(preview["status"], "planned")
+        checked.assert_not_called()
+        applied = hermes.worktree_preserve("test", "demo", True)
+        self.assertEqual(applied["status"], "pushed")
+        self.assertEqual(applied["commit"], "a" * 40)
+        self.assertIn("HEAD:hermes/demo", checked.call_args.args[1])
+
     @patch("sandbox.core._hermes._ssh")
     def test_managed_cron_worktree_fast_forwards_only_when_clean(self, ssh):
         ssh.side_effect = [_completed(), _completed()]

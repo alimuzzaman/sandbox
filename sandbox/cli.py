@@ -422,7 +422,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
+        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")

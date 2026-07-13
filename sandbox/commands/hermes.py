@@ -208,9 +208,18 @@ def cmd_hermes(cfg, args) -> None:
             else:
                 payload = hermes.gateway(args.remote, args.subaction, args.allowlist, args.lines)
         elif action == "worktree":
-            if args.subaction != "list":
-                raise hermes.HermesError("worktree action must be list", "invalid_worktree_action")
-            payload = hermes.worktree_list(args.remote)
+            if args.subaction == "list":
+                payload = hermes.worktree_list(args.remote)
+            elif args.subaction == "inspect":
+                if not args.name:
+                    raise hermes.HermesError("worktree inspect requires --name", "missing_worktree_name")
+                payload = hermes.worktree_inspect(args.remote, args.name)
+            elif args.subaction == "preserve":
+                if not args.name:
+                    raise hermes.HermesError("worktree preserve requires --name", "missing_worktree_name")
+                payload = hermes.worktree_preserve(args.remote, args.name, args.confirm)
+            else:
+                raise hermes.HermesError("worktree action must be list, inspect, or preserve", "invalid_worktree_action")
         elif action == "update":
             if args.subaction == "plan":
                 payload = hermes.update_plan(args.remote, args.version or hermes.SUPPORTED_TAG, args.commit)

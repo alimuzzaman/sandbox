@@ -30,7 +30,8 @@ print("HERMES", int({
     'hermes_status', 'hermes_run', 'hermes_job_status', 'hermes_job_kill',
     'hermes_cron_list', 'hermes_cron_validate', 'hermes_cron_create',
     'hermes_cron_route', 'hermes_cron_run', 'hermes_cron_output', 'hermes_health',
-    'hermes_worktree_list', 'hermes_gateway_converge',
+    'hermes_worktree_list', 'hermes_worktree_inspect', 'hermes_worktree_preserve',
+    'hermes_gateway_converge',
     'hermes_cron_catalog', 'hermes_cron_reconcile', 'hermes_cron_verify',
     'hermes_repo_sync',
 } <= names))
@@ -56,6 +57,8 @@ hermes.hermes_gateway_converge("remote", confirm=True)
 hermes.hermes_cron_catalog("remote")
 hermes.hermes_cron_reconcile("remote", confirm=True, force_replace=True)
 hermes.hermes_cron_verify("remote", "3359664aaf91", timeout=60, confirm=True)
+hermes.hermes_worktree_inspect("remote", "sandbox-approved-spec-task")
+hermes.hermes_worktree_preserve("remote", "sandbox-approved-spec-task", confirm=True)
 print("HERMES_CALLS", json.dumps(calls))
 hermes._run_sb = original_run_sb
 def timed_out(*_args, **_kwargs):
@@ -128,6 +131,9 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertEqual(calls[15][0][1:3], ["cron", "catalog"])
         self.assertIn("--force-replace", calls[16][0])
         self.assertEqual(calls[17][0][1:3], ["cron", "verify"])
+        self.assertEqual(calls[18][0][1:3], ["worktree", "inspect"])
+        self.assertEqual(calls[19][0][1:3], ["worktree", "preserve"])
+        self.assertIn("--confirm", calls[19][0])
         timeout_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_TIMEOUT "))
         self.assertIn("timed out", timeout_line.lower())
         instance_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_INSTANCE "))

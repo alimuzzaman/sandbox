@@ -1603,6 +1603,86 @@ def worktree_list(remote_name: str) -> dict:
                   data={"worktrees": items, "dirty_count": sum(bool(item.get("dirty")) for item in items)})
 
 
+def _managed_worktree_path(paths: dict, name: str) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name or ""):
+        raise HermesError("managed worktree name is invalid", "invalid_worktree_name")
+    return str(PurePosixPath(paths["worktrees"]) / name)
+
+
+def worktree_inspect(remote_name: str, name: str) -> dict:
+    """Return bounded, secret-screened evidence for one managed worktree."""
+    entry = _require_remote(remote_name)
+    path = _managed_worktree_path(_paths(entry), name)
+    program = r'''
+import json, re, subprocess, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+def run(*args):
+    return subprocess.run(["git", "-C", str(path), *args], text=True, capture_output=True)
+if not path.is_dir() or run("rev-parse", "--is-inside-work-tree").returncode:
+    raise SystemExit(4)
+status = run("status", "--porcelain=v1")
+branch = run("symbolic-ref", "--short", "HEAD")
+check = run("diff", "--check")
+stat = run("diff", "--stat", "HEAD")
+diff = run("diff", "--no-ext-diff", "--unified=3", "HEAD", "--")
+text = diff.stdout
+secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|authorization:\\s*bearer)", text))
+bounded = text[:65536]
+print(json.dumps({"path": str(path), "branch": branch.stdout.strip() or None,
+                  "status": status.stdout.splitlines()[:100], "diff_check_ok": check.returncode == 0,
+                  "stat": stat.stdout[:12000], "diff": "" if secret_like else bounded,
+                  "secret_like": secret_like, "truncated": len(text) > len(bounded)}))
+'''
+    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(path)}", timeout=30,
+                   what="Hermes managed worktree inspection failed")
+    try:
+        data = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("Hermes worktree inspection was invalid", "invalid_worktree_inventory") from exc
+    data["diff"] = _redact(str(data.get("diff") or ""), entry)
+    return result(True, "worktree_inspect", remote_name,
+                  status="blocked" if data.get("secret_like") or not data.get("diff_check_ok") else "reviewable",
+                  data=data)
+
+
+def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dict:
+    """Commit tracked reviewed changes and push the explicit managed branch."""
+    inspected = worktree_inspect(remote_name, name)
+    data = inspected["data"]
+    if data.get("secret_like"):
+        raise HermesError("worktree diff contains secret-like material", "secret_like_content")
+    if not data.get("diff_check_ok"):
+        raise HermesError("worktree diff check failed", "invalid_worktree_diff")
+    if any(str(line).startswith("?? ") for line in data.get("status", [])):
+        raise HermesError("untracked files require explicit manual review", "untracked_worktree_files")
+    expected_branch = f"hermes/{name}"
+    if data.get("branch") != expected_branch:
+        raise HermesError("managed worktree is not on its expected branch", "unexpected_worktree_branch")
+    if not data.get("status"):
+        return result(True, "worktree_preserve", remote_name, status="clean", data=data)
+    if not confirm:
+        return result(True, "worktree_preserve", remote_name, status="planned",
+                      data={**data, "requires_confirm": True})
+    entry = _require_remote(remote_name)
+    path = _managed_worktree_path(_paths(entry), name)
+    message = f"chore: preserve Hermes worktree {name}"
+    command = (
+        f"set -eu; test -z \"$(git -C {shlex.quote(path)} status --porcelain | sed -n '/^?? /p')\"; "
+        f"git -C {shlex.quote(path)} diff --check; git -C {shlex.quote(path)} add -u; "
+        f"git -C {shlex.quote(path)} -c user.name='Hermes Preservation' "
+        f"-c user.email='hermes-preservation@users.noreply.github.com' commit -m {shlex.quote(message)} >/dev/null; "
+        f"git -C {shlex.quote(path)} push -u origin HEAD:{shlex.quote(expected_branch)} >/dev/null; "
+        f"git -C {shlex.quote(path)} rev-parse HEAD"
+    )
+    saved = _checked(entry, command, timeout=180, what="Hermes worktree preservation failed")
+    commit = (saved.stdout or "").strip().splitlines()[-1]
+    if not _COMMIT_RE.fullmatch(commit):
+        raise HermesError("preserved worktree did not return a commit", "invalid_commit")
+    return result(True, "worktree_preserve", remote_name, status="pushed", commit=commit,
+                  data={"name": name, "branch": expected_branch, "path": path})
+
+
 def health(remote_name: str) -> dict:
     """Return a bounded operational view without performing repair."""
     entry = _require_remote(remote_name)

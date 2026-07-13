@@ -1776,12 +1776,29 @@ head = run("rev-parse", "HEAD")
 check = run("diff", "--check", "HEAD")
 stat = run("diff", "--stat", "HEAD")
 diff = run("diff", "--no-ext-diff", "--unified=3", "HEAD", "--")
-text = diff.stdout
+untracked = run("ls-files", "--others", "--exclude-standard", "-z")
+untracked_diff = []
+for relative in filter(None, untracked.stdout.split("\0")):
+    added = subprocess.run(
+        ["git", "-C", str(path), "diff", "--no-index", "--unified=3", "/dev/null", relative],
+        text=True, capture_output=True,
+    )
+    untracked_diff.append(added.stdout)
+text = diff.stdout + "".join(untracked_diff)
+if untracked_diff:
+    stat_text = stat.stdout + "".join(
+        subprocess.run(
+            ["git", "-C", str(path), "diff", "--no-index", "--stat", "/dev/null", relative],
+            text=True, capture_output=True,
+        ).stdout for relative in filter(None, untracked.stdout.split("\0"))
+    )
+else:
+    stat_text = stat.stdout
 secret_like = bool(re.search(credential_pattern, text, re.IGNORECASE))
 bounded = text[:65536]
 print(json.dumps({"path": str(path), "branch": branch.stdout.strip() or None,
                   "status": status.stdout.splitlines()[:100], "diff_check_ok": check.returncode == 0,
-                  "stat": stat.stdout[:12000], "diff": "" if secret_like else bounded,
+                  "stat": stat_text[:12000], "diff": "" if secret_like else bounded,
                   "secret_like": secret_like, "head": head.stdout.strip(),
                   "review_id": hashlib.sha256((head.stdout.strip() + "\0" + text).encode()).hexdigest(),
                   "truncated": len(text) > len(bounded)}))
@@ -1810,7 +1827,8 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
         raise HermesError("worktree diff contains secret-like material", "secret_like_content")
     if not data.get("diff_check_ok"):
         raise HermesError("worktree diff check failed", "invalid_worktree_diff")
-    if any(str(line).startswith("?? ") for line in data.get("status", [])):
+    has_untracked = any(str(line).startswith("?? ") for line in data.get("status", []))
+    if has_untracked and not confirm:
         raise HermesError("untracked files require explicit manual review", "untracked_worktree_files")
     expected_branch = f"hermes/{name}"
     if data.get("branch") != expected_branch:
@@ -1834,16 +1852,24 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
     )
     lock = f"$HOME/.hermes/locks/worktree-{name}.lock"
     tick_lock = "$HOME/.hermes/cron/.tick.lock"
+    review_guard = (
+        f"review_id=$( (printf '%s\\0' \"$(git -C {shlex.quote(path)} rev-parse HEAD)\"; "
+        f"git -C {shlex.quote(path)} diff --cached --no-ext-diff --unified=3) | sha256sum | awk '{{print $1}}' ); "
+        f"test \"$review_id\" = {shlex.quote(review_id)}; "
+        if has_untracked else
+        f"review_id=$( (printf '%s\\0' \"$(git -C {shlex.quote(path)} rev-parse HEAD)\"; "
+        f"git -C {shlex.quote(path)} diff --no-ext-diff HEAD --) | sha256sum | awk '{{print $1}}' ); "
+        f"test \"$review_id\" = {shlex.quote(review_id)}; "
+    )
     command = (
         f"set -eu; mkdir -p $HOME/.hermes/cron $HOME/.hermes/locks; exec 8>{tick_lock}; flock -w 30 8; "
         f"exec 9>{lock}; flock -n 9; "
         f"test \"$(git -C {shlex.quote(path)} symbolic-ref --short HEAD)\" = {shlex.quote(expected_branch)}; "
         f"test \"$(git -C {shlex.quote(path)} rev-parse HEAD)\" = {shlex.quote(reviewed_head)}; "
-        f"test -z \"$(git -C {shlex.quote(path)} status --porcelain | sed -n '/^?? /p')\"; "
-        f"review_id=$( (printf '%s\\0' \"$(git -C {shlex.quote(path)} rev-parse HEAD)\"; git -C {shlex.quote(path)} diff --no-ext-diff HEAD --) | sha256sum | awk '{{print $1}}' ); "
-        f"test \"$review_id\" = {shlex.quote(review_id)}; "
-        f"if git -C {shlex.quote(path)} diff HEAD -- | {credential_scan}; then exit 44; fi; "
-        f"git -C {shlex.quote(path)} diff --check HEAD; git -C {shlex.quote(path)} add -u; "
+        f"git -C {shlex.quote(path)} add -A; " +
+        review_guard +
+        f"if git -C {shlex.quote(path)} diff --cached | {credential_scan}; then exit 44; fi; "
+        f"git -C {shlex.quote(path)} diff --cached --check; "
         f"git -C {shlex.quote(path)} -c user.name='Hermes Preservation' "
         f"-c user.email='hermes-preservation@users.noreply.github.com' commit -m {shlex.quote(message)} >/dev/null; "
         f"git -C {shlex.quote(path)} push -u origin HEAD:{shlex.quote(expected_branch)} >/dev/null; "

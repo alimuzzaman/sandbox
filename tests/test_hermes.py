@@ -173,7 +173,7 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("flock -n 9", command)
         self.assertIn(".hermes/cron/.tick.lock", command)
         self.assertLess(command.index(".tick.lock"), command.index("worktree-demo.lock"))
-        self.assertIn("git -C /home/u/worktrees/demo diff --check HEAD", command)
+        self.assertIn("git -C /home/u/worktrees/demo diff --cached --check", command)
         self.assertIn("symbolic-ref --short HEAD", command)
         self.assertIn("sha256sum", command)
         self.assertIn("re.search(sys.argv[1]", command)

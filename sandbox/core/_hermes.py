@@ -2066,6 +2066,54 @@ def list_repos(remote_name: str) -> dict:
     return result(True, "repo_list", remote_name, status="ready", data={"repositories": repos})
 
 
+def repo_sync(remote_name: str, repo_name: str, confirm: bool) -> dict:
+    """Fast-forward a clean managed checkout and atomically refresh Sandbox runtime source."""
+    if not confirm:
+        raise HermesError("repository synchronization requires --confirm", "confirmation_required")
+    name = validate_repo_name(repo_name)
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    repo = f"{paths['repo_root']}/{name}"
+    runtime = f"{paths['sandbox_home']}/sb-src"
+    program = r'''
+import json, subprocess, sys
+from pathlib import Path
+repo=Path(sys.argv[1])
+def run(args):
+    result=subprocess.run(args,text=True,capture_output=True)
+    if result.returncode: raise SystemExit(result.stderr or result.stdout or "git operation failed")
+    return result.stdout.strip()
+if not (repo / ".git").exists(): raise SystemExit("managed repository is missing")
+if run(["git","-C",str(repo),"status","--porcelain"]): raise SystemExit("managed repository is dirty")
+branch=run(["git","-C",str(repo),"symbolic-ref","--short","HEAD"])
+run(["git","-C",str(repo),"fetch","origin",branch])
+run(["git","-C",str(repo),"merge","--ff-only",f"origin/{branch}"])
+head=run(["git","-C",str(repo),"rev-parse","HEAD"])
+print(json.dumps({"branch":branch,"head":head}))
+'''
+    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(repo)}", timeout=120,
+                   what="managed repository synchronization failed")
+    try:
+        data = json.loads((res.stdout or "").splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise HermesError("repository synchronization returned invalid evidence", "repo_sync_failed") from exc
+    if name == "sandbox":
+        refresh = (
+            f"set -eu; repo={shlex.quote(repo)}; runtime={shlex.quote(runtime)}; "
+            "stage=$(mktemp -d \"${runtime}.new.XXXXXX\"); old=\"${runtime}.old.$$\"; "
+            "trap 'rm -rf \"$stage\"' EXIT; git -C \"$repo\" archive HEAD | tar -xf - -C \"$stage\"; "
+            "for rel in .cli-venv mcp/wp-server/.venv; do if test -e \"$runtime/$rel\"; then "
+            "mkdir -p \"$stage/$(dirname \"$rel\")\"; mv \"$runtime/$rel\" \"$stage/$rel\"; fi; done; "
+            "mv \"$runtime\" \"$old\"; mv \"$stage\" \"$runtime\"; "
+            "if \"$runtime/sb\" --help >/dev/null; then rm -rf \"$old\"; "
+            "else rm -rf \"$runtime\"; mv \"$old\" \"$runtime\"; exit 1; fi"
+        )
+        _checked(entry, refresh, timeout=180, what="Sandbox runtime refresh failed")
+    return result(True, "repo_sync", remote_name, status="synced", repo=name,
+                  commit=data.get("head"), data={"branch": data.get("branch"),
+                                                 "runtime_refreshed": name == "sandbox"})
+
+
 def _worktree_setup(paths: dict, repo_name: str) -> str:
     """Create one worktree while holding a repository-scoped advisory lock."""
     repo = f"{paths['repo_root']}/{repo_name}"

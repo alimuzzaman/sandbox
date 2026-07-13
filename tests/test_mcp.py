@@ -32,6 +32,7 @@ print("HERMES", int({
     'hermes_cron_route', 'hermes_cron_run', 'hermes_health',
     'hermes_worktree_list', 'hermes_gateway_converge',
     'hermes_cron_catalog', 'hermes_cron_reconcile', 'hermes_cron_verify',
+    'hermes_repo_sync',
 } <= names))
 import tools.hermes as hermes
 calls = []
@@ -49,6 +50,7 @@ hermes.hermes_cron_route("remote", "3359664aaf91", profile="terra", confirm=True
 hermes.hermes_cron_run("remote", "3359664aaf91", confirm=True)
 hermes.hermes_health("remote")
 hermes.hermes_worktree_list("remote")
+hermes.hermes_repo_sync("remote", "sandbox", confirm=True)
 hermes.hermes_gateway_converge("remote", confirm=True)
 hermes.hermes_cron_catalog("remote")
 hermes.hermes_cron_reconcile("remote", confirm=True, force_replace=True)
@@ -117,10 +119,12 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertEqual(calls[9][0][1:3], ["cron", "run"])
         self.assertEqual(calls[10][0][1], "health")
         self.assertEqual(calls[11][0][1:3], ["worktree", "list"])
+        self.assertEqual(calls[12][0][1:3], ["repo", "sync"])
         self.assertIn("--confirm", calls[12][0])
-        self.assertEqual(calls[13][0][1:3], ["cron", "catalog"])
-        self.assertIn("--force-replace", calls[14][0])
-        self.assertEqual(calls[15][0][1:3], ["cron", "verify"])
+        self.assertIn("--confirm", calls[13][0])
+        self.assertEqual(calls[14][0][1:3], ["cron", "catalog"])
+        self.assertIn("--force-replace", calls[15][0])
+        self.assertEqual(calls[16][0][1:3], ["cron", "verify"])
         timeout_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_TIMEOUT "))
         self.assertIn("timed out", timeout_line.lower())
         instance_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_INSTANCE "))

@@ -5,6 +5,7 @@
 ```text
 ./sb hermes health --remote NAME --json
 ./sb hermes worktree list --remote NAME --json
+./sb hermes repo sync --remote NAME --repo sandbox --confirm --json
 ./sb hermes gateway converge --remote NAME [--confirm] --json
 ./sb hermes cron catalog --remote NAME --json
 ./sb hermes cron reconcile --remote NAME [--confirm] [--force-replace] --json
@@ -23,6 +24,7 @@
 ```text
 hermes_health(remote)
 hermes_worktree_list(remote)
+hermes_repo_sync(remote, repo, confirm=false)
 hermes_gateway_converge(remote, confirm=false)
 hermes_cron_catalog(remote)
 hermes_cron_reconcile(remote, confirm=false, force_replace=false)

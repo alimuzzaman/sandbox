@@ -149,6 +149,15 @@ def hermes_worktree_list(remote: str) -> dict:
 
 
 @mcp.tool()
+def hermes_repo_sync(remote: str, repo: str, confirm: bool = False) -> dict:
+    """Fast-forward a clean managed repo and refresh runtime for the Sandbox repo."""
+    args = ["hermes", "repo", "sync", "--remote", remote, "--repo", repo]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 240)
+
+
+@mcp.tool()
 def hermes_gateway_converge(remote: str, confirm: bool = False) -> dict:
     """Preview or establish the Sandbox gateway as the sole owner."""
     args = ["hermes", "gateway", "converge", "--remote", remote]

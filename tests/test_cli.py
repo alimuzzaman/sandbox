@@ -70,6 +70,7 @@ class TestResolutionGate(unittest.TestCase):
         for command, expected in (
             (("cron", "reconcile", "--force-replace"), "unknown_remote"),
             (("cron", "verify", "deadbeef1234"), "confirmation_required"),
+            (("repo", "sync", "--repo", "sandbox"), "confirmation_required"),
         ):
             with self.subTest(command=command):
                 r = run_sb("hermes", *command, "--remote", remote, "--json")

@@ -47,6 +47,11 @@ def _repo_action(args) -> dict:
         if not url:
             raise hermes.HermesError("hermes repo clone requires --url", "missing_repo_url")
         return hermes.clone_repo(args.remote, url, args.name, args.ref)
+    if args.subaction == "sync":
+        repo_name = args.repo or args.target
+        if not repo_name:
+            raise hermes.HermesError("hermes repo sync requires --repo", "missing_repo")
+        return hermes.repo_sync(args.remote, repo_name, args.confirm)
     if args.subaction == "auth":
         provider = (args.target or "").lower()
         if provider != "github":
@@ -94,7 +99,7 @@ def _repo_action(args) -> dict:
             raise hermes.HermesError("GitHub fine-grained token authentication did not complete", "provider_auth_failed", True)
         return hermes.result(True, "repo_auth", args.remote, status="authenticated",
                              data={"provider": "github", "existing": False, "credential": "fine_grained"})
-    raise hermes.HermesError("repo action must be auth, clone, or list", "invalid_repo_action")
+    raise hermes.HermesError("repo action must be auth, clone, list, or sync", "invalid_repo_action")
 
 
 def _job_payload(remote_name: str, action: str, data: dict) -> dict:

@@ -132,6 +132,7 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes cron catalog --remote scaleway-sandbox --json
 ./sb hermes cron reconcile --remote scaleway-sandbox --force-replace --json
 ./sb hermes worktree list --remote scaleway-sandbox --json
+./sb hermes repo sync --remote scaleway-sandbox --repo sandbox --confirm --json
 ./sb hermes gateway converge --remote scaleway-sandbox --json
 ./sb hermes gateway converge --remote scaleway-sandbox --confirm --json
 ./sb hermes cron reconcile --remote scaleway-sandbox --force-replace --confirm --json
@@ -162,6 +163,9 @@ or legitimate no-work result. Missing files, malformed output, timeouts, and
 command failures return nonzero, and scripts never add/remove their own cron job.
 Confirmed reconciliation creates the implementation worker's dedicated managed
 Git worktree if it is absent; scheduled edits never target the primary checkout.
+`hermes repo sync` refuses dirty or detached managed checkouts, performs only a
+fast-forward merge, and for the `sandbox` repo atomically refreshes `sb-src`
+from the committed Git tree while preserving its managed virtual environments.
 
 `hermes health` aggregates gateway ownership, catalog drift, model routing,
 bounded correlated request dumps, and dirty worktrees. A provider rejection wins

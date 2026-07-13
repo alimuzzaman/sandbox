@@ -101,6 +101,28 @@ class TestValidation(unittest.TestCase):
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    def test_repo_sync_requires_confirmation_before_remote_access(self):
+        with patch("sandbox.core._hermes._require_remote") as require_remote:
+            with self.assertRaises(hermes.HermesError) as caught:
+                hermes.repo_sync("test", "sandbox", False)
+        self.assertEqual(caught.exception.code, "confirmation_required")
+        require_remote.assert_not_called()
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_repo_sync_refreshes_runtime_only_for_sandbox(self, require_remote, paths, checked):
+        checked.side_effect = [
+            _completed(stdout=json.dumps({"branch": "feature", "head": "a" * 40}) + "\n"),
+            _completed(),
+        ]
+        out = hermes.repo_sync("test", "sandbox", True)
+        self.assertTrue(out["data"]["runtime_refreshed"])
+        self.assertEqual(out["commit"], "a" * 40)
+        self.assertIn("git -C \"$repo\" archive HEAD", checked.call_args_list[1].args[1])
+
     @patch("sandbox.core._hermes._paths", return_value={
         "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
         "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",

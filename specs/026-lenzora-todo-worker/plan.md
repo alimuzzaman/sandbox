@@ -33,6 +33,7 @@ Replace idle Lenzora Kanban dispatch with one bounded Terra/Medium worker that r
 2. Set quota requeue, Kanban dispatch, and Sandbox task worker to disabled in the committed catalog. Add one enabled `lenzora-todo-task` Terra/Medium agent on the existing conservative four-hour cadence.
 3. Its guarded prompt checks root `TODO.md`, returns `NO_TODO_WORK` if absent/completed, selects the first actionable `- [ ]` task while skipping only explicitly prerequisite-blocked tasks, performs only that bounded task, runs task-relevant checks, marks the selected checkbox only after success, and leaves the isolated worktree uncommitted.
 4. Reconcile after server synchronization; verify the saved terminal result. The first live run found a real TODO file and correctly reported that the former first task was blocked, which requires the actionable-selection refinement.
+5. The subsequent actionable-selection run returned `[SILENT]` and made no change. The prompt now requires an explicit, non-empty completion/no-work/review result so a nominal success cannot obscure an idle or blocked run.
 
 ## Project Structure
 

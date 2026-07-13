@@ -57,6 +57,7 @@ As the Lenzora owner, I want absent or empty TODO files to be a safe no-work out
 - **FR-006**: Missing or fully completed `TODO.md` MUST return `NO_TODO_WORK` without a file mutation or error status.
 - **FR-007**: The desired catalog MUST keep the Kanban dispatcher, quota requeue, and Sandbox task worker disabled while their respective prerequisites are absent.
 - **FR-008**: The worker MUST use the Terra profile at medium effort; Spark remains orchestration-only and Luna remains read-only.
+- **FR-009**: The worker MUST return a non-empty terminal result identifying completion, no-work, or the concrete review blocker.
 
 ### Key Entities
 
@@ -71,6 +72,7 @@ As the Lenzora owner, I want absent or empty TODO files to be a safe no-work out
 - **SC-002**: Missing or empty TODO state produces a successful no-work result in 100% of verified runs.
 - **SC-003**: A verified task run leaves no commit, push, deployment, or shared-primary-worktree change.
 - **SC-004**: The live catalog contains exactly one enabled job after reconciliation: the Lenzora TODO worker.
+- **SC-005**: Every verified run produces an inspectable non-empty terminal result.
 
 ## Assumptions
 

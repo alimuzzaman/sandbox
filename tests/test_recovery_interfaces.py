@@ -22,3 +22,7 @@ class TestRecoveryInterfaces(unittest.TestCase):
     def test_cli_restore_needs_a_backup_id_and_never_applies_by_default(self):
         with self.assertRaises(SystemExit):
             cmd_recovery(None, self._args("restore"))
+
+    def test_cli_schedule_and_retention_default_to_non_mutating_plans(self):
+        cmd_recovery(None, self._args("schedule"))
+        cmd_recovery(None, self._args("retention"))

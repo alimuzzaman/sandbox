@@ -59,3 +59,24 @@ def recovery_restore_apply(backup_id: str, remote: str | None = None, confirm: b
                       error=RecoveryError("restore apply requires confirmation", "confirmation_required"))
     return result(False, "restore", remote=remote, error=RecoveryError(
         "restore apply requires disposable target adapters", "recovery_not_configured"))
+
+
+@mcp.tool()
+def recovery_schedule_plan(remote: str | None = None, profiles: list[str] | None = None) -> dict:
+    """Render disabled systemd recovery units; this never installs or enables them."""
+    from sandbox.recovery.errors import result
+    from sandbox.recovery.scheduler import build_schedule_policy, render_systemd_units
+    chosen = tuple(profiles or ()) or tuple(profile.profile_id for profile in _service().catalog.profiles)
+    return result(True, "schedule", remote=remote, status="planned", data={
+        "units": render_systemd_units(build_schedule_policy("recovery-daily", chosen, "daily"))})
+
+
+@mcp.tool()
+def recovery_retention_plan(remote: str | None = None) -> dict:
+    """Return a conservative empty retention plan until verified remote sets are supplied."""
+    from sandbox.recovery.errors import result
+    from sandbox.recovery.retention import build_retention_plan
+    plan = build_retention_plan("sets/", ())
+    return result(True, "retention", remote=remote, status="planned", data={
+        "destination_prefix": plan.destination_prefix, "protected_sets": plan.protected_sets,
+        "candidates": plan.candidates, "requires_confirmation": True})

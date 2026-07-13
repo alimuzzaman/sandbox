@@ -71,6 +71,27 @@ def cmd_recovery(_cfg, args) -> None:
                 "restore apply requires disposable target adapters", "recovery_not_configured"))
         else:
             payload = service.restore_plan(args.backup_id, tuple(args.profile), remote=args.remote)
+    elif args.action == "schedule":
+        from sandbox.recovery.errors import RecoveryError, result
+        if args.confirm:
+            payload = result(False, "schedule", remote=args.remote, error=RecoveryError(
+                "schedule activation requires a verified real recovery set", "protected_operation"))
+        else:
+            from sandbox.recovery.scheduler import build_schedule_policy, render_systemd_units
+            profiles = tuple(args.profile) or tuple(profile.profile_id for profile in service.catalog.profiles)
+            policy = build_schedule_policy("recovery-daily", profiles, "daily")
+            payload = result(True, "schedule", remote=args.remote, status="planned", data={"units": render_systemd_units(policy)})
+    elif args.action == "retention":
+        from sandbox.recovery.errors import RecoveryError, result
+        if args.confirm:
+            payload = result(False, "retention", remote=args.remote, error=RecoveryError(
+                "retention deletion requires a verified real recovery set", "protected_operation"))
+        else:
+            from sandbox.recovery.retention import build_retention_plan
+            plan = build_retention_plan("sets/", ())
+            payload = result(True, "retention", remote=args.remote, status="planned", data={
+                "destination_prefix": plan.destination_prefix, "protected_sets": plan.protected_sets,
+                "candidates": plan.candidates, "requires_confirmation": True})
     else:
         from sandbox.recovery.errors import RecoveryError, result
         payload = result(False, args.action, remote=args.remote, error=RecoveryError(

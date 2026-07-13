@@ -130,15 +130,15 @@
 
 ### Tests for User Story 4
 
-- [ ] T048 [P] [US4] Add failing lock/resource/timeout/retry/random-delay/timer rendering tests in `tests/test_recovery_scheduler.py`
-- [ ] T049 [P] [US4] Add failing destination-boundary/classification/newest/only/current-passphrase/candidate freshness tests in `tests/test_recovery_retention.py`
+- [X] T048 [P] [US4] Add failing lock/resource/timeout/retry/random-delay/timer rendering tests in `tests/test_recovery_scheduler.py`
+- [X] T049 [P] [US4] Add failing destination-boundary/classification/newest/only/current-passphrase/candidate freshness tests in `tests/test_recovery_retention.py`
 
 ### Implementation for User Story 4
 
-- [ ] T050 [US4] Implement single-run lock, resource gate, and schedule plan/render/remove in `sandbox/recovery/scheduler.py`
-- [ ] T051 [US4] Implement conservative retention classification and plan/apply in `sandbox/recovery/retention.py`
-- [ ] T052 [US4] Add protected CLI schedule/retention operations in `sandbox/commands/recovery.py`
-- [ ] T053 [US4] Add protected MCP schedule/retention tools in `mcp/wp-server/tools/recovery.py`
+- [X] T050 [US4] Implement single-run lock, resource gate, and schedule plan/render/remove in `sandbox/recovery/scheduler.py`
+- [X] T051 [US4] Implement conservative retention classification and plan/apply in `sandbox/recovery/retention.py`
+- [X] T052 [US4] Add protected CLI schedule/retention operations in `sandbox/commands/recovery.py`
+- [X] T053 [US4] Add protected MCP schedule/retention tools in `mcp/wp-server/tools/recovery.py`
 - [ ] T054 [US4] Verify schedule and retention plans remotely without activation/deletion in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 
 **Checkpoint**: Automation is implemented but remains disabled pending a verified real set and separate confirmation.

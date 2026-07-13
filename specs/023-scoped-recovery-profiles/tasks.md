@@ -153,14 +153,14 @@
 
 ### Tests for User Story 5
 
-- [ ] T055 [P] [US5] Add control-plane safe-state/credential exclusion and Cloudflare declaration tests in `tests/test_recovery_control_plane.py`
-- [ ] T056 [P] [US5] Add clean-root bootstrap, prerequisite, profile selection, and acceptance tests in `tests/test_recovery_fresh_server.py`
+- [X] T055 [P] [US5] Add control-plane safe-state/credential exclusion and Cloudflare declaration tests in `tests/test_recovery_control_plane.py`
+- [X] T056 [P] [US5] Add clean-root bootstrap, prerequisite, profile selection, and acceptance tests in `tests/test_recovery_fresh_server.py`
 
 ### Implementation for User Story 5
 
-- [ ] T057 [US5] Implement control-plane capture/restore adapter over Sandbox/Hermes backup and shared service contracts in `sandbox/recovery/control_plane.py`
-- [ ] T058 [US5] Add fresh-server bootstrap and verification orchestration in `sandbox/recovery/bootstrap.py`
-- [ ] T059 [US5] Document operator-safe recovery and per-profile restore in `docs/recovery.md`
+- [X] T057 [US5] Implement control-plane capture/restore adapter over Sandbox/Hermes backup and shared service contracts in `sandbox/recovery/control_plane.py`
+- [X] T058 [US5] Add fresh-server bootstrap and verification orchestration in `sandbox/recovery/bootstrap.py`
+- [X] T059 [US5] Document operator-safe recovery and per-profile restore in `docs/recovery.md`
 - [ ] T060 [US5] Create one real scoped encrypted set with the current passphrase through `./sb recovery create` and verify download/decrypt/integrity in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T061 [US5] Run a disposable fresh-server drill and re-run Hermes/public-dashboard/hosting acceptance checks in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 

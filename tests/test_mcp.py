@@ -29,7 +29,9 @@ print("PROMPTS", p)
 print("HERMES", int({
     'hermes_status', 'hermes_run', 'hermes_job_status', 'hermes_job_kill',
     'hermes_cron_list', 'hermes_cron_validate', 'hermes_cron_create',
-    'hermes_cron_route', 'hermes_cron_run',
+    'hermes_cron_route', 'hermes_cron_run', 'hermes_health',
+    'hermes_worktree_list', 'hermes_gateway_converge',
+    'hermes_cron_catalog', 'hermes_cron_reconcile', 'hermes_cron_verify',
 } <= names))
 import tools.hermes as hermes
 calls = []
@@ -45,6 +47,12 @@ hermes.hermes_cron_validate("remote")
 hermes.hermes_cron_create("remote", "every 4h", "bounded work", profile="terra", confirm=True)
 hermes.hermes_cron_route("remote", "3359664aaf91", profile="terra", confirm=True)
 hermes.hermes_cron_run("remote", "3359664aaf91", confirm=True)
+hermes.hermes_health("remote")
+hermes.hermes_worktree_list("remote")
+hermes.hermes_gateway_converge("remote", confirm=True)
+hermes.hermes_cron_catalog("remote")
+hermes.hermes_cron_reconcile("remote", confirm=True, force_replace=True)
+hermes.hermes_cron_verify("remote", "3359664aaf91", timeout=60, confirm=True)
 print("HERMES_CALLS", json.dumps(calls))
 hermes._run_sb = original_run_sb
 def timed_out(*_args, **_kwargs):
@@ -107,6 +115,12 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertIn("--confirm", calls[7][0])
         self.assertEqual(calls[8][0][1:3], ["cron", "route"])
         self.assertEqual(calls[9][0][1:3], ["cron", "run"])
+        self.assertEqual(calls[10][0][1], "health")
+        self.assertEqual(calls[11][0][1:3], ["worktree", "list"])
+        self.assertIn("--confirm", calls[12][0])
+        self.assertEqual(calls[13][0][1:3], ["cron", "catalog"])
+        self.assertIn("--force-replace", calls[14][0])
+        self.assertEqual(calls[15][0][1:3], ["cron", "verify"])
         timeout_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_TIMEOUT "))
         self.assertIn("timed out", timeout_line.lower())
         instance_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_INSTANCE "))

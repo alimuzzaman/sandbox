@@ -118,7 +118,7 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes run --remote scaleway-sandbox --repo repo --prompt "Inspect the test command" --async --json
 ./sb hermes job status --remote scaleway-sandbox --job-id JOB_ID --json
 
-# Scheduler changes are routed and confirmation-gated by Sandbox.
+# Ad-hoc scheduler changes remain routed and confirmation-gated by Sandbox.
 ./sb hermes cron validate --remote scaleway-sandbox --json
 ./sb hermes cron create --remote scaleway-sandbox \
   --schedule '17 */4 * * *' --profile terra \
@@ -127,6 +127,15 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes cron route JOB_ID --remote scaleway-sandbox \
   --profile terra --confirm --json
 ./sb hermes cron run JOB_ID --remote scaleway-sandbox --confirm --json
+
+# The repeatable path is the committed catalog. Preview first, then converge.
+./sb hermes cron catalog --remote scaleway-sandbox --json
+./sb hermes cron reconcile --remote scaleway-sandbox --force-replace --json
+./sb hermes worktree list --remote scaleway-sandbox --json
+./sb hermes gateway converge --remote scaleway-sandbox --json
+./sb hermes gateway converge --remote scaleway-sandbox --confirm --json
+./sb hermes cron reconcile --remote scaleway-sandbox --force-replace --confirm --json
+./sb hermes cron verify JOB_ID --remote scaleway-sandbox --timeout 1200 --confirm --json
 ```
 
 The scheduler interface accepts only the named Sandbox routes `luna`, `terra`,
@@ -137,6 +146,28 @@ profile setting while each default-profile cron job receives an explicit,
 validated provider/model snapshot. `cron validate` is read-only. Creation,
 routing repair, and triggering require `--confirm`, and creation always uses
 local-file delivery rather than an external messaging destination.
+
+The source of truth is `sandbox/hermes/cron-catalog.json`; its scripts live in
+`sandbox/hermes/cron_scripts/` and are installed by setup, update, restore, and
+confirmed reconciliation. Reconciliation without `--confirm` is read-only.
+`--force-replace` backs up `~/.hermes/cron/jobs.json`, removes every observed
+job, installs the committed scripts, and recreates exactly the reviewed catalog.
+A partial failure reports removed and created IDs and retains the protected
+backup so the same command can be rerun.
+
+The base catalog contains three no-agent monitors/dispatchers and one bounded
+Terra/Medium Spec-Kit implementation worker. Spark remains orchestration only;
+Luna remains read-only. Monitor scripts return zero only after a valid inspection
+or legitimate no-work result. Missing files, malformed output, timeouts, and
+command failures return nonzero, and scripts never add/remove their own cron job.
+Confirmed reconciliation creates the implementation worker's dedicated managed
+Git worktree if it is absent; scheduled edits never target the primary checkout.
+
+`hermes health` aggregates gateway ownership, catalog drift, model routing,
+bounded correlated request dumps, and dirty worktrees. A provider rejection wins
+over an upstream `last_status=ok` marker and is reported as `false_success`.
+`cron verify` likewise waits for a changed terminal run marker and rejects a
+nominal success when correlated request evidence records an error.
 
 Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
 instead use the upstream OpenAI Codex OAuth provider on the remote:
@@ -180,6 +211,8 @@ reuse that stored allowlist and fail closed if it is missing or unsafe:
 ./sb hermes gateway setup --remote scaleway-sandbox --allow user-or-channel
 ./sb hermes gateway install --remote scaleway-sandbox
 ./sb hermes gateway start --remote scaleway-sandbox
+./sb hermes gateway converge --remote scaleway-sandbox --json
+./sb hermes gateway converge --remote scaleway-sandbox --confirm --json
 ```
 
 Gateway installation enables systemd user lingering so an enabled gateway can
@@ -187,6 +220,10 @@ recover after a remote reboot; `hermes health` reports its linger state. The
 managed unit starts with upstream Hermes's `--replace` flag so a stale/manual
 gateway process cannot leave systemd in a restart loop or create two scheduler
 owners.
+The convergence operation also stops and disables the legacy
+`hermes-gateway.service`, terminates only processes whose argv is an actual
+`hermes gateway run`, installs the Sandbox unit, and verifies one owner. It is
+idempotent after convergence.
 
 ## Routed worker profile
 
@@ -234,8 +271,10 @@ The local Sandbox MCP server also exposes `hermes_status(remote)` and
 `hermes_job_status(remote, job_id, offset=0)` and
 `hermes_job_kill(remote, job_id)`. Scheduler parity is provided by
 `hermes_cron_list`, `hermes_cron_validate`, `hermes_cron_create`,
-`hermes_cron_route`, and `hermes_cron_run`; mutating calls require
-`confirm=true`. Async runs return a Hermes job ID; the
+`hermes_cron_route`, `hermes_cron_run`, `hermes_cron_catalog`,
+`hermes_cron_reconcile`, and `hermes_cron_verify`. Aggregated operations are
+available as `hermes_health`, `hermes_worktree_list`, and
+`hermes_gateway_converge`; mutating calls require `confirm=true`. Async runs return a Hermes job ID; the
 equivalent CLI operations are `sb hermes job status|kill`. Returned output is
 bounded and sanitized, including labelled and common bare provider/API,
 OAuth, and cookie credential forms.

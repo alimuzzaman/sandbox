@@ -62,6 +62,19 @@ class TestResolutionGate(unittest.TestCase):
         self.assertIn("policy", r.stdout)
         self.assertIn("acceptance", r.stdout)
         self.assertIn("--confirm", r.stdout)
+        self.assertIn("--force-replace", r.stdout)
+        self.assertIn("worktree", r.stdout)
+
+    def test_scheduler_mutations_fail_closed_before_remote_lookup(self):
+        remote = "missing-scheduler-remote"
+        for command, expected in (
+            (("cron", "reconcile", "--force-replace"), "unknown_remote"),
+            (("cron", "verify", "deadbeef1234"), "confirmation_required"),
+        ):
+            with self.subTest(command=command):
+                r = run_sb("hermes", *command, "--remote", remote, "--json")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual(json.loads(r.stdout)["error"]["code"], expected)
 
     def test_hermes_dashboard_options_are_listed_in_help(self):
         r = run_sb("hermes", "--help")

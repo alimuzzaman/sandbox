@@ -106,6 +106,10 @@ log "provisioning the CLI + visit tools venvs"
 export SANDBOX_HOME
 (
     cd "$SANDBOX_HOME/sb-src"
+    test -f sandbox/hermes/cron-catalog.json
+    test -f sandbox/hermes/cron_scripts/todo_md_monitor.py
+    test -f sandbox/hermes/cron_scripts/codex_quota_requeue.py
+    test -f sandbox/hermes/cron_scripts/lenzora_kanban_dispatch.py
     if [[ ! -x "$SANDBOX_HOME/sb-src/.cli-venv/bin/python" ]]; then
         python3 -m venv "$SANDBOX_HOME/sb-src/.cli-venv"
         "$SANDBOX_HOME/sb-src/.cli-venv/bin/pip" install --quiet \

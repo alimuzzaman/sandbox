@@ -451,3 +451,7 @@ Its optional public dashboard route uses Cloudflare Access and Tunnel while keep
 Hermes loopback-only; see the public-route section in that guide before any live apply.
 Fresh `sb hermes setup` also prepares the Spark/Luna/Terra/Sol routed-worker profile;
 provider authentication and gateway activation remain explicit operator steps.
+Hermes scheduled state is reproducible from the committed cron catalog: use
+`sb hermes cron reconcile --remote NAME` to preview, then repeat with
+`--confirm --force-replace`. `sb hermes health` reports false-green provider
+errors, catalog drift, competing gateway owners, and dirty managed worktrees.

@@ -8,6 +8,7 @@ registry or exposes a new network listener.
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import os
@@ -17,6 +18,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
@@ -27,7 +29,18 @@ import sandbox.core._cloudflare_access as cloudflare_access
 import sandbox.core._cloudflare_tunnel as cloudflare_tunnel
 from sandbox.core._config import _local_yaml
 from sandbox.core._secrets import resolve_secret
-from sandbox.hermes.scheduler import SCHEDULE_GUARD, audit_jobs, scheduled_route
+from sandbox.hermes.scheduler import (
+    SCHEDULE_GUARD,
+    audit_jobs,
+    catalog_fingerprint,
+    classify_job,
+    effective_job_status,
+    load_catalog,
+    reconciliation_plan,
+    render_entry,
+    scheduled_route,
+    scripts_path,
+)
 
 
 SUPPORTED_TAG = "v2026.7.7.2"
@@ -905,6 +918,7 @@ p.chmod(0o600)
 PY
 """
     _checked(entry, command, timeout=180, what="Hermes setup failed")
+    _install_cron_scripts(entry)
     state_sync_status = None
     if entry.get(HERMES_STATE_REPO_KEY):
         synced = _checked(entry, _state_sync_command(paths, _state_repo(entry)), timeout=300,
@@ -946,6 +960,7 @@ def _cron_snapshot(entry: dict) -> dict:
     """Read only non-secret scheduler metadata from the default Hermes home."""
     program = r'''
 import json
+import re
 from pathlib import Path
 
 path = Path.home() / ".hermes" / "cron" / "jobs.json"
@@ -954,19 +969,37 @@ safe = []
 for job in data.get("jobs", []):
     if not isinstance(job, dict):
         continue
+    reason = ""
+    job_id = str(job.get("id") or "")
+    dumps = sorted((Path.home() / ".hermes" / "sessions").glob(f"request_dump_cron_{job_id}_*.json"),
+                   key=lambda item: item.stat().st_mtime, reverse=True)[:1]
+    if dumps:
+        try:
+            with dumps[0].open("rb") as stream:
+                stream.seek(max(0, dumps[0].stat().st_size - 65536))
+                tail = stream.read().decode(errors="replace")
+            if re.search(r"(?i)not supported|unsupported model", tail): reason = "unsupported_model"
+            elif re.search(r"(?i)http\s*400|bad request", tail): reason = "provider_bad_request"
+            elif re.search(r"(?i)authentication|unauthorized|forbidden", tail): reason = "provider_authentication"
+            elif re.search(r"(?i)rate.?limit|quota exceeded|usage limit|\b429\b", tail): reason = "provider_quota"
+        except OSError:
+            reason = "evidence_unreadable"
     safe.append({
         "id": job.get("id"),
         "name": job.get("name"),
         "enabled": job.get("enabled"),
         "state": job.get("state"),
-        "schedule": job.get("schedule"),
+        "schedule": job.get("schedule_display") or job.get("schedule"),
         "workdir": job.get("workdir"),
         "provider_snapshot": job.get("provider_snapshot") or job.get("provider"),
         "model_snapshot": job.get("model_snapshot") or job.get("model"),
+        "no_agent": bool(job.get("no_agent")),
+        "script": Path(str(job.get("script") or "")).name or None,
         "last_status": job.get("last_status"),
         "last_error": job.get("last_error"),
         "last_run_at": job.get("last_run_at"),
         "next_run_at": job.get("next_run_at"),
+        "evidence_reason": reason,
     })
 print(json.dumps({"jobs": safe}, sort_keys=True))
 '''
@@ -1003,6 +1036,167 @@ def cron_validate(remote_name: str) -> dict:
             "invalid_cron_routing",
         ),
     )
+
+
+def cron_catalog(remote_name: str) -> dict:
+    """Render the committed desired cron catalog without remote mutation."""
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    try:
+        catalog = load_catalog()
+        jobs = [render_entry(item, paths) for item in catalog["jobs"]]
+    except (ValueError, KeyError, OSError) as exc:
+        raise HermesError(str(exc), "invalid_cron_catalog") from exc
+    safe_jobs = [
+        {key: value for key, value in job.items() if key != "prompt"}
+        for job in jobs
+    ]
+    return result(True, "cron_catalog", remote_name, status="valid", data={
+        "schema_version": catalog["schema_version"],
+        "fingerprint": catalog_fingerprint(catalog),
+        "jobs": safe_jobs,
+    })
+
+
+def _install_cron_scripts(entry: dict) -> None:
+    payload = {
+        path.name: base64.b64encode(path.read_bytes()).decode()
+        for path in sorted(scripts_path().glob("*.py"))
+    }
+    program = r'''
+import base64, json, os, sys, tempfile
+from pathlib import Path
+payload = json.loads(base64.b64decode(sys.argv[1]))
+root = Path.home() / ".hermes" / "scripts"
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+for name, encoded in payload.items():
+    if Path(name).name != name or not name.endswith(".py"):
+        raise SystemExit(3)
+    fd, temp = tempfile.mkstemp(prefix=name + ".", dir=root)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(base64.b64decode(encoded))
+            stream.flush(); os.fsync(stream.fileno())
+        os.chmod(temp, 0o700)
+        os.replace(temp, root / name)
+    finally:
+        if os.path.exists(temp): os.unlink(temp)
+'''
+    encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
+    _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(encoded)}", timeout=30,
+             what="Hermes cron script installation failed")
+
+
+def _create_catalog_job(entry: dict, paths: dict, desired: dict) -> str:
+    before = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
+    args = [paths["launcher"], "cron", "create", desired["schedule"]]
+    if desired["kind"] == "agent":
+        args.append(desired["prompt"])
+    args += ["--name", desired["name"], "--deliver", desired["deliver"]]
+    if desired.get("workdir"):
+        args += ["--workdir", desired["workdir"]]
+    if desired["kind"] == "script":
+        args += ["--script", desired["script"], "--no-agent"]
+    res = _ssh(entry, " ".join(shlex.quote(part) for part in args), timeout=45)
+    if res.returncode != 0:
+        raise HermesError(_redact(res.stderr or res.stdout or "cron create failed", entry)[:1000],
+                          "cron_create_failed", True)
+    after = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
+    created = [value for value in after - before if isinstance(value, str) and _CRON_JOB_RE.fullmatch(value)]
+    if len(created) != 1:
+        raise HermesError("cron creation did not produce exactly one job", "invalid_cron_response")
+    if desired["kind"] == "agent":
+        _set_cron_route(entry, created[0], desired["profile"])
+    return created[0]
+
+
+def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool = False) -> dict:
+    """Preview or apply the committed cron catalog as one controlled replacement."""
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    try:
+        catalog = load_catalog()
+        desired = [render_entry(item, paths) for item in catalog["jobs"] if item.enabled]
+        plan = reconciliation_plan(catalog, _cron_snapshot(entry)["jobs"], force_replace=force_replace, paths=paths)
+    except (ValueError, KeyError, OSError) as exc:
+        raise HermesError(str(exc), "invalid_cron_catalog") from exc
+    plan["requires_confirm"] = bool(plan["changes"])
+    if not confirm or not plan["changes"]:
+        return result(True, "cron_reconcile", remote_name,
+                      status="planned" if plan["changes"] else "converged", data=plan)
+
+    missing = []
+    prepared_workdirs = []
+    for item in desired:
+        workdir = item.get("workdir")
+        if workdir:
+            probe = _ssh(entry, f"test -d {shlex.quote(workdir)}", timeout=15)
+            if probe.returncode != 0:
+                if item["kind"] == "agent" and item["name"] == "sandbox-approved-spec-task":
+                    source = f"{paths['repo_root']}/sandbox"
+                    branch = "hermes/sandbox-approved-spec-task"
+                    command = (
+                        f"set -eu; test -d {shlex.quote(source + '/.git')}; "
+                        f"mkdir -p {shlex.quote(str(PurePosixPath(workdir).parent))}; "
+                        f"if git -C {shlex.quote(source)} show-ref --verify --quiet refs/heads/{shlex.quote(branch)}; "
+                        f"then git -C {shlex.quote(source)} worktree add {shlex.quote(workdir)} {shlex.quote(branch)}; "
+                        f"else git -C {shlex.quote(source)} worktree add -b {shlex.quote(branch)} {shlex.quote(workdir)} HEAD; fi"
+                    )
+                    prepared = _ssh(entry, command, timeout=60)
+                    if prepared.returncode == 0:
+                        prepared_workdirs.append(workdir)
+                    else:
+                        missing.append(item["name"])
+                else:
+                    missing.append(item["name"])
+    if missing:
+        raise HermesError("catalog work directories are missing: " + ", ".join(missing),
+                          "cron_workdir_missing")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = f"$HOME/.hermes/cron/backups/jobs-{stamp}.json"
+    _checked(entry, "mkdir -p $HOME/.hermes/cron/backups; chmod 700 $HOME/.hermes/cron/backups; "
+             f"if test -f $HOME/.hermes/cron/jobs.json; then cp $HOME/.hermes/cron/jobs.json {backup}; chmod 600 {backup}; fi",
+             what="Hermes cron inventory backup failed")
+    removed: list[str] = []
+    created: list[dict[str, str]] = []
+    try:
+        for item in plan["remove"]:
+            job_id = _valid_cron_job_id(item["id"])
+            res = _ssh(entry, f"{paths['launcher']} cron remove {shlex.quote(job_id)}", timeout=30)
+            if res.returncode != 0:
+                raise HermesError("could not remove cron job " + job_id, "cron_remove_failed", True)
+            removed.append(job_id)
+        _install_cron_scripts(entry)
+        # The pinned Hermes release has one global reasoning-effort setting.
+        # The desired catalog intentionally has one agent profile, so setting
+        # it separately from the model keeps the effective provider request valid.
+        agent_efforts = {scheduled_route(item["profile"]).effort for item in desired if item["kind"] == "agent"}
+        if len(agent_efforts) > 1:
+            raise HermesError("catalog requires incompatible per-job reasoning efforts", "invalid_cron_catalog")
+        if agent_efforts:
+            effort = next(iter(agent_efforts))
+            _checked(entry, f"{paths['launcher']} config set agent.reasoning_effort {shlex.quote(effort)} >/dev/null",
+                     what="Hermes reasoning effort configuration failed")
+        for item in desired:
+            job_id = _create_catalog_job(entry, paths, item)
+            created.append({"id": job_id, "name": item["name"]})
+    except HermesError as exc:
+        partial = {**plan, "removed_ids": removed, "created": created,
+                   "recovery": "rerun confirmed reconciliation; protected pre-change jobs.json was retained"}
+        partial["prepared_workdirs"] = prepared_workdirs
+        return result(False, "cron_reconcile", remote_name, status="partial", data=partial, error=exc)
+
+    final = reconciliation_plan(catalog, _cron_snapshot(entry)["jobs"], force_replace=False, paths=paths)
+    if final["changes"]:
+        return result(False, "cron_reconcile", remote_name, status="partial",
+                      data={**final, "removed_ids": removed, "created": created,
+                            "prepared_workdirs": prepared_workdirs,
+                            "recovery": "inspect cron health and rerun reconciliation"},
+                      error=HermesError("created cron inventory did not match the catalog", "cron_verify_failed"))
+    return result(True, "cron_reconcile", remote_name, status="converged",
+                  data={**final, "removed_ids": removed, "created": created,
+                        "prepared_workdirs": prepared_workdirs})
 
 
 def _set_cron_route(entry: dict, job_id: str, profile: str) -> dict:
@@ -1103,8 +1297,7 @@ def cron_create(remote_name: str, schedule: str, prompt: str, *, name: str | Non
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     before = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
-    args = [paths["launcher"], "cron", "create", "--schedule", schedule,
-            "--prompt", prompt, "--deliver", "local"]
+    args = [paths["launcher"], "cron", "create", schedule, prompt, "--deliver", "local"]
     if name:
         args += ["--name", name.strip()]
     if workdir:
@@ -1149,6 +1342,75 @@ def cron_run(remote_name: str, job_id: str, confirm: bool) -> dict:
         raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron trigger failed", entry)[:1000],
                           "cron_run_failed", True)
     return result(True, "cron_run", remote_name, status="triggered", job_id=valid_id)
+
+
+def _cron_request_evidence(entry: dict, job_id: str, since_epoch: float = 0) -> dict:
+    """Reduce correlated request dumps to a safe failure classification remotely."""
+    program = r'''
+import json, re, sys
+from pathlib import Path
+job_id, since = sys.argv[1], float(sys.argv[2])
+root = Path.home() / ".hermes" / "sessions"
+files = sorted(root.glob(f"request_dump_cron_{job_id}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+files = [p for p in files if p.stat().st_mtime >= since][:3]
+patterns = [
+    (re.compile(r"(?i)not supported|unsupported model"), "unsupported_model"),
+    (re.compile(r"(?i)http\s*400|bad request"), "provider_bad_request"),
+    (re.compile(r"(?i)authentication|unauthorized|forbidden"), "provider_authentication"),
+    (re.compile(r"(?i)rate.?limit|quota exceeded|usage limit|\b429\b"), "provider_quota"),
+]
+reason = ""
+for path in files:
+    try: text = path.read_text(errors="replace")[-65536:]
+    except OSError: continue
+    for pattern, label in patterns:
+        if pattern.search(text): reason = label; break
+    if reason: break
+print(json.dumps({"files_checked": len(files), "failure": bool(reason), "reason": reason}))
+'''
+    res = _checked(entry, "python3 -c {} {} {}".format(
+        shlex.quote(program), shlex.quote(job_id), shlex.quote(str(since_epoch))),
+        timeout=20, what="Hermes request evidence inspection failed")
+    try:
+        evidence = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("Hermes request evidence was invalid", "invalid_cron_evidence") from exc
+    return evidence if isinstance(evidence, dict) else {}
+
+
+def cron_verify(remote_name: str, job_id: str, timeout: int, confirm: bool) -> dict:
+    """Run one cron synchronously and cross-check terminal metadata and request evidence."""
+    if not confirm:
+        raise HermesError("verified cron run requires --confirm", "confirmation_required")
+    if timeout < 10 or timeout > 7200:
+        raise HermesError("verified cron timeout must be between 10 and 7200 seconds", "invalid_timeout")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    valid_id = _valid_cron_job_id(job_id)
+    before = next((job for job in _cron_snapshot(entry)["jobs"] if job.get("id") == valid_id), None)
+    if before is None:
+        raise HermesError("Hermes cron job was not found", "cron_job_not_found")
+    route_issues = audit_jobs([before])
+    if route_issues:
+        raise HermesError(route_issues[0]["reason"], "invalid_cron_routing")
+    started = time.time()
+    res = _ssh(entry, f"{paths['launcher']} cron run --accept-hooks {shlex.quote(valid_id)}", timeout=timeout)
+    after = next((job for job in _cron_snapshot(entry)["jobs"] if job.get("id") == valid_id), None) or before
+    evidence = _cron_request_evidence(entry, valid_id, started - 2)
+    derived = effective_job_status(after, evidence.get("reason", "") if evidence.get("failure") else "")
+    transitioned = after.get("last_run_at") != before.get("last_run_at")
+    ok = res.returncode == 0 and transitioned and derived["effective_status"] in {"ok", "idle_ok"}
+    data = {
+        "name": after.get("name"), "transitioned": transitioned,
+        "prior_run_at": before.get("last_run_at"), "observed_run_at": after.get("last_run_at"),
+        "upstream_status": after.get("last_status"), **derived,
+        "evidence": evidence, "elapsed_seconds": round(time.time() - started, 2),
+    }
+    error = None if ok else HermesError(
+        "verified cron execution failed: " + (evidence.get("reason") or "no successful terminal transition"),
+        "cron_verified_run_failed", True)
+    return result(ok, "cron_verify", remote_name, status=derived["effective_status"],
+                  job_id=valid_id, data=data, error=error)
 
 
 def _mcp_contract_probe(paths: dict) -> str:
@@ -1238,19 +1500,77 @@ def doctor(remote_name: str) -> dict:
                   error=None if healthy else HermesError("remote Hermes prerequisites are incomplete", "doctor_failed", True))
 
 
+def _worktree_snapshot(entry: dict, paths: dict) -> list[dict]:
+    program = r'''
+import json, subprocess, sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve()
+worktree_root = Path(sys.argv[2]).resolve()
+items=[]
+if root.is_dir():
+  for repo in sorted(root.iterdir()):
+    if not (repo / ".git").exists(): continue
+    listed=subprocess.run(["git","-C",str(repo),"worktree","list","--porcelain"],text=True,capture_output=True)
+    if listed.returncode: continue
+    records=[]; current={}
+    for line in listed.stdout.splitlines()+[""]:
+      if not line:
+        if current: records.append(current); current={}
+      elif " " in line:
+        key,value=line.split(" ",1); current[key]=value
+      else: current[line]=True
+    for record in records:
+      path=Path(record.get("worktree","")).resolve()
+      allowed = path == repo.resolve() or root in path.parents or worktree_root in path.parents
+      if not allowed: continue
+      status=subprocess.run(["git","-C",str(path),"status","--porcelain"],text=True,capture_output=True)
+      dirty=[line[3:] for line in status.stdout.splitlines()[:100] if len(line)>3] if status.returncode==0 else []
+      items.append({"repository":repo.name,"path":str(path),"head":record.get("HEAD",""),
+                    "branch":record.get("branch"),"detached":bool(record.get("detached")),
+                    "dirty":bool(dirty),"dirty_paths":dirty,"dirty_truncated":len(status.stdout.splitlines())>100})
+print(json.dumps({"worktrees":items},sort_keys=True))
+'''
+    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(paths['repo_root'])} {shlex.quote(paths['worktrees'])}",
+                   timeout=60, what="Hermes worktree inventory failed")
+    try:
+        payload = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("Hermes worktree inventory was invalid", "invalid_worktree_inventory") from exc
+    items = payload.get("worktrees", [])
+    return items if isinstance(items, list) else []
+
+
+def worktree_list(remote_name: str) -> dict:
+    entry = _require_remote(remote_name)
+    items = _worktree_snapshot(entry, _paths(entry))
+    return result(True, "worktree_list", remote_name, status="dirty" if any(item.get("dirty") for item in items) else "clean",
+                  data={"worktrees": items, "dirty_count": sum(bool(item.get("dirty")) for item in items)})
+
+
 def health(remote_name: str) -> dict:
     """Return a bounded operational view without performing repair."""
-    diagnostic = doctor(remote_name)
     entry = _require_remote(remote_name)
     paths = _paths(entry)
-    state = _remote_state_read(entry, paths)
-    state, stale_jobs = _reconcile_sessions(entry, paths, state)
-    service = _ssh(entry, (
+    service_command = (
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user is-active hermes-gateway-sandbox.service 2>/dev/null || true; "
         "else echo unavailable; fi; "
         "if command -v loginctl >/dev/null 2>&1; then loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
         "else echo unavailable; fi; "
-        "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true"), timeout=30)
+        "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        diagnostic_future = pool.submit(doctor, remote_name)
+        state_future = pool.submit(_remote_state_read, entry, paths)
+        service_future = pool.submit(_ssh, entry, service_command, 30)
+        gateway_future = pool.submit(_gateway_ownership, entry)
+        cron_future = pool.submit(_cron_snapshot, entry)
+        worktree_future = pool.submit(_worktree_snapshot, entry, paths)
+        diagnostic = diagnostic_future.result()
+        state = state_future.result()
+        service = service_future.result()
+        gateway = gateway_future.result()
+        observed = cron_future.result()["jobs"]
+        worktrees = worktree_future.result()
+    state, stale_jobs = _reconcile_sessions(entry, paths, state)
     lines = (service.stdout or "").splitlines()
     gateway_state = lines[0].strip() if lines else "unknown"
     linger = lines[1].strip().lower() if len(lines) > 1 else "unknown"
@@ -1282,13 +1602,35 @@ def health(remote_name: str) -> dict:
         state = persisted
     sessions = state["sessions"].values()
     diagnostic_error = diagnostic["error"]
-    error = None if diagnostic_error is None else HermesError(
-        diagnostic_error["message"], diagnostic_error["code"], diagnostic_error["retryable"])
+    cron_health = []
+    for job in observed:
+        evidence_reason = str(job.get("evidence_reason") or "")
+        derived = effective_job_status(job, evidence_reason)
+        cron_health.append({
+            "id": job.get("id"), "name": job.get("name"), "kind": classify_job(job),
+            "upstream_status": job.get("last_status"), **derived,
+            "evidence_reason": evidence_reason,
+        })
+    catalog = load_catalog()
+    cron_plan = reconciliation_plan(catalog, observed, paths=paths)
+    degraded_reasons = []
+    if not diagnostic["ok"]: degraded_reasons.append("prerequisites")
+    if not gateway["healthy"]: degraded_reasons.append("gateway_ownership")
+    if any(item["effective_status"] in {"failed", "invalid"} for item in cron_health): degraded_reasons.append("cron_failure")
+    if cron_plan["changes"]: degraded_reasons.append("cron_drift")
+    healthy = not degraded_reasons
+    error = None if healthy else HermesError(
+        "Hermes health is degraded: " + ", ".join(degraded_reasons), "hermes_health_degraded", True)
     return result(
-        diagnostic["ok"], "health", remote_name, status="healthy" if diagnostic["ok"] else "degraded",
+        healthy, "health", remote_name, status="healthy" if healthy else "degraded",
         data={
             "checks": diagnostic["data"]["checks"],
-            "gateway": {"state": gateway_state, "linger": linger},
+            "gateway": {**gateway, "state": gateway_state, "linger": linger},
+            "cron": {"jobs": cron_health, "drift": cron_plan["changes"],
+                     "catalog_fingerprint": cron_plan["catalog_fingerprint"]},
+            "worktrees": {"count": len(worktrees),
+                          "dirty_count": sum(bool(item.get("dirty")) for item in worktrees)},
+            "degraded_reasons": degraded_reasons,
             "sessions": {
                 "running": sum(session.get("state") == "running" for session in sessions),
                 "stale": sum(session.get("state") == "stale" for session in sessions),
@@ -1524,12 +1866,15 @@ def update_apply(remote_name: str, version: str, commit: str | None, confirm: bo
     gateway_was_active = (quiesce.stdout or "").strip().splitlines()[-1:] == ["active"]
     try:
         installed = install(remote_name, version, plan["commit"])
-        health_result = health(remote_name)
-        if not health_result["ok"]:
-            raise HermesError("post-update health check failed", "update_health_failed")
+        _install_cron_scripts(entry)
         if gateway_was_active:
             _checked(entry, "systemctl --user start hermes-gateway-sandbox.service", timeout=60,
                      what="could not resume Hermes gateway")
+        health_result = health(remote_name)
+        blocking_health = [reason for reason in health_result["data"].get("degraded_reasons", [])
+                           if reason != "cron_drift"]
+        if blocking_health:
+            raise HermesError("post-update health check failed", "update_health_failed")
     except HermesError as exc:
         try:
             backup_restore(remote_name, backup_id, True, create_pre_restore_backup=False)
@@ -1965,6 +2310,95 @@ def _gateway_install_command(unit: str, body: str) -> str:
         f"if systemctl --user daemon-reload && systemctl --user enable {shlex.quote(unit)} && loginctl enable-linger \"$USER\"; "
         "then rm -f \"$backup\"; else rc=$?; rollback; exit \"$rc\"; fi"
     )
+
+
+def _gateway_ownership(entry: dict) -> dict:
+    program = r'''
+import json, os, subprocess
+from pathlib import Path
+processes=[]
+for proc in Path("/proc").iterdir():
+    if not proc.name.isdigit(): continue
+    try: args=proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\0")
+    except OSError: continue
+    if any(arg.endswith("hermes") or "/hermes" in arg for arg in args) and "gateway" in args and "run" in args:
+        processes.append(int(proc.name))
+units={}
+for unit in ("hermes-gateway-sandbox.service","hermes-gateway.service"):
+    result=subprocess.run(["systemctl","--user","show",unit,"-p","ActiveState","-p","UnitFileState","-p","NRestarts"],text=True,capture_output=True)
+    values={}
+    for line in result.stdout.splitlines():
+        key,sep,value=line.partition("=")
+        if sep: values[key]=value
+    units[unit]={"active_state":values.get("ActiveState","unknown"),
+                 "unit_file_state":values.get("UnitFileState","unknown"),
+                 "restart_count":int(values.get("NRestarts","0") or 0)}
+print(json.dumps({"gateway_pids": sorted(processes),"units":units},sort_keys=True))
+'''
+    res = _ssh(entry, f"python3 -c {shlex.quote(program)}", timeout=30)
+    try:
+        process_data = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError:
+        process_data = {}
+    units = process_data.get("units") if isinstance(process_data, dict) else {}
+    units = units if isinstance(units, dict) else {}
+    pids = process_data.get("gateway_pids") if isinstance(process_data, dict) else []
+    pids = pids if isinstance(pids, list) else []
+    expected_active = units.get(GATEWAY_UNIT, {}).get("active_state") == "active"
+    legacy_state = units.get("hermes-gateway.service", {}).get("active_state")
+    legacy_active = legacy_state in {"active", "activating", "reloading"}
+    conflict = legacy_active or len(pids) != 1 or not expected_active
+    return {"expected_unit": GATEWAY_UNIT, "units": units, "gateway_process_count": len(pids),
+            "conflict": conflict, "healthy": not conflict}
+
+
+def gateway_converge(remote_name: str, confirm: bool = False) -> dict:
+    """Preview or establish the Sandbox user service as the sole gateway owner."""
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    before = _gateway_ownership(entry)
+    actions = []
+    legacy = before["units"].get("hermes-gateway.service", {})
+    if legacy.get("active_state") in {"active", "activating", "reloading"}:
+        actions.append("stop legacy hermes-gateway.service")
+    if legacy.get("unit_file_state") == "enabled":
+        actions.append("disable legacy hermes-gateway.service")
+    if before["gateway_process_count"] != (1 if before["healthy"] else 0):
+        actions.append("stop unmanaged gateway processes")
+    if not before["healthy"]:
+        actions += ["install hermes-gateway-sandbox.service", "start managed gateway", "verify stable ownership"]
+    if not confirm or before["healthy"]:
+        return result(True, "gateway_converge", remote_name,
+                      status="converged" if before["healthy"] else "planned",
+                      data={"before": before, "actions": actions, "requires_confirm": bool(actions)})
+    killer = r'''
+import os, signal
+from pathlib import Path
+me={os.getpid(), os.getppid()}
+for proc in Path("/proc").iterdir():
+    if not proc.name.isdigit() or int(proc.name) in me: continue
+    try: args=proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\0")
+    except OSError: continue
+    if any(arg.endswith("hermes") or "/hermes" in arg for arg in args) and "gateway" in args and "run" in args:
+        try: os.kill(int(proc.name), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError): pass
+'''
+    command = (
+        "set -eu; systemctl --user stop hermes-gateway-sandbox.service 2>/dev/null || true; "
+        "systemctl --user stop hermes-gateway.service 2>/dev/null || true; "
+        "systemctl --user disable hermes-gateway.service >/dev/null 2>&1 || true; "
+        f"python3 -c {shlex.quote(killer)}; sleep 2; "
+        + _gateway_install_command(GATEWAY_UNIT, _gateway_unit(paths)) + "; "
+        f"systemctl --user restart {GATEWAY_UNIT}; sleep 5"
+    )
+    _checked(entry, command, timeout=60, what="Hermes gateway convergence failed")
+    after = _gateway_ownership(entry)
+    if not after["healthy"]:
+        return result(False, "gateway_converge", remote_name, status="degraded",
+                      data={"before": before, "after": after, "actions": actions},
+                      error=HermesError("gateway ownership did not converge", "gateway_conflict", True))
+    return result(True, "gateway_converge", remote_name, status="converged",
+                  data={"before": before, "after": after, "actions": actions})
 
 
 def gateway(remote_name: str, action: str, allowlist: list[str] | None = None, lines: int = 200) -> dict:

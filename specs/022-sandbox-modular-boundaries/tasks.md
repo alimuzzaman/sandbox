@@ -132,16 +132,16 @@
 
 ### Tests for User Story 4
 
-- [ ] T049 [P] [US4] Add failing exact command/alias inventory, deterministic help grouping, and collision tests in `tests/test_command_composition.py`
-- [ ] T050 [P] [US4] Add failing test-only command, project/instance resolution, capability preflight, and destructive-confirmation tests in `tests/test_command_composition.py`
-- [ ] T051 [P] [US4] Add failing compatibility tests for current parser options, representative errors, JSON output, and exit codes in `tests/test_cli.py`
+- [X] T049 [P] [US4] Add failing exact command/alias inventory, deterministic help grouping, and collision tests in `tests/test_command_composition.py`
+- [X] T050 [P] [US4] Add failing test-only command, project/instance resolution, capability preflight, and destructive-confirmation tests in `tests/test_command_composition.py`
+- [X] T051 [P] [US4] Add failing compatibility tests for current parser options, representative errors, JSON output, and exit codes in `tests/test_cli.py`
 
 ### Implementation for User Story 4
 
-- [ ] T052 [US4] Implement deterministic parser composition, shared scope resolution, capability preflight, and legacy bridge in `sandbox/registry.py` and `sandbox/cli.py`
-- [ ] T053 [US4] Add the explicit built-in command manifest in `sandbox/commands/manifest.py`
-- [ ] T054 [US4] Move instance/config parser ownership beside handlers in `sandbox/commands/instances_cmd.py` and `sandbox/commands/config_setup.py`
-- [ ] T055 [US4] Move shared lifecycle parser ownership beside handlers in `sandbox/commands/lifecycle.py`
+- [X] T052 [US4] Implement deterministic parser composition, shared scope resolution, capability preflight, and legacy bridge in `sandbox/registry.py` and `sandbox/cli.py`
+- [X] T053 [US4] Add the explicit built-in command manifest in `sandbox/commands/manifest.py`
+- [X] T054 [US4] Move instance/config parser ownership beside handlers in `sandbox/commands/instances_cmd.py` and `sandbox/commands/config_setup.py`
+- [X] T055 [US4] Move shared lifecycle parser ownership beside handlers in `sandbox/commands/lifecycle.py`
 - [ ] T056 [US4] Represent every remaining command through a feature-owned spec or explicit bridge entry without changing its handler in `sandbox/commands/manifest.py`
 - [ ] T057 [US4] Run exact inventory, full CLI parser, representative live command, and no-central-growth checks; update `specs/022-sandbox-modular-boundaries/cli-inventory.md` and implementation evidence
 

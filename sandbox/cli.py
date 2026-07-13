@@ -419,7 +419,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
         help="repo: auth|clone|list; job: status|kill; cron: list|validate|create|route|run; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
@@ -449,6 +449,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="explicit gateway allowlist entry (repeatable)")
     hermes_p.add_argument("--lines", type=int, default=200, help="maximum gateway log lines")
     hermes_p.add_argument("--confirm", action="store_true", help="confirm a protected Hermes operation")
+    hermes_p.add_argument("--force-replace", action="store_true", help="replace every observed cron entry from the committed catalog")
     hermes_p.add_argument("--port", type=int, default=None, help="loopback dashboard port (default 9119)")
     hermes_p.add_argument("--fqdn", default=None, help="public dashboard hostname for expose")
     hermes_p.add_argument("--plan", action="store_true", help="show a read-only dashboard exposure plan")

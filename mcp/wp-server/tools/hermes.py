@@ -134,3 +134,53 @@ def hermes_cron_run(remote: str, job_id: str, confirm: bool = False) -> dict:
     if confirm:
         args.append("--confirm")
     return _run_sb(args, 30)
+
+
+@mcp.tool()
+def hermes_health(remote: str) -> dict:
+    """Read aggregated gateway, scheduler, cron, and worktree health."""
+    return _run_sb(["hermes", "health", "--remote", remote], 90)
+
+
+@mcp.tool()
+def hermes_worktree_list(remote: str) -> dict:
+    """List bounded managed repository and worktree evidence."""
+    return _run_sb(["hermes", "worktree", "list", "--remote", remote], 90)
+
+
+@mcp.tool()
+def hermes_gateway_converge(remote: str, confirm: bool = False) -> dict:
+    """Preview or establish the Sandbox gateway as the sole owner."""
+    args = ["hermes", "gateway", "converge", "--remote", remote]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 90)
+
+
+@mcp.tool()
+def hermes_cron_catalog(remote: str) -> dict:
+    """Validate and render the committed non-secret cron catalog."""
+    return _run_sb(["hermes", "cron", "catalog", "--remote", remote], 30)
+
+
+@mcp.tool()
+def hermes_cron_reconcile(remote: str, confirm: bool = False,
+                          force_replace: bool = False) -> dict:
+    """Preview or apply exact desired cron state from the committed catalog."""
+    args = ["hermes", "cron", "reconcile", "--remote", remote]
+    if force_replace:
+        args.append("--force-replace")
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 300)
+
+
+@mcp.tool()
+def hermes_cron_verify(remote: str, job_id: str, timeout: int = 600,
+                       confirm: bool = False) -> dict:
+    """Run one cron and wait for evidence-backed terminal status."""
+    args = ["hermes", "cron", "verify", job_id, "--remote", remote,
+            "--timeout", str(timeout)]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, min(timeout + 60, 7260))

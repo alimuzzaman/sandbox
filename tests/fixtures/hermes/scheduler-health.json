@@ -1,0 +1,36 @@
+{
+  "gateway": {
+    "expected_unit": "hermes-gateway-sandbox.service",
+    "gateway_process_count": 2,
+    "legacy_restart_count": 1350
+  },
+  "jobs": [
+    {
+      "id": "111111111111",
+      "name": "monitor",
+      "no_agent": true,
+      "script": "monitor.py",
+      "last_status": "ok",
+      "last_run_at": "2026-07-13T00:00:00Z"
+    },
+    {
+      "id": "222222222222",
+      "name": "false-green-agent",
+      "no_agent": false,
+      "model_snapshot": "gpt-5.6-terra",
+      "last_status": "ok",
+      "last_run_at": "2026-07-13T00:00:00Z",
+      "evidence_reason": "unsupported_model"
+    }
+  ],
+  "worktrees": [
+    {
+      "repository": "sandbox",
+      "branch": null,
+      "detached": true,
+      "head": "0000000000000000000000000000000000000000",
+      "dirty": true,
+      "dirty_paths": ["sandbox/core/_hermes.py"]
+    }
+  ]
+}

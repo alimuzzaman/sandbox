@@ -174,9 +174,18 @@ def cmd_hermes(cfg, args) -> None:
                 if not job_id:
                     raise hermes.HermesError("cron run requires a job id", "missing_cron_job_id")
                 payload = hermes.cron_run(args.remote, job_id, args.confirm)
+            elif args.subaction == "catalog":
+                payload = hermes.cron_catalog(args.remote)
+            elif args.subaction == "reconcile":
+                payload = hermes.cron_reconcile(args.remote, args.confirm, args.force_replace)
+            elif args.subaction == "verify":
+                job_id = args.target or args.job_id
+                if not job_id:
+                    raise hermes.HermesError("cron verify requires a job id", "missing_cron_job_id")
+                payload = hermes.cron_verify(args.remote, job_id, args.timeout, args.confirm)
             else:
                 raise hermes.HermesError(
-                    "cron action must be list, validate, create, route, or run",
+                    "cron action must be list, validate, create, route, run, catalog, reconcile, or verify",
                     "invalid_cron_action",
                 )
         elif action == "repo":
@@ -184,7 +193,14 @@ def cmd_hermes(cfg, args) -> None:
         elif action == "gateway":
             if not args.subaction:
                 raise hermes.HermesError("gateway action is required", "missing_gateway_action")
-            payload = hermes.gateway(args.remote, args.subaction, args.allowlist, args.lines)
+            if args.subaction == "converge":
+                payload = hermes.gateway_converge(args.remote, args.confirm)
+            else:
+                payload = hermes.gateway(args.remote, args.subaction, args.allowlist, args.lines)
+        elif action == "worktree":
+            if args.subaction != "list":
+                raise hermes.HermesError("worktree action must be list", "invalid_worktree_action")
+            payload = hermes.worktree_list(args.remote)
         elif action == "update":
             if args.subaction == "plan":
                 payload = hermes.update_plan(args.remote, args.version or hermes.SUPPORTED_TAG, args.commit)

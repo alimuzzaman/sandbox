@@ -66,6 +66,13 @@ Workspace / commits / delegates: Local `codex/hermes-public-access`; remote Herm
 
 Evidence: Commands and live results above; final full-suite and post-worker review evidence are appended after execution.
 
+## Final local verification (T038)
+
+- `python3 -m unittest tests.test_hermes tests.test_cli tests.test_mcp` → 138 passed, 1 skipped (14.892s).
+- `python3 -m unittest discover -s tests -v` → 510 passed, 2 skipped (19.327s). Expected negative-path diagnostic output and pre-existing subprocess `ResourceWarning` messages were emitted without test failures.
+- `./sb selftest` → 510 passed, 2 skipped (24.495s); final status: `selftest: passed`.
+- The repository does not provide an executable `.cli-venv/bin/python`, so all T038 commands used the mandated `python3 -m unittest` fallback. No remote or deployment command was run.
+
 Outcome, residual risk, and follow-up: Gateway and cron state are converged. Remaining work is the approved scheduled-change proof, final full-suite rerun after the last tooling additions, and reviewed preservation of any resulting worktree change.
 
 Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, and bounded verified execution.

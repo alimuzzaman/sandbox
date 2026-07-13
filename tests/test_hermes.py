@@ -527,6 +527,25 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertFalse(out["data"]["stability"]["scheduler_present"])
         self.assertIn("cron status", ssh.call_args.args[1])
 
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._gateway_ownership")
+    @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_gateway_convergence_bounds_transient_ownership_probe_failure(
+            self, require_remote, paths, ownership, ssh):
+        healthy = {"healthy": True, "gateway_process_count": 1, "units": {
+            hermes.GATEWAY_UNIT: {"restart_count": 3},
+            "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
+        }}
+        ownership.side_effect = [healthy, hermes.HermesError(
+            "private command", "remote_unavailable", True)]
+        out = hermes.gateway_converge("test", True, stability_seconds=1, sample_interval=1,
+                                      sleeper=lambda _: None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "gateway_stability_failed")
+        self.assertFalse(out["data"]["stability"]["ownership_present"])
+        self.assertNotIn("private command", json.dumps(out))
+
     @patch("sandbox.core._hermes._install_cron_scripts")
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read", return_value={})
@@ -741,11 +760,14 @@ class TestPublicExposureLifecycle(unittest.TestCase):
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     def test_remote_timeout_becomes_a_retryable_sanitized_error(self, ssh_run):
-        ssh_run.side_effect = subprocess.TimeoutExpired(["ssh"], 30)
+        secret_command = ["ssh", "host", "Authorization: Bearer should-not-appear"]
+        ssh_run.side_effect = subprocess.TimeoutExpired(secret_command, 30)
         with self.assertRaises(hermes.HermesError) as caught:
             hermes._ssh({"ssh": "ubuntu@example.test"}, "true", timeout=30)
         self.assertEqual(caught.exception.code, "remote_unavailable")
         self.assertTrue(caught.exception.retryable)
+        self.assertEqual(str(caught.exception), "remote command timed out after 30 seconds")
+        self.assertNotIn("should-not-appear", str(caught.exception))
 
     @patch("sandbox.core._hermes.remote.resolve_sandbox_home")
     def test_sandbox_home_timeout_becomes_a_retryable_sanitized_error(self, resolve_home):

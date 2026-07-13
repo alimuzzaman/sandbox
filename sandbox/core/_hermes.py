@@ -263,8 +263,10 @@ def validate_state_repo(value: str) -> str:
 def _ssh(entry: dict, command: str, timeout: int = 60) -> subprocess.CompletedProcess:
     try:
         return remote.ssh_run(entry, command, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HermesError(f"remote command timed out after {timeout} seconds", "remote_unavailable", True) from exc
+    except (OSError, ValueError) as exc:
+        raise HermesError(_redact(str(exc), entry)[:500], "remote_unavailable", True) from exc
 
 
 def _ssh_stdin(entry: dict, command: str, data: bytes, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -272,8 +274,10 @@ def _ssh_stdin(entry: dict, command: str, data: bytes, timeout: int = 60) -> sub
     try:
         return subprocess.run(remote.ssh_command_args(entry, command), input=data,
                               capture_output=True, text=False, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HermesError(f"remote input command timed out after {timeout} seconds", "remote_unavailable", True) from exc
+    except (OSError, ValueError) as exc:
+        raise HermesError(_redact(str(exc), entry)[:500], "remote_unavailable", True) from exc
 
 
 def _ssh_stdin_with_progress(entry: dict, command: str, data: bytes, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -293,8 +297,10 @@ def _ssh_stdin_with_progress(entry: dict, command: str, data: bytes, timeout: in
         stdout = proc.stdout.read()
         returncode = proc.wait(timeout=timeout)
         return subprocess.CompletedProcess(proc.args, returncode, stdout, "".join(progress).encode())
-    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        raise HermesError(_redact(str(exc), entry), "remote_unavailable", True) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HermesError(f"remote streaming command timed out after {timeout} seconds", "remote_unavailable", True) from exc
+    except (OSError, ValueError) as exc:
+        raise HermesError(_redact(str(exc), entry)[:500], "remote_unavailable", True) from exc
 
 
 def _checked(entry: dict, command: str, timeout: int = 60, *, what: str) -> subprocess.CompletedProcess:
@@ -2648,8 +2654,18 @@ def _gateway_stability(entry: dict, initial: dict, *, paths: dict, stability_sec
     scheduler = []
 
     def observe_scheduler() -> dict:
-        status = _ssh(entry, f"{paths['launcher']} cron status", timeout=30)
+        try:
+            status = _ssh(entry, f"{paths['launcher']} cron status", timeout=30)
+        except HermesError:
+            return {"available": False}
         return {"available": status.returncode == 0}
+
+    def observe_ownership() -> dict:
+        try:
+            return _gateway_ownership(entry)
+        except HermesError:
+            return {"healthy": False, "units": {}, "gateway_process_count": 0,
+                    "available": False}
 
     scheduler.append(observe_scheduler())
     elapsed = 0
@@ -2657,7 +2673,7 @@ def _gateway_stability(entry: dict, initial: dict, *, paths: dict, stability_sec
         delay = min(sample_interval, stability_seconds - elapsed)
         sleeper(delay)
         elapsed += delay
-        observations.append(_gateway_ownership(entry))
+        observations.append(observe_ownership())
         scheduler.append(observe_scheduler())
 
     def restart_count(observation: dict) -> int:
@@ -2668,12 +2684,14 @@ def _gateway_stability(entry: dict, initial: dict, *, paths: dict, stability_sec
             return -1
 
     restart_counts = [restart_count(observation) for observation in observations]
-    stable = (all(observation.get("healthy") for observation in observations)
+    ownership_present = all(observation.get("available", True) for observation in observations)
+    stable = (ownership_present and all(observation.get("healthy") for observation in observations)
               and all(item["available"] for item in scheduler)
               and all(count <= restart_counts[0] for count in restart_counts[1:]))
     return {"stable": stable, "observation_seconds": stability_seconds,
             "sample_count": len(observations), "restart_counts": restart_counts,
-            "scheduler": scheduler[-1], "scheduler_present": all(item["available"] for item in scheduler)}
+            "ownership_present": ownership_present, "scheduler": scheduler[-1],
+            "scheduler_present": all(item["available"] for item in scheduler)}
 
 
 def gateway_converge(remote_name: str, confirm: bool = False, *,

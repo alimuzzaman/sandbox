@@ -126,7 +126,7 @@
 - [X] T043 Run confirmed gateway convergence and verify one stable scheduler owner over the required observation window
 - [X] T044 Back up the remote cron inventory, remove every existing job, recreate the complete reviewed catalog, and report exact partial state if any step fails
 - [X] T045 Trigger the harmless acceptance job with verified execution, confirm evidence-backed terminal behavior, and rerun reconciliation to prove zero drift
-- [ ] T046 Complete `implementation-evidence.md`, mark implemented tasks, rerun Spec-Kit analysis/convergence, and report residual risks and learning delta
+- [X] T046 Complete `implementation-evidence.md`, mark implemented tasks, rerun Spec-Kit analysis/convergence, and report residual risks and learning delta
 
 ---
 

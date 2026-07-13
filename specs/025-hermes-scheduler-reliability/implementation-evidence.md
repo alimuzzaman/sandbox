@@ -68,6 +68,15 @@
 - Local control state was verified as a mode-0700 directory with a mode-0600 `%C`-hashed socket. It contains no readable user, host, port, or credential.
 - SSH, SCP, and direct VPS Git pushes share the 60-second policy. Every command launches once, keeps its own timeout/exit/output/confirmation contract, and never retries from stderr after launch. If the local control directory cannot be prepared, one direct non-multiplexed command is selected before launch.
 
+## Final live convergence
+
+- The managed remote Sandbox checkout and runtime were synchronized to `c0effa478ac55dbd0ebf7a64ccbcbc33c20d6a84` before acceptance.
+- `./sb hermes gateway converge --remote scaleway-sandbox --confirm --json` completed one uninterrupted 120-second remote observation. All 13 samples reported exactly one managed gateway process, the legacy unit inactive/disabled, scheduler availability, and managed restart count zero.
+- The first confirmed cron replacement call timed out during its 15-second preflight. A read-only job inventory proved that no job had changed, so the operation was not replayed until observed reconciliation still showed the complete four-to-three replacement plan.
+- Confirmed reconciliation then removed `todo-md-monitor` plus all three old catalog jobs and recreated exactly three jobs: `28330fb99073` (`codex-quota-requeue`), `abee32318dc4` (`lenzora-kanban-dispatch`), and `d158d3a92a9c` (`sandbox-approved-spec-task`).
+- Verified runs of the two script jobs completed successfully in 5.45 and 4.42 seconds respectively, with transitions observed, valid routes, no evidence failures, and no false success.
+- A subsequent ordinary reconciliation reported `changes=false`, `blocked_by=[]`, and all three names retained. Aggregate health reported `healthy`, no degraded reasons, no cron drift, one gateway process, and zero managed or legacy restart counts. The scheduled agent had not yet run at this checkpoint and remained route-valid.
+
 ## Trace
 
 Outcome / non-goals: Make Hermes scheduling truthful and reproducible; no unrelated production deployment.
@@ -94,7 +103,8 @@ Evidence: Commands and live results above; final full-suite and post-worker revi
 - `./sb selftest` passed after the final changes. Test discovery contains 534 tests; pre-existing subprocess `ResourceWarning` diagnostics remain non-failing.
 - `git diff --check` and Python compilation of `sandbox/core/_remote.py`, `sandbox/core/_hermes.py`, and `sandbox/hermes/scheduler.py` passed.
 - The final single-connection gateway sampler passed `tests.test_hermes.TestSchedulerReliability`; the combined Hermes, remote transport, and catalog-integrity suites passed 211 tests.
+- Final `./sb selftest` passed 536 tests with one documented dependency-isolation skip. Spec-Kit analysis found no unchecked tasks, placeholders, clarification markers, requirement conflicts, or constitution violations; convergence found no remaining unimplemented scope.
 
-Outcome, residual risk, and follow-up: Local implementation and review are complete. Remaining live work is to ship/synchronize this revision, replace the four observed jobs with the final three-job catalog, execute every recreated job, and retain final sanitized evidence. Unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
+Outcome, residual risk, and follow-up: Local implementation, review, remote synchronization, gateway convergence, and three-job replacement are complete. The recreated agent job still needs one final no-work acceptance run after this specification has no unchecked implementation task. Unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
 
 Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, and bounded verified execution.

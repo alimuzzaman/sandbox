@@ -170,6 +170,41 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("stop legacy hermes-gateway.service", out["data"]["actions"])
         self.assertTrue(out["data"]["requires_confirm"])
 
+    @patch("sandbox.core._hermes._ssh")
+    def test_gateway_ownership_rejects_deactivating_legacy_unit(self, ssh):
+        ssh.return_value = _completed(stdout=json.dumps({
+            "gateway_pids": [123],
+            "units": {
+                "hermes-gateway-sandbox.service": {
+                    "active_state": "active", "unit_file_state": "enabled", "restart_count": 0,
+                },
+                "hermes-gateway.service": {
+                    "active_state": "deactivating", "unit_file_state": "disabled", "restart_count": 99,
+                },
+            },
+        }))
+        out = hermes._gateway_ownership({})
+        self.assertFalse(out["healthy"])
+        self.assertTrue(out["conflict"])
+
+    @patch("sandbox.core._hermes._install_cron_scripts")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read", return_value={})
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={
+        "launcher": "$HOME/.local/bin/hermes", "repo_root": "/home/u/repos",
+        "sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_setup_bounds_and_labels_each_hermes_cli_step(
+            self, require_remote, paths, checked, state_read, state_write, install_scripts):
+        hermes.setup("test")
+        command = checked.call_args_list[0].args[1]
+        self.assertIn('timeout --foreground 45 "$hermes_bin" "$@"', command)
+        self.assertIn("HERMES_SETUP_STEP_FAILED", command)
+        self.assertIn("run_hermes kanban init", command)
+        self.assertNotIn("$HOME/.local/bin/hermes kanban init", command)
+
     @patch("sandbox.core._hermes._worktree_snapshot", return_value=[{
         "repository": "sandbox", "dirty": True, "dirty_paths": ["file.py"],
     }])

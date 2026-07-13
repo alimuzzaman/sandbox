@@ -886,30 +886,40 @@ def setup(remote_name: str) -> dict:
 mkdir -p \"$HOME/.hermes\" {shlex.quote(paths['repo_root'])}
 test -x {paths['launcher']}
 payload={shlex.quote(payload)}
-{paths['launcher']} --version >/dev/null
+hermes_bin={paths['launcher']}
+run_hermes() {{
+  if timeout --foreground 45 "$hermes_bin" "$@"; then
+    return 0
+  else
+    rc=$?
+  fi
+  printf 'HERMES_SETUP_STEP_FAILED:%s:%s:%s\n' "${{1:-unknown}}" "${{2:-unknown}}" "$rc" >&2
+  return "$rc"
+}}
+run_hermes --version >/dev/null
 if test -f "$HOME/.hermes/sandbox-integration.json"; then
   cp "$HOME/.hermes/sandbox-integration.json" "$HOME/.hermes/sandbox-integration.json.backup"
   chmod 600 "$HOME/.hermes/sandbox-integration.json.backup"
 fi
-{paths['launcher']} mcp remove sandbox >/dev/null 2>&1 || true
-{paths['launcher']} mcp add sandbox --command {shlex.quote(paths['sb'])} --args mcp >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.env.SANDBOX_HOME {shlex.quote(paths['sandbox_home'])} >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.enabled true >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.connect_timeout 60 >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.timeout 1200 >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.supports_parallel_tool_calls false >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.tools.resources true >/dev/null
-{paths['launcher']} config set mcp_servers.sandbox.tools.prompts true >/dev/null
-{paths['launcher']} config set model.default {shlex.quote(HERMES_DEFAULT_MODEL)} >/dev/null
-{paths['launcher']} config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null
-{paths['launcher']} config set terminal.backend local >/dev/null
-{paths['launcher']} config set terminal.home_mode real >/dev/null
-{paths['launcher']} config set terminal.cwd {shlex.quote(paths['repo_root'])} >/dev/null
-{paths['launcher']} config set approvals.mode manual >/dev/null
-{paths['launcher']} config set approvals.cron_mode deny >/dev/null
-{paths['launcher']} config set approvals.mcp_reload_confirm true >/dev/null
-{paths['launcher']} config set approvals.destructive_slash_confirm true >/dev/null
-{_routing_setup_command(paths)}
+run_hermes mcp remove sandbox >/dev/null 2>&1 || true
+run_hermes mcp add sandbox --command {shlex.quote(paths['sb'])} --args mcp >/dev/null
+run_hermes config set mcp_servers.sandbox.env.SANDBOX_HOME {shlex.quote(paths['sandbox_home'])} >/dev/null
+run_hermes config set mcp_servers.sandbox.enabled true >/dev/null
+run_hermes config set mcp_servers.sandbox.connect_timeout 60 >/dev/null
+run_hermes config set mcp_servers.sandbox.timeout 1200 >/dev/null
+run_hermes config set mcp_servers.sandbox.supports_parallel_tool_calls false >/dev/null
+run_hermes config set mcp_servers.sandbox.tools.resources true >/dev/null
+run_hermes config set mcp_servers.sandbox.tools.prompts true >/dev/null
+run_hermes config set model.default {shlex.quote(HERMES_DEFAULT_MODEL)} >/dev/null
+run_hermes config set model.provider {shlex.quote(HERMES_DEFAULT_PROVIDER)} >/dev/null
+run_hermes config set terminal.backend local >/dev/null
+run_hermes config set terminal.home_mode real >/dev/null
+run_hermes config set terminal.cwd {shlex.quote(paths['repo_root'])} >/dev/null
+run_hermes config set approvals.mode manual >/dev/null
+run_hermes config set approvals.cron_mode deny >/dev/null
+run_hermes config set approvals.mcp_reload_confirm true >/dev/null
+run_hermes config set approvals.destructive_slash_confirm true >/dev/null
+{_routing_setup_command({'launcher': 'run_hermes'})}
 python3 - <<'PY'
 import base64, json, pathlib
 p = pathlib.Path.home() / '.hermes' / 'sandbox-integration.json'
@@ -2394,8 +2404,10 @@ print(json.dumps({"gateway_pids": sorted(processes),"units":units},sort_keys=Tru
     pids = pids if isinstance(pids, list) else []
     expected_active = units.get(GATEWAY_UNIT, {}).get("active_state") == "active"
     legacy_state = units.get("hermes-gateway.service", {}).get("active_state")
-    legacy_active = legacy_state in {"active", "activating", "reloading"}
-    conflict = legacy_active or len(pids) != 1 or not expected_active
+    # Transitional states are not quiescent: a restart policy can move a
+    # deactivating legacy unit straight back to activating.
+    legacy_quiescent = legacy_state in {"inactive", "failed"}
+    conflict = not legacy_quiescent or len(pids) != 1 or not expected_active
     return {"expected_unit": GATEWAY_UNIT, "units": units, "gateway_process_count": len(pids),
             "conflict": conflict, "healthy": not conflict}
 
@@ -2407,7 +2419,7 @@ def gateway_converge(remote_name: str, confirm: bool = False) -> dict:
     before = _gateway_ownership(entry)
     actions = []
     legacy = before["units"].get("hermes-gateway.service", {})
-    if legacy.get("active_state") in {"active", "activating", "reloading"}:
+    if legacy.get("active_state") not in {"inactive", "failed"}:
         actions.append("stop legacy hermes-gateway.service")
     if legacy.get("unit_file_state") == "enabled":
         actions.append("disable legacy hermes-gateway.service")

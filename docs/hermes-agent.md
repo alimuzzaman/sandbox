@@ -117,7 +117,26 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes repo clone --remote scaleway-sandbox --url git@github.com:OWNER/REPO.git --name repo
 ./sb hermes run --remote scaleway-sandbox --repo repo --prompt "Inspect the test command" --async --json
 ./sb hermes job status --remote scaleway-sandbox --job-id JOB_ID --json
+
+# Scheduler changes are routed and confirmation-gated by Sandbox.
+./sb hermes cron validate --remote scaleway-sandbox --json
+./sb hermes cron create --remote scaleway-sandbox \
+  --schedule '17 */4 * * *' --profile terra \
+  --workdir /absolute/remote/worktree --name bounded-work \
+  --prompt 'Process the next approved bounded task.' --confirm --json
+./sb hermes cron route JOB_ID --remote scaleway-sandbox \
+  --profile terra --confirm --json
+./sb hermes cron run JOB_ID --remote scaleway-sandbox --confirm --json
 ```
+
+The scheduler interface accepts only the named Sandbox routes `luna`, `terra`,
+and `sol`. It resolves provider, model, and reasoning effort as separate values;
+a string such as `gpt-5.6-terra/high` is invalid because `/high` is not part of
+the model identifier. On the pinned Hermes release, reasoning effort remains a
+profile setting while each default-profile cron job receives an explicit,
+validated provider/model snapshot. `cron validate` is read-only. Creation,
+routing repair, and triggering require `--confirm`, and creation always uses
+local-file delivery rather than an external messaging destination.
 
 Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
 instead use the upstream OpenAI Codex OAuth provider on the remote:
@@ -164,7 +183,10 @@ reuse that stored allowlist and fail closed if it is missing or unsafe:
 ```
 
 Gateway installation enables systemd user lingering so an enabled gateway can
-recover after a remote reboot; `hermes health` reports its linger state.
+recover after a remote reboot; `hermes health` reports its linger state. The
+managed unit starts with upstream Hermes's `--replace` flag so a stale/manual
+gateway process cannot leave systemd in a restart loop or create two scheduler
+owners.
 
 ## Routed worker profile
 
@@ -195,7 +217,10 @@ to Terra or Sol.
 The local Sandbox MCP server also exposes `hermes_status(remote)` and
 `hermes_run(remote, repo, prompt, worktree=true, async_=true)`, plus
 `hermes_job_status(remote, job_id, offset=0)` and
-`hermes_job_kill(remote, job_id)`. Async runs return a Hermes job ID; the
+`hermes_job_kill(remote, job_id)`. Scheduler parity is provided by
+`hermes_cron_list`, `hermes_cron_validate`, `hermes_cron_create`,
+`hermes_cron_route`, and `hermes_cron_run`; mutating calls require
+`confirm=true`. Async runs return a Hermes job ID; the
 equivalent CLI operations are `sb hermes job status|kill`. Returned output is
 bounded and sanitized, including labelled and common bare provider/API,
 OAuth, and cookie credential forms.

@@ -81,3 +81,56 @@ def hermes_job_kill(remote: str, job_id: str) -> dict:
     return _run_sb([
         "hermes", "job", "kill", "--remote", remote, "--job-id", job_id,
     ], 30)
+
+
+@mcp.tool()
+def hermes_cron_list(remote: str) -> dict:
+    """List non-secret Hermes cron metadata on a configured remote."""
+    return _run_sb(["hermes", "cron", "list", "--remote", remote], 30)
+
+
+@mcp.tool()
+def hermes_cron_validate(remote: str) -> dict:
+    """Audit Hermes cron model snapshots for invalid model/effort combinations."""
+    return _run_sb(["hermes", "cron", "validate", "--remote", remote], 30)
+
+
+@mcp.tool()
+def hermes_cron_create(remote: str, schedule: str, prompt: str, name: str = "",
+                       workdir: str = "", profile: str = "terra",
+                       confirm: bool = False) -> dict:
+    """Create a locally-delivered cron job with a validated Sandbox route.
+
+    profile is one of luna, terra, or sol. Provider, model, and reasoning
+    effort are resolved separately; callers cannot pass a free-form model.
+    confirm must be true because this changes an external scheduler.
+    """
+    args = ["hermes", "cron", "create", "--remote", remote,
+            "--schedule", schedule, "--prompt", prompt, "--profile", profile]
+    if name:
+        args += ["--name", name]
+    if workdir:
+        args += ["--workdir", workdir]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 60)
+
+
+@mcp.tool()
+def hermes_cron_route(remote: str, job_id: str, profile: str = "terra",
+                      confirm: bool = False) -> dict:
+    """Atomically repair a cron job's provider/model snapshot using a named route."""
+    args = ["hermes", "cron", "route", job_id, "--remote", remote,
+            "--profile", profile]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 30)
+
+
+@mcp.tool()
+def hermes_cron_run(remote: str, job_id: str, confirm: bool = False) -> dict:
+    """Trigger a validated existing cron job on the next scheduler tick."""
+    args = ["hermes", "cron", "run", job_id, "--remote", remote]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 30)

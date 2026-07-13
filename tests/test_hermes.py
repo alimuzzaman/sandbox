@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT))
 
 import sandbox.core._hermes as hermes  # noqa: E402
 from sandbox.commands.hermes import _job_payload, _repo_action  # noqa: E402
+from sandbox.hermes.scheduler import (  # noqa: E402
+    SCHEDULE_GUARD_START, audit_jobs, guarded_prompt, invalid_model_reason, scheduled_route,
+)
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -27,6 +30,37 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 
 class TestValidation(unittest.TestCase):
+    def test_scheduled_routes_keep_model_and_effort_separate(self):
+        route = scheduled_route("terra")
+        self.assertEqual(route.model, "gpt-5.6-terra")
+        self.assertEqual(route.effort, "medium")
+        self.assertNotIn(route.effort, route.model)
+        with self.assertRaises(ValueError):
+            scheduled_route("terra/high")
+
+    def test_cron_audit_rejects_effort_appended_to_model(self):
+        self.assertIsNotNone(invalid_model_reason("gpt-5.6-terra/high"))
+        self.assertIsNone(invalid_model_reason("gpt-5.6-terra"))
+        invalid = audit_jobs([
+            {"id": "3359664aaf91", "model_snapshot": "gpt-5.6-terra/high"},
+            {"id": "fallback", "model_snapshot": None, "model": "gpt-5.6-sol/high"},
+            {"id": "healthy", "model_snapshot": "gpt-5.6-terra"},
+        ])
+        self.assertEqual(invalid, [
+            {"job_id": "3359664aaf91",
+             "reason": "reasoning effort was appended to the model identifier"},
+            {"job_id": "fallback",
+             "reason": "reasoning effort was appended to the model identifier"},
+        ])
+
+    def test_cron_execution_guard_is_idempotent_and_uses_supported_runner(self):
+        once = guarded_prompt("Do bounded work.")
+        twice = guarded_prompt(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count(SCHEDULE_GUARD_START), 1)
+        self.assertIn(".cli-venv/bin/python -m unittest", once)
+        self.assertIn("never create a .hermes", once)
+
     def test_public_dashboard_is_exact_and_caddy_stays_loopback(self):
         fragment = hermes._public_caddy_fragment("hermes.asb.bd", False)
         self.assertIn("http://:9120", fragment)
@@ -320,7 +354,7 @@ class TestProfileRendering(unittest.TestCase):
     def test_gateway_user_unit_uses_systemd_home_specifier(self):
         body = hermes._gateway_unit({"repo_root": "/home/ubuntu/sandbox/hermes-repos"})
         self.assertIn("Environment=HERMES_HOME=%h/.hermes", body)
-        self.assertIn("ExecStart=%h/.local/bin/hermes gateway run", body)
+        self.assertIn("ExecStart=%h/.local/bin/hermes gateway run --replace", body)
         self.assertNotIn("$HOME", body)
 
     def test_gateway_install_command_restores_prior_unit_on_failure(self):
@@ -491,6 +525,54 @@ class TestProfileRendering(unittest.TestCase):
 class TestRemoteCommands(unittest.TestCase):
     def setUp(self):
         self.entry = {"ssh": "ubuntu@example.test", "provisioned": True}
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_cron_validate_reports_invalid_routing_without_prompt_data(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.return_value = _completed(stdout=json.dumps({"jobs": [{
+            "id": "3359664aaf91", "name": "work", "model_snapshot": "gpt-5.6-terra/high",
+        }]}))
+        out = hermes.cron_validate("test")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "invalid_cron_routing")
+        self.assertEqual(out["data"]["invalid"][0]["job_id"], "3359664aaf91")
+        self.assertNotIn("prompt", json.dumps(out).lower())
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_cron_route_writes_validated_model_atomically(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.return_value = _completed(stdout='{"job_id":"3359664aaf91"}\n')
+        out = hermes.cron_route("test", "3359664aaf91", "terra", True)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["data"]["model"], "gpt-5.6-terra")
+        command = ssh_run.call_args.args[1]
+        self.assertIn("model_snapshot", command)
+        self.assertIn("os.replace", command)
+        self.assertIn("base64.b64decode", command)
+        self.assertNotIn("terra/high", command)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_cron_mutations_require_confirmation_before_ssh(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.cron_route("test", "3359664aaf91", "terra", False)
+        self.assertEqual(caught.exception.code, "confirmation_required")
+        ssh_run.assert_not_called()
+
+    @patch("sandbox.core._hermes.remote.resolve_sandbox_home", return_value="/home/ubuntu/sandbox")
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_cron_run_detaches_from_slow_upstream_command(self, get_remote, ssh_run, _resolve_home):
+        get_remote.return_value = self.entry
+        ssh_run.return_value = _completed(stdout="triggered\n")
+        out = hermes.cron_run("test", "3359664aaf91", True)
+        self.assertTrue(out["ok"])
+        command = ssh_run.call_args.args[1]
+        self.assertIn("nohup setsid", command)
+        self.assertIn("sandbox-trigger-3359664aaf91.log", command)
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

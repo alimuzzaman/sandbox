@@ -27,6 +27,7 @@ import sandbox.core._cloudflare_access as cloudflare_access
 import sandbox.core._cloudflare_tunnel as cloudflare_tunnel
 from sandbox.core._config import _local_yaml
 from sandbox.core._secrets import resolve_secret
+from sandbox.hermes.scheduler import SCHEDULE_GUARD, audit_jobs, scheduled_route
 
 
 SUPPORTED_TAG = "v2026.7.7.2"
@@ -57,6 +58,7 @@ STATE_SCHEMA = 1
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _JOB_RE = re.compile(r"^[0-9a-f]{16}$")
+_CRON_JOB_RE = re.compile(r"^[0-9a-f]{8,32}$")
 _SECRET_RE = re.compile(r"(?i)\b(token|password|secret|authorization|cookie|session)\b\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
 _BARE_SECRET_RE = re.compile(
     r"(?ix)(?:"
@@ -162,6 +164,13 @@ def validate_repo_name(name: str) -> str:
     if not _REPO_NAME_RE.fullmatch(name) or name.startswith("."):
         raise HermesError("repository name must be a simple managed name", "invalid_repo_name")
     return name
+
+
+def _valid_cron_job_id(job_id: str) -> str:
+    value = (job_id or "").strip().lower()
+    if not _CRON_JOB_RE.fullmatch(value):
+        raise HermesError("invalid Hermes cron job id", "invalid_cron_job_id")
+    return value
 
 
 def validate_repo_url(url: str) -> str:
@@ -427,6 +436,9 @@ def render_profile(sandbox_home: str, sb_path: str) -> dict:
 
 def render_routing_profile() -> dict:
     """Return the non-secret routed-worker policy owned by Sandbox setup."""
+    luna = scheduled_route("luna")
+    terra = scheduled_route("terra")
+    sol = scheduled_route("sol")
     coordinator_soul = f"""{HERMES_ROUTING_POLICY_START}
 ## Sandbox worker routing
 
@@ -436,12 +448,14 @@ Terra, and architecture, security, authorization, data/API, or production-risk w
 Sol. Give workers a bounded goal, context, acceptance criteria, and tool scope. Gather
 their evidence, report residual risk, and require human approval before high-impact
 changes. Do not silently downgrade Sol-class work. Trivial questions may be answered
-directly without delegation.
+directly without delegation. For scheduled jobs, keep provider, model, and reasoning
+effort as separate fields. Never append an effort such as `/high` to a model identifier.
+Use the Sandbox `hermes cron` controls so routing is validated before activation.
 {HERMES_ROUTING_POLICY_END}"""
     return {
         "delegation": {
-            "provider": HERMES_DEFAULT_PROVIDER,
-            "model": "gpt-5.6-terra",
+            "provider": terra.provider,
+            "model": terra.model,
             "max_concurrent_children": 1,
             "max_spawn_depth": 1,
             "orchestrator_enabled": False,
@@ -457,14 +471,14 @@ directly without delegation.
         },
         "auxiliary": {
             "kanban_decomposer": {"provider": HERMES_DEFAULT_PROVIDER, "model": HERMES_DEFAULT_MODEL},
-            "triage_specifier": {"provider": HERMES_DEFAULT_PROVIDER, "model": "gpt-5.6-sol"},
+            "triage_specifier": {"provider": sol.provider, "model": sol.model},
         },
         "coordinator_soul": coordinator_soul,
         "workers": (
             {
                 "name": "luna",
-                "model": "gpt-5.6-luna",
-                "reasoning_effort": "low",
+                "model": luna.model,
+                "reasoning_effort": luna.effort,
                 "description": "Read-only evidence worker for file review, logs, specifications, and research.",
                 "toolsets": ["safe", "file"],
                 "soul": (
@@ -476,8 +490,8 @@ directly without delegation.
             },
             {
                 "name": "terra",
-                "model": "gpt-5.6-terra",
-                "reasoning_effort": "medium",
+                "model": terra.model,
+                "reasoning_effort": terra.effort,
                 "description": "Implementation worker for bounded approved changes, tests, and routine debugging.",
                 "toolsets": [],
                 "soul": (
@@ -489,8 +503,8 @@ directly without delegation.
             },
             {
                 "name": "sol",
-                "model": "gpt-5.6-sol",
-                "reasoning_effort": "high",
+                "model": sol.model,
+                "reasoning_effort": sol.effort,
                 "description": "High-judgment worker for architecture, specifications, and sensitive boundaries.",
                 "toolsets": [],
                 "soul": (
@@ -926,6 +940,215 @@ def status(remote_name: str) -> dict:
     data["lifecycle"] = lifecycle
     data["running_sessions"] = running
     return result(True, "status", remote_name, status=lifecycle, data=data)
+
+
+def _cron_snapshot(entry: dict) -> dict:
+    """Read only non-secret scheduler metadata from the default Hermes home."""
+    program = r'''
+import json
+from pathlib import Path
+
+path = Path.home() / ".hermes" / "cron" / "jobs.json"
+data = json.loads(path.read_text()) if path.exists() else {"jobs": []}
+safe = []
+for job in data.get("jobs", []):
+    if not isinstance(job, dict):
+        continue
+    safe.append({
+        "id": job.get("id"),
+        "name": job.get("name"),
+        "enabled": job.get("enabled"),
+        "state": job.get("state"),
+        "schedule": job.get("schedule"),
+        "workdir": job.get("workdir"),
+        "provider_snapshot": job.get("provider_snapshot") or job.get("provider"),
+        "model_snapshot": job.get("model_snapshot") or job.get("model"),
+        "last_status": job.get("last_status"),
+        "last_error": job.get("last_error"),
+        "last_run_at": job.get("last_run_at"),
+        "next_run_at": job.get("next_run_at"),
+    })
+print(json.dumps({"jobs": safe}, sort_keys=True))
+'''
+    res = _checked(entry, f"python3 -c {shlex.quote(program)}", timeout=20,
+                   what="Hermes cron metadata read failed")
+    try:
+        payload = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HermesError("Hermes cron metadata was invalid", "invalid_cron_state") from exc
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        raise HermesError("Hermes cron jobs collection was invalid", "invalid_cron_state")
+    return {"jobs": jobs}
+
+
+def cron_list(remote_name: str) -> dict:
+    entry = _require_remote(remote_name)
+    snapshot = _cron_snapshot(entry)
+    return result(True, "cron_list", remote_name, status="ok", data=snapshot)
+
+
+def cron_validate(remote_name: str) -> dict:
+    entry = _require_remote(remote_name)
+    snapshot = _cron_snapshot(entry)
+    invalid = audit_jobs(snapshot["jobs"])
+    return result(
+        not invalid,
+        "cron_validate",
+        remote_name,
+        status="valid" if not invalid else "invalid",
+        data={"job_count": len(snapshot["jobs"]), "invalid": invalid},
+        error=None if not invalid else HermesError(
+            "one or more Hermes cron jobs have invalid model routing",
+            "invalid_cron_routing",
+        ),
+    )
+
+
+def _set_cron_route(entry: dict, job_id: str, profile: str) -> dict:
+    route = scheduled_route(profile)
+    program = r'''
+import base64
+import fcntl
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+job_id, provider, model, guard_encoded = sys.argv[1:5]
+guard = base64.b64decode(guard_encoded).decode()
+root = Path.home() / ".hermes" / "cron"
+path = root / "jobs.json"
+lock_path = root / ".tick.lock"
+with lock_path.open("a+") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    data = json.loads(path.read_text())
+    matches = [job for job in data.get("jobs", []) if job.get("id") == job_id]
+    if len(matches) != 1:
+        raise SystemExit(4)
+    job = matches[0]
+    job["provider_snapshot"] = provider
+    job["model_snapshot"] = model
+    if "provider" in job:
+        job["provider"] = provider
+    if "model" in job:
+        job["model"] = model
+    prompt = str(job.get("prompt") or "")
+    if "<!-- SANDBOX_CRON_GUARD_BEGIN -->" not in prompt:
+        job["prompt"] = prompt.rstrip() + "\n\n" + guard + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix="jobs.", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w") as temp:
+            json.dump(data, temp, indent=2, sort_keys=True)
+            temp.write("\n")
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+print(json.dumps({"job_id": job_id, "provider": provider, "model": model}))
+'''
+    command = "python3 -c {} {} {} {} {}".format(
+        shlex.quote(program),
+        shlex.quote(job_id),
+        shlex.quote(route.provider),
+        shlex.quote(route.model),
+        shlex.quote(base64.b64encode(SCHEDULE_GUARD.encode()).decode()),
+    )
+    res = _ssh(entry, command, timeout=20)
+    if res.returncode == 4:
+        raise HermesError("Hermes cron job was not found", "cron_job_not_found")
+    if res.returncode != 0:
+        detail = _redact(res.stderr or res.stdout or "Hermes cron routing update failed", entry)[:1000]
+        raise HermesError(f"Hermes cron routing update failed: {detail}", "cron_route_failed", True)
+    return {"job_id": job_id, "profile": route.profile, "provider": route.provider,
+            "model": route.model, "effort": route.effort}
+
+
+def cron_route(remote_name: str, job_id: str, profile: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("cron routing changes require --confirm", "confirmation_required")
+    entry = _require_remote(remote_name)
+    valid_id = _valid_cron_job_id(job_id)
+    try:
+        route = _set_cron_route(entry, valid_id, profile)
+    except ValueError as exc:
+        raise HermesError(str(exc), "invalid_cron_profile") from exc
+    return result(True, "cron_route", remote_name, status="updated",
+                  job_id=valid_id, data=route)
+
+
+def cron_create(remote_name: str, schedule: str, prompt: str, *, name: str | None,
+                workdir: str | None, profile: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("cron creation requires --confirm", "confirmation_required")
+    schedule = (schedule or "").strip()
+    if not schedule or len(schedule) > 128 or "\n" in schedule:
+        raise HermesError("cron schedule must be between 1 and 128 characters", "invalid_cron_schedule")
+    if not prompt or len(prompt) > 32000:
+        raise HermesError("prompt must be between 1 and 32000 characters", "invalid_prompt")
+    if name is not None and (not name.strip() or len(name) > 120 or "\n" in name):
+        raise HermesError("cron name must be between 1 and 120 characters", "invalid_cron_name")
+    if workdir is not None:
+        path = PurePosixPath(workdir)
+        if not path.is_absolute() or ".." in path.parts:
+            raise HermesError("cron workdir must be an absolute normalized path", "invalid_cron_workdir")
+    try:
+        scheduled_route(profile)
+    except ValueError as exc:
+        raise HermesError(str(exc), "invalid_cron_profile") from exc
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    before = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
+    args = [paths["launcher"], "cron", "create", "--schedule", schedule,
+            "--prompt", prompt, "--deliver", "local"]
+    if name:
+        args += ["--name", name.strip()]
+    if workdir:
+        args += ["--workdir", workdir]
+    command = " ".join(shlex.quote(part) for part in args)
+    res = _ssh(entry, command, timeout=30)
+    if res.returncode != 0:
+        raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron creation failed", entry)[:1000],
+                          "cron_create_failed", True)
+    after = {job.get("id") for job in _cron_snapshot(entry)["jobs"]}
+    created = sorted(job_id for job_id in after - before if isinstance(job_id, str))
+    if len(created) != 1 or not _CRON_JOB_RE.fullmatch(created[0]):
+        raise HermesError("Hermes cron creation did not produce exactly one job", "invalid_cron_response")
+    job_id = created[0]
+    try:
+        route = _set_cron_route(entry, job_id, profile)
+    except Exception:
+        _ssh(entry, f"{paths['launcher']} cron pause {shlex.quote(job_id)}", timeout=20)
+        raise
+    return result(True, "cron_create", remote_name, status="scheduled", job_id=job_id,
+                  data={"schedule": schedule, "name": name, "workdir": workdir, **route})
+
+
+def cron_run(remote_name: str, job_id: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("cron run requires --confirm", "confirmation_required")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    valid_id = _valid_cron_job_id(job_id)
+    output = f"$HOME/.hermes/cron/sandbox-trigger-{valid_id}.log"
+    child = (
+        f"{paths['launcher']} cron run {shlex.quote(valid_id)} "
+        f"> {output} 2>&1"
+    )
+    command = (
+        "mkdir -p $HOME/.hermes/cron; "
+        f"nohup setsid sh -c {shlex.quote(child)} </dev/null >/dev/null 2>&1 & "
+        "printf 'triggered\\n'"
+    )
+    res = _ssh(entry, command, timeout=20)
+    if res.returncode != 0:
+        raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron trigger failed", entry)[:1000],
+                          "cron_run_failed", True)
+    return result(True, "cron_run", remote_name, status="triggered", job_id=valid_id)
 
 
 def _mcp_contract_probe(paths: dict) -> str:
@@ -1722,7 +1945,7 @@ def _gateway_unit(paths: dict) -> str:
     return (
         "[Unit]\nDescription=Hermes Sandbox gateway\n[Service]\n"
         f"Environment=HERMES_HOME=%h/.hermes\nWorkingDirectory={paths['repo_root']}\n"
-        "ExecStart=%h/.local/bin/hermes gateway run\n"
+        "ExecStart=%h/.local/bin/hermes gateway run --replace\n"
         "Restart=on-failure\n[Install]\nWantedBy=default.target\n"
     )
 

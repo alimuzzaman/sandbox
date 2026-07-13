@@ -419,10 +419,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list; job: status|kill; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
+        help="repo: auth|clone|list; job: status|kill; cron: list|validate|create|route|run; gateway: setup|install|start|stop|restart|status|logs; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")
@@ -438,6 +438,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--name", default=None, help="managed repository name for clone")
     hermes_p.add_argument("--ref", default=None, help="branch, tag, or ref to clone")
     hermes_p.add_argument("--prompt", default=None, help="one-shot Hermes prompt")
+    hermes_p.add_argument("--schedule", default=None, help="Hermes cron expression or interval")
+    hermes_p.add_argument("--workdir", default=None, help="absolute remote working directory for a cron job")
+    hermes_p.add_argument("--profile", choices=["luna", "terra", "sol"], default="terra",
+        help="validated Sandbox route for a cron job (default: terra)")
     hermes_p.add_argument("--no-worktree", action="store_true", help="run against the primary checkout")
     hermes_p.add_argument("--async", dest="run_async", action="store_true", help="return a detached job id")
     hermes_p.add_argument("--timeout", type=int, default=1200, help="one-shot timeout in seconds")

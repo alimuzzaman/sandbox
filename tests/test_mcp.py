@@ -26,7 +26,11 @@ async def go():
 t, p, names = asyncio.run(go())
 print("TOOLS", t)
 print("PROMPTS", p)
-print("HERMES", int({'hermes_status', 'hermes_run', 'hermes_job_status', 'hermes_job_kill'} <= names))
+print("HERMES", int({
+    'hermes_status', 'hermes_run', 'hermes_job_status', 'hermes_job_kill',
+    'hermes_cron_list', 'hermes_cron_validate', 'hermes_cron_create',
+    'hermes_cron_route', 'hermes_cron_run',
+} <= names))
 import tools.hermes as hermes
 calls = []
 original_run_sb = hermes._run_sb
@@ -36,6 +40,11 @@ hermes.hermes_run("remote", "repo", "non-secret", worktree=False, async_=True, t
 hermes.hermes_run("remote", "repo", "non-secret", worktree=True, async_=False, timeout=100)
 hermes.hermes_job_status("remote", "0123456789abcdef", offset=7)
 hermes.hermes_job_kill("remote", "0123456789abcdef")
+hermes.hermes_cron_list("remote")
+hermes.hermes_cron_validate("remote")
+hermes.hermes_cron_create("remote", "every 4h", "bounded work", profile="terra", confirm=True)
+hermes.hermes_cron_route("remote", "3359664aaf91", profile="terra", confirm=True)
+hermes.hermes_cron_run("remote", "3359664aaf91", confirm=True)
 print("HERMES_CALLS", json.dumps(calls))
 hermes._run_sb = original_run_sb
 def timed_out(*_args, **_kwargs):
@@ -92,6 +101,12 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertEqual(calls[2][1], 130)
         self.assertEqual(calls[3][0][-2:], ["--offset", "7"])
         self.assertEqual(calls[4][0][1:3], ["job", "kill"])
+        self.assertEqual(calls[5][0][1:3], ["cron", "list"])
+        self.assertEqual(calls[6][0][1:3], ["cron", "validate"])
+        self.assertIn("--profile", calls[7][0])
+        self.assertIn("--confirm", calls[7][0])
+        self.assertEqual(calls[8][0][1:3], ["cron", "route"])
+        self.assertEqual(calls[9][0][1:3], ["cron", "run"])
         timeout_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_TIMEOUT "))
         self.assertIn("timed out", timeout_line.lower())
         instance_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_INSTANCE "))

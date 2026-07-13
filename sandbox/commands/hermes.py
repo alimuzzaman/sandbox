@@ -149,6 +149,36 @@ def cmd_hermes(cfg, args) -> None:
                 payload = _job_payload(args.remote, "kill", hermes.job_kill(args.remote, args.job_id))
             else:
                 raise hermes.HermesError("job action must be status or kill", "invalid_job_action")
+        elif action == "cron":
+            if args.subaction == "list":
+                payload = hermes.cron_list(args.remote)
+            elif args.subaction == "validate":
+                payload = hermes.cron_validate(args.remote)
+            elif args.subaction == "create":
+                if not args.schedule or not args.prompt:
+                    raise hermes.HermesError(
+                        "cron create requires --schedule and --prompt", "missing_cron_input"
+                    )
+                payload = hermes.cron_create(
+                    args.remote, args.schedule, args.prompt,
+                    name=args.name, workdir=args.workdir,
+                    profile=args.profile, confirm=args.confirm,
+                )
+            elif args.subaction == "route":
+                job_id = args.target or args.job_id
+                if not job_id:
+                    raise hermes.HermesError("cron route requires a job id", "missing_cron_job_id")
+                payload = hermes.cron_route(args.remote, job_id, args.profile, args.confirm)
+            elif args.subaction == "run":
+                job_id = args.target or args.job_id
+                if not job_id:
+                    raise hermes.HermesError("cron run requires a job id", "missing_cron_job_id")
+                payload = hermes.cron_run(args.remote, job_id, args.confirm)
+            else:
+                raise hermes.HermesError(
+                    "cron action must be list, validate, create, route, or run",
+                    "invalid_cron_action",
+                )
         elif action == "repo":
             payload = _repo_action(args)
         elif action == "gateway":

@@ -1021,7 +1021,7 @@ def cron_output(remote_name: str, job_id: str, lines: int = 200) -> dict:
         raise HermesError("cron output lines must be between 1 and 2000", "invalid_lines")
     entry = _require_remote(remote_name)
     program = r'''
-import json, sys
+import json, re, sys
 from pathlib import Path
 job_id, line_limit = sys.argv[1], int(sys.argv[2])
 root = Path.home() / ".hermes" / "cron" / "output" / job_id
@@ -1034,8 +1034,23 @@ with path.open("rb") as stream:
     stream.seek(max(0, path.stat().st_size - 131072))
     raw = stream.read().decode(errors="replace")
 selected = raw.splitlines()[-line_limit:]
-text = "\n".join(selected)
-print(json.dumps({"found": True, "file": path.name, "output": text,
+tail = "\n".join(selected)
+text = ""
+format_supported = False
+for marker in ("\n## Response\n", "\n## Error\n", "\n---\n"):
+    if marker in tail:
+        text = tail.rsplit(marker, 1)[1].strip()
+        format_supported = True
+        break
+if not format_supported:
+    status = re.search(r"(?m)^\*\*Status:\*\*\s*([^\n]+)$", tail)
+    if status:
+        text = "Status: " + status.group(1).strip()
+        format_supported = True
+secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|(?:api[_-]?key|token|password|passphrase|secret|authorization)\s*[:=]\s*['\"]?[^\s'\"]{8,})", text))
+print(json.dumps({"found": True, "file": path.name,
+                  "output": "" if secret_like else text,
+                  "format_supported": format_supported, "secret_like": secret_like,
                   "truncated": path.stat().st_size > 131072 or len(raw.splitlines()) > line_limit}))
 '''
     res = _checked(
@@ -1049,8 +1064,11 @@ print(json.dumps({"found": True, "file": path.name, "output": text,
     except json.JSONDecodeError as exc:
         raise HermesError("Hermes cron output was invalid", "invalid_cron_output") from exc
     data["output"] = _redact(str(data.get("output") or ""), entry)
+    output_status = "never_run"
+    if data.get("found"):
+        output_status = "withheld" if data.get("secret_like") or not data.get("format_supported", True) else "available"
     return result(True, "cron_output", remote_name,
-                  status="available" if data.get("found") else "never_run",
+                  status=output_status,
                   job_id=valid_id, data=data)
 
 
@@ -1627,7 +1645,7 @@ check = run("diff", "--check")
 stat = run("diff", "--stat", "HEAD")
 diff = run("diff", "--no-ext-diff", "--unified=3", "HEAD", "--")
 text = diff.stdout
-secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|authorization:\\s*bearer)", text))
+secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|(?:api[_-]?key|token|password|passphrase|secret|authorization)\s*[:=]\s*['\"]?[^\s'\"]{8,})", text))
 bounded = text[:65536]
 print(json.dumps({"path": str(path), "branch": branch.stdout.strip() or None,
                   "status": status.stdout.splitlines()[:100], "diff_check_ok": check.returncode == 0,
@@ -1667,8 +1685,12 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
     entry = _require_remote(remote_name)
     path = _managed_worktree_path(_paths(entry), name)
     message = f"chore: preserve Hermes worktree {name}"
+    secret_pattern = r"(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY|(api[_-]?key|token|password|passphrase|secret|authorization)[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"]{8,})"
+    lock = f"$HOME/.hermes/locks/worktree-{name}.lock"
     command = (
-        f"set -eu; test -z \"$(git -C {shlex.quote(path)} status --porcelain | sed -n '/^?? /p')\"; "
+        f"set -eu; mkdir -p $HOME/.hermes/locks; exec 9>{lock}; flock -n 9; "
+        f"test -z \"$(git -C {shlex.quote(path)} status --porcelain | sed -n '/^?? /p')\"; "
+        f"if git -C {shlex.quote(path)} diff HEAD -- | grep -Eiq {shlex.quote(secret_pattern)}; then exit 44; fi; "
         f"git -C {shlex.quote(path)} diff --check; git -C {shlex.quote(path)} add -u; "
         f"git -C {shlex.quote(path)} -c user.name='Hermes Preservation' "
         f"-c user.email='hermes-preservation@users.noreply.github.com' commit -m {shlex.quote(message)} >/dev/null; "

@@ -44,7 +44,8 @@ MCP wrappers call the same CLI/service path; they do not implement remote behavi
 - No stored prompt, environment value, request body, authorization material, or raw unbounded log is returned.
 - Errors are classified and redacted before crossing the remote boundary.
 - Worktree paths must remain inside registered managed roots.
-- Cron output reads only a validated job ID's newest bounded artifact.
+- Cron output reads only a validated job ID's newest bounded outcome section;
+  stored prompts are never returned and secret-like outcomes are withheld.
 - Worktree inspection withholds secret-like diffs; preservation rejects
   untracked files, failed diff checks, and unexpected branches.
 - Destructive operations fail closed when dirty worktrees are unpreserved unless the operation cannot affect them (cron replacement itself records them but does not delete worktrees).

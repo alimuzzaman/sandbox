@@ -136,7 +136,10 @@ class TestSchedulerReliability(unittest.TestCase):
         applied = hermes.worktree_preserve("test", "demo", True)
         self.assertEqual(applied["status"], "pushed")
         self.assertEqual(applied["commit"], "a" * 40)
-        self.assertIn("HEAD:hermes/demo", checked.call_args.args[1])
+        command = checked.call_args.args[1]
+        self.assertIn("HEAD:hermes/demo", command)
+        self.assertIn("flock -n 9", command)
+        self.assertIn("git -C /home/u/worktrees/demo diff HEAD -- | grep -Eiq", command)
 
     @patch("sandbox.core._hermes._ssh")
     def test_managed_cron_worktree_fast_forwards_only_when_clean(self, ssh):
@@ -177,8 +180,22 @@ class TestSchedulerReliability(unittest.TestCase):
         command = checked.call_args.args[1]
         self.assertIn("deadbeef1234", command)
         self.assertTrue(command.endswith(" 50"))
+        self.assertIn("## Response", command)
+        self.assertIn("rsplit(marker, 1)", command)
+        self.assertIn("secret_like", command)
         with self.assertRaises(hermes.HermesError):
             hermes.cron_output("test", "../escape", 50)
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_cron_output_reports_secret_like_saved_response_as_withheld(self, require_remote, checked):
+        checked.return_value = _completed(stdout=json.dumps({
+            "found": True, "file": "run.md", "output": "", "format_supported": True,
+            "secret_like": True, "truncated": False,
+        }))
+        out = hermes.cron_output("test", "deadbeef1234", 50)
+        self.assertEqual(out["status"], "withheld")
+        self.assertEqual(out["data"]["output"], "")
 
     @patch("sandbox.core._hermes._set_cron_route", return_value={})
     @patch("sandbox.core._hermes._cron_snapshot")

@@ -177,11 +177,14 @@ over an upstream `last_status=ok` marker and is reported as `false_success`.
 `cron verify` likewise waits for a changed terminal run marker and rejects a
 nominal success when correlated request evidence records an error.
 `cron output` reads only the latest saved Markdown artifact for a validated job
-ID, bounds the response, and applies configured redaction. `worktree inspect`
+ID, returns only its response/error outcome (never the stored prompt), bounds
+the response, and withholds secret-like content. `worktree inspect`
 returns a bounded diff only after a secret-like-content screen. `worktree
 preserve` previews by default; confirmed preservation rejects untracked files,
 requires the expected `hermes/<name>` branch and a clean `git diff --check`,
 commits tracked reviewed changes, and pushes that explicit branch.
+Confirmed preservation repeats the secret scan while holding a per-worktree
+lock immediately before staging, closing the preview-to-commit race.
 
 Hermes Quick Setup defaults to Nous Portal. A ChatGPT Plus/Pro account can
 instead use the upstream OpenAI Codex OAuth provider on the remote:

@@ -55,6 +55,14 @@ one-time root bootstrap to grant that user package-install rights. HTTPS mode al
 the `--control-host` DNS name to resolve to the VPS; Tailscale mode needs either
 `TAILSCALE_AUTHKEY` or a one-time manual `tailscale up`.
 
+Sandbox opportunistically reuses one authenticated OpenSSH connection for repeated
+SSH and SCP calls to the same endpoint. The control socket lives under the local
+Sandbox runtime with owner-only permissions, uses OpenSSH's endpoint hash rather
+than a readable host/user name, and expires after 60 idle seconds. Commands remain
+independent: each keeps its own timeout, exit status, output handling, and
+confirmation gate. If local multiplexing state cannot be prepared, Sandbox makes
+one ordinary SSH connection; it never replays a command after launch.
+
 Register the second MCP server in Claude Code:
 
 ```bash
@@ -77,7 +85,7 @@ This is a **one-way, on-demand** push — never a continuous sync. Every deploy:
 
 1. `git push`es your current `HEAD` to a deploy-target git repo on the VPS (works even
    for a branch never pushed to GitHub/origin — it's a direct git-to-git push over your
-   existing SSH connection).
+existing SSH connection).
 2. Resets the VPS's working tree to that commit.
 3. Applies your CURRENT uncommitted changes on top — both edits to tracked files and
    brand-new untracked files. This step REPLACES whatever a previous deploy applied; it

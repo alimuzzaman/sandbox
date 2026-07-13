@@ -2,17 +2,6 @@
   "schema_version": 1,
   "jobs": [
     {
-      "name": "todo-md-monitor",
-      "schedule": "every 5m",
-      "kind": "script",
-      "script": "todo_md_monitor.py",
-      "prompt": "",
-      "profile": null,
-      "workdir_template": "{repo_root}/lenzora",
-      "enabled": true,
-      "deliver": "local"
-    },
-    {
       "name": "codex-quota-requeue",
       "schedule": "every 30m",
       "kind": "script",

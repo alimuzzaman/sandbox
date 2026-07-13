@@ -15,7 +15,7 @@
 ./sb hermes worktree preserve --remote NAME --name MANAGED_NAME [--confirm] --json
 ```
 
-- Read-only commands never require confirmation.
+- Read-only commands never require confirmation and never reconcile sessions, record gates, or persist remote state.
 - `gateway converge` without confirmation returns a plan.
 - `cron reconcile` without confirmation returns a plan. The feature-025 migration uses `--force-replace`; ordinary later runs retain exact matches.
 - `cron verify` requires confirmation, validates the route first, and returns only after terminal evidence or timeout.
@@ -39,6 +39,13 @@ hermes_worktree_preserve(remote, name, confirm=false)
 
 MCP wrappers call the same CLI/service path; they do not implement remote behavior independently.
 
+## Remote transport
+
+- SSH and SCP calls share one endpoint-isolated, short-lived authenticated connection when supported by the local OpenSSH client.
+- Reuse is opportunistic: missing, stale, or unsupported multiplexing state falls back to a normal secure connection without changing host-key or authentication policy.
+- The control endpoint is owner-only, bounded in idle lifetime, and named with a one-way endpoint hash rather than a readable host, user, port, or credential.
+- Reuse never combines confirmation authority. Each CLI/MCP operation retains its own timeout, exit status, output bounds, and redaction.
+
 ## Security and output bounds
 
 - No stored prompt, environment value, request body, authorization material, or raw unbounded log is returned.
@@ -47,5 +54,9 @@ MCP wrappers call the same CLI/service path; they do not implement remote behavi
 - Cron output reads only a validated job ID's newest bounded outcome section;
   stored prompts are never returned and secret-like outcomes are withheld.
 - Worktree inspection withholds secret-like diffs; preservation rejects
-  untracked files, failed diff checks, and unexpected branches.
+  untracked files, failed `git diff --check HEAD`, bearer/JWT credentials, and
+  unexpected branches. Preservation rechecks the reviewed tree and branch while
+  holding the same per-worktree lock used by scheduled writers.
+- Repository synchronization smoke-tests a staged runtime before replacement;
+  failed validation preserves the prior runtime and retained virtual environments.
 - Destructive operations fail closed when dirty worktrees are unpreserved unless the operation cannot affect them (cron replacement itself records them but does not delete worktrees).

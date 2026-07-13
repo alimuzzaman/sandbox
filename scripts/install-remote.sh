@@ -107,9 +107,20 @@ export SANDBOX_HOME
 (
     cd "$SANDBOX_HOME/sb-src"
     test -f sandbox/hermes/cron-catalog.json
-    test -f sandbox/hermes/cron_scripts/todo_md_monitor.py
-    test -f sandbox/hermes/cron_scripts/codex_quota_requeue.py
-    test -f sandbox/hermes/cron_scripts/lenzora_kanban_dispatch.py
+    python3 - <<'PY'
+import json
+from pathlib import Path
+
+root = Path("sandbox/hermes")
+catalog = json.loads((root / "cron-catalog.json").read_text())
+jobs = catalog.get("jobs")
+if not isinstance(jobs, list):
+    raise SystemExit("invalid Hermes cron catalog")
+for job in jobs:
+    script = job.get("script") if isinstance(job, dict) else None
+    if script and (Path(script).name != script or not (root / "cron_scripts" / script).is_file()):
+        raise SystemExit(f"missing committed Hermes cron script: {script}")
+PY
     if [[ ! -x "$SANDBOX_HOME/sb-src/.cli-venv/bin/python" ]]; then
         python3 -m venv "$SANDBOX_HOME/sb-src/.cli-venv"
         "$SANDBOX_HOME/sb-src/.cli-venv/bin/pip" install --quiet \

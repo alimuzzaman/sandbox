@@ -30,6 +30,7 @@ by a field on a shared record. This module only tracks how to REACH a remote and
 whether it's provisioned -- never what instances it has.
 """
 from __future__ import annotations
+import os
 import re
 import secrets
 import shlex
@@ -42,9 +43,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._config import ensure_pyyaml, _local_yaml
-from sandbox.core._paths import CONFIG_LOCAL
+from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+_CONTROL_PERSIST_SECONDS = 60
 
 
 def _remote_block() -> dict:
@@ -180,22 +183,57 @@ def remote_ssh_parts(remote_or_target) -> dict:
     return parse_ssh_target(ssh_value or "")
 
 
-def ssh_command_args(remote_or_target, command: str) -> list[str]:
+def _ssh_control_dir() -> Path:
+    """Short, per-user directory for OpenSSH multiplexing sockets."""
+    return Path(RUNTIME_DIR) / "s"
+
+
+def _ensure_ssh_control_dir() -> Path:
+    """Create the local socket directory before handing it to OpenSSH."""
+    directory = _ssh_control_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    return directory
+
+
+def _ssh_connection_options(multiplex: bool = True) -> list[str]:
+    options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if multiplex:
+        control_path = _ssh_control_dir() / "cm-%C"
+        options.extend([
+            "-o", "ControlMaster=auto",
+            "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
+            "-o", f"ControlPath={control_path}",
+        ])
+    return options
+
+
+def ssh_command_args(remote_or_target, command: str, *, multiplex: bool = True) -> list[str]:
     parts = remote_ssh_parts(remote_or_target)
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    args = ["ssh", *_ssh_connection_options(multiplex)]
     if parts["port"]:
         args.extend(["-p", str(parts["port"])])
     args.extend([parts["target"], command])
     return args
 
 
-def scp_command_args(remote_or_target, local_path: str, remote_path: str) -> list[str]:
+def scp_command_args(remote_or_target, local_path: str, remote_path: str,
+                     *, multiplex: bool = True) -> list[str]:
     parts = remote_ssh_parts(remote_or_target)
-    args = ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    args = ["scp", *_ssh_connection_options(multiplex)]
     if parts["port"]:
         args.extend(["-P", str(parts["port"])])
     args.extend([local_path, f"{parts['target']}:{remote_path}"])
     return args
+
+
+def git_ssh_command(remote_or_target, *, multiplex: bool = True) -> str:
+    """Shell-safe SSH command for Git's direct VPS transport."""
+    parts = remote_ssh_parts(remote_or_target)
+    args = ["ssh", *_ssh_connection_options(multiplex)]
+    if parts["port"]:
+        args.extend(["-p", str(parts["port"])])
+    return shlex.join(args)
 
 
 def git_ssh_url(remote: dict, path: str) -> str:
@@ -216,9 +254,28 @@ def ssh_run(remote: dict, command: str, timeout: int = 30) -> subprocess.Complet
     pattern as shelling to `docker`/`wp` elsewhere in this codebase. check=False:
     callers interpret returncode/stdout/stderr themselves, never a bare
     exception on a nonzero remote exit."""
+    try:
+        _ensure_ssh_control_dir()
+    except OSError:
+        args = ssh_command_args(remote, command, multiplex=False)
+    else:
+        args = ssh_command_args(remote, command)
     return subprocess.run(
-        ssh_command_args(remote, command),
-        capture_output=True, text=True, timeout=timeout, check=False,
+        args, capture_output=True, text=True, timeout=timeout, check=False,
+    )
+
+
+def scp_run(remote: dict, local_path: str, remote_path: str,
+            timeout: int = 60) -> subprocess.CompletedProcess:
+    """Copy one file over SCP, bypassing mux only if local setup fails."""
+    try:
+        _ensure_ssh_control_dir()
+    except OSError:
+        args = scp_command_args(remote, local_path, remote_path, multiplex=False)
+    else:
+        args = scp_command_args(remote, local_path, remote_path)
+    return subprocess.run(
+        args, capture_output=True, text=True, timeout=timeout, check=False,
     )
 
 
@@ -501,9 +558,18 @@ def push_commits(remote: dict, project_root, target_path: str, branch: str) -> s
     git-to-git push over the SAME SSH connection already registered, not
     dependent on GitHub/origin at all. Returns the pushed commit SHA."""
     push_url = git_ssh_url(remote, target_path)
+    try:
+        _ensure_ssh_control_dir()
+    except OSError:
+        git_ssh = git_ssh_command(remote, multiplex=False)
+    else:
+        git_ssh = git_ssh_command(remote)
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = git_ssh
     res = subprocess.run(
         ["git", "push", push_url, f"HEAD:refs/heads/{branch}"],
-        cwd=str(project_root), capture_output=True, text=True, timeout=120, check=False,
+        cwd=str(project_root), env=env, capture_output=True, text=True,
+        timeout=120, check=False,
     )
     if res.returncode != 0:
         raise RuntimeError(
@@ -631,10 +697,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
                 f"could not prepare directory for dirty file {relpath}: "
                 f"{(mk_res.stderr or mk_res.stdout or '').strip()[:500]}"
             )
-        res = subprocess.run(
-            scp_command_args(remote, str(local_path), remote_path),
-            capture_output=True, text=True, timeout=60, check=False,
-        )
+        res = scp_run(remote, str(local_path), remote_path, timeout=60)
         if res.returncode != 0:
             raise RuntimeError(
                 f"could not transfer dirty file {relpath}: "

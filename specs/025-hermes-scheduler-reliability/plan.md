@@ -48,11 +48,11 @@ Post-design re-check: contracts preserve all gates. The only intentional broad o
 
 ### AD-001 — One gateway owner: Sandbox systemd service
 
-The gateway owns the upstream cron tick, so Sandbox must converge to one `hermes-gateway-sandbox.service`. A legacy unit or manual process is stopped and disabled during confirmed convergence. The managed unit uses upstream `gateway run --replace` defensively but health still treats multiple owners or restart growth as degraded.
+The gateway owns the upstream cron tick, so Sandbox must converge to one `hermes-gateway-sandbox.service`. A legacy unit or manual process is stopped and disabled during confirmed convergence. The managed unit uses upstream `gateway run --replace` defensively, but convergence succeeds only after `hermes cron status` proves scheduler availability and repeated ownership samples over 120 seconds prove one process with no restart growth.
 
 ### AD-002 — Desired cron catalog is committed and versioned
 
-All base jobs, schedules, execution modes, scripts/prompts, route profiles, work targets, and enabled state live in `sandbox/hermes/cron-catalog.json`. Remote setup installs the committed scripts and reconciliation replaces observed jobs from this catalog. No credentials or host-specific IDs are stored; remote paths are rendered from the configured Sandbox home.
+All base jobs, schedules, execution modes, scripts/prompts, route profiles, work targets, delivery targets, and enabled state live in `sandbox/hermes/cron-catalog.json`. Remote setup derives its required script set from that catalog, installs those committed scripts, and reconciliation replaces observed jobs from this catalog. Exactness compares every Sandbox-controlled field through canonical secret-safe hashes, including guarded prompts and script content. No credentials or host-specific IDs are stored; remote paths are rendered from the configured Sandbox home.
 
 ### AD-003 — Model and reasoning are separate validated fields
 
@@ -60,11 +60,11 @@ Catalog agent jobs select `luna`, `terra`, or `sol`; the route table resolves pr
 
 ### AD-004 — Health is evidence aggregation, not upstream status passthrough
 
-Sandbox combines sanitized cron metadata, job execution type, latest output/error artifacts, gateway service/process ownership, restart counters, and Git worktree state. A newer provider/client error overrides an upstream `ok` marker and is reported as a false success.
+Sandbox combines sanitized cron metadata, job execution type, latest output/error artifacts, gateway service/process ownership, restart counters, and Git worktree state. Health is observation-only: it never reconciles sessions, records boot gates, or writes remote state. A newer provider/client error overrides an upstream `ok` marker and is reported as a false success.
 
 ### AD-005 — No-work and operational failure have different exits
 
-Committed monitor/dispatcher scripts return zero only for a successful inspection or legitimate no-work state. Missing dependencies, unreadable state, timeout, command failure, or malformed output return nonzero. The TODO monitor never edits its own cron definition; catalog reconciliation owns lifecycle.
+Committed monitor/dispatcher scripts return zero only for a successful inspection or legitimate no-work state. Missing dependencies, unreadable state, timeout, command failure, or malformed output return nonzero. The reusable TODO monitor never edits its own cron definition and is not in the base catalog because Lenzora's authoritative queue is Hermes Kanban; catalog reconciliation alone owns lifecycle.
 
 ### AD-006 — Full replacement uses a two-phase plan/apply contract
 
@@ -76,7 +76,15 @@ Triggering remains available for asynchronous operation. Verified execution snap
 
 ### AD-008 — Agent work is preserved before cleanup, not blindly committed
 
-Sandbox inventories every managed repo/worktree and blocks destructive cleanup while any is dirty. This task may commit and push reviewed work because the user explicitly authorized it; recurring jobs do not receive standing Git authority and must leave changes for a later approved preservation action.
+Sandbox inventories every managed repo/worktree and blocks destructive cleanup while any is dirty. Preservation uses the same per-worktree lock as scheduled writers, reviews tracked changes only, rejects secret-like content including bearer credentials, and revalidates branch, reviewed tree identity, and `git diff --check HEAD` under the lock immediately before commit/push. This task may commit and push reviewed work because the user explicitly authorized it; recurring jobs do not receive standing Git authority and must leave changes for a later approved preservation action.
+
+### AD-009 — Runtime refresh validates staging before replacing the live runtime
+
+Repository synchronization builds and smoke-tests a staged Sandbox runtime while leaving the live runtime and retained virtual environments intact. Only a validated stage may replace the live runtime; failure removes the stage and preserves the prior runtime byte-for-byte. A missing live runtime is a supported fresh-server state rather than an implicit precondition.
+
+### AD-010 — Shared remote adapter uses bounded opportunistic connection reuse
+
+All Sandbox SSH and SCP operations use one short-lived OpenSSH multiplexing policy from the shared remote adapter. `ControlMaster=auto` reuses an existing authenticated connection or establishes one, `ControlPersist=60s` bounds idle lifetime, and `ControlPath` uses OpenSSH's endpoint hash in an owner-only short runtime directory. Independent commands keep separate processes, timeouts, exit codes, output bounds, and confirmation gates. Callers batch probes only when they form one diagnostic transaction with explicit per-probe evidence; arbitrary shell concatenation is not the default.
 
 ## Project Structure
 
@@ -105,12 +113,15 @@ sandbox/hermes/
     ├── codex_quota_requeue.py
     └── lenzora_kanban_dispatch.py
 sandbox/core/_hermes.py          # remote evidence, apply, gateway and run adapter
+sandbox/core/_remote.py          # shared SSH/SCP/Git transport and connection reuse
 sandbox/commands/hermes.py       # CLI composition
 sandbox/cli.py                   # arguments/help only
 mcp/wp-server/tools/hermes.py    # MCP wrappers
 scripts/install-remote.sh        # fresh-server integration
 docs/hermes-agent.md             # operator runbook and failure semantics
 tests/test_hermes.py             # pure and remote-adapter behavior
+tests/test_hermes_catalog_integrity.py # controlled-state drift behavior
+tests/test_remote.py             # shared transport and fallback behavior
 tests/test_mcp.py                # MCP contract
 tests/test_cli.py                # CLI contract
 ```
@@ -120,7 +131,7 @@ tests/test_cli.py                # CLI contract
 ## Implementation Strategy
 
 1. Add failing pure tests for catalog validation, script classification, false-success evidence, exact reconciliation plans, and worktree cleanup blocking.
-2. Commit the desired catalog and monitor scripts; render host paths from remote configuration during installation.
+2. Commit the desired catalog and reusable scripts; derive installed script requirements from the catalog and render host paths from remote configuration during installation.
 3. Add read-only health and reconciliation preview in the scheduler module and remote adapter.
 4. Add confirmed gateway convergence, cron apply/remove/recreate, and verified run.
 5. Expose identical CLI and MCP operations; integrate setup/restore/fresh-server paths.
@@ -139,7 +150,7 @@ The desired catalog includes one bounded `sandbox-approved-spec-task` agent entr
 ## Verification Plan
 
 - Pure: route/catalog validation, exact plan determinism, no-work vs failure exits, redaction, false-success precedence.
-- Adapter: command construction, confirmation gates, partial apply reporting, gateway conflict detection, bounded polling and timeout.
+- Adapter: command construction, confirmation gates, partial apply reporting, gateway conflict detection, bounded polling and timeout, endpoint-isolated connection reuse, stale-socket fallback, and SSH/SCP parity.
 - Contract: CLI help/options/JSON envelopes and MCP tool parity.
 - Full: complete unittest suite plus `./sb selftest` and plugin check.
 - Remote: health detects current conflict/failure; gateway convergence stabilizes one owner; reconciliation yields exact catalog; verified harmless job returns terminal evidence; second reconciliation is a no-op; all managed worktrees are accounted for.

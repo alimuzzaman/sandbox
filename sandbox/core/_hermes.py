@@ -57,6 +57,8 @@ HERMES_RELEASE_SIGNER = "teknium1"
 # SHA256:x9xNOpeJhoEAY2gWhmWHZROC3QF3VjOEbmNo9vQ8y2A.
 HERMES_RELEASE_SIGNER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPpWPAE2WMbZ0fAZ8xsqiTIJqA28qDBfGru8kPrpNyUb"
 GATEWAY_UNIT = "hermes-gateway-sandbox.service"
+GATEWAY_STABILITY_SECONDS = 120
+GATEWAY_STABILITY_INTERVAL = 10
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
@@ -82,6 +84,14 @@ _BARE_SECRET_RE = re.compile(
     r"ya29\.[a-z0-9._-]{20,}"
     r")"
 )
+_CREDENTIAL_PATTERN = (
+    r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|"
+    r"BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|"
+    r"(?:api[_-]?key|token|password|passphrase|secret|authorization)\s*[:=]\s*['\"]?\S{8,}|"
+    r"authorization\s*:\s*bearer\s+\S+|"
+    r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+)
+_CREDENTIAL_RE = re.compile(_CREDENTIAL_PATTERN, re.IGNORECASE)
 _DEFAULT_POLICY = {"max_jobs": 2, "max_worktrees": 8, "min_free_disk_mb": 1024, "min_free_memory_mb": 512}
 _BACKUP_RETENTION_COUNT = 10
 _BACKUP_MIN_FREE_MB = 512
@@ -108,6 +118,11 @@ def _redact(value: str, entry: dict | None = None) -> str:
     text = remote.redact_ssh_connection(str(value or ""), entry)
     text = _SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", text)
     return _BARE_SECRET_RE.sub("[redacted]", text)
+
+
+def _contains_credential(value: object) -> bool:
+    """Recognize credential-like content before it can enter review output."""
+    return bool(_CREDENTIAL_RE.search(str(value or "")))
 
 
 def _redact_public(value):
@@ -952,12 +967,52 @@ def status(remote_name: str) -> dict:
 def _cron_snapshot(entry: dict) -> dict:
     """Read only non-secret scheduler metadata from the default Hermes home."""
     program = r'''
-import json
+import base64, hashlib, json
 import re
+import sys
 from pathlib import Path
 
 path = Path.home() / ".hermes" / "cron" / "jobs.json"
 data = json.loads(path.read_text()) if path.exists() else {"jobs": []}
+guard = base64.b64decode(sys.argv[1]).decode()
+config_path = Path.home() / ".hermes" / "config.yaml"
+
+def config_effort():
+    try:
+        lines = config_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    agent_indent = None
+    for line in lines:
+        direct = re.match(r"^\s*agent\.reasoning_effort\s*:\s*([^#]+)", line)
+        if direct:
+            return direct.group(1).strip().strip("\"'")
+        match = re.match(r"^(\s*)agent\s*:\s*(?:#.*)?$", line)
+        if match:
+            agent_indent = len(match.group(1))
+            continue
+        if agent_indent is None:
+            continue
+        if line.strip() and len(line) - len(line.lstrip()) <= agent_indent:
+            agent_indent = None
+            continue
+        nested = re.match(r"^\s*reasoning_effort\s*:\s*([^#]+)", line)
+        if nested:
+            return nested.group(1).strip().strip("\"'")
+    return None
+
+def guarded_hash(value):
+    if not isinstance(value, str):
+        return None
+    if "<!-- SANDBOX_CRON_GUARD_BEGIN -->" not in value:
+        value = value.rstrip() + "\n\n" + guard + "\n"
+    return hashlib.sha256(value.encode()).hexdigest()
+
+def safe_effort(value):
+    value = str(value or "").strip().lower()
+    return value if re.fullmatch(r"(?:none|minimal|low|medium|high|xhigh|max)", value) else None
+
+configured_effort = safe_effort(config_effort())
 safe = []
 for job in data.get("jobs", []):
     if not isinstance(job, dict):
@@ -977,6 +1032,13 @@ for job in data.get("jobs", []):
             elif re.search(r"(?i)rate.?limit|quota exceeded|usage limit|\b429\b", tail): reason = "provider_quota"
         except OSError:
             reason = "evidence_unreadable"
+    raw_script = job.get("script")
+    script = raw_script if isinstance(raw_script, str) and Path(raw_script).name == raw_script else None
+    script_path = Path.home() / ".hermes" / "scripts" / script if script else None
+    try:
+        script_sha256 = hashlib.sha256(script_path.read_bytes()).hexdigest() if script_path and script_path.is_file() else None
+    except OSError:
+        script_sha256 = None
     safe.append({
         "id": job.get("id"),
         "name": job.get("name"),
@@ -984,10 +1046,19 @@ for job in data.get("jobs", []):
         "state": job.get("state"),
         "schedule": job.get("schedule_display") or job.get("schedule"),
         "workdir": job.get("workdir"),
+        "deliver": job.get("deliver") if isinstance(job.get("deliver"), str) else None,
         "provider_snapshot": job.get("provider_snapshot") or job.get("provider"),
         "model_snapshot": job.get("model_snapshot") or job.get("model"),
+        "reasoning_effort_snapshot": (
+            safe_effort(job.get("reasoning_effort_snapshot"))
+            or safe_effort(job.get("reasoning_effort"))
+            or safe_effort(job.get("model_reasoning_effort"))
+            or configured_effort
+        ),
         "no_agent": bool(job.get("no_agent")),
-        "script": Path(str(job.get("script") or "")).name or None,
+        "prompt_sha256": guarded_hash(job.get("prompt")) if not job.get("no_agent") else None,
+        "script": script,
+        "script_sha256": script_sha256,
         "last_status": job.get("last_status"),
         "last_error": job.get("last_error"),
         "last_run_at": job.get("last_run_at"),
@@ -996,7 +1067,8 @@ for job in data.get("jobs", []):
     })
 print(json.dumps({"jobs": safe}, sort_keys=True))
 '''
-    res = _checked(entry, f"python3 -c {shlex.quote(program)}", timeout=20,
+    guard = base64.b64encode(SCHEDULE_GUARD.encode()).decode()
+    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(guard)}", timeout=20,
                    what="Hermes cron metadata read failed")
     try:
         payload = json.loads(res.stdout or "{}")
@@ -1179,9 +1251,15 @@ def _prepare_catalog_workdir(entry: dict, paths: dict, desired: dict) -> str | N
     source = f"{paths['repo_root']}/sandbox"
     branch = "hermes/sandbox-approved-spec-task"
     parent = str(PurePosixPath(workdir).parent)
+    lock = "$HOME/.hermes/locks/worktree-sandbox-approved-spec-task.lock"
+    tick_lock = "$HOME/.hermes/cron/.tick.lock"
+    lock_command = (
+        f"mkdir -p $HOME/.hermes/cron $HOME/.hermes/locks; exec 8>{tick_lock}; flock -w 30 8; "
+        f"exec 9>{lock}; flock -w 30 9; "
+    )
     if exists.returncode != 0:
         command = (
-            f"set -eu; test -d {shlex.quote(source + '/.git')}; "
+            f"set -eu; {lock_command}test -d {shlex.quote(source + '/.git')}; "
             f"mkdir -p {shlex.quote(parent)}; "
             f"if git -C {shlex.quote(source)} show-ref --verify --quiet refs/heads/{shlex.quote(branch)}; "
             f"then git -C {shlex.quote(source)} worktree add {shlex.quote(workdir)} {shlex.quote(branch)}; "
@@ -1192,7 +1270,7 @@ def _prepare_catalog_workdir(entry: dict, paths: dict, desired: dict) -> str | N
             raise HermesError("could not create the managed cron worktree", "cron_workdir_prepare_failed", True)
         return workdir
     command = (
-        f"set -eu; git -C {shlex.quote(workdir)} diff --quiet; "
+        f"set -eu; {lock_command}git -C {shlex.quote(workdir)} diff --quiet; "
         f"git -C {shlex.quote(workdir)} diff --cached --quiet; "
         f"target=$(git -C {shlex.quote(source)} rev-parse HEAD); "
         f"git -C {shlex.quote(workdir)} merge --ff-only \"$target\" >/dev/null"
@@ -1216,7 +1294,10 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
         plan = reconciliation_plan(catalog, _cron_snapshot(entry)["jobs"], force_replace=force_replace, paths=paths)
     except (ValueError, KeyError, OSError) as exc:
         raise HermesError(str(exc), "invalid_cron_catalog") from exc
-    plan["requires_confirm"] = bool(plan["changes"])
+    plan["requires_confirm"] = bool(plan["changes"] and not plan["blocked_by"])
+    if plan["blocked_by"]:
+        return result(False, "cron_reconcile", remote_name, status="blocked", data=plan,
+                      error=HermesError("observed cron state cannot be verified safely", "cron_reconcile_blocked"))
     if not confirm or not plan["changes"]:
         return result(True, "cron_reconcile", remote_name,
                       status="planned" if plan["changes"] else "converged", data=plan)
@@ -1632,33 +1713,41 @@ def worktree_inspect(remote_name: str, name: str) -> dict:
     entry = _require_remote(remote_name)
     path = _managed_worktree_path(_paths(entry), name)
     program = r'''
-import json, re, subprocess, sys
+import hashlib, json, re, subprocess, sys
 from pathlib import Path
 path = Path(sys.argv[1])
+credential_pattern = sys.argv[2]
 def run(*args):
     return subprocess.run(["git", "-C", str(path), *args], text=True, capture_output=True)
 if not path.is_dir() or run("rev-parse", "--is-inside-work-tree").returncode:
     raise SystemExit(4)
 status = run("status", "--porcelain=v1")
 branch = run("symbolic-ref", "--short", "HEAD")
-check = run("diff", "--check")
+head = run("rev-parse", "HEAD")
+check = run("diff", "--check", "HEAD")
 stat = run("diff", "--stat", "HEAD")
 diff = run("diff", "--no-ext-diff", "--unified=3", "HEAD", "--")
 text = diff.stdout
-secret_like = bool(re.search(r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY|(?:api[_-]?key|token|password|passphrase|secret|authorization)\s*[:=]\s*['\"]?[^\s'\"]{8,})", text))
+secret_like = bool(re.search(credential_pattern, text, re.IGNORECASE))
 bounded = text[:65536]
 print(json.dumps({"path": str(path), "branch": branch.stdout.strip() or None,
                   "status": status.stdout.splitlines()[:100], "diff_check_ok": check.returncode == 0,
                   "stat": stat.stdout[:12000], "diff": "" if secret_like else bounded,
-                  "secret_like": secret_like, "truncated": len(text) > len(bounded)}))
+                  "secret_like": secret_like, "head": head.stdout.strip(),
+                  "review_id": hashlib.sha256((head.stdout.strip() + "\0" + text).encode()).hexdigest(),
+                  "truncated": len(text) > len(bounded)}))
 '''
-    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(path)}", timeout=30,
+    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(path)} {shlex.quote(_CREDENTIAL_PATTERN)}", timeout=30,
                    what="Hermes managed worktree inspection failed")
     try:
         data = json.loads(res.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise HermesError("Hermes worktree inspection was invalid", "invalid_worktree_inventory") from exc
-    data["diff"] = _redact(str(data.get("diff") or ""), entry)
+    if _contains_credential(data.get("diff")):
+        data["secret_like"] = True
+        data["diff"] = ""
+    else:
+        data["diff"] = _redact(str(data.get("diff") or ""), entry)
     return result(True, "worktree_inspect", remote_name,
                   status="blocked" if data.get("secret_like") or not data.get("diff_check_ok") else "reviewable",
                   data=data)
@@ -1677,6 +1766,10 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
     expected_branch = f"hermes/{name}"
     if data.get("branch") != expected_branch:
         raise HermesError("managed worktree is not on its expected branch", "unexpected_worktree_branch")
+    reviewed_head = str(data.get("head") or "")
+    review_id = str(data.get("review_id") or "")
+    if not _COMMIT_RE.fullmatch(reviewed_head) or not re.fullmatch(r"[0-9a-f]{64}", review_id):
+        raise HermesError("worktree inspection lacks a stable review identity", "invalid_worktree_review")
     if not data.get("status"):
         return result(True, "worktree_preserve", remote_name, status="clean", data=data)
     if not confirm:
@@ -1685,13 +1778,23 @@ def worktree_preserve(remote_name: str, name: str, confirm: bool = False) -> dic
     entry = _require_remote(remote_name)
     path = _managed_worktree_path(_paths(entry), name)
     message = f"chore: preserve Hermes worktree {name}"
-    secret_pattern = r"(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY|(api[_-]?key|token|password|passphrase|secret|authorization)[[:space:]]*[:=][[:space:]]*['\"]?[^[:space:]'\"]{8,})"
+    credential_scan = (
+        "python3 -c "
+        + shlex.quote("import re, sys; raise SystemExit(0 if re.search(sys.argv[1], sys.stdin.read(), re.IGNORECASE) else 1)")
+        + " " + shlex.quote(_CREDENTIAL_PATTERN)
+    )
     lock = f"$HOME/.hermes/locks/worktree-{name}.lock"
+    tick_lock = "$HOME/.hermes/cron/.tick.lock"
     command = (
-        f"set -eu; mkdir -p $HOME/.hermes/locks; exec 9>{lock}; flock -n 9; "
+        f"set -eu; mkdir -p $HOME/.hermes/cron $HOME/.hermes/locks; exec 8>{tick_lock}; flock -w 30 8; "
+        f"exec 9>{lock}; flock -n 9; "
+        f"test \"$(git -C {shlex.quote(path)} symbolic-ref --short HEAD)\" = {shlex.quote(expected_branch)}; "
+        f"test \"$(git -C {shlex.quote(path)} rev-parse HEAD)\" = {shlex.quote(reviewed_head)}; "
         f"test -z \"$(git -C {shlex.quote(path)} status --porcelain | sed -n '/^?? /p')\"; "
-        f"if git -C {shlex.quote(path)} diff HEAD -- | grep -Eiq {shlex.quote(secret_pattern)}; then exit 44; fi; "
-        f"git -C {shlex.quote(path)} diff --check; git -C {shlex.quote(path)} add -u; "
+        f"review_id=$( (printf '%s\\0' \"$(git -C {shlex.quote(path)} rev-parse HEAD)\"; git -C {shlex.quote(path)} diff --no-ext-diff HEAD --) | sha256sum | awk '{{print $1}}' ); "
+        f"test \"$review_id\" = {shlex.quote(review_id)}; "
+        f"if git -C {shlex.quote(path)} diff HEAD -- | {credential_scan}; then exit 44; fi; "
+        f"git -C {shlex.quote(path)} diff --check HEAD; git -C {shlex.quote(path)} add -u; "
         f"git -C {shlex.quote(path)} -c user.name='Hermes Preservation' "
         f"-c user.email='hermes-preservation@users.noreply.github.com' commit -m {shlex.quote(message)} >/dev/null; "
         f"git -C {shlex.quote(path)} push -u origin HEAD:{shlex.quote(expected_branch)} >/dev/null; "
@@ -1713,8 +1816,7 @@ def health(remote_name: str) -> dict:
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user is-active hermes-gateway-sandbox.service 2>/dev/null || true; "
         "else echo unavailable; fi; "
         "if command -v loginctl >/dev/null 2>&1; then loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        "else echo unavailable; fi; "
-        "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true")
+        "else echo unavailable; fi")
     with ThreadPoolExecutor(max_workers=6) as pool:
         diagnostic_future = pool.submit(doctor, remote_name)
         state_future = pool.submit(_remote_state_read, entry, paths)
@@ -1728,36 +1830,9 @@ def health(remote_name: str) -> dict:
         gateway = gateway_future.result()
         observed = cron_future.result()["jobs"]
         worktrees = worktree_future.result()
-    state, stale_jobs = _reconcile_sessions(entry, paths, state)
     lines = (service.stdout or "").splitlines()
     gateway_state = lines[0].strip() if lines else "unknown"
     linger = lines[1].strip().lower() if len(lines) > 1 else "unknown"
-    boot_id = lines[2].strip()[:80] if len(lines) > 2 else ""
-    if not re.fullmatch(r"[0-9a-f-]{16,80}", boot_id):
-        boot_id = ""
-    previous_boot = state.get("last_boot_id")
-    state["last_boot_id"] = boot_id
-    if previous_boot and boot_id and previous_boot != boot_id:
-        installation = state.get("installation") or {}
-        commit = installation.get("commit")
-        if _COMMIT_RE.fullmatch(str(commit or "")):
-            gate = state.setdefault("gates", {}).setdefault("v2_operations", {})
-            gate.setdefault("evidence", {})["reboot_recovery"] = "passed"
-            gate.setdefault("check_details", {})["reboot_recovery"] = {"boot_id_changed": "true"}
-            gate["commit"] = commit
-            gate["integration_schema"] = STATE_SCHEMA
-            gate["recorded_at"] = datetime.now(timezone.utc).isoformat()
-            if all(gate["evidence"].get(name) == "passed" for name in _V2_ACCEPTANCE_CHECKS):
-                gate["status"] = "passed"
-    # Merge the boot marker with any evidence/session updates written by the
-    # reconciliation helpers so one observation cannot overwrite another.
-    if boot_id:
-        persisted = _remote_state_read(entry, paths)
-        persisted["last_boot_id"] = state["last_boot_id"]
-        if "v2_operations" in state.get("gates", {}):
-            persisted.setdefault("gates", {})["v2_operations"] = state["gates"]["v2_operations"]
-        _remote_state_write(entry, paths, persisted)
-        state = persisted
     sessions = state["sessions"].values()
     diagnostic_error = diagnostic["error"]
     cron_health = []
@@ -1793,7 +1868,6 @@ def health(remote_name: str) -> dict:
                 "running": sum(session.get("state") == "running" for session in sessions),
                 "stale": sum(session.get("state") == "stale" for session in sessions),
             },
-            "stale_jobs": stale_jobs,
             "completed_job_retention_days": _COMPLETED_JOB_RETENTION_DAYS,
             "v2_gate": _v2_gate(state),
         },
@@ -2039,7 +2113,7 @@ def update_apply(remote_name: str, version: str, commit: str | None, confirm: bo
             if gateway_was_active:
                 _checked(entry, "systemctl --user start hermes-gateway-sandbox.service", timeout=60,
                          what="could not resume Hermes gateway after rollback")
-        except HermesError:
+        except (HermesError, KeyError, TypeError):
             pass
         _record_v2_evidence(entry, _paths(entry), "update_rollback", {"reason": exc.code})
         raise HermesError(f"update failed and restore was attempted: {exc}", "update_rolled_back", True) from exc
@@ -2258,13 +2332,15 @@ print(json.dumps({"branch":branch,"head":head}))
     if name == "sandbox":
         refresh = (
             f"set -eu; repo={shlex.quote(repo)}; runtime={shlex.quote(runtime)}; "
-            "stage=$(mktemp -d \"${runtime}.new.XXXXXX\"); old=\"${runtime}.old.$$\"; "
+            "stage=$(mktemp -d \"${runtime}.new.XXXXXX\"); old=\"${runtime}.old.$$\"; had_runtime=0; "
             "trap 'rm -rf \"$stage\"' EXIT; git -C \"$repo\" archive HEAD | tar -xf - -C \"$stage\"; "
             "for rel in .cli-venv mcp/wp-server/.venv; do if test -e \"$runtime/$rel\"; then "
-            "mkdir -p \"$stage/$(dirname \"$rel\")\"; mv \"$runtime/$rel\" \"$stage/$rel\"; fi; done; "
-            "mv \"$runtime\" \"$old\"; mv \"$stage\" \"$runtime\"; "
-            "if \"$runtime/sb\" --help >/dev/null; then rm -rf \"$old\"; "
-            "else rm -rf \"$runtime\"; mv \"$old\" \"$runtime\"; exit 1; fi"
+            "mkdir -p \"$stage/$(dirname \"$rel\")\"; cp -a \"$runtime/$rel\" \"$stage/$rel\"; fi; done; "
+            "if test -e \"$runtime\"; then mv \"$runtime\" \"$old\"; had_runtime=1; fi; "
+            "rollback() { rm -rf \"$runtime\"; if test \"$had_runtime\" = 1 && test -e \"$old\"; then mv \"$old\" \"$runtime\"; fi; }; "
+            "if ! mv \"$stage\" \"$runtime\"; then rollback; exit 1; fi; "
+            "if \"$runtime/sb\" --help >/dev/null; then test \"$had_runtime\" = 0 || rm -rf \"$old\"; "
+            "else rollback; exit 1; fi"
         )
         _checked(entry, refresh, timeout=180, what="Sandbox runtime refresh failed")
     return result(True, "repo_sync", remote_name, status="synced", repo=name,
@@ -2560,7 +2636,50 @@ print(json.dumps({"gateway_pids": sorted(processes),"units":units},sort_keys=Tru
             "conflict": conflict, "healthy": not conflict}
 
 
-def gateway_converge(remote_name: str, confirm: bool = False) -> dict:
+def _gateway_stability(entry: dict, initial: dict, *, paths: dict, stability_seconds: int,
+                       sample_interval: int, sleeper) -> dict:
+    """Observe gateway ownership and a successful scheduler status probe."""
+    if not isinstance(stability_seconds, int) or stability_seconds < 0:
+        raise HermesError("gateway stability seconds must be a non-negative integer", "invalid_stability_window")
+    if not isinstance(sample_interval, int) or sample_interval < 1:
+        raise HermesError("gateway sample interval must be a positive integer", "invalid_stability_interval")
+
+    observations = [initial]
+    scheduler = []
+
+    def observe_scheduler() -> dict:
+        status = _ssh(entry, f"{paths['launcher']} cron status", timeout=30)
+        return {"available": status.returncode == 0}
+
+    scheduler.append(observe_scheduler())
+    elapsed = 0
+    while elapsed < stability_seconds:
+        delay = min(sample_interval, stability_seconds - elapsed)
+        sleeper(delay)
+        elapsed += delay
+        observations.append(_gateway_ownership(entry))
+        scheduler.append(observe_scheduler())
+
+    def restart_count(observation: dict) -> int:
+        value = (observation.get("units", {}).get(GATEWAY_UNIT, {}) or {}).get("restart_count", 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1
+
+    restart_counts = [restart_count(observation) for observation in observations]
+    stable = (all(observation.get("healthy") for observation in observations)
+              and all(item["available"] for item in scheduler)
+              and all(count <= restart_counts[0] for count in restart_counts[1:]))
+    return {"stable": stable, "observation_seconds": stability_seconds,
+            "sample_count": len(observations), "restart_counts": restart_counts,
+            "scheduler": scheduler[-1], "scheduler_present": all(item["available"] for item in scheduler)}
+
+
+def gateway_converge(remote_name: str, confirm: bool = False, *,
+                     stability_seconds: int = GATEWAY_STABILITY_SECONDS,
+                     sample_interval: int = GATEWAY_STABILITY_INTERVAL,
+                     sleeper=time.sleep) -> dict:
     """Preview or establish the Sandbox user service as the sole gateway owner."""
     entry = _require_remote(remote_name)
     paths = _paths(entry)
@@ -2575,11 +2694,13 @@ def gateway_converge(remote_name: str, confirm: bool = False) -> dict:
         actions.append("stop unmanaged gateway processes")
     if not before["healthy"]:
         actions += ["install hermes-gateway-sandbox.service", "start managed gateway", "verify stable ownership"]
-    if not confirm or before["healthy"]:
+    if not confirm:
         return result(True, "gateway_converge", remote_name,
                       status="converged" if before["healthy"] else "planned",
                       data={"before": before, "actions": actions, "requires_confirm": bool(actions)})
-    killer = r'''
+    after = before
+    if not before["healthy"]:
+        killer = r'''
 import os, signal
 from pathlib import Path
 me={os.getpid(), os.getppid()}
@@ -2591,22 +2712,28 @@ for proc in Path("/proc").iterdir():
         try: os.kill(int(proc.name), signal.SIGTERM)
         except (ProcessLookupError, PermissionError): pass
 '''
-    command = (
-        "set -eu; systemctl --user stop hermes-gateway-sandbox.service 2>/dev/null || true; "
-        "systemctl --user stop hermes-gateway.service 2>/dev/null || true; "
-        "systemctl --user disable hermes-gateway.service >/dev/null 2>&1 || true; "
-        f"python3 -c {shlex.quote(killer)}; sleep 2; "
-        + _gateway_install_command(GATEWAY_UNIT, _gateway_unit(paths)) + "; "
-        f"systemctl --user restart {GATEWAY_UNIT}; sleep 5"
-    )
-    _checked(entry, command, timeout=60, what="Hermes gateway convergence failed")
-    after = _gateway_ownership(entry)
+        command = (
+            "set -eu; systemctl --user stop hermes-gateway-sandbox.service 2>/dev/null || true; "
+            "systemctl --user stop hermes-gateway.service 2>/dev/null || true; "
+            "systemctl --user disable hermes-gateway.service >/dev/null 2>&1 || true; "
+            f"python3 -c {shlex.quote(killer)}; sleep 2; "
+            + _gateway_install_command(GATEWAY_UNIT, _gateway_unit(paths)) + "; "
+            f"systemctl --user restart {GATEWAY_UNIT}; sleep 5"
+        )
+        _checked(entry, command, timeout=60, what="Hermes gateway convergence failed")
+        after = _gateway_ownership(entry)
     if not after["healthy"]:
         return result(False, "gateway_converge", remote_name, status="degraded",
                       data={"before": before, "after": after, "actions": actions},
                       error=HermesError("gateway ownership did not converge", "gateway_conflict", True))
+    stability = _gateway_stability(entry, after, paths=paths, stability_seconds=stability_seconds,
+                                   sample_interval=sample_interval, sleeper=sleeper)
+    if not stability["stable"]:
+        return result(False, "gateway_converge", remote_name, status="degraded",
+                      data={"before": before, "after": after, "actions": actions, "stability": stability},
+                      error=HermesError("gateway scheduler did not remain stable", "gateway_stability_failed", True))
     return result(True, "gateway_converge", remote_name, status="converged",
-                  data={"before": before, "after": after, "actions": actions})
+                  data={"before": before, "after": after, "actions": actions, "stability": stability})
 
 
 def gateway(remote_name: str, action: str, allowlist: list[str] | None = None, lines: int = 200) -> dict:

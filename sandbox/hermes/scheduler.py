@@ -193,6 +193,8 @@ def render_entry(entry: DesiredCronEntry, paths: dict[str, str]) -> dict[str, An
         if not target.is_absolute() or not any(target == root or root in target.parents for root in roots):
             raise ValueError(f"rendered workdir escaped managed roots for {entry.name}")
     data = asdict(entry)
+    if entry.kind == "agent":
+        data["prompt"] = guarded_prompt(entry.prompt)
     data["workdir"] = workdir
     data.pop("workdir_template")
     return data
@@ -203,6 +205,8 @@ def catalog_fingerprint(catalog: dict[str, Any], script_root: Path | None = None
     normalized = []
     for entry in catalog["jobs"]:
         item = asdict(entry)
+        if entry.kind == "agent":
+            item["prompt"] = guarded_prompt(entry.prompt)
         if entry.script:
             item["script_sha256"] = hashlib.sha256((root / entry.script).read_bytes()).hexdigest()
         normalized.append(item)
@@ -241,6 +245,92 @@ def effective_job_status(job: dict[str, Any], evidence: str = "") -> dict[str, A
     }
 
 
+def _fingerprint(value: dict[str, Any]) -> str:
+    """Hash one canonical, non-secret scheduler record."""
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _sha256(value: str | bytes) -> str:
+    data = value.encode() if isinstance(value, str) else value
+    return hashlib.sha256(data).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
+
+
+def _desired_job_fingerprint(entry: DesiredCronEntry, *, script_root: Path,
+                              paths: dict[str, str] | None) -> str | None:
+    """Fingerprint every field Sandbox controls without retaining task content."""
+    if paths is None:
+        return None
+    rendered = render_entry(entry, paths)
+    route = scheduled_route(entry.profile) if entry.profile else None
+    return _fingerprint({
+        "name": entry.name,
+        "schedule": entry.schedule,
+        "kind": entry.kind,
+        "enabled": entry.enabled,
+        "deliver": entry.deliver,
+        "workdir": rendered["workdir"],
+        "provider": route.provider if route else None,
+        "model": route.model if route else None,
+        "reasoning_effort": route.effort if route else None,
+        "prompt_sha256": _sha256(rendered["prompt"]) if entry.kind == "agent" else None,
+        "script": entry.script,
+        "script_sha256": _sha256((script_root / entry.script).read_bytes()) if entry.script else None,
+    })
+
+
+def _observed_job_fingerprint(job: dict[str, Any]) -> str | None:
+    """Fingerprint the pinned safe snapshot, failing closed on missing evidence."""
+    kind = classify_job(job)
+    required = ("name", "schedule", "enabled", "deliver", "workdir")
+    if any(field not in job for field in required) or not isinstance(job.get("name"), str):
+        return None
+    if job.get("enabled") is not True:
+        return None
+    if kind == "agent":
+        required = ("provider_snapshot", "model_snapshot", "reasoning_effort_snapshot", "prompt_sha256")
+        if any(field not in job for field in required) or job.get("no_agent") is not False:
+            return None
+        if not _is_sha256(job.get("prompt_sha256")):
+            return None
+        provider = job["provider_snapshot"]
+        model = job["model_snapshot"]
+        effort = job["reasoning_effort_snapshot"]
+        prompt_sha256 = job["prompt_sha256"]
+        script = None
+        script_sha256 = None
+    else:
+        required = ("script", "script_sha256")
+        if any(field not in job for field in required) or job.get("no_agent") is not True:
+            return None
+        if not isinstance(job.get("script"), str) or not _is_sha256(job.get("script_sha256")):
+            return None
+        provider = None
+        model = None
+        effort = None
+        prompt_sha256 = None
+        script = job["script"]
+        script_sha256 = job["script_sha256"]
+    return _fingerprint({
+        "name": job["name"],
+        "schedule": job["schedule"],
+        "kind": kind,
+        "enabled": job["enabled"],
+        "deliver": job["deliver"],
+        "workdir": job["workdir"],
+        "provider": provider,
+        "model": model,
+        "reasoning_effort": effort,
+        "prompt_sha256": prompt_sha256,
+        "script": script,
+        "script_sha256": script_sha256,
+    })
+
+
 def reconciliation_plan(catalog: dict[str, Any], observed: list[dict[str, Any]], *,
                         force_replace: bool = False, script_root: Path | None = None,
                         paths: dict[str, str] | None = None) -> dict[str, Any]:
@@ -249,17 +339,23 @@ def reconciliation_plan(catalog: dict[str, Any], observed: list[dict[str, Any]],
     observed_by_name: dict[str, list[dict[str, Any]]] = {}
     for job in observed:
         observed_by_name.setdefault(str(job.get("name") or ""), []).append(job)
-    exact = not force_replace and set(observed_by_name) == set(desired) and all(
-        len(observed_by_name[name]) == 1
-        and str(observed_by_name[name][0].get("schedule")) == entry.schedule
-        and classify_job(observed_by_name[name][0]) == entry.kind
-        and observed_by_name[name][0].get("enabled") is True
-        and not invalid_model_reason(observed_by_name[name][0].get("model_snapshot"))
-        and (entry.kind != "agent" or observed_by_name[name][0].get("model_snapshot") == scheduled_route(entry.profile or "").model)
-        and (entry.kind != "agent" or observed_by_name[name][0].get("provider_snapshot") == scheduled_route(entry.profile or "").provider)
-        and (entry.kind != "script" or PurePosixPath(str(observed_by_name[name][0].get("script") or "")).name == entry.script)
-        and (paths is None or observed_by_name[name][0].get("workdir") == render_entry(entry, paths)["workdir"])
+    desired_fingerprints = {
+        name: _desired_job_fingerprint(entry, script_root=script_root or scripts_path(), paths=paths)
         for name, entry in desired.items()
+    }
+    blocked_by = [] if force_replace else [
+        {"name": name, "reason": "controlled-state fingerprint unavailable"}
+        for name, entry in desired.items()
+        if desired_fingerprints[name] is None
+        or (
+            len(observed_by_name.get(name, [])) == 1
+            and _observed_job_fingerprint(observed_by_name[name][0]) is None
+        )
+    ]
+    exact = not force_replace and not blocked_by and set(observed_by_name) == set(desired) and all(
+        len(observed_by_name[name]) == 1
+        and _observed_job_fingerprint(observed_by_name[name][0]) == desired_fingerprints[name]
+        for name in desired
     )
     remove = [] if exact else [
         {"id": str(job.get("id") or ""), "name": str(job.get("name") or "")}
@@ -272,6 +368,6 @@ def reconciliation_plan(catalog: dict[str, Any], observed: list[dict[str, Any]],
         "remove": remove,
         "create": create,
         "retain": list(desired) if exact else [],
-        "blocked_by": [],
+        "blocked_by": blocked_by,
         "changes": not exact,
     }

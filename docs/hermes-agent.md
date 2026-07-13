@@ -160,11 +160,20 @@ job, installs the committed scripts, and recreates exactly the reviewed catalog.
 A partial failure reports removed and created IDs and retains the protected
 backup so the same command can be rerun.
 
-The base catalog contains three no-agent monitors/dispatchers and one bounded
-Terra/Medium Spec-Kit implementation worker. Spark remains orchestration only;
+The base catalog contains two purposeful no-agent Kanban jobs (bounded dispatch
+and quota requeue) plus one bounded Terra/Medium Spec-Kit implementation worker.
+The obsolete TODO monitor is not scheduled because Lenzora has no `TODO.md`;
+its actual work source is the Kanban board. Spark remains orchestration only;
 Luna remains read-only. Monitor scripts return zero only after a valid inspection
 or legitimate no-work result. Missing files, malformed output, timeouts, and
 command failures return nonzero, and scripts never add/remove their own cron job.
+
+All Hermes controls use Sandbox's shared short-lived SSH multiplexing policy.
+Sequential commands reuse authentication for up to 60 idle seconds, while each
+operation retains a separate timeout, result, redaction boundary, and confirmation.
+Hermes health already batches cohesive probes and can run independent probes over
+parallel channels on that shared connection; operators should not concatenate
+unrelated or destructive commands merely to save round trips.
 Confirmed reconciliation creates the implementation worker's dedicated managed
 Git worktree if it is absent; scheduled edits never target the primary checkout.
 `hermes repo sync` refuses dirty or detached managed checkouts, performs only a

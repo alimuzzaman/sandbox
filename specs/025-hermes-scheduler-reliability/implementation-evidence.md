@@ -46,6 +46,7 @@
 - `./sb hermes cron verify 433ce28bea8b --timeout 1200 --confirm --json` reached an evidence-backed terminal result in 78.61 seconds with a valid `openai-codex` / `gpt-5.6-terra` route, no correlated provider failure, and no false success.
 - The corresponding bounded saved output reported `NO_APPROVED_WORK`: the worker correctly refused mutation because this specification was still marked Draft. The specification is now explicitly approved; the remaining bounded convergence task will be used to prove an actual scheduled change.
 - Latest aggregate health reported no cron drift, no false success, one healthy gateway owner, and no degraded reasons. Six dirty worktrees remain inventoried; reviewed invalid/unrelated changes remain preserved rather than force-committed.
+- Post-acceptance script evidence showed `todo-md-monitor` failing every five minutes because Lenzora has no `TODO.md`. The Lenzora Kanban board is the actual work source, already covered by bounded dispatch and quota requeue, so the redundant monitor was removed from the desired catalog instead of preserving a permanent false alarm.
 
 ## Additional failures converted into safeguards
 
@@ -53,6 +54,17 @@
 2. Setup previously performed many lock-prone Hermes config mutations and omitted the Sandbox MCP contract from isolated worker profiles; setup now uses one schema-preserving atomic merge for all profiles.
 3. Cron command composition previously shell-quoted the trusted `$HOME` launcher expression; launcher expansion and catalog argument quoting now have dedicated tests.
 4. Sandbox previously could not inspect Hermes' saved cron response. `hermes cron output` now provides validated, bounded, redacted CLI/MCP access without allowing arbitrary paths.
+5. Independent Terra/High review found that fresh bootstrap still hard-required a retired script, health performed hidden reconciliation writes, and gateway convergence sampled only five seconds without proving scheduler availability. Bootstrap now derives required scripts from the catalog; health is observation-only; convergence probes `hermes cron status` and ownership/restart state over 120 seconds.
+6. The same review found preservation could miss bearer/JWT credentials and revalidate incompletely, while failed repository refresh could lose retained virtual environments. One shared credential detector, tick/worktree lock ordering, reviewed tree identity, `git diff --check HEAD`, and transactional staged runtime replacement now fail closed with regression coverage.
+7. Reconciliation previously compared only shallow metadata. Exact convergence now uses secret-safe canonical hashes for every controlled field, guarded prompt, delivery, route, workdir, script identity, and installed script content. Missing evidence blocks ordinary apply before deletion; an explicit force-replacement can replace unknown observed state, but final verification still requires exact hashes.
+
+## Secure remote connection reuse
+
+- Official OpenSSH guidance supports opportunistic session sharing with `ControlMaster=auto`, endpoint-unique `%C` control paths, and bounded `ControlPersist`; the control directory must not be writable by other users.
+- Before implementation, three harmless `hermes cron list` calls took 6.15s, 6.85s, and 4.13s because each established a new SSH connection.
+- With the shared Sandbox transport policy, the same sequence took 6.84s, 1.54s, and 1.49s. The first call authenticated normally; the next two reused the connection and were approximately 3–4 times faster.
+- Local control state was verified as a mode-0700 directory with a mode-0600 `%C`-hashed socket. It contains no readable user, host, port, or credential.
+- SSH, SCP, and direct VPS Git pushes share the 60-second policy. Every command launches once, keeps its own timeout/exit/output/confirmation contract, and never retries from stderr after launch. If the local control directory cannot be prepared, one direct non-multiplexed command is selected before launch.
 
 ## Trace
 
@@ -71,8 +83,15 @@ Evidence: Commands and live results above; final full-suite and post-worker revi
 - `python3 -m unittest tests.test_hermes tests.test_cli tests.test_mcp` → 138 passed, 1 skipped (14.892s).
 - `python3 -m unittest discover -s tests -v` → 510 passed, 2 skipped (19.327s). Expected negative-path diagnostic output and pre-existing subprocess `ResourceWarning` messages were emitted without test failures.
 - `./sb selftest` → 510 passed, 2 skipped (24.495s); final status: `selftest: passed`.
-- The repository does not provide an executable `.cli-venv/bin/python`, so all T038 commands used the mandated `python3 -m unittest` fallback. No remote or deployment command was run.
+- The scheduled T038 worker used the documented `python3 -m unittest` fallback in its worktree. Final parent verification used the current executable `./.cli-venv/bin/python`. No remote mutation or deployment occurred during T038.
 
-Outcome, residual risk, and follow-up: Gateway and cron state are converged. Remaining work is the approved scheduled-change proof, final full-suite rerun after the last tooling additions, and reviewed preservation of any resulting worktree change.
+## Final independent review and expanded verification (T039 / US6)
+
+- Two independent Terra/High read-only reviews covered specification completeness and implementation correctness/security. All seven material findings are listed above and resolved with regression tests.
+- `./.cli-venv/bin/python -m unittest tests.test_remote tests.test_hermes_catalog_integrity tests.test_hermes tests.test_cli tests.test_mcp` passed after the final transport and scheduler changes.
+- `./sb selftest` passed after the final changes. Test discovery contains 534 tests; pre-existing subprocess `ResourceWarning` diagnostics remain non-failing.
+- `git diff --check` and Python compilation of `sandbox/core/_remote.py`, `sandbox/core/_hermes.py`, and `sandbox/hermes/scheduler.py` passed.
+
+Outcome, residual risk, and follow-up: Local implementation and review are complete. Remaining live work is to ship/synchronize this revision, replace the four observed jobs with the final three-job catalog, execute every recreated job, and retain final sanitized evidence. Unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
 
 Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, and bounded verified execution.

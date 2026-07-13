@@ -6,7 +6,10 @@ without installing Hermes, authenticating a Git provider, or changing a VPS.
 from __future__ import annotations
 
 import json
+import hashlib
 import io
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -31,12 +34,33 @@ def _completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
+def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
+    catalog = load_catalog()
+    jobs = []
+    for index, entry in enumerate(catalog["jobs"]):
+        rendered = render_entry(entry, paths)
+        job = {
+            "id": f"deadbeef{index:04d}", "name": entry.name, "schedule": entry.schedule,
+            "enabled": True, "deliver": entry.deliver, "workdir": rendered["workdir"],
+            "no_agent": entry.kind == "script", "script": entry.script,
+            "provider_snapshot": scheduled_route(entry.profile).provider if entry.profile else None,
+            "model_snapshot": scheduled_route(entry.profile).model if entry.profile else None,
+        }
+        if entry.script:
+            job["script_sha256"] = hashlib.sha256(
+                (ROOT / "sandbox/hermes/cron_scripts" / entry.script).read_bytes()).hexdigest()
+        else:
+            job["reasoning_effort_snapshot"] = scheduled_route(entry.profile).effort
+            job["prompt_sha256"] = hashlib.sha256(rendered["prompt"].encode()).hexdigest()
+        jobs.append(job)
+    return {"jobs": jobs}
+
+
 class TestValidation(unittest.TestCase):
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
-            "todo-md-monitor", "codex-quota-requeue", "lenzora-kanban-dispatch",
-            "sandbox-approved-spec-task",
+            "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
@@ -48,6 +72,12 @@ class TestValidation(unittest.TestCase):
         })
         self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/sandbox-approved-spec-task")
 
+    def test_remote_install_validates_catalog_scripts_without_retired_names(self):
+        script = (ROOT / "scripts/install-remote.sh").read_text()
+        self.assertIn('jobs = catalog.get("jobs")', script)
+        self.assertIn('root / "cron_scripts" / script', script)
+        self.assertNotIn("todo_md_monitor.py", script)
+
     def test_cron_status_prefers_provider_failure_over_false_green(self):
         job = {"last_status": "ok", "last_run_at": "now", "model_snapshot": "gpt-5.6-luna"}
         status = effective_job_status(job, "provider_bad_request")
@@ -56,22 +86,17 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(classify_job({"no_agent": True, "script": "watch.py"}), "script")
 
     def test_reconciliation_is_exact_and_idempotent(self):
+        paths = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                 "worktrees": "/home/u/sandbox/runtime/hermes-worktrees"}
         catalog = load_catalog()
-        observed = []
-        for index, entry in enumerate(catalog["jobs"]):
-            observed.append({
-                "id": f"deadbeef{index:04d}", "name": entry.name, "schedule": entry.schedule,
-                "enabled": True, "no_agent": entry.kind == "script", "script": entry.script,
-                "provider_snapshot": scheduled_route(entry.profile).provider if entry.profile else None,
-                "model_snapshot": scheduled_route(entry.profile).model if entry.profile else None,
-            })
-        converged = reconciliation_plan(catalog, observed)
+        observed = _exact_catalog_snapshot(paths)["jobs"]
+        converged = reconciliation_plan(catalog, observed, paths=paths)
         self.assertFalse(converged["changes"])
         self.assertEqual(converged["create"], [])
-        forced = reconciliation_plan(catalog, observed, force_replace=True)
+        forced = reconciliation_plan(catalog, observed, force_replace=True, paths=paths)
         self.assertTrue(forced["changes"])
-        self.assertEqual(len(forced["remove"]), 4)
-        self.assertEqual(len(forced["create"]), 4)
+        self.assertEqual(len(forced["remove"]), 3)
+        self.assertEqual(len(forced["create"]), 3)
 
     def test_scheduled_routes_keep_model_and_effort_separate(self):
         route = scheduled_route("terra")
@@ -128,7 +153,7 @@ class TestSchedulerReliability(unittest.TestCase):
         inspect.return_value = {"data": {
             "path": "/home/u/worktrees/demo", "branch": "hermes/demo",
             "status": [" M docs/file.md"], "diff_check_ok": True,
-            "secret_like": False,
+            "secret_like": False, "head": "b" * 40, "review_id": "c" * 64,
         }}
         preview = hermes.worktree_preserve("test", "demo", False)
         self.assertEqual(preview["status"], "planned")
@@ -139,7 +164,28 @@ class TestSchedulerReliability(unittest.TestCase):
         command = checked.call_args.args[1]
         self.assertIn("HEAD:hermes/demo", command)
         self.assertIn("flock -n 9", command)
-        self.assertIn("git -C /home/u/worktrees/demo diff HEAD -- | grep -Eiq", command)
+        self.assertIn(".hermes/cron/.tick.lock", command)
+        self.assertLess(command.index(".tick.lock"), command.index("worktree-demo.lock"))
+        self.assertIn("git -C /home/u/worktrees/demo diff --check HEAD", command)
+        self.assertIn("symbolic-ref --short HEAD", command)
+        self.assertIn("sha256sum", command)
+        self.assertIn("re.search(sys.argv[1]", command)
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={"worktrees": "/home/u/worktrees"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_worktree_inspect_withholds_generic_bearer_jwt(self, require_remote, paths, checked):
+        token = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature"
+        checked.return_value = _completed(stdout=json.dumps({
+            "path": "/home/u/worktrees/demo", "branch": "hermes/demo", "status": [],
+            "diff_check_ok": True, "stat": "", "diff": token, "secret_like": False,
+            "head": "a" * 40, "review_id": "b" * 64, "truncated": False,
+        }))
+        out = hermes.worktree_inspect("test", "demo")
+        self.assertTrue(out["data"]["secret_like"])
+        self.assertEqual(out["data"]["diff"], "")
+        self.assertNotIn(token, json.dumps(out))
+        self.assertIn("credential_pattern = sys.argv[2]", checked.call_args.args[1])
 
     @patch("sandbox.core._hermes._ssh")
     def test_managed_cron_worktree_fast_forwards_only_when_clean(self, ssh):
@@ -156,6 +202,9 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("diff --quiet", command)
         self.assertIn("diff --cached --quiet", command)
         self.assertIn('merge --ff-only "$target"', command)
+        self.assertIn("worktree-sandbox-approved-spec-task.lock", command)
+        self.assertIn(".hermes/cron/.tick.lock", command)
+        self.assertLess(command.index(".tick.lock"), command.index("worktree-sandbox-approved-spec-task.lock"))
 
     @patch("sandbox.core._hermes._ssh")
     def test_managed_cron_worktree_refuses_dirty_or_divergent_state(self, ssh):
@@ -167,6 +216,91 @@ class TestSchedulerReliability(unittest.TestCase):
         with self.assertRaises(hermes.HermesError) as caught:
             hermes._prepare_catalog_workdir({}, {"repo_root": "/home/u/repos"}, desired)
         self.assertEqual(caught.exception.code, "cron_workdir_not_clean")
+
+    @patch("sandbox.core._hermes._checked")
+    def test_cron_snapshot_returns_only_safe_catalog_hashes(self, checked):
+        raw_prompt = "Private task intent"
+        script = b"#!/usr/bin/env python3\nprint('safe')\n"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            cron = home / ".hermes" / "cron"
+            scripts = home / ".hermes" / "scripts"
+            cron.mkdir(parents=True)
+            scripts.mkdir()
+            (home / ".hermes" / "config.yaml").write_text("agent:\n  reasoning_effort: medium\n")
+            (scripts / "safe.py").write_bytes(script)
+            (cron / "jobs.json").write_text(json.dumps({"jobs": [{
+                "id": "agent", "name": "worker", "enabled": True, "schedule": "every 1h",
+                "deliver": "local", "workdir": "/srv/work", "provider": "openai-codex",
+                "model": "gpt-5.6-terra", "prompt": raw_prompt, "no_agent": False,
+            }, {
+                "id": "script", "name": "monitor", "enabled": True, "schedule": "every 1h",
+                "deliver": "local", "workdir": "/srv/work", "script": "safe.py", "no_agent": True,
+            }]}))
+
+            def execute_snapshot(_, command, **__):
+                run = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False,
+                                     env={**os.environ, "HOME": str(home)})
+                return _completed(run.returncode, run.stdout, run.stderr)
+
+            checked.side_effect = execute_snapshot
+            observed = hermes._cron_snapshot({})
+
+        agent, script_job = observed["jobs"]
+        self.assertEqual(agent["prompt_sha256"], hashlib.sha256(guarded_prompt(raw_prompt).encode()).hexdigest())
+        self.assertEqual(agent["reasoning_effort_snapshot"], "medium")
+        self.assertEqual(script_job["script_sha256"], hashlib.sha256(script).hexdigest())
+        self.assertNotIn(raw_prompt, json.dumps(observed))
+        self.assertNotIn("prompt", agent)
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._ssh")
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+        "worktrees": "/home/u/sandbox/runtime/hermes-worktrees", "launcher": "$HOME/.local/bin/hermes",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    def test_reconcile_blocked_snapshot_makes_zero_remote_mutations(
+            self, snapshot, require_remote, paths, ssh, checked):
+        observed = _exact_catalog_snapshot(paths.return_value)
+        del next(job for job in observed["jobs"] if not job["no_agent"])["prompt_sha256"]
+        snapshot.return_value = observed
+
+        out = hermes.cron_reconcile("test", confirm=True)
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "blocked")
+        self.assertEqual(out["error"]["code"], "cron_reconcile_blocked")
+        ssh.assert_not_called()
+        checked.assert_not_called()
+
+    @patch("sandbox.core._hermes._create_catalog_job", side_effect=["created-1", "created-2", "created-3"])
+    @patch("sandbox.core._hermes._install_cron_scripts")
+    @patch("sandbox.core._hermes._prepare_catalog_workdir", return_value=None)
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+        "worktrees": "/home/u/sandbox/runtime/hermes-worktrees", "launcher": "$HOME/.local/bin/hermes",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    def test_force_reconcile_bypasses_missing_hashes_then_requires_exact_final_snapshot(
+            self, snapshot, require_remote, paths, ssh, checked, prepare, install_scripts, create):
+        initial = _exact_catalog_snapshot(paths.return_value)
+        del next(job for job in initial["jobs"] if not job["no_agent"])["prompt_sha256"]
+        final = _exact_catalog_snapshot(paths.return_value)
+        snapshot.side_effect = [initial, final]
+
+        out = hermes.cron_reconcile("test", confirm=True, force_replace=True)
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "converged")
+        self.assertEqual(out["data"]["blocked_by"], [])
+        self.assertEqual(ssh.call_count, 3)
+        self.assertEqual(create.call_count, 3)
+        install_scripts.assert_called_once()
 
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -236,6 +370,40 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertEqual(out["commit"], "a" * 40)
         self.assertIn("git -C \"$repo\" archive HEAD", checked.call_args_list[1].args[1])
 
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_repo_sync_restores_old_runtime_and_venvs_after_smoke_failure(self, require_remote, paths, checked):
+        checked.side_effect = [
+            _completed(stdout=json.dumps({"branch": "feature", "head": "a" * 40}) + "\n"),
+            hermes.HermesError("smoke failed", "repo_sync_failed"),
+        ]
+        with self.assertRaises(hermes.HermesError):
+            hermes.repo_sync("test", "sandbox", True)
+        command = checked.call_args_list[1].args[1]
+        self.assertIn('cp -a "$runtime/$rel" "$stage/$rel"', command)
+        self.assertIn('if test "$had_runtime" = 1 && test -e "$old"; then mv "$old" "$runtime"; fi', command)
+        self.assertIn('if ! mv "$stage" "$runtime"; then rollback; exit 1; fi', command)
+        self.assertIn(".cli-venv mcp/wp-server/.venv", command)
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_repo_sync_supports_a_fresh_server_without_live_runtime(self, require_remote, paths, checked):
+        checked.side_effect = [
+            _completed(stdout=json.dumps({"branch": "feature", "head": "a" * 40}) + "\n"),
+            _completed(),
+        ]
+        out = hermes.repo_sync("test", "sandbox", True)
+        command = checked.call_args_list[1].args[1]
+        self.assertTrue(out["data"]["runtime_refreshed"])
+        self.assertIn('had_runtime=0', command)
+        self.assertIn('if test -e "$runtime"; then mv "$runtime" "$old"; had_runtime=1; fi', command)
+
     @patch("sandbox.core._hermes._paths", return_value={
         "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
         "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",
@@ -247,7 +415,7 @@ class TestSchedulerReliability(unittest.TestCase):
         out = hermes.cron_reconcile("test", confirm=False, force_replace=True)
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "planned")
-        self.assertEqual(len(out["data"]["create"]), 4)
+        self.assertEqual(len(out["data"]["create"]), 3)
         ssh.assert_not_called()
 
     @patch("sandbox.core._hermes._cron_request_evidence", return_value={
@@ -299,6 +467,65 @@ class TestSchedulerReliability(unittest.TestCase):
         out = hermes._gateway_ownership({})
         self.assertFalse(out["healthy"])
         self.assertTrue(out["conflict"])
+
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._gateway_ownership")
+    @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_gateway_convergence_observes_scheduler_and_restart_stability(
+            self, require_remote, paths, ownership, ssh, checked):
+        unhealthy = {"healthy": False, "gateway_process_count": 2,
+                     "units": {"hermes-gateway.service": {"active_state": "active", "unit_file_state": "enabled"}}}
+        healthy = {"healthy": True, "gateway_process_count": 1, "units": {
+            hermes.GATEWAY_UNIT: {"restart_count": 3},
+            "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
+        }}
+        ownership.side_effect = [unhealthy, healthy, healthy, healthy]
+        sleeps = []
+        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=60,
+                                      sleeper=sleeps.append)
+        self.assertTrue(out["ok"])
+        self.assertEqual(sleeps, [60, 60])
+        self.assertTrue(out["data"]["stability"]["scheduler_present"])
+        self.assertEqual(out["data"]["stability"]["restart_counts"], [3, 3, 3])
+        self.assertEqual(ssh.call_count, 3)
+        self.assertTrue(all("cron status" in call.args[1] for call in ssh.call_args_list))
+
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._gateway_ownership")
+    @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_gateway_convergence_rejects_restart_growth(self, require_remote, paths, ownership, ssh, checked):
+        unhealthy = {"healthy": False, "gateway_process_count": 2,
+                     "units": {"hermes-gateway.service": {"active_state": "active", "unit_file_state": "enabled"}}}
+        healthy = {"healthy": True, "gateway_process_count": 1, "units": {
+            hermes.GATEWAY_UNIT: {"restart_count": 3},
+            "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
+        }}
+        restarted = {**healthy, "units": {**healthy["units"], hermes.GATEWAY_UNIT: {"restart_count": 4}}}
+        ownership.side_effect = [unhealthy, healthy, healthy, restarted]
+        out = hermes.gateway_converge("test", True, stability_seconds=120, sample_interval=60,
+                                      sleeper=lambda _: None)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["code"], "gateway_stability_failed")
+        self.assertEqual(out["data"]["stability"]["restart_counts"], [3, 3, 4])
+
+    @patch("sandbox.core._hermes._ssh", return_value=_completed(returncode=1))
+    @patch("sandbox.core._hermes._gateway_ownership")
+    @patch("sandbox.core._hermes._paths", return_value={"repo_root": "/home/u/repos", "launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_gateway_convergence_rejects_scheduler_status_failure(self, require_remote, paths, ownership, ssh):
+        healthy = {"healthy": True, "gateway_process_count": 1, "units": {
+            hermes.GATEWAY_UNIT: {"restart_count": 3},
+            "hermes-gateway.service": {"active_state": "inactive", "unit_file_state": "disabled"},
+        }}
+        ownership.return_value = healthy
+        out = hermes.gateway_converge("test", True, stability_seconds=0)
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["data"]["stability"]["scheduler_present"])
+        self.assertIn("cron status", ssh.call_args.args[1])
 
     @patch("sandbox.core._hermes._install_cron_scripts")
     @patch("sandbox.core._hermes._remote_state_write")
@@ -1670,7 +1897,7 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(out["data"]["gateway"]["linger"], "yes")
         self.assertEqual(out["data"]["sessions"]["stale"], 1)
 
-    def test_health_persists_reboot_gate_evidence_with_boot_marker(self):
+    def test_health_observes_state_without_reconciliation_or_persistence(self):
         before = {
             "schema_version": 1,
             "last_boot_id": "11111111-1111-1111-1111-111111111111",
@@ -1679,14 +1906,12 @@ class TestRemoteCommands(unittest.TestCase):
             "gates": {"v2_operations": {"commit": hermes.SUPPORTED_COMMIT,
                 "evidence": {name: "passed" for name in hermes._V2_ACCEPTANCE_CHECKS if name != "reboot_recovery"}}},
         }
-        persisted = {"schema_version": 1, "installation": {"commit": hermes.SUPPORTED_COMMIT},
-                     "sessions": {}, "gates": {}}
         diagnostic = {"ok": True, "data": {"checks": {}}, "error": None}
         with patch.object(hermes, "doctor", return_value=diagnostic), \
              patch.object(hermes, "_require_remote", return_value=self.entry), \
              patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
-             patch.object(hermes, "_remote_state_read", side_effect=[before, persisted]), \
-             patch.object(hermes, "_reconcile_sessions", return_value=(before, [])), \
+             patch.object(hermes, "_remote_state_read", return_value=before), \
+             patch.object(hermes, "_reconcile_sessions") as reconcile, \
              patch.object(hermes, "_remote_state_write") as write_state, \
              patch.object(hermes, "_ssh", return_value=_completed(stdout="inactive\nno\n22222222-2222-2222-2222-222222222222\n")), \
              patch.object(hermes, "_gateway_ownership", return_value={"healthy": True, "conflict": False}), \
@@ -1694,10 +1919,10 @@ class TestRemoteCommands(unittest.TestCase):
              patch.object(hermes, "_worktree_snapshot", return_value=[]), \
              patch.object(hermes, "reconciliation_plan", return_value={"changes": False, "catalog_fingerprint": "a" * 64}):
             out = hermes.health("test")
-        written = write_state.call_args.args[2]
-        self.assertEqual(written["last_boot_id"], "22222222-2222-2222-2222-222222222222")
-        self.assertEqual(written["gates"]["v2_operations"]["evidence"]["reboot_recovery"], "passed")
-        self.assertEqual(out["data"]["v2_gate"]["status"], "passed")
+        reconcile.assert_not_called()
+        write_state.assert_not_called()
+        self.assertEqual(before["last_boot_id"], "11111111-1111-1111-1111-111111111111")
+        self.assertEqual(out["data"]["v2_gate"]["status"], "pending")
 
     @patch("sandbox.core._hermes.subprocess.run")
     @patch("sandbox.core._hermes.remote.ssh_run")

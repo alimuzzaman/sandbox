@@ -11,6 +11,8 @@ live-verification pass against a real VPS.
 """
 import json
 import importlib.util
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -131,20 +133,123 @@ class TestSshRun(unittest.TestCase):
     @patch("subprocess.run")
     def test_builds_expected_ssh_command(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
-        sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
-        args = mock_run.call_args[0][0]
-        self.assertEqual(args[0], "ssh")
-        self.assertIn("ubuntu@1.2.3.4", args)
-        self.assertIn("true", args)
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
+                args = mock_run.call_args[0][0]
+                self.assertEqual(args[0], "ssh")
+                self.assertIn("ubuntu@1.2.3.4", args)
+                self.assertIn("true", args)
+                self.assertIn("ControlMaster=auto", args)
+                self.assertIn("ControlPersist=60", args)
+                control_path = next(arg for arg in args if arg.startswith("ControlPath="))
+                self.assertIn("%C", control_path)
+                self.assertNotIn("ubuntu", control_path)
+                self.assertNotIn("1.2.3.4", control_path)
+
+    def test_control_directory_is_owner_only(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            control_dir = Path(runtime) / "s"
+            control_dir.mkdir(mode=0o755)
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                self.assertEqual(sr._ensure_ssh_control_dir(), control_dir)
+            self.assertEqual(control_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_control_path_never_contains_connection_details(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                args = sr.ssh_command_args(
+                    {"ssh": "deploy-token@secret-host.internal:2222"}, "true"
+                )
+        control_path = next(arg for arg in args if arg.startswith("ControlPath="))
+        self.assertIn("%C", control_path)
+        self.assertNotIn("deploy-token", control_path)
+        self.assertNotIn("secret-host.internal", control_path)
 
     @patch("subprocess.run")
     def test_builds_expected_ssh_command_with_custom_port(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
-        sr.ssh_run({"ssh": "ubuntu@1.2.3.4:2222"}, "true", timeout=10)
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                sr.ssh_run({"ssh": "ubuntu@1.2.3.4:2222"}, "true", timeout=10)
+                args = mock_run.call_args[0][0]
+                self.assertIn("-p", args)
+                self.assertIn("2222", args)
+                self.assertIn("ubuntu@1.2.3.4", args)
+
+    @patch("subprocess.run")
+    def test_any_ssh_or_scp_result_is_returned_without_retry(self, mock_run):
+        calls = [
+            ("ssh", lambda: sr.ssh_run(
+                {"ssh": "ubuntu@1.2.3.4"}, "mutating-command"
+            )),
+            ("scp", lambda: sr.scp_run(
+                {"ssh": "ubuntu@1.2.3.4"}, "local.php", "/remote/local.php"
+            )),
+        ]
+        results = [
+            (1, "remote command failed"),
+            (255, "ControlPath too long"),
+            (255, "mux_client_request_session: read from master failed"),
+        ]
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                for transport, call in calls:
+                    for returncode, stderr in results:
+                        with self.subTest(transport=transport, returncode=returncode, stderr=stderr):
+                            mock_run.reset_mock()
+                            mock_run.return_value = _completed(
+                                returncode=returncode, stderr=stderr
+                            )
+                            result = call()
+                            self.assertEqual(result.returncode, returncode)
+                            mock_run.assert_called_once()
+
+    @patch("subprocess.run")
+    def test_scp_uses_control_options_with_custom_port(self, mock_run):
+        mock_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                result = sr.scp_run(
+                    {"ssh": "ubuntu@1.2.3.4:2222"}, "local.php", "/remote/local.php"
+                )
+        self.assertEqual(result.returncode, 0)
+        multiplexed_args = mock_run.call_args[0][0]
+        self.assertIn("ControlMaster=auto", multiplexed_args)
+        self.assertIn("ControlPersist=60", multiplexed_args)
+        self.assertIn("-P", multiplexed_args)
+        self.assertIn("2222", multiplexed_args)
+        control_path = next(arg for arg in multiplexed_args if arg.startswith("ControlPath="))
+        self.assertIn("%C", control_path)
+        self.assertNotIn("ubuntu", control_path)
+
+    @patch("subprocess.run")
+    @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=PermissionError("denied"))
+    def test_ssh_uses_direct_mode_when_control_directory_preparation_fails(
+            self, mock_ensure, mock_run):
+        mock_run.return_value = _completed(returncode=0)
+        sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true")
+        mock_ensure.assert_called_once()
+        mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
-        self.assertIn("-p", args)
+        self.assertIn("BatchMode=yes", args)
+        self.assertIn("ConnectTimeout=10", args)
+        self.assertNotIn("ControlMaster=auto", args)
+        self.assertNotIn("ControlPersist=60", args)
+
+    @patch("subprocess.run")
+    @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=OSError("readonly"))
+    def test_scp_uses_direct_mode_when_control_directory_preparation_fails(
+            self, mock_ensure, mock_run):
+        mock_run.return_value = _completed(returncode=0)
+        sr.scp_run({"ssh": "ubuntu@1.2.3.4:2222"}, "local.php", "/remote/local.php")
+        mock_ensure.assert_called_once()
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        self.assertIn("-P", args)
         self.assertIn("2222", args)
-        self.assertIn("ubuntu@1.2.3.4", args)
+        self.assertNotIn("ControlMaster=auto", args)
+        self.assertNotIn("ControlPersist=60", args)
 
     def test_parses_ssh_url_with_custom_port(self):
         parts = sr.remote_ssh_parts("ssh://ubuntu@1.2.3.4:2222")
@@ -202,14 +307,27 @@ class TestPushCommits(unittest.TestCase):
             _completed(returncode=0),
             _completed(returncode=0, stdout="abc1234\n"),
         ]
-        sha = sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
-                               "/home/ubuntu/sandbox/deploy-src/proj", "main")
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.dict(os.environ, {"PRESERVE_ME": "value"}):
+                sha = sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                                       "/home/ubuntu/sandbox/deploy-src/proj", "main")
         self.assertEqual(sha, "abc1234")
         push_args = mock_run.call_args_list[0][0][0]
         self.assertEqual(push_args[0], "git")
         self.assertEqual(push_args[1], "push")
         self.assertIn("ssh://ubuntu@1.2.3.4/home/ubuntu/sandbox/deploy-src/proj", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
+        push_env = mock_run.call_args_list[0][1]["env"]
+        git_ssh = push_env["GIT_SSH_COMMAND"]
+        self.assertEqual(push_env["PRESERVE_ME"], "value")
+        self.assertIn("BatchMode=yes", git_ssh)
+        self.assertIn("ConnectTimeout=10", git_ssh)
+        self.assertIn("ControlMaster=auto", git_ssh)
+        self.assertIn("ControlPersist=60", git_ssh)
+        self.assertIn("%C", git_ssh)
+        self.assertNotIn("ubuntu", git_ssh)
+        self.assertNotIn("1.2.3.4", git_ssh)
 
     @patch("subprocess.run")
     def test_push_url_preserves_custom_ssh_port(self, mock_run):
@@ -217,18 +335,46 @@ class TestPushCommits(unittest.TestCase):
             _completed(returncode=0),
             _completed(returncode=0, stdout="abc1234\n"),
         ]
-        sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
-                         "/home/ubuntu/sandbox/deploy-src/proj", "main")
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
+                                 "/home/ubuntu/sandbox/deploy-src/proj", "main")
         push_args = mock_run.call_args_list[0][0][0]
         self.assertIn("ssh://ubuntu@1.2.3.4:2222/home/ubuntu/sandbox/deploy-src/proj",
                       push_args)
+        self.assertEqual(
+            shlex.split(mock_run.call_args_list[0][1]["env"]["GIT_SSH_COMMAND"])[-2:],
+            ["-p", "2222"],
+        )
 
     @patch("subprocess.run")
-    def test_raises_on_push_failure(self, mock_run):
-        mock_run.return_value = _completed(returncode=1, stderr="rejected")
-        with self.assertRaises(RuntimeError):
-            sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
-                             "/home/ubuntu/sandbox/deploy-src/proj", "main")
+    def test_push_failure_is_not_replayed(self, mock_run):
+        mock_run.return_value = _completed(returncode=255, stderr="ControlPath too long")
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                with self.assertRaises(RuntimeError):
+                    sr.push_commits({"ssh": "ubuntu@1.2.3.4"}, "/local/proj",
+                                     "/home/ubuntu/sandbox/deploy-src/proj", "main")
+        mock_run.assert_called_once()
+
+    @patch("subprocess.run")
+    @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=PermissionError("denied"))
+    def test_push_uses_direct_ssh_when_control_directory_preparation_fails(
+            self, mock_ensure, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0),
+            _completed(returncode=0, stdout="abc1234\n"),
+        ]
+        sr.push_commits({"ssh": "ubuntu@1.2.3.4:2222"}, "/local/proj",
+                        "/home/ubuntu/sandbox/deploy-src/proj", "main")
+        mock_ensure.assert_called_once()
+        self.assertEqual(mock_run.call_count, 2)  # push, then local rev-parse
+        git_ssh = mock_run.call_args_list[0][1]["env"]["GIT_SSH_COMMAND"]
+        self.assertIn("BatchMode=yes", git_ssh)
+        self.assertIn("ConnectTimeout=10", git_ssh)
+        self.assertEqual(shlex.split(git_ssh)[-2:], ["-p", "2222"])
+        self.assertNotIn("ControlMaster=auto", git_ssh)
+        self.assertNotIn("ControlPersist=60", git_ssh)
 
     @patch("subprocess.run")
     def test_never_references_origin_or_any_other_remote(self, mock_run):

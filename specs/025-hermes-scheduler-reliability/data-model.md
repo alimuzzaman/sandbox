@@ -64,3 +64,14 @@ Preservation states: `clean`, `dirty_unreviewed`, `validated`, `committed`, `pus
 ## VerifiedRunResult
 
 Fields: job ID/name, prior and observed run timestamps, trigger acknowledgement, terminal/effective status, bounded sanitized error/output summary, false-success flag, timeout, and optional worktree evidence delta.
+
+## RemoteConnectionLease
+
+| Field | Type | Rules |
+| --- | --- | --- |
+| `endpoint_hash` | string | One-way identity derived by the SSH client from user, host, port, and connection options; no readable target or credential. |
+| `control_path` | local path | Short socket path under the owner-only Sandbox runtime directory. |
+| `idle_lifetime` | duration | Finite reuse window; 60 seconds by default. |
+| `mode` | enum | Opportunistic reuse with automatic fresh-connection fallback. |
+
+The lease contains no authorization material and grants no new command authority. Each session opened through it retains its own command, timeout, exit status, bounded output, and confirmation decision.

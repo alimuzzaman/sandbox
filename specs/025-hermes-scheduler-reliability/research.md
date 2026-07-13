@@ -78,3 +78,41 @@
 
 **Alternatives considered**:
 - Recreate byte-for-byte: rejected because it reproduces the unsupported route, no-op implementation scope, false-green scripts, and self-deletion drift.
+
+## Decision: Use Kanban—not a synthetic TODO file—as Lenzora's work source
+
+**Rationale**: Hermes documents Kanban as the durable shared task board that scripts and cron drive through `hermes kanban`, while no project `TODO.md` exists for Lenzora. Scheduling a file monitor with no authoritative file creates a permanent false alarm and duplicates the bounded Kanban dispatcher. The monitor remains reusable for repositories that explicitly adopt that workflow, but it is omitted from the base catalog.
+
+**Primary source**: [Hermes Kanban documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md), [Hermes cron documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md).
+
+**Alternatives considered**:
+- Create an empty `TODO.md`: rejected because it invents a second source of truth.
+- Keep the failing monitor as a liveness signal: rejected because missing input is an operational failure, not useful queue telemetry.
+
+## Decision: Treat health as a pure observation and convergence as the repair boundary
+
+**Rationale**: Read-only health must be safe to poll, compose, and expose through MCP. Session reconciliation, boot-gate recording, or other writes make observation alter the state being diagnosed. Repair and evidence recording therefore remain explicit confirmed operations, while health aggregates bounded snapshots only.
+
+**Alternatives considered**:
+- Reconcile stale sessions during health: rejected because polling would mutate work state without confirmation.
+- Keep writes but label them harmless: rejected because state transitions and gate evidence are externally visible behavior.
+
+## Decision: Compare canonical controlled-state hashes and preserve runtimes transactionally
+
+**Rationale**: Name/schedule/model equality cannot detect a changed guarded prompt, delivery target, or script body. Reconciliation hashes every non-secret controlled field and committed script content. Repository sync similarly validates a staged runtime before swapping it into place, leaving the prior runtime and virtual environments untouched on failure. Both controls turn silent semantic drift into explicit recoverable failure.
+
+**Alternatives considered**:
+- Return raw prompts/scripts for comparison: rejected because health and reconciliation output must not disclose stored task intent or credentials.
+- Move virtual environments into an unvalidated stage: rejected because rollback can then destroy the only working environments.
+
+## Decision: Reuse short-lived authenticated SSH connections; batch only cohesive probes
+
+**Rationale**: OpenSSH officially supports sharing multiple sessions over one network connection with `ControlMaster`, uniquely identifying an endpoint with the `%C` hash in `ControlPath`, and automatically closing an idle master with `ControlPersist`. This removes repeated transport, key-exchange, and authentication setup while preserving one process, timeout, exit status, and output contract per Sandbox command. A 60-second idle lifetime covers normal command sequences without creating an indefinite background dependency. Cohesive health probes may still be emitted as one bounded remote program when their results are parsed independently.
+
+**Primary source**: [OpenBSD `ssh_config(5)`](https://man.openbsd.org/OpenBSD-current/man5/ssh_config.5), [OpenBSD `ssh(1)`](https://man.openbsd.org/ssh), [OpenSSH multiplexing protocol](https://www.openssh.org/specs.html).
+
+**Alternatives considered**:
+- Keep opening a new connection for every command: rejected because three harmless live checks took 6.15s, 6.85s, and 4.13s before multiplexing.
+- Keep one custom interactive shell and stream arbitrary commands: rejected because it complicates timeout, cancellation, redaction, per-command status, and crash recovery.
+- Concatenate every operation into one shell command: rejected because partial failure and destructive-action boundaries become ambiguous.
+- Persist indefinitely: rejected because stale masters become hidden long-lived state and complicate credential/host changes.

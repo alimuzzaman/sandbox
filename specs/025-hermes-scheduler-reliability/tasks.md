@@ -119,7 +119,7 @@
 - [X] T036 [P] Update the operator runbook, failure semantics, desired-job rationale, recovery, and fresh-server commands in `docs/hermes-agent.md`
 - [X] T037 [P] Update Sandbox setup/restore documentation and command help for catalog and gateway convergence in relevant `README.md`, `AGENTS.md`, and command help files
 - [X] T038 Run focused scheduler, CLI, and MCP tests; then run the full test suite and `./sb selftest`, recording commands and results in `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
-- [ ] T039 Perform a fresh independent review for correctness, security/redaction, destructive-action gates, CLI/MCP parity, and spec/task completeness; resolve every material finding
+- [X] T039 Perform a fresh independent review for correctness, security/redaction, destructive-action gates, CLI/MCP parity, and spec/task completeness; resolve every material finding
 - [X] T040 Commit and push validated Sandbox changes to the current explicit branch, preserving unrelated local files
 - [X] T041 Synchronize the remote Sandbox checkout through the Sandbox-managed update path and verify its commit matches the pushed branch
 - [X] T042 Run read-only remote health, worktree inventory, gateway convergence preview, and cron reconciliation preview; retain sanitized evidence
@@ -127,6 +127,19 @@
 - [X] T044 Back up the remote cron inventory, remove every existing job, recreate the complete reviewed catalog, and report exact partial state if any step fails
 - [X] T045 Trigger the harmless acceptance job with verified execution, confirm evidence-backed terminal behavior, and rerun reconciliation to prove zero drift
 - [ ] T046 Complete `implementation-evidence.md`, mark implemented tasks, rerun Spec-Kit analysis/convergence, and report residual risks and learning delta
+
+---
+
+## Phase 9: User Story 6 — Reuse Secure Remote Connections (Priority: P2)
+
+**Goal**: Reuse authenticated transport setup for sequential Sandbox remote operations without combining command authority or replaying mutations.
+
+**Independent Test**: Three harmless live checks reuse one endpoint-hashed connection after the first call, retain independent outcomes, and direct mode remains available when local control state cannot be prepared.
+
+- [X] T047 [P] [US6] Add SSH, SCP, and Git transport tests for owner-only control state, endpoint isolation, custom ports, pre-launch fallback, and no replay in `tests/test_remote.py`
+- [X] T048 [US6] Implement bounded opportunistic connection reuse for shared SSH and SCP operations in `sandbox/core/_remote.py`
+- [X] T049 [US6] Apply the same transport policy to direct VPS deploy pushes in `sandbox/core/_remote.py` without affecting unrelated Git remotes
+- [X] T050 [P] [US6] Document transport lifetime, batching boundaries, security behavior, and live timing evidence in `docs/remote-hosting.md`, `docs/hermes-agent.md`, and `specs/025-hermes-scheduler-reliability/implementation-evidence.md`
 
 ---
 

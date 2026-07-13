@@ -89,6 +89,22 @@ An operator can inventory every managed repository and worktree, classify dirty 
 2. **Given** changes fail validation or exceed their task scope, **When** reviewed, **Then** they are retained and reported rather than automatically committed.
 3. **Given** changes pass their repository checks and current approval permits shipping, **When** preserved, **Then** they are committed and pushed to an explicit branch before cleanup.
 
+---
+
+### User Story 6 - Reuse Secure Remote Connections (Priority: P2)
+
+An operator can run several independent Sandbox checks against the same server without paying the full connection and authentication setup cost for every command.
+
+**Why this priority**: Scheduler diagnosis and convergence require many short remote observations. Repeating secure-session setup makes routine checks slow and encourages unsafe ad hoc command bundling.
+
+**Independent Test**: Run three harmless remote checks in sequence; later checks reuse the established secure connection, retain independent exit/timeout evidence, and automatically recover when the reusable connection is absent or stale.
+
+**Acceptance Scenarios**:
+
+1. **Given** a successful remote check established a reusable connection, **When** another Sandbox command targets the same endpoint shortly afterward, **Then** it reuses that connection without changing authentication or host-verification policy.
+2. **Given** the reusable connection is unavailable or stale, **When** a command runs, **Then** the command falls back to a fresh secure connection and retains truthful failure evidence.
+3. **Given** several observations are one atomic diagnostic operation, **When** Sandbox gathers them, **Then** it may batch them into one bounded remote operation while preserving per-observation status.
+
 ### Edge Cases
 
 - The job metadata says success while the newest request dump or run artifact records a provider/client failure.
@@ -99,6 +115,7 @@ An operator can inventory every managed repository and worktree, classify dirty 
 - Reconciliation is interrupted after removals but before all creations finish.
 - A cron script or prompt contains a secret-like value; reports and committed catalog data must never expose it.
 - The upstream Hermes version changes job storage or output behavior.
+- A reusable remote connection is stale, its control endpoint is inaccessible, or two configured remotes use the same host with different users or ports.
 
 ## Requirements *(mandatory)*
 
@@ -124,6 +141,9 @@ An operator can inventory every managed repository and worktree, classify dirty 
 - **FR-018**: CLI, MCP, documentation, tests, and remote bootstrap behavior MUST expose the same health, reconciliation, verification, and ownership contracts.
 - **FR-019**: All external mutations MUST require explicit confirmation and use the configured Sandbox remote and secret-handling paths.
 - **FR-020**: The implementation MUST retain a bounded task trace with commands, checks, remote evidence, outcome, and residual risks without recording secrets.
+- **FR-021**: Sandbox MUST opportunistically reuse authenticated remote connections for repeated operations against the same user, host, and port without weakening authentication or host verification.
+- **FR-022**: Reusable remote connection state MUST be isolated per endpoint, owner-only, bounded in idle lifetime, contain no credentials or readable connection target, and fall back safely when unavailable.
+- **FR-023**: Connection reuse and any batched diagnostic operation MUST preserve each command's timeout, exit status, bounded output, redaction, and confirmation contract.
 
 ### Key Entities
 
@@ -133,6 +153,7 @@ An operator can inventory every managed repository and worktree, classify dirty 
 - **Gateway Ownership State**: Expected service owner, observed services/processes, restart behavior, and conflict classification.
 - **Worktree Evidence**: Repository, worktree, branch/detached state, commit, dirty paths, and validation disposition.
 - **Verified Run Result**: Trigger time, observed run transition, terminal status, sanitized failure or outcome, and repository evidence.
+- **Remote Connection Lease**: Short-lived, endpoint-isolated client state that allows later commands to reuse an authenticated secure transport without storing credentials.
 
 ## Success Criteria *(mandatory)*
 
@@ -146,6 +167,7 @@ An operator can inventory every managed repository and worktree, classify dirty 
 - **SC-006**: Every dirty Hermes worktree is either shipped on an explicit branch or retained with a documented reason; none is silently deleted.
 - **SC-007**: A fresh-server setup can reproduce gateway ownership and the complete cron catalog using only documented Sandbox commands.
 - **SC-008**: Focused scheduler tests, full Sandbox tests, CLI/MCP contract checks, and remote health checks all pass with no secret values in output or committed files.
+- **SC-009**: In a three-command live acceptance sequence, at least two later commands reuse one established secure connection, all three retain independent results, and stale reusable state recovers without manual cleanup.
 
 ## Assumptions
 

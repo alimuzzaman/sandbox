@@ -29,4 +29,6 @@ Rules:
 - Workdir templates may reference only declared remote path keys and resolve to normalized absolute paths.
 - Catalog and scripts must contain no secret-like assignment or credential material.
 - A normalized catalog and script-content fingerprint is included in previews and applied-state evidence.
+- Exact reconciliation compares every Sandbox-controlled field: name, schedule, execution kind, enabled state, route, workdir, delivery target, guarded prompt hash, exact script path, and installed script-content hash.
+- Prompts and script bodies are never returned merely to prove equality; comparison evidence exposes hashes and drift classifications only.
 - Base catalog scripts never add, remove, pause, resume, or edit cron jobs themselves.

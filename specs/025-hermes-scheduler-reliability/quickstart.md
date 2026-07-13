@@ -27,6 +27,8 @@ Expected: scheduler/catalog tests pass, CLI and MCP expose matching controls, an
 
 Before migration, health should identify the provider rejection false-success and gateway owner conflict. Preview must enumerate every current cron removal and every desired creation without changing state.
 
+Repeat three harmless list/status calls within 60 seconds and inspect the generated SSH arguments or client diagnostics in a safe test environment. Expected: the first call may establish a control connection; later calls reuse the same endpoint-hashed control path, retain separate results, and a deliberately stale control socket recovers through a fresh connection.
+
 ## 3. Preserve agent work
 
 Review every dirty worktree from step 2 under its repository instructions. Run repository-specific checks. Commit and push only validated changes; retain invalid/unrelated changes with their worktree paths documented.
@@ -37,7 +39,7 @@ Review every dirty worktree from step 2 under its repository instructions. Run r
 ./sb hermes gateway converge --remote scaleway-sandbox --confirm --json
 ```
 
-Expected: one active `hermes-gateway-sandbox.service`, no active legacy/manual owner, scheduler available, and no restart growth during the bounded observation.
+Expected: one active `hermes-gateway-sandbox.service`, no active legacy/manual owner, `hermes cron status` available, and no process-count or restart-count drift across the full 120-second observation.
 
 ## 5. Replace and verify cron jobs
 

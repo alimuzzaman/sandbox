@@ -40,3 +40,9 @@ class TestRecoveryService(unittest.TestCase):
         drive.objects["sets/set-1/archive.bin"] = b"tampered"
         rejected = RecoveryService(RecoveryCatalog(1, ()), drive=drive).verify("set-1")
         self.assertEqual(rejected["error"]["code"], "ciphertext_verification_failed")
+
+    def test_restore_plan_is_non_mutating_and_carries_confirmation_gate(self):
+        drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"artifact": b"payload"})
+        payload = RecoveryService(RecoveryCatalog(1, ()), drive=drive).restore_plan("set-1", ("fixture",))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["data"]["requires_confirmation"])

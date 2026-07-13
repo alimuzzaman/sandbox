@@ -105,18 +105,18 @@
 
 ### Tests for User Story 3
 
-- [ ] T039 [P] [US3] Add failing manifest/schema/hash/compatibility/free-space/target/dependency restore-plan tests in `tests/test_recovery_restore.py`
-- [ ] T040 [P] [US3] Add failing checkpoint/quiesce/stage/swap/import/verify/resume/rollback ordering tests in `tests/test_recovery_restore_apply.py`
-- [ ] T041 [P] [US3] Add zero-side-effect CLI and MCP restore-plan tests in `tests/test_recovery_interfaces.py`
+- [X] T039 [P] [US3] Add failing manifest/schema/hash/compatibility/free-space/target/dependency restore-plan tests in `tests/test_recovery_restore.py`
+- [X] T040 [P] [US3] Add failing checkpoint/quiesce/stage/swap/import/verify/resume/rollback ordering tests in `tests/test_recovery_restore_apply.py`
+- [X] T041 [P] [US3] Add zero-side-effect CLI and MCP restore-plan tests in `tests/test_recovery_interfaces.py`
 
 ### Implementation for User Story 3
 
-- [ ] T042 [US3] Implement manifest download, integrity, compatibility, and restore planning in `sandbox/recovery/restore.py`
-- [ ] T043 [US3] Implement checkpointed database/filesystem/control-plane/Git restore adapters in `sandbox/recovery/restore.py`
-- [ ] T044 [US3] Implement selected-profile dependency ordering and rollback coordinator in `sandbox/recovery/service.py`
-- [ ] T045 [US3] Add plan-default and confirm-required CLI restore in `sandbox/commands/recovery.py`
-- [ ] T046 [US3] Add plan-default and confirm-required MCP restore tools in `mcp/wp-server/tools/recovery.py`
-- [ ] T047 [US3] Run disposable fixture restore and rollback drill; record exact evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T042 [US3] Implement manifest download, integrity, compatibility, and restore planning in `sandbox/recovery/restore.py`
+- [X] T043 [US3] Implement checkpointed database/filesystem/control-plane/Git restore adapters in `sandbox/recovery/restore.py`
+- [X] T044 [US3] Implement selected-profile dependency ordering and rollback coordinator in `sandbox/recovery/service.py`
+- [X] T045 [US3] Add plan-default and confirm-required CLI restore in `sandbox/commands/recovery.py`
+- [X] T046 [US3] Add plan-default and confirm-required MCP restore tools in `mcp/wp-server/tools/recovery.py`
+- [X] T047 [US3] Run disposable fixture restore and rollback drill; record exact evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 
 **Checkpoint**: Restore works in disposable targets; no production target has been changed.
 

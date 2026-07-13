@@ -63,3 +63,13 @@ Ran 44 tests — OK
 ```
 
 No production archive, Drive object, schedule, deletion, or restore has been created/applied. Remote profile materialization, disposable restore application, scheduler/retention, and fresh-server proof remain gated by their later tasks.
+
+## Disposable restore checkpoint
+
+Fixture restore plans verify manifest integrity/compatibility, selected-profile dependencies, and target free-space before any adapter is called. A disposable two-profile file-swap drill injects a verification failure in the second target and proves the first target is restored from its checkpoint. CLI and MCP restore surfaces are plan-default; apply is confirmation-gated and has no live target adapter.
+
+```text
+python3 -m unittest tests.test_recovery_restore tests.test_recovery_restore_apply \
+  tests.test_recovery_interfaces -q
+Ran 8 tests — OK
+```

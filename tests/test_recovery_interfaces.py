@@ -18,3 +18,7 @@ class TestRecoveryInterfaces(unittest.TestCase):
     def test_cli_verify_needs_a_backup_id(self):
         with self.assertRaises(SystemExit):
             cmd_recovery(None, self._args("verify"))
+
+    def test_cli_restore_needs_a_backup_id_and_never_applies_by_default(self):
+        with self.assertRaises(SystemExit):
+            cmd_recovery(None, self._args("restore"))

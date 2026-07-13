@@ -67,3 +67,19 @@ class RecoveryService:
         except RecoveryError as exc:
             return result(False, "verify", remote=remote, error=exc)
         return result(True, "verify", remote=remote, status="verified", data={"id": set_id, "manifest": manifest})
+
+    def restore_plan(self, set_id: str, profiles: tuple[str, ...] = (), *, remote: str | None = None) -> dict:
+        if self.drive is None:
+            return result(False, "restore", remote=remote, error=RecoveryError(
+                "recovery Drive is not configured", "recovery_not_configured"))
+        try:
+            from .restore import build_restore_plan
+            dependencies = {profile.profile_id: profile.dependencies for profile in self.catalog.profiles}
+            plan = build_restore_plan(self.drive, set_id, profiles, dependencies=dependencies)
+        except RecoveryError as exc:
+            return result(False, "restore", remote=remote, error=exc)
+        return result(True, "restore", remote=remote, status="planned", data={
+            "set_id": plan.set_id, "profiles": plan.profiles, "actions": plan.actions,
+            "checkpoints": plan.checkpoints, "rollback": plan.rollback,
+            "requires_confirmation": plan.requires_confirmation,
+        })

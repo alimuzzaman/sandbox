@@ -61,6 +61,16 @@ def cmd_recovery(_cfg, args) -> None:
         else:
             payload = result(False, "create", remote=args.remote, error=RecoveryError(
                 "profile capture requires a configured remote adapter", "recovery_not_configured"))
+    elif args.action == "restore":
+        from sandbox.recovery.errors import RecoveryError, result
+        if not args.backup_id:
+            payload = result(False, "restore", remote=args.remote,
+                             error=RecoveryError("--backup-id is required", "missing_backup_id"))
+        elif args.confirm:
+            payload = result(False, "restore", remote=args.remote, error=RecoveryError(
+                "restore apply requires disposable target adapters", "recovery_not_configured"))
+        else:
+            payload = service.restore_plan(args.backup_id, tuple(args.profile), remote=args.remote)
     else:
         from sandbox.recovery.errors import RecoveryError, result
         payload = result(False, args.action, remote=args.remote, error=RecoveryError(

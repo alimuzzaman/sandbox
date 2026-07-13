@@ -55,23 +55,19 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         self.script_root = scripts_path()
 
     def _observed_catalog(self):
-        return [_observed(entry, script_root=self.script_root) for entry in self.catalog["jobs"]]
+        return [_observed(entry, script_root=self.script_root)
+                for entry in self.catalog["jobs"] if entry.enabled]
 
     def assertConverged(self, observed):
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
         self.assertFalse(plan["changes"])
         self.assertEqual(plan["blocked_by"], [])
 
-    def test_guarded_prompt_drift_requires_reconciliation_without_disclosing_prompt(self):
+    def test_disabled_agents_are_not_reconciled_or_prompt_exposed(self):
         observed = self._observed_catalog()
         self.assertConverged(observed)
-        worker = next(job for job in observed if job["name"] == "sandbox-approved-spec-task")
-        worker["prompt_sha256"] = "0" * 64
-
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-
-        self.assertTrue(plan["changes"])
-        self.assertEqual(plan["retain"], [])
+        self.assertEqual(plan["retain"], ["lenzora-todo-task"])
         self.assertNotIn("prompt", str(plan).lower())
 
     def test_delivery_drift_requires_reconciliation(self):
@@ -84,11 +80,11 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["retain"], [])
 
-    def test_installed_script_content_drift_requires_reconciliation(self):
+    def test_active_agent_prompt_hash_drift_requires_reconciliation(self):
         observed = self._observed_catalog()
         self.assertConverged(observed)
-        script_job = next(job for job in observed if job["no_agent"])
-        script_job["script_sha256"] = "f" * 64
+        worker = next(job for job in observed if not job["no_agent"])
+        worker["prompt_sha256"] = "f" * 64
 
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
 
@@ -97,14 +93,14 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
 
     def test_incomplete_safe_observation_is_explicitly_blocked(self):
         observed = self._observed_catalog()
-        worker = next(job for job in observed if job["name"] == "sandbox-approved-spec-task")
+        worker = next(job for job in observed if job["name"] == "lenzora-todo-task")
         del worker["prompt_sha256"]
 
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
 
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["blocked_by"], [{
-            "name": "sandbox-approved-spec-task",
+            "name": "lenzora-todo-task",
             "reason": "controlled-state fingerprint unavailable",
         }])
         self.assertNotIn("prompt", str(plan).lower())

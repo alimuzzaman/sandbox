@@ -111,3 +111,8 @@ Evidence: Commands and live results above; final full-suite and post-worker revi
 Outcome, residual risk, and follow-up: Local implementation, review, remote synchronization, gateway convergence, three-job replacement, and verified execution of every final job are complete. Six reviewed dirty worktrees and one stale retained session remain preserved for their separate owners; unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
 
 Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, bounded verified execution, shared SSH transport, and one-connection remote stability sampling.
+
+## Post-acceptance idle policy
+
+- A live review found that the automatic Lenzora dispatcher was healthy but had no ready work, quota requeue had no marked quota block, and the Terra worker consumed 51 seconds to correctly report `NO_APPROVED_WORK` after every approved Sandbox task was complete.
+- The committed catalog now keeps only `lenzora-kanban-dispatch` active. It preserves quota requeue and the Sandbox Terra worker as disabled reviewed definitions, so they can be deliberately re-enabled and reconciled when their real prerequisites exist.

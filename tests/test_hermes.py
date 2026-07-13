@@ -37,7 +37,7 @@ def _completed(returncode=0, stdout="", stderr=""):
 def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
     catalog = load_catalog()
     jobs = []
-    for index, entry in enumerate(catalog["jobs"]):
+    for index, entry in enumerate(entry for entry in catalog["jobs"] if entry.enabled):
         rendered = render_entry(entry, paths)
         job = {
             "id": f"deadbeef{index:04d}", "name": entry.name, "schedule": entry.schedule,
@@ -61,6 +61,10 @@ class TestValidation(unittest.TestCase):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
             "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
+            "lenzora-todo-task",
+        ])
+        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
+            "lenzora-todo-task",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
@@ -70,7 +74,7 @@ class TestValidation(unittest.TestCase):
             "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
             "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",
         })
-        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/sandbox-approved-spec-task")
+        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/lenzora-todo-task")
 
     def test_remote_install_validates_catalog_scripts_without_retired_names(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()
@@ -95,8 +99,8 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(converged["create"], [])
         forced = reconciliation_plan(catalog, observed, force_replace=True, paths=paths)
         self.assertTrue(forced["changes"])
-        self.assertEqual(len(forced["remove"]), 3)
-        self.assertEqual(len(forced["create"]), 3)
+        self.assertEqual(len(forced["remove"]), 1)
+        self.assertEqual(len(forced["create"]), 1)
 
     def test_scheduled_routes_keep_model_and_effort_separate(self):
         route = scheduled_route("terra")
@@ -191,8 +195,8 @@ class TestSchedulerReliability(unittest.TestCase):
     def test_managed_cron_worktree_fast_forwards_only_when_clean(self, ssh):
         ssh.side_effect = [_completed(), _completed()]
         desired = {
-            "kind": "agent", "name": "sandbox-approved-spec-task",
-            "workdir": "/home/u/worktrees/sandbox-approved-spec-task",
+            "kind": "agent", "name": "lenzora-todo-task",
+            "workdir": "/home/u/worktrees/lenzora-todo-task",
         }
         out = hermes._prepare_catalog_workdir(
             {}, {"repo_root": "/home/u/repos"}, desired,
@@ -202,16 +206,17 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("diff --quiet", command)
         self.assertIn("diff --cached --quiet", command)
         self.assertIn('merge --ff-only "$target"', command)
-        self.assertIn("worktree-sandbox-approved-spec-task.lock", command)
+        self.assertIn("worktree-lenzora-todo-task.lock", command)
         self.assertIn(".hermes/cron/.tick.lock", command)
-        self.assertLess(command.index(".tick.lock"), command.index("worktree-sandbox-approved-spec-task.lock"))
+        self.assertLess(command.index(".tick.lock"), command.index("worktree-lenzora-todo-task.lock"))
+        self.assertIn("/home/u/repos/lenzora", command)
 
     @patch("sandbox.core._hermes._ssh")
     def test_managed_cron_worktree_refuses_dirty_or_divergent_state(self, ssh):
         ssh.side_effect = [_completed(), _completed(returncode=1)]
         desired = {
-            "kind": "agent", "name": "sandbox-approved-spec-task",
-            "workdir": "/home/u/worktrees/sandbox-approved-spec-task",
+            "kind": "agent", "name": "lenzora-todo-task",
+            "workdir": "/home/u/worktrees/lenzora-todo-task",
         }
         with self.assertRaises(hermes.HermesError) as caught:
             hermes._prepare_catalog_workdir({}, {"repo_root": "/home/u/repos"}, desired)
@@ -275,7 +280,7 @@ class TestSchedulerReliability(unittest.TestCase):
         ssh.assert_not_called()
         checked.assert_not_called()
 
-    @patch("sandbox.core._hermes._create_catalog_job", side_effect=["created-1", "created-2", "created-3"])
+    @patch("sandbox.core._hermes._create_catalog_job", return_value="created-1")
     @patch("sandbox.core._hermes._install_cron_scripts")
     @patch("sandbox.core._hermes._prepare_catalog_workdir", return_value=None)
     @patch("sandbox.core._hermes._checked", return_value=_completed())
@@ -289,7 +294,7 @@ class TestSchedulerReliability(unittest.TestCase):
     def test_force_reconcile_bypasses_missing_hashes_then_requires_exact_final_snapshot(
             self, snapshot, require_remote, paths, ssh, checked, prepare, install_scripts, create):
         initial = _exact_catalog_snapshot(paths.return_value)
-        del next(job for job in initial["jobs"] if not job["no_agent"])["prompt_sha256"]
+        del initial["jobs"][0]["prompt_sha256"]
         final = _exact_catalog_snapshot(paths.return_value)
         snapshot.side_effect = [initial, final]
 
@@ -298,8 +303,8 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "converged")
         self.assertEqual(out["data"]["blocked_by"], [])
-        self.assertEqual(ssh.call_count, 3)
-        self.assertEqual(create.call_count, 3)
+        self.assertEqual(ssh.call_count, 1)
+        self.assertEqual(create.call_count, 1)
         install_scripts.assert_called_once()
 
     @patch("sandbox.core._hermes._checked")
@@ -415,7 +420,7 @@ class TestSchedulerReliability(unittest.TestCase):
         out = hermes.cron_reconcile("test", confirm=False, force_replace=True)
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "planned")
-        self.assertEqual(len(out["data"]["create"]), 3)
+        self.assertEqual(len(out["data"]["create"]), 1)
         ssh.assert_not_called()
 
     @patch("sandbox.core._hermes._cron_request_evidence", return_value={

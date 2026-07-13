@@ -61,6 +61,10 @@ GATEWAY_STABILITY_SECONDS = 120
 GATEWAY_STABILITY_INTERVAL = 10
 GATEWAY_STABILITY_TIMEOUT_MARGIN = 30
 GATEWAY_STABILITY_MAX_SAMPLES = 48
+_MANAGED_CATALOG_WORKTREES = {
+    "sandbox-approved-spec-task": ("sandbox", "hermes/sandbox-approved-spec-task"),
+    "lenzora-todo-task": ("lenzora", "hermes/lenzora-todo-task"),
+}
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
@@ -1251,15 +1255,15 @@ def _prepare_catalog_workdir(entry: dict, paths: dict, desired: dict) -> str | N
     if not workdir:
         return None
     exists = _ssh(entry, f"test -d {shlex.quote(workdir)}", timeout=15)
-    managed_agent = desired.get("kind") == "agent" and desired.get("name") == "sandbox-approved-spec-task"
-    if exists.returncode == 0 and not managed_agent:
+    managed = _MANAGED_CATALOG_WORKTREES.get(str(desired.get("name") or ""))
+    if exists.returncode == 0 and not managed:
         return None
-    if not managed_agent:
+    if not managed or desired.get("kind") != "agent":
         raise HermesError("catalog work directory is missing: " + desired["name"], "cron_workdir_missing")
-    source = f"{paths['repo_root']}/sandbox"
-    branch = "hermes/sandbox-approved-spec-task"
+    repository, branch = managed
+    source = f"{paths['repo_root']}/{repository}"
     parent = str(PurePosixPath(workdir).parent)
-    lock = "$HOME/.hermes/locks/worktree-sandbox-approved-spec-task.lock"
+    lock = f"$HOME/.hermes/locks/worktree-{desired['name']}.lock"
     tick_lock = "$HOME/.hermes/cron/.tick.lock"
     lock_command = (
         f"mkdir -p $HOME/.hermes/cron $HOME/.hermes/locks; exec 8>{tick_lock}; flock -w 30 8; "

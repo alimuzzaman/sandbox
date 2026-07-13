@@ -160,13 +160,16 @@ job, installs the committed scripts, and recreates exactly the reviewed catalog.
 A partial failure reports removed and created IDs and retains the protected
 backup so the same command can be rerun.
 
-The base catalog contains two purposeful no-agent Kanban jobs (bounded dispatch
-and quota requeue) plus one bounded Terra/Medium Spec-Kit implementation worker.
-The obsolete TODO monitor is not scheduled because Lenzora has no `TODO.md`;
-its actual work source is the Kanban board. Spark remains orchestration only;
-Luna remains read-only. Monitor scripts return zero only after a valid inspection
-or legitimate no-work result. Missing files, malformed output, timeouts, and
-command failures return nonzero, and scripts never add/remove their own cron job.
+The base catalog keeps one bounded Lenzora TODO worker active. It reads only
+repository-root `TODO.md`, advances at most one `- [ ]` task per run in a clean
+isolated Lenzora worktree, and reports `NO_TODO_WORK` when the file is absent or
+complete. The quota requeue, Kanban dispatcher, and Sandbox Terra worker remain
+disabled reviewed definitions: enable each only when its respective source of
+work exists, then reconcile so its managed worktree is current. Spark remains
+orchestration only; Luna remains read-only.
+Monitor scripts return zero only after a valid inspection or legitimate no-work
+result. Missing files, malformed output, timeouts, and command failures return
+nonzero, and scripts never add/remove their own cron job.
 
 All Hermes controls use Sandbox's shared short-lived SSH multiplexing policy.
 Sequential commands reuse authentication for up to 60 idle seconds, while each

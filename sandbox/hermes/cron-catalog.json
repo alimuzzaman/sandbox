@@ -9,7 +9,7 @@
       "prompt": "",
       "profile": null,
       "workdir_template": "{repo_root}/lenzora",
-      "enabled": true,
+      "enabled": false,
       "deliver": "local"
     },
     {
@@ -20,7 +20,7 @@
       "prompt": "",
       "profile": null,
       "workdir_template": "{repo_root}/lenzora",
-      "enabled": true,
+      "enabled": false,
       "deliver": "local"
     },
     {
@@ -31,6 +31,17 @@
       "prompt": "Work only in the current Sandbox repository and follow AGENTS.md. Before doing anything, require a clean Git worktree; if it is dirty, report REVIEW_REQUIRED without changing files. Find the first unchecked implementation task in the active Spec-Kit feature referenced by .specify/feature.json. Implement at most that one bounded task in the existing isolated Hermes worktree, run its narrow required checks, and update only that task checkbox after the checks pass. Do not commit, push, deploy, remove worktrees, edit credentials, or perform external mutations. If there is no approved unchecked task, report NO_APPROVED_WORK without changing files.",
       "profile": "terra",
       "workdir_template": "{worktrees}/sandbox-approved-spec-task",
+      "enabled": false,
+      "deliver": "local"
+    },
+    {
+      "name": "lenzora-todo-task",
+      "schedule": "17 */4 * * *",
+      "kind": "agent",
+      "script": null,
+      "prompt": "Work only in the current Lenzora repository and follow AGENTS.md. Before doing anything, require a clean Git worktree; if it is dirty, report REVIEW_REQUIRED without changing files. Treat repository-root TODO.md as the only automatic work source. If TODO.md is missing or has no unchecked Markdown checklist item, report NO_TODO_WORK without changing files. Otherwise select only the first unchecked '- [ ]' item. Do not infer or begin a second task. If the selected task requires credentials, production deployment, deletion, external communication, payments, or an architectural decision, report REVIEW_REQUIRED without changing files. Implement only that one bounded task in the existing isolated Hermes worktree, run its narrow required checks, and mark only its TODO checkbox complete after the checks pass. Do not commit, push, deploy, remove worktrees, edit credentials, or perform external mutations.",
+      "profile": "terra",
+      "workdir_template": "{worktrees}/lenzora-todo-task",
       "enabled": true,
       "deliver": "local"
     }

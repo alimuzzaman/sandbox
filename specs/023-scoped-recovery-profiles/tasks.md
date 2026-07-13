@@ -17,7 +17,7 @@
 
 - [X] T001 Record exact existing Hermes local/Drive backup CLI and MCP envelopes in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [X] T002 Record read-only remote inventory needed to locate candidate production services, repositories, volumes, and roots through `./sb` in `specs/023-scoped-recovery-profiles/profile-inventory.md`
-- [ ] T003 [P] Create secret-free recovery fixtures and sentinel trees in `tests/fixtures/recovery/`
+- [X] T003 [P] Create secret-free recovery fixtures and sentinel trees in `tests/fixtures/recovery/`
 - [X] T004 [P] Capture exact CLI and MCP inventories before recovery registration in `specs/023-scoped-recovery-profiles/interface-inventory.md`
 - [X] T005 Create `sandbox/recovery/` package skeleton and public exports in `sandbox/recovery/__init__.py`
 
@@ -27,13 +27,13 @@
 
 **Purpose**: Shared immutable models, errors, fakes, and composition required by every story.
 
-- [ ] T006 [P] Add failing profile/artifact/set/restore/schedule/retention model tests in `tests/test_recovery_models.py`
-- [ ] T007 [P] Add failing stable redacted result/error envelope tests in `tests/test_recovery_service.py`
-- [ ] T008 [P] Add recording crypto/Drive/lock/clock/database/filesystem fakes in `tests/fakes/recovery.py`
-- [ ] T009 Implement immutable domain models and state transitions in `sandbox/recovery/models.py`
-- [ ] T010 Implement recovery errors and recursive redaction in `sandbox/recovery/errors.py`
-- [ ] T011 Implement dependency container and service composition skeleton in `sandbox/recovery/context.py` and `sandbox/recovery/service.py`
-- [ ] T012 Add architecture guards preventing recovery modules from importing WordPress policy, raw Docker, or legacy broad Drive builders in `tests/test_architecture_boundaries.py`
+- [X] T006 [P] Add failing profile/artifact/set/restore/schedule/retention model tests in `tests/test_recovery_models.py`
+- [X] T007 [P] Add failing stable redacted result/error envelope tests in `tests/test_recovery_service.py`
+- [X] T008 [P] Add recording crypto/Drive/lock/clock/database/filesystem fakes in `tests/fakes/recovery.py`
+- [X] T009 Implement immutable domain models and state transitions in `sandbox/recovery/models.py`
+- [X] T010 Implement recovery errors and recursive redaction in `sandbox/recovery/errors.py`
+- [X] T011 Implement dependency container and service composition skeleton in `sandbox/recovery/context.py` and `sandbox/recovery/service.py`
+- [X] T012 Add architecture guards preventing recovery modules from importing WordPress policy, raw Docker, or legacy broad Drive builders in `tests/test_architecture_boundaries.py`
 
 **Checkpoint**: Recovery has no live side effects and all mechanisms are injectable.
 
@@ -47,14 +47,14 @@
 
 ### Tests for User Story 1
 
-- [ ] T013 [P] [US1] Add failing catalog schema, duplicate, unknown field/adapter, cycle, shell-string, and secret-field tests in `tests/test_recovery_catalog.py`
-- [ ] T014 [P] [US1] Add failing allowed-root, symlink escape, absent source, full/partial, and deterministic dependency-order tests in `tests/test_recovery_planner.py`
-- [ ] T015 [P] [US1] Add failing initial-profile inclusion/exclusion policy tests in `tests/test_recovery_profiles.py`
+- [X] T013 [P] [US1] Add failing catalog schema, duplicate, unknown field/adapter, cycle, shell-string, and secret-field tests in `tests/test_recovery_catalog.py`
+- [X] T014 [P] [US1] Add failing allowed-root, symlink escape, absent source, full/partial, and deterministic dependency-order tests in `tests/test_recovery_planner.py`
+- [X] T015 [P] [US1] Add failing initial-profile inclusion/exclusion policy tests in `tests/test_recovery_catalog.py`
 
 ### Implementation for User Story 1
 
 - [X] T016 [US1] Implement catalog loader and strict v1 validation in `sandbox/recovery/catalog.py`
-- [ ] T017 [US1] Implement side-effect-free target resolver and artifact planner in `sandbox/recovery/planner.py`
+- [X] T017 [US1] Implement side-effect-free target resolver and artifact planner in `sandbox/recovery/planner.py`
 - [X] T018 [US1] Add four initial secret-free profiles in `config/recovery-profiles.json`
 - [X] T019 [US1] Implement service `profiles` and `plan` operations in `sandbox/recovery/service.py`
 - [X] T020 [US1] Add feature-owned `sb recovery profiles|plan` parser/handlers in `sandbox/commands/recovery.py` and register the module in `sandbox/commands/manifest.py`

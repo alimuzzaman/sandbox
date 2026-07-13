@@ -56,6 +56,16 @@ class TestArchitectureBoundaries(unittest.TestCase):
         app = (ROOT / "mcp" / "wp-server" / "app.py").read_text()
         self.assertNotIn('(RUNTIME_DIR / "registry.json").read_text()', app)
 
+    def test_recovery_modules_do_not_depend_on_runtime_mechanisms(self):
+        forbidden = re.compile(r"(?:docker\s+compose|subprocess\.run\(\[?['\"]docker|from sandbox\.core import)")
+        violations = []
+        for path in (ROOT / "sandbox" / "recovery").glob("*.py"):
+            if path.name == "inventory.py":
+                continue  # read-only remote inventory is the boundary adapter
+            if forbidden.search(path.read_text()):
+                violations.append(str(path.relative_to(ROOT)))
+        self.assertEqual(violations, [])
+
 
 if __name__ == "__main__":
     unittest.main()

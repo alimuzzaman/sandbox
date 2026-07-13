@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .catalog import RecoveryCatalog
 from .errors import RecoveryError
 from .models import ArtifactPlan, RecoveryPlan
 
 
-def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = ()) -> RecoveryPlan:
+class PathResolver:
+    """Resolve an explicit relative source under one configured local root."""
+
+    def __init__(self, roots: dict[str, str | Path]) -> None:
+        self.roots = {name: Path(path).resolve() for name, path in roots.items()}
+
+    def resolve(self, root: str, source: str) -> Path:
+        if root not in self.roots:
+            raise RecoveryError("unknown recovery allowed root", "invalid_root")
+        path = (self.roots[root] / source).resolve()
+        try:
+            path.relative_to(self.roots[root])
+        except ValueError as exc:
+            raise RecoveryError("recovery source escapes its allowed root", "invalid_source") from exc
+        if not path.exists():
+            raise RecoveryError("recovery source is absent", "missing_source")
+        return path
+
+
+def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = (), *, resolver: PathResolver | None = None) -> RecoveryPlan:
     by_id = catalog.by_id()
     requested = set(selected or by_id)
     if requested - set(by_id):
@@ -26,7 +47,9 @@ def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = ()) -> Reco
         profile_id=profile_id, artifact_id=f"{profile_id}-primary",
         source_type=by_id[profile_id].source_type,
         allowed_roots=by_id[profile_id].allowed_roots,
-        sources=by_id[profile_id].sources,
+        sources=(tuple(str(resolver.resolve(by_id[profile_id].allowed_roots[0], source))
+                       for source in by_id[profile_id].sources)
+                 if resolver and len(by_id[profile_id].allowed_roots) == 1 else by_id[profile_id].sources),
         capture_mode=by_id[profile_id].capture_mode,
         consistency=by_id[profile_id].consistency,
         excludes=by_id[profile_id].excludes,

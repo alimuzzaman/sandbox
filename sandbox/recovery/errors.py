@@ -9,14 +9,16 @@ class RecoveryError(RuntimeError):
         self.code = code
 
 
-_SECRET = re.compile(r"(?i)(token|password|passphrase|authorization|cookie)\s*[=:]\s*\S+")
+_SECRET = re.compile(r"(?i)(token|password|passphrase|authorization|cookie|credential|secret)\s*[=:]\s*\S+")
+_SECRET_KEY = re.compile(r"(?i)(token|password|passphrase|authorization|cookie|credential|secret)")
 
 
 def redact(value):
     if isinstance(value, str):
         return _SECRET.sub(lambda match: match.group(1) + "=[redacted]", value)
     if isinstance(value, dict):
-        return {key: redact(item) for key, item in value.items()}
+        return {key: "[redacted]" if _SECRET_KEY.search(str(key)) else redact(item)
+                for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(redact(item) for item in value)
     return value

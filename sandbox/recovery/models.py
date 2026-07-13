@@ -21,6 +21,9 @@ class RecoveryProfile:
     retention_class: str
     dependencies: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    version: int = 1
+    enabled: bool = True
+    schedule_class: str = "manual"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
@@ -41,6 +44,81 @@ class ArtifactPlan:
     dependencies: tuple[str, ...]
     rationale: str
     status: str = "planned"
+    warnings: tuple[str, ...] = ()
+
+
+_ARTIFACT_TRANSITIONS = {
+    "capturing": {"validated", "failed"},
+    "validated": {"packaged", "failed"},
+    "packaged": {"failed"},
+    "failed": set(),
+}
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    profile_id: str
+    artifact_id: str
+    source_type: str
+    state: str = "capturing"
+
+    def transition(self, state: str) -> "ArtifactRecord":
+        if state not in _ARTIFACT_TRANSITIONS.get(self.state, set()):
+            raise ValueError(f"invalid artifact transition: {self.state} -> {state}")
+        return ArtifactRecord(self.profile_id, self.artifact_id, self.source_type, state)
+
+
+_SET_TRANSITIONS = {
+    "staging": {"captured", "incomplete"},
+    "captured": {"encrypted", "incomplete"},
+    "encrypted": {"remotely_verified", "incomplete"},
+    "remotely_verified": {"complete", "incomplete"},
+    "complete": set(),
+    "incomplete": set(),
+}
+
+
+@dataclass(frozen=True)
+class RecoverySet:
+    set_id: str
+    status: str = "staging"
+
+    @property
+    def restorable(self) -> bool:
+        return self.status == "complete"
+
+    def transition(self, status: str) -> "RecoverySet":
+        if status not in _SET_TRANSITIONS.get(self.status, set()):
+            raise ValueError(f"invalid recovery set transition: {self.status} -> {status}")
+        return RecoverySet(self.set_id, status)
+
+
+@dataclass(frozen=True)
+class RestorePlan:
+    set_id: str
+    profiles: tuple[str, ...]
+    actions: tuple[str, ...]
+    prerequisites: tuple[str, ...]
+    checkpoints: tuple[str, ...]
+    rollback: tuple[str, ...]
+    warnings: tuple[str, ...]
+    requires_confirmation: bool = True
+
+
+@dataclass(frozen=True)
+class SchedulePolicy:
+    policy_id: str
+    profiles: tuple[str, ...]
+    calendar: str
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class RetentionPlan:
+    destination_prefix: str
+    protected_sets: tuple[str, ...]
+    candidates: tuple[str, ...]
+    requires_confirmation: bool = True
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,10 @@
 import unittest
+import tempfile
 from pathlib import Path
 
 from sandbox.recovery.catalog import load_catalog
-from sandbox.recovery.planner import build_plan
+from sandbox.recovery.errors import RecoveryError
+from sandbox.recovery.planner import PathResolver, build_plan
 
 
 class TestRecoveryPlanner(unittest.TestCase):
@@ -17,6 +19,17 @@ class TestRecoveryPlanner(unittest.TestCase):
         amar = next(item for item in first.artifacts if item.profile_id == "amarsonar-bangla-prod")
         self.assertEqual(amar.capture_mode, "full")
         self.assertIn("full-wordpress-directory", amar.sources)
+
+    def test_resolver_rejects_escape_and_absent_sources(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root); allowed = root_path / "allowed"; allowed.mkdir()
+            (allowed / "ok").mkdir()
+            resolver = PathResolver({"root": allowed})
+            self.assertEqual(resolver.resolve("root", "ok"), (allowed / "ok").resolve())
+            with self.assertRaises(RecoveryError):
+                resolver.resolve("root", "../outside")
+            with self.assertRaises(RecoveryError):
+                resolver.resolve("root", "missing")
 
 
 if __name__ == "__main__": unittest.main()

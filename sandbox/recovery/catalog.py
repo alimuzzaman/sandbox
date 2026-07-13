@@ -14,8 +14,9 @@ _CAPTURE_MODES = {"declarative", "logical", "full", "partial", "provenance"}
 _FIELDS = {
     "id", "scope", "source_type", "allowed_roots", "sources", "capture_mode",
     "consistency", "excludes", "sensitivity", "restore_target", "verification",
-    "retention_class", "dependencies", "metadata",
+    "retention_class", "dependencies", "metadata", "version", "enabled", "schedule_class",
 }
+_SECRET_FIELD = re.compile(r"(?i)(?:token|password|passphrase|secret|credential|cookie|authorization)")
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,16 @@ def _strings(value, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise RecoveryError(f"{field} must be a list of non-empty strings", "invalid_catalog")
     return tuple(value)
+
+
+def _safe_value(value) -> bool:
+    if isinstance(value, str):
+        return "\n" not in value and not value.startswith(("sh:", "bash:"))
+    if isinstance(value, dict):
+        return all(not _SECRET_FIELD.search(str(key)) and _safe_value(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return all(_safe_value(item) for item in value)
+    return value is None or isinstance(value, (bool, int, float))
 
 
 def load_catalog(path: str | Path) -> RecoveryCatalog:
@@ -51,8 +62,10 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
         if raw.get("source_type") not in _SOURCE_TYPES or raw.get("capture_mode") not in _CAPTURE_MODES:
             raise RecoveryError(f"profile {profile_id} has an unknown adapter or mode", "invalid_catalog")
         for value in raw.values():
-            if isinstance(value, str) and ("\n" in value or value.startswith(("sh:", "bash:"))):
+            if not _safe_value(value):
                 raise RecoveryError(f"profile {profile_id} contains command text", "invalid_catalog")
+        if not isinstance(raw.get("metadata") or {}, dict):
+            raise RecoveryError(f"profile {profile_id} metadata must be an object", "invalid_catalog")
         profile = RecoveryProfile(
             profile_id, str(raw.get("scope") or ""), raw["source_type"],
             _strings(raw.get("allowed_roots", []), "allowed_roots"),
@@ -61,6 +74,7 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
             str(raw.get("sensitivity") or "encrypted"), str(raw.get("restore_target") or ""),
             str(raw.get("verification") or ""), str(raw.get("retention_class") or "standard"),
             _strings(raw.get("dependencies", []), "dependencies"), raw.get("metadata") or {},
+            int(raw.get("version", 1)), bool(raw.get("enabled", True)), str(raw.get("schedule_class", "manual")),
         )
         seen.add(profile_id)
         profiles.append(profile)

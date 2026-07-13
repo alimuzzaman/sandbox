@@ -76,6 +76,9 @@
 - Confirmed reconciliation then removed `todo-md-monitor` plus all three old catalog jobs and recreated exactly three jobs: `28330fb99073` (`codex-quota-requeue`), `abee32318dc4` (`lenzora-kanban-dispatch`), and `d158d3a92a9c` (`sandbox-approved-spec-task`).
 - Verified runs of the two script jobs completed successfully in 5.45 and 4.42 seconds respectively, with transitions observed, valid routes, no evidence failures, and no false success.
 - A subsequent ordinary reconciliation reported `changes=false`, `blocked_by=[]`, and all three names retained. Aggregate health reported `healthy`, no degraded reasons, no cron drift, one gateway process, and zero managed or legacy restart counts. The scheduled agent had not yet run at this checkpoint and remained route-valid.
+- After task closure was pushed and synchronized, a final forced replacement fast-forwarded the dedicated agent worktree to `379cc931533574425cc94a1f1b0d96f147a2056a` and recreated the final IDs: `016c3d2cb8bb` (`codex-quota-requeue`), `58aec1a15556` (`lenzora-kanban-dispatch`), and `ef2282b0597e` (`sandbox-approved-spec-task`).
+- All three final IDs passed verified execution. The scripts completed in 4.61 and 3.78 seconds. The agent completed in 51.34 seconds through `openai-codex` / `gpt-5.6-terra` at medium effort, and its bounded saved output was exactly `NO_APPROVED_WORK`.
+- Final ordinary reconciliation remained zero-drift and aggregate health remained healthy with all three effective statuses `ok`. Six previously reviewed dirty worktrees and one stale retained session remain intentionally preserved; no running Hermes session exists and no invalid work was force-committed or deleted.
 
 ## Trace
 
@@ -105,6 +108,6 @@ Evidence: Commands and live results above; final full-suite and post-worker revi
 - The final single-connection gateway sampler passed `tests.test_hermes.TestSchedulerReliability`; the combined Hermes, remote transport, and catalog-integrity suites passed 211 tests.
 - Final `./sb selftest` passed 536 tests with one documented dependency-isolation skip. Spec-Kit analysis found no unchecked tasks, placeholders, clarification markers, requirement conflicts, or constitution violations; convergence found no remaining unimplemented scope.
 
-Outcome, residual risk, and follow-up: Local implementation, review, remote synchronization, gateway convergence, and three-job replacement are complete. The recreated agent job still needs one final no-work acceptance run after this specification has no unchecked implementation task. Unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
+Outcome, residual risk, and follow-up: Local implementation, review, remote synchronization, gateway convergence, three-job replacement, and verified execution of every final job are complete. Six reviewed dirty worktrees and one stale retained session remain preserved for their separate owners; unsupported Hermes configuration layouts deliberately block ordinary reconciliation rather than claiming convergence.
 
-Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, and bounded verified execution.
+Learning delta: Added durable safeguards for positional CLI compatibility, false-success precedence, nonzero monitor failures, one gateway owner, committed desired state, bounded verified execution, shared SSH transport, and one-connection remote stability sampling.

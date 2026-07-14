@@ -223,6 +223,11 @@ zipping the local dir to a throwaway temp copy). A wp-admin screen — **Plugins
 Sandbox On-Demand** — lists on-demand plugins with a one-click "Install from
 local" button.
 
+The generated Apache and Nginx/FPM stacks also reconcile ownership of
+`wp-content/plugins` during bootstrap. This keeps the WordPress web user able to
+create a new plugin directory for ordinary wp.org and wp-admin installs on the
+bind-mounted development tree.
+
 ### Legacy keys (deprecated sugar)
 
 The pre-010 keys still work, translated into the map at load time, preserving

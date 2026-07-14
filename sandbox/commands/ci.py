@@ -360,6 +360,22 @@ def _neutralize_workflow_for_safety(data: dict, allow_deploy: bool) -> tuple[dic
     return patched, notes
 
 
+def _runtime_secrets_needed(jobs: list[dict], allow_deploy: bool) -> list[str]:
+    """Return secrets needed by steps that will actually reach `act`.
+
+    Deploy-class actions are replaced with no-op stubs when deployment is not
+    allowed, so their deploy-only secrets must not block the safe CI path.
+    """
+    needed = set()
+    for job in jobs:
+        for step in job.get("steps") or []:
+            uses = step.get("uses")
+            if uses and not allow_deploy and _is_deploy_class(uses):
+                continue
+            needed.update(step.get("secrets_needed") or [])
+    return sorted(needed)
+
+
 def _write_patched_workflow(data: dict) -> Path:
     ensure_pyyaml()
     import yaml
@@ -584,8 +600,7 @@ def cmd_ci(cfg, args) -> None:
     label_prefix = getattr(args, "label_prefix", None) or "ci"
     timeout = int(getattr(args, "timeout", 900) or 900)
 
-    all_secrets_needed = sorted({s for j in jobs for step in j["steps"]
-                                 for s in step.get("secrets_needed") or []})
+    all_secrets_needed = _runtime_secrets_needed(jobs, allow_deploy)
     if getattr(args, "list_secrets", False):
         print(json.dumps({"secrets_needed": all_secrets_needed}) if as_json
               else "secrets needed: " + (", ".join(all_secrets_needed) or "(none)"))

@@ -216,6 +216,24 @@ class TestNeutralizeWorkflowForSafety(unittest.TestCase):
                          "10up/action-wordpress-plugin-deploy@stable")
 
 
+class TestRuntimeSecrets(unittest.TestCase):
+    def test_skipped_deploy_secrets_do_not_block_safe_run(self):
+        jobs = [{"steps": [
+            {"uses": "10up/action-wordpress-plugin-deploy@stable",
+             "secrets_needed": ["SVN_PASSWORD"]},
+            {"run": "npm test", "secrets_needed": []},
+        ]}]
+        self.assertEqual(ci._runtime_secrets_needed(jobs, allow_deploy=False), [])
+
+    def test_deploy_secrets_are_required_when_allowed(self):
+        jobs = [{"steps": [{
+            "uses": "10up/action-wordpress-plugin-deploy@stable",
+            "secrets_needed": ["SVN_PASSWORD"],
+        }]}]
+        self.assertEqual(ci._runtime_secrets_needed(jobs, allow_deploy=True),
+                         ["SVN_PASSWORD"])
+
+
 class TestWriteTempFiles(unittest.TestCase):
     def test_write_patched_workflow_roundtrips(self):
         import yaml

@@ -167,6 +167,8 @@ dangerous. `_neutralize_workflow_for_safety` deep-copies the parsed workflow and
 
 The patched workflow is written to a temp file (`_write_patched_workflow`) and is the ONLY
 copy `act` ever sees — the original on disk is never touched, never even read by act.
+Deploy-only secrets from neutralized steps are likewise excluded from the safe-run
+preflight; they are required when `--allow-deploy` is enabled.
 
 ### 3.5 Matrix → concurrent labelled instances, with real version override
 

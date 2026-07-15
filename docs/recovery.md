@@ -60,3 +60,7 @@ capture is considered ready.
 The service rechecks that catalog/materialization boundary immediately before capture and
 rejects unknown profiles, missing profile selections, unresolved warnings, and empty artifact
 sets before invoking an adapter.
+
+The CLI accepts repeated explicit materialized inputs with the recovery create command:
+--backup-id SET --profile PROFILE --artifact NAME=PATH. It does not discover paths from the
+host; unresolved catalog roots remain blocked.

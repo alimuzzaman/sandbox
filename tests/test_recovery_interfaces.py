@@ -8,8 +8,10 @@ from sandbox.commands.recovery import cmd_recovery
 
 class TestRecoveryInterfaces(unittest.TestCase):
     def _args(self, action, **extra):
-        return SimpleNamespace(action=action, remote=None, profile=[], backup_id=None,
-                               confirm=False, json=True, **extra)
+        values = {"action": action, "remote": None, "profile": [], "backup_id": None,
+                  "artifact": [], "confirm": False, "json": True}
+        values.update(extra)
+        return SimpleNamespace(**values)
 
     def test_cli_create_needs_confirmation_before_secret_or_capture(self):
         with self.assertRaises(SystemExit), patch.dict(os.environ, {}, clear=True):
@@ -26,3 +28,18 @@ class TestRecoveryInterfaces(unittest.TestCase):
     def test_cli_schedule_and_retention_default_to_non_mutating_plans(self):
         cmd_recovery(None, self._args("schedule"))
         cmd_recovery(None, self._args("retention"))
+
+    def test_cli_create_routes_explicit_materialized_inputs_to_service(self):
+        service = SimpleNamespace(create=lambda *args, **kwargs: {
+            "action": "create", "ok": True, "status": "complete", "data": {}
+        })
+        args = self._args("create", profile=["fixture"], backup_id="set-1",
+                          artifact=["archive=/tmp/archive"], confirm=True)
+        with patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True), \
+                patch("sandbox.commands.recovery.recovery_service", return_value=service):
+            cmd_recovery(None, args)
+
+    def test_cli_create_rejects_malformed_artifact_declaration(self):
+        args = self._args("create", profile=["fixture"], backup_id="set-1", artifact=["malformed"])
+        with self.assertRaises(SystemExit), patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True):
+            cmd_recovery(None, args)

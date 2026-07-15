@@ -18,6 +18,8 @@ def configure_recovery(parser) -> None:
     parser.add_argument("--remote", default=None)
     parser.add_argument("--profile", action="append", default=[])
     parser.add_argument("--backup-id", default=None)
+    parser.add_argument("--artifact", action="append", default=[],
+                        help="materialized artifact as NAME=PATH; repeat for each artifact")
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--json", action="store_true")
 
@@ -35,6 +37,18 @@ def _emit(payload: dict, as_json: bool) -> None:
     elif payload["action"] == "plan":
         for artifact in payload["data"]["artifacts"]:
             print(f"  {artifact['profile_id']}: {artifact['capture_mode']} ({artifact['rationale']})")
+
+
+def _parse_artifacts(values: list[str]) -> dict[str, Path]:
+    artifacts = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError("artifacts must use NAME=PATH")
+        name, source = value.split("=", 1)
+        if not name or not source or name in artifacts:
+            raise ValueError("artifact names must be unique and non-empty")
+        artifacts[name] = Path(source)
+    return artifacts
 
 
 def cmd_recovery(_cfg, args) -> None:
@@ -58,9 +72,20 @@ def cmd_recovery(_cfg, args) -> None:
         elif not os.environ.get("RECOVERY_PASSPHRASE"):
             payload = result(False, "create", remote=args.remote,
                              error=RecoveryError("RECOVERY_PASSPHRASE is not available", "missing_passphrase"))
+        elif not args.backup_id:
+            payload = result(False, "create", remote=args.remote,
+                             error=RecoveryError("--backup-id is required", "missing_backup_id"))
+        elif not args.profile:
+            payload = result(False, "create", remote=args.remote,
+                             error=RecoveryError("at least one --profile is required", "missing_profiles"))
         else:
-            payload = result(False, "create", remote=args.remote, error=RecoveryError(
-                "profile capture requires a configured remote adapter", "recovery_not_configured"))
+            try:
+                artifacts = _parse_artifacts(getattr(args, "artifact", []))
+                payload = service.create(args.backup_id, artifacts, tuple(args.profile),
+                                         confirm=True, remote=args.remote)
+            except ValueError as exc:
+                payload = result(False, "create", remote=args.remote,
+                                 error=RecoveryError(str(exc), "invalid_artifact"))
     elif args.action == "restore":
         from sandbox.recovery.errors import RecoveryError, result
         if not args.backup_id:

@@ -212,3 +212,6 @@ source kinds, making clear that the result is review-only until explicit adapter
 RecoveryService.create now revalidates the selected catalog profiles and planner warnings before
 invoking capture, rejecting unknown/missing profiles, unresolved materialization, and empty
 artifact sets without invoking the adapter.
+
+The CLI now routes explicit repeated NAME=PATH artifact inputs, set ID, and profile selection
+through RecoveryService.create; malformed declarations fail before adapter invocation.

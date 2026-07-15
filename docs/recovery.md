@@ -46,3 +46,7 @@ targets.
 When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the service composes
 the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;
 missing secret configuration leaves capture unavailable rather than guessing sources.
+
+Plans with symbolic host-manifest roots or composite source declarations report explicit
+materialization warnings. Those warnings must be resolved by a target-bound adapter before
+capture is considered ready.

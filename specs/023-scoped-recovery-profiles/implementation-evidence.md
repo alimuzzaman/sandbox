@@ -199,3 +199,6 @@ explicitly supplied by the caller; no production restore target was discovered o
 Recovery context now composes the GnuPG/rclone capture coordinator only when both the approved
 destination and inherited passphrase channel are present. It passes configured staging/pending
 roots and leaves capture unavailable when the secret channel is absent.
+
+Planner output now warns when host-manifest roots remain symbolic or a profile combines multiple
+source kinds, making clear that the result is review-only until explicit adapter materialization.

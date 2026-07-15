@@ -43,6 +43,13 @@ def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = (), *, reso
         visiting.remove(profile_id); visited.add(profile_id); ordered.append(profile_id)
     for profile_id in sorted(requested):
         visit(profile_id)
+    warnings = []
+    for profile_id in ordered:
+        profile = by_id[profile_id]
+        if resolver is None and any(root.startswith("host-manifest:") for root in profile.allowed_roots):
+            warnings.append(f"{profile_id}: symbolic host roots require explicit materialization before capture")
+        if profile.source_type == "filesystem" and len(profile.sources) > 1:
+            warnings.append(f"{profile_id}: multiple sources require explicit adapter materialization before capture")
     artifacts = tuple(ArtifactPlan(
         profile_id=profile_id, artifact_id=f"{profile_id}-primary",
         source_type=by_id[profile_id].source_type,
@@ -61,4 +68,4 @@ def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = (), *, reso
     excluded = ({"class": "containers-and-images", "reason": "reproducible runtime mechanism"},
                 {"class": "development-wordpress-state", "reason": "disposable unless explicitly profiled"},
                 {"class": "caches-logs-sockets", "reason": "transient state"})
-    return RecoveryPlan(catalog.schema_version, tuple(ordered), artifacts, excluded)
+    return RecoveryPlan(catalog.schema_version, tuple(ordered), artifacts, excluded, tuple(warnings))

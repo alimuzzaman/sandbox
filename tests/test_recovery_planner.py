@@ -19,6 +19,8 @@ class TestRecoveryPlanner(unittest.TestCase):
         amar = next(item for item in first.artifacts if item.profile_id == "amarsonar-bangla-prod")
         self.assertEqual(amar.capture_mode, "full")
         self.assertIn("full-wordpress-directory", amar.sources)
+        self.assertTrue(any("symbolic host roots" in warning for warning in first.warnings))
+        self.assertTrue(any("multiple sources" in warning for warning in first.warnings))
 
     def test_resolver_rejects_escape_and_absent_sources(self):
         with tempfile.TemporaryDirectory() as root:

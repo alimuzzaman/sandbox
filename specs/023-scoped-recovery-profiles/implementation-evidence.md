@@ -170,3 +170,7 @@ remote deletion was performed.
 The staging coordinator now optionally preserves a verified encrypted artifact in an owner-only
 pending directory when remote publication fails; incomplete runs still never publish a complete
 manifest, and staging cleanup remains guaranteed.
+
+Restore apply now rolls back the active profile as well as previously completed profiles when
+verification or a later operation fails; the disposable file-swap drill confirms both targets
+return to their pre-restore contents.

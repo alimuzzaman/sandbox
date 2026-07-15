@@ -45,4 +45,5 @@ class TestDisposableRestoreApply(unittest.TestCase):
                 apply_restore(plan, adapters, confirm=True)
             self.assertEqual(first.read_bytes(), b"before-first")
             self.assertIn("rollback", adapters["first"].events)
-            self.assertEqual(second.read_bytes(), b"after-second")
+            self.assertEqual(second.read_bytes(), b"before-second")
+            self.assertIn("rollback", adapters["second"].events)

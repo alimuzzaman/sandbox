@@ -81,19 +81,19 @@ def apply_restore(plan: RestorePlan, adapters: Mapping[str, object], *, confirm:
     """
     if not confirm:
         raise RecoveryError("restore apply requires explicit confirmation", "confirmation_required")
-    completed: list[str] = []
+    touched: list[str] = []
     events: list[str] = []
     try:
         for profile in plan.profiles:
             adapter = adapters.get(profile)
             if adapter is None:
                 raise RecoveryError("restore adapter is unavailable", "missing_restore_adapter")
+            touched.append(profile)
             for operation in ("checkpoint", "quiesce", "stage", "swap", "import", "verify", "resume"):
                 getattr(adapter, operation)()
                 events.append(f"{operation}:{profile}")
-            completed.append(profile)
     except Exception as exc:
-        for profile in reversed(completed):
+        for profile in reversed(touched):
             adapter = adapters[profile]
             try:
                 adapter.rollback(); events.append(f"rollback:{profile}")

@@ -66,4 +66,6 @@ class TestRecoveryRestore(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "rollback"):
             apply_restore(plan, {"one": Adapter("one"), "two": Adapter("two", True)}, confirm=True)
         self.assertEqual(events[:7], [f"{op}:one" for op in ("checkpoint", "quiesce", "stage", "swap", "import", "verify", "resume")])
+        self.assertIn("rollback:two", events)
+        self.assertIn("resume:two", events)
         self.assertIn("rollback:one", events)

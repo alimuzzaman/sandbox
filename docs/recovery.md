@@ -18,3 +18,6 @@ side-effect-free, and deletion still requires confirmation plus a fresh candidat
 When a staging coordinator is configured with an owner-only pending directory, a verified
 encrypted artifact is retained there if remote publication or verification fails. The pending
 artifact is immutable by set ID and can be retried without recapturing the source.
+
+Restore rollback includes the profile currently being applied when checkpointed work fails,
+not only profiles that completed earlier in the restore order.

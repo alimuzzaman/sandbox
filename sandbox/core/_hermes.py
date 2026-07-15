@@ -1020,7 +1020,7 @@ import hashlib
 import tempfile
 
 HOME = pathlib.Path(os.path.expanduser("~"))
-SANDBOX = __SANDBOX__
+SANDBOX = pathlib.Path(__SANDBOX__)
 SB = __SB__
 DESTINATION = __DESTINATION__
 BACKUP_ID = __BACKUP_ID__

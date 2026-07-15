@@ -10,12 +10,59 @@ import re as _re
 
 
 
-from app import mcp
+from app import (
+    PROXY_TLD, SANDBOX_ROOT, _core, _load_sandbox_yml, _project_instance,
+    _resolve_instance, _safe_json, _site_url, mcp,
+)
 from dependencies import ToolDependencies
 from tools.manifest import built_in_tool_registry
 
 
-built_in_tool_registry().compose(mcp, ToolDependencies())
+def _last_json(stdout: str) -> dict | None:
+    for line in reversed((stdout or "").splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _run_hermes_command(args: list[str], timeout: int) -> dict:
+    try:
+        result = subprocess.run(
+            [str(SANDBOX_ROOT / "sb"), *args, "--json"], cwd=str(SANDBOX_ROOT),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Hermes control command timed out"}
+    payload = _last_json(result.stdout)
+    if payload is not None:
+        return payload
+    message = result.stderr or result.stdout or "Hermes control command failed"
+    return {"ok": False, "error": message.strip()[:1000]}
+
+
+class _HermesCommandAdapter:
+    """MCP transport adapter satisfying the explicit Hermes command service."""
+
+    def run(self, arguments: list[str], timeout: int) -> dict:
+        return _run_hermes_command(arguments, timeout)
+
+
+built_in_tool_registry().compose(mcp, ToolDependencies({
+    "app": mcp,
+    "sandbox_root": SANDBOX_ROOT,
+    "proxy_tld": PROXY_TLD,
+    "core": _core,
+    "load_sandbox_yml": _load_sandbox_yml,
+    "project_instance": _project_instance,
+    "resolve_instance": _resolve_instance,
+    "safe_json": _safe_json,
+    "site_url": _site_url,
+    "hermes_service": _HermesCommandAdapter(),
+}))
 
 
 

@@ -74,6 +74,27 @@ class TestRuntimeService(unittest.TestCase):
         self.assertEqual(result.data["instance"], "fixture")
         self.assertEqual(calls, ["/tmp/project"])
 
+    def test_final_wordpress_adapter_regression_preserves_result_and_capabilities(self):
+        """Feature 022 final gate: the compatibility adapter adds no transport drift."""
+        from sandbox.runtimes.base import OperationRequest, OperationResult
+        from sandbox.runtimes.wordpress import WordPressAdapter
+
+        expected = OperationResult(
+            ok=True,
+            operation="status",
+            project_root="/tmp/project",
+            project_kind="wordpress",
+            data={"ready": True, "url": "https://fixture.tst"},
+        )
+        adapter = WordPressAdapter(
+            {"status": lambda request: expected}, capabilities=("wp_cli",)
+        )
+
+        actual = adapter.invoke(OperationRequest("/tmp/project", "status"))
+
+        self.assertIs(actual, expected)
+        self.assertEqual(adapter.capabilities, frozenset({"status", "wp_cli"}))
+
 
 if __name__ == "__main__":
     unittest.main()

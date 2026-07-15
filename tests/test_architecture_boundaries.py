@@ -13,6 +13,57 @@ def production_python_files():
 
 
 class TestArchitectureBoundaries(unittest.TestCase):
+    def test_compatibility_facade_consumer_baseline_does_not_grow(self):
+        sandbox_core_consumers = set()
+        hermes_facade_consumers = set()
+        facade_files = production_python_files() + [ROOT / "mcp" / "wp-server" / "app.py"]
+        for path in facade_files:
+            tree = ast.parse(path.read_text())
+            relative = str(path.relative_to(ROOT))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import) and any(
+                    alias.name == "sandbox_core" for alias in node.names
+                ):
+                    sandbox_core_consumers.add(relative)
+                if isinstance(node, ast.ImportFrom) and node.module == "sandbox_core":
+                    sandbox_core_consumers.add(relative)
+                if isinstance(node, ast.ImportFrom) and node.module in {
+                    "sandbox.hermes", "sandbox.hermes.facade"
+                }:
+                    if any(alias.name == "facade" for alias in node.names) \
+                            or node.module == "sandbox.hermes.facade":
+                        hermes_facade_consumers.add(relative)
+
+        self.assertEqual(sandbox_core_consumers, {
+            "mcp/wp-server/app.py",
+            "sandbox/application/context.py",
+            "sandbox/core/_instances.py",
+        })
+        self.assertEqual(hermes_facade_consumers, {"sandbox/commands/hermes.py"})
+
+    def test_exact_owned_cli_and_mcp_inventories_are_enforced(self):
+        from sandbox.commands.manifest import load_builtin_commands, validate_builtin_command_coverage
+        from sandbox.registry import COMMANDS
+
+        load_builtin_commands()
+        self.assertEqual(len(COMMANDS), 68)
+        self.assertEqual(validate_builtin_command_coverage(), ())
+
+        import sys
+        mcp_root = ROOT / "mcp" / "wp-server"
+        sys.path.insert(0, str(mcp_root))
+        try:
+            from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 18)
+            tool_names = tuple(
+                name for group_id in BUILTIN_TOOL_GROUPS
+                for name in BUILTIN_TOOL_NAMES[group_id]
+            )
+            self.assertEqual(len(tool_names), 75)
+            self.assertEqual(len(tool_names), len(set(tool_names)))
+        finally:
+            sys.path.remove(str(mcp_root))
+
     def test_new_boundary_packages_do_not_use_legacy_wildcards(self):
         roots = (
             ROOT / "sandbox" / "application",
@@ -65,6 +116,29 @@ class TestArchitectureBoundaries(unittest.TestCase):
             if forbidden.search(path.read_text()):
                 violations.append(str(path.relative_to(ROOT)))
         self.assertEqual(violations, [])
+
+    def test_hermes_bounded_modules_do_not_reach_back_into_legacy_control_plane(self):
+        """Only the compatibility facade may import the pre-extraction module."""
+        hermes_root = ROOT / "sandbox" / "hermes"
+        violations = []
+        for path in hermes_root.glob("*.py"):
+            if path.name in {"facade.py", "__init__.py"}:
+                continue
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "sandbox.core._hermes":
+                    violations.append(str(path.relative_to(ROOT)))
+        self.assertEqual(violations, [])
+
+    def test_hermes_command_uses_the_public_facade_not_the_legacy_module(self):
+        tree = ast.parse((ROOT / "sandbox" / "commands" / "hermes.py").read_text())
+        imports = [
+            (node.module, tuple(alias.name for alias in node.names))
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        ]
+        self.assertIn(("sandbox.hermes", ("facade",)), imports)
+        self.assertNotIn(("sandbox.core._hermes", ("*",)), imports)
 
 
 if __name__ == "__main__":

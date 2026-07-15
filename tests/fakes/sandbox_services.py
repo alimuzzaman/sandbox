@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 from sandbox.services import ProcessResult
@@ -29,17 +30,31 @@ class RecordingPortAllocator(_Recorder):
         self._record("allocate", preferred)
         return preferred or 8200
 
+    def reserve(self, preferred=None):
+        self._record("reserve", preferred)
+        return nullcontext(type("Reservation", (), {"port": preferred or 8200})())
+
 
 class RecordingPathPolicy(_Recorder):
     def require_allowed(self, path):
         self._record("require_allowed", path)
         return path
 
+    def artifact_path(self, root, *parts):
+        self._record("artifact_path", root, *parts)
+        return "/".join((str(root), *(str(part) for part in parts)))
+
 
 class RecordingProxyManager(_Recorder):
     def plan(self, hostname, port):
         self._record("plan", hostname, port)
         return {"hostname": hostname, "port": port}
+
+    def apply(self, plan):
+        self._record("apply", plan)
+
+    def remove(self, hostname):
+        self._record("remove", hostname)
 
 
 @dataclass

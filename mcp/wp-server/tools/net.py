@@ -10,7 +10,7 @@ import re as _re
 
 
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, TOOLS_VENV_PY, VISIT_SCRIPT, _admin_creds, _safe_json, mcp
 
 
 

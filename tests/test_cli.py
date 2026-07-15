@@ -21,6 +21,15 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_final_public_command_inventory_matches_the_owned_manifest(self):
+        from sandbox.commands.manifest import load_builtin_commands, validate_builtin_command_coverage
+        from sandbox.registry import COMMANDS, COMMAND_SPECS
+
+        load_builtin_commands()
+        self.assertEqual(len(COMMANDS), 68)
+        self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
+        self.assertEqual(validate_builtin_command_coverage(), ())
+
     def test_instance_scoped_command_errors_outside_project(self):
         # `status` is instance-scoped; from a non-registered dir it must abort
         # with guidance and a non-zero exit — never silently target `main`.

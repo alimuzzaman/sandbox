@@ -3,7 +3,7 @@ import json
 import re
 import subprocess
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, mcp
 
 
 def _json_or_text(text: str):

@@ -12,6 +12,7 @@ class ToolGroupSpec:
     register: Callable
     owner: str
     dependencies: tuple[str, ...] = ()
+    tool_names: tuple[str, ...] = ()
     order: int = 100
     project_scope: str = "legacy"
     required_capability: str | None = None
@@ -24,6 +25,18 @@ class ToolGroupRegistry:
     def add(self, spec: ToolGroupSpec) -> ToolGroupSpec:
         if spec.group_id in self._specs:
             raise ValueError(f"duplicate tool group: {spec.group_id}")
+        owned_tools = {
+            tool_name: group.group_id
+            for group in self._specs.values()
+            for tool_name in group.tool_names
+        }
+        duplicate_tools = sorted(set(spec.tool_names).intersection(owned_tools))
+        if duplicate_tools:
+            duplicate = duplicate_tools[0]
+            raise ValueError(
+                f"duplicate MCP tool: {duplicate} owned by "
+                f"{owned_tools[duplicate]} and {spec.group_id}"
+            )
         self._specs[spec.group_id] = spec
         return spec
 

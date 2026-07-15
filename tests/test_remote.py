@@ -18,6 +18,8 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -112,6 +114,33 @@ class TestRemoteBlockConfig(unittest.TestCase):
                 self.assertIsNone(sr.get_remote("myvps"))
                 # removing again is a no-op, not an error
                 self.assertFalse(sr.remove_remote("myvps"))
+
+
+class TestFeature022FinalRemoteRegression(unittest.TestCase):
+    def test_machine_scoped_list_keeps_exact_json_envelope_without_secret_fields(self):
+        remotes = {
+            "zeta": {"ssh": "user@private.example", "provisioned": True},
+            "alpha": {"ssh": "user@other.example", "provisioned": False},
+        }
+        output = StringIO()
+        with patch.object(sr, "list_remotes", return_value=remotes), \
+             patch.object(sr, "check_reachable", side_effect=(True, False)), \
+             redirect_stdout(output):
+            remote_cmd._cmd_list(types.SimpleNamespace(), True)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload, {
+            "ok": True,
+            "remotes": [
+                {"name": "alpha", "ssh_configured": True, "reachable": True,
+                 "provisioned": False},
+                {"name": "zeta", "ssh_configured": True, "reachable": False,
+                 "provisioned": True},
+            ],
+            "error": None,
+        })
+        self.assertNotIn("private.example", output.getvalue())
+        self.assertNotIn("other.example", output.getvalue())
 
 
 class TestValidateRemoteName(unittest.TestCase):

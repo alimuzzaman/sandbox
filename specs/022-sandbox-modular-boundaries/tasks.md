@@ -142,8 +142,8 @@
 - [X] T053 [US4] Add the explicit built-in command manifest in `sandbox/commands/manifest.py`
 - [X] T054 [US4] Move instance/config parser ownership beside handlers in `sandbox/commands/instances_cmd.py` and `sandbox/commands/config_setup.py`
 - [X] T055 [US4] Move shared lifecycle parser ownership beside handlers in `sandbox/commands/lifecycle.py`
-- [ ] T056 [US4] Represent every remaining command through a feature-owned spec or explicit bridge entry without changing its handler in `sandbox/commands/manifest.py`
-- [ ] T057 [US4] Run exact inventory, full CLI parser, representative live command, and no-central-growth checks; update `specs/022-sandbox-modular-boundaries/cli-inventory.md` and implementation evidence
+- [X] T056 [US4] Represent every remaining command through a feature-owned spec or explicit bridge entry without changing its handler in `sandbox/commands/manifest.py`
+- [X] T057 [US4] Run exact inventory, full CLI parser, representative live command, and no-central-growth checks; update `specs/022-sandbox-modular-boundaries/cli-inventory.md` and implementation evidence
 
 **Checkpoint**: Spec 021 and recovery can add commands without editing central parser/routing lists.
 
@@ -157,17 +157,17 @@
 
 ### Tests for User Story 5
 
-- [ ] T058 [P] [US5] Add failing exact group/tool inventory, deterministic order, duplicate group/tool, and test-group tests in `tests/test_mcp_composition.py`
-- [ ] T059 [P] [US5] Add failing dependency declaration, isolated fake context, and no-import-side-effect tests in `tests/test_mcp_composition.py`
-- [ ] T060 [P] [US5] Add failing public name/required-parameter/response compatibility snapshots for all groups in `tests/test_mcp.py`
+- [X] T058 [P] [US5] Add failing exact group/tool inventory, deterministic order, duplicate group/tool, and test-group tests in `tests/test_mcp_composition.py`
+- [X] T059 [P] [US5] Add failing dependency declaration, isolated fake context, and no-import-side-effect tests in `tests/test_mcp_composition.py`
+- [X] T060 [P] [US5] Add failing public name/required-parameter/response compatibility snapshots for all groups in `tests/test_mcp.py`
 
 ### Implementation for User Story 5
 
-- [ ] T061 [US5] Complete the MCP dependency container and deterministic group composer in `mcp/wp-server/dependencies.py` and `mcp/wp-server/composition.py`
-- [ ] T062 [US5] Add one explicit built-in tool-group manifest in `mcp/wp-server/tools/manifest.py`
-- [ ] T063 [US5] Replace the manual server import list with composer invocation while preserving transport behavior in `mcp/wp-server/server.py`
-- [ ] T064 [US5] Migrate instance/runtime and Hermes groups to explicit dependencies without wildcard `app` imports in `mcp/wp-server/tools/instances.py`, `mcp/wp-server/tools/hermes.py`, and focused shared helpers
-- [ ] T065 [US5] Represent every remaining tool group exactly once through the manifest/compatibility wrapper, run MCP schema/registration tests, and update `specs/022-sandbox-modular-boundaries/mcp-inventory.md` and implementation evidence
+- [X] T061 [US5] Complete the MCP dependency container and deterministic group composer in `mcp/wp-server/dependencies.py` and `mcp/wp-server/composition.py`
+- [X] T062 [US5] Add one explicit built-in tool-group manifest in `mcp/wp-server/tools/manifest.py`
+- [X] T063 [US5] Replace the manual server import list with composer invocation while preserving transport behavior in `mcp/wp-server/server.py`
+- [X] T064 [US5] Migrate instance/runtime and Hermes groups to explicit dependencies without wildcard `app` imports in `mcp/wp-server/tools/instances.py`, `mcp/wp-server/tools/hermes.py`, and focused shared helpers
+- [X] T065 [US5] Represent every remaining tool group exactly once through the manifest/compatibility wrapper, run MCP schema/registration tests, and update `specs/022-sandbox-modular-boundaries/mcp-inventory.md` and implementation evidence
 
 **Checkpoint**: Future runtime/recovery tool groups register without central bootstrap edits or broad globals.
 
@@ -181,17 +181,17 @@
 
 ### Tests for User Story 6
 
-- [ ] T066 [P] [US6] Add failing argument-list, cwd/environment, timeout, output-limit, result, and secret-redaction tests in `tests/test_service_process.py`
-- [ ] T067 [P] [US6] Add failing HTTP timeout/status and port collision/reservation tests in `tests/test_service_http_ports.py`
-- [ ] T068 [P] [US6] Add failing allowed-root/artifact-path and proxy plan/apply/remove/rollback tests in `tests/test_service_paths_proxy.py`
+- [X] T066 [P] [US6] Add failing argument-list, cwd/environment, timeout, output-limit, result, and secret-redaction tests in `tests/test_service_process.py`
+- [X] T067 [P] [US6] Add failing HTTP timeout/status and port collision/reservation tests in `tests/test_service_http_ports.py`
+- [X] T068 [P] [US6] Add failing allowed-root/artifact-path and proxy plan/apply/remove/rollback tests in `tests/test_service_paths_proxy.py`
 
 ### Implementation for User Story 6
 
-- [ ] T069 [US6] Implement the production bounded process runner in `sandbox/services/process.py`
-- [ ] T070 [P] [US6] Implement the HTTP probe and port allocator services in `sandbox/services/http.py` and `sandbox/services/ports.py`
-- [ ] T071 [P] [US6] Implement the allowed-root/artifact path policy in `sandbox/services/paths.py`
-- [ ] T072 [US6] Implement the proxy route plan/apply/remove/rollback adapter over existing Caddy/domain behavior in `sandbox/services/proxy.py`
-- [ ] T073 [US6] Inject services into the runtime composition root and migrated WordPress paths without moving WordPress-specific policy in `sandbox/application/context.py` and focused `sandbox/core/` callers
+- [X] T069 [US6] Implement the production bounded process runner in `sandbox/services/process.py`
+- [X] T070 [P] [US6] Implement the HTTP probe and port allocator services in `sandbox/services/http.py` and `sandbox/services/ports.py`
+- [X] T071 [P] [US6] Implement the allowed-root/artifact path policy in `sandbox/services/paths.py`
+- [X] T072 [US6] Implement the proxy route plan/apply/remove/rollback adapter over existing Caddy/domain behavior in `sandbox/services/proxy.py`
+- [X] T073 [US6] Inject services into the runtime composition root and migrated WordPress paths without moving WordPress-specific policy in `sandbox/application/context.py` and focused `sandbox/core/` callers
 - [ ] T074 [US6] Run service failure tests plus live domain/HTTPS/lifecycle parity and append redaction/rollback evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 
 **Checkpoint**: Generic and recovery features can orchestrate safe mechanisms without importing WordPress policy.
@@ -206,27 +206,27 @@
 
 ### Tests for User Story 7
 
-- [ ] T075 [P] [US7] Add failing state schema/lock/atomic-write/corruption/compatibility tests in `tests/test_hermes_state.py`
-- [ ] T076 [P] [US7] Add failing side-effect-free target/policy routing tests in `tests/test_hermes_routing.py`
-- [ ] T077 [P] [US7] Add failing job/worktree/status/cancel/race/cleanup tests with fakes in `tests/test_hermes_jobs.py`
-- [ ] T078 [P] [US7] Add failing gateway plan/apply/remove/auth-order/rollback tests with fakes in `tests/test_hermes_gateway.py`
-- [ ] T079 [P] [US7] Add failing backup artifact/integrity/list/retention-hook/non-mutating-restore-plan tests in `tests/test_hermes_backup.py`
-- [ ] T080 [P] [US7] Add failing facade/public-function and no-cross-internal-import tests in `tests/test_hermes_service.py` and `tests/test_architecture_boundaries.py`
+- [X] T075 [P] [US7] Add failing state schema/lock/atomic-write/corruption/compatibility tests in `tests/test_hermes_state.py`
+- [X] T076 [P] [US7] Add failing side-effect-free target/policy routing tests in `tests/test_hermes_routing.py`
+- [X] T077 [P] [US7] Add failing job/worktree/status/cancel/race/cleanup tests with fakes in `tests/test_hermes_jobs.py`
+- [X] T078 [P] [US7] Add failing gateway plan/apply/remove/auth-order/rollback tests with fakes in `tests/test_hermes_gateway.py`
+- [X] T079 [P] [US7] Add failing backup artifact/integrity/list/retention-hook/non-mutating-restore-plan tests in `tests/test_hermes_backup.py`
+- [X] T080 [P] [US7] Add failing facade/public-function and no-cross-internal-import tests in `tests/test_hermes_service.py` and `tests/test_architecture_boundaries.py`
 
 ### Implementation for User Story 7
 
-- [ ] T081 [US7] Extract Hermes state models, validation, atomic persistence, and corruption reporting into `sandbox/hermes/state.py`
-- [ ] T082 [US7] Extract side-effect-free target resolution and routing policy into `sandbox/hermes/routing.py`
-- [ ] T083 [US7] Extract run/worktree process coordination, status, cancellation, and cleanup into `sandbox/hermes/jobs.py`
+- [X] T081 [US7] Extract Hermes state models, validation, atomic persistence, and corruption reporting into `sandbox/hermes/state.py`
+- [X] T082 [US7] Extract side-effect-free target resolution and routing policy into `sandbox/hermes/routing.py`
+- [X] T083 [US7] Extract run/worktree process coordination, status, cancellation, and cleanup into `sandbox/hermes/jobs.py`
 - [ ] T084 [US7] Run focused state/routing/jobs tests and remote status/job lifecycle parity; record pre-gateway evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
-- [ ] T085 [US7] Extract gateway/public endpoint/tunnel/route/auth-related plan and reversible operations into `sandbox/hermes/gateway.py`
+- [X] T085 [US7] Extract gateway/public endpoint/tunnel/route/auth-related plan and reversible operations into `sandbox/hermes/gateway.py`
 - [ ] T086 [US7] Run gateway tests and verify `hermes.asb.bd` authentication, route, WebSocket reconnect, and no-exposure-drift behavior through Sandbox commands; record evidence
-- [ ] T087 [US7] Extract existing artifact create/list/integrity behavior and non-mutating restore planning into `sandbox/hermes/backup.py`
-- [ ] T088 [US7] Implement Hermes dependency composition and service orchestration in `sandbox/hermes/service.py`
-- [ ] T089 [US7] Preserve existing public functions and error/authorization ordering through `sandbox/hermes/facade.py` and `sandbox/core/_hermes.py`
-- [ ] T090 [US7] Route CLI Hermes handlers through the facade in `sandbox/commands/hermes.py`
-- [ ] T091 [US7] Route MCP Hermes tools through explicit service dependencies in `mcp/wp-server/tools/hermes.py`
-- [ ] T092 [US7] Add a facade ledger with owner, consumers, rollback, tests, and removal gates in `specs/022-sandbox-modular-boundaries/compatibility-facades.md`
+- [X] T087 [US7] Extract existing artifact create/list/integrity behavior and non-mutating restore planning into `sandbox/hermes/backup.py`
+- [X] T088 [US7] Implement Hermes dependency composition and service orchestration in `sandbox/hermes/service.py`
+- [X] T089 [US7] Preserve existing public functions and error/authorization ordering through `sandbox/hermes/facade.py` and `sandbox/core/_hermes.py`
+- [X] T090 [US7] Route CLI Hermes handlers through the facade in `sandbox/commands/hermes.py`
+- [X] T091 [US7] Route MCP Hermes tools through explicit service dependencies in `mcp/wp-server/tools/hermes.py`
+- [X] T092 [US7] Add a facade ledger with owner, consumers, rollback, tests, and removal gates in `specs/022-sandbox-modular-boundaries/compatibility-facades.md`
 - [ ] T093 [US7] Run the complete focused Hermes suite and existing local/remote acceptance checks without restore application or deletion; append exact evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 - [ ] T094 [US7] Verify scoped recovery can be specified solely against `sandbox/hermes/backup.py` and shared service contracts, documenting any remaining blocker in implementation evidence
 
@@ -242,15 +242,15 @@
 
 ### Tests and Integration for User Story 8
 
-- [ ] T095 [P] [US8] Add final exact CLI/MCP inventory and compatibility assertions in `tests/test_cli.py`, `tests/test_mcp.py`, and composition suites
-- [ ] T096 [P] [US8] Add final config/registry/facade compatibility matrix tests in `tests/test_project_config.py`, `tests/test_sandbox.py`, and new facade suites
-- [ ] T097 [P] [US8] Add final WordPress runtime, remote, and Hermes facade regression tests in `tests/test_runtime_service.py`, `tests/test_remote.py`, and `tests/test_hermes_service.py`
+- [X] T095 [P] [US8] Add final exact CLI/MCP inventory and compatibility assertions in `tests/test_cli.py`, `tests/test_mcp.py`, and composition suites
+- [X] T096 [P] [US8] Add final config/registry/facade compatibility matrix tests in `tests/test_project_config.py`, `tests/test_sandbox.py`, and new facade suites
+- [X] T097 [P] [US8] Add final WordPress runtime, remote, and Hermes facade regression tests in `tests/test_runtime_service.py`, `tests/test_remote.py`, and `tests/test_hermes_service.py`
 - [ ] T098 [US8] Run every WordPress scenario in `quickstart.md` on the live stack through Sandbox tools and record exact results
 - [ ] T099 [US8] Run every remote/Hermes scenario in `quickstart.md` through Sandbox commands/MCP and record exact results without destructive restore or deletion
-- [ ] T100 [US8] Run all registry/state failure-injection scenarios against copied/disposable state and record recovery evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
-- [ ] T101 [US8] Review and resolve every unexplained baseline drift or document return to the prior facade path in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
-- [ ] T102 [US8] Confirm all compatibility facades have no new consumers and all deferred removals remain blocked in `specs/022-sandbox-modular-boundaries/compatibility-facades.md`
-- [ ] T103 [US8] Obtain fresh correctness/regression and security/data-loss review, recording findings and resolutions in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [X] T100 [US8] Run all registry/state failure-injection scenarios against copied/disposable state and record recovery evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [X] T101 [US8] Review and resolve every unexplained baseline drift or document return to the prior facade path in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [X] T102 [US8] Confirm all compatibility facades have no new consumers and all deferred removals remain blocked in `specs/022-sandbox-modular-boundaries/compatibility-facades.md`
+- [X] T103 [US8] Obtain fresh correctness/regression and security/data-loss review, recording findings and resolutions in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 
 **Checkpoint**: Existing users require no config edits and observe no unexplained behavior, protocol, authorization, state, or public-access drift.
 
@@ -258,14 +258,14 @@
 
 ## Phase 11: Documentation, Enforcement, and Downstream Handoff
 
-- [ ] T104 [P] Update architecture, config, command, MCP, and Hermes guidance in `README.md`, `docs/sandbox-config-reference.md`, `AGENTS.md`, and `CLAUDE.md`
-- [ ] T105 [P] Add durable module-boundary and compatibility-facade guidance to the relevant Sandbox skills/workflows under `.agents/skills/` and `workflows/`
-- [ ] T106 [P] Update Spec 021 status/dependency notes to remain implementation-blocked and identify moved responsibilities in `specs/021-generic-project-instances/plan.md` and `tasks.md`
-- [ ] T107 Enable the reviewed architecture guards and exact inventory checks in `tests/test_architecture_boundaries.py`
+- [X] T104 [P] Update architecture, config, command, MCP, and Hermes guidance in `README.md`, `docs/sandbox-config-reference.md`, `AGENTS.md`, and `CLAUDE.md`
+- [X] T105 [P] Add durable module-boundary and compatibility-facade guidance to the relevant Sandbox skills/workflows under `.agents/skills/` and `workflows/`
+- [X] T106 [P] Update Spec 021 status/dependency notes to remain implementation-blocked and identify moved responsibilities in `specs/021-generic-project-instances/plan.md` and `tasks.md`
+- [X] T107 Enable the reviewed architecture guards and exact inventory checks in `tests/test_architecture_boundaries.py`
 - [ ] T108 Run focused suites, `python3 -m unittest discover -s tests -v`, `./sb selftest`, `git diff --check`, and every scenario in `quickstart.md`; append commands/results/retries to implementation evidence
-- [ ] T109 Confirm scope stayed bounded, user changes were preserved, no secret was recorded, no unapproved git/release/production action occurred, and every deferred item matches the spec in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
-- [ ] T110 Re-run Spec-Kit analysis/convergence against the implemented feature and append any remaining work to `tasks.md` before claiming completion
-- [ ] T111 Prepare the downstream handoff in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`: replan `specs/021-generic-project-instances/` and start the scoped-recovery Spec-Kit feature only after explicit human approval to unblock them
+- [X] T109 Confirm scope stayed bounded, user changes were preserved, no secret was recorded, no unapproved git/release/production action occurred, and every deferred item matches the spec in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [X] T110 Re-run Spec-Kit analysis/convergence against the implemented feature and append any remaining work to `tasks.md` before claiming completion
+- [X] T111 Prepare the downstream handoff in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`: replan `specs/021-generic-project-instances/` and start the scoped-recovery Spec-Kit feature only after explicit human approval to unblock them
 
 ---
 

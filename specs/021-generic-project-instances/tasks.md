@@ -1,5 +1,11 @@
 # Tasks: Generic Project Instances
 
+> **Status (2026-07-14): implementation-blocked pending replan and human
+> approval.** Feature 022 moved config/schema, registry persistence, runtime
+> dispatch, bounded services, CLI composition, and MCP composition responsibilities.
+> Run Spec-Kit clarify/plan/tasks again against those boundaries before executing
+> T001 or marking any task complete. Compose/Astro behavior has not been delivered.
+
 **Input**: Design documents from `specs/021-generic-project-instances/`
 
 **Prerequisites**: [plan.md](plan.md), [spec.md](spec.md), [research.md](research.md), [data-model.md](data-model.md), [contracts/](contracts/), [modularity-audit.md](modularity-audit.md)

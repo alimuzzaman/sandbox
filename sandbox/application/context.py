@@ -19,6 +19,87 @@ class ApplicationDependencies:
     clock: Any | None = None
 
 
+def runtime_neutral_dependencies(
+    *, registry: Any, allowed_roots, proxy: Any, process: Any | None = None,
+    http: Any | None = None, ports: Any | None = None, paths: Any | None = None,
+    clock: Any | None = None,
+) -> ApplicationDependencies:
+    """Build generic mechanisms; callers retain runtime-specific proxy policy."""
+    from sandbox.services import (
+        AllowedRootPathPolicy, BoundedProcessRunner, SocketPortAllocator,
+        UrlHttpProbe,
+    )
+
+    return ApplicationDependencies(
+        registry=registry,
+        process=process or BoundedProcessRunner(),
+        http=http or UrlHttpProbe(),
+        ports=ports or SocketPortAllocator(),
+        paths=paths or AllowedRootPathPolicy(allowed_roots),
+        proxy=proxy,
+        clock=clock,
+    )
+
+
+def wordpress_proxy_facade(cfg, *, core=None):
+    """Adapt declared WordPress routes to the existing aggregate Caddy owner.
+
+    Route policy and host mutations remain in ``sandbox.core``. This facade
+    validates exact route identity and delegates apply/remove operations.
+    Removal is allowed only after the owning config entry has been removed,
+    matching the existing instance-delete ordering.
+    """
+    if core is None:
+        import sandbox.core as core
+
+    from sandbox.services import CallbackProxyManager
+
+    def declared(config, hostname, port=None):
+        for instance in core.resolve_instances(config).values():
+            if instance.get("domain") != hostname:
+                continue
+            if port is None or int(instance.get("wordpress_port", 0)) == int(port):
+                return True
+        return False
+
+    def validate(plan):
+        if not declared(cfg, str(plan["hostname"]), int(plan["port"])):
+            raise ValueError("proxy plan does not match a declared WordPress route")
+
+    def apply_route(_hostname, _port):
+        core._ensure_proxy_up(cfg)
+
+    def remove_route(hostname):
+        current = core.load_config()
+        if declared(current, hostname):
+            raise ValueError(f"proxy route {hostname!r} is still declared")
+        core.regen_caddyfile(current)
+        if not core.reload_proxy():
+            raise RuntimeError(f"failed to reload proxy after removing {hostname!r}")
+
+    return CallbackProxyManager(
+        apply_route=apply_route,
+        remove_route=remove_route,
+        validate_plan=validate,
+    )
+
+
+def wordpress_runtime_dependencies(cfg, *, core=None, registry=None, **overrides):
+    """Compose bounded mechanisms with the existing WordPress proxy facade."""
+    if core is None:
+        import sandbox.core as core
+    if registry is None:
+        import sandbox_core as sc
+        registry = sc
+    allowed_roots = overrides.pop("allowed_roots", (core.ROOT, core.BASE))
+    return runtime_neutral_dependencies(
+        registry=registry,
+        allowed_roots=allowed_roots,
+        proxy=overrides.pop("proxy", wordpress_proxy_facade(cfg, core=core)),
+        **overrides,
+    )
+
+
 def wordpress_runtime_service(cfg):
     """Compose current WordPress behavior behind the runtime contract."""
     import sandbox.core as core

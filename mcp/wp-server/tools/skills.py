@@ -2,7 +2,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, mcp
 
 
 def _sb_skill(*args: str) -> dict:

@@ -39,11 +39,22 @@ class BoundedProcessRunner:
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a non-empty argument sequence")
         command = tuple(str(item) for item in argv)
-        result = subprocess.run(
-            command, cwd=cwd, env={**os.environ, **dict(env or {})},
-            timeout=timeout, capture_output=True, text=True, shell=False,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command, cwd=cwd, env={**os.environ, **dict(env or {})},
+                timeout=timeout, capture_output=True, text=True, shell=False,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            def output(value: str | bytes | None) -> str:
+                return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+            return ProcessResult(
+                command,
+                124,
+                self._redact(output(exc.stdout)),
+                self._redact(output(exc.stderr) + "\nprocess timed out"),
+            )
         return ProcessResult(
             command, result.returncode,
             self._redact(result.stdout or ""), self._redact(result.stderr or ""),

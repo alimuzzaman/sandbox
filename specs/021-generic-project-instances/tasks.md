@@ -20,7 +20,7 @@
 
 - [x] T001 Record the pre-change WordPress ensure/status/WP-CLI/REST/test outputs and current command/tool counts in `specs/021-generic-project-instances/implementation-evidence.md`
 - [x] T002 [P] Create a minimal project-owned Compose web fixture with a named-volume marker in `tests/fixtures/generic-compose/compose.yaml`, `tests/fixtures/generic-compose/site/`, and `tests/fixtures/generic-compose/sandbox.config.json`
-- [ ] T003 [P] Create a representative Astro fixture with conventional and overridden package scripts in `tests/fixtures/astro/package.json`, `tests/fixtures/astro/astro.config.mjs`, and `tests/fixtures/astro/src/`
+- [x] T003 [P] Create a representative Astro fixture with conventional and overridden package scripts in `tests/fixtures/astro/package.json`, `tests/fixtures/astro/astro.config.mjs`, and `tests/fixtures/astro/src/`
 - [ ] T004 [P] Add audit guard scripts or test helpers that count CLI commands, MCP tools, wildcard imports, and runtime-kind branches in `tests/test_modularity.py`
 
 **Checkpoint**: Baseline and fixtures are reviewable; no product behavior has changed.

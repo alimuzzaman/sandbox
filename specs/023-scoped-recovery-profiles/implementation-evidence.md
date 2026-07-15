@@ -174,3 +174,7 @@ manifest, and staging cleanup remains guaranteed.
 Restore apply now rolls back the active profile as well as previously completed profiles when
 verification or a later operation fails; the disposable file-swap drill confirms both targets
 return to their pre-restore contents.
+
+Recovery listing now classifies complete, incomplete, legacy, locally pending, and
+unverifiable objects without decrypting archives; the existing pending response key remains
+available as an incomplete-object compatibility alias.

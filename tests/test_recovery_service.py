@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+from pathlib import Path
 
 from sandbox.recovery.catalog import RecoveryCatalog
 from sandbox.recovery.capture import CaptureCoordinator
@@ -31,6 +34,30 @@ class TestRecoveryService(unittest.TestCase):
         listed = service.list()
         self.assertTrue(listed["ok"])
         self.assertEqual(listed["data"]["pending"][0]["Path"], "sets/pending/archive.bin")
+        self.assertEqual(listed["data"]["incomplete"][0]["Path"], "sets/pending/archive.bin")
+
+    def test_list_classifies_complete_legacy_unverifiable_and_local_pending_sets(self):
+        drive = MemoryDrive()
+        CaptureCoordinator(FixtureCrypto(), drive).publish("complete", {"artifact": b"payload"})
+        drive.put("sets/partial/archive.bin", b"cipher")
+        drive.put("sets/broken/manifest.json", b"not-json")
+        drive.put("sets/legacy-backup.tar", b"legacy")
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "pending"
+            pending.mkdir()
+            (pending / "retry.archive.tar.gpg").write_bytes(b"ciphertext")
+            listed = RecoveryService(RecoveryCatalog(1, ()), drive=drive, pending_root=pending).list()
+        self.assertTrue(listed["ok"])
+        self.assertEqual([item["Path"] for item in listed["data"]["complete_manifests"]],
+                         ["sets/complete/manifest.json"])
+        self.assertEqual([item["Path"] for item in listed["data"]["incomplete"]],
+                         ["sets/partial/archive.bin"])
+        self.assertEqual([item["Path"] for item in listed["data"]["legacy"]],
+                         ["sets/legacy-backup.tar"])
+        self.assertEqual([item["Path"] for item in listed["data"]["unverifiable"]],
+                         ["sets/broken/manifest.json"])
+        self.assertEqual([item["Path"] for item in listed["data"]["locally_pending"]],
+                         [str(pending / "retry.archive.tar.gpg")])
 
     def test_verify_checks_manifest_and_ciphertext(self):
         drive = MemoryDrive()

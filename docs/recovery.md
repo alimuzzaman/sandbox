@@ -21,3 +21,7 @@ artifact is immutable by set ID and can be retried without recapturing the sourc
 
 Restore rollback includes the profile currently being applied when checkpointed work fails,
 not only profiles that completed earlier in the restore order.
+
+Recovery listing reports complete manifests, incomplete remote sets, malformed or unverifiable
+sets, structurally legacy objects, and locally pending encrypted artifacts separately. The
+legacy pending key remains as a compatibility alias for incomplete remote objects.

@@ -65,7 +65,7 @@ class RecoveryService:
             return result(False, "list", remote=remote, error=RecoveryError(
                 "recovery Drive is not configured", "recovery_not_configured"))
         try:
-            objects = self.drive.list("sets")
+            objects = self.drive.list("")
             groups: dict[str, list[dict]] = {}
             legacy: list[dict] = []
             for item in objects:

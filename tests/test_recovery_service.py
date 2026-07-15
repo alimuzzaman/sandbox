@@ -41,7 +41,7 @@ class TestRecoveryService(unittest.TestCase):
         CaptureCoordinator(FixtureCrypto(), drive).publish("complete", {"artifact": b"payload"})
         drive.put("sets/partial/archive.bin", b"cipher")
         drive.put("sets/broken/manifest.json", b"not-json")
-        drive.put("sets/legacy-backup.tar", b"legacy")
+        drive.put("legacy-backup.tar", b"legacy")
         with tempfile.TemporaryDirectory() as directory:
             pending = Path(directory) / "pending"
             pending.mkdir()
@@ -53,7 +53,7 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual([item["Path"] for item in listed["data"]["incomplete"]],
                          ["sets/partial/archive.bin"])
         self.assertEqual([item["Path"] for item in listed["data"]["legacy"]],
-                         ["sets/legacy-backup.tar"])
+                         ["legacy-backup.tar"])
         self.assertEqual([item["Path"] for item in listed["data"]["unverifiable"]],
                          ["sets/broken/manifest.json"])
         self.assertEqual([item["Path"] for item in listed["data"]["locally_pending"]],

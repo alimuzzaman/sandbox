@@ -179,6 +179,9 @@ Recovery listing now classifies complete, incomplete, legacy, locally pending, a
 unverifiable objects without decrypting archives; the existing pending response key remains
 available as an incomplete-object compatibility alias.
 
+Listing now inventories the configured remote destination root rather than only the new sets
+prefix, allowing legacy objects outside that prefix to be reported without mutation.
+
 Database capture now validates PostgreSQL custom-dump signatures and MariaDB/MySQL SQL-shaped
 output after the native command succeeds, rejecting non-empty but invalid dump artifacts.
 

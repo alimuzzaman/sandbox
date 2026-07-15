@@ -33,3 +33,8 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(runner.calls[0][0][:3], ("rclone", "copyto", "--immutable"))
         with self.assertRaises(RecoveryError): drive.get("../outside")
         self.assertEqual(drive.list()[0]["Path"], "sets/a/manifest.json")
+
+    def test_rclone_can_list_destination_root_for_legacy_classification(self):
+        runner = RcloneRunner(); drive = RcloneDrive(runner, "gdrive:recovery")
+        drive.list("")
+        self.assertEqual(runner.calls[-1][0][2:], ("--recursive", "gdrive:recovery"))

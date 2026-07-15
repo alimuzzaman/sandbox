@@ -23,7 +23,9 @@ class RcloneDrive:
         self.runner, self.destination = runner, destination.rstrip("/")
 
     def _remote(self, key: str) -> str:
-        if not key or key.startswith("/") or ".." in Path(key).parts:
+        if key == "":
+            return self.destination
+        if key.startswith("/") or ".." in Path(key).parts:
             raise RecoveryError("recovery object key is invalid", "invalid_object_key")
         return f"{self.destination}/{key}"
 

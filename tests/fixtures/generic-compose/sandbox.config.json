@@ -1,0 +1,9 @@
+{
+  "kind": "compose",
+  "compose": {
+    "file": "compose.yaml",
+    "service": "web",
+    "internal_port": 80,
+    "health_path": "/"
+  }
+}

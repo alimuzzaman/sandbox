@@ -5,6 +5,42 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
 
+CAPABILITY_ENSURE = "ensure"
+CAPABILITY_STATUS = "status"
+CAPABILITY_START = "start"
+CAPABILITY_STOP = "stop"
+CAPABILITY_LOGS = "logs"
+CAPABILITY_EXEC = "exec"
+CAPABILITY_APPLY = "apply"
+CAPABILITY_DESTROY = "destroy"
+CAPABILITY_OPEN = "open"
+
+SHARED_CAPABILITIES = frozenset({
+    CAPABILITY_ENSURE,
+    CAPABILITY_STATUS,
+    CAPABILITY_START,
+    CAPABILITY_STOP,
+    CAPABILITY_LOGS,
+    CAPABILITY_EXEC,
+    CAPABILITY_APPLY,
+    CAPABILITY_DESTROY,
+    CAPABILITY_OPEN,
+})
+
+
+@dataclass(frozen=True)
+class RuntimeDependencies:
+    """Explicitly supplied shared services available to a runtime adapter."""
+
+    process: Any
+    http: Any
+    ports: Any
+    paths: Any
+    proxy: Any
+    registry: Any
+    clock: Any | None = None
+
+
 @dataclass(frozen=True)
 class ProjectDescriptor:
     root: str

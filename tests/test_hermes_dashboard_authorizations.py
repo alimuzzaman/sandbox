@@ -392,6 +392,36 @@ class TestDashboardAuthorizationAuth(unittest.TestCase):
             else:
                 sys.modules["fastapi"] = old_fastapi
 
+    def test_approval_rejects_non_object_confirmation_body(self):
+        class Router:
+            def get(self, *_args, **_kwargs): return lambda fn: fn
+            def post(self, *_args, **_kwargs): return lambda fn: fn
+        class HttpError(Exception):
+            def __init__(self, status_code, detail): self.status_code, self.detail = status_code, detail
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.APIRouter, fake_fastapi.HTTPException, fake_fastapi.Request = Router, HttpError, object
+        module_name = "dashboard_authorization_plugin_body_test"
+        old_fastapi = sys.modules.get("fastapi")
+        sys.modules["fastapi"] = fake_fastapi
+        try:
+            plugin_path = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/plugin_api.py"
+            spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+            plugin = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(plugin)
+            plugin._actor = lambda _request: "operator"
+            async def request_json(): return []
+            request = types.SimpleNamespace(json=request_json)
+            with self.assertRaises(HttpError) as caught:
+                asyncio.run(plugin.approve("a" * 16, request))
+            self.assertEqual(caught.exception.status_code, 400)
+        finally:
+            sys.modules.pop(module_name, None)
+            if old_fastapi is None:
+                sys.modules.pop("fastapi", None)
+            else:
+                sys.modules["fastapi"] = old_fastapi
+
 
 if __name__ == "__main__":
     unittest.main()

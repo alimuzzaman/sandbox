@@ -123,7 +123,8 @@ async def approve(request_id: str, request: Request):
     actor = _actor(request)
     try:
         body = await request.json()
-        if body.get("confirm") is not True or not _ID.fullmatch(request_id):
+        if (not isinstance(body, dict) or body.get("confirm") is not True or
+                not _ID.fullmatch(request_id)):
             raise AuthorizationError("explicit confirmation is required")
         state = read_state(STATE)
         expected_digest = state_digest(state) if STATE.exists() else None

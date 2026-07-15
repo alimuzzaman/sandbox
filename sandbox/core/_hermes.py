@@ -1136,6 +1136,7 @@ manifest = stage / f"{BACKUP_ID}.manifest.json"
 state = stage / f"{BACKUP_ID}.state.snar"
 fallback = SANDBOX / "runtime" / f".drive-volume-fallbacks-{BACKUP_ID}"
 fallback.mkdir(parents=True, exist_ok=True)
+atexit.register(shutil.rmtree, str(fallback), ignore_errors=True)
 
 instances = list(_read_instances())
 for instance in instances:

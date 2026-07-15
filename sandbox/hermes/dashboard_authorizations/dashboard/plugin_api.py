@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import copy
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -139,16 +140,22 @@ async def approve(request_id: str, request: Request):
                  if value.get("job_name") == item["job_name"] and value.get("status") == "approved"]
         rollback_prompt = job["prompt"] if not prior else approval_prompt(
             job, max(prior, key=lambda value: (str(value.get("approved_at") or ""), str(value.get("created_at") or ""), value["id"])))
-        subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", prompt], text=True, capture_output=True, check=True, timeout=30)
+        original_state = copy.deepcopy(state)
         supersede_approved(state, item["job_name"], item["id"], actor)
         item["status"] = "approved"
         item["approved_at"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
         audit(state, item, "approved", actor)
+        write_state(STATE, state)
         try:
-            write_state(STATE, state)
-        except Exception:
-            subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", rollback_prompt], text=True, capture_output=True, check=False, timeout=30)
-            raise
+            subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", prompt], text=True, capture_output=True, check=True, timeout=30)
+        except Exception as prompt_error:
+            try:
+                write_state(STATE, original_state)
+                subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", rollback_prompt],
+                               text=True, capture_output=True, check=False, timeout=30)
+            except Exception as rollback_error:
+                raise AuthorizationError("authorization state rollback failed") from rollback_error
+            raise prompt_error
         return {"request": view(state, item, True)}
     except (AuthorizationError, subprocess.SubprocessError, OSError, ValueError) as exc:
         raise _failure(exc) from exc

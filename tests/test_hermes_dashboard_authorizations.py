@@ -1,6 +1,7 @@
 """Focused tests for the deployable Hermes authorization dashboard bundle."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
 import json
@@ -329,6 +330,48 @@ class TestDashboardAuthorizationAuth(unittest.TestCase):
                 sys.modules["fastapi"] = old_fastapi
             if old_module is not None:
                 sys.modules[module_name] = old_module
+
+    def test_approval_persists_state_before_editing_cron_prompt(self):
+        class Router:
+            def get(self, *_args, **_kwargs): return lambda fn: fn
+            def post(self, *_args, **_kwargs): return lambda fn: fn
+        class HttpError(Exception):
+            def __init__(self, status_code, detail): self.status_code, self.detail = status_code, detail
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.APIRouter, fake_fastapi.HTTPException, fake_fastapi.Request = Router, HttpError, object
+        module_name = "dashboard_authorization_plugin_approval_test"
+        old_fastapi = sys.modules.get("fastapi")
+        sys.modules["fastapi"] = fake_fastapi
+        try:
+            plugin_path = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/plugin_api.py"
+            spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+            plugin = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(plugin)
+            job = {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe base"}
+            state = core.new_state()
+            item = core.create_request(state, {"job": job}, "job", "preview-overlay",
+                                       "https://example.test", "safe", 60, "operator")
+            plugin._actor = lambda _request: "operator"
+            plugin._state = lambda: state
+            plugin._catalog = lambda: {"job": job}
+            plugin._cron_jobs = lambda: [{"id": "deadbeef1234", "name": "job", "enabled": True}]
+            events = []
+            plugin.write_state = lambda _path, _state: events.append("state")
+            plugin.subprocess = types.SimpleNamespace(run=lambda *args, **kwargs: events.append("prompt"))
+
+            body = types.SimpleNamespace(json=lambda: None)
+            async def request_json(): return {"confirm": True}
+            body.json = request_json
+            asyncio.run(plugin.approve(item["id"], body))
+            self.assertEqual(events[:2], ["state", "prompt"])
+            self.assertEqual(state["authorizations"]["requests"][item["id"]]["status"], "approved")
+        finally:
+            sys.modules.pop(module_name, None)
+            if old_fastapi is None:
+                sys.modules.pop("fastapi", None)
+            else:
+                sys.modules["fastapi"] = old_fastapi
 
 
 if __name__ == "__main__":

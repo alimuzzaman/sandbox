@@ -33,6 +33,12 @@ class TestRecoveryRestore(unittest.TestCase):
             build_restore_plan(drive, "set-a")
         self.assertEqual(caught.exception.code, "invalid_manifest")
 
+    def test_restore_rejects_non_object_manifest(self):
+        drive = MemoryDrive()
+        drive.put("sets/set-1/manifest.json", b"[]")
+        with self.assertRaisesRegex(RecoveryError, "manifest"):
+            build_restore_plan(drive, "set-1")
+
     def test_plan_rejects_bad_hash_compatibility_space_and_dependencies(self):
         drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"a": b"b"})
         drive.objects["sets/set-1/archive.bin"] = b"changed"

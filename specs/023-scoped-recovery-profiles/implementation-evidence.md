@@ -226,3 +226,4 @@ both cases.
 
 Recovery listing now reuses manifest verification, including ciphertext SHA-256 and canonical
 set-object binding, instead of treating matching object size as sufficient evidence of completeness.
+The verifier also rejects non-object JSON manifests with the stable invalid-manifest error path.

@@ -29,6 +29,8 @@ The read-only listing includes the configured destination root so legacy objects
 new sets prefix are visible for review.
 Complete-set listing also performs the same manifest/ciphertext hash and object-binding checks as
 verification, so a same-size tampered archive is classified as unverifiable rather than complete.
+Malformed manifest JSON values are rejected as stable invalid-manifest errors rather than escaping
+through the CLI or MCP result envelope.
 
 Database capture rejects empty output and performs format-aware validation before an artifact
 can enter the encrypted publication pipeline.

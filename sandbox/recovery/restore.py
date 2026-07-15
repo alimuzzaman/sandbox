@@ -26,6 +26,8 @@ def verify_manifest(drive, set_id: str) -> dict:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
     except (ValueError, RecoveryError) as exc:
         raise RecoveryError("recovery manifest is unavailable or invalid", "invalid_manifest") from exc
+    if not isinstance(manifest, dict):
+        raise RecoveryError("recovery manifest is unavailable or invalid", "invalid_manifest")
     required = {"schema_version", "id", "status", "ciphertext_object", "ciphertext_sha256", "ciphertext_size"}
     if (manifest.get("schema_version") != 1 or manifest.get("id") != set_id or
             manifest.get("status") != "complete" or not required <= set(manifest)):

@@ -35,22 +35,11 @@
       "deliver": "local"
     },
     {
-      "name": "sandbox-approved-spec-task",
+      "name": "sandbox-spec-backlog",
       "schedule": "17 */4 * * *",
       "kind": "agent",
       "script": null,
-      "prompt": "Work only in the current Sandbox repository and follow AGENTS.md. Before doing anything, require a clean Git worktree; if it is dirty, report REVIEW_REQUIRED without changing files. Find the first unchecked implementation task in the active Spec-Kit feature referenced by .specify/feature.json. Implement at most that one bounded task in the existing isolated Hermes worktree, run its narrow required checks, and update only that task checkbox after the checks pass. Do not commit, push, deploy, remove worktrees, edit credentials, or perform external mutations. If there is no approved unchecked task, report NO_APPROVED_WORK without changing files.",
-      "profile": "terra",
-      "workdir_template": "{worktrees}/sandbox-approved-spec-task",
-      "enabled": true,
-      "deliver": "local"
-    },
-    {
-      "name": "sandbox-remaining-spec-tasks",
-      "schedule": "47 */4 * * *",
-      "kind": "agent",
-      "script": null,
-      "prompt": "Work only in the current Sandbox repository and follow AGENTS.md. Before doing anything, require a clean Git worktree; if it is dirty, report REVIEW_REQUIRED without changing files. Treat the active Spec-Kit feature referenced by .specify/feature.json as the only automatic work source. Find the first unchecked implementation or test task in its tasks.md. Implement at most that one bounded local task in this isolated Hermes worktree, run its narrow required checks, and update only that task checkbox after the checks pass. Do not commit, push, deploy, remove worktrees, edit credentials, contact external services, create or restore recovery sets, or perform any other external mutation. If the first unchecked task needs any of those actions or a material architecture/security decision, report REVIEW_REQUIRED with the concrete blocker and change nothing. If there is no local actionable unchecked task, report NO_APPROVED_WORK without changing files. Always finish with exactly one non-empty terminal result: COMPLETED_SPEC_TASK followed by the selected task summary after a verified change; NO_APPROVED_WORK; or REVIEW_REQUIRED followed by the concrete blocker. Never return an empty or SILENT response.",
+      "prompt": "Work only in the current Sandbox repository and follow AGENTS.md. This is the autonomous Sandbox implementation backlog: do not limit work to .specify/feature.json. Inspect specs/*/spec.md, plan.md, and tasks.md in numeric order. Skip a feature only when its documents explicitly say it is blocked, deferred, or awaiting a named prerequisite; otherwise select the first unchecked dependency-ready local implementation, test, fixture, documentation, or verification task. Do not let an external, production, credential, recovery create/restore, deletion, payment, or third-party communication task stop the queue: skip it and continue to the next eligible local task. Work continuously through dependency-ready local tasks until the Hermes session deadline or no eligible work remains. After each task's required checks pass, mark only that task checkbox complete, commit it, and push it only to the current hermes/sandbox-remaining-spec-tasks branch; never merge, force-push, release, or deploy. Do not stop merely because one task completed. If checks fail, either fix the selected task or revert its uncommitted changes before reporting the concrete failure, so the next scheduled run can continue. If no dependency-ready local task remains across the backlog, report NO_BACKLOG_WORK. Always finish with exactly one non-empty terminal result: COMPLETED_SPEC_TASK followed by every completed task summary and commit; NO_BACKLOG_WORK; or REVIEW_REQUIRED followed by the concrete failure. Never return an empty or SILENT response.",
       "profile": "terra",
       "workdir_template": "{worktrees}/sandbox-remaining-spec-tasks",
       "enabled": true,

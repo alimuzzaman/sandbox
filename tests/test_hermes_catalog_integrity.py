@@ -79,8 +79,7 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
         self.assertEqual(plan["retain"], [
-            "codex-quota-requeue", "authorization-expiry", "sandbox-approved-spec-task",
-            "sandbox-remaining-spec-tasks",
+            "codex-quota-requeue", "authorization-expiry", "sandbox-spec-backlog",
         ])
 
     def test_delivery_drift_requires_reconciliation(self):

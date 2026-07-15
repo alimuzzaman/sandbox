@@ -165,19 +165,20 @@ class TestValidation(unittest.TestCase):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
             "codex-quota-requeue", "authorization-expiry", "lenzora-kanban-dispatch",
-            "sandbox-approved-spec-task", "sandbox-remaining-spec-tasks", "lenzora-todo-task",
+            "sandbox-spec-backlog", "lenzora-todo-task",
         ])
         self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
-            "codex-quota-requeue", "authorization-expiry", "sandbox-approved-spec-task",
-            "sandbox-remaining-spec-tasks",
+            "codex-quota-requeue", "authorization-expiry", "sandbox-spec-backlog",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
-        worker = next(job for job in catalog["jobs"] if job.name == "sandbox-remaining-spec-tasks")
+        worker = next(job for job in catalog["jobs"] if job.name == "sandbox-spec-backlog")
         self.assertEqual(worker.profile, "terra")
         self.assertEqual(scheduled_route(worker.profile).effort, "medium")
-        self.assertEqual(worker.schedule, "47 */4 * * *")
-        self.assertIn("first unchecked implementation or test task", worker.prompt)
-        self.assertIn("NO_APPROVED_WORK", worker.prompt)
+        self.assertEqual(worker.schedule, "17 */4 * * *")
+        self.assertIn("do not limit work to .specify/feature.json", worker.prompt)
+        self.assertIn("Work continuously through dependency-ready local tasks", worker.prompt)
+        self.assertIn("Do not stop merely because one task completed", worker.prompt)
+        self.assertIn("NO_BACKLOG_WORK", worker.prompt)
         self.assertIn("Never return an empty or SILENT response", worker.prompt)
         rendered = render_entry(worker, {
             "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",

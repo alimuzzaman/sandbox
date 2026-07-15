@@ -8,6 +8,23 @@ drivable by Claude Code (or any MCP client: Cursor, Cline, Continue, Zed).
 Recovery is profile-driven through `sb recovery`. Capture, restore apply, retention deletion,
 and schedule activation are protected; see [docs/recovery.md](docs/recovery.md).
 
+## Extension boundaries
+
+Sandbox keeps public CLI and MCP behavior stable while feature ownership is modularized:
+
+- project descriptors select `kind` before runtime-specific defaults; omitted `kind` remains `wordpress`;
+- registry identity and atomic persistence live behind the project-registry repository;
+- runtime capabilities reject unsupported work before process, network, proxy, or registry side effects;
+- CLI commands and MCP tool groups are owned by explicit deterministic manifests;
+- shared process, HTTP, port, path, and proxy services own mechanisms, while adapters own runtime policy;
+- Hermes state, routing, jobs, gateway, and backup planning are bounded modules.
+
+`sandbox_core.py`, `sandbox.registry.COMMANDS`, `sandbox.hermes.facade`, and the MCP
+`app.py` helper namespace are compatibility/rollback paths, not extension points.
+New code must use the bounded service or registration contract. Their consumer sets
+are frozen by architecture tests; removal requires parity evidence and separate
+human approval.
+
 **MCP-first and per-project.** Each plugin repo carries its own
 `sandbox.config.json`. You `cd` into a plugin, and a single MCP server boots a
 WordPress instance for that directory on demand and runs the plugin's **real

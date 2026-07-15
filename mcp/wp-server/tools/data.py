@@ -10,7 +10,7 @@ import re as _re
 
 
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, _is_herd, _project_instance, _require_project_capability, _wpcli, mcp
 
 
 

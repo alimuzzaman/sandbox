@@ -1,6 +1,6 @@
 from __future__ import annotations
 import shutil
-from app import *  # noqa: F401,F403  (SANDBOX_ROOT, mcp)
+from app import SANDBOX_ROOT, mcp
 
 # Mirrors sandbox/core/_docker.py (dl_cache_info / dl_cache_clear) — kept
 # self-contained so the MCP venv needn't import the sb CLI package. The cache is

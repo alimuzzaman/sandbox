@@ -161,6 +161,11 @@ You **MUST** consider the user input before proceeding (if not empty).
    - **Core development**: Implement models, services, CLI commands, endpoints
    - **Integration work**: Database connections, middleware, logging, external services
    - **Polish and validation**: Unit tests, performance optimization, documentation
+   - **Sandbox control-plane boundaries**: schemas, adapters, commands, and MCP
+     groups use explicit registries/manifests; repositories own persisted state;
+     capability checks precede side effects; shared services own mechanisms, not
+     runtime policy. Compatibility facades are frozen rollback controls—do not add
+     consumers or remove one without parity evidence and explicit human approval.
 
 8. Progress tracking and error handling:
    - Report progress after each completed task

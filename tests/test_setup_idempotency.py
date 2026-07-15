@@ -1,6 +1,6 @@
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sandbox.commands import lifecycle
 from sandbox.core import _instances
@@ -43,6 +43,27 @@ class TestSetupIdempotency(unittest.TestCase):
         compose.assert_called_once_with(
             "up", "-d", "--remove-orphans", "wp", "nginx", instance="demo"
         )
+
+    def test_up_routes_proxy_work_through_runtime_dependencies(self):
+        cfg = {"instances": {"demo": {"server": "nginx"}}}
+        args = types.SimpleNamespace(resolved_instance="demo")
+        inst = {"server": "nginx", "domain": "demo.tst", "tld": "tst",
+                "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125}
+        proxy = Mock()
+        proxy.plan.return_value = {"hostname": "demo.tst", "port": 8188}
+        dependencies = types.SimpleNamespace(proxy=proxy)
+        with patch.object(lifecycle, "resolve_instances", return_value={"demo": inst}), \
+             patch.object(lifecycle, "proxy_available", return_value=True), \
+             patch.object(lifecycle, "wordpress_runtime_dependencies", return_value=dependencies), \
+             patch.object(lifecycle, "_ensure_proxy_up") as legacy_ensure, \
+             patch.object(lifecycle, "compose"), \
+             patch.object(lifecycle, "_web_services", return_value=("wp", "nginx")), \
+             patch.object(lifecycle, "site_url", return_value="http://demo.tst"), \
+             patch.object(lifecycle, "wp_dir", return_value=types.SimpleNamespace(exists=lambda: False)):
+            lifecycle.cmd_up(cfg, args)
+        proxy.plan.assert_called_once_with("demo.tst", 8188)
+        proxy.apply.assert_called_once_with({"hostname": "demo.tst", "port": 8188})
+        legacy_ensure.assert_not_called()
 
     def test_port_conflicts_reassign_all_instance_ports(self):
         cfg = {"instances": {"demo": {}}}

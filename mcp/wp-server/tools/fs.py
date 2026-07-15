@@ -10,7 +10,7 @@ import re as _re
 
 
 
-from app import *  # noqa: F401,F403
+from app import _log_path, _project_instance, _safe_resolve, _wp_root, mcp
 
 
 

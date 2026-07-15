@@ -40,7 +40,12 @@ class TestCommandComposition(unittest.TestCase):
         self.assertEqual((args.cmd, args.value), ("fixture-command", "ok"))
 
     def test_builtin_manifest_is_explicit_and_complete(self):
-        from sandbox.commands.manifest import BUILTIN_COMMAND_MODULES, load_builtin_commands
+        from sandbox.commands.manifest import (
+            BUILTIN_COMMAND_MODULES,
+            LEGACY_BRIDGE_COMMANDS,
+            load_builtin_commands,
+            validate_builtin_command_coverage,
+        )
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
@@ -48,6 +53,8 @@ class TestCommandComposition(unittest.TestCase):
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
         self.assertEqual(len(COMMANDS), 68)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
+        self.assertEqual(set(COMMANDS), set(LEGACY_BRIDGE_COMMANDS))
+        self.assertEqual(validate_builtin_command_coverage(), ())
 
     def test_recovery_stays_feature_owned(self):
         from pathlib import Path

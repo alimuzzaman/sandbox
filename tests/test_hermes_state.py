@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.hermes.state import HermesState, HermesStateError, HermesStateRepository
 
@@ -16,6 +17,63 @@ class TestHermesState(unittest.TestCase):
             path.write_text("{")
             with self.assertRaises(HermesStateError):
                 repo.read()
+
+            path.write_text("[]")
+            with self.assertRaises(HermesStateError):
+                repo.read()
+
+            for invalid in (
+                '{"schema_version": 1, "installation": []}',
+                '{"schema_version": 1, "sessions": "running"}',
+            ):
+                path.write_text(invalid)
+                with self.assertRaises(HermesStateError):
+                    repo.read()
+
+    def test_schema_defaults_are_written_under_a_private_lock(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "runtime" / "hermes.json"
+            repo = HermesStateRepository(path)
+
+            repo.write(HermesState())
+
+            self.assertEqual(repo.read().as_dict(), {
+                "schema_version": 1, "installation": {}, "sessions": {},
+            })
+            self.assertEqual(repo.lock_path, path.with_name("hermes.json.lock"))
+            self.assertEqual(repo.lock_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_interrupted_atomic_replace_keeps_the_previous_document(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hermes.json"
+            repo = HermesStateRepository(path)
+            repo.write(HermesState(installation={"commit": "before"}))
+            before = path.read_bytes()
+
+            with patch("sandbox.hermes.state.os.replace", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    repo.write(HermesState(installation={"commit": "after"}))
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(path.parent.glob("hermes.json.*")), [repo.lock_path])
+
+    def test_legacy_collections_survive_compatible_read_and_rewrite(self):
+        """US7 seam: state extraction must not discard legacy control-plane data."""
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hermes.json"
+            path.write_text(
+                '{"schema_version": 1, "repositories": {"sandbox": {"ref": "main"}}, '
+                '"sessions": {"job": {"status": "running"}}, "gates": {"v2": true}}\n'
+            )
+            repo = HermesStateRepository(path)
+
+            state = repo.read()
+            repo.write(state)
+
+            persisted = path.read_text()
+            self.assertIn('"repositories"', persisted)
+            self.assertIn('"gates"', persisted)
 
 
 if __name__ == "__main__": unittest.main()

@@ -1,8 +1,8 @@
 # CLI Baseline Inventory
 
-**Audit point**: `e52eb8d`
-**Count**: 67 registered root commands
-**Current composition**: `sandbox/cli.py` owns parser definitions and routing sets; 25 feature modules register handlers through `sandbox/registry.py`.
+**Audit point**: `e52eb8d`; composition replay 2026-07-14
+**Count**: 68 registered root commands
+**Current composition**: `sandbox/commands/manifest.py` imports the 26 feature modules in a deterministic order. `LEGACY_BRIDGE_COMMANDS` explicitly maps all 68 handlers to their feature owner while `sandbox/cli.py` retains the bounded parser-definition bridge.
 
 | Owner | Commands | Current scope/capability class |
 |---|---|---|
@@ -26,6 +26,7 @@
 | `plugin_check.py` | `plugin-check` | WordPress plugin |
 | `preview.py` | `preview` | WordPress remote preview |
 | `remote.py` | `remote` | Remote infrastructure |
+| `recovery.py` | `recovery` | Scoped recovery |
 | `secrets.py` | `secrets` | Infrastructure/secrets |
 | `skill.py` | `skill` | Agent infrastructure |
 | `ui_dash.py` | `dashboard`, `ui`, `web` | Infrastructure with WP assumptions |

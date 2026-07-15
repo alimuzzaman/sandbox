@@ -24,6 +24,11 @@ async def go():
     tools = await mcp.list_tools()
     return len(tools), len(await mcp.list_prompts()), {tool.name for tool in tools}
 t, p, names = asyncio.run(go())
+tools = asyncio.run(mcp.list_tools())
+print("SCHEMA", json.dumps([
+    [tool.name, sorted(tool.inputSchema.get("required", [])), tool.outputSchema]
+    for tool in tools
+], sort_keys=True))
 print("TOOLS", t)
 print("PROMPTS", p)
 print("HERMES", int({
@@ -69,7 +74,8 @@ print("HERMES_CALLS", json.dumps(calls))
 hermes._run_sb = original_run_sb
 def timed_out(*_args, **_kwargs):
     raise subprocess.TimeoutExpired("sb", 30)
-hermes.subprocess.run = timed_out
+server.subprocess.run = timed_out
+hermes.HERMES_SERVICE = server._HermesCommandAdapter()
 print("HERMES_TIMEOUT", hermes._run_sb(["hermes", "status"], 30)["error"])
 import tools.instances as instances
 instance_calls = []
@@ -98,6 +104,57 @@ print("CAPABILITY_REJECTION", json.dumps([
 
 @unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
 class TestMcpServerSplit(unittest.TestCase):
+    def test_public_tool_schema_snapshot(self):
+        r = subprocess.run(
+            [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT)})
+        self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
+        schema_line = next(line for line in r.stdout.splitlines() if line.startswith("SCHEMA "))
+        actual = __import__("json").loads(schema_line.removeprefix("SCHEMA "))
+        expected = (
+            ("ensure_instance", "project_dir"), ("destroy_instance", "project_dir"),
+            ("recreate_instance", "project_dir"), ("setup_domains", ""),
+            ("secure_instance", "project_dir"), ("apply_config", "project_dir"),
+            ("wp_cli", "command,project_dir"), ("wp_exec", "command,project_dir"),
+            ("wp_rest", "method,path,project_dir"), ("run_tests", "project_dir"),
+            ("wp_cli_async", "command,project_dir"), ("wp_cli_job", "job_id,project_dir"),
+            ("wp_cli_job_kill", "job_id,project_dir"), ("http_fetch", "url"),
+            ("pixelmatch_diff", "build,reference"), ("visit", "url"),
+            ("db_query", "project_dir,sql"), ("import_content", "project_dir,seed_file"),
+            ("wp_reset", "project_dir"), ("tail_log", "project_dir"),
+            ("fs_read", "path,project_dir"), ("fs_write", "content,path,project_dir"),
+            ("fs_list", "project_dir"), ("mail_list", "project_dir"),
+            ("mail_get", "message_id,project_dir"), ("focus_get", "project_dir"),
+            ("activate_plugin", "project_dir,slug"), ("deactivate_plugin", "project_dir,slug"),
+            ("load_context", ""), ("load_workflow", "name"), ("load_skill", "name"),
+            ("cache_info", ""), ("cache_clear", ""),
+            ("wp_eval_live", "code,project_dir"), ("list_skills", "project_dir"),
+            ("skill_write", "description,project_dir,title"), ("skill_edit", "project_dir,slug"),
+            ("skill_delete", "project_dir,slug"), ("qm_capture", "project_dir"),
+            ("xdebug", "project_dir"), ("run_e2e", "project_dir"),
+            ("ci_plan", "workflow"), ("ci_run", "project_dir,workflow"),
+            ("async_job_status", "job_id"), ("async_job_kill", "job_id"),
+            ("run_plugin_check", "project_dir"), ("remote_deploy", "project_dir,remote"),
+            ("hermes_status", "remote"), ("hermes_run", "prompt,remote,repo"),
+            ("hermes_job_status", "job_id,remote"), ("hermes_job_kill", "job_id,remote"),
+            ("hermes_cron_list", "remote"), ("hermes_cron_validate", "remote"),
+            ("hermes_cron_create", "prompt,remote,schedule"), ("hermes_cron_route", "job_id,remote"),
+            ("hermes_cron_run", "job_id,remote"), ("hermes_cron_output", "job_id,remote"),
+            ("hermes_health", "remote"), ("hermes_worktree_list", "remote"),
+            ("hermes_worktree_inspect", "name,remote"), ("hermes_worktree_preserve", "name,remote"),
+            ("hermes_repo_sync", "remote,repo"), ("hermes_gateway_converge", "remote"),
+            ("hermes_cron_catalog", "remote"), ("hermes_cron_reconcile", "remote"),
+            ("hermes_cron_verify", "job_id,remote"), ("recovery_profiles", ""),
+            ("recovery_plan", ""), ("recovery_list", ""), ("recovery_verify", "backup_id"),
+            ("recovery_create", ""), ("recovery_restore_plan", "backup_id"),
+            ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
+            ("recovery_retention_plan", ""),
+        )
+        self.assertEqual(len(actual), 75)
+        self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
+        self.assertTrue(all(response is None for _name, _required, response in actual), actual)
+
     def test_tools_and_prompts_register(self):
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),

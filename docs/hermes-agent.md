@@ -190,6 +190,10 @@ output-sync control. List and review requests before approving:
 ./sb hermes authorization approve REQUEST_ID --remote scaleway-sandbox --confirm --json
 ```
 
+List and show are read-only: they may report an effective `expired` status from the timestamp,
+but they do not write state or alter a cron job. The bounded expiry companion persists the
+expiry transition and audit event.
+
 Approval is default-deny: it only accepts an existing pending, unexpired
 request and updates only the matching cron job's prompt with the reviewed
 context. The injected context repeats its exact expiry and tells the worker to

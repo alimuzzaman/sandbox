@@ -488,6 +488,8 @@ def _authorization_view(state: dict, request: dict, detail: bool) -> dict:
     keys = ("id", "job_name", "scope", "replay_origin", "rationale", "blocker", "source_fingerprint",
             "fingerprint", "status", "created_at", "expires_at", "approved_at")
     view = {key: request.get(key) for key in keys if request.get(key) is not None}
+    if request.get("status") == "pending" and _authorization_expiry(request) <= _authorization_now():
+        view["status"] = "expired"
     if detail:
         view["audit"] = [event for event in state["authorizations"]["audit"] if event["request_id"] == request["id"]]
     return view
@@ -541,7 +543,6 @@ def authorization_sync(remote_name: str) -> dict:
 def authorization_list(remote_name: str) -> dict:
     entry = _require_remote(remote_name)
     state = _remote_state_read(entry, _paths(entry))
-    _expire_authorizations(state)
     requests = state["authorizations"]["requests"]
     rows = [_authorization_view(state, request, False) for request in requests.values()]
     rows.sort(key=lambda row: (row["status"] != "pending", row["created_at"]), reverse=False)
@@ -551,13 +552,12 @@ def authorization_list(remote_name: str) -> dict:
 def authorization_show(remote_name: str, request_id: str) -> dict:
     entry = _require_remote(remote_name)
     state = _remote_state_read(entry, _paths(entry))
-    _expire_authorizations(state)
     request_id = _valid_authorization_id(request_id)
     request = state["authorizations"]["requests"].get(request_id)
     if not request:
         raise HermesError("authorization request was not found", "authorization_not_found")
-    return result(True, "authorization_show", remote_name, status=request["status"],
-                  data={"request": _authorization_view(state, request, True)})
+    view = _authorization_view(state, request, True)
+    return result(True, "authorization_show", remote_name, status=view["status"], data={"request": view})
 
 
 def authorization_request(remote_name: str, job_name: str, scope: str, replay_origin: str, reason: str,

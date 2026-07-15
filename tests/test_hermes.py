@@ -180,6 +180,24 @@ class TestValidation(unittest.TestCase):
             hermes._normalize_state({"authorizations": {"requests": {"a" * 16: []}, "audit": []}})
         self.assertEqual(caught.exception.code, "invalid_state")
 
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths", return_value={})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._authorization_now")
+    def test_authorization_review_reports_expiry_without_mutating_state(
+            self, now, require_remote, paths, read_state, write_state):
+        state = hermes._new_state()
+        request = {"id": "a" * 16, "job_name": "job", "status": "pending",
+                   "created_at": "2026-07-15T00:00:00+00:00",
+                   "expires_at": "2026-07-15T01:00:00+00:00", "fingerprint": "b" * 64}
+        state["authorizations"]["requests"][request["id"]] = request
+        read_state.return_value = state
+        now.return_value = hermes.datetime(2026, 7, 15, 2, tzinfo=hermes.timezone.utc)
+        listed = hermes.authorization_list("test")
+        self.assertEqual(listed["data"]["requests"][0]["status"], "expired")
+        write_state.assert_not_called()
+
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [

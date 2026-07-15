@@ -28,6 +28,10 @@ class AuthorizationError(ValueError):
     """A bounded, display-safe authorization error."""
 
 
+def state_digest(state: dict) -> str:
+    return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -110,7 +114,7 @@ def read_state(path: Path) -> dict:
         raise AuthorizationError("authorization state is invalid") from exc
 
 
-def write_state(path: Path, state: dict) -> None:
+def write_state(path: Path, state: dict, *, expected_digest: str | None = None) -> None:
     normalize_state(state)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".lock")
@@ -118,6 +122,15 @@ def write_state(path: Path, state: dict) -> None:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            if expected_digest is not None:
+                if not path.exists():
+                    raise AuthorizationError("authorization state changed")
+                try:
+                    current = normalize_state(json.loads(path.read_text()))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise AuthorizationError("authorization state is invalid") from exc
+                if state_digest(current) != expected_digest:
+                    raise AuthorizationError("authorization state changed")
             with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
                 json.dump(state, handle, sort_keys=True, indent=2)
                 handle.write("\n")

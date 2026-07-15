@@ -105,6 +105,19 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
         with self.assertRaises(core.AuthorizationError):
             core.valid_reason(123)
 
+    def test_state_write_rejects_a_stale_digest(self):
+        state = core.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            core.write_state(path, state)
+            expected = core.state_digest(state)
+            changed = core.new_state(); changed["authorizations"]["audit"].append({
+                "request_id": "a" * 16, "event": "test", "at": "now", "fingerprint": "b" * 64,
+            })
+            core.write_state(path, changed)
+            with self.assertRaises(core.AuthorizationError):
+                core.write_state(path, state, expected_digest=expected)
+
     def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
         companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
         with tempfile.TemporaryDirectory() as directory:
@@ -353,19 +366,25 @@ class TestDashboardAuthorizationAuth(unittest.TestCase):
             item = core.create_request(state, {"job": job}, "job", "preview-overlay",
                                        "https://example.test", "safe", 60, "operator")
             plugin._actor = lambda _request: "operator"
-            plugin._state = lambda: state
             plugin._catalog = lambda: {"job": job}
             plugin._cron_jobs = lambda: [{"id": "deadbeef1234", "name": "job", "enabled": True}]
             events = []
-            plugin.write_state = lambda _path, _state: events.append("state")
-            plugin.subprocess = types.SimpleNamespace(run=lambda *args, **kwargs: events.append("prompt"))
+            written = []
+            plugin.write_state = lambda _path, value, **_kwargs: (events.append("state"), written.append(value))[0]
+            plugin.subprocess = types.SimpleNamespace(
+                run=lambda *args, **kwargs: events.append("prompt"),
+                SubprocessError=subprocess.SubprocessError,
+            )
 
             body = types.SimpleNamespace(json=lambda: None)
             async def request_json(): return {"confirm": True}
             body.json = request_json
-            asyncio.run(plugin.approve(item["id"], body))
+            with tempfile.TemporaryDirectory() as directory:
+                plugin.STATE = Path(directory) / "state.json"
+                core.write_state(plugin.STATE, state)
+                asyncio.run(plugin.approve(item["id"], body))
             self.assertEqual(events[:2], ["state", "prompt"])
-            self.assertEqual(state["authorizations"]["requests"][item["id"]]["status"], "approved")
+            self.assertEqual(written[0]["authorizations"]["requests"][item["id"]]["status"], "approved")
         finally:
             sys.modules.pop(module_name, None)
             if old_fastapi is None:

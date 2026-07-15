@@ -16,7 +16,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from authorization_core import AuthorizationError, approval_prompt, audit, expire, read_state, supersede_approved, view, write_state
+from authorization_core import (AuthorizationError, approval_prompt, audit, expire, read_state,
+                                state_digest, supersede_approved, view, write_state)
 
 router = APIRouter()
 ROOT = Path(os.environ.get("SANDBOX_AUTHORIZATION_HOME", Path.home() / ".hermes" / "sandbox-authorizations"))
@@ -124,7 +125,9 @@ async def approve(request_id: str, request: Request):
         body = await request.json()
         if body.get("confirm") is not True or not _ID.fullmatch(request_id):
             raise AuthorizationError("explicit confirmation is required")
-        state = _state()
+        state = read_state(STATE)
+        expected_digest = state_digest(state) if STATE.exists() else None
+        expire(state)
         item = state["authorizations"]["requests"].get(request_id)
         if not item or item.get("status") != "pending":
             raise AuthorizationError("authorization request is not pending")
@@ -145,12 +148,12 @@ async def approve(request_id: str, request: Request):
         item["status"] = "approved"
         item["approved_at"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
         audit(state, item, "approved", actor)
-        write_state(STATE, state)
+        write_state(STATE, state, expected_digest=expected_digest)
         try:
             subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", prompt], text=True, capture_output=True, check=True, timeout=30)
         except Exception as prompt_error:
             try:
-                write_state(STATE, original_state)
+                write_state(STATE, original_state, expected_digest=state_digest(state))
                 subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", rollback_prompt],
                                text=True, capture_output=True, check=False, timeout=30)
             except Exception as rollback_error:

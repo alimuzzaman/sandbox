@@ -2,7 +2,10 @@
 
 **Branch**: `018-drive-full-backup` | **Date**: 2026-07-11 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+> This plan is retained for historical traceability and is superseded by
+> [`specs/023-scoped-recovery-profiles/plan.md`](../023-scoped-recovery-profiles/plan.md).
+
+**Input**: Historical feature specification from `/specs/018-drive-full-backup/spec.md`; current implementation authority is `/specs/023-scoped-recovery-profiles/`.
 
 **Note**: This template is filled in by the `/speckit-plan` command. See `.specify/templates/plan-template.md` for the execution workflow.
 
@@ -14,12 +17,6 @@ uses a Drive adapter with resumable transfer. Restore verifies/decrypts into a
 staging root and replaces only after integrity checks pass.
 
 ## Technical Context
-
-<!--
-  ACTION REQUIRED: Replace the content in this section with the technical details
-  for the project. The structure here is presented in advisory capacity to guide
-  the iteration process.
--->
 
 **Language/Version**: Python 3.11+, POSIX shell, OpenSSL AES-256-GCM fallback
 
@@ -51,7 +48,7 @@ live destructive recovery only on a disposable remote; preserve unrelated edits.
 ### Documentation (this feature)
 
 ```text
-specs/[###-feature]/
+specs/023-scoped-recovery-profiles/
 ├── plan.md              # This file (/speckit-plan command output)
 ├── research.md          # Phase 0 output (/speckit-plan command)
 ├── data-model.md        # Phase 1 output (/speckit-plan command)
@@ -61,51 +58,18 @@ specs/[###-feature]/
 ```
 
 ### Source Code (repository root)
-<!--
-  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
-  for this feature. Delete unused options and expand the chosen structure with
-  real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
--->
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
-src/
-├── models/
-├── services/
-├── cli/
-└── lib/
-
-tests/
-├── contract/
-├── integration/
-└── unit/
-
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
-backend/
-├── src/
-│   ├── models/
-│   ├── services/
-│   └── api/
-└── tests/
-
-frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
-└── tests/
-
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
-api/
-└── [same as backend above]
-
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+sandbox/core/_hermes.py       # historical Hermes Drive adapter
+sandbox/commands/hermes.py    # historical CLI dispatch
+tests/test_hermes.py          # adapter and safety fixtures
+sandbox/recovery/             # canonical scoped-recovery implementation
+specs/023-scoped-recovery-profiles/  # canonical recovery specification and evidence
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real
-directories captured above]
+**Structure Decision**: Do not extend this superseded feature independently. New recovery
+profiles, manifest verification, retention planning, and restore safety belong to the canonical
+`sandbox/recovery/` modules and the 023 Spec-Kit artifacts.
 
 ## Complexity Tracking
 
@@ -113,5 +77,4 @@ directories captured above]
 
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
-| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
-| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
+| None | The historical feature is superseded rather than separately implemented. | A second backup boundary would duplicate recovery policy and weaken consistency. |

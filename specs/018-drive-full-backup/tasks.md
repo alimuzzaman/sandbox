@@ -1,5 +1,9 @@
 # Tasks: Google Drive Full Backup
 
+> Historical task record. This feature is superseded by `specs/023-scoped-recovery-profiles`;
+> do not start new implementation from this list. Open live tasks remain unperformed rather than
+> being represented as complete.
+
 ## Phase 1: Setup
 
 - [X] T001 Add Drive CLI command/options in `sandbox/cli.py` and `sandbox/commands/hermes.py`

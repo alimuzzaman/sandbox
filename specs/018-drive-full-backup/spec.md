@@ -4,9 +4,17 @@
 
 **Created**: 2026-07-11
 
-**Status**: Ready for planning
+**Status**: Superseded by [scoped recovery profiles](../023-scoped-recovery-profiles/spec.md)
 
 **Input**: User description: "Create a Google Drive alternative to Git backup. Full encrypted backup and restore is the default."
+
+## Clarifications
+
+### Session 2026-07-16
+
+- Q: Which authorization model applies to this historical backup request? → A: The existing single-operator Sandbox control plane and inherited passphrase channel; this feature does not introduce application-user authentication.
+- Q: What retention policy applies? → A: The canonical scoped-recovery policy in `specs/023-scoped-recovery-profiles`, using verified-set keep-count and minimum-age floors; this historical feature does not define a separate fixed retention period.
+- Q: Which feature owns implementation and acceptance? → A: `specs/023-scoped-recovery-profiles`; this directory remains an archival record of the superseded broad-backup proposal.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -68,14 +76,10 @@ As the operator, I can store chats, sessions, provider authentication, credentia
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+These scenarios are retained for historical traceability. New implementation and acceptance
+work belongs to the scoped recovery feature referenced above.
 
 ### Edge Cases
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
--->
 
 - Remote interrupted during backup: upload resumes or a new immutable backup is created; incomplete archives are not marked restorable.
 - An instance cannot create a logical snapshot because its port is occupied: capture its stopped database volume into the encrypted archive without stopping the conflicting service.
@@ -86,11 +90,6 @@ As the operator, I can store chats, sessions, provider authentication, credentia
 
 ## Requirements *(mandatory)*
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
--->
-
 ### Functional Requirements
 
 - **FR-001**: `sb hermes drive backup` MUST default to a full backup scope.
@@ -98,15 +97,10 @@ As the operator, I can store chats, sessions, provider authentication, credentia
 - **FR-003**: Full scope MUST exclude recreatable container images, package caches, and transient runtime sockets while documenting their recreation requirements.
 - **FR-004**: Every archive MUST be compressed, encrypted client-side with an operator recovery passphrase, integrity-checked, and uploaded only as encrypted data.
 - **FR-005**: Passphrases and decrypted contents MUST never be stored in command arguments, persistent configuration, logs, manifests, Git, Drive metadata, or result envelopes.
-- **FR-006**: Backup MUST create immutable timestamped recovery points and retain a configurable bounded history.
+- **FR-006**: Backup MUST create immutable timestamped recovery points; retention MUST use the verified-set keep-count and minimum-age policy defined by the scoped recovery feature.
 - **FR-007**: Restore MUST require explicit confirmation, verify integrity before mutation, stage files atomically, and preserve the pre-restore state until success.
 - **FR-008**: Drive access MUST be least-privilege and limited to the application backup folder/files.
 - **FR-009**: Existing Git state sync remains a separate sanitized configuration mirror and does not substitute for Drive full recovery.
-
-*Example of marking unclear requirements:*
-
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
 
 ### Key Entities *(include if feature involves data)*
 
@@ -116,27 +110,18 @@ As the operator, I can store chats, sessions, provider authentication, credentia
 
 ## Success Criteria *(mandatory)*
 
-<!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
--->
-
 ### Measurable Outcomes
 
-- **SC-001**: A default backup produces one encrypted full recovery point with a verifiable manifest.
-- **SC-002**: A clean replacement remote restores a fixture archive with all declared state checksums present and no plaintext secrets left in Drive.
-- **SC-003**: Interrupted/invalid backup or restore leaves the source and target usable with no partial destructive mutation.
-- **SC-004**: Existing state sync and Hermes setup remain functional when Drive backup is unconfigured.
+- **SC-001**: In fixture verification, a default full capture produces exactly one immutable encrypted recovery point with a verifiable non-sensitive manifest.
+- **SC-002**: In a disposable restore drill, every declared artifact checksum is verified before replacement and no plaintext secret is present in destination metadata or operator output.
+- **SC-003**: In every interrupted or invalid capture/restore test, the source remains usable, incomplete data is not classified as restorable, and no destructive target replacement occurs.
+- **SC-004**: When Drive recovery is unconfigured, existing Hermes state-sync and setup flows continue to pass focused checks without requiring Drive credentials.
 
 ## Assumptions
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right assumptions based on reasonable defaults
-  chosen when the feature description did not specify certain details.
--->
 
 - The operator keeps the recovery passphrase in an external password manager; it is not recoverable from the server or Drive.
 - Google Drive is a private personal destination using the narrowest available application/file scope.
 - A full restore recreates containers from configuration; it does not copy live Docker layers.
 - Full backup requires temporary remote disk space approximately equal to the compressed archive.
+- The existing Sandbox remote and inherited secret channel are the only authorization boundary for this historical proposal.
+- Live capture, restore, deletion, and schedule activation remain protected actions governed by the scoped-recovery acceptance gates.

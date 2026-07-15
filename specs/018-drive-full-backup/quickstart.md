@@ -1,5 +1,10 @@
 # Google Drive Full Backup Quickstart
 
+> Superseded: use the scoped recovery workflow in
+> [`specs/023-scoped-recovery-profiles/quickstart.md`](../023-scoped-recovery-profiles/quickstart.md)
+> and [`docs/recovery.md`](../../docs/recovery.md) for current commands, safety gates, and
+> acceptance evidence. The commands below are retained only as historical evidence.
+
 Full is the default scope.
 
 Before using the commands, install `rclone` on the remote and run `rclone

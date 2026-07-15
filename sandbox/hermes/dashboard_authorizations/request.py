@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from authorization_core import AuthorizationError, ensure_request, read_state, view, write_state
+from authorization_core import AuthorizationError, ensure_request, read_state, state_digest, view, write_state
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 CONFIG = Path(os.environ.get("SANDBOX_AUTHORIZATION_CONFIG", PLUGIN_ROOT / "sandbox-authorization-config.json"))
@@ -56,10 +56,11 @@ def create_from_template(template_id: str) -> tuple[dict, bool]:
     state_path = Path(os.path.expandvars(state_value)).expanduser()
     catalog_path = Path(os.path.expandvars(catalog_value)).expanduser()
     state = read_state(state_path)
+    expected_digest = state_digest(state) if state_path.exists() else None
     item, created = ensure_request(state, _catalog(catalog_path), template["job_name"], template["scope"],
                                    template["replay_origin"], template["rationale"],
                                    template["expires_in_minutes"], f"cron:{template['job_name']}")
-    write_state(state_path, state)
+    write_state(state_path, state, expected_digest=expected_digest)
     return view(state, item, True), created
 
 

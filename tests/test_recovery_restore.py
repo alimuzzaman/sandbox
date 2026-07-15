@@ -39,6 +39,18 @@ class TestRecoveryRestore(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "manifest"):
             build_restore_plan(drive, "set-1")
 
+    def test_restore_rejects_malformed_ciphertext_metadata(self):
+        drive = MemoryDrive()
+        drive.put("sets/set-1/archive.bin", b"valid")
+        manifest = {
+            "schema_version": 1, "id": "set-1", "status": "complete",
+            "ciphertext_object": "sets/set-1/archive.bin",
+            "ciphertext_sha256": ["not-a-digest"], "ciphertext_size": "5",
+        }
+        drive.put("sets/set-1/manifest.json", json.dumps(manifest).encode())
+        with self.assertRaisesRegex(RecoveryError, "fields"):
+            build_restore_plan(drive, "set-1")
+
     def test_plan_rejects_bad_hash_compatibility_space_and_dependencies(self):
         drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"a": b"b"})
         drive.objects["sets/set-1/archive.bin"] = b"changed"

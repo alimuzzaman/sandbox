@@ -36,11 +36,18 @@ def verify_manifest(drive, set_id: str) -> dict:
     compatibility = manifest.get("restore_compatibility")
     if compatibility not in (None, _COMPATIBILITY):
         raise RecoveryError("recovery set requires an incompatible restore tool", "incompatible_restore")
+    digest = manifest["ciphertext_sha256"]
+    size = manifest["ciphertext_size"]
+    if (not isinstance(manifest["ciphertext_object"], str) or
+            not isinstance(digest, str) or len(digest) != 64 or
+            any(char not in "0123456789abcdef" for char in digest) or
+            isinstance(size, bool) or not isinstance(size, int) or size < 1):
+        raise RecoveryError("recovery manifest fields are invalid", "invalid_manifest")
     if manifest["ciphertext_object"] not in _canonical_ciphertext_keys(set_id):
         raise RecoveryError("recovery ciphertext is not bound to its manifest", "invalid_manifest")
     ciphertext = drive.get(manifest["ciphertext_object"])
-    if (len(ciphertext) != manifest["ciphertext_size"] or
-            hashlib.sha256(ciphertext).hexdigest() != manifest["ciphertext_sha256"]):
+    if not isinstance(ciphertext, bytes) or (len(ciphertext) != size or
+            hashlib.sha256(ciphertext).hexdigest() != digest):
         raise RecoveryError("recovery ciphertext does not match manifest", "ciphertext_verification_failed")
     return manifest
 

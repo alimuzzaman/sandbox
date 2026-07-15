@@ -1373,6 +1373,25 @@ def _expected_commit(tag: str, commit: str | None) -> str | None:
     return commit or (SUPPORTED_COMMIT if tag == SUPPORTED_TAG else None)
 
 
+def _installed_checkout_snapshot(entry: dict) -> dict:
+    res = _checked(
+        entry,
+        "if test -d \"$HOME/.hermes/hermes-agent/.git\"; then "
+        "printf 'HEAD=%s\\n' \"$(git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD)\"; "
+        "printf 'ORIGIN=%s\\n' \"$(git -C \"$HOME/.hermes/hermes-agent\" remote get-url origin 2>/dev/null || true)\"; fi",
+        what="could not read installed Hermes checkout",
+    )
+    values = dict(line.split("=", 1) for line in (res.stdout or "").splitlines() if "=" in line)
+    head = values.get("HEAD", "")
+    origin = values.get("ORIGIN", "")
+    if not _COMMIT_RE.fullmatch(head):
+        raise HermesError("installed Hermes revision is invalid", "invalid_installed_revision")
+    if origin != HERMES_REPOSITORY_URL:
+        raise HermesError("installed Hermes checkout does not retain the canonical upstream",
+                          "invalid_installed_origin")
+    return {"commit": head, "origin": origin}
+
+
 def release_provenance_plan(remote_name: str, version: str = SUPPORTED_TAG,
                             commit: str | None = None) -> dict:
     """Verify a signed release in a disposable remote checkout without mutation."""
@@ -1381,13 +1400,7 @@ def release_provenance_plan(remote_name: str, version: str = SUPPORTED_TAG,
     paths = _paths(entry)
     resolved = _resolve_commit(entry, version, _expected_commit(version, commit))
     tag, resolved = validate_release(version, resolved)
-    installed = _checked(
-        entry,
-        "if test -d \"$HOME/.hermes/hermes-agent/.git\"; then "
-        "git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD; fi",
-        what="could not read installed Hermes revision",
-    )
-    before = (installed.stdout or "").strip().splitlines()[-1:] or [""]
+    before = _installed_checkout_snapshot(entry)
     allowed_signer = f"{HERMES_RELEASE_SIGNER} {HERMES_RELEASE_SIGNER_KEY}"
     command = (
         "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; repo=\"$stage/repo\"; "
@@ -1406,18 +1419,13 @@ def release_provenance_plan(remote_name: str, version: str = SUPPORTED_TAG,
         if "HERMES_RELEASE_PROVENANCE_FAILED" in (verified.stderr or "") + (verified.stdout or ""):
             detail = "Hermes release signature or revision verification failed"
         raise HermesError(detail, "release_provenance_failed", True)
-    installed = _checked(
-        entry,
-        "if test -d \"$HOME/.hermes/hermes-agent/.git\"; then "
-        "git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD; fi",
-        what="could not re-read installed Hermes revision",
-    )
-    after = (installed.stdout or "").strip().splitlines()[-1:] or [""]
+    after = _installed_checkout_snapshot(entry)
     if before != after:
         raise HermesError("installed Hermes checkout changed during provenance verification",
                           "installed_checkout_changed", True)
     return result(True, "release_provenance_plan", remote_name, version=tag, commit=resolved,
-                  status="verified", data={"current_commit": after[0] or None,
+                  status="verified", data={"current_commit": after["commit"],
+                                           "origin": after["origin"],
                                            "target_commit": resolved,
                                            "signature": "verified",
                                            "installed_checkout_unchanged": True})

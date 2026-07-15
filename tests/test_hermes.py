@@ -1783,13 +1783,14 @@ class TestRemoteCommands(unittest.TestCase):
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout="b" * 40 + "\n"),
-            _completed(stdout="a" * 40 + "\n"),
+            _completed(stdout="HEAD=" + "a" * 40 + "\nORIGIN=https://github.com/NousResearch/hermes-agent.git\n"),
             _completed(stdout="PROVENANCE_VERIFIED:v2026.7.7.2:b" + "b" * 39 + "\n"),
-            _completed(stdout="a" * 40 + "\n"),
+            _completed(stdout="HEAD=" + "a" * 40 + "\nORIGIN=https://github.com/NousResearch/hermes-agent.git\n"),
         ]
         out = hermes.release_provenance_plan("test", "v2026.7.7.2", "b" * 40)
         self.assertTrue(out["ok"])
         self.assertEqual(out["status"], "verified")
+        self.assertEqual(out["data"]["origin"], "https://github.com/NousResearch/hermes-agent.git")
         self.assertTrue(out["data"]["installed_checkout_unchanged"])
         command = ssh_run.call_args_list[3].args[1]
         self.assertIn("mktemp -d", command)
@@ -1805,13 +1806,26 @@ class TestRemoteCommands(unittest.TestCase):
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
             _completed(stdout="b" * 40 + "\n"),
-            _completed(stdout="a" * 40 + "\n"),
+            _completed(stdout="HEAD=" + "a" * 40 + "\nORIGIN=https://github.com/NousResearch/hermes-agent.git\n"),
             _completed(stdout="PROVENANCE_VERIFIED:v2026.7.7.2:b" + "b" * 39 + "\n"),
-            _completed(stdout="c" * 40 + "\n"),
+            _completed(stdout="HEAD=" + "c" * 40 + "\nORIGIN=https://github.com/NousResearch/hermes-agent.git\n"),
         ]
         with self.assertRaises(hermes.HermesError) as caught:
             hermes.release_provenance_plan("test", "v2026.7.7.2", "b" * 40)
         self.assertEqual(caught.exception.code, "installed_checkout_changed")
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_release_provenance_plan_rejects_noncanonical_origin(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout="b" * 40 + "\n"),
+            _completed(stdout="HEAD=" + "a" * 40 + "\nORIGIN=https://example.invalid/other.git\n"),
+        ]
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.release_provenance_plan("test", "v2026.7.7.2", "b" * 40)
+        self.assertEqual(caught.exception.code, "invalid_installed_origin")
 
     def test_update_apply_quiesces_and_resumes_an_active_gateway(self):
         plan = {"status": "update_available", "commit": "b" * 40}

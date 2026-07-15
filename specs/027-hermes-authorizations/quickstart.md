@@ -40,13 +40,14 @@ resume only that reviewed scope until `expires_at`; the local five-minute
   `up_to_date` without confirmation or mutation. This is immutable target/checkout evidence;
 - `./sb hermes update provenance --remote scaleway-sandbox --json` — fetched the pinned tag into
   a disposable checkout, verified its SSH signature and exact commit, and confirmed the installed
-  checkout remained `9de9c25f620ff7f1ce0fd5457d596052d5159596` before and after the check.
+  checkout remained `9de9c25f620ff7f1ce0fd5457d596052d5159596` with canonical origin
+  `https://github.com/NousResearch/hermes-agent.git` before and after the check.
 
 ## Local verification refresh (2026-07-16)
 
-- `./.cli-venv/bin/python -m unittest tests.test_hermes` — 148 tests passed.
+- `./.cli-venv/bin/python -m unittest tests.test_hermes` — 149 tests passed.
 - `./.cli-venv/bin/python -m unittest discover -s tests -p 'test_recovery_*.py' -q` — 81 tests passed.
-- `./.cli-venv/bin/python -m unittest discover -s tests -q` — 719 tests passed, 1 skipped.
+- `./.cli-venv/bin/python -m unittest discover -s tests -q` — 720 tests passed, 1 skipped.
 - This refresh performed no additional live remote acceptance, approval, deployment, deletion,
   schedule activation, or production recovery operation; the live evidence above remains historical.
 - Authorization approval concurrency is fixture-proven: state CAS conflicts fail before prompt

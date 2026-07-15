@@ -120,6 +120,26 @@ class TestRegistrySourcedResolution(unittest.TestCase):
             sandbox_core.registry_find_instance("proj-x")["wordpress_port"], 8200)
         self.assertTrue(sandbox_core.registry_remove(root))
 
+    def test_registry_preserves_additive_generic_instance_metadata(self):
+        root = str(Path(self._tmp) / "generic.project")
+        sandbox_core.registry_put(
+            root,
+            instance="generic-project",
+            wordpress_port=8200,
+            kind="compose",
+            adapter="compose",
+            display_name="generic.project",
+            http_port=8080,
+        )
+
+        record = sandbox_core.registry_get(root)
+
+        self.assertEqual(record["kind"], "compose")
+        self.assertEqual(record["adapter"], "compose")
+        self.assertEqual(record["display_name"], "generic.project")
+        self.assertEqual(record["http_port"], 8080)
+        self.assertEqual(record["wordpress_port"], 8200)
+
     def test_core_selftest_registry(self):
         # The shipped registry self-test (CRUD + lock + no lost updates).
         sandbox_core._selftest_registry()
@@ -167,7 +187,9 @@ class TestTldValidation(unittest.TestCase):
 class TestSiteUrl(unittest.TestCase):
     """site_url's deterministic paths (no proxy/valet probe involved)."""
 
-    def test_no_domain_is_localhost_port(self):
+    def test_no_domain_prefers_http_port_and_keeps_wordpress_port_fallback(self):
+        self.assertEqual(core.site_url({"http_port": 8080, "wordpress_port": 8195}),
+                         "http://localhost:8080")
         self.assertEqual(core.site_url({"wordpress_port": 8195}),
                          "http://localhost:8195")
         self.assertEqual(core.site_url({"domain": None, "wordpress_port": 9001}),

@@ -9,6 +9,7 @@ class TestRecoveryScheduler(unittest.TestCase):
         policy = build_schedule_policy("daily", ("fixture",), "daily")
         units = render_systemd_units(policy)
         self.assertIn("ExecStart=/usr/bin/flock -n", units["service"])
+        self.assertIn("sb recovery create --confirm --profile fixture", units["service"])
         self.assertNotIn("ExecStart", units["timer"])
         self.assertIn("RandomizedDelaySec", units["timer"])
         self.assertEqual(units["enabled"], "false")
@@ -27,6 +28,14 @@ class TestRecoveryScheduler(unittest.TestCase):
             build_schedule_policy("daily", ("fixture",), "daily\nExecStart=unsafe")
         with self.assertRaises(ValueError):
             build_schedule_policy("daily", ("fixture",), "daily", timeout="6h\n")
+        with self.assertRaises(ValueError):
+            build_schedule_policy("daily", ("bad/profile",), "daily")
+
+    def test_scheduled_command_carries_reviewed_profiles_and_remote(self):
+        policy = build_schedule_policy("daily", ("control-plane", "lenzora-prod"),
+                                       "daily", remote="scaleway-sandbox")
+        service = render_systemd_units(policy)["service"]
+        self.assertIn("--profile control-plane --profile lenzora-prod --remote scaleway-sandbox", service)
 
     def test_lock_and_resource_gates_skip_without_running_action(self):
         lock = RecordingLock(); lock.acquire(); called = []

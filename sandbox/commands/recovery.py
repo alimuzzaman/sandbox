@@ -79,7 +79,7 @@ def cmd_recovery(_cfg, args) -> None:
         else:
             from sandbox.recovery.scheduler import build_schedule_policy, render_systemd_units
             profiles = tuple(args.profile) or tuple(profile.profile_id for profile in service.catalog.profiles)
-            policy = build_schedule_policy("recovery-daily", profiles, "daily")
+            policy = build_schedule_policy("recovery-daily", profiles, "daily", remote=args.remote)
             payload = result(True, "schedule", remote=args.remote, status="planned", data={"units": render_systemd_units(policy)})
     elif args.action == "retention":
         from sandbox.recovery.errors import RecoveryError, result

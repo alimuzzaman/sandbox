@@ -31,3 +31,7 @@ can enter the encrypted publication pipeline.
 
 Filesystem capture preserves declared in-root symlinks as links while rejecting links whose
 resolved targets escape the allowed root.
+
+Schedule plans render the reviewed profile selection and remote target into the disabled
+service command, including the explicit confirmation required when an operator later activates
+the schedule.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 
 from .errors import RecoveryError
 from .models import SchedulePolicy
@@ -21,26 +22,37 @@ def _validate_unit_value(value: str, field: str, *, time_span: bool = False) -> 
 
 
 def build_schedule_policy(policy_id: str, profiles: tuple[str, ...], calendar: str, *,
-                          randomized_delay: str = "15m", timeout: str = "6h") -> SchedulePolicy:
+                          randomized_delay: str = "15m", timeout: str = "6h",
+                          remote: str | None = None) -> SchedulePolicy:
     if not policy_id or not profiles or not calendar or not randomized_delay or not timeout:
         raise ValueError("schedule policy requires id, profiles, calendar, delay, and timeout")
     if not _POLICY_ID.fullmatch(policy_id):
         raise ValueError("schedule policy id must be a lowercase slug")
+    if any(not _POLICY_ID.fullmatch(profile) for profile in profiles):
+        raise ValueError("schedule profile ids must be lowercase slugs")
+    if remote is not None and not _POLICY_ID.fullmatch(remote):
+        raise ValueError("schedule remote must be a lowercase slug")
     _validate_unit_value(calendar, "calendar")
     _validate_unit_value(randomized_delay, "randomized delay", time_span=True)
     _validate_unit_value(timeout, "timeout", time_span=True)
     return SchedulePolicy(policy_id, profiles, calendar, enabled=False,
-                          randomized_delay=randomized_delay, timeout=timeout)
+                          randomized_delay=randomized_delay, timeout=timeout, remote=remote)
 
 
 def render_systemd_units(policy: SchedulePolicy, command: str = "sb recovery create") -> dict[str, str]:
     if any(char in command for char in "\r\n\0") or command != "sb recovery create":
         raise RecoveryError("recovery schedule command is invalid", "invalid_schedule_command")
+    arguments = ["sb", "recovery", "create", "--confirm"]
+    for profile in policy.profiles:
+        arguments.extend(("--profile", profile))
+    if policy.remote is not None:
+        arguments.extend(("--remote", policy.remote))
+    scheduled_command = shlex.join(arguments)
     name = f"sandbox-recovery-{policy.policy_id}"
     service = "\n".join(("[Unit]", "Description=Sandbox scoped recovery capture", "",
                            "[Service]", "Type=oneshot", "UMask=0077",
                            f"TimeoutStartSec={policy.timeout}",
-                           f"ExecStart=/usr/bin/flock -n %t/{name}.lock {command}", ""))
+                           f"ExecStart=/usr/bin/flock -n %t/{name}.lock {scheduled_command}", ""))
     timer = "\n".join(("[Unit]", "Description=Schedule scoped recovery capture", "",
                          "[Timer]", f"OnCalendar={policy.calendar}",
                          f"RandomizedDelaySec={policy.randomized_delay}",

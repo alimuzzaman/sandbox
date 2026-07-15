@@ -113,6 +113,7 @@ class SchedulePolicy:
     enabled: bool = False
     randomized_delay: str = "15m"
     timeout: str = "6h"
+    remote: str | None = None
 
 
 @dataclass(frozen=True)

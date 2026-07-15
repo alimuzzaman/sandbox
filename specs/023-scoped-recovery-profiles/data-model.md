@@ -44,7 +44,7 @@ transition to `rolling_back -> rolled_back` or `manual_intervention` with retain
 
 ## SchedulePolicy
 
-Fields: ID, selected profiles, calendar expression, randomized delay, lock path, timeout,
+Fields: ID, selected profiles, remote target, calendar expression, randomized delay, lock path, timeout,
 resource floors, retry policy, retention policy ID, enabled state, and last-run summary.
 
 Rules: schedule creation defaults disabled; activation requires confirmation; one lock owner;

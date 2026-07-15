@@ -68,7 +68,7 @@ def recovery_schedule_plan(remote: str | None = None, profiles: list[str] | None
     from sandbox.recovery.scheduler import build_schedule_policy, render_systemd_units
     chosen = tuple(profiles or ()) or tuple(profile.profile_id for profile in _service().catalog.profiles)
     return result(True, "schedule", remote=remote, status="planned", data={
-        "units": render_systemd_units(build_schedule_policy("recovery-daily", chosen, "daily"))})
+        "units": render_systemd_units(build_schedule_policy("recovery-daily", chosen, "daily", remote=remote))})
 
 
 @mcp.tool()

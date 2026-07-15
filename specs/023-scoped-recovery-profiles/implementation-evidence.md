@@ -184,3 +184,7 @@ output after the native command succeeds, rejecting non-empty but invalid dump a
 
 Filesystem capture now archives an in-root symlink as a symlink rather than following it into
 target contents, while still resolving the target for allowed-root confinement.
+
+Schedule rendering now carries selected profile IDs and the reviewed remote into the fixed
+recovery command, with explicit confirmation in the disabled unit; activation remains a
+separate protected operation.

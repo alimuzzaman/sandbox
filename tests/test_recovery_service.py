@@ -2,6 +2,7 @@ import unittest
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.recovery.catalog import RecoveryCatalog
 from sandbox.recovery.capture import CaptureCoordinator
@@ -73,3 +74,30 @@ class TestRecoveryService(unittest.TestCase):
         payload = RecoveryService(RecoveryCatalog(1, ()), drive=drive).restore_plan("set-1", ("fixture",))
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["data"]["requires_confirmation"])
+
+    def test_context_composes_capture_only_with_destination_and_secret_channel(self):
+        from sandbox.recovery import context
+        with patch.dict("os.environ", {
+            "RECOVERY_RCLONE_DESTINATION": "gdrive:recovery",
+            "RECOVERY_PASSPHRASE": "fixture-secret",
+            "RECOVERY_STAGING_ROOT": "/tmp/recovery-stage",
+            "RECOVERY_PENDING_ROOT": "/tmp/recovery-pending",
+        }, clear=True), patch.object(context, "RcloneDrive") as drive_cls, \
+                patch.object(context, "GpgCrypto") as crypto_cls, \
+                patch.object(context, "StagingCaptureCoordinator") as capture_cls:
+            service = context.recovery_service(Path(__file__).parents[1])
+        self.assertIsNotNone(service.drive)
+        self.assertIsNotNone(service.capture)
+        drive_cls.assert_called_once()
+        crypto_cls.assert_called_once_with("fixture-secret")
+        capture_cls.assert_called_once()
+
+    def test_context_leaves_capture_unconfigured_without_secret_channel(self):
+        from sandbox.recovery import context
+        with patch.dict("os.environ", {
+            "RECOVERY_RCLONE_DESTINATION": "gdrive:recovery",
+        }, clear=True):
+            with patch.object(context, "StagingCaptureCoordinator") as capture_cls:
+                service = context.recovery_service(Path(__file__).parents[1])
+        self.assertIsNone(service.capture)
+        capture_cls.assert_not_called()

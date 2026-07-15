@@ -195,3 +195,7 @@ separate protected operation.
 An injectable filesystem restore adapter now provides checkpoint, decrypt, safe archive
 extraction, atomic swap, member verification, and rollback behavior. Its target must be
 explicitly supplied by the caller; no production restore target was discovered or mutated.
+
+Recovery context now composes the GnuPG/rclone capture coordinator only when both the approved
+destination and inherited passphrase channel are present. It passes configured staging/pending
+roots and leaves capture unavailable when the secret channel is absent.

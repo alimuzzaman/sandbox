@@ -42,3 +42,7 @@ The filesystem restore adapter is target-explicit and injectable: it decrypts in
 staging, validates archive members, checkpoints the target, swaps atomically, verifies expected
 members, and restores the checkpoint on failure. It is not automatically wired to production
 targets.
+
+When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the service composes
+the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;
+missing secret configuration leaves capture unavailable rather than guessing sources.

@@ -35,6 +35,10 @@ resume only that reviewed scope until `expires_at`; the local five-minute
 - `./sb hermes cron verify 040044cc36a6 --remote scaleway-sandbox --timeout 120 --confirm --json` — the `authorization-expiry` cron completed successfully after refreshing the approved dev-only request with its expiry guard.
 - `./sb hermes dashboard doctor --remote scaleway-sandbox --json` — dashboard v1.0.6 is healthy, loopback-only, and uses Hermes's upstream session authentication; the revoker superseded the prior approval so exactly one Lenzora approval remains active.
 - `git fetch --dry-run --tags --prune origin` in the installed Hermes checkout — completed after restoring the canonical upstream remote; no checkout update was applied.
+- `./sb hermes update plan --remote scaleway-sandbox --json` — resolved the pinned target
+  `9de9c25f620ff7f1ce0fd5457d596052d5159596`, matched the installed checkout, and returned
+  `up_to_date` without confirmation or mutation. This is immutable target/checkout evidence;
+  a separate signed-history fetch proof remains open under T022.
 
 ## Local verification refresh (2026-07-16)
 

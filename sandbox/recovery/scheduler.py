@@ -14,7 +14,7 @@ _TIME_SPAN = re.compile(
 
 
 def _validate_unit_value(value: str, field: str, *, time_span: bool = False) -> str:
-    if not value or any(char in value for char in "\r\n\0"):
+    if not isinstance(value, str) or not value or any(char in value for char in "\r\n\0"):
         raise ValueError(f"schedule {field} contains unsafe unit text")
     if time_span and not _TIME_SPAN.fullmatch(value):
         raise ValueError(f"schedule {field} is not a valid systemd time span")
@@ -24,13 +24,16 @@ def _validate_unit_value(value: str, field: str, *, time_span: bool = False) -> 
 def build_schedule_policy(policy_id: str, profiles: tuple[str, ...], calendar: str, *,
                           randomized_delay: str = "15m", timeout: str = "6h",
                           remote: str | None = None) -> SchedulePolicy:
-    if not policy_id or not profiles or not calendar or not randomized_delay or not timeout:
+    if (not isinstance(policy_id, str) or not isinstance(profiles, tuple) or
+            not isinstance(calendar, str) or not isinstance(randomized_delay, str) or
+            not isinstance(timeout, str) or not policy_id or not profiles or not calendar or
+            not randomized_delay or not timeout):
         raise ValueError("schedule policy requires id, profiles, calendar, delay, and timeout")
     if not _POLICY_ID.fullmatch(policy_id):
         raise ValueError("schedule policy id must be a lowercase slug")
-    if any(not _POLICY_ID.fullmatch(profile) for profile in profiles):
+    if any(not isinstance(profile, str) or not _POLICY_ID.fullmatch(profile) for profile in profiles):
         raise ValueError("schedule profile ids must be lowercase slugs")
-    if remote is not None and not _POLICY_ID.fullmatch(remote):
+    if remote is not None and (not isinstance(remote, str) or not _POLICY_ID.fullmatch(remote)):
         raise ValueError("schedule remote must be a lowercase slug")
     _validate_unit_value(calendar, "calendar")
     _validate_unit_value(randomized_delay, "randomized delay", time_span=True)

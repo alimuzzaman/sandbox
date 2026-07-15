@@ -30,6 +30,12 @@ class TestRecoveryScheduler(unittest.TestCase):
             build_schedule_policy("daily", ("fixture",), "daily", timeout="6h\n")
         with self.assertRaises(ValueError):
             build_schedule_policy("daily", ("bad/profile",), "daily")
+        with self.assertRaises(ValueError):
+            build_schedule_policy("daily", (1,), "daily")
+        with self.assertRaises(ValueError):
+            build_schedule_policy("daily", ("fixture",), "daily", remote=1)
+        with self.assertRaises(ValueError):
+            build_schedule_policy("daily", ("fixture",), "daily", timeout=6)
 
     def test_scheduled_command_carries_reviewed_profiles_and_remote(self):
         policy = build_schedule_policy("daily", ("control-plane", "lenzora-prod"),

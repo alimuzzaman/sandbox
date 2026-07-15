@@ -419,10 +419,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive", "authorization"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "dashboard-ui", "state", "drive", "authorization"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore; authorization: sync|list|show|request|approve")
+        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; dashboard-ui: install|status|upgrade|uninstall|catalog; state: setup|sync|restore; drive: setup|backup|list|restore; authorization: sync|list|show|request|approve")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")
@@ -446,6 +446,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--no-worktree", action="store_true", help="run against the primary checkout")
     hermes_p.add_argument("--scope", default=None, help="bounded authorization scope slug")
     hermes_p.add_argument("--replay-origin", default=None, help="exact HTTPS origin approved for replay")
+    hermes_p.add_argument("--authorization-catalog", default=None,
+        help="path to a standalone dashboard authorization catalog")
     hermes_p.add_argument("--reason", default=None, help="non-secret authorization rationale")
     hermes_p.add_argument("--expires-in-minutes", type=int, default=1440, help="authorization request expiry (1-1440)")
     hermes_p.add_argument("--async", dest="run_async", action="store_true", help="return a detached job id")

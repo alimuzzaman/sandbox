@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -35,7 +36,7 @@ def _completed(returncode=0, stdout="", stderr=""):
 
 
 def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
-    catalog = load_catalog()
+    catalog = _catalog_with_worker_enabled()
     jobs = []
     for index, entry in enumerate(entry for entry in catalog["jobs"] if entry.enabled):
         rendered = render_entry(entry, paths)
@@ -56,6 +57,12 @@ def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
     return {"jobs": jobs}
 
 
+def _catalog_with_worker_enabled() -> dict:
+    catalog = load_catalog()
+    return {"jobs": [replace(entry, enabled=True) if entry.name == "lenzora-todo-task" else entry
+                      for entry in catalog["jobs"]], "schema_version": catalog["schema_version"]}
+
+
 class TestValidation(unittest.TestCase):
     @patch("sandbox.core._hermes.cron_output")
     @patch("sandbox.core._hermes._cron_snapshot")
@@ -71,8 +78,9 @@ class TestValidation(unittest.TestCase):
         read_state.return_value = state
         snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
         output.return_value = {"status": "available", "data": {"output": "REVIEW_REQUIRED — exact origin required"}}
-        first = hermes.authorization_sync("test")
-        second = hermes.authorization_sync("test")
+        with patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled()):
+            first = hermes.authorization_sync("test")
+            second = hermes.authorization_sync("test")
         self.assertEqual(first["data"]["created_count"], 1)
         self.assertEqual(second["data"]["created_count"], 0)
         request = next(iter(state["authorizations"]["requests"].values()))
@@ -102,10 +110,11 @@ class TestValidation(unittest.TestCase):
                               "worktrees": "/home/u/worktrees"}
         state = hermes._new_state()
         read_state.return_value = state
-        first = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
-                                             "https://replay.example.test", "first review", 60)
-        second = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
-                                              "https://replay.example.test", "second review", 60)
+        with patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled()):
+            first = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
+                                                 "https://replay.example.test", "first review", 60)
+            second = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
+                                                  "https://replay.example.test", "second review", 60)
         self.assertEqual(first["status"], "pending")
         self.assertEqual(second["status"], "pending")
         requests = state["authorizations"]["requests"]
@@ -131,7 +140,8 @@ class TestValidation(unittest.TestCase):
         state["authorizations"]["requests"][request["id"]] = request
         read_state.return_value = state
         snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
-        out = hermes.authorization_approve("test", request["id"], True)
+        with patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled()):
+            out = hermes.authorization_approve("test", request["id"], True)
         self.assertEqual(out["status"], "approved")
         self.assertEqual(request["status"], "approved")
         self.assertEqual(set_prompt.call_count, 1)
@@ -150,9 +160,7 @@ class TestValidation(unittest.TestCase):
             "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
             "lenzora-todo-task",
         ])
-        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
-            "lenzora-todo-task",
-        ])
+        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
         self.assertEqual(worker.profile, "terra")
@@ -182,7 +190,7 @@ class TestValidation(unittest.TestCase):
     def test_reconciliation_is_exact_and_idempotent(self):
         paths = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
                  "worktrees": "/home/u/sandbox/runtime/hermes-worktrees"}
-        catalog = load_catalog()
+        catalog = _catalog_with_worker_enabled()
         observed = _exact_catalog_snapshot(paths)["jobs"]
         converged = reconciliation_plan(catalog, observed, paths=paths)
         self.assertFalse(converged["changes"])
@@ -222,6 +230,11 @@ class TestValidation(unittest.TestCase):
 
 
 class TestSchedulerReliability(unittest.TestCase):
+    def setUp(self):
+        self.catalog_patch = patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled())
+        self.catalog_patch.start()
+        self.addCleanup(self.catalog_patch.stop)
+
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._paths", return_value={"worktrees": "/home/u/worktrees"})
     @patch("sandbox.core._hermes._require_remote", return_value={})

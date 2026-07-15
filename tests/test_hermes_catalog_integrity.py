@@ -1,6 +1,8 @@
 """Regression coverage for secret-safe Hermes catalog reconciliation."""
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import unittest
 
@@ -54,9 +56,18 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         self.catalog = load_catalog()
         self.script_root = scripts_path()
 
-    def _observed_catalog(self):
+    def _observed_catalog(self, catalog=None):
+        catalog = catalog or self.catalog
         return [_observed(entry, script_root=self.script_root)
-                for entry in self.catalog["jobs"] if entry.enabled]
+                for entry in catalog["jobs"] if entry.enabled]
+
+    def _catalog_with_worker_enabled(self):
+        catalog = deepcopy(self.catalog)
+        worker = next(entry for entry in catalog["jobs"] if entry.name == "lenzora-todo-task")
+        return {"schema_version": catalog["schema_version"], "jobs": [
+            replace(entry, enabled=True) if entry.name == "lenzora-todo-task" else entry
+            for entry in catalog["jobs"]
+        ]}
 
     def assertConverged(self, observed):
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
@@ -67,36 +78,41 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         observed = self._observed_catalog()
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-        self.assertEqual(plan["retain"], ["lenzora-todo-task"])
+        self.assertEqual(plan["retain"], [])
         self.assertNotIn("prompt", str(plan).lower())
 
     def test_delivery_drift_requires_reconciliation(self):
-        observed = self._observed_catalog()
-        self.assertConverged(observed)
+        catalog = self._catalog_with_worker_enabled()
+        observed = self._observed_catalog(catalog)
+        plan = reconciliation_plan(catalog, observed, paths=PATHS)
+        self.assertFalse(plan["changes"])
         observed[0]["deliver"] = "remote"
 
-        plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
+        plan = reconciliation_plan(catalog, observed, paths=PATHS)
 
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["retain"], [])
 
     def test_active_agent_prompt_hash_drift_requires_reconciliation(self):
-        observed = self._observed_catalog()
-        self.assertConverged(observed)
+        catalog = self._catalog_with_worker_enabled()
+        observed = self._observed_catalog(catalog)
+        plan = reconciliation_plan(catalog, observed, paths=PATHS)
+        self.assertFalse(plan["changes"])
         worker = next(job for job in observed if not job["no_agent"])
         worker["prompt_sha256"] = "f" * 64
 
-        plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
+        plan = reconciliation_plan(catalog, observed, paths=PATHS)
 
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["retain"], [])
 
     def test_incomplete_safe_observation_is_explicitly_blocked(self):
-        observed = self._observed_catalog()
+        catalog = self._catalog_with_worker_enabled()
+        observed = self._observed_catalog(catalog)
         worker = next(job for job in observed if job["name"] == "lenzora-todo-task")
         del worker["prompt_sha256"]
 
-        plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
+        plan = reconciliation_plan(catalog, observed, paths=PATHS)
 
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["blocked_by"], [{

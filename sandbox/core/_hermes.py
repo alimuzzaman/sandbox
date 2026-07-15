@@ -8,6 +8,7 @@ registry or exposes a new network listener.
 from __future__ import annotations
 
 import base64
+import io
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
@@ -73,6 +75,8 @@ _LENZORA_SPECKIT_SKILLS = (
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
+DASHBOARD_AUTHORIZATION_PLUGIN = "sandbox-authorizations"
+DASHBOARD_AUTHORIZATION_VERSION = "1.0.0"
 PUBLIC_DASHBOARD_FQDN = "hermes.asb.bd"
 PUBLIC_PROXY_PORT = 9120
 PUBLIC_TUNNEL_UNIT = "hermes-cloudflared.service"
@@ -3589,3 +3593,136 @@ def dashboard_action(remote_name: str, action: str, *, port: int | str | None = 
         return result(True, "dashboard_basic_auth", remote_name, status="configured", commit=gate["commit"],
                       data={"enabled": bool(exposure.get("basic_auth", {}).get("enabled"))})
     raise HermesError("unknown dashboard action", "invalid_dashboard_action")
+
+
+def _dashboard_authorization_source() -> Path:
+    source = Path(__file__).resolve().parents[1] / "hermes" / "dashboard_authorizations"
+    if not (source / "dashboard" / "manifest.json").is_file():
+        raise HermesError("dashboard authorization plugin bundle is missing", "dashboard_ui_bundle_missing")
+    return source
+
+
+def _dashboard_authorization_catalog(path: str | None = None) -> dict:
+    """Return the deliberately small catalog the dashboard companion may authorize."""
+    from_default = not path
+    if path:
+        try:
+            raw = json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HermesError("authorization catalog is invalid", "invalid_authorization_catalog") from exc
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1 or not isinstance(raw.get("jobs"), list):
+            raise HermesError("authorization catalog must contain schema_version 1 and jobs", "invalid_authorization_catalog")
+        jobs = raw["jobs"]
+    else:
+        jobs = [{"name": item.name, "kind": item.kind, "enabled": item.enabled, "prompt": item.prompt}
+                for item in load_catalog()["jobs"]]
+    normalized, names = [], set()
+    for item in jobs:
+        if not isinstance(item, dict):
+            raise HermesError("authorization catalog job is invalid", "invalid_authorization_catalog")
+        name, prompt = item.get("name"), item.get("prompt")
+        if from_default and (item.get("kind") != "agent" or item.get("enabled") is not True):
+            continue
+        if (not isinstance(name, str) or not _REPO_NAME_RE.fullmatch(name) or name in names
+                or item.get("kind") != "agent" or item.get("enabled") is not True
+                or not isinstance(prompt, str) or not prompt.strip() or _contains_credential(prompt)):
+            raise HermesError("authorization catalog must contain unique enabled non-secret agent jobs", "invalid_authorization_catalog")
+        names.add(name)
+        normalized.append({"name": name, "kind": "agent", "enabled": True, "prompt": prompt})
+    return {"schema_version": 1, "jobs": normalized}
+
+
+def _dashboard_authorization_archive(catalog: dict, state_path: str) -> bytes:
+    source = _dashboard_authorization_source()
+    config = {"state_path": state_path, "catalog_path": "${HOME}/.hermes/sandbox-authorizations/catalog.json"}
+    with io.BytesIO() as data:
+        with tarfile.open(fileobj=data, mode="w:gz") as archive:
+            for path in source.rglob("*"):
+                if path.is_file():
+                    archive.add(path, arcname=f"{DASHBOARD_AUTHORIZATION_PLUGIN}/{path.relative_to(source)}")
+            for name, payload in (("catalog.json", catalog), ("sandbox-authorization-config.json", config)):
+                encoded = json.dumps(payload, sort_keys=True, indent=2).encode() + b"\n"
+                info = tarfile.TarInfo(f"{DASHBOARD_AUTHORIZATION_PLUGIN}/{name}")
+                info.size, info.mode = len(encoded), 0o600
+                archive.addfile(info, io.BytesIO(encoded))
+        return data.getvalue()
+
+
+def dashboard_ui_action(remote_name: str, action: str, *, catalog_path: str | None = None,
+                        confirm: bool = False, port: int | str | None = None) -> dict:
+    """Install the Sandbox-owned dashboard plugin without modifying Hermes itself."""
+    if action == "catalog":
+        catalog = _dashboard_authorization_catalog(catalog_path)
+        return result(True, "dashboard_ui_catalog", remote_name, status="valid",
+                      data={"jobs": [item["name"] for item in catalog["jobs"]]})
+    if action not in {"install", "status", "upgrade", "uninstall"}:
+        raise HermesError("dashboard-ui action must be install, status, upgrade, uninstall, or catalog", "invalid_dashboard_ui_action")
+    if action in {"install", "upgrade", "uninstall"} and not confirm:
+        raise HermesError("dashboard UI changes require --confirm", "confirmation_required")
+    entry = remote.get_remote(remote_name)
+    if not entry or not entry.get("ssh"):
+        raise HermesError(f"no SSH remote named '{remote_name}'", "unknown_remote")
+    managed = bool(entry.get("provisioned"))
+    paths = _paths(entry) if managed else {"state": "${HOME}/.hermes/sandbox-authorizations/state.json"}
+    selected_port = validate_dashboard_port(port)
+    plugin_root = f"$HOME/.hermes/plugins/{DASHBOARD_AUTHORIZATION_PLUGIN}"
+    config_root = "$HOME/.hermes/sandbox-authorizations"
+    if action == "status":
+        command = (
+            f"test -f {plugin_root}/dashboard/manifest.json && "
+            f"test -f {plugin_root}/sandbox-authorization-config.json && "
+            f"test -f {config_root}/catalog.json"
+        )
+        observed = _ssh(entry, command, timeout=30)
+        return result(observed.returncode == 0, "dashboard_ui_status", remote_name,
+                      status="installed" if observed.returncode == 0 else "not_installed",
+                      data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN, "version": DASHBOARD_AUTHORIZATION_VERSION})
+    if action == "uninstall":
+        command = (
+            "set -eu; "
+            f"test \"{DASHBOARD_AUTHORIZATION_PLUGIN}\" = sandbox-authorizations; "
+            f"rm -rf {plugin_root}; "
+            f"curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null || true"
+        )
+        _checked(entry, command, timeout=60, what="could not uninstall dashboard authorization plugin")
+        return result(True, "dashboard_ui_uninstall", remote_name, status="uninstalled",
+                      data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN})
+    if not managed and not catalog_path:
+        raise HermesError("standalone dashboard installation requires --authorization-catalog", "authorization_catalog_required")
+    catalog = _dashboard_authorization_catalog(catalog_path)
+    archive = _dashboard_authorization_archive(catalog, paths["state"])
+    command = f'''set -eu
+command -v hermes >/dev/null
+hermes dashboard --status >/dev/null
+root="$HOME/.hermes/plugins"
+config="$HOME/.hermes/sandbox-authorizations"
+target="$root/{DASHBOARD_AUTHORIZATION_PLUGIN}"
+stage="$(mktemp -d "$root/.sandbox-authorizations.XXXXXX")"
+backup="$root/.sandbox-authorizations.previous"
+cleanup() {{ rm -rf "$stage"; }}
+trap cleanup EXIT
+tar -xzf - -C "$stage"
+test -f "$stage/{DASHBOARD_AUTHORIZATION_PLUGIN}/dashboard/manifest.json"
+test -f "$stage/{DASHBOARD_AUTHORIZATION_PLUGIN}/dashboard/plugin_api.py"
+mkdir -p "$config"
+chmod 700 "$config"
+rm -rf "$backup"
+if test -e "$target"; then mv "$target" "$backup"; fi
+mv "$stage/{DASHBOARD_AUTHORIZATION_PLUGIN}" "$target"
+mv "$target/catalog.json" "$config/catalog.json"
+chmod 600 "$config/catalog.json" "$target/sandbox-authorization-config.json"
+if ! curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null; then
+  rm -rf "$target"; test ! -e "$backup" || mv "$backup" "$target"; exit 1
+fi
+if ! curl -fsS http://127.0.0.1:{selected_port}/api/plugins/{DASHBOARD_AUTHORIZATION_PLUGIN}/health >/dev/null; then
+  rm -rf "$target"; test ! -e "$backup" || mv "$backup" "$target"; exit 1
+fi
+rm -rf "$backup"'''
+    _checked(entry, "mkdir -p \"$HOME/.hermes/plugins\"", timeout=30, what="could not prepare Hermes plugin directory")
+    uploaded = _ssh_stdin(entry, command, archive, timeout=120)
+    if uploaded.returncode != 0:
+        raise HermesError(_redact(uploaded.stderr.decode(errors="replace") or "dashboard plugin install failed", entry)[:1000],
+                          "dashboard_ui_install_failed", True)
+    return result(True, f"dashboard_ui_{action}", remote_name, status="installed",
+                  data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN, "version": DASHBOARD_AUTHORIZATION_VERSION,
+                        "catalog_jobs": [item["name"] for item in catalog["jobs"]]})

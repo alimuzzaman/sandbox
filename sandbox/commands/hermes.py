@@ -289,6 +289,11 @@ def cmd_hermes(cfg, args) -> None:
                 basic_auth_user=args.basic_auth_user,
                 basic_auth_secret=args.basic_auth_secret,
             )
+        elif action == "dashboard-ui":
+            payload = hermes.dashboard_ui_action(
+                args.remote, args.subaction or "status", catalog_path=args.authorization_catalog,
+                confirm=args.confirm, port=args.port,
+            )
         elif action == "state":
             if args.subaction == "setup":
                 if not args.state_repo:

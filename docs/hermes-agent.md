@@ -493,3 +493,26 @@ secret reference, not a password argument:
   unavailable until a current V2 gate passes; when scheduled for V3 it must
   bind to loopback first, and any public OAuth/TLS route requires the reviewed
   managed-hosting workflow and a separate confirmation.
+# Hermes dashboard authorization plugin
+
+Install the Sandbox-owned authorization tab on a compatible Hermes dashboard
+without modifying Hermes itself:
+
+```sh
+./sb hermes dashboard-ui install --remote NAME --confirm
+./sb hermes dashboard-ui status --remote NAME
+./sb hermes dashboard-ui upgrade --remote NAME --confirm
+./sb hermes dashboard-ui uninstall --remote NAME --confirm
+```
+
+Sandbox-managed remotes derive their eligible jobs from the committed cron
+catalog. A standalone SSH remote must supply a separate, non-secret catalog:
+
+```sh
+./sb hermes dashboard-ui install --remote NAME \
+  --authorization-catalog /absolute/path/to/catalog.json --confirm
+```
+
+The tab only authorizes enabled catalog agent jobs. It requires the upstream
+Hermes dashboard to supply an authenticated principal for every mutation and
+records that principal in the local authorization audit trail.

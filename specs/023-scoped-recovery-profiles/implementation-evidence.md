@@ -215,3 +215,7 @@ artifact sets without invoking the adapter.
 
 The CLI now routes explicit repeated NAME=PATH artifact inputs, set ID, and profile selection
 through RecoveryService.create; malformed declarations fail before adapter invocation.
+
+The MCP recovery_create tool now routes explicit backup_id, profiles, and artifact-path inputs
+through the same service boundary; confirmation, materialization warnings, and configured-secret
+checks remain service-owned.

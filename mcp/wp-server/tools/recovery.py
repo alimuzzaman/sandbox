@@ -1,6 +1,8 @@
 """Read-only scoped recovery planning tools."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from app import SANDBOX_ROOT, mcp
 
 
@@ -34,14 +36,27 @@ def recovery_verify(backup_id: str, remote: str | None = None) -> dict:
 
 
 @mcp.tool()
-def recovery_create(remote: str | None = None, confirm: bool = False) -> dict:
-    """Request a configured recovery capture; secrets are inherited only, never arguments."""
+def recovery_create(remote: str | None = None, backup_id: str | None = None,
+                    profiles: list[str] | None = None,
+                    artifacts: dict[str, str] | None = None,
+                    confirm: bool = False) -> dict:
+    """Capture explicit materialized artifacts; secrets are inherited, never arguments."""
     from sandbox.recovery.errors import RecoveryError, result
     if not confirm:
         return result(False, "create", remote=remote,
                       error=RecoveryError("recovery create requires confirmation", "confirmation_required"))
-    return result(False, "create", remote=remote, error=RecoveryError(
-        "profile capture requires a configured remote adapter", "recovery_not_configured"))
+    if not backup_id:
+        return result(False, "create", remote=remote,
+                      error=RecoveryError("backup_id is required", "missing_backup_id"))
+    if not profiles:
+        return result(False, "create", remote=remote,
+                      error=RecoveryError("at least one profile is required", "missing_profiles"))
+    try:
+        materialized = {name: Path(source) for name, source in (artifacts or {}).items()}
+    except (TypeError, ValueError):
+        return result(False, "create", remote=remote,
+                      error=RecoveryError("artifacts must map names to paths", "invalid_artifact"))
+    return _service().create(backup_id, materialized, tuple(profiles), confirm=True, remote=remote)
 
 
 @mcp.tool()

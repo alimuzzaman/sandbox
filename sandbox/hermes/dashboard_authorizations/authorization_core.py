@@ -69,7 +69,11 @@ def normalize_state(state: object) -> dict:
         raise AuthorizationError("unsupported authorization state")
     state.setdefault("schema_version", 2)
     auth = state.setdefault("authorizations", {"requests": {}, "audit": []})
-    if not isinstance(auth, dict) or not isinstance(auth.setdefault("requests", {}), dict) or not isinstance(auth.setdefault("audit", []), list):
+    if (not isinstance(auth, dict)
+            or not isinstance(auth.setdefault("requests", {}), dict)
+            or not isinstance(auth.setdefault("audit", []), list)
+            or not all(isinstance(request, dict) for request in auth["requests"].values())
+            or not all(isinstance(event, dict) for event in auth["audit"])):
         raise AuthorizationError("invalid authorization state")
     return state
 

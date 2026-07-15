@@ -396,7 +396,12 @@ def _normalize_state(data: dict) -> dict:
         raise HermesError("invalid Hermes authorization collection", "invalid_state")
     authorizations.setdefault("requests", {})
     authorizations.setdefault("audit", [])
-    if not isinstance(authorizations["requests"], dict) or not isinstance(authorizations["audit"], list):
+    if (not isinstance(authorizations["requests"], dict)
+            or not isinstance(authorizations["audit"], list)
+            or not all(isinstance(request, dict) for request in authorizations["requests"].values())
+            or not all(isinstance(event, dict) for event in authorizations["audit"])):
+        raise HermesError("invalid Hermes authorization record", "invalid_state")
+    if any(not isinstance(request_id, str) for request_id in authorizations["requests"]):
         raise HermesError("invalid Hermes authorization collection", "invalid_state")
     return data
 

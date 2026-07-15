@@ -175,6 +175,11 @@ class TestValidation(unittest.TestCase):
             hermes.authorization_list("test")
         self.assertEqual(caught.exception.code, "invalid_state")
 
+    def test_authorization_rejects_malformed_record_shape(self):
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes._normalize_state({"authorizations": {"requests": {"a" * 16: []}, "audit": []}})
+        self.assertEqual(caught.exception.code, "invalid_state")
+
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [

@@ -106,7 +106,14 @@ def reconcile(*, refresh: bool = False) -> dict:
             raise AuthorizationError("authorization request has an invalid expiry") from exc
         job = catalog.get(item.get("job_name"))
         if not job:
-            raise AuthorizationError("approved authorization job is not cataloged")
+            # A catalog job can be deliberately disabled or removed while a
+            # time-limited approval is active. There is no remaining cron
+            # prompt to restore, but the approval must not stay active or
+            # make this safety-maintenance job fail forever.
+            item["status"] = "expired"
+            audit(state, item, "expired", "authorization-expiry")
+            expired_count += 1
+            continue
         job_id = _job_id(jobs, item["job_name"])
         approved_prompt = approval_prompt(job, item)
         if expired:

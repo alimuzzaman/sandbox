@@ -128,6 +128,33 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             self.assertEqual(denied.returncode, 2)
             self.assertEqual(len(core.read_state(state)["authorizations"]["requests"]), 1)
 
+    def test_expiry_companion_expires_an_approval_for_a_disabled_catalog_job(self):
+        companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, catalog, config = root / "state.json", root / "catalog.json", root / "config.json"
+            home = root / "hermes-home"
+            (home / "cron").mkdir(parents=True)
+            job = {"name": "disabled-job", "kind": "agent", "enabled": True, "prompt": "safe"}
+            value = core.new_state()
+            item = core.create_request(value, {"disabled-job": job}, "disabled-job", "preview-overlay",
+                                       "https://lenzora.dev", "safe", 60, "operator")
+            item["status"] = "approved"
+            core.write_state(state, value)
+            catalog.write_text(json.dumps({"jobs": []}))
+            config.write_text(json.dumps({"state_path": str(state), "catalog_path": str(catalog)}))
+            (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": []}))
+            hermes = root / "hermes"
+            hermes.write_text("#!/bin/sh\nexit 0\n")
+            hermes.chmod(0o700)
+            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                           "HERMES_BIN": str(hermes)}
+            result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
+                                    text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"expired_count": 1, "refreshed_count": 0})
+            self.assertEqual(core.read_state(state)["authorizations"]["requests"][item["id"]]["status"], "expired")
+
 
 class TestDashboardAuthorizationInstaller(unittest.TestCase):
     def test_default_catalog_contains_only_enabled_agent_jobs(self):

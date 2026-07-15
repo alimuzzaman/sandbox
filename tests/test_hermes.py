@@ -168,7 +168,7 @@ class TestValidation(unittest.TestCase):
             "sandbox-approved-spec-task", "lenzora-todo-task",
         ])
         self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
-            "codex-quota-requeue", "authorization-expiry", "lenzora-todo-task",
+            "codex-quota-requeue", "authorization-expiry", "sandbox-approved-spec-task",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
@@ -571,6 +571,24 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertTrue(out["data"]["false_success"])
         self.assertEqual(out["status"], "failed")
 
+    @patch("sandbox.core._hermes.time.sleep")
+    @patch("sandbox.core._hermes.time.time", side_effect=[0, 0, 0, 1])
+    @patch("sandbox.core._hermes._cron_request_evidence", return_value={"files_checked": 0, "failure": False, "reason": ""})
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={"launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    def test_verified_run_waits_for_queued_scheduler_tick(
+            self, snapshot, require_remote, paths, ssh, evidence, now, sleep):
+        before = {"id": "deadbeef1234", "name": "worker", "last_run_at": None,
+                  "last_status": None, "model_snapshot": "gpt-5.6-terra"}
+        after = {**before, "last_run_at": "after", "last_status": "ok"}
+        snapshot.side_effect = [{"jobs": [before]}, {"jobs": [before]}, {"jobs": [after]}]
+        out = hermes.cron_verify("test", "deadbeef1234", 60, True)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["data"]["transitioned"])
+        sleep.assert_called_once()
+
     @patch("sandbox.core._hermes._gateway_ownership", return_value={
         "healthy": False, "gateway_process_count": 2,
         "units": {"hermes-gateway.service": {"active_state": "activating", "unit_file_state": "disabled"}},
@@ -941,6 +959,33 @@ class TestPublicExposureLifecycle(unittest.TestCase):
         self.assertEqual(str(caught.exception), "remote command timed out after 30 seconds")
         self.assertNotIn("should-not-appear", str(caught.exception))
 
+    @patch("sandbox.core._hermes.remote.ssh_command_args", return_value=["ssh", "host"])
+    @patch("sandbox.core._hermes.subprocess.Popen")
+    def test_streaming_ssh_timeout_terminates_its_child(self, popen, _args):
+        class TimedOutProcess:
+            args = ["ssh", "host"]
+            stdin, stdout, stderr = io.BytesIO(), io.BytesIO(), io.BytesIO()
+            killed = False
+
+            def wait(self, timeout):
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                self.killed = True
+
+            def communicate(self):
+                return b"", b""
+
+        process = TimedOutProcess()
+        popen.return_value = process
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes._ssh_stdin_with_progress({"ssh": "ubuntu@example.test"}, "safe", b"data", timeout=1)
+        self.assertEqual(caught.exception.code, "remote_unavailable")
+        self.assertTrue(process.killed)
+
     @patch("sandbox.core._hermes.remote.resolve_sandbox_home")
     def test_sandbox_home_timeout_becomes_a_retryable_sanitized_error(self, resolve_home):
         resolve_home.side_effect = subprocess.TimeoutExpired(["ssh"], 15)
@@ -1286,14 +1331,13 @@ class TestRemoteCommands(unittest.TestCase):
     @patch("sandbox.core._hermes.remote.resolve_sandbox_home", return_value="/home/ubuntu/sandbox")
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
-    def test_cron_run_detaches_from_slow_upstream_command(self, get_remote, ssh_run, _resolve_home):
+    def test_cron_run_preserves_the_queued_trigger_result(self, get_remote, ssh_run, _resolve_home):
         get_remote.return_value = self.entry
         ssh_run.return_value = _completed(stdout="triggered\n")
         out = hermes.cron_run("test", "3359664aaf91", True)
         self.assertTrue(out["ok"])
         command = ssh_run.call_args.args[1]
-        self.assertIn("nohup setsid", command)
-        self.assertIn("sandbox-trigger-3359664aaf91.log", command)
+        self.assertEqual(command, "$HOME/.local/bin/hermes cron run --accept-hooks 3359664aaf91")
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")

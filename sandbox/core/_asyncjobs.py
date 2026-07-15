@@ -18,6 +18,14 @@ from pathlib import Path
 # polling feels identical from the caller's side.
 
 _JOB_ID_RE = re.compile(r"^[a-f0-9]{16}$")
+_DETACHED_PROCESSES: set[subprocess.Popen] = set()
+
+
+def _reap_detached_processes() -> None:
+    """Discard completed launcher handles without waiting on live jobs."""
+    for proc in tuple(_DETACHED_PROCESSES):
+        if proc.poll() is not None:
+            _DETACHED_PROCESSES.discard(proc)
 
 
 def valid_async_job_id(jid: str) -> bool:
@@ -60,9 +68,13 @@ def launch_background_job(cmd: list[str], cwd) -> str:
         f"echo $? > {shlex.quote(str(status))}\n"
     )
     script.chmod(0o755)
-    subprocess.Popen(["sh", str(script)],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    _reap_detached_processes()
+    proc = subprocess.Popen(["sh", str(script)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    # Keep the launcher handle until it exits. Dropping a live Popen object
+    # emits ResourceWarning and can leave a zombie behind in a long-lived CLI.
+    _DETACHED_PROCESSES.add(proc)
     return jid
 
 
@@ -71,6 +83,7 @@ def background_job_status(jid: str, offset: int = 0,
     """{job_id, status: running|completed|not_found, exit_code?, stdout,
     bytes_read, truncated} — same shape as commands/jobs.py's job_status so
     polling code (and agents) don't need two mental models."""
+    _reap_detached_processes()
     jdir = _jobs_root() / jid
     log, status = jdir / "output.log", jdir / "status"
     if not jdir.is_dir():

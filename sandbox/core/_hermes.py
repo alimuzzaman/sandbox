@@ -302,6 +302,7 @@ def _ssh_stdin(entry: dict, command: str, data: bytes, timeout: int = 60) -> sub
 
 def _ssh_stdin_with_progress(entry: dict, command: str, data: bytes, timeout: int = 60) -> subprocess.CompletedProcess:
     """Relay sanitized remote stderr progress while preserving stdout for JSON results."""
+    proc: subprocess.Popen | None = None
     try:
         proc = subprocess.Popen(remote.ssh_command_args(entry, command), stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
@@ -318,8 +319,14 @@ def _ssh_stdin_with_progress(entry: dict, command: str, data: bytes, timeout: in
         returncode = proc.wait(timeout=timeout)
         return subprocess.CompletedProcess(proc.args, returncode, stdout, "".join(progress).encode())
     except subprocess.TimeoutExpired as exc:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.communicate()
         raise HermesError(f"remote streaming command timed out after {timeout} seconds", "remote_unavailable", True) from exc
     except (OSError, ValueError) as exc:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.communicate()
         raise HermesError(_redact(str(exc), entry)[:500], "remote_unavailable", True) from exc
 
 
@@ -1783,17 +1790,10 @@ def cron_run(remote_name: str, job_id: str, confirm: bool) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     valid_id = _valid_cron_job_id(job_id)
-    output = f"$HOME/.hermes/cron/sandbox-trigger-{valid_id}.log"
-    child = (
-        f"{paths['launcher']} cron run {shlex.quote(valid_id)} "
-        f"> {output} 2>&1"
-    )
-    command = (
-        "mkdir -p $HOME/.hermes/cron; "
-        f"nohup setsid sh -c {shlex.quote(child)} </dev/null >/dev/null 2>&1 & "
-        "printf 'triggered\\n'"
-    )
-    res = _ssh(entry, command, timeout=20)
+    # Hermes queues this command for its next scheduler tick, so it should
+    # return quickly. Running it through SSH directly preserves a failed
+    # trigger's exit status instead of reporting a detached-process success.
+    res = _ssh(entry, f"{paths['launcher']} cron run --accept-hooks {shlex.quote(valid_id)}", timeout=30)
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron trigger failed", entry)[:1000],
                           "cron_run_failed", True)
@@ -1850,8 +1850,19 @@ def cron_verify(remote_name: str, job_id: str, timeout: int, confirm: bool) -> d
     if route_issues:
         raise HermesError(route_issues[0]["reason"], "invalid_cron_routing")
     started = time.time()
-    res = _ssh(entry, f"{paths['launcher']} cron run --accept-hooks {shlex.quote(valid_id)}", timeout=timeout)
-    after = next((job for job in _cron_snapshot(entry)["jobs"] if job.get("id") == valid_id), None) or before
+    # Hermes queues `cron run` for its next scheduler tick; it is not a
+    # synchronous job execution. Poll the durable scheduler metadata instead
+    # of treating the trigger command's exit status as a completed run.
+    res = _ssh(entry, f"{paths['launcher']} cron run --accept-hooks {shlex.quote(valid_id)}", timeout=30)
+    after = before
+    deadline = started + timeout
+    while True:
+        candidate = next((job for job in _cron_snapshot(entry)["jobs"] if job.get("id") == valid_id), None)
+        if candidate is not None:
+            after = candidate
+        if after.get("last_run_at") != before.get("last_run_at") or time.time() >= deadline:
+            break
+        time.sleep(min(2.0, max(0.0, deadline - time.time())))
     evidence = _cron_request_evidence(entry, valid_id, started - 2)
     derived = effective_job_status(after, evidence.get("reason", "") if evidence.get("failure") else "")
     transitioned = after.get("last_run_at") != before.get("last_run_at")

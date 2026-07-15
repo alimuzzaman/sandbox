@@ -403,6 +403,11 @@ def _normalize_state(data: dict) -> dict:
         raise HermesError("invalid Hermes authorization record", "invalid_state")
     if any(not isinstance(request_id, str) for request_id in authorizations["requests"]):
         raise HermesError("invalid Hermes authorization collection", "invalid_state")
+    request_fields = {"id", "status", "created_at", "expires_at", "fingerprint"}
+    audit_fields = {"request_id", "event", "at", "fingerprint"}
+    if (any(not request_fields <= set(request) for request in authorizations["requests"].values())
+            or any(not audit_fields <= set(event) for event in authorizations["audit"])):
+        raise HermesError("invalid Hermes authorization record", "invalid_state")
     return data
 
 

@@ -75,6 +75,11 @@ def normalize_state(state: object) -> dict:
             or not all(isinstance(request, dict) for request in auth["requests"].values())
             or not all(isinstance(event, dict) for event in auth["audit"])):
         raise AuthorizationError("invalid authorization state")
+    request_fields = {"id", "status", "created_at", "expires_at", "fingerprint"}
+    audit_fields = {"request_id", "event", "at", "fingerprint"}
+    if (any(not request_fields <= set(request) for request in auth["requests"].values())
+            or any(not audit_fields <= set(event) for event in auth["audit"])):
+        raise AuthorizationError("invalid authorization state")
     return state
 
 

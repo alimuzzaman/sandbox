@@ -82,6 +82,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
     def test_state_rejects_malformed_record_shape(self):
         with self.assertRaises(core.AuthorizationError):
             core.normalize_state({"authorizations": {"requests": {"a" * 16: []}, "audit": []}})
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state({"authorizations": {"requests": {"a" * 16: {
+                "id": "a" * 16, "status": "pending", "created_at": "now",
+                "expires_at": "later"}}, "audit": []}})
 
     def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
         companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"

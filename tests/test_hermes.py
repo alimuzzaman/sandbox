@@ -179,6 +179,10 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(hermes.HermesError) as caught:
             hermes._normalize_state({"authorizations": {"requests": {"a" * 16: []}, "audit": []}})
         self.assertEqual(caught.exception.code, "invalid_state")
+        with self.assertRaises(hermes.HermesError):
+            hermes._normalize_state({"authorizations": {"requests": {"a" * 16: {
+                "id": "a" * 16, "status": "pending", "created_at": "now",
+                "expires_at": "later"}}, "audit": []}})
 
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")

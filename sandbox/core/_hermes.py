@@ -429,21 +429,21 @@ def _authorization_now() -> datetime:
 
 
 def _valid_authorization_id(value: str) -> str:
-    value = (value or "").strip().lower()
+    value = value.strip().lower() if isinstance(value, str) else ""
     if not _AUTH_REQUEST_RE.fullmatch(value):
         raise HermesError("authorization request id is invalid", "invalid_authorization_id")
     return value
 
 
 def _valid_authorization_scope(value: str) -> str:
-    value = (value or "").strip().lower()
+    value = value.strip().lower() if isinstance(value, str) else ""
     if not _AUTH_SCOPE_RE.fullmatch(value):
         raise HermesError("authorization scope must be a lowercase slug", "invalid_authorization_scope")
     return value
 
 
 def _valid_replay_origin(value: str) -> str:
-    value = (value or "").strip()
+    value = value.strip() if isinstance(value, str) else ""
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise HermesError("replay origin contains unsafe control text", "invalid_replay_origin")
     parsed = urlsplit(value)
@@ -454,7 +454,7 @@ def _valid_replay_origin(value: str) -> str:
 
 
 def _valid_authorization_reason(value: str) -> str:
-    value = (value or "").strip()
+    value = value.strip() if isinstance(value, str) else ""
     if (not 1 <= len(value) <= 500 or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or _contains_credential(value)):
         raise HermesError("authorization reason must be 1-500 non-secret characters", "invalid_authorization_reason")
@@ -585,7 +585,8 @@ def authorization_show(remote_name: str, request_id: str) -> dict:
 
 def authorization_request(remote_name: str, job_name: str, scope: str, replay_origin: str, reason: str,
                           expires_in_minutes: int = 1440) -> dict:
-    if not isinstance(expires_in_minutes, int) or not 1 <= expires_in_minutes <= 1440:
+    if (isinstance(expires_in_minutes, bool) or not isinstance(expires_in_minutes, int) or
+            not 1 <= expires_in_minutes <= 1440):
         raise HermesError("authorization expiry must be between 1 and 1440 minutes", "invalid_authorization_expiry")
     entry = _require_remote(remote_name)
     paths = _paths(entry)

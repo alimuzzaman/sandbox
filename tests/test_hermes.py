@@ -218,6 +218,17 @@ class TestValidation(unittest.TestCase):
             hermes.authorization_approve("test", "a" * 16, False)
         self.assertEqual(caught.exception.code, "confirmation_required")
 
+    def test_authorization_validators_reject_non_string_values_and_boolean_expiry(self):
+        for validator in (hermes._valid_authorization_id, hermes._valid_authorization_scope,
+                          hermes._valid_replay_origin, hermes._valid_authorization_reason):
+            with self.subTest(validator=validator.__name__), self.assertRaises(hermes.HermesError):
+                validator(123)
+        with patch.object(hermes, "_require_remote") as require_remote:
+            with self.assertRaises(hermes.HermesError) as caught:
+                hermes.authorization_request("test", "job", "scope", "https://replay.example", "reason", True)
+        self.assertEqual(caught.exception.code, "invalid_authorization_expiry")
+        require_remote.assert_not_called()
+
     @patch("sandbox.core._hermes._remote_state_read")
     @patch("sandbox.core._hermes._paths", return_value={})
     @patch("sandbox.core._hermes._require_remote", return_value={})

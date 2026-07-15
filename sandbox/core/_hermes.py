@@ -1017,8 +1017,10 @@ import os
 import pathlib
 import subprocess
 import hashlib
+import tempfile
 
-HOME = __HOME__
+HOME = pathlib.Path(os.path.expanduser("~"))
+SANDBOX = __SANDBOX__
 SB = __SB__
 DESTINATION = __DESTINATION__
 BACKUP_ID = __BACKUP_ID__
@@ -1039,7 +1041,7 @@ def _run(command, capture=False):
 
 
 def _read_instances():
-    registry = pathlib.Path(HOME) / "runtime" / "registry.json"
+    registry = SANDBOX / "runtime" / "registry.json"
     if not registry.exists():
         return []
     data = json.loads(registry.read_text())
@@ -1059,8 +1061,7 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-stage = pathlib.Path('/tmp').joinpath('hermes-drive-backup')
-stage.mkdir(parents=True, exist_ok=True)
+stage = pathlib.Path(tempfile.mkdtemp(prefix="hermes-drive-backup-", dir=str(SANDBOX / "runtime")))
 
 passfile = stage / "passphrase"
 passfile.write_bytes(__import__('sys').stdin.buffer.read())
@@ -1069,7 +1070,7 @@ archive = stage / f"{BACKUP_ID}.tar.gz"
 cipher = stage / f"{BACKUP_ID}.tar.gz.gpg"
 manifest = stage / f"{BACKUP_ID}.manifest.json"
 state = stage / f"{BACKUP_ID}.state.snar"
-fallback = pathlib.Path(HOME) / "runtime" / f".drive-volume-fallbacks-{BACKUP_ID}"
+fallback = SANDBOX / "runtime" / f".drive-volume-fallbacks-{BACKUP_ID}"
 fallback.mkdir(parents=True, exist_ok=True)
 
 instances = list(_read_instances())
@@ -1116,13 +1117,14 @@ if SCOPE == "incremental":
             previous_state.replace(state)
 
 _run(["tar", "--ignore-failed-read", "--absolute-names", "--listed-incremental", str(state),
-      "-czf", str(archive),
-      f"{HOME}/.hermes", f"{HOME}/.config/gh", f"{HOME}/.config/rclone",
       "--exclude", f"{HOME}/.hermes/hermes-agent",
       "--exclude", f"{HOME}/.hermes/hermes-agent.restore.*",
       "--exclude", f"{HOME}/.hermes/node",
-      "--exclude", f"{HOME}/runtime/dl-cache",
-      "--exclude", f"{HOME}/runtime/hermes-jobs"],
+      "--exclude", f"{SANDBOX}/runtime/dl-cache",
+      "--exclude", f"{SANDBOX}/runtime/hermes-jobs",
+      "-czf", str(archive),
+      f"{HOME}/.hermes", f"{HOME}/.config/gh", f"{HOME}/.config/rclone",
+      f"{SANDBOX}/runtime"],
      capture=True)
 _run(["rm", "-rf", str(fallback)], capture=True)
 
@@ -1153,7 +1155,7 @@ print(f"base_id={base_id}")
 print(f"archive_bytes={cipher.stat().st_size}")
 '''
 
-    script = script.replace("__HOME__", json.dumps(pathlib.Path(paths["sandbox_home"]).as_posix()))
+    script = script.replace("__SANDBOX__", json.dumps(pathlib.Path(paths["sandbox_home"]).as_posix()))
     script = script.replace("__SB__", json.dumps(paths["sb"]))
     script = script.replace("__DESTINATION__", json.dumps(destination))
     script = script.replace("__BACKUP_ID__", json.dumps(backup_id))

@@ -1179,7 +1179,7 @@ class TestProfileRendering(unittest.TestCase):
             {"sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb", "state": "/home/u/sandbox/runtime/hermes.json"},
             "gdrive:hermes-backups", "20260711T000000Z-deadbeef",
         )
-        self.assertIn('HOME = "/home/u/sandbox"', command)
+        self.assertIn('SANDBOX = "/home/u/sandbox"', command)
         self.assertIn('f"{HOME}/.hermes"', command)
         self.assertIn('f"{HOME}/.config/gh"', command)
         self.assertIn('f"{HOME}/.config/rclone"', command)

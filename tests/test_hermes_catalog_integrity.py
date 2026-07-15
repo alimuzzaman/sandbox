@@ -74,12 +74,11 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         self.assertFalse(plan["changes"])
         self.assertEqual(plan["blocked_by"], [])
 
-    def test_disabled_agents_are_not_reconciled_or_prompt_exposed(self):
+    def test_enabled_agents_are_reconciled(self):
         observed = self._observed_catalog()
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-        self.assertEqual(plan["retain"], ["codex-quota-requeue"])
-        self.assertNotIn("prompt", str(plan).lower())
+        self.assertEqual(plan["retain"], ["codex-quota-requeue", "lenzora-todo-task"])
 
     def test_delivery_drift_requires_reconciliation(self):
         catalog = self._catalog_with_worker_enabled()

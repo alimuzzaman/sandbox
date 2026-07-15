@@ -160,7 +160,9 @@ class TestValidation(unittest.TestCase):
             "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
             "lenzora-todo-task",
         ])
-        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], ["codex-quota-requeue"])
+        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
+            "codex-quota-requeue", "lenzora-todo-task",
+        ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
         self.assertEqual(worker.profile, "terra")

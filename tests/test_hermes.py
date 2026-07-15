@@ -1291,6 +1291,7 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("instance", command)
         self.assertIn('"docker", "cp"', command)
         self.assertIn("drive-volume-fallbacks", command)
+        self.assertIn('"--exclude", f"{SANDBOX}/runtime/.drive-volume-fallbacks-*"', command)
         self.assertIn('"snapshot"', command)
         self.assertIn("archive_bytes", command)
         self.assertIn("atexit.register(shutil.rmtree", command)

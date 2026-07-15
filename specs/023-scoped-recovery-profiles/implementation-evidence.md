@@ -156,3 +156,13 @@ and the full suite was rerun afterward.
 
 No new convergence tasks were required after that fix. The review did not activate any
 protected operation or change external state.
+
+## Retention and manifest-binding review
+
+Competitor research covered restic/resticprofile, borgmatic, Borg, Kopia, and Duplicati.
+The highest-value in-scope gap was retention policy semantics, not a new product boundary.
+Retention planning now accepts keep-count and minimum-age floors with a deterministic
+timezone-aware clock, protects malformed timestamps, and remains confirmation-gated.
+Restore planning also rejects ciphertext objects that are not canonically bound to their set ID.
+The focused recovery suite passes 61 tests; no capture, restore, schedule activation, or
+remote deletion was performed.

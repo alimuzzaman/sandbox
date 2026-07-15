@@ -8,3 +8,7 @@ The manifest contains no passphrase, API token, database credential, decrypted s
 line, or sensitive file content. A manifest is valid only after all artifacts validate and the
 ciphertext remote object is verified. Restore rejects unknown schema versions or non-complete
 status without changing state.
+
+The ciphertext object is canonically bound to the manifest ID: it must be
+sets/<id>/archive.bin or sets/<id>/archive.tar.gpg. Cross-set object references are invalid
+even when their supplied hash and size match.

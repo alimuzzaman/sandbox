@@ -55,5 +55,8 @@ retention only follows a complete verified run.
 Fields: destination prefix, all observed objects, classifications, protected sets, candidates,
 reason per candidate, safety-floor checks, and confirmation requirement.
 
-Rules: newest complete set, only complete set, objects outside prefix, incomplete current run,
-and unclassified objects are never automatic candidates.
+Policy inputs: keep_count (at least one), minimum_age, and an injected timezone-aware reference
+time for deterministic planning. The planner retains the newest keep_count qualifying sets and
+every qualifying set newer than the age floor. Invalid or missing timestamps are unclassified
+and therefore protected. Newest/only complete set, objects outside prefix, incomplete current
+run, unverified sets, and non-current-passphrase sets are never automatic candidates.

@@ -13,6 +13,10 @@ from .models import RestorePlan
 _COMPATIBILITY = "sandbox-recovery-v1"
 
 
+def _canonical_ciphertext_keys(set_id: str) -> tuple[str, ...]:
+    return (f"sets/{set_id}/archive.bin", f"sets/{set_id}/archive.tar.gpg")
+
+
 def verify_manifest(drive, set_id: str) -> dict:
     try:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
@@ -25,6 +29,8 @@ def verify_manifest(drive, set_id: str) -> dict:
     compatibility = manifest.get("restore_compatibility")
     if compatibility not in (None, _COMPATIBILITY):
         raise RecoveryError("recovery set requires an incompatible restore tool", "incompatible_restore")
+    if manifest["ciphertext_object"] not in _canonical_ciphertext_keys(set_id):
+        raise RecoveryError("recovery ciphertext is not bound to its manifest", "invalid_manifest")
     ciphertext = drive.get(manifest["ciphertext_object"])
     if (len(ciphertext) != manifest["ciphertext_size"] or
             hashlib.sha256(ciphertext).hexdigest() != manifest["ciphertext_sha256"]):

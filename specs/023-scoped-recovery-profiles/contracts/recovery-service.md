@@ -9,3 +9,7 @@ result envelope, and never accept arbitrary shell text or destination paths from
 
 Create publishes manifest last. Restore apply requires a prior compatible plan and checkpoints.
 Retention apply accepts only candidate IDs from a freshly recomputed plan.
+
+Retention planning accepts keep_count, minimum_age, and a timezone-aware clock reference;
+malformed timestamps fail closed by remaining protected. The planner never performs remote
+deletion.

@@ -1,4 +1,6 @@
 import unittest
+import hashlib
+import json
 from unittest.mock import patch
 
 from sandbox.recovery.capture import CaptureCoordinator
@@ -18,6 +20,18 @@ class TestRecoveryRestore(unittest.TestCase):
     def test_incomplete_manifest_is_rejected(self):
         drive = MemoryDrive(); drive.put("sets/set-1/manifest.json", b'{"schema_version": 1, "status": "incomplete"}')
         with self.assertRaises(RecoveryError): build_restore_plan(drive, "set-1")
+
+    def test_restore_rejects_cross_set_ciphertext_reference(self):
+        drive = MemoryDrive()
+        drive.put("sets/set-b/archive.bin", b"valid")
+        drive.put("sets/set-a/manifest.json", json.dumps({
+            "schema_version": 1, "id": "set-a", "status": "complete",
+            "ciphertext_object": "sets/set-b/archive.bin",
+            "ciphertext_sha256": hashlib.sha256(b"valid").hexdigest(), "ciphertext_size": 5,
+        }).encode())
+        with self.assertRaises(RecoveryError) as caught:
+            build_restore_plan(drive, "set-a")
+        self.assertEqual(caught.exception.code, "invalid_manifest")
 
     def test_plan_rejects_bad_hash_compatibility_space_and_dependencies(self):
         drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"a": b"b"})

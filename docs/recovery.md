@@ -28,3 +28,6 @@ legacy pending key remains as a compatibility alias for incomplete remote object
 
 Database capture rejects empty output and performs format-aware validation before an artifact
 can enter the encrypted publication pipeline.
+
+Filesystem capture preserves declared in-root symlinks as links while rejecting links whose
+resolved targets escape the allowed root.

@@ -37,17 +37,23 @@ def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: 
     members = []
     for raw in paths:
         raw_path = Path(raw)
-        # A symlink itself is permitted only if its resolved target remains inside root.
-        path = raw_path.resolve()
-        _member_name(root, path)
-        if not path.exists(): raise RecoveryError("archive member is absent", "missing_source")
-        members.append(path)
+        source = raw_path if raw_path.is_absolute() else root / raw_path
+        # Canonicalize parent-directory aliases (including macOS /var -> /private)
+        # without resolving the final entry, so a final symlink remains archivable.
+        source = source.parent.resolve() / source.name
+        member_name = _member_name(root, source)
+        # Preserve the declared link while validating its resolved target remains inside root.
+        _member_name(root, source.resolve())
+        if not source.exists(): raise RecoveryError("archive member is absent", "missing_source")
+        members.append((source, member_name))
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(destination, "w") as archive:
-        for path in members:
-            before = (path.stat().st_mtime_ns, path.stat().st_size)
-            archive.add(path, arcname=_member_name(root, path), recursive=True)
-            after = (path.stat().st_mtime_ns, path.stat().st_size)
+        for source, member_name in members:
+            before_stat = source.lstat()
+            before = (before_stat.st_mtime_ns, before_stat.st_size)
+            archive.add(source, arcname=member_name, recursive=True)
+            after_stat = source.lstat()
+            after = (after_stat.st_mtime_ns, after_stat.st_size)
             if before != after:
                 raise RecoveryError("filesystem source changed during archive", "source_changed")
     validate_archive(destination)

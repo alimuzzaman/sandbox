@@ -181,3 +181,6 @@ available as an incomplete-object compatibility alias.
 
 Database capture now validates PostgreSQL custom-dump signatures and MariaDB/MySQL SQL-shaped
 output after the native command succeeds, rejecting non-empty but invalid dump artifacts.
+
+Filesystem capture now archives an in-root symlink as a symlink rather than following it into
+target contents, while still resolving the target for allowed-root confinement.

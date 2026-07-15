@@ -1,6 +1,7 @@
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from sandbox.recovery.errors import RecoveryError
@@ -24,9 +25,20 @@ class TestFilesystemCapture(unittest.TestCase):
             root = Path(directory) / "root"; root.mkdir(); source = root / "file"; source.write_text("before")
             receipt = FilesystemCapture().capture(root, (source,), Path(directory) / "set.tar")
             self.assertIn("ACL/xattr", receipt["warnings"][0])
-            with unittest.mock.patch.object(tarfile.TarFile, "add", side_effect=lambda *args, **kwargs: source.write_text("after")):
+            with mock.patch.object(tarfile.TarFile, "add", side_effect=lambda *args, **kwargs: source.write_text("after")):
                 with self.assertRaisesRegex(RecoveryError, "changed"):
                     archive_paths(root, (source,), Path(directory) / "changed.tar")
+
+    def test_preserves_in_root_symlinks_without_following_the_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"; root.mkdir()
+            target = root / "target.txt"; target.write_text("value")
+            link = root / "link.txt"; link.symlink_to("target.txt")
+            archive = archive_paths(root, (link,), Path(directory) / "link.tar")
+            with tarfile.open(archive) as opened:
+                member = opened.getmember("link.txt")
+                self.assertTrue(member.issym())
+                self.assertEqual(member.linkname, "target.txt")
 
     def test_rejects_member_traversal_and_escaping_link(self):
         with tempfile.TemporaryDirectory() as directory:

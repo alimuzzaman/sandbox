@@ -165,23 +165,25 @@ class TestValidation(unittest.TestCase):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
             "codex-quota-requeue", "authorization-expiry", "lenzora-kanban-dispatch",
-            "sandbox-approved-spec-task", "lenzora-todo-task",
+            "sandbox-approved-spec-task", "sandbox-remaining-spec-tasks", "lenzora-todo-task",
         ])
         self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
             "codex-quota-requeue", "authorization-expiry", "sandbox-approved-spec-task",
+            "sandbox-remaining-spec-tasks",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
-        worker = catalog["jobs"][-1]
+        worker = next(job for job in catalog["jobs"] if job.name == "sandbox-remaining-spec-tasks")
         self.assertEqual(worker.profile, "terra")
         self.assertEqual(scheduled_route(worker.profile).effort, "medium")
-        self.assertIn("first actionable item", worker.prompt)
-        self.assertIn("NO_TODO_WORK", worker.prompt)
+        self.assertEqual(worker.schedule, "47 */4 * * *")
+        self.assertIn("first unchecked implementation or test task", worker.prompt)
+        self.assertIn("NO_APPROVED_WORK", worker.prompt)
         self.assertIn("Never return an empty or SILENT response", worker.prompt)
         rendered = render_entry(worker, {
             "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
             "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",
         })
-        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/lenzora-todo-task")
+        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/sandbox-remaining-spec-tasks")
 
     def test_remote_install_validates_catalog_scripts_without_retired_names(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()

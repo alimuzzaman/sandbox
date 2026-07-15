@@ -66,6 +66,7 @@ GATEWAY_STABILITY_TIMEOUT_MARGIN = 30
 GATEWAY_STABILITY_MAX_SAMPLES = 48
 _MANAGED_CATALOG_WORKTREES = {
     "sandbox-approved-spec-task": ("sandbox", "hermes/sandbox-approved-spec-task"),
+    "sandbox-remaining-spec-tasks": ("sandbox", "hermes/sandbox-remaining-spec-tasks"),
     "lenzora-todo-task": ("lenzora", "hermes/lenzora-todo-task"),
 }
 _LENZORA_SPECKIT_SKILLS = (

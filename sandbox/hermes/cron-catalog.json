@@ -46,6 +46,17 @@
       "deliver": "local"
     },
     {
+      "name": "sandbox-remaining-spec-tasks",
+      "schedule": "47 */4 * * *",
+      "kind": "agent",
+      "script": null,
+      "prompt": "Work only in the current Sandbox repository and follow AGENTS.md. Before doing anything, require a clean Git worktree; if it is dirty, report REVIEW_REQUIRED without changing files. Treat the active Spec-Kit feature referenced by .specify/feature.json as the only automatic work source. Find the first unchecked implementation or test task in its tasks.md. Implement at most that one bounded local task in this isolated Hermes worktree, run its narrow required checks, and update only that task checkbox after the checks pass. Do not commit, push, deploy, remove worktrees, edit credentials, contact external services, create or restore recovery sets, or perform any other external mutation. If the first unchecked task needs any of those actions or a material architecture/security decision, report REVIEW_REQUIRED with the concrete blocker and change nothing. If there is no local actionable unchecked task, report NO_APPROVED_WORK without changing files. Always finish with exactly one non-empty terminal result: COMPLETED_SPEC_TASK followed by the selected task summary after a verified change; NO_APPROVED_WORK; or REVIEW_REQUIRED followed by the concrete blocker. Never return an empty or SILENT response.",
+      "profile": "terra",
+      "workdir_template": "{worktrees}/sandbox-remaining-spec-tasks",
+      "enabled": true,
+      "deliver": "local"
+    },
+    {
       "name": "lenzora-todo-task",
       "schedule": "17 */4 * * *",
       "kind": "agent",

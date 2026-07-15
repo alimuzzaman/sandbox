@@ -22,7 +22,7 @@ services:
     command: >
       bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
       ; ( while [ ! -f /var/www/html/wp-load.php ]; do sleep 1; done
-      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown -R www-data:www-data /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
+      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown www-data:www-data /var/www/html/wp-content 2>/dev/null || true ; chmod 0777 /var/www/html/wp-content /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; chown -R www-data:www-data /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
       docker-entrypoint.sh apache2-foreground"
     environment:
       WORDPRESS_DB_HOST: db:3306
@@ -31,6 +31,7 @@ services:
       WORDPRESS_DB_NAME: wp
       WORDPRESS_DEBUG: "1"
       WORDPRESS_CONFIG_EXTRA: |
+        define('FS_METHOD', 'direct');
         define('WP_DEBUG_LOG', true);
         define('WP_DEBUG_DISPLAY', false);
         define('SCRIPT_DEBUG', true);

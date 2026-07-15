@@ -49,6 +49,8 @@ class TestRenderCompose(unittest.TestCase):
         self.assertIn("host.docker.internal:host-gateway", out)  # spec-002 reachability
         self.assertIn("mariadb", out.lower() + "")          # db service image family
         self.assertIn("wp-content/plugins", out)             # wp.org installs need a writable destination
+        self.assertIn("chown www-data:www-data /var/www/html/wp-content", out)
+        self.assertIn("chmod 0777 /var/www/html/wp-content", out)
         for svc in ("wp:", "db:", "mailpit:"):
             self.assertIn(svc, out, f"missing service {svc}")
 
@@ -58,6 +60,8 @@ class TestRenderCompose(unittest.TestCase):
         self.assertIn("-fpm", out)                          # php-fpm image flavor
         self.assertIn("host.docker.internal:host-gateway", out)
         self.assertIn("wp-content/plugins", out)             # wp.org installs need a writable destination
+        self.assertIn("chown www-data:www-data /var/www/html/wp-content", out)
+        self.assertIn("chmod 0777 /var/www/html/wp-content", out)
         self.assertIn("docker-entrypoint.sh php-fpm", out)  # FPM must repair permissions before serving
 
     def test_litespeed_compose(self):

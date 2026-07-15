@@ -217,6 +217,10 @@ _HTTPS_OFFER_MARKER = RUNTIME_DIR / ".https-offer-declined"
 
 
 _BASE_WP_CONFIG = {
+    # Keep WordPress installs non-interactive in the disposable local stack.
+    # The web container also repairs wp-content ownership during bootstrap;
+    # without both guarantees WordPress falls back to FTP/SSH credentials.
+    "FS_METHOD": "direct",
     "WP_DEBUG_LOG": True,
     "WP_DEBUG_DISPLAY": False,
     "SCRIPT_DEBUG": True,

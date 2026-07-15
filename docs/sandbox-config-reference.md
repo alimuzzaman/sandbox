@@ -228,6 +228,11 @@ The generated Apache and Nginx/FPM stacks also reconcile ownership of
 create a new plugin directory for ordinary wp.org and wp-admin installs on the
 bind-mounted development tree.
 
+The local runtime also sets WordPress `FS_METHOD` to `direct` and repairs the
+parent `wp-content` directory during bootstrap. This prevents wp-admin and
+Templately dependency installs from falling back to unavailable FTP/SSH
+credentials when the bind mount starts with host-owned directories.
+
 ### Legacy keys (deprecated sugar)
 
 The pre-010 keys still work, translated into the map at load time, preserving

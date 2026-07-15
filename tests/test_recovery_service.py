@@ -77,6 +77,12 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual([item["Path"] for item in listed["data"]["locally_pending"]],
                          [str(pending / "retry.archive.tar.gpg")])
 
+        drive.objects["sets/complete/archive.bin"] = b"payloaf"
+        tampered = RecoveryService(RecoveryCatalog(1, ()), drive=drive).list()
+        self.assertEqual(tampered["data"]["complete_manifests"], ())
+        self.assertIn({"Path": "sets/complete/archive.bin", "Size": 7},
+                      tampered["data"]["unverifiable"])
+
     def test_verify_checks_manifest_and_ciphertext(self):
         drive = MemoryDrive()
         CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"artifact.txt": b"payload"})

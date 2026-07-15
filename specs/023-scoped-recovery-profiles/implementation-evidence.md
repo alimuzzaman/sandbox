@@ -223,3 +223,6 @@ checks remain service-owned.
 Archive member validation now rejects dot segments and normalized path aliases before restore,
 closing an ambiguity in traversal and duplicate-member checks; filesystem regression tests cover
 both cases.
+
+Recovery listing now reuses manifest verification, including ciphertext SHA-256 and canonical
+set-object binding, instead of treating matching object size as sufficient evidence of completeness.

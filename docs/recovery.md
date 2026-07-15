@@ -27,6 +27,8 @@ sets, structurally legacy objects, and locally pending encrypted artifacts separ
 legacy pending key remains as a compatibility alias for incomplete remote objects.
 The read-only listing includes the configured destination root so legacy objects outside the
 new sets prefix are visible for review.
+Complete-set listing also performs the same manifest/ciphertext hash and object-binding checks as
+verification, so a same-size tampered archive is classified as unverifiable rather than complete.
 
 Database capture rejects empty output and performs format-aware validation before an artifact
 can enter the encrypted publication pipeline.

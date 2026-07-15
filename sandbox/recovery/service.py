@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from .catalog import RecoveryCatalog
@@ -105,18 +104,12 @@ class RecoveryService:
                     continue
                 manifest_item = manifests[0]
                 try:
-                    manifest = json.loads(self.drive.get(manifest_item["Path"]))
-                    cipher_key = manifest["ciphertext_object"]
-                    cipher_item = next(item for item in group if item.get("Path") == cipher_key)
-                    valid = (manifest.get("schema_version") == 1 and manifest.get("id") == set_id
-                             and manifest.get("status") == "complete"
-                             and manifest.get("ciphertext_size") == cipher_item.get("Size"))
-                except (KeyError, TypeError, ValueError, StopIteration, RecoveryError):
-                    valid = False
-                if valid:
-                    complete.append(manifest_item)
-                else:
+                    from .restore import verify_manifest
+                    verify_manifest(self.drive, set_id)
+                except (KeyError, TypeError, ValueError, RecoveryError):
                     unverifiable.extend(group)
+                else:
+                    complete.append(manifest_item)
             local_pending: list[dict] = []
             if self.pending_root and self.pending_root.is_dir():
                 for path in sorted(self.pending_root.glob("*.archive.tar.gpg")):

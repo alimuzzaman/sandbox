@@ -87,11 +87,9 @@ def recovery_schedule_plan(remote: str | None = None, profiles: list[str] | None
 
 
 @mcp.tool()
-def recovery_retention_plan(remote: str | None = None) -> dict:
-    """Return a conservative empty retention plan until verified remote sets are supplied."""
-    from sandbox.recovery.errors import result
-    from sandbox.recovery.retention import build_retention_plan
-    plan = build_retention_plan("sets/", ())
-    return result(True, "retention", remote=remote, status="planned", data={
-        "destination_prefix": plan.destination_prefix, "protected_sets": plan.protected_sets,
-        "candidates": plan.candidates, "requires_confirmation": True})
+def recovery_retention_plan(remote: str | None = None, keep_count: int = 1,
+                            minimum_age_days: int = 0) -> dict:
+    """Build a verified, non-destructive retention plan; deletion remains protected."""
+    return _service().retention_plan(
+        remote, keep_count=keep_count, minimum_age_days=minimum_age_days,
+    )

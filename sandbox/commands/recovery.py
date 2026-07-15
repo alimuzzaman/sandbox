@@ -20,6 +20,8 @@ def configure_recovery(parser) -> None:
     parser.add_argument("--backup-id", default=None)
     parser.add_argument("--artifact", action="append", default=[],
                         help="materialized artifact as NAME=PATH; repeat for each artifact")
+    parser.add_argument("--keep-count", type=int, default=1)
+    parser.add_argument("--minimum-age-days", type=int, default=0)
     parser.add_argument("--confirm", action="store_true")
     parser.add_argument("--json", action="store_true")
 
@@ -112,11 +114,10 @@ def cmd_recovery(_cfg, args) -> None:
             payload = result(False, "retention", remote=args.remote, error=RecoveryError(
                 "retention deletion requires a verified real recovery set", "protected_operation"))
         else:
-            from sandbox.recovery.retention import build_retention_plan
-            plan = build_retention_plan("sets/", ())
-            payload = result(True, "retention", remote=args.remote, status="planned", data={
-                "destination_prefix": plan.destination_prefix, "protected_sets": plan.protected_sets,
-                "candidates": plan.candidates, "requires_confirmation": True})
+            payload = service.retention_plan(
+                args.remote, keep_count=getattr(args, "keep_count", 1),
+                minimum_age_days=getattr(args, "minimum_age_days", 0),
+            )
     else:
         from sandbox.recovery.errors import RecoveryError, result
         payload = result(False, args.action, remote=args.remote, error=RecoveryError(

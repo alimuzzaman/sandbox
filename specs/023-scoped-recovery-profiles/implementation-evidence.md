@@ -230,3 +230,7 @@ retaining the validated Python 3.11 path for the supported baseline.
 Recovery listing now reuses manifest verification, including ciphertext SHA-256 and canonical
 set-object binding, instead of treating matching object size as sufficient evidence of completeness.
 The verifier also rejects non-object JSON manifests with the stable invalid-manifest error path.
+
+Retention planning is now wired through the service and CLI/MCP surfaces: fixture coverage proves
+that complete sets are manifest-verified, decrypted with the current crypto adapter, and reduced
+to deterministic keep-count candidates without deleting remote objects.

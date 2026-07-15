@@ -1,7 +1,9 @@
 import unittest
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.recovery.catalog import RecoveryCatalog
@@ -82,6 +84,28 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual(tampered["data"]["complete_manifests"], ())
         self.assertIn({"Path": "sets/complete/archive.bin", "Size": 7},
                       tampered["data"]["unverifiable"])
+
+    def test_retention_plan_verifies_sets_and_current_passphrase_before_candidates(self):
+        drive = MemoryDrive()
+        crypto = FixtureCrypto()
+        coordinator = CaptureCoordinator(crypto, drive)
+        for set_id, created_at in (("old", "2026-01-01T00:00:00+00:00"),
+                                    ("new", "2026-07-15T00:00:00+00:00")):
+            coordinator.publish(set_id, {"artifact": set_id.encode()})
+            manifest = json.loads(drive.objects[f"sets/{set_id}/manifest.json"])
+            manifest["created_at"] = created_at
+            drive.objects[f"sets/{set_id}/manifest.json"] = json.dumps(manifest).encode()
+        service = RecoveryService(
+            RecoveryCatalog(1, ()), drive=drive,
+            capture=SimpleNamespace(crypto=crypto),
+        )
+        planned = service.retention_plan(
+            keep_count=1, now=datetime(2026, 7, 16, tzinfo=timezone.utc),
+        )
+        self.assertTrue(planned["ok"])
+        self.assertEqual(planned["data"]["protected_sets"], ("new",))
+        self.assertEqual(planned["data"]["candidates"], ("old",))
+        self.assertEqual(planned["data"]["unclassified"], ())
 
     def test_verify_checks_manifest_and_ciphertext(self):
         drive = MemoryDrive()

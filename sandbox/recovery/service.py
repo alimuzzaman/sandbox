@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
+import tempfile
 
 from .catalog import RecoveryCatalog
 from .errors import RecoveryError, result
@@ -136,6 +138,76 @@ class RecoveryService:
         except RecoveryError as exc:
             return result(False, "verify", remote=remote, error=exc)
         return result(True, "verify", remote=remote, status="verified", data={"id": set_id, "manifest": manifest})
+
+    def _current_passphrase_verifies(self, ciphertext_key: str) -> bool:
+        """Check decryption with the configured capture crypto without persisting plaintext."""
+        if self.drive is None or self.capture is None:
+            return False
+        crypto = getattr(self.capture, "crypto", None)
+        if crypto is None:
+            return False
+        try:
+            ciphertext = self.drive.get(ciphertext_key)
+            decrypt = getattr(crypto, "decrypt", None)
+            if callable(decrypt):
+                decrypt(ciphertext)
+                return True
+            decrypt_file = getattr(crypto, "decrypt_file", None)
+            if not callable(decrypt_file):
+                return False
+            with tempfile.TemporaryDirectory(prefix="sandbox-recovery-retention-") as directory:
+                source = Path(directory) / "archive.gpg"
+                plaintext = Path(directory) / "archive"
+                source.write_bytes(ciphertext)
+                decrypt_file(source, plaintext)
+                return plaintext.is_file()
+        except (OSError, RecoveryError, TypeError, ValueError):
+            return False
+
+    def retention_plan(self, remote: str | None = None, *, keep_count: int = 1,
+                       minimum_age_days: int = 0, now: datetime | None = None) -> dict:
+        """Build a verified, non-destructive retention plan from complete remote sets."""
+        if self.drive is None:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery Drive is not configured", "recovery_not_configured"))
+        if (not isinstance(minimum_age_days, int) or isinstance(minimum_age_days, bool)
+                or minimum_age_days < 0):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "retention minimum age is invalid", "invalid_retention_policy"))
+        try:
+            from .restore import verify_manifest
+            from .retention import build_retention_plan
+
+            objects = self.drive.list("")
+            manifest_ids = sorted({set_id for item in objects
+                                   if (set_id := _set_id(str(item.get("Path", ""))))
+                                   and str(item.get("Path", "")).endswith("/manifest.json")})
+            observed = []
+            unclassified = []
+            for set_id in manifest_ids:
+                try:
+                    manifest = verify_manifest(self.drive, set_id)
+                    current = self._current_passphrase_verifies(manifest["ciphertext_object"])
+                    observed.append({
+                        "id": set_id, "prefix": "sets/", "status": "complete",
+                        "verified": True, "passphrase_current": current,
+                        "created_at": manifest.get("created_at"),
+                    })
+                except RecoveryError as exc:
+                    unclassified.append({"id": set_id, "reason": exc.code})
+            plan = build_retention_plan(
+                "sets/", tuple(observed), keep_count=keep_count,
+                minimum_age=timedelta(days=minimum_age_days), now=now,
+            )
+        except RecoveryError as exc:
+            return result(False, "retention", remote=remote, error=exc)
+        return result(True, "retention", remote=remote, status="planned", data={
+            "destination_prefix": plan.destination_prefix,
+            "protected_sets": plan.protected_sets,
+            "candidates": plan.candidates,
+            "unclassified": tuple(unclassified),
+            "requires_confirmation": plan.requires_confirmation,
+        })
 
     def restore_plan(self, set_id: str, profiles: tuple[str, ...] = (), *, remote: str | None = None) -> dict:
         if self.drive is None:

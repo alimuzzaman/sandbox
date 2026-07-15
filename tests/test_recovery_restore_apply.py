@@ -1,12 +1,14 @@
 import tempfile
 import unittest
 from pathlib import Path
+import shutil
 
 from sandbox.recovery.capture import CaptureCoordinator
 from sandbox.recovery.crypto import FixtureCrypto
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
 from sandbox.recovery.restore import apply_restore, build_restore_plan
+from sandbox.recovery.restore import FilesystemRestoreAdapter
 
 
 class FileSwapAdapter:
@@ -33,6 +35,46 @@ class FileSwapAdapter:
 
 
 class TestDisposableRestoreApply(unittest.TestCase):
+    def test_filesystem_adapter_restores_and_cleans_checkpoint(self):
+        class FileCrypto:
+            def decrypt_file(self, source, target):
+                shutil.copyfile(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            (source / "new.txt").write_text("new")
+            archive = root / "archive.tar"
+            from sandbox.recovery.filesystem import archive_paths
+            archive_paths(source, (source / "new.txt",), archive)
+            target = root / "target"; target.mkdir(); (target / "old.txt").write_text("old")
+            adapter = FilesystemRestoreAdapter(FileCrypto(), archive, target)
+            plan = type("Plan", (), {"profiles": ("filesystem",)})()
+            result = apply_restore(plan, {"filesystem": adapter}, confirm=True)
+            self.assertEqual(result["status"], "complete")
+            self.assertTrue((target / "new.txt").is_file())
+            self.assertFalse((target / "old.txt").exists())
+            self.assertEqual(list(root.glob(".target.recovery-*")), [])
+
+    def test_filesystem_adapter_rolls_back_when_restored_member_is_missing(self):
+        class FileCrypto:
+            def decrypt_file(self, source, target):
+                shutil.copyfile(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            (source / "new.txt").write_text("new")
+            archive = root / "archive.tar"
+            from sandbox.recovery.filesystem import archive_paths
+            archive_paths(source, (source / "new.txt",), archive)
+            target = root / "target"; target.mkdir(); (target / "old.txt").write_text("old")
+            class BrokenAdapter(FilesystemRestoreAdapter):
+                def verify(self):
+                    self._members = ("missing.txt",)
+                    super().verify()
+            adapter = BrokenAdapter(FileCrypto(), archive, target)
+            plan = type("Plan", (), {"profiles": ("filesystem",)})()
+            with self.assertRaises(RecoveryError):
+                apply_restore(plan, {"filesystem": adapter}, confirm=True)
+            self.assertEqual((target / "old.txt").read_text(), "old")
+
     def test_failed_later_profile_restores_prior_file_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); first = root / "first"; second = root / "second"

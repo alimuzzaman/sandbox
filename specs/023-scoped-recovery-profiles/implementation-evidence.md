@@ -191,3 +191,7 @@ target contents, while still resolving the target for allowed-root confinement.
 Schedule rendering now carries selected profile IDs and the reviewed remote into the fixed
 recovery command, with explicit confirmation in the disabled unit; activation remains a
 separate protected operation.
+
+An injectable filesystem restore adapter now provides checkpoint, decrypt, safe archive
+extraction, atomic swap, member verification, and rollback behavior. Its target must be
+explicitly supplied by the caller; no production restore target was discovered or mutated.

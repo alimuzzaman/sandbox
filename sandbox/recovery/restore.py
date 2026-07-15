@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import tarfile
+import tempfile
 from typing import Mapping
 
 from .errors import RecoveryError
+from .filesystem import validate_archive
 from .models import RestorePlan
 
 
@@ -104,3 +108,95 @@ def apply_restore(plan: RestorePlan, adapters: Mapping[str, object], *, confirm:
             raise
         raise RecoveryError("restore apply failed and rollback was attempted", "restore_apply_failed") from exc
     return {"status": "complete", "events": tuple(events)}
+
+
+class FilesystemRestoreAdapter:
+    """Checkpointed filesystem restore adapter for an explicitly supplied target.
+
+    The adapter is injectable and target-explicit: it never discovers a target from a
+    profile or remote inventory. Callers must provide the decryption adapter, ciphertext
+    file, and destination directory.
+    """
+
+    def __init__(self, crypto, ciphertext: str | Path, target: str | Path) -> None:
+        self.crypto = crypto
+        self.ciphertext = Path(ciphertext)
+        self.target = Path(target)
+        self._workspace: Path | None = None
+        self._stage: Path | None = None
+        self._previous: Path | None = None
+        self._members: tuple[str, ...] = ()
+        self._swapped = False
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+    def checkpoint(self) -> None:
+        if not self.ciphertext.is_file():
+            raise RecoveryError("restore ciphertext is unavailable", "missing_ciphertext")
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self._workspace = Path(tempfile.mkdtemp(prefix=f".{self.target.name}.recovery-",
+                                                 dir=self.target.parent))
+        os.chmod(self._workspace, 0o700)
+        checkpoint = self._workspace / "checkpoint"
+        if self.target.is_dir():
+            shutil.copytree(self.target, checkpoint, symlinks=True)
+        elif self.target.exists() or self.target.is_symlink():
+            shutil.copy2(self.target, checkpoint, follow_symlinks=False)
+
+    def quiesce(self) -> None:
+        return None
+
+    def stage(self) -> None:
+        if self._workspace is None:
+            raise RecoveryError("restore checkpoint is unavailable", "restore_not_checkpointed")
+        plaintext = self._workspace / "archive.tar"
+        self.crypto.decrypt_file(self.ciphertext, plaintext)
+        self._members = validate_archive(plaintext)
+        extracted = self._workspace / "extracted"
+        extracted.mkdir()
+        with tarfile.open(plaintext, "r") as archive:
+            archive.extractall(extracted)
+        self._stage = extracted
+
+    def swap(self) -> None:
+        if self._workspace is None or self._stage is None:
+            raise RecoveryError("restore stage is unavailable", "restore_not_staged")
+        self._previous = self._workspace / "previous"
+        if self.target.exists() or self.target.is_symlink():
+            self.target.replace(self._previous)
+        self._stage.replace(self.target)
+        self._swapped = True
+
+    def import_(self) -> None:
+        return None
+
+    def verify(self) -> None:
+        if not self.target.is_dir():
+            raise RecoveryError("restored filesystem target is not a directory", "restore_verification_failed")
+        for member in self._members:
+            if not os.path.lexists(self.target / member):
+                raise RecoveryError("restored archive member is missing", "restore_verification_failed")
+
+    def resume(self) -> None:
+        if self._workspace is not None:
+            shutil.rmtree(self._workspace, ignore_errors=True)
+        self._workspace = None
+
+    def rollback(self) -> None:
+        if self._swapped:
+            self._remove(self.target)
+            if self._previous is not None and (self._previous.exists() or self._previous.is_symlink()):
+                self._previous.replace(self.target)
+        if self._workspace is not None:
+            shutil.rmtree(self._workspace, ignore_errors=True)
+        self._workspace = None
+
+    def __getattr__(self, name: str):
+        if name == "import":
+            return self.import_
+        raise AttributeError(name)

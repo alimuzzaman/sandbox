@@ -37,3 +37,8 @@ resolved targets escape the allowed root.
 Schedule plans render the reviewed profile selection and remote target into the disabled
 service command, including the explicit confirmation required when an operator later activates
 the schedule.
+
+The filesystem restore adapter is target-explicit and injectable: it decrypts into owner-only
+staging, validates archive members, checkpoints the target, swaps atomically, verifies expected
+members, and restores the checkpoint on failure. It is not automatically wired to production
+targets.

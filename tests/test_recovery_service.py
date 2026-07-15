@@ -107,6 +107,30 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual(planned["data"]["candidates"], ("old",))
         self.assertEqual(planned["data"]["unclassified"], ())
 
+    def test_retention_plan_exposes_stale_passphrase_and_invalid_timestamp(self):
+        class StaleCrypto(FixtureCrypto):
+            def decrypt(self, payload):
+                raise RecoveryError("old passphrase", "invalid_ciphertext")
+
+        drive = MemoryDrive()
+        CaptureCoordinator(FixtureCrypto(), drive).publish("stale", {"artifact": b"payload"})
+        manifest = json.loads(drive.objects["sets/stale/manifest.json"])
+        manifest["created_at"] = "not-a-timestamp"
+        drive.objects["sets/stale/manifest.json"] = json.dumps(manifest).encode()
+        service = RecoveryService(
+            RecoveryCatalog(1, ()), drive=drive,
+            capture=SimpleNamespace(crypto=StaleCrypto()),
+        )
+
+        planned = service.retention_plan()
+
+        self.assertTrue(planned["ok"])
+        self.assertEqual(planned["data"]["protected_sets"], ())
+        self.assertEqual(planned["data"]["candidates"], ())
+        self.assertEqual(planned["data"]["unclassified"], (
+            {"id": "stale", "reason": "passphrase_not_current,invalid_created_at"},
+        ))
+
     def test_verify_checks_manifest_and_ciphertext(self):
         drive = MemoryDrive()
         CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"artifact.txt": b"payload"})

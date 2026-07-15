@@ -61,8 +61,10 @@ non-progressing descriptor, without placing the passphrase in argv or process ou
 
 Retention planning now inventories the configured destination, verifies each complete manifest
 and ciphertext binding, and tests decryption with the current inherited crypto channel before
-classifying candidates. It remains non-destructive; `--keep-count` and `--minimum-age-days`
-control the plan, while deletion remains separately protected.
+classifying candidates. Sets with an unavailable current passphrase or invalid timestamps are
+reported as unclassified instead of disappearing from the plan. It remains non-destructive;
+`--keep-count` and `--minimum-age-days` control the plan, while deletion remains separately
+protected.
 
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before

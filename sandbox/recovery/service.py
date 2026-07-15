@@ -19,6 +19,16 @@ def _set_id(path: str) -> str | None:
     return candidate
 
 
+def _retention_timestamp_valid(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
 class RecoveryService:
     def __init__(self, catalog: RecoveryCatalog, *, inventory=None, drive=None, capture=None,
                  pending_root: str | Path | None = None) -> None:
@@ -188,11 +198,18 @@ class RecoveryService:
                 try:
                     manifest = verify_manifest(self.drive, set_id)
                     current = self._current_passphrase_verifies(manifest["ciphertext_object"])
+                    reasons = []
+                    if not current:
+                        reasons.append("passphrase_not_current")
+                    if not _retention_timestamp_valid(manifest.get("created_at")):
+                        reasons.append("invalid_created_at")
                     observed.append({
                         "id": set_id, "prefix": "sets/", "status": "complete",
                         "verified": True, "passphrase_current": current,
                         "created_at": manifest.get("created_at"),
                     })
+                    if reasons:
+                        unclassified.append({"id": set_id, "reason": ",".join(reasons)})
                 except RecoveryError as exc:
                     unclassified.append({"id": set_id, "reason": exc.code})
             plan = build_retention_plan(

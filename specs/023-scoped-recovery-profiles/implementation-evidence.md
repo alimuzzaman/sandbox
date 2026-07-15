@@ -233,4 +233,6 @@ The verifier also rejects non-object JSON manifests with the stable invalid-mani
 
 Retention planning is now wired through the service and CLI/MCP surfaces: fixture coverage proves
 that complete sets are manifest-verified, decrypted with the current crypto adapter, and reduced
-to deterministic keep-count candidates without deleting remote objects.
+to deterministic keep-count candidates without deleting remote objects. Verified sets with stale
+or unavailable passphrase material, or invalid timestamps, remain explicitly unclassified rather
+than being silently omitted.

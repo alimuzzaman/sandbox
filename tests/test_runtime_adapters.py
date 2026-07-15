@@ -1,59 +1,57 @@
 import unittest
 
 
-class _Adapter:
-    adapter_id = "fixture"
-    kinds = ("fixture",)
-    capabilities = frozenset({"status"})
-
-
 class TestRuntimeAdapters(unittest.TestCase):
-    def test_builtin_registration_selects_wordpress_and_compose_adapters(self):
+    def test_builtin_registration_selects_wordpress_and_leaves_compose_unregistered(self):
         from sandbox.runtimes import builtin_adapter_registry
 
-        registry = builtin_adapter_registry()
+        registry = builtin_adapter_registry({"status": lambda request: {"ok": True}})
 
         self.assertEqual(registry.for_kind("wordpress").adapter_id, "wordpress")
-        self.assertEqual(registry.for_kind("compose").adapter_id, "compose")
+        self.assertIsNone(registry.for_kind("compose"))
 
     def test_adapter_registration_exposes_declared_capabilities(self):
         from sandbox.runtimes import builtin_adapter_registry
 
-        registry = builtin_adapter_registry()
-        compose = registry.for_kind("compose")
+        registry = builtin_adapter_registry({"ensure": lambda request: {"ok": True}})
+        wordpress = registry.for_kind("wordpress")
 
-        self.assertIn("ensure", compose.adapter.capabilities)
-        self.assertIn("status", compose.adapter.capabilities)
-        self.assertNotIn("wp_cli", compose.adapter.capabilities)
+        self.assertIn("ensure", wordpress.adapter.capabilities)
+        self.assertNotIn("wp_cli", wordpress.adapter.capabilities)
 
     def test_unsupported_kind_returns_structured_error(self):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes import builtin_adapter_registry
-        from sandbox.runtimes.base import OperationRequest
+        from sandbox.runtimes.base import OperationError, OperationRequest
 
-        result = RuntimeService(builtin_adapter_registry()).invoke(
-            "unknown",
-            OperationRequest(project_root="/tmp/project", operation="status"),
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label: {"kind": "compose"},
+            adapters=builtin_adapter_registry({}),
         )
+        result = service.invoke(OperationRequest(project_root="/tmp/project", operation="status"))
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error.code, "unsupported_project_kind")
-        self.assertEqual(result.error.project_kind, "unknown")
+        self.assertIsInstance(result, OperationError)
+        self.assertEqual(result.code, "unsupported_kind")
+        self.assertEqual(result.project_kind, "compose")
 
     def test_adapter_results_have_stable_kind_and_capability_shape(self):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes import builtin_adapter_registry
-        from sandbox.runtimes.base import OperationRequest
+        from sandbox.runtimes.base import OperationError, OperationRequest, OperationResult
 
-        result = RuntimeService(builtin_adapter_registry()).invoke(
-            "compose",
-            OperationRequest(project_root="/tmp/project", operation="wp_cli"),
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label: {"kind": "wordpress"},
+            adapters=builtin_adapter_registry({"status": lambda request: {"url": "http://localhost"}}),
         )
+        result = service.invoke(OperationRequest(project_root="/tmp/project", operation="status"))
+        rejection = service.invoke(OperationRequest(project_root="/tmp/project", operation="wp_cli"))
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error.code, "unsupported_capability")
-        self.assertEqual(result.error.project_kind, "compose")
-        self.assertIn("status", result.error.available_capabilities)
+        self.assertIsInstance(result, OperationResult)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.project_kind, "wordpress")
+        self.assertIsInstance(rejection, OperationError)
+        self.assertEqual(rejection.code, "unsupported_capability")
+        self.assertIn("status", rejection.available_capabilities)
 
 
 if __name__ == "__main__":

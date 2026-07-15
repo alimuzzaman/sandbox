@@ -37,7 +37,7 @@
 - [x] T006 [P] Add failing adapter registration, capability, unsupported-kind, and result-shape tests in `tests/test_runtime_adapters.py`
 - [x] T007 [P] Add failing additive registry compatibility tests for `kind`, `adapter`, `display_name`, `http_port`, and legacy `wordpress_port` fallback in `tests/test_sandbox.py`
 - [x] T008 Define explicit runtime protocol, capability constants, structured results/errors, and injected dependencies in `sandbox/runtimes/base.py`
-- [ ] T009 Implement explicit built-in adapter registration and kind selection without wildcard imports in `sandbox/runtimes/__init__.py`
+- [x] T009 Implement explicit built-in adapter registration and kind selection without wildcard imports in `sandbox/runtimes/__init__.py`
 - [ ] T010 Implement the WordPress compatibility adapter by delegating to current lifecycle behavior in `sandbox/runtimes/wordpress.py`
 - [ ] T011 Split common versus WordPress defaults, select kind before normalization, and scope plugin-slug validation to WordPress in `sandbox_core.py`
 - [ ] T012 Extend registry reads/writes additively for common instance metadata while preserving the v2 key and all legacy fields in `sandbox_core.py`

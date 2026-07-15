@@ -1311,6 +1311,9 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("data.get('id') != current", command)
         self.assertIn("data.get('archive') != f'{current}.tar.gz.gpg'", command)
         self.assertIn("cipher_sha256", command)
+        self.assertIn("tarfile.open(archive_path, 'r:gz')", command)
+        self.assertIn("member.linkname", command)
+        self.assertIn("--no-same-owner", command)
         self.assertIn("docker run --rm", command)
         self.assertIn("systemctl --user start hermes-gateway-sandbox.service", command)
 

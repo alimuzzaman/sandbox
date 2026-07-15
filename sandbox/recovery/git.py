@@ -15,6 +15,14 @@ class GitRunner(Protocol):
 _SENSITIVE_NAMES = (".env", "id_rsa", "id_ed25519", ".pem", ".key", "credentials")
 
 
+def _validate_git_token(value: str, field: str, *, allow_dash: bool = False) -> str:
+    if (not isinstance(value, str) or not value or
+            (not allow_dash and value.startswith("-")) or
+            any(char in value for char in "\r\n\0")):
+        raise RecoveryError(f"Git {field} is invalid", f"invalid_git_{field}")
+    return value
+
+
 class GitCapture:
     def __init__(self, runner: GitRunner) -> None:
         self.runner = runner
@@ -28,6 +36,7 @@ class GitCapture:
 
     def provenance(self, root: str | Path, remote: str = "origin") -> dict:
         root = Path(root).resolve()
+        remote = _validate_git_token(remote, "remote")
         revision = self._text(("git", "rev-parse", "HEAD"), root)
         remote_url = self._text(("git", "remote", "get-url", remote), root)
         status = self._text(("git", "status", "--porcelain=v1", "--untracked-files=all"), root)
@@ -39,6 +48,9 @@ class GitCapture:
 
     def create_bundle(self, root: str | Path, destination: str | Path, revision: str) -> Path:
         target = Path(destination)
+        _validate_git_token(revision, "revision")
+        if target.name.startswith("-") or any(char in str(target) for char in "\r\n\0"):
+            raise RecoveryError("Git bundle destination is invalid", "invalid_git_destination")
         target.parent.mkdir(parents=True, exist_ok=True)
         result = self.runner.run(("git", "bundle", "create", str(target), revision), cwd=str(root), timeout=300)
         if result.returncode != 0:
@@ -53,6 +65,8 @@ class GitCapture:
             raise RecoveryError("Git patch paths are invalid", "invalid_git_patch")
         if any(any(name in path.lower() for name in _SENSITIVE_NAMES) for path in paths):
             raise RecoveryError("sensitive files cannot be added to a Git patch", "sensitive_git_patch")
+        if any(char in str(destination) for char in "\r\n\0"):
+            raise RecoveryError("Git patch destination is invalid", "invalid_git_destination")
         result = self.runner.run(("git", "diff", "--binary", "--", *paths), cwd=str(root), timeout=60)
         if result.returncode != 0 or not result.stdout:
             raise RecoveryError("Git patch generation failed", "git_patch_failed")

@@ -43,3 +43,13 @@ class TestGitCapture(unittest.TestCase):
             self.assertIn("diff --git", patch.read_text())
             with self.assertRaisesRegex(Exception, "sensitive"):
                 capture.create_patch(".", Path(directory) / "unsafe.patch", (".env",))
+
+    def test_rejects_option_like_git_tokens_and_unsafe_destinations(self):
+        capture = GitCapture(GitRunner())
+        with self.assertRaisesRegex(Exception, "remote"):
+            capture.provenance(".", remote="--all")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(Exception, "revision"):
+                capture.create_bundle(".", Path(directory) / "changes.bundle", "--all")
+            with self.assertRaisesRegex(Exception, "destination"):
+                capture.create_bundle(".", Path(directory) / "-bundle", "HEAD")

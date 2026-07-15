@@ -245,10 +245,12 @@ def cmd_hermes(cfg, args) -> None:
         elif action == "update":
             if args.subaction == "plan":
                 payload = hermes.update_plan(args.remote, args.version or hermes.SUPPORTED_TAG, args.commit)
+            elif args.subaction == "provenance":
+                payload = hermes.release_provenance_plan(args.remote, args.version or hermes.SUPPORTED_TAG, args.commit)
             elif args.subaction == "apply":
                 payload = hermes.update_apply(args.remote, args.version or hermes.SUPPORTED_TAG, args.commit, args.confirm)
             else:
-                raise hermes.HermesError("update action must be plan or apply", "invalid_update_action")
+                raise hermes.HermesError("update action must be plan, provenance, or apply", "invalid_update_action")
         elif action == "backup":
             if args.subaction == "create":
                 payload = hermes.backup_create(args.remote)

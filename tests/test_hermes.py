@@ -1776,6 +1776,43 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(out["data"]["current_commit"], "a" * 40)
         self.assertEqual(out["data"]["backup"], "create verified backup before apply")
 
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_release_provenance_plan_verifies_signature_in_disposable_checkout(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout="b" * 40 + "\n"),
+            _completed(stdout="a" * 40 + "\n"),
+            _completed(stdout="PROVENANCE_VERIFIED:v2026.7.7.2:b" + "b" * 39 + "\n"),
+            _completed(stdout="a" * 40 + "\n"),
+        ]
+        out = hermes.release_provenance_plan("test", "v2026.7.7.2", "b" * 40)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "verified")
+        self.assertTrue(out["data"]["installed_checkout_unchanged"])
+        command = ssh_run.call_args_list[3].args[1]
+        self.assertIn("mktemp -d", command)
+        self.assertIn("fetch -q --depth=1", command)
+        self.assertIn("verify-tag", command)
+        self.assertIn("HERMES_RELEASE_PROVENANCE_FAILED", command)
+        self.assertNotIn("hermes-agent/;", command)
+
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_release_provenance_plan_rejects_checkout_change(self, get_remote, ssh_run):
+        get_remote.return_value = self.entry
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout="b" * 40 + "\n"),
+            _completed(stdout="a" * 40 + "\n"),
+            _completed(stdout="PROVENANCE_VERIFIED:v2026.7.7.2:b" + "b" * 39 + "\n"),
+            _completed(stdout="c" * 40 + "\n"),
+        ]
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.release_provenance_plan("test", "v2026.7.7.2", "b" * 40)
+        self.assertEqual(caught.exception.code, "installed_checkout_changed")
+
     def test_update_apply_quiesces_and_resumes_an_active_gateway(self):
         plan = {"status": "update_available", "commit": "b" * 40}
         installed = {"version": "v2026.7.7.2", "commit": "b" * 40}

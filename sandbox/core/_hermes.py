@@ -1373,6 +1373,56 @@ def _expected_commit(tag: str, commit: str | None) -> str | None:
     return commit or (SUPPORTED_COMMIT if tag == SUPPORTED_TAG else None)
 
 
+def release_provenance_plan(remote_name: str, version: str = SUPPORTED_TAG,
+                            commit: str | None = None) -> dict:
+    """Verify a signed release in a disposable remote checkout without mutation."""
+    _validate_release_tag(version)
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    resolved = _resolve_commit(entry, version, _expected_commit(version, commit))
+    tag, resolved = validate_release(version, resolved)
+    installed = _checked(
+        entry,
+        "if test -d \"$HOME/.hermes/hermes-agent/.git\"; then "
+        "git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD; fi",
+        what="could not read installed Hermes revision",
+    )
+    before = (installed.stdout or "").strip().splitlines()[-1:] or [""]
+    allowed_signer = f"{HERMES_RELEASE_SIGNER} {HERMES_RELEASE_SIGNER_KEY}"
+    command = (
+        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; repo=\"$stage/repo\"; "
+        "git init -q \"$repo\"; "
+        f"git -C \"$repo\" remote add origin {shlex.quote(HERMES_REPOSITORY_URL)}; "
+        f"git -C \"$repo\" fetch -q --depth=1 origin refs/tags/{shlex.quote(tag)}:refs/tags/{shlex.quote(tag)}; "
+        f"printf '%s\\n' {shlex.quote(allowed_signer)} > \"$stage/allowed_signers\"; chmod 600 \"$stage/allowed_signers\"; "
+        f"if ! git -C \"$repo\" -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=\"$stage/allowed_signers\" verify-tag {shlex.quote(tag)}; then "
+        "echo HERMES_RELEASE_PROVENANCE_FAILED >&2; exit 42; fi; "
+        f"actual=$(git -C \"$repo\" rev-parse refs/tags/{shlex.quote(tag)}^{{}}); "
+        f"test \"$actual\" = {shlex.quote(resolved)}; printf 'PROVENANCE_VERIFIED:%s:%s\\n' {shlex.quote(tag)} \"$actual\""
+    )
+    verified = _ssh(entry, command, timeout=180)
+    if verified.returncode != 0:
+        detail = _redact(verified.stderr or verified.stdout or "Hermes release provenance verification failed", entry)[:1000]
+        if "HERMES_RELEASE_PROVENANCE_FAILED" in (verified.stderr or "") + (verified.stdout or ""):
+            detail = "Hermes release signature or revision verification failed"
+        raise HermesError(detail, "release_provenance_failed", True)
+    installed = _checked(
+        entry,
+        "if test -d \"$HOME/.hermes/hermes-agent/.git\"; then "
+        "git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD; fi",
+        what="could not re-read installed Hermes revision",
+    )
+    after = (installed.stdout or "").strip().splitlines()[-1:] or [""]
+    if before != after:
+        raise HermesError("installed Hermes checkout changed during provenance verification",
+                          "installed_checkout_changed", True)
+    return result(True, "release_provenance_plan", remote_name, version=tag, commit=resolved,
+                  status="verified", data={"current_commit": after[0] or None,
+                                           "target_commit": resolved,
+                                           "signature": "verified",
+                                           "installed_checkout_unchanged": True})
+
+
 def install(remote_name: str, version: str = SUPPORTED_TAG, commit: str | None = None) -> dict:
     _validate_release_tag(version)
     entry = _require_remote(remote_name)

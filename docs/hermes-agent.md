@@ -377,6 +377,7 @@ planned and never uses insecure mode.
 ./sb hermes policy set --remote scaleway-sandbox --max-jobs 2 --max-worktrees 8 \
   --min-free-disk-mb 1024 --min-free-memory-mb 512 --json
 ./sb hermes update plan --remote scaleway-sandbox --version v2026.7.7.2 --json
+./sb hermes update provenance --remote scaleway-sandbox --version v2026.7.7.2 --json
 ./sb hermes backup list --remote scaleway-sandbox --json
 ./sb hermes cleanup --remote scaleway-sandbox --dry-run --json
 ./sb hermes health --remote scaleway-sandbox --json
@@ -388,6 +389,9 @@ Sandbox verifies that the installed Hermes checkout retains the canonical
 upstream `origin`; if Hermes's own updater reports a missing remote, do not run
 an ad-hoc pull or reset. Use the verified Sandbox update workflow after the
 remote has been repaired and its release plan reviewed.
+`update provenance` is read-only: it fetches the requested signed tag into a
+disposable remote checkout, verifies the configured SSH signer and exact commit,
+then confirms the installed checkout is unchanged before and after the check.
 `acceptance v2` is read-only: it reports the revision-bound evidence written by
 the approved live recovery suite. It never offers an override or a way to set a
 passing gate manually. Until every required check is recorded against the

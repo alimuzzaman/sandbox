@@ -1089,10 +1089,14 @@ for instance in instances:
         print(f"Hermes Drive: snapshot for {instance} failed; using fallback", file=__import__('sys').stderr)
     backup_tar = fallback / f"{instance}-mysql.tar"
     with backup_tar.open("wb") as out:
-        docker_result = subprocess.run(["docker", "cp", f"sandbox-{instance}-db-1:/var/lib/mysql", "-"],
-                                      stdout=out, stderr=subprocess.PIPE, text=False, cwd=HOME, check=False)
+    docker_result = subprocess.run(["docker", "cp", f"sandbox-{instance}-db-1:/var/lib/mysql", "-"],
+                                  stdout=out, stderr=subprocess.PIPE, text=False, cwd=HOME, check=False)
     if docker_result.returncode != 0:
-        raise SystemExit((docker_result.stderr or b"").decode(errors="replace").strip())
+        print(f"Hermes Drive: database snapshot unavailable for {instance}; continuing", file=__import__('sys').stderr)
+        try:
+            backup_tar.unlink()
+        except FileNotFoundError:
+            pass
 
 base_id = ""
 chain_id = BACKUP_ID

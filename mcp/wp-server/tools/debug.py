@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from app import SANDBOX_ROOT, _project_instance, mcp
+from app import SANDBOX_ROOT, _project_instance, _require_project_capability, mcp
 
 
 def _sb(inst: str, *args: str) -> subprocess.CompletedProcess:
@@ -16,6 +16,9 @@ def qm_capture(url: str = "/", collectors: list[str] | None = None, *, project_d
     Auto-activates QM, fires the request, returns the parsed collectors (db_queries,
     php_errors, timing, http, …; `hooks` excluded). Optional `collectors` filter.
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -45,6 +48,9 @@ def xdebug(action: str = "status", *, project_dir: str, label: str | None = None
     """
     if action not in ("on", "off", "status"):
         return {"ok": False, "error": "action must be on|off|status"}
+    capability_error = _require_project_capability(project_dir, label, "wordpress.exec")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

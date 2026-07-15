@@ -27,6 +27,16 @@ def _distinct_tlds(cfg: dict) -> set:
     return {_tld(ic) for ic in resolve_instances(cfg).values()} or {PROXY_TLD}
 
 
+def _generic_proxy_entries() -> list[dict]:
+    """Declared generic runtime routes owned by the aggregate proxy."""
+    return [e for e in registry_all().values()
+            if e.get("kind") == "compose" and e.get("instance")]
+
+
+def _generic_tld(entry: dict) -> str:
+    return entry.get("tld") or PROXY_TLD
+
+
 def _lo0_alias_present() -> bool:
     """True if the proxy's loopback alias is already on lo0 — checkable WITHOUT
     sudo, so we can skip an unnecessary `sudo alias-up`.
@@ -386,7 +396,18 @@ def regen_caddyfile(cfg: dict) -> None:
         # sub-site host proxies to the same port.
         wildcard = _multisite_mode(ic) == "subdomain"
         blocks.append(_caddy_block(dom, ic["wordpress_port"], wildcard=wildcard))
-    PROXY_CADDYFILE.write_text("\n".join(blocks))
+    for entry in _generic_proxy_entries():
+        dom = entry.get("domain")
+        port = entry.get("http_port")
+        if dom and port and dom.endswith(f".{_generic_tld(entry)}"):
+            blocks.append(_caddy_block(dom, int(port)))
+    # Replace atomically. Docker Desktop can retain a stale view of a bind
+    # mounted file after in-place truncation; an inode replacement makes the
+    # generated config change visible before Caddy reloads/restarts.
+    rendered = "\n".join(blocks)
+    temporary = PROXY_CADDYFILE.with_name(f".{PROXY_CADDYFILE.name}.tmp")
+    temporary.write_text(rendered)
+    os.replace(temporary, PROXY_CADDYFILE)
 
 
 def _dns_flush() -> None:
@@ -810,7 +831,54 @@ def _assign_domains_to_all(cfg: dict, tld=None):
         wpcli(["option", "update", "siteurl", url], instance=name, check=False)
         wpcli(["option", "update", "home", url], instance=name, check=False)
         info(f"{name}: WP url → {url}")
+    _assign_generic_domains(tld)
     return cfg
+
+
+def _assign_generic_domains(tld=None) -> list[str]:
+    """Assign proxy hostnames to generic runtimes without editing app config."""
+    try:
+        changed = []
+        for entry in _generic_proxy_entries():
+            chosen_tld = tld or _generic_tld(entry)
+            domain = entry.get("domain") or f"{entry['instance']}.{chosen_tld}"
+            if not entry.get("domain"):
+                changed.append(domain)
+            url = f"https://{domain}" if _cert_paths(domain)[0].exists() else f"http://{domain}"
+            registry_put(entry["root"], label=entry.get("label", "default"),
+                         domain=domain, tld=chosen_tld, url=url)
+        return changed
+    except Exception:
+        return []
+
+
+def secure_generic_instance(instance: str, *, tld=None) -> tuple[bool, str | None]:
+    """Secure a generic route while leaving framework/application config alone."""
+    entry = registry_find_instance(instance)
+    if not entry or entry.get("kind") != "compose":
+        return False, f"generic instance {instance!r} was not found"
+    chosen_tld = tld or _generic_tld(entry)
+    domain = entry.get("domain") or f"{instance}.{chosen_tld}"
+    # A configured proxy is already sufficient for an existing generic route;
+    # avoid restarting it before minting the new certificate (which can race
+    # Docker Desktop's bind-mounted Caddyfile/cert view). Only run the full
+    # setup path when the local DNS/proxy prerequisites are actually absent.
+    ready = (_proxy_container_running() and _lo0_alias_present()
+             and _resolver_present(chosen_tld))
+    up = True if ready else _ensure_url_proxy(load_config(), tld=chosen_tld)[0]
+    if not up:
+        return False, "clean URL proxy is not available"
+    ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
+    if not (shutil.which("mkcert") and ca_ok):
+        return False, "mkcert CA is not installed and trusted"
+    if not _mint_cert(domain):
+        return False, f"could not mint certificate for {domain}"
+    registry_put(entry["root"], label=entry.get("label", "default"),
+                 domain=domain, tld=chosen_tld, url=f"https://{domain}")
+    regen_caddyfile(load_config())
+    if not reload_proxy():
+        return False, "proxy reload failed"
+    return True, f"https://{domain}"
 
 
 def proxy_teardown(cfg) -> None:

@@ -47,7 +47,12 @@ from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
-_CONTROL_PERSIST_SECONDS = 60
+# OpenSSH multiplexing removes the repeated TCP/KEX/authentication cost while
+# still keeping each command a separately isolated SSH session. Ten minutes is
+# long enough to cover a deploy/provision workflow without leaving an idle
+# authenticated connection indefinitely (the same bounded pattern commonly
+# used by Ansible's native OpenSSH transport).
+_CONTROL_PERSIST_SECONDS = 600
 
 
 def _remote_block() -> dict:
@@ -197,13 +202,19 @@ def _ensure_ssh_control_dir() -> Path:
 
 
 def _ssh_connection_options(multiplex: bool = True) -> list[str]:
-    options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    options = [
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ConnectionAttempts=1",
+    ]
     if multiplex:
         control_path = _ssh_control_dir() / "cm-%C"
         options.extend([
             "-o", "ControlMaster=auto",
             "-o", f"ControlPersist={_CONTROL_PERSIST_SECONDS}",
             "-o", f"ControlPath={control_path}",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
         ])
     return options
 
@@ -248,20 +259,47 @@ def ssh_host(ssh_value: str) -> str:
     return remote_ssh_parts(ssh_value)["host"]
 
 
-def ssh_run(remote: dict, command: str, timeout: int = 30) -> subprocess.CompletedProcess:
+def ssh_run(remote: dict, command: str, timeout: int = 30,
+            input_data=None) -> subprocess.CompletedProcess:
     """Run `command` on the remote over SSH. Shells to the system `ssh` binary
     using the remote's stored connection string -- no new pip dependency, same
     pattern as shelling to `docker`/`wp` elsewhere in this codebase. check=False:
     callers interpret returncode/stdout/stderr themselves, never a bare
     exception on a nonzero remote exit."""
+    return ssh_process(remote, command, input_data=input_data, timeout=timeout)
+
+
+def ssh_run_batch(remote: dict, commands: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run several independent shell commands in one SSH session.
+
+    This is for orchestration steps that do not need individual interactive
+    output. Each command remains a separate line under ``set -e``; callers get
+    one combined exit status and avoid one SSH channel/process per item.
+    """
+    if not commands:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    script = "set -e\n" + "\n".join(commands) + "\n"
+    return ssh_process(remote, "sh -s", input_data=script, timeout=timeout)
+
+
+def ssh_process(remote_or_target, command: str, *, input_data=None,
+                timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run one SSH session through the shared multiplexing policy.
+
+    ``input_data`` supports streamed tar/script uploads without bypassing the
+    control socket. It is intentionally a single command/session API; callers
+    still get an isolated remote shell and normal SSH exit status.
+    """
     try:
         _ensure_ssh_control_dir()
     except OSError:
-        args = ssh_command_args(remote, command, multiplex=False)
+        args = ssh_command_args(remote_or_target, command, multiplex=False)
     else:
-        args = ssh_command_args(remote, command)
+        args = ssh_command_args(remote_or_target, command)
+    is_text = input_data is None or isinstance(input_data, str)
     return subprocess.run(
-        args, capture_output=True, text=True, timeout=timeout, check=False,
+        args, input=input_data, capture_output=True, text=is_text,
+        timeout=timeout, check=False,
     )
 
 
@@ -675,35 +713,55 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         deleted_set = set(deleted)
         to_copy.extend([n for n in changed_names if n not in deleted_set])
     to_copy.extend(untracked)
-    for relpath in deleted:
-        remote_path = f"{target_path.rstrip('/')}/{relpath}"
-        rm_res = ssh_run(remote, f"rm -f -- {shlex.quote(remote_path)}", timeout=15)
+    def safe_relpath(value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise RuntimeError(f"unsafe relative deploy path: {value!r}")
+        return value
+
+    deleted = [safe_relpath(value) for value in deleted]
+    to_copy = [safe_relpath(value) for value in to_copy]
+    if deleted:
+        commands = [
+            f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
+            for relpath in deleted
+        ]
+        rm_res = ssh_run_batch(remote, commands, timeout=30)
         if rm_res.returncode != 0:
             raise RuntimeError(
-                f"could not remove deleted file {relpath} on remote: "
+                "could not remove deleted files on remote: "
                 f"{(rm_res.stderr or rm_res.stdout or '').strip()[:500]}"
             )
-        applied += 1
-    for relpath in to_copy:
-        local_path = Path(project_root) / relpath
-        if not local_path.is_file():
-            continue
-        remote_path = f"{target_path.rstrip('/')}/{relpath}"
-        parent = posixpath.dirname(remote_path)
-        parent_cmd = f"mkdir -p -- {shlex.quote(parent)}"
-        mk_res = ssh_run(remote, parent_cmd, timeout=15)
-        if mk_res.returncode != 0:
+        applied += len(deleted)
+
+    existing = [relpath for relpath in to_copy
+                if (Path(project_root) / relpath).is_file()]
+    if existing:
+        # One compressed archive and one remote shell session replace one
+        # mkdir + SCP channel per file. The archive is built from the local
+        # project root, so paths remain relative and no local absolute path is
+        # ever sent to the remote shell.
+        tar_res = subprocess.run(
+            ["tar", "-czf", "-", "--", *existing], cwd=str(project_root),
+            capture_output=True, check=False,
+        )
+        if tar_res.returncode != 0:
             raise RuntimeError(
-                f"could not prepare directory for dirty file {relpath}: "
-                f"{(mk_res.stderr or mk_res.stdout or '').strip()[:500]}"
+                "could not package dirty files: "
+                f"{(tar_res.stderr or b'').decode(errors='replace').strip()[:500]}"
             )
-        res = scp_run(remote, str(local_path), remote_path, timeout=60)
-        if res.returncode != 0:
+        extract = (
+            f"mkdir -p -- {shlex.quote(target_path)} && "
+            f"tar -xzf - -C {shlex.quote(target_path)}"
+        )
+        copy_res = ssh_run(remote, extract, timeout=120,
+                           input_data=tar_res.stdout)
+        if copy_res.returncode != 0:
             raise RuntimeError(
-                f"could not transfer dirty file {relpath}: "
-                f"{(res.stderr or res.stdout or '').strip()[:500]}"
+                "could not transfer dirty files: "
+                f"{(copy_res.stderr or copy_res.stdout or '').strip()[:500]}"
             )
-        applied += 1
+        applied += len(existing)
     return applied
 
 

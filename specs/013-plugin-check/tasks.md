@@ -213,13 +213,13 @@ see `quickstart.md` Run 5.
   test-running documentation, matching how `run_tests`/e2e are already introduced there)
 - [x] T028 Run the full test suite (`.cli-venv/bin/python -m unittest discover -s
   tests`) and confirm it stays green including all new `test_plugin_check.py` cases
-- [~] T029 Execute `quickstart.md` end-to-end against a REAL sandbox instance in a
+- [X] T029 Execute `quickstart.md` end-to-end against a REAL sandbox instance in a
   scratch project under the session scratchpad (never a real repo) — all 6 runs,
   per Constitution Principle IV; fix anything quickstart surfaces that unit tests
   couldn't catch (mirroring this session's own established pattern of live-verification
   catching real bugs unit tests miss). Pending post-fix live re-run after the
   absolute-path and `.distignore` fixes described in `docs/plugin-check.md` §6.
-- [ ] T030 Clean up all scratch Docker/state created during T029 before considering
+- [X] T030 Clean up all scratch Docker/state created during T029 before considering
   this feature done
 
 ---

@@ -219,6 +219,23 @@ class TestCaddyBlocks(unittest.TestCase):
         self.assertNotIn("example.tst *.example.tst", rendered)
         self.assertNotIn("http://example.tst *.example.tst", rendered)
 
+    def test_regen_caddyfile_includes_generic_compose_route(self):
+        with tempfile.TemporaryDirectory() as td:
+            proxy_dir = Path(td) / "proxy"
+            caddyfile = proxy_dir / "Caddyfile"
+            generic = {
+                "root": "/tmp/generic", "label": "default",
+                "instance": "generic-app", "kind": "compose",
+                "http_port": 49152, "domain": "generic-app.tst",
+            }
+            with mock.patch.object(domains_core, "PROXY_DIR", proxy_dir), \
+                 mock.patch.object(domains_core, "PROXY_CADDYFILE", caddyfile), \
+                 mock.patch.object(sandbox_core, "registry_all", return_value={"g": generic}):
+                domains_core.regen_caddyfile({})
+            rendered = caddyfile.read_text()
+        self.assertIn("http://generic-app.tst {", rendered)
+        self.assertIn("reverse_proxy host.docker.internal:49152", rendered)
+
 
 class TestDomainValidation(unittest.TestCase):
     def test_valid_domain_passthrough(self):

@@ -1,6 +1,6 @@
 # Sandbox Modularity and Feature-Surface Audit
 
-**Audit point**: commit `014d5e1`, 2026-07-12  
+**Audit point**: working tree, 2026-07-16
 **Scope**: shipped CLI, core package, shared project config/registry, MCP server/tools, tests, and documented feature families. Generated virtual environments, `runtime/wp/`, and `vendor/` are excluded.
 
 ## Executive finding
@@ -15,12 +15,12 @@ The recommended response is a runtime adapter seam plus touch-driven cleanup. A 
 |---|---|---|---|
 | Entry/distribution | `sb` is a 60-line polyglot entry and remains stable | Good | Meets the single-entry distribution constraint |
 | CLI feature handlers | 67 commands are registered from 25 command modules | Good foundation | Handler ownership is visible and reasonably grouped |
-| CLI parsing/routing | `sandbox/cli.py` is 756 lines and declares every parser plus central project/instance routing sets | Weak boundary | A feature is not self-contained; adding a command changes central dispatch |
+| CLI parsing/routing | `sandbox/cli.py` is 775 lines and retains the compatibility parser bridge plus central project/instance routing sets; lifecycle parsers now register from `sandbox/commands/lifecycle.py` | Partial boundary | Legacy commands remain centralized, while touched lifecycle additions can stay feature-owned |
 | Shared command registry | `sandbox/registry.py` stores only name-to-handler mappings | Partial | It cannot own parser config, capability needs, or feature metadata |
 | Shared project config/registry | `sandbox_core.py` is 980 lines and independently contains WP config normalization plus registry/locks | Weak boundary | A second “core” exists outside `sandbox/core/`; generic kind selection touches a monolith |
 | CLI core package | 24 underscore modules exist | Good foundation | Large concepts have named homes |
 | Core dependency model | `sandbox/core/__init__.py` imports modules, combines their symbols, and back-fills every module | Poor isolation | Import order/collisions are hidden; unit boundaries are not explicit |
-| Wildcard imports | 40 shipped Python files wildcard-import `sandbox.core` or MCP `app` | Poor isolation | Callers do not declare dependencies and static analysis is weakened |
+| Wildcard imports | 21 shipped Python files still wildcard-import `sandbox.core` or MCP `app`; the three touched instance/lifecycle/config modules now use explicit imports | Improving, not complete | Continue touch-driven migration; do not claim repository-wide decomposition |
 | MCP grouping | 51 tools are grouped into 17 modules | Good foundation | User-facing tools have recognizable ownership |
 | MCP bootstrap/helpers | `app.py` is 607 lines; `server.py` manually imports all tool groups; most tool modules wildcard-import `app` | Weak boundary | New groups grow bootstrap and rely on a broad global surface |
 | Runtime model | `_instances.py` and registry records assume WP, DB, Mailpit, WP images, and `wordpress_port` | WordPress-cohesive, not extensible | Generic behavior needs an adapter/common record rather than more optional fields in every path |
@@ -37,7 +37,7 @@ The recommended response is a runtime adapter seam plus touch-driven cleanup. A 
 | `sandbox/core/_domains.py` | 846 | Proxy, cert, host resolver, and domain behavior are coupled | Reuse through a narrow generic proxy call |
 | `sandbox/core/_instances.py` | 836 | Identity, ports, WP boot, proxy, registry, and apply are coupled | Preserve as WordPress implementation behind adapter |
 | `sandbox/core/_remote.py` | 756 | Remote registry/provision/deploy behavior is concentrated | Out of MVP |
-| `sandbox/cli.py` | 756 | Parser and routing composition are centralized | Add feature-owned command specs for touched commands |
+| `sandbox/cli.py` | 775 | Compatibility parser bridge and routing composition remain centralized | Continue moving only touched command families behind feature-owned registration |
 | `sandbox/core/_docker.py` | 744 | WP Compose rendering and container helpers share a module | Do not reuse renderer for project-owned Compose; reuse only safe process primitives |
 | `sandbox/core/_dash.py` | 673 | Web dashboard rendering/actions/state share a module | Dashboard generic support deferred |
 | `mcp/wp-server/app.py` | 607 | Resolution, process, credentials, URLs, HTTP, and MCP server object coexist | Add explicit runtime helpers; do not add generic logic to wildcard surface |

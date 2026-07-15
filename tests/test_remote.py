@@ -170,7 +170,9 @@ class TestSshRun(unittest.TestCase):
                 self.assertIn("ubuntu@1.2.3.4", args)
                 self.assertIn("true", args)
                 self.assertIn("ControlMaster=auto", args)
-                self.assertIn("ControlPersist=60", args)
+                self.assertIn("ControlPersist=600", args)
+                self.assertIn("ServerAliveInterval=30", args)
+                self.assertIn("ServerAliveCountMax=3", args)
                 control_path = next(arg for arg in args if arg.startswith("ControlPath="))
                 self.assertIn("%C", control_path)
                 self.assertNotIn("ubuntu", control_path)
@@ -245,7 +247,7 @@ class TestSshRun(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         multiplexed_args = mock_run.call_args[0][0]
         self.assertIn("ControlMaster=auto", multiplexed_args)
-        self.assertIn("ControlPersist=60", multiplexed_args)
+        self.assertIn("ControlPersist=600", multiplexed_args)
         self.assertIn("-P", multiplexed_args)
         self.assertIn("2222", multiplexed_args)
         control_path = next(arg for arg in multiplexed_args if arg.startswith("ControlPath="))
@@ -264,7 +266,7 @@ class TestSshRun(unittest.TestCase):
         self.assertIn("BatchMode=yes", args)
         self.assertIn("ConnectTimeout=10", args)
         self.assertNotIn("ControlMaster=auto", args)
-        self.assertNotIn("ControlPersist=60", args)
+        self.assertNotIn("ControlPersist=600", args)
 
     @patch("subprocess.run")
     @patch("sandbox.core._remote._ensure_ssh_control_dir", side_effect=OSError("readonly"))
@@ -353,7 +355,7 @@ class TestPushCommits(unittest.TestCase):
         self.assertIn("BatchMode=yes", git_ssh)
         self.assertIn("ConnectTimeout=10", git_ssh)
         self.assertIn("ControlMaster=auto", git_ssh)
-        self.assertIn("ControlPersist=60", git_ssh)
+        self.assertIn("ControlPersist=600", git_ssh)
         self.assertIn("%C", git_ssh)
         self.assertNotIn("ubuntu", git_ssh)
         self.assertNotIn("1.2.3.4", git_ssh)
@@ -403,7 +405,7 @@ class TestPushCommits(unittest.TestCase):
         self.assertIn("ConnectTimeout=10", git_ssh)
         self.assertEqual(shlex.split(git_ssh)[-2:], ["-p", "2222"])
         self.assertNotIn("ControlMaster=auto", git_ssh)
-        self.assertNotIn("ControlPersist=60", git_ssh)
+        self.assertNotIn("ControlPersist=600", git_ssh)
 
     @patch("subprocess.run")
     def test_never_references_origin_or_any_other_remote(self, mock_run):
@@ -495,8 +497,8 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
     def test_apply_counts_tracked_and_untracked_files(self, mock_run, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         # subprocess.run is used for: git diff --name-only, git diff deleted,
-        # and scp for each dirty file. mkdir-parent goes through ssh_run,
-        # mocked separately.
+        # and one local tar archive; the archive is streamed over one SSH
+        # session.
         with tempfile.TemporaryDirectory() as d:
             proj = Path(d)
             (proj / "a.php").write_text("x")
@@ -504,37 +506,39 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             mock_run.side_effect = [
                 _completed(returncode=0, stdout="a.php\n"),  # git diff --name-only
                 _completed(returncode=0, stdout=""),           # git diff deleted
-                _completed(returncode=0),                      # scp a.php
-                _completed(returncode=0),                      # scp b.php
+                _completed(returncode=0, stdout=b"archive"),   # tar archive
             ]
             applied = sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4"}, "/home/ubuntu/sandbox/deploy-src/proj",
                 str(proj), "diff --git a/x b/x\n+y\n", ["b.php"],
             )
             self.assertEqual(applied, 2)  # 1 tracked-diff file + 1 untracked file
-            self.assertIn("a.php", mock_run.call_args_list[2][0][0][-1])
-            self.assertIn("b.php", mock_run.call_args_list[3][0][0][-1])
+            self.assertEqual(mock_run.call_args_list[2][0][0][:3], ["tar", "-czf", "-"])
+            self.assertIn("a.php", mock_run.call_args_list[2][0][0])
+            self.assertIn("b.php", mock_run.call_args_list[2][0][0])
+            mock_ssh_run.assert_called_once()
+            self.assertEqual(mock_ssh_run.call_args.kwargs["input_data"], b"archive")
 
     @patch("sandbox.core._remote.ssh_run")
     @patch("subprocess.run")
-    def test_scp_uses_custom_ssh_port(self, mock_run, mock_ssh_run):
+    def test_streamed_dirty_files_use_one_remote_session(self, mock_run, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as d:
             proj = Path(d)
             (proj / "b.php").write_text("y")
-            mock_run.return_value = _completed(returncode=0)
+            mock_run.return_value = _completed(returncode=0, stdout=b"archive")
             sr.apply_uncommitted(
                 {"ssh": "ubuntu@1.2.3.4:2222"},
                 "/home/ubuntu/sandbox/deploy-src/proj",
                 str(proj), "", ["b.php"],
             )
-            scp_args = mock_run.call_args[0][0]
-            self.assertIn("-P", scp_args)
-            self.assertIn("2222", scp_args)
-            self.assertIn("ubuntu@1.2.3.4:/home/ubuntu/sandbox/deploy-src/proj/b.php",
-                          scp_args)
+            tar_args = mock_run.call_args[0][0]
+            self.assertEqual(tar_args[:3], ["tar", "-czf", "-"])
+            self.assertIn("b.php", tar_args)
+            mock_ssh_run.assert_called_once()
+            self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", mock_ssh_run.call_args[0][1])
 
-    @patch("sandbox.core._remote.ssh_run")
+    @patch("sandbox.core._remote.ssh_run_batch")
     @patch("subprocess.run")
     def test_apply_removes_deleted_tracked_files(self, mock_run, mock_ssh_run):
         mock_run.side_effect = [
@@ -547,7 +551,7 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             "/local/proj", "diff --git a/gone.php b/gone.php\n", [],
         )
         self.assertEqual(applied, 1)
-        rm_cmd = mock_ssh_run.call_args[0][1]
+        rm_cmd = mock_ssh_run.call_args[0][1][0]
         self.assertIn("rm -f --", rm_cmd)
         self.assertIn("gone.php", rm_cmd)
 

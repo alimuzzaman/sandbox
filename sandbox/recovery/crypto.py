@@ -27,6 +27,8 @@ class GpgCrypto:
     def __init__(self, passphrase: str, *, executable: str = "gpg") -> None:
         if not passphrase:
             raise RecoveryError("recovery passphrase is unavailable", "missing_passphrase")
+        if any(char in passphrase for char in "\r\n\0"):
+            raise RecoveryError("recovery passphrase contains unsafe control text", "invalid_passphrase")
         self._passphrase = passphrase
         self.executable = executable
 

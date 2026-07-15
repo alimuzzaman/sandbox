@@ -154,9 +154,8 @@ def _upload_runtime_source(ssh_target: str) -> None:
             f"could not package the local sandbox runtime: "
             f"{tar_res.stderr.decode(errors='replace').strip()[:500]}"
         )
-    ssh_res = subprocess.run(
-        sr.ssh_command_args(ssh_target, remote_cmd),
-        input=tar_res.stdout, capture_output=True, text=False, timeout=300, check=False,
+    ssh_res = sr.ssh_process(
+        ssh_target, remote_cmd, input_data=tar_res.stdout, timeout=300,
     )
     if ssh_res.returncode != 0:
         detail = (ssh_res.stderr or ssh_res.stdout or b"").decode(errors="replace")

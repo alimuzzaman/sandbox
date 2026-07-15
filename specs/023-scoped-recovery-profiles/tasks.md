@@ -139,7 +139,7 @@
 - [X] T051 [US4] Implement conservative retention classification and plan/apply in `sandbox/recovery/retention.py`
 - [X] T052 [US4] Add protected CLI schedule/retention operations in `sandbox/commands/recovery.py`
 - [X] T053 [US4] Add protected MCP schedule/retention tools in `mcp/wp-server/tools/recovery.py`
-- [ ] T054 [US4] Verify schedule and retention plans remotely without activation/deletion in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T054 [US4] Verify schedule and retention plans remotely without activation/deletion in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 
 **Checkpoint**: Automation is implemented but remains disabled pending a verified real set and separate confirmation.
 
@@ -173,12 +173,12 @@
 - [X] T062 [P] Update recovery/module architecture and command references in `README.md`, `AGENTS.md`, `CLAUDE.md`, and `docs/sandbox-config-reference.md`
 - [X] T063 [P] Add recovery workflow guidance under `.agents/skills/` or `workflows/` and verify it calls only Sandbox commands
 - [X] T064 Add exact CLI/MCP inventories and no-central-growth guards in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_architecture_boundaries.py`
-- [ ] T065 Run focused recovery suites, full unit discovery, MCP tests, `./sb selftest`, `git diff --check`, and quickstart scenarios; record results in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
-- [ ] T066 Perform fresh correctness/regression review and separate security/data-loss review; resolve findings in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
-- [ ] T067 Re-run Spec-Kit analyze/converge and append any missing work to `specs/023-scoped-recovery-profiles/tasks.md`
-- [ ] T068 Prepare but do not apply the remote schedule activation plan in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T065 Run focused recovery suites, full unit discovery, MCP tests, `./sb selftest`, `git diff --check`, and quickstart scenarios; record results in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T066 Perform fresh correctness/regression review and separate security/data-loss review; resolve findings in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T067 Re-run Spec-Kit analyze/converge and append any missing work to `specs/023-scoped-recovery-profiles/tasks.md`
+- [X] T068 Prepare but do not apply the remote schedule activation plan in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T069 Prepare the legacy Drive deletion candidate plan only after T060 and leave apply blocked on explicit confirmation in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
-- [ ] T070 Confirm no production restore, deletion, schedule activation, public-access mutation, commit, or push occurred without its specific approval in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
+- [X] T070 Confirm no production restore, deletion, schedule activation, public-access mutation, commit, or push occurred without its specific approval in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T071 Apply the exact reviewed legacy Drive deletion plan after T060 using the user's explicit deletion authorization, verify only legacy objects were removed, and record evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 - [ ] T072 Activate the reviewed non-overlapping recovery schedule after T060 and T061 using the user's explicit scheduling authorization, monitor its first run, and record evidence in `specs/023-scoped-recovery-profiles/implementation-evidence.md`
 

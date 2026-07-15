@@ -27,6 +27,7 @@ class TestDrive(unittest.TestCase):
 
     def test_rclone_uses_copyto_and_rejects_bad_destination_or_key(self):
         with self.assertRaises(RecoveryError): RcloneDrive(RcloneRunner(), "not-a-remote")
+        with self.assertRaises(RecoveryError): RcloneDrive(RcloneRunner(), "gdrive:recovery/../outside")
         runner = RcloneRunner(); drive = RcloneDrive(runner, "gdrive:recovery")
         drive.put("sets/a/archive.bin", b"payload")
         self.assertEqual(runner.calls[0][0][:3], ("rclone", "copyto", "--immutable"))

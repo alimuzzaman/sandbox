@@ -21,6 +21,20 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_wordpress_only_legacy_commands_have_capability_gates(self):
+        import sandbox.cli as cli
+        self.assertEqual(cli.CLI_CAPABILITIES["wp"], "wordpress.cli")
+        self.assertEqual(cli.CLI_CAPABILITIES["snapshot"], "wordpress.snapshot")
+        self.assertEqual(cli.CLI_CAPABILITIES["shell"], "wordpress.exec")
+        self.assertNotIn("up", cli.CLI_CAPABILITIES)
+        self.assertNotIn("open", cli.CLI_CAPABILITIES)
+
+    def test_generic_init_types_are_parser_visible(self):
+        r = run_sb("init", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("astro", r.stdout)
+        self.assertIn("compose", r.stdout)
+
     def test_final_public_command_inventory_matches_the_owned_manifest(self):
         from sandbox.commands.manifest import load_builtin_commands, validate_builtin_command_coverage
         from sandbox.registry import COMMANDS, COMMAND_SPECS

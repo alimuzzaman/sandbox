@@ -28,6 +28,13 @@ def cmd_secure(cfg, args) -> None:
     install never does this — plain http needs no cert + never warns."""
     # Accept the instance as a positional (`./sb secure he`) or via --instance.
     name = getattr(args, "name", None) or args.resolved_instance
+    owner = registry_find_instance(name)
+    if owner and owner.get("kind") == "compose":
+        secured, result = secure_generic_instance(name)
+        if not secured:
+            die(result or f"could not secure generic instance '{name}'")
+        ok(f"{name} now serves {result}")
+        return
     inst = resolve_instances(cfg).get(name)
     if not inst:
         die(f"unknown instance '{name}'. Run: ./sb instances")

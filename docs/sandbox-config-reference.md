@@ -13,6 +13,40 @@ MCP-first model — `cd` into the plugin and the tools (or `sandbox init` /
 
 There is **no central catalog**; each plugin self-describes here.
 
+## Generic Compose projects
+
+For non-WordPress projects, set `kind` to `compose` (the aliases `php`, `js`,
+`javascript`, `node`, `docker`, `laravel`, `laravel-sail`, and `astro` are
+normalized to the same framework-neutral adapter). The project owns its
+Compose file and declares the public service and container port:
+
+```json
+{
+  "kind": "compose",
+  "framework": "laravel",
+  "compose": {
+    "file": "docker-compose.yml",
+    "service": "laravel.test",
+    "internal_port": 80,
+    "health_path": "/"
+  }
+}
+```
+
+The adapter supports `ensure`, `status`, `start`, `stop`, `logs`, bounded argv
+`exec`, `apply`, and non-destructive `destroy`. Sandbox writes only its
+loopback port overlay under `$SANDBOX_HOME/runtime/projects/<instance>/`; it
+does not rewrite the project's Compose file, infer or execute package scripts,
+or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
+database, Mailpit, WordPress filesystem, abilities, snapshots) fail before
+their side effects with a capability error.
+
+`sb init --type astro` is a convenience preset: it reads `package.json` and
+the lockfile/configuration without executing project code, then writes an
+explicit `sandbox.config.json` and `sandbox.compose.yml` for review. PHP,
+Node/JavaScript, Docker-native, Laravel/Sail, Astro, and similar projects use
+the same Compose adapter rather than separate framework runtimes.
+
 ## Resolution order
 
 The loader discovers the common project descriptor and selects `kind` **before**

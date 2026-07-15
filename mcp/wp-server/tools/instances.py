@@ -38,12 +38,11 @@ def register(server, dependencies: ToolDependencies) -> None:
 
 
 def ensure_instance(project_dir: str, label: str = "default", create: bool = False) -> dict:
-    """Ensure a sandbox WordPress instance exists for `project_dir`, creating it
-    on demand, and return {ok, instance, url, ports, status, root, source, label}.
+    """Ensure a configured project instance exists and return its kind-neutral record.
 
-    project_dir: the plugin's project root (or your cwd). The server reads its
-    sandbox.config.* / .wp-env.json, boots an instance keyed by that directory
-    + `label`, installs WordPress, wires the plugin, and records it.
+    WordPress projects retain their existing install/wiring behavior. Explicit
+    generic Compose projects use the framework-neutral adapter and return
+    kind/adapter/service/http_port/capability metadata without WordPress setup.
     **Call this FIRST** — other tools error until an instance exists. Idempotent:
     a ready (project, label) returns instantly; a cold boot pulls images +
     installs WP and can take ~1 minute.
@@ -95,6 +94,21 @@ def destroy_instance(project_dir: str, label: str | None = None) -> dict:
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
+    try:
+        root = str(_core().find_project_root(project_dir))
+        owner = _core().registry_get(root, label=label)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not resolve project owner: {exc}"}
+    if owner and owner.get("kind") == "compose":
+        try:
+            res = subprocess.run(
+                [str(SANDBOX_ROOT / "sb"), "instance", "delete", inst, "--yes"],
+                capture_output=True, text=True, timeout=120, cwd=str(SANDBOX_ROOT),
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "generic destroy timed out after 120s"}
+        return {"ok": res.returncode == 0, "instance": inst,
+                "kind": "compose", "output": (res.stdout or res.stderr).strip()[:2000]}
     sb = SANDBOX_ROOT / "sb"
     try:
         res = subprocess.run(
@@ -131,6 +145,13 @@ def recreate_instance(project_dir: str, label: str | None = None) -> dict:
                          f"Call ensure_instance(project_dir={project_dir!r}) first."}
     inst = existing["instance"]
     resolved_label = existing["label"]
+    if existing.get("kind") == "compose":
+        destroyed = destroy_instance(project_dir, resolved_label)
+        if not destroyed.get("ok"):
+            return destroyed
+        recreated = ensure_instance(project_dir, resolved_label, create=True)
+        recreated["recreated"] = bool(recreated.get("ok"))
+        return recreated
     # Snapshot the ports + server so ensure reuses them after destroy.
     saved_ports = {k: existing[k]
                    for k in ("wordpress_port", "db_port", "mailpit_port", "server")
@@ -219,6 +240,19 @@ def secure_instance(project_dir: str, label: str | None = None) -> dict:
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
+    try:
+        root = str(_core().find_project_root(project_dir))
+        owner = _core().registry_get(root, label=label)
+    except Exception:
+        owner = None
+    if owner and owner.get("kind") == "compose":
+        try:
+            ok, result = _core().secure_generic_instance(inst)
+        except Exception as exc:
+            return {"ok": False, "code": "proxy_error", "error": str(exc)}
+        if not ok:
+            return {"ok": False, "code": "proxy_error", "error": result}
+        return {"ok": True, "instance": inst, "kind": "compose", "url": result}
     sb = SANDBOX_ROOT / "sb"
     tld = (_load_sandbox_yml().get("instances", {}).get(inst, {}) or {}).get("tld") or PROXY_TLD
     try:

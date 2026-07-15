@@ -116,6 +116,8 @@ class TestMcpServerSplit(unittest.TestCase):
             ("ensure_instance", "project_dir"), ("destroy_instance", "project_dir"),
             ("recreate_instance", "project_dir"), ("setup_domains", ""),
             ("secure_instance", "project_dir"), ("apply_config", "project_dir"),
+            ("instance_status", "project_dir"), ("instance_logs", "project_dir"),
+            ("instance_exec", "command,project_dir"),
             ("wp_cli", "command,project_dir"), ("wp_exec", "command,project_dir"),
             ("wp_rest", "method,path,project_dir"), ("run_tests", "project_dir"),
             ("wp_cli_async", "command,project_dir"), ("wp_cli_job", "job_id,project_dir"),
@@ -141,6 +143,10 @@ class TestMcpServerSplit(unittest.TestCase):
             ("hermes_cron_list", "remote"), ("hermes_cron_validate", "remote"),
             ("hermes_cron_create", "prompt,remote,schedule"), ("hermes_cron_route", "job_id,remote"),
             ("hermes_cron_run", "job_id,remote"), ("hermes_cron_output", "job_id,remote"),
+            ("hermes_authorization_sync", "remote"), ("hermes_authorization_list", "remote"),
+            ("hermes_authorization_show", "remote,request_id"),
+            ("hermes_authorization_request", "job,reason,remote,replay_origin,scope"),
+            ("hermes_authorization_approve", "remote,request_id"),
             ("hermes_health", "remote"), ("hermes_worktree_list", "remote"),
             ("hermes_worktree_inspect", "name,remote"), ("hermes_worktree_preserve", "name,remote"),
             ("hermes_repo_sync", "remote,repo"), ("hermes_gateway_converge", "remote"),
@@ -151,7 +157,7 @@ class TestMcpServerSplit(unittest.TestCase):
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 75)
+        self.assertEqual(len(actual), 83)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

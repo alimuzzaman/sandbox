@@ -78,6 +78,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | Tool | Purpose |
 |---|---|
 | `ensure_instance` | Boot instance; returns URL. Call FIRST. |
+| `instance_status` / `instance_logs` / `instance_exec` | Runtime-neutral status, bounded logs, and argv execution for generic Compose instances. |
 | `destroy_instance` | Permanent delete (irreversible). |
 | `recreate_instance` | Destroy + clean WP install. |
 | `apply_config` | Reconcile config in place (no DB drop). |

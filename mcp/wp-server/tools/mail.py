@@ -10,13 +10,16 @@ import re as _re
 
 
 
-from app import _mailpit_url, _project_instance, _safe_json, mcp
+from app import _mailpit_url, _project_instance, _require_project_capability, _safe_json, mcp
 
 
 
 @mcp.tool()
 def mail_list(limit: int = 20, *, project_dir: str, label: str | None = None) -> dict:
     """List the most recent messages caught by Mailpit (test SMTP)."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.mail")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -32,6 +35,9 @@ def mail_list(limit: int = 20, *, project_dir: str, label: str | None = None) ->
 @mcp.tool()
 def mail_get(message_id: str, *, project_dir: str, label: str | None = None) -> dict:
     """Get a single message from Mailpit (headers, text, html)."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.mail")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

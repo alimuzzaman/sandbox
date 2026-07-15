@@ -4,9 +4,17 @@
 
 **Created**: 2026-07-12
 
-**Status**: Draft
+**Status**: Implementation in progress
 
 **Input**: User description: "Plan and specify Docker-backed Sandbox instances outside WordPress, using an Astro site as the immediate case, while checking the modularity of the whole Sandbox project and treating the work as an incremental side project rather than a dedicated rewrite."
+
+## Clarifications
+
+### Session 2026-07-16
+
+- Q: What must generic project instances support by default? → A: A framework-neutral local Compose runtime covering common PHP, JavaScript/Node, Docker, Laravel/Sail, Astro, and similar projects through one adapter.
+
+The generic runtime is therefore the default implementation path for explicitly configured non-WordPress projects. Framework recognition is limited to read-only metadata and configuration proposals; it must not select or execute arbitrary repository commands. Laravel/Sail, Astro, Node, PHP, and other stacks are Compose projects with different declared services, commands, ports, health checks, and optional persistent dependencies, not separate runtime adapters.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -91,6 +99,7 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 
 - **FR-001**: Sandbox MUST represent project kind explicitly and MUST treat existing configurations without a kind as WordPress for backward compatibility.
 - **FR-002**: Sandbox MUST support an explicitly configured generic Compose web-project kind with a declared Compose file, public service, internal port, and health probe.
+- **FR-002a**: The generic Compose adapter MUST support common PHP, JavaScript/Node, Docker-native, Laravel/Sail, Astro, and similar projects through the same descriptor and lifecycle contract; framework-specific behavior MUST remain configuration/preset metadata rather than a separate runtime branch.
 - **FR-003**: `sb ensure` and `ensure_instance` MUST resolve both WordPress and generic projects through the same canonical project-root registry without an implicit global or fallback instance.
 - **FR-004**: Sandbox MUST separate project display names from runtime-safe identifiers so names containing dots or other non-WordPress characters can be represented without weakening container, domain, or registry validation.
 - **FR-005**: Generic project execution MUST require explicit Sandbox configuration or an explicit initialization action; Sandbox MUST NOT execute merely discovered repository manifests as an automatic fallback.
@@ -100,6 +109,7 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 - **FR-009**: Generic cleanup MUST preserve source files and project-owned persistent data by default; any future destructive volume purge MUST be separately named and explicitly confirmed.
 - **FR-010**: Existing WordPress project configuration, instance naming, CLI behavior, MCP contracts, remote workflows, and live-stack behavior MUST remain backward compatible.
 - **FR-011**: Guided Astro initialization MUST write explicit, reviewable generic-project configuration and MUST use Astro only as a preset over the generic adapter.
+- **FR-011a**: Guided initialization MAY recognize PHP, JavaScript/Node, Laravel/Sail, Astro, and other common project markers to propose configuration, but MUST require explicit reviewable values for Compose file, service, command, port, bind address, and health path before boot.
 - **FR-012**: Astro initialization MUST validate or obtain the package command, package manager, internal port, bind behavior, and health path before the first boot.
 - **FR-013**: Runtime-specific validation, lifecycle operations, and capabilities MUST be behind an adapter boundary selected by project kind.
 - **FR-014**: Feature registration MUST allow touched CLI parser definitions, handlers, and MCP exposure to live with or beside their feature module rather than expanding the central CLI or MCP bootstrap.
@@ -124,6 +134,7 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 ### Measurable Outcomes
 
 - **SC-001**: A developer can initialize and boot the representative Astro site to a reachable clean URL in no more than two explicit commands after reviewing generated configuration.
+- **SC-001a**: A developer can use the same generic Compose lifecycle for representative PHP, JavaScript/Node, Docker-native, Laravel/Sail, and Astro fixtures without adding a framework-specific adapter or central runtime branch.
 - **SC-002**: Repeating ensure, stop/start, apply, and status operations three times each produces one registry identity, no orphaned Sandbox containers, and the same reachable project URL.
 - **SC-003**: All existing WordPress automated checks pass unchanged, and a live WordPress smoke scenario produces the same externally visible lifecycle and MCP results as before the feature.
 - **SC-004**: Every registered CLI command group and MCP tool group appears exactly once in the feature surface inventory with an ownership classification and generic-support decision.
@@ -134,7 +145,7 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 
 ## Assumptions
 
-- The MVP supports local Docker Compose projects; generic Herd, remote hosting/deploy, CI matrices, snapshot semantics, databases, mail capture, and framework presets other than Astro are out of scope.
+- The MVP supports local Docker Compose projects; generic Herd, remote hosting/deploy, CI matrices, snapshot semantics, databases, and mail capture are out of scope. PHP, JavaScript/Node, Docker-native, Laravel/Sail, Astro, and similar frameworks are supported through the generic adapter; convenience presets may be incremental.
 - Existing WordPress configuration remains the default when the project kind is omitted; migration is opt-in and no current plugin repository must change.
 - A generic project owns its application images, Compose services, dependency services, and named volumes. Sandbox owns only its registry record, generated overlay/runtime files, allocated host route, and proxy integration.
 - Initialization may inspect common Astro/package metadata but does not execute repository commands until the developer explicitly confirms or runs the resulting boot operation.

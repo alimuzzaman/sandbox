@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_BASENAMES = ("sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml")
+COMPOSE_KIND_ALIASES = frozenset({
+    "compose", "generic", "docker", "php", "javascript", "js", "node",
+    "laravel", "laravel-sail", "astro",
+})
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -31,5 +35,6 @@ def discover_project_kind(root: str | Path) -> str:
             kind = _load_mapping(path).get("kind", "wordpress")
             if not isinstance(kind, str) or not kind.strip():
                 raise ValueError("project kind must be a non-empty string")
-            return kind.strip().lower()
+            kind = kind.strip().lower()
+            return "compose" if kind in COMPOSE_KIND_ALIASES else kind
     return "wordpress"

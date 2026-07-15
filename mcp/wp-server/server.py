@@ -18,6 +18,12 @@ from dependencies import ToolDependencies
 from tools.manifest import built_in_tool_registry
 
 
+def _runtime_service():
+    from sandbox.application.context import runtime_service
+    from sandbox.core._config import load_config
+    return runtime_service(load_config())
+
+
 def _last_json(stdout: str) -> dict | None:
     for line in reversed((stdout or "").splitlines()):
         try:
@@ -61,6 +67,7 @@ built_in_tool_registry().compose(mcp, ToolDependencies({
     "resolve_instance": _resolve_instance,
     "safe_json": _safe_json,
     "site_url": _site_url,
+    "runtime_service": _runtime_service,
     "hermes_service": _HermesCommandAdapter(),
 }))
 

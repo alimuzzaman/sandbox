@@ -8,7 +8,7 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 
 
 BUILTIN_TOOL_GROUPS = (
-    "instances", "wp", "net", "data", "fs", "mail", "context", "cache",
+    "instances", "runtime", "wp", "net", "data", "fs", "mail", "context", "cache",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
     "plugin_check", "remote", "hermes", "recovery",
 )
@@ -21,6 +21,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
         "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
         "project_instance", "resolve_instance", "safe_json", "site_url",
     ),
+    "runtime": ("core", "project_instance", "runtime_service"),
     "hermes": ("hermes_service",),
 }
 
@@ -28,6 +29,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 # imports so duplicate ownership fails before FastMCP is initialized.
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
+    "runtime": ("instance_status", "instance_logs", "instance_exec"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),
     "data": ("db_query", "import_content", "wp_reset"),
@@ -43,7 +45,7 @@ BUILTIN_TOOL_NAMES = {
     "asyncjobs": ("async_job_status", "async_job_kill"),
     "plugin_check": ("run_plugin_check",),
     "remote": ("remote_deploy",),
-    "hermes": ("hermes_status", "hermes_run", "hermes_job_status", "hermes_job_kill", "hermes_cron_list", "hermes_cron_validate", "hermes_cron_create", "hermes_cron_route", "hermes_cron_run", "hermes_cron_output", "hermes_health", "hermes_worktree_list", "hermes_worktree_inspect", "hermes_worktree_preserve", "hermes_repo_sync", "hermes_gateway_converge", "hermes_cron_catalog", "hermes_cron_reconcile", "hermes_cron_verify"),
+    "hermes": ("hermes_status", "hermes_run", "hermes_job_status", "hermes_job_kill", "hermes_cron_list", "hermes_cron_validate", "hermes_cron_create", "hermes_cron_route", "hermes_cron_run", "hermes_cron_output", "hermes_authorization_sync", "hermes_authorization_list", "hermes_authorization_show", "hermes_authorization_request", "hermes_authorization_approve", "hermes_health", "hermes_worktree_list", "hermes_worktree_inspect", "hermes_worktree_preserve", "hermes_repo_sync", "hermes_gateway_converge", "hermes_cron_catalog", "hermes_cron_reconcile", "hermes_cron_verify"),
     "recovery": ("recovery_profiles", "recovery_plan", "recovery_list", "recovery_verify", "recovery_create", "recovery_restore_plan", "recovery_restore_apply", "recovery_schedule_plan", "recovery_retention_plan"),
 }
 

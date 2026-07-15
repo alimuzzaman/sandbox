@@ -47,6 +47,9 @@ def db_query(sql: str, mutate: bool = False, *, project_dir: str, label: str | N
 def import_content(seed_file: str, authors: str = "create",
                    *, project_dir: str, label: str | None = None) -> dict:
     """Import a WXR XML from runtime/seeds/. Pass just the filename."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -66,6 +69,9 @@ def wp_reset(confirm: bool = False, rebaseline: bool = False, *, project_dir: st
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.reset")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

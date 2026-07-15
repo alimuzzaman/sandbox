@@ -151,6 +151,11 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
 (An existing **`.wp-env.json`** is read as a fallback and converted on
 `sandbox init`. Full schema: [`docs/sandbox-config-reference.md`](docs/sandbox-config-reference.md).)
 
+Generic PHP, JavaScript/Node, Docker, Laravel/Sail, Astro, and similar projects
+can use the same framework-neutral Compose runtime by declaring `kind: compose`
+and their public service in `sandbox.config.json`. See the
+[generic Compose configuration reference](docs/sandbox-config-reference.md#generic-compose-projects).
+
 Then, from the plugin directory:
 
 ```bash

@@ -111,6 +111,8 @@ class SchedulePolicy:
     profiles: tuple[str, ...]
     calendar: str
     enabled: bool = False
+    randomized_delay: str = "15m"
+    timeout: str = "6h"
 
 
 @dataclass(frozen=True)

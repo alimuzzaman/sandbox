@@ -58,10 +58,17 @@ the `--control-host` DNS name to resolve to the VPS; Tailscale mode needs either
 Sandbox opportunistically reuses one authenticated OpenSSH connection for repeated
 SSH and SCP calls to the same endpoint. The control socket lives under the local
 Sandbox runtime with owner-only permissions, uses OpenSSH's endpoint hash rather
-than a readable host/user name, and expires after 60 idle seconds. Commands remain
+than a readable host/user name, and expires after 600 idle seconds. Commands remain
 independent: each keeps its own timeout, exit status, output handling, and
 confirmation gate. If local multiplexing state cannot be prepared, Sandbox makes
 one ordinary SSH connection; it never replays a command after launch.
+
+Runtime uploads and dirty-file deployment use one streamed archive/session where
+possible. This avoids one SSH channel for every `mkdir` and `scp`; the control
+master still provides safe opportunistic fallback when a socket disappears or
+the host is unavailable. Long-lived MCP HTTP access uses the remote server's
+HTTPS/Tailscale transport rather than an SSH tunnel; a tunnel would add
+forwarding lifecycle without reducing ordinary command-shell latency.
 
 Register the second MCP server in Claude Code:
 

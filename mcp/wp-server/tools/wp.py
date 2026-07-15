@@ -44,6 +44,9 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     container: 'wp' (default), 'db', 'wpcli', or 'mailpit'.
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.exec")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -70,6 +73,9 @@ def wp_rest(method: str, path: str, body: dict | None = None,
     Auth via Application Password — auto-provisioned when the instance installs.
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.rest")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -108,6 +114,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     Returns {ok, passed, summary, output}. This is live evidence — prefer it to
     asserting a fix works from code reading.
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -142,6 +151,9 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -161,6 +173,9 @@ def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_di
     (running|completed|not_found), exit_code?, stdout, bytes_read, truncated}.
     Advance `offset` by `bytes_read` to fetch only new output. limit=-1 = whole log.
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -179,6 +194,9 @@ def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_di
 def wp_cli_job_kill(job_id: str, *, project_dir: str, label: str | None = None) -> dict:
     """Cancel a running background wp-cli job (spec 004). No-op if already finished.
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

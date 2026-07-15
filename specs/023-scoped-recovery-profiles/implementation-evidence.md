@@ -59,7 +59,7 @@ Evidence command (local, fixture-only; no remote rclone or production profile in
 
 ```text
 python3 -m unittest discover -s tests -p 'test_recovery*.py'
-Ran 44 tests — OK
+Ran 55 tests — OK
 ```
 
 No production archive, Drive object, schedule, deletion, or restore has been created/applied. Remote profile materialization, disposable restore application, scheduler/retention, and fresh-server proof remain gated by their later tasks.
@@ -73,3 +73,86 @@ python3 -m unittest tests.test_recovery_restore tests.test_recovery_restore_appl
   tests.test_recovery_interfaces -q
 Ran 8 tests — OK
 ```
+
+## Schedule and retention read-only checkpoint
+
+Remote planning was verified against `scaleway-sandbox` without activation, deletion, or
+capture:
+
+```text
+./sb recovery profiles --remote scaleway-sandbox --json
+./sb recovery plan --remote scaleway-sandbox --json
+./sb recovery schedule --remote scaleway-sandbox --json
+./sb recovery retention --remote scaleway-sandbox --json
+```
+
+Results:
+
+- five catalog profiles were returned and the remote plan contained no secret values or file
+  contents;
+- the schedule rendered disabled systemd service/timer units with a non-blocking lock and a
+  15-minute randomized delay;
+- retention returned zero candidates, required confirmation, and protected no incomplete or
+  unverified objects;
+- no scheduler, Drive, filesystem, database, or production state was changed.
+
+## Validation and review checkpoint
+
+The canonical project environment passed the full local suite:
+
+```text
+.cli-venv/bin/python -m unittest discover -s tests -p 'test_*.py' -q
+Ran 676 tests in 37.071s — OK (skipped=1)
+./sb selftest
+Ran 676 tests in 37.120s — OK (skipped=1); selftest: passed
+python3 -m unittest discover -s tests -p 'test_recovery_*.py' -v
+Ran 55 tests — OK
+python3 -m unittest tests.test_mcp.TestMcpServerSplit -v
+Ran 2 tests — OK
+git diff --check
+```
+
+The MCP schema snapshot was refreshed to include the five committed Hermes authorization
+tools; the focused MCP registration tests and the full suite then passed. Correctness review
+covered catalog fail-closed validation, deterministic planning, archive/path confinement,
+credential-channel handling, manifest-last publication, restore checkpoints and rollback,
+schedule non-overlap, retention safety floors, CLI/MCP confirmation gates, and compatibility
+boundaries. Security/data-loss review found no unresolved issue in the local implementation.
+
+## Protected-operation boundary and prepared schedule plan
+
+No real recovery set has been created, no production restore or fresh-server drill has been
+applied, no legacy Drive object has been deleted, and no schedule or public-access mutation has
+been activated. The prepared schedule activation remains:
+
+1. create and verify one current-passphrase scoped set;
+2. complete the disposable fresh-server drill and acceptance checks;
+3. review the disabled units and exact profile selection;
+4. activate only after separate explicit scheduling approval;
+5. monitor the first run and record the result.
+
+The CLI continues to fail closed for protected actions until those prerequisites and
+confirmations exist. No commit or push was performed by this implementation pass.
+
+## Standards/convergence review
+
+The local implementation was reviewed against the current primary documentation for
+PostgreSQL logical dumps, MariaDB `--single-transaction` dumps, GnuPG loopback/passphrase-fd
+handling, GNU tar path/metadata controls, rclone immutable copy semantics, and Git bundle
+verification. The review confirmed the existing database, crypto, Drive, Git, and path
+confinement choices. It also found and fixed one convergence gap: scheduler policy inputs for
+randomized delay and timeout were accepted but discarded. `SchedulePolicy` now retains both
+values; the generated systemd timer uses the requested `RandomizedDelaySec`, and the service
+uses the requested `TimeoutStartSec`, with regression coverage in
+`tests/test_recovery_scheduler.py`.
+
+The same review also added fail-closed validation for systemd unit-field newlines/NULs,
+lowercase policy slugs, and systemd time-span values; the schedule renderer now accepts only
+the fixed recovery command and cannot interpolate arbitrary unit text.
+
+The final adapter review also rejects control characters in inherited GnuPG passphrases and
+path traversal in configured rclone destinations. Focused crypto/Drive/scheduler tests pass,
+and the full suite was rerun afterward.
+
+No new convergence tasks were required after that fix. The review did not activate any
+protected operation or change external state.

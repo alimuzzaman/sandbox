@@ -1,26 +1,49 @@
 """Non-overlapping recovery schedule planning; installation is deliberately separate."""
 from __future__ import annotations
 
+import re
+
 from .errors import RecoveryError
 from .models import SchedulePolicy
+
+_POLICY_ID = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+_TIME_SPAN = re.compile(
+    r"^[0-9]+(?:us|ms|s|min|h|d|w|m)(?:[ \t]+[0-9]+(?:us|ms|s|min|h|d|w|m))*$"
+)
+
+
+def _validate_unit_value(value: str, field: str, *, time_span: bool = False) -> str:
+    if not value or any(char in value for char in "\r\n\0"):
+        raise ValueError(f"schedule {field} contains unsafe unit text")
+    if time_span and not _TIME_SPAN.fullmatch(value):
+        raise ValueError(f"schedule {field} is not a valid systemd time span")
+    return value
 
 
 def build_schedule_policy(policy_id: str, profiles: tuple[str, ...], calendar: str, *,
                           randomized_delay: str = "15m", timeout: str = "6h") -> SchedulePolicy:
     if not policy_id or not profiles or not calendar or not randomized_delay or not timeout:
         raise ValueError("schedule policy requires id, profiles, calendar, delay, and timeout")
-    return SchedulePolicy(policy_id, profiles, calendar, enabled=False)
+    if not _POLICY_ID.fullmatch(policy_id):
+        raise ValueError("schedule policy id must be a lowercase slug")
+    _validate_unit_value(calendar, "calendar")
+    _validate_unit_value(randomized_delay, "randomized delay", time_span=True)
+    _validate_unit_value(timeout, "timeout", time_span=True)
+    return SchedulePolicy(policy_id, profiles, calendar, enabled=False,
+                          randomized_delay=randomized_delay, timeout=timeout)
 
 
 def render_systemd_units(policy: SchedulePolicy, command: str = "sb recovery create") -> dict[str, str]:
-    if "\n" in command or not command.startswith("sb recovery create"):
+    if any(char in command for char in "\r\n\0") or command != "sb recovery create":
         raise RecoveryError("recovery schedule command is invalid", "invalid_schedule_command")
     name = f"sandbox-recovery-{policy.policy_id}"
     service = "\n".join(("[Unit]", "Description=Sandbox scoped recovery capture", "",
                            "[Service]", "Type=oneshot", "UMask=0077",
+                           f"TimeoutStartSec={policy.timeout}",
                            f"ExecStart=/usr/bin/flock -n %t/{name}.lock {command}", ""))
     timer = "\n".join(("[Unit]", "Description=Schedule scoped recovery capture", "",
-                         "[Timer]", f"OnCalendar={policy.calendar}", "RandomizedDelaySec=15m",
+                         "[Timer]", f"OnCalendar={policy.calendar}",
+                         f"RandomizedDelaySec={policy.randomized_delay}",
                          "Persistent=true", "", "[Install]", "WantedBy=timers.target", ""))
     return {"service": service, "timer": timer, "enabled": "false"}
 

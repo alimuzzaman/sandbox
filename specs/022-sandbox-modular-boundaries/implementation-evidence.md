@@ -1517,3 +1517,103 @@ its port-conflict fixture adjusted only ignored machine-local `sandbox.local.yml
 Final status/path checks found no `runtime/wp/` or `vendor/` diff. No local/domain
 fixture, public route, external gateway, remote access/configuration, recovery
 operation, restore, delete, commit, push, `runtime/wp/`, or `vendor/` action occurred.
+
+## Remote SSH latency increment — 2026-07-16
+
+The remote control path already used OpenSSH connection multiplexing, but the
+idle master lifetime was only 60 seconds and the runtime-upload path bypassed
+the shared SSH wrapper. The implementation now keeps the control master for a
+bounded 600 seconds, uses `ServerAliveInterval=30` with three missed probes,
+limits connection attempts to one, and routes streamed runtime uploads through
+the same multiplexed helper. Dirty deploy files are packaged once and extracted
+in one remote session instead of one mkdir plus SCP session per file; deleted
+files are removed in one `sh -s` batch.
+
+This follows OpenSSH's documented `ControlMaster`/`ControlPersist` semantics
+and the native OpenSSH strategy documented by Ansible. A tunnel was not added:
+it is appropriate for a long-lived HTTP/control endpoint, but it does not
+remove the per-command remote-shell channel cost and would add lifecycle and
+port-forwarding state to ordinary SSH operations.
+
+Evidence:
+
+```text
+./.cli-venv/bin/python -m unittest -q tests.test_remote
+Ran 75 tests — OK
+
+./sb remote list --json
+ok=true; hermes-acceptance reachable=true; scaleway-sandbox reachable=true
+
+three `ssh_run(..., "true")` probes per configured remote
+hermes-acceptance: [2135.1, 651.6, 808.5] ms
+scaleway-sandbox:   [665.4, 408.6, 404.2] ms
+```
+
+The first probe includes connection establishment; later probes reuse the
+control socket. The remaining ~400–800 ms reflects remote command/network
+latency rather than repeated authentication. No SSH target, credential, or
+remote command output was recorded.
+
+## Non-destructive remote/Hermes acceptance — 2026-07-16
+
+Focused state/routing/jobs/gateway/backup/service tests passed in the 139-test
+focused run above. Read-only remote replay also passed for both configured
+targets with `./sb remote list --json`; the `hermes-acceptance` target returned
+configured status, zero running sessions, clean worktrees, valid zero-job cron,
+`job status` returned the expected `not_found` contract for a synthetic ID, and
+backup list returned the existing manifest inventory without mutation.
+
+The gateway plan correctly reported a real external acceptance blocker: the
+remote currently has a conflicting unmanaged gateway process and no active
+managed unit. `hermes gateway converge --plan` returned the exact actions and
+`requires_confirm=true`; no converge/apply was run because it would mutate an
+external VPS service. T086/T099 therefore remain open pending the explicit
+external authorization gate, while the read-only contract evidence is recorded.
+
+Local WordPress parity also passed non-destructively: `ensure --json` returned
+the existing `https://sandbox.tst` identity, `down → up → apply --project-dir`
+completed with the same ports/URL, `status` reported healthy `wp`, `nginx`,
+`db`, and `mailpit`, and `https://sandbox.tst/wp-json/` returned HTTP 200.
+
+## Focused Hermes and recovery-boundary verification — 2026-07-16
+
+`.cli-venv/bin/python -m unittest -q tests.test_remote tests.test_hermes
+tests.test_hermes_catalog_integrity tests.test_hermes_gateway
+tests.test_hermes_state tests.test_hermes_backup tests.test_hermes_jobs
+tests.test_hermes_routing tests.test_hermes_service
+tests.test_hermes_dashboard_authorizations tests.test_recovery_catalog
+tests.test_recovery_crypto tests.test_recovery_drive
+tests.test_recovery_scheduler` — 279 tests passed. Negative tests emitted
+expected CLI validation messages; no restore application or deletion ran.
+
+`sandbox/hermes/backup.py` depends only on standard-library validation/types and
+the injected `ArtifactStore` protocol. Its create/list/verify, retention,
+restore-plan, and manifest behavior are covered without remote, Drive,
+scheduler, or runtime imports. The scoped recovery boundary is therefore
+specified by this module plus shared injected service contracts.
+## WordPress live quickstart replay and deletion-path repair — 2026-07-16
+
+- `./sb ensure --json` twice returned the same ready `sandbox` identity,
+  ports, and `https://sandbox.tst` URL. `./sb status` showed healthy db,
+  mailpit, nginx, and wp services. `./sb wp core version` returned `7.0.1`.
+- HTTPS REST probes before and after lifecycle returned HTTP 200. The focused
+  live sandbox suite passed 76 tests. `down → up → apply --project-dir` kept
+  the same instance identity/ports/URL and completed without a DB reset.
+  `./sb snapshots` listed existing snapshots read-only.
+- A disposable labeled instance was created and then deleted by its exact
+  instance name. During the first cleanup attempt, the command was invoked
+  with the default instance name plus a label; the CLI ignored that label and
+  deleted the existing default `sandbox` instance. This exposed a missing
+  explicit `compose_file` import in the recently modularized delete path and
+  an unsafe test invocation. The import was restored, the disposable instance
+  was deleted correctly, and the default instance was recreated and verified
+  healthy with HTTPS REST HTTP 200. No external/remote state was touched.
+- Post-repair verification: `python3 -m unittest discover -s tests -q` — 686
+  passed, `./sb selftest` — passed, and `git diff --check` — passed. The
+  default instance's prior local database/snapshot contents were not
+  recoverable from the recreated runtime; this is recorded as residual local
+  state risk rather than claimed as parity.
+- A regression guard now asserts that `instances_cmd` explicitly exposes the
+  canonical `compose_file` resolver after wildcard-import removal; the focused
+  post-fix pass (`tests.test_modularity`, CLI, generic Compose, and Sandbox)
+  passed 102 tests.

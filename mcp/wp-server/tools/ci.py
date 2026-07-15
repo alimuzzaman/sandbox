@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from app import SANDBOX_ROOT, _safe_json, mcp
+from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
 
 
 @mcp.tool()
@@ -85,6 +85,9 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     exit_code, url, warning, output, error}], neutralized:[...],
     summary:{cells, passed, failed}} — or {ok, job_id} when async_=true.
     """
+    capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
+    if capability_error:
+        return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "ci", "run", workflow, "--project-dir", project_dir, "--json"]
     for j in (jobs or []):

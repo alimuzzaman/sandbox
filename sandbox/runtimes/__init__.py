@@ -15,15 +15,23 @@ from .base import (
     SchemaSpec,
 )
 from .registry import wordpress_registry
+from .wordpress import WordPressAdapter
+from .compose import ComposeAdapter
 
 
-def builtin_adapter_registry(operations: Mapping[str, Callable]) -> AdapterRegistry:
-    """Register only adapters implemented in this increment.
-
-    Compose remains deliberately unregistered until its validated adapter exists;
-    callers receive the structured unsupported-kind result instead of a fallback.
-    """
-    return wordpress_registry(operations)
+def builtin_adapter_registry(operations: Mapping[str, Callable], *, compose=None) -> AdapterRegistry:
+    """Compose the shipped adapters in deterministic, feature-owned order."""
+    registry = AdapterRegistry()
+    registry.register(
+        "wordpress", WordPressAdapter(operations), kinds=("wordpress",),
+        owner="sandbox.runtimes.wordpress", order=10,
+    )
+    if compose is not None:
+        registry.register(
+            "compose", compose, kinds=("compose",),
+            owner="sandbox.runtimes.compose", order=20,
+        )
+    return registry
 
 
 __all__ = [

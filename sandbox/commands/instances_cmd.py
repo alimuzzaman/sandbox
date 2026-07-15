@@ -15,10 +15,18 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 
-from sandbox.core import *  # noqa: F401,F403
+from sandbox.core import (
+    CONFIG_LOCAL, ROOT, RUNTIME_DIR, _cert_paths, _core, _herd,
+    _herd_tests_db, _hosts_edit, _local_yaml, _provision_test_harness,
+    _valet_proxy_active, _write_local_yaml, active_project_file,
+    collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
+    focus_file, info, load_config, ok, proxy_available, regen_caddyfile,
+    reload_proxy, resolve_instances, snapshots_dir, valet_proxy_remove, wp_dir,
+    wpcli,
+)
 
 from sandbox.registry import register
-from sandbox.application.context import wordpress_runtime_service
+from sandbox.application.context import runtime_service, wordpress_runtime_service
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -93,9 +101,12 @@ def cmd_ensure(cfg, args) -> None:
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")
-        print(f"  ports:   WP={entry['wordpress_port']} "
-              f"DB={entry['db_port']} mail={entry['mailpit_port']}")
-        print(f"  server:  {entry['server']}  (source: {entry.get('source')})")
+        if entry.get("kind") == "compose":
+            print(f"  kind:    compose  service={entry.get('service')} http={entry.get('http_port')}")
+        else:
+            print(f"  ports:   WP={entry['wordpress_port']} "
+                  f"DB={entry['db_port']} mail={entry['mailpit_port']}")
+            print(f"  server:  {entry['server']}  (source: {entry.get('source')})")
 
 def cmd_init(cfg, args) -> None:
     """`./sb init [--project-dir DIR] [--force] [--no-test-harness]` — turn a
@@ -104,8 +115,42 @@ def cmd_init(cfg, args) -> None:
     regenerates the same native file), boot its per-directory instance
     (create-if-missing), and provision the phpunit test harness. From a bare
     checkout to a running, testable stack."""
-    sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
+    sc = _core()
+    requested_type = getattr(args, "type", None)
+    project_root = Path(pd).expanduser().resolve()
+    if requested_type and not any((project_root / name).exists() for name in sc.CONFIG_BASENAMES):
+        if requested_type == "astro":
+            from sandbox.runtimes.presets import propose_astro
+            propose_astro(project_root)
+            ok("wrote reviewable Astro Compose and Sandbox configuration")
+            requested_type = None
+        compose_file = next((project_root / name for name in ("compose.yaml", "compose.yml", "docker-compose.yml") if (project_root / name).exists()), None)
+        if requested_type and compose_file is None:
+            die("generic initialization requires an existing compose.yaml, compose.yml, or docker-compose.yml; no project command was guessed")
+        if requested_type:
+            import yaml
+            document = yaml.safe_load(compose_file.read_text()) or {}
+            services = document.get("services") if isinstance(document, dict) else None
+            if not isinstance(services, dict) or not services:
+                die("generic initialization found no Compose services")
+            preferred = ("web", "app", "laravel.test", "node", "frontend")
+            service = next((name for name in preferred if name in services), next(iter(services)))
+            service_doc = services.get(service) or {}
+            ports = service_doc.get("expose") or service_doc.get("ports") or []
+            internal_port = 80
+            if ports:
+                raw = ports[0]
+                raw = raw.get("target") if isinstance(raw, dict) else str(raw).split(":")[-1].split("/")[0]
+                try:
+                    internal_port = int(raw)
+                except (TypeError, ValueError):
+                    pass
+            config = {"kind": "compose", "framework": requested_type,
+                      "compose": {"file": compose_file.name, "service": service,
+                                   "internal_port": internal_port, "health_path": "/"}}
+            (project_root / "sandbox.config.json").write_text(json.dumps(config, indent=2) + "\n")
+            ok(f"wrote sandbox.config.json for generic {requested_type} project")
     try:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:
@@ -114,6 +159,18 @@ def cmd_init(cfg, args) -> None:
     base_source = pconf["source"].split("+")[0]   # drop any "+override" suffix
     has_native = base_source in sc.CONFIG_BASENAMES
     force = getattr(args, "force", False)
+
+    if pconf.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(
+            project_root=str(root), operation="ensure", label="default",
+            arguments={"create": True},
+        ))
+        if isinstance(result, OperationError):
+            die(result.message)
+        entry = dict(result.data)
+        ok(f"generic instance '{entry['instance']}' ready at {entry['url']}")
+        print(f"  project: {entry['root']}\n  service: {entry['service']}\n  framework: {entry.get('framework') or 'compose'}")
+        return
 
     # 1. Ensure a native config exists (don't clobber unless --force).
     if has_native and not force:
@@ -176,6 +233,16 @@ def cmd_instance(cfg, args) -> None:
     if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name or ""):
         die("instance name must be lowercase, start with [a-z0-9], "
             "and contain only [a-z0-9_-] (max 31 chars)")
+
+    owner = _core().registry_find_instance(name)
+    if owner and owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], "destroy", label=owner.get("label", "default"),
+        ))
+        if isinstance(result, OperationError):
+            die(result.message)
+        ok(f"Generic instance '{name}' deleted without removing project volumes.")
+        return
 
     # delete
     instances = resolve_instances(cfg)

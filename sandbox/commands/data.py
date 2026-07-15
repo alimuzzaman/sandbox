@@ -135,6 +135,9 @@ def capture_install_full_snapshot(inst: str, force: bool = False) -> None:
 
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance
+    error = preflight_instance_capability(cfg, inst, "wordpress.restore")
+    if error is not None:
+        die(error.message)
     if _is_herd_instance(inst):
         die("snapshots aren't supported on herd (host) instances yet — "
             "use `./sb wp db export` / `db import` directly")
@@ -179,6 +182,9 @@ def cmd_reset(cfg, args) -> None:
     in-place DB rollback (keeps uploads, containers, ports). `--rebaseline`
     re-captures the baseline from the current DB instead of restoring."""
     inst = args.resolved_instance
+    error = preflight_instance_capability(cfg, inst, "wordpress.reset")
+    if error is not None:
+        die(error.message)
     if _is_herd_instance(inst):
         die("reset isn't supported on herd instances yet")
     snap_root = snapshots_dir(inst)
@@ -224,6 +230,9 @@ def cmd_snapshots(cfg, args) -> None:
 
 def cmd_clean(cfg, args) -> None:
     inst = args.resolved_instance
+    error = preflight_instance_capability(cfg, inst, "wordpress.cli")
+    if error is not None:
+        die(error.message)
     if not args.yes:
         ans = input(f"This deletes the DB volume for instance '{inst}'. "
                     f"Continue? [y/N] ").lower()

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from .descriptors import _load_mapping
 
 
 class ComposeSchemaProvider:
     """Normalize the small, explicit Compose project descriptor."""
 
     def resolve(self, root: Path, *, label: str | None = None) -> dict:
-        document = json.loads((root / "sandbox.config.json").read_text())
+        config_path = next((root / name for name in ("sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml") if (root / name).exists()), None)
+        if config_path is None:
+            raise ValueError("generic Compose project requires sandbox.config.json or sandbox.config.yml")
+        document = _load_mapping(config_path)
         if label:
-            override = root / f"sandbox.config.{label}.json"
-            if override.exists():
-                document["compose"] = {**document.get("compose", {}), **json.loads(override.read_text()).get("compose", {})}
+            override = next((root / f"sandbox.config.{label}{suffix}" for suffix in (".json", ".yml", ".yaml") if (root / f"sandbox.config.{label}{suffix}").exists()), None)
+            if override is not None:
+                override_doc = _load_mapping(override)
+                document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
@@ -33,6 +38,9 @@ class ComposeSchemaProvider:
             raise ValueError("compose internal_port must be a valid port")
         if not isinstance(health_path, str) or not health_path.startswith("/"):
             raise ValueError("compose health_path must start with /")
-        return {"kind": "compose", "compose_file": str(path), "service": service,
+        return {"kind": "compose", "framework": document.get("framework") or document.get("preset"),
+                "compose_file": str(path), "service": service,
                 "internal_port": port, "health_path": health_path,
-                "display_name": root.name, "label": label or "default"}
+                "http_port": compose.get("http_port"),
+                "display_name": root.name, "label": label or "default",
+                "root": str(root), "source": config_path.name}

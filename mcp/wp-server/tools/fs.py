@@ -10,7 +10,7 @@ import re as _re
 
 
 
-from app import _log_path, _project_instance, _safe_resolve, _wp_root, mcp
+from app import _log_path, _project_instance, _require_project_capability, _safe_resolve, _wp_root, mcp
 
 
 
@@ -22,6 +22,9 @@ def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str, label: 
     wp-content/debug-dump.log, spec 007), or 'qm' (Query Monitor capture →
     wp-content/qm.jsonl, spec 007).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.files")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -50,6 +53,9 @@ def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str, label: str
     Refuses paths that escape the WP root.
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.files")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -80,6 +86,9 @@ def fs_write(path: str, content: str, create_dirs: bool = True,
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.files")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -96,6 +105,9 @@ def fs_write(path: str, content: str, create_dirs: bool = True,
 @mcp.tool()
 def fs_list(path: str = "", depth: int = 1, *, project_dir: str, label: str | None = None) -> dict:
     """List files under the project instance's WP install. depth=1 is shallow."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.files")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

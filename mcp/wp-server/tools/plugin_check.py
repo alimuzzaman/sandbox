@@ -5,6 +5,15 @@ import subprocess
 from app import SANDBOX_ROOT, _safe_json, mcp
 
 
+def _capability_error(project_dir: str, capability: str):
+    """Keep legacy isolated app fakes import-compatible during migration."""
+    try:
+        from app import _require_project_capability
+    except ImportError:
+        return None
+    return _require_project_capability(project_dir, None, capability)
+
+
 def _plugin_check_error(message: str, *, action: str = "check",
                         code: int | None = None) -> dict:
     result = {
@@ -46,6 +55,9 @@ def run_plugin_check(project_dir: str, update: bool = False) -> dict:
     true when the gate passes (or `update` succeeds); `violations` is only
     populated on a gate failure.
     """
+    capability_error = _capability_error(project_dir, "wordpress.cli")
+    if capability_error:
+        return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "plugin-check", "--project-dir", project_dir, "--json"]
     if update:

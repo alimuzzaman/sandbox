@@ -99,7 +99,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
     _RKEYS = ("wordpress_port", "db_port", "mailpit_port", "server", "domain")
     try:
         reg = {e["instance"]: e for e in _core().registry_all().values()
-               if e.get("instance")}
+               if e.get("instance") and e.get("kind") != "compose"}
     except Exception:
         reg = {}
     reg_names = set(reg) or set(instances or {})
@@ -834,3 +834,19 @@ def _instance_running(name: str) -> bool:
         if row.get("Service") == "wp" and row.get("State") == "running":
             return True
     return False
+def registry_all() -> dict:
+    """Compatibility facade for the typed project registry."""
+    import sandbox_core as sc
+    return sc.registry_all()
+
+
+def registry_find_instance(instance_name: str) -> dict | None:
+    """Compatibility facade for reverse instance ownership lookup."""
+    import sandbox_core as sc
+    return sc.registry_find_instance(instance_name)
+
+
+def registry_put(root, label="default", **fields) -> dict:
+    """Compatibility facade for updating one typed registry record."""
+    import sandbox_core as sc
+    return sc.registry_put(root, label=label, **fields)

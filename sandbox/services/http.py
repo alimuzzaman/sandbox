@@ -11,5 +11,5 @@ class UrlHttpProbe:
         try:
             with urllib.request.urlopen(url, timeout=timeout) as response:
                 return 200 <= response.status < 400
-        except (urllib.error.URLError, TimeoutError, ValueError):
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             return False

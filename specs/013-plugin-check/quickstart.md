@@ -11,7 +11,7 @@ HOME_DIR=<session-scratchpad>/plugin-check-home
 mkdir -p "$SCRATCH"
 cat > "$SCRATCH/sandbox.config.json" << 'EOF'
 {
-  "slug": "plugin-check-proj",
+  "slug": "plugin-check",
   "plugins": {"plugin-check": true}
 }
 EOF

@@ -2,7 +2,7 @@ from __future__ import annotations
 import base64
 import json
 
-from app import _project_instance, _wpcli, mcp
+from app import _project_instance, _require_project_capability, _wpcli, mcp
 
 
 @mcp.tool()
@@ -17,6 +17,9 @@ def wp_eval_live(code: str, *, project_dir: str, label: str | None = None) -> di
 
     project_dir: the plugin project to target (call ensure_instance first).
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.abilities")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

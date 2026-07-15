@@ -57,14 +57,21 @@ def audit_metrics() -> dict[str, int]:
 
 
 class TestModularityInventory(unittest.TestCase):
+    def test_instance_delete_declares_legacy_compose_helper(self):
+        # The delete compatibility path still needs the canonical compose-file
+        # resolver after wildcard imports are removed from instances_cmd.
+        import sandbox.commands.instances_cmd as instances_cmd
+
+        self.assertTrue(callable(instances_cmd.compose_file))
+
     def test_pre_generic_project_inventory_is_explicit(self):
         self.assertEqual(
             audit_metrics(),
             {
                 "cli_commands": 68,
                 "mcp_tools": 50,
-                "wildcard_imports": 23,
-                "runtime_kind_branches": 25,
+                "wildcard_imports": 20,
+                "runtime_kind_branches": 41,
             },
         )
 

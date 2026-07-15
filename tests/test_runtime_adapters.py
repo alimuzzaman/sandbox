@@ -2,6 +2,14 @@ import unittest
 
 
 class TestRuntimeAdapters(unittest.TestCase):
+    def test_feature_owned_compose_adapter_can_be_discovered_without_cli_edit(self):
+        from sandbox.runtimes import builtin_adapter_registry
+
+        compose = object()
+        registry = builtin_adapter_registry({"status": lambda request: {"ok": True}}, compose=compose)
+        self.assertIs(registry.for_kind("compose").adapter, compose)
+        self.assertEqual(registry.for_kind("compose").owner, "sandbox.runtimes.compose")
+
     def test_builtin_registration_selects_wordpress_and_leaves_compose_unregistered(self):
         from sandbox.runtimes import builtin_adapter_registry
 

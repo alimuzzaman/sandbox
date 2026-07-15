@@ -192,7 +192,7 @@
 - [X] T071 [P] [US6] Implement the allowed-root/artifact path policy in `sandbox/services/paths.py`
 - [X] T072 [US6] Implement the proxy route plan/apply/remove/rollback adapter over existing Caddy/domain behavior in `sandbox/services/proxy.py`
 - [X] T073 [US6] Inject services into the runtime composition root and migrated WordPress paths without moving WordPress-specific policy in `sandbox/application/context.py` and focused `sandbox/core/` callers
-- [ ] T074 [US6] Run service failure tests plus live domain/HTTPS/lifecycle parity and append redaction/rollback evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [x] T074 [US6] Run service failure tests plus live domain/HTTPS/lifecycle parity and append redaction/rollback evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 
 **Checkpoint**: Generic and recovery features can orchestrate safe mechanisms without importing WordPress policy.
 
@@ -218,7 +218,7 @@
 - [X] T081 [US7] Extract Hermes state models, validation, atomic persistence, and corruption reporting into `sandbox/hermes/state.py`
 - [X] T082 [US7] Extract side-effect-free target resolution and routing policy into `sandbox/hermes/routing.py`
 - [X] T083 [US7] Extract run/worktree process coordination, status, cancellation, and cleanup into `sandbox/hermes/jobs.py`
-- [ ] T084 [US7] Run focused state/routing/jobs tests and remote status/job lifecycle parity; record pre-gateway evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [x] T084 [US7] Run focused state/routing/jobs tests and remote status/job lifecycle parity; record pre-gateway evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 - [X] T085 [US7] Extract gateway/public endpoint/tunnel/route/auth-related plan and reversible operations into `sandbox/hermes/gateway.py`
 - [ ] T086 [US7] Run gateway tests and verify `hermes.asb.bd` authentication, route, WebSocket reconnect, and no-exposure-drift behavior through Sandbox commands; record evidence
 - [X] T087 [US7] Extract existing artifact create/list/integrity behavior and non-mutating restore planning into `sandbox/hermes/backup.py`
@@ -227,8 +227,8 @@
 - [X] T090 [US7] Route CLI Hermes handlers through the facade in `sandbox/commands/hermes.py`
 - [X] T091 [US7] Route MCP Hermes tools through explicit service dependencies in `mcp/wp-server/tools/hermes.py`
 - [X] T092 [US7] Add a facade ledger with owner, consumers, rollback, tests, and removal gates in `specs/022-sandbox-modular-boundaries/compatibility-facades.md`
-- [ ] T093 [US7] Run the complete focused Hermes suite and existing local/remote acceptance checks without restore application or deletion; append exact evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
-- [ ] T094 [US7] Verify scoped recovery can be specified solely against `sandbox/hermes/backup.py` and shared service contracts, documenting any remaining blocker in implementation evidence
+- [x] T093 [US7] Run the complete focused Hermes suite and existing local/remote acceptance checks without restore application or deletion; append exact evidence to `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
+- [x] T094 [US7] Verify scoped recovery can be specified solely against `sandbox/hermes/backup.py` and shared service contracts, documenting any remaining blocker in implementation evidence
 
 **Checkpoint**: Recovery policy can be added without modifying unrelated Hermes state/routing/jobs/gateway internals.
 
@@ -245,7 +245,7 @@
 - [X] T095 [P] [US8] Add final exact CLI/MCP inventory and compatibility assertions in `tests/test_cli.py`, `tests/test_mcp.py`, and composition suites
 - [X] T096 [P] [US8] Add final config/registry/facade compatibility matrix tests in `tests/test_project_config.py`, `tests/test_sandbox.py`, and new facade suites
 - [X] T097 [P] [US8] Add final WordPress runtime, remote, and Hermes facade regression tests in `tests/test_runtime_service.py`, `tests/test_remote.py`, and `tests/test_hermes_service.py`
-- [ ] T098 [US8] Run every WordPress scenario in `quickstart.md` on the live stack through Sandbox tools and record exact results
+- [X] T098 [US8] Run every WordPress scenario in `quickstart.md` on the live stack through Sandbox tools and record exact results
 - [ ] T099 [US8] Run every remote/Hermes scenario in `quickstart.md` through Sandbox commands/MCP and record exact results without destructive restore or deletion
 - [X] T100 [US8] Run all registry/state failure-injection scenarios against copied/disposable state and record recovery evidence in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`
 - [X] T101 [US8] Review and resolve every unexplained baseline drift or document return to the prior facade path in `specs/022-sandbox-modular-boundaries/implementation-evidence.md`

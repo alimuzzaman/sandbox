@@ -113,7 +113,7 @@ repositories, backups, or loopback/SSH dashboard access.
 
 - [x] T026 Update `docs/hermes-agent.md` and `README.md` with plan/review/apply, MFA, optional Basic Auth, SSH fallback, and emergency containment guidance.
 - [x] T027 Run focused and full unit suites plus `git diff --check`; record sanitized evidence in `specs/019-hermes-public-access/quickstart.md`.
-- [ ] T028 Execute the separately approved live remote/edge acceptance only after explicit Cloudflare/VPS authorization; otherwise record it as pending in `specs/019-hermes-public-access/quickstart.md`.
+- [X] T028 Execute the separately approved live remote/edge acceptance only after explicit Cloudflare/VPS authorization; otherwise record it as pending in `specs/019-hermes-public-access/quickstart.md`.
 
 ## Dependencies & Execution Order
 

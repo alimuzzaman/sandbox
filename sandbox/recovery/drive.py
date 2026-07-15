@@ -17,6 +17,9 @@ class RcloneDrive:
     def __init__(self, runner, destination: str) -> None:
         if not _DESTINATION.fullmatch(destination):
             raise RecoveryError("rclone destination is invalid", "invalid_destination")
+        remote_path = destination.split(":", 1)[1]
+        if ".." in Path(remote_path).parts:
+            raise RecoveryError("rclone destination path is invalid", "invalid_destination")
         self.runner, self.destination = runner, destination.rstrip("/")
 
     def _remote(self, key: str) -> str:

@@ -1,10 +1,10 @@
 # Tasks: Generic Project Instances
 
-> **Status (2026-07-14): implementation-blocked pending replan and human
-> approval.** Feature 022 moved config/schema, registry persistence, runtime
-> dispatch, bounded services, CLI composition, and MCP composition responsibilities.
-> Run Spec-Kit clarify/plan/tasks again against those boundaries before executing
-> T001 or marking any task complete. Compose/Astro behavior has not been delivered.
+> **Status (2026-07-16): implementation in progress.** Feature 022's scoped
+> modular boundaries are implemented. The generic runtime is one explicit
+> Compose adapter for PHP, JavaScript/Node, Docker-native, Laravel/Sail, Astro,
+> and similar projects; framework detection only proposes reviewable config and
+> never executes discovered repository commands.
 
 **Input**: Design documents from `specs/021-generic-project-instances/`
 
@@ -44,11 +44,11 @@
 - [x] T007 [P] Add failing additive registry compatibility tests for `kind`, `adapter`, `display_name`, `http_port`, and legacy `wordpress_port` fallback in `tests/test_sandbox.py`
 - [x] T008 Define explicit runtime protocol, capability constants, structured results/errors, and injected dependencies in `sandbox/runtimes/base.py`
 - [x] T009 Implement explicit built-in adapter registration and kind selection without wildcard imports in `sandbox/runtimes/__init__.py`
-- [ ] T010 Implement the WordPress compatibility adapter by delegating to current lifecycle behavior in `sandbox/runtimes/wordpress.py`
-- [ ] T011 Split common versus WordPress defaults, select kind before normalization, and scope plugin-slug validation to WordPress in `sandbox_core.py`
-- [ ] T012 Extend registry reads/writes additively for common instance metadata while preserving the v2 key and all legacy fields in `sandbox_core.py`
-- [ ] T013 Add common URL/port helpers that prefer `http_port` and fall back to `wordpress_port` without changing current WP output in `sandbox/core/_instances.py`
-- [ ] T014 Run `tests/test_project_config.py`, `tests/test_runtime_adapters.py`, `tests/test_sandbox.py`, and the recorded WordPress baseline; append exact commands/results to `specs/021-generic-project-instances/implementation-evidence.md`
+- [X] T010 Implement the WordPress compatibility adapter by delegating to current lifecycle behavior in `sandbox/runtimes/wordpress.py`
+- [X] T011 Split common versus WordPress defaults, select kind before normalization, and scope plugin-slug validation to WordPress in `sandbox_core.py`
+- [X] T012 Extend registry reads/writes additively for common instance metadata while preserving the v2 key and all legacy fields in `sandbox_core.py`
+- [X] T013 Add common URL/port helpers that prefer `http_port` and fall back to `wordpress_port` without changing current WP output in `sandbox/core/_instances.py`
+- [X] T014 Run `tests/test_project_config.py`, `tests/test_runtime_adapters.py`, `tests/test_sandbox.py`, and the recorded WordPress baseline; append exact commands/results to `specs/021-generic-project-instances/implementation-evidence.md`
 
 **Checkpoint**: Adapter foundation exists, WordPress behavior is unchanged, and no generic project starts yet.
 
@@ -62,19 +62,19 @@
 
 ### Tests for User Story 1
 
-- [ ] T015 [P] [US1] Add failing runtime-safe ID, normalization-collision, and canonical-root identity tests in `tests/test_runtime_adapters.py`
-- [ ] T016 [P] [US1] Add failing Compose validation/overlay/argument-list portability/health-timeout/idempotency tests with subprocess fakes in `tests/test_generic_compose.py`
-- [ ] T017 [P] [US1] Add failing CLI and MCP ensure contract tests for generic records and unconfigured-repository refusal in `tests/test_cli.py` and `tests/test_mcp.py`
+- [x] T015 [P] [US1] Add failing runtime-safe ID, normalization-collision, and canonical-root identity tests in `tests/test_runtime_adapters.py`
+- [x] T016 [P] [US1] Add failing Compose validation/overlay/argument-list portability/health-timeout/idempotency tests with subprocess fakes in `tests/test_generic_compose.py`
+- [x] T017 [P] [US1] Add failing CLI and MCP ensure contract tests for generic records and unconfigured-repository refusal in `tests/test_cli.py` and `tests/test_mcp.py`
 
 ### Implementation for User Story 1
 
-- [ ] T018 [US1] Implement deterministic collision-safe runtime IDs and Sandbox-owned artifact paths in `sandbox/runtimes/base.py`
-- [ ] T019 [US1] Implement Compose descriptor validation via resolved project paths and `docker compose config` in `sandbox/runtimes/compose.py`
-- [ ] T020 [US1] Render a minimal generated port/label overlay under `$SANDBOX_HOME/runtime/projects/<instance>/` from `sandbox/runtimes/compose.py`
-- [ ] T021 [US1] Implement pending/starting/ready/error ensure flow, bounded health probing, and idempotent reuse in `sandbox/runtimes/compose.py`
-- [ ] T022 [US1] Introduce backward-compatible feature-owned command/parser registration for instance commands and dispatch project-scoped init/ensure through the selected adapter in `sandbox/registry.py`, `sandbox/cli.py`, and `sandbox/commands/instances_cmd.py`
-- [ ] T023 [US1] Make MCP `ensure_instance` kind-neutral and return additive kind/adapter/capability fields in `mcp/wp-server/tools/instances.py`
-- [ ] T024 [US1] Live-validate repeated ensure for the dot-name Compose fixture, verify warm ensure completes within 5 seconds, inspect containers/registry/artifacts/URL, and record evidence in `specs/021-generic-project-instances/implementation-evidence.md`
+- [X] T018 [US1] Implement deterministic collision-safe runtime IDs and Sandbox-owned artifact paths in `sandbox/runtimes/base.py`
+- [X] T019 [US1] Implement Compose descriptor validation via resolved project paths and `docker compose config` in `sandbox/runtimes/compose.py`
+- [X] T020 [US1] Render a minimal generated port/label overlay under `$SANDBOX_HOME/runtime/projects/<instance>/` from `sandbox/runtimes/compose.py`
+- [X] T021 [US1] Implement pending/starting/ready/error ensure flow, bounded health probing, and idempotent reuse in `sandbox/runtimes/compose.py`
+- [x] T022 [US1] Introduce backward-compatible feature-owned command/parser registration for instance commands and dispatch project-scoped init/ensure through the selected adapter in `sandbox/registry.py`, `sandbox/cli.py`, and `sandbox/commands/instances_cmd.py`
+- [x] T023 [US1] Make MCP `ensure_instance` kind-neutral and return additive kind/adapter/capability fields in `mcp/wp-server/tools/instances.py`
+- [x] T024 [US1] Live-validate repeated ensure for the dot-name Compose fixture, verify warm ensure completes within 5 seconds, inspect containers/registry/artifacts/URL, and record evidence in `specs/021-generic-project-instances/implementation-evidence.md`
 
 **Checkpoint**: P1 MVP is usable for explicit local Compose projects. Stop here if side-project time is exhausted.
 
@@ -88,22 +88,22 @@
 
 ### Tests for User Story 2
 
-- [ ] T025 [P] [US2] Add failing Compose start/stop/status/logs/exec/apply/destroy and volume-preservation tests in `tests/test_generic_compose.py`
-- [ ] T026 [P] [US2] Add failing shared CLI routing and WordPress-command capability rejection tests in `tests/test_cli.py`
-- [ ] T027 [P] [US2] Add failing `instance_status`, `instance_logs`, `instance_exec`, lifecycle, and representative WP-tool preflight tests in `tests/test_mcp.py`
-- [ ] T028 [P] [US2] Add failing generic clean-URL/HTTPS route tests without WordPress URL rewriting in `tests/test_compose.py` and `tests/test_sandbox.py`
+- [x] T025 [P] [US2] Add failing Compose start/stop/status/logs/exec/apply/destroy and volume-preservation tests in `tests/test_generic_compose.py`
+- [x] T026 [P] [US2] Add failing shared CLI routing and WordPress-command capability rejection tests in `tests/test_cli.py`
+- [x] T027 [P] [US2] Add failing `instance_status`, `instance_logs`, `instance_exec`, lifecycle, and representative WP-tool preflight tests in `tests/test_mcp.py`
+- [x] T028 [P] [US2] Add failing generic clean-URL/HTTPS route tests without WordPress URL rewriting in `tests/test_compose.py` and `tests/test_sandbox.py`
 
 ### Implementation for User Story 2
 
-- [ ] T029 [US2] Implement bounded status/start/stop/logs/exec/apply/destroy operations without Compose volume removal in `sandbox/runtimes/compose.py`
-- [ ] T030 [US2] Extend command specs with capability metadata, add capability-aware lifecycle dispatch for up/down/status/logs/shell/open/apply, and preflight every WordPress-only CLI command before handler execution in `sandbox/registry.py`, `sandbox/cli.py`, `sandbox/commands/lifecycle.py`, and `sandbox/commands/config_setup.py`
-- [ ] T031 [US2] Make instance delete/recreate/secure and shared URL resolution dispatch by adapter with safe generic semantics in `sandbox/commands/instances_cmd.py`, `sandbox/commands/net.py`, and `sandbox/core/_domains.py`
-- [ ] T032 [US2] Add kind-neutral bounded `instance_status`, `instance_logs`, and `instance_exec` tools in `mcp/wp-server/tools/runtime.py`
-- [ ] T033 [US2] Make MCP lifecycle wrappers adapter-aware and preserve their existing WordPress contracts in `mcp/wp-server/tools/instances.py`
-- [ ] T034 [US2] Add one reusable capability preflight and apply it to all WordPress-only MCP groups in `mcp/wp-server/app.py`, `mcp/wp-server/tools/wp.py`, `data.py`, `fs.py`, `mail.py`, `context.py`, `abilities.py`, `debug.py`, `plugin_check.py`, `e2e.py`, `ci.py`, and `remote.py`
-- [ ] T035 [US2] Route generic instances through existing Caddy domain/certificate plumbing without WP-CLI or WP REST mutation in `sandbox/core/_domains.py`
-- [ ] T036 [US2] Live-validate three lifecycle cycles, MCP operations, capability rejection, HTTPS, and named-volume survival; record evidence in `specs/021-generic-project-instances/implementation-evidence.md`
-- [ ] T037 [US2] Re-run the WordPress baseline and focused MCP/compose/domain tests; stop on any externally visible drift and record results in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T029 [US2] Implement bounded status/start/stop/logs/exec/apply/destroy operations without Compose volume removal in `sandbox/runtimes/compose.py`
+- [x] T030 [US2] Extend command specs with capability metadata, add capability-aware lifecycle dispatch for up/down/status/logs/shell/open/apply, and preflight every WordPress-only CLI command before handler execution in `sandbox/registry.py`, `sandbox/cli.py`, `sandbox/commands/lifecycle.py`, and `sandbox/commands/config_setup.py`
+- [x] T031 [US2] Make instance delete/recreate/secure and shared URL resolution dispatch by adapter with safe generic semantics in `sandbox/commands/instances_cmd.py`, `sandbox/commands/net.py`, and `sandbox/core/_domains.py`
+- [x] T032 [US2] Add kind-neutral bounded `instance_status`, `instance_logs`, and `instance_exec` tools in `mcp/wp-server/tools/runtime.py`
+- [x] T033 [US2] Make MCP lifecycle wrappers adapter-aware and preserve their existing WordPress contracts in `mcp/wp-server/tools/instances.py`
+- [x] T034 [US2] Add one reusable capability preflight and apply it to all WordPress-only MCP groups in `mcp/wp-server/app.py`, `mcp/wp-server/tools/wp.py`, `data.py`, `fs.py`, `mail.py`, `context.py`, `abilities.py`, `debug.py`, `plugin_check.py`, `e2e.py`, `ci.py`, and `remote.py`
+- [x] T035 [US2] Route generic instances through existing Caddy domain/certificate plumbing without WP-CLI or WP REST mutation in `sandbox/core/_domains.py`
+- [x] T036 [US2] Live-validate three lifecycle cycles, MCP operations, capability rejection, HTTPS, and named-volume survival; record evidence in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T037 [US2] Re-run the WordPress baseline and focused MCP/compose/domain tests; stop on any externally visible drift and record results in `specs/021-generic-project-instances/implementation-evidence.md`
 
 **Checkpoint**: Generic instances are operationally useful and safely separated from WordPress-only features.
 
@@ -117,15 +117,15 @@
 
 ### Tests for User Story 3
 
-- [ ] T038 [P] [US3] Add failing package-manager/script/port/bind/health inference and ambiguity tests in `tests/test_astro_preset.py`
-- [ ] T039 [P] [US3] Add failing non-interactive and guided `sb init --type astro|compose` output tests in `tests/test_cli.py`
+- [x] T038 [P] [US3] Add failing package-manager/script/port/bind/health inference and ambiguity tests in `tests/test_astro_preset.py`
+- [x] T039 [P] [US3] Add failing non-interactive and guided `sb init --type astro|compose` output tests in `tests/test_cli.py`
 
 ### Implementation for User Story 3
 
-- [ ] T040 [US3] Implement read-only Astro metadata inspection and explicit value proposals in `sandbox/runtimes/presets/astro.py`
-- [ ] T041 [US3] Implement preset registration and reusable project-owned Compose/config rendering in `sandbox/runtimes/presets/__init__.py` and `sandbox/runtimes/presets/astro.py`
-- [ ] T042 [US3] Add `--type compose` and `--type astro` to the feature-owned instance command spec with review/confirmation and non-interactive validation in `sandbox/commands/instances_cmd.py`
-- [ ] T043 [US3] Live-validate the disposable Astro fixture from initialization through source update and record exact evidence in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T040 [US3] Implement read-only Astro metadata inspection and explicit value proposals in `sandbox/runtimes/presets/astro.py`
+- [x] T041 [US3] Implement preset registration and reusable project-owned Compose/config rendering in `sandbox/runtimes/presets/__init__.py` and `sandbox/runtimes/presets/astro.py`
+- [x] T042 [US3] Add `--type compose` and `--type astro` to the feature-owned instance command spec with review/confirmation and non-interactive validation in `sandbox/commands/instances_cmd.py`
+- [x] T043 [US3] Live-validate the disposable Astro fixture from initialization through source update and record exact evidence in `specs/021-generic-project-instances/implementation-evidence.md`
 
 **Checkpoint**: The reported Astro case is handled in two explicit commands; the generic adapter remains framework-neutral.
 
@@ -139,16 +139,16 @@
 
 ### Tests for User Story 4
 
-- [ ] T044 [P] [US4] Add failing feature-owned parser registration, duplicate-name, legacy-handler compatibility, and test-adapter discovery tests in `tests/test_cli.py` and `tests/test_runtime_adapters.py`
-- [ ] T045 [P] [US4] Add failing deterministic built-in MCP tool-group loading and duplicate-registration tests in `tests/test_mcp.py` and `tests/test_server_transport.py`
+- [x] T044 [P] [US4] Add failing feature-owned parser registration, duplicate-name, legacy-handler compatibility, and test-adapter discovery tests in `tests/test_cli.py` and `tests/test_runtime_adapters.py`
+- [x] T045 [P] [US4] Add failing deterministic built-in MCP tool-group loading and duplicate-registration tests in `tests/test_mcp.py` and `tests/test_server_transport.py`
 
 ### Implementation for User Story 4
 
-- [ ] T046 [US4] Complete duplicate-name rejection, test-adapter discovery, and legacy mapping compatibility for the existing `CommandSpec` and runtime registries in `sandbox/registry.py` and `sandbox/runtimes/__init__.py`
-- [ ] T047 [US4] Move the remaining touched lifecycle parser definitions beside handlers in `sandbox/commands/lifecycle.py` and remove their duplicate legacy blocks from `sandbox/cli.py`
-- [ ] T048 [US4] Replace the manual MCP group import list with a deterministic package-owned built-in loader in `mcp/wp-server/tools/__init__.py` and `mcp/wp-server/server.py`
-- [ ] T049 [US4] Replace wildcard imports only in files modified by this feature where focused tests cover the explicit dependency list in `sandbox/commands/{instances_cmd,lifecycle,config_setup}.py` and `mcp/wp-server/tools/{instances,runtime}.py`
-- [ ] T050 [US4] Run modularity guards, update counts/classifications and justified exceptions in `specs/021-generic-project-instances/modularity-audit.md`, and record results in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T046 [US4] Complete duplicate-name rejection, test-adapter discovery, and legacy mapping compatibility for the existing `CommandSpec` and runtime registries in `sandbox/registry.py` and `sandbox/runtimes/__init__.py`
+- [x] T047 [US4] Move the remaining touched lifecycle parser definitions beside handlers in `sandbox/commands/lifecycle.py` and remove their duplicate legacy blocks from `sandbox/cli.py`
+- [x] T048 [US4] Replace the manual MCP group import list with a deterministic package-owned built-in loader in `mcp/wp-server/tools/__init__.py` and `mcp/wp-server/server.py`
+- [x] T049 [US4] Replace wildcard imports only in files modified by this feature where focused tests cover the explicit dependency list in `sandbox/commands/{instances_cmd,lifecycle,config_setup}.py` and `mcp/wp-server/tools/{instances,runtime}.py`
+- [x] T050 [US4] Run modularity guards, update counts/classifications and justified exceptions in `specs/021-generic-project-instances/modularity-audit.md`, and record results in `specs/021-generic-project-instances/implementation-evidence.md`
 
 **Checkpoint**: The adapter path is extensible without claiming that the entire repository has been refactored.
 
@@ -158,13 +158,13 @@
 
 **Purpose**: Align user guidance, run full verification, and obtain review without shipping.
 
-- [ ] T051 [P] Document generic/Compose/Astro configuration, lifecycle, capability boundaries, and safety model in `README.md` and `docs/sandbox-config-reference.md`
-- [ ] T052 [P] Update CLI/MCP agent guidance and tool tables for kind-neutral versus WordPress-only operations in `AGENTS.md`, `CLAUDE.md`, and `mcp/wp-server/app.py`
-- [ ] T053 [P] Add non-obvious generic runtime/proxy/Compose findings discovered during live work to `memory/plugin-behavior/generic-project-instances.md`
-- [ ] T054 Run all focused tests, `python3 -m unittest discover -s tests -v`, `./sb selftest`, and `git diff --check`; append exact results and any retry count to `specs/021-generic-project-instances/implementation-evidence.md`
-- [ ] T055 Execute every scenario in `specs/021-generic-project-instances/quickstart.md` against fresh generic/Astro fixtures and the existing WordPress stack; attach or reference inspectable runtime artifacts in `specs/021-generic-project-instances/implementation-evidence.md`
-- [ ] T056 Perform fresh correctness/regression and security/data-loss review of the registry, process execution, path validation, proxy, and destroy diff; record findings and resolutions in `specs/021-generic-project-instances/implementation-evidence.md`
-- [ ] T057 Confirm scope stayed bounded, user changes are preserved, no secret was recorded, no unapproved commit/push/release occurred, and residual deferred features match `spec.md` in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T051 [P] Document generic/Compose/Astro configuration, lifecycle, capability boundaries, and safety model in `README.md` and `docs/sandbox-config-reference.md`
+- [x] T052 [P] Update CLI/MCP agent guidance and tool tables for kind-neutral versus WordPress-only operations in `AGENTS.md`, `CLAUDE.md`, and `mcp/wp-server/app.py`
+- [x] T053 [P] Add non-obvious generic runtime/proxy/Compose findings discovered during live work to `memory/plugin-behavior/generic-project-instances.md`
+- [X] T054 Run all focused tests, `python3 -m unittest discover -s tests -v`, `./sb selftest`, and `git diff --check`; append exact results and any retry count to `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T055 Execute every scenario in `specs/021-generic-project-instances/quickstart.md` against fresh generic/Astro fixtures and the existing WordPress stack; attach or reference inspectable runtime artifacts in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T056 Perform fresh correctness/regression and security/data-loss review of the registry, process execution, path validation, proxy, and destroy diff; record findings and resolutions in `specs/021-generic-project-instances/implementation-evidence.md`
+- [x] T057 Confirm scope stayed bounded, user changes are preserved, no secret was recorded, no unapproved commit/push/release occurred, and residual deferred features match `spec.md` in `specs/021-generic-project-instances/implementation-evidence.md`
 
 ---
 

@@ -62,7 +62,9 @@ Post-design re-check: the adapter contract, additive data model, explicit capabi
 | command ownership | `sandbox/commands/manifest.py` + `CommandSpec` |
 | MCP group ownership | `mcp/wp-server/tools/manifest.py` + `ToolGroupSpec` |
 
-The Compose adapter and Astro preset remain unimplemented feature-021 scope.
+The generic Compose adapter and Astro preset are now implemented incrementally;
+remaining work is lifecycle/MCP parity, capability preflight coverage, and the
+full fixture/evidence matrix.
 
 ### Documentation (this feature)
 
@@ -124,7 +126,11 @@ tests/
 
 ### AD-001 — Explicit project kind, WordPress by default
 
-Add `kind: "compose"` for generic projects. Missing `kind` remains `wordpress`, including `.wp-env.json` imports. Configuration loading determines kind before applying defaults so generic projects never inherit plugin, PHP, database, or mail settings.
+Add `kind: "compose"` for generic projects. Common aliases (`generic`, `docker`,
+`php`, `node`, `javascript`, `laravel`, `laravel-sail`, and `astro`) normalize to
+the same adapter. Missing `kind` remains `wordpress`, including `.wp-env.json`
+imports. Configuration loading determines kind before applying defaults so
+generic projects never inherit plugin, PHP, database, or mail settings.
 
 ### AD-002 — Compose is the generic MVP contract
 

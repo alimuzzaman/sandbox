@@ -15,16 +15,40 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 
-from sandbox.core import *  # noqa: F401,F403
+from sandbox.core import (
+    BASE, HERD_DB_HOST, HERD_DB_PASSWORD, HERD_DB_PORT, HERD_DB_USER,
+    MCP_VENV, ROOT, SECRETS_ENV, _autologin_mu_plugin, _bridge_token_for,
+    _convert_multisite, _core, _ensure_bridge_server, _ensure_litespeed_htaccess,
+    _ensure_proxy_up,
+    _herd_db_name, _instance_reachable, _is_herd_instance, _local_yaml,
+    _pin_wp_constants_in_config, _remove_obsolete_builder_authoring_assets,
+    _tld, _web_services, _write_abilities_muplugin, _write_debug_muplugins,
+    _write_dl_cache_muplugin, _write_licensing_muplugin, _write_local_yaml,
+    _write_mail_muplugin, _write_ondemand_muplugin, _write_snapshot_muplugin,
+    active_project_file, compose, compose_file, die, ensure_instance, focus_file,
+    info, mcp_server_name, ok, plugins_dir,
+    proxy_available, resolve_instances, run, save_local_app_password,
+    save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
+    wp_dir, wpcli,
+)
 
 from sandbox.registry import register
-from sandbox.application.context import wordpress_runtime_dependencies, wordpress_runtime_service
+from sandbox.application.context import (
+    preflight_instance_capability, runtime_service, wordpress_runtime_dependencies,
+)
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
 
 def cmd_up(cfg: dict, args) -> None:
     inst = args.resolved_instance
+    owner = _core().registry_find_instance(inst)
+    if owner and owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "start", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            die(result.message)
+        ok(f"Generic Compose: {result.data.get('url', '')}")
+        return
     inst_cfg = resolve_instances(cfg)[inst]
     if inst_cfg.get("server") == "herd":
         # Host-served by Herd — nothing to boot; Herd serves linked sites
@@ -91,6 +115,13 @@ def cmd_up(cfg: dict, args) -> None:
     ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
 
 def cmd_down(cfg, args) -> None:
+    owner = _core().registry_find_instance(args.resolved_instance)
+    if owner and owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "stop", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            die(result.message)
+        ok(f"stopped generic instance '{args.resolved_instance}'")
+        return
     if _is_herd_instance(args.resolved_instance):
         info("host-served by Herd — nothing to stop (sites serve while Herd "
              "runs). Remove entirely with: ./sb instance delete "
@@ -101,8 +132,15 @@ def cmd_down(cfg, args) -> None:
 def cmd_status(cfg, args) -> None:
     inst = args.resolved_instance
     owner = _core().registry_find_instance(inst)
+    if owner and owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "status", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            die(result.message)
+        data = dict(result.data)
+        ok(f"Generic Compose instance: {inst} ({data.get('status')}) at {data.get('url', '')}")
+        return
     if owner and owner.get("root"):
-        result = wordpress_runtime_service(cfg).invoke(OperationRequest(
+        result = runtime_service(cfg).invoke(OperationRequest(
             project_root=owner["root"],
             operation="status",
             label=owner.get("label", "default"),
@@ -136,18 +174,31 @@ def cmd_status(cfg, args) -> None:
         _ensure_bridge_server()
 
 def cmd_logs(cfg, args) -> None:
+    owner = _core().registry_find_instance(args.resolved_instance)
+    if owner and owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "logs", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            die(result.message)
+        print(result.data.get("output", ""), end="")
+        return
     if _is_herd_instance(args.resolved_instance):
         die("no containers on a herd instance — tail the WP debug log instead: "
             f"tail -f runtime/wp-{args.resolved_instance}/wp-content/debug.log")
     compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
 
 def cmd_shell(cfg, args) -> None:
+    error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.exec")
+    if error is not None:
+        die(error.message)
     if _is_herd_instance(args.resolved_instance):
         die("no containers on a herd instance — the WP install is on the host "
             f"at runtime/wp-{args.resolved_instance}/")
     compose("exec", "wp", "bash", instance=args.resolved_instance)
 
 def cmd_install(cfg, args) -> None:
+    error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
+    if error is not None:
+        die(error.message)
     inst = args.resolved_instance
     inst_cfg = resolve_instances(cfg)[inst]
     adm = inst_cfg["admin"]
@@ -332,6 +383,9 @@ def wp_is_installed(instance: str) -> bool:
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
+    error = preflight_instance_capability(cfg, inst, "wordpress.cli")
+    if error is not None:
+        die(error.message)
     inst_cfg = resolve_instances(cfg)[inst]
     adm = inst_cfg["admin"]
     port = inst_cfg["wordpress_port"]
@@ -601,6 +655,14 @@ def cmd_update(cfg, args) -> None:
     ok("Done.")
 
 def cmd_open(cfg, args) -> None:
+    owner = _core().registry_find_instance(args.resolved_instance)
+    if owner and owner.get("kind") == "compose":
+        if args.what == "mail":
+            die("generic Compose instances do not provide a mailpit capability")
+        url = owner.get("url") or f"http://127.0.0.1:{owner.get('http_port')}"
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        run([opener, url], check=False)
+        return
     inst_cfg = resolve_instances(cfg)[args.resolved_instance]
     port = inst_cfg["wordpress_port"]
     mailpit = inst_cfg["mailpit_port"]
@@ -614,6 +676,28 @@ def cmd_open(cfg, args) -> None:
         die(f"unknown target '{args.what}'. Try: admin | site | mail")
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     run([opener, url], check=False)
+
+
+def configure_parser(sub) -> None:
+    """Register the lifecycle command parsers owned by this module.
+
+    The CLI keeps a compatibility bridge for commands whose historical
+    parsers have not moved yet.  Lifecycle is the first touched surface to
+    own both its handlers and parser definitions, so future lifecycle flags
+    do not grow the central composition root.
+    """
+    sub.add_parser("up", help="Boot the docker stack")
+    sub.add_parser("down", help="Stop the stack")
+    sub.add_parser("status", help="Show container + project status")
+    sub.add_parser("logs", help="Tail WP + DB logs")
+    sub.add_parser("shell", help="Bash into the WP container")
+    sub.add_parser("install", help="Install WP + create admin user")
+    sub.add_parser("doctor", help="Audit the stack and report problems")
+    sub.add_parser("smoke", help="Self-test: boot a fresh instance, REST probe, tear down")
+    sub.add_parser("update", help="git pull the project repo this instance tracks")
+    op = sub.add_parser("open", help="Open admin / site / mailpit in browser")
+    op.add_argument("what", nargs="?", default="admin",
+                    choices=["admin", "site", "mail"])
 
 register({
     'up': cmd_up,

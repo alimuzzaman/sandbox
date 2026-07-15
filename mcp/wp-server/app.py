@@ -125,6 +125,19 @@ def _project_instance(project_dir: str, label: str | None = None):
                 "error": f"no instance labelled '{label}' for '{root}'. "
                          f"Labels: {[e['label'] for e in entries]}",
             }
+    else:
+        # Preserve the historical default-instance behavior while keeping
+        # multi-instance roots deterministic: prefer the explicit default
+        # label, otherwise resolve a sole entry, and refuse ambiguity.
+        entry = next((e for e in entries if e.get("label") == "default"), None)
+        if entry is None and len(entries) == 1:
+            entry = entries[0]
+        if entry is None:
+            return None, {
+                "ok": False,
+                "error": f"project '{root}' has multiple instances; pass label",
+                "labels": [e.get("label") for e in entries],
+            }
     return entry["instance"], None
 
 
@@ -316,11 +329,12 @@ def _admin_creds() -> tuple[str, str]:
     rt = (_load_sandbox_yml().get("runtime") or {}).get("admin") or {}
     return rt.get("user", "admin"), rt.get("password", "admin")
 
-SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a per-project WordPress dev/test stack driven by MCP tools (ensure_instance, wp_cli, wp_rest, db_query, tail_log, run_tests, visit, fs_read, ...).
+SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a per-project runtime driven by MCP tools (ensure_instance, instance_status, instance_logs, instance_exec, wp_cli, wp_rest, db_query, tail_log, run_tests, visit, fs_read, ...).
 
 PROJECT HANDSHAKE — this is mandatory:
 - Every tool takes `project_dir`. ALWAYS pass your current working directory (or the plugin's project root if you can determine it — the dir holding sandbox.config.* / .wp-env.json / .git). The server is a separate process; it cannot see your cd, so it relies on this.
 - Before using any stack tool, call `ensure_instance(project_dir=...)`. It returns the instance + URL, booting one on demand if needed (may take ~1 min the first time). Other tools error with "call ensure_instance first" until then.
+- Generic PHP, JavaScript/Node, Docker-native, Laravel/Sail, Astro, and similar projects use the framework-neutral Compose adapter. Use `instance_status`, `instance_logs`, and `instance_exec` for them; WordPress-only tools fail closed before side effects.
 - One project directory ↔ one-or-more instances (per worktree) — a root normally has exactly one (unchanged behavior); pass `label=` to target or mint an ADDITIONAL instance of the same root (e.g. 'qa', 'php81') for side-by-side testing. Omit `label` for the default/sole instance. focus_get(project_dir) returns the project's plugin + its CLAUDE.md.
 
 ACTIVATION: engage when the user wants to run/test a plugin, names a WPDeveloper plugin, or hits a WP error / stack trace / wp-admin issue. Stay quiet on non-WP work.

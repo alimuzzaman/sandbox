@@ -18,11 +18,27 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import COMMANDS, COMMAND_SPECS, compose_missing_parsers
+from sandbox.application.context import preflight_instance_capability
 from sandbox.commands.manifest import load_builtin_commands
 
 
 
 load_builtin_commands()
+
+
+# Capability gates for historical handlers whose parsers remain in the
+# compatibility bridge. New feature-owned commands should put equivalent
+# metadata on their CommandSpec instead of extending this table.
+CLI_CAPABILITIES = {
+    "install": "wordpress.cli", "shell": "wordpress.exec",
+    "doctor": "wordpress.cli", "server": "wordpress.cli",
+    "xdebug": "wordpress.exec", "introspect": "wordpress.cli",
+    "wp": "wordpress.cli", "seed": "wordpress.cli", "visit": "wordpress.rest",
+    "snapshot": "wordpress.snapshot", "restore": "wordpress.restore",
+    "reset": "wordpress.reset", "clean": "wordpress.cli",
+    "dump": "wordpress.cli", "qm": "wordpress.cli",
+    "abilities": "wordpress.abilities", "onboard": "wordpress.cli",
+}
 
 
 class _KVAction(argparse.Action):
@@ -91,12 +107,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     cn.add_argument("-n", "--non-interactive", action="store_true",
                     help="read values from env vars instead of prompting "
                          "(FLUENTBOARDS_URL/EMAIL/APP_PASSWORD, GITHUB_ORG)")
-    sub.add_parser("up", help="Boot the docker stack")
-    sub.add_parser("down", help="Stop the stack")
-    sub.add_parser("status", help="Show container + project status")
-    sub.add_parser("logs", help="Tail WP + DB logs")
-    sub.add_parser("shell", help="Bash into the WP container")
-    sub.add_parser("install", help="Install WP + create admin user")
+    # Lifecycle owns these parsers and handlers.  Keeping registration beside
+    # the implementation prevents new lifecycle flags from enlarging this
+    # compatibility composition root.
+    from sandbox.commands.lifecycle import configure_parser as configure_lifecycle_parser
+    configure_lifecycle_parser(sub)
 
     w = sub.add_parser("wp", help="Run any wp-cli command")
     w.add_argument("--async", dest="run_async", action="store_true",
@@ -157,8 +172,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="Show the $SANDBOX_HOME base, or relocate it: `./sb home <dir>`")
     hm.add_argument("dir", nargs="?", help="new base directory to relocate to")
 
-    sub.add_parser("doctor", help="Audit the stack and report problems")
-    sub.add_parser("smoke",  help="Self-test: boot a fresh instance, REST probe, tear down")
+
     sub.add_parser("selftest", help="Run the sandbox tooling's own unit tests (tests/)")
 
     f = sub.add_parser("focus",
@@ -191,12 +205,6 @@ Per-project (each plugin carries its own sandbox.config.json):
     rs = sub.add_parser("reset", help="Reset DB to the post-install @install baseline (spec 008)")
     rs.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     rs.add_argument("--rebaseline", action="store_true", help="re-capture the baseline from the current DB")
-    sub.add_parser("update", help="git pull the project repo this instance tracks")
-
-    op = sub.add_parser("open", help="Open admin / site / mailpit in browser")
-    op.add_argument("what", nargs="?", default="admin",
-                    choices=["admin", "site", "mail"])
-
     xd = sub.add_parser("xdebug", help="Toggle Xdebug in the WP container")
     xd.add_argument("state", choices=["on", "off", "status"])
 
@@ -494,6 +502,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="regenerate sandbox.config.json even if one already exists")
     ini.add_argument("--no-test-harness", dest="no_test_harness", action="store_true",
         help="skip provisioning the phpunit test harness")
+    ini.add_argument("--type", choices=["compose", "generic", "astro", "laravel", "php", "node", "javascript"],
+        help="explicit generic project type; uses the framework-neutral Compose runtime")
 
     ins = sub.add_parser("instance",
         help="Delete a sandbox instance (create via `./sb init` in a plugin dir)")
@@ -683,6 +693,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     # THAT project's instance; run outside any registered project (and not
     # project-routed) it aborts with guidance rather than targeting a fallback.
     instances = resolve_instances(cfg)
+    # Generic adapters own their lifecycle records; they do not belong in the
+    # WordPress-specific sandbox.local.yml instance map.
+    for entry in _core().registry_all().values():
+        if entry.get("kind") == "compose" and entry.get("instance"):
+            instances.setdefault(entry["instance"], entry)
     explicit = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE")
     cwd_label = getattr(args, "label", None) or os.environ.get("SANDBOX_LABEL")
     chosen = explicit or _cwd_instance(label=cwd_label)
@@ -726,6 +741,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         die(f"unknown instance '{chosen}'. "
             f"Known: {', '.join(sorted(instances)) or '(none)'}.")
     args.resolved_instance = chosen
+
+    # WordPress-only legacy handlers retain their historical parser/dispatch
+    # names, but capability checks happen at the composition boundary before
+    # any handler can regenerate files or touch a runtime. Generic adapters
+    # therefore receive a structured unsupported-capability error instead of a
+    # late KeyError or an accidental WP mutation.
+    required = CLI_CAPABILITIES.get(args.cmd)
+    if required and chosen is not None:
+        capability_error = preflight_instance_capability(cfg, chosen, required)
+        if capability_error is not None:
+            die(capability_error.message)
 
     # (Re)generate per-instance compose files so they're always in sync with the
     # registered instances. Cheap + idempotent.

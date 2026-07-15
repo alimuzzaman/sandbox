@@ -10,7 +10,7 @@ import re as _re
 
 
 
-from app import (SANDBOX_CLAUDE_MD, SANDBOX_ROOT, SANDBOX_SKILLS_DIR, SANDBOX_WORKFLOWS_DIR, _core, _focus_file, _list_sandbox_skills, _list_sandbox_workflows, _parse_skill_metadata, _project_instance, _resolve_instance, _site_url, _skill_prompt_body, _wpcli, mcp)
+from app import (SANDBOX_CLAUDE_MD, SANDBOX_ROOT, SANDBOX_SKILLS_DIR, SANDBOX_WORKFLOWS_DIR, _core, _focus_file, _list_sandbox_skills, _list_sandbox_workflows, _parse_skill_metadata, _project_instance, _resolve_instance, _require_project_capability, _site_url, _skill_prompt_body, _wpcli, mcp)
 
 
 
@@ -24,6 +24,9 @@ def focus_get(project_dir: str, include_claude_md: bool = True,
     this reads CLAUDE.md / .claude/skills/*/SKILL.md from `project_dir` directly.
     Requires the instance to exist — call ensure_instance first.
     """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.rest")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -69,6 +72,9 @@ def focus_get(project_dir: str, include_claude_md: bool = True,
 @mcp.tool()
 def activate_plugin(slug: str, *, project_dir: str, label: str | None = None) -> dict:
     """wp plugin activate <slug>. Slug must match the plugin folder name."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -77,6 +83,9 @@ def activate_plugin(slug: str, *, project_dir: str, label: str | None = None) ->
 @mcp.tool()
 def deactivate_plugin(slug: str, *, project_dir: str, label: str | None = None) -> dict:
     """wp plugin deactivate <slug>."""
+    capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
+    if capability_error:
+        return capability_error
     inst, err = _project_instance(project_dir, label)
     if err:
         return err

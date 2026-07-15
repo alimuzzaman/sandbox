@@ -16,7 +16,14 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 
-from sandbox.core import *  # noqa: F401,F403
+from sandbox.core import (
+    BASE, CONNECT_TARGETS, ENTRY, ROOT, _assign_domains_to_all, _cert_paths,
+    _connect_fluentboards, _connect_github, _core, _docker_preflight,
+    _ensure_url_proxy, _global_link_dir, _is_server, _onboard_instance,
+    _resolve_port_conflicts, _sudo, _tld, _wait_reachable, apply_config, die, info,
+    load_config, ok, regen_caddyfile, register_claude_user_scope, reload_proxy,
+    resolve_instances, site_url, write_claude_mcp_config,
+)
 
 from sandbox.registry import register
 from sandbox.application.context import wordpress_runtime_service

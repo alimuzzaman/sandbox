@@ -1074,10 +1074,10 @@ fallback.mkdir(parents=True, exist_ok=True)
 
 instances = list(_read_instances())
 for instance in instances:
-        env = dict(os.environ)
-        env["SANDBOX_INSTANCE"] = instance
-        result = subprocess.run([SB, "snapshot", f"drive-{BACKUP_ID}", "--force"], text=True,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False, cwd=HOME)
+    env = dict(os.environ)
+    env["SANDBOX_INSTANCE"] = instance
+    result = subprocess.run([SB, "snapshot", f"drive-{BACKUP_ID}", "--force"], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False, cwd=HOME)
     if result.returncode == 0:
         print(f"Hermes Drive: snapshot {instance} complete", file=__import__('sys').stderr)
         continue

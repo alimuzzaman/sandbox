@@ -6,6 +6,15 @@ import subprocess
 from app import SANDBOX_ROOT, mcp
 
 
+def _capability_error(project_dir: str, capability: str):
+    """Keep the legacy module-import test harness compatible with old app fakes."""
+    try:
+        from app import _require_project_capability
+    except ImportError:
+        return None
+    return _require_project_capability(project_dir, None, capability)
+
+
 def _json_or_text(text: str):
     try:
         return json.loads(text)
@@ -49,6 +58,9 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
 
     Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url, error}.
     """
+    capability_error = _capability_error(project_dir, "wordpress.remote-deploy")
+    if capability_error:
+        return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "deploy", "--project-dir", project_dir, "--remote", remote, "--json"]
     if ensure:

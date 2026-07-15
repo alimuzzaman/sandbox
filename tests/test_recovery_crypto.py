@@ -28,6 +28,10 @@ class TestGpgCrypto(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "passphrase"):
             GpgCrypto("")
 
+    def test_rejects_ambiguous_passphrase_control_text(self):
+        with self.assertRaisesRegex(RecoveryError, "control text"):
+            GpgCrypto("fixture\npassphrase")
+
     def test_interruption_removes_pending_ciphertext(self):
         with tempfile.TemporaryDirectory() as directory, patch("sandbox.recovery.crypto.subprocess.run", side_effect=OSError("interrupted")):
             source = Path(directory) / "plain"; target = Path(directory) / "cipher"; source.write_bytes(b"payload")

@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from app import SANDBOX_ROOT, _safe_json, mcp
+from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
 
 
 @mcp.tool()
@@ -37,6 +37,9 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
     Returns {ok, workers, concurrency, passed, failed, by_worker:[{label, url,
     status, error?, exit_code?}]} — or {ok, job_id} when async_=true.
     """
+    capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
+    if capability_error:
+        return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "e2e", "--project-dir", project_dir,
            "--workers", str(workers), "--json"]

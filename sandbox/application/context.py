@@ -100,13 +100,14 @@ def wordpress_runtime_dependencies(cfg, *, core=None, registry=None, **overrides
     )
 
 
-def wordpress_runtime_service(cfg):
-    """Compose current WordPress behavior behind the runtime contract."""
+def runtime_service(cfg):
+    """Compose WordPress compatibility and the framework-neutral Compose adapter."""
     import sandbox.core as core
     import sandbox_core as sc
 
     from sandbox.application.runtime_service import RuntimeService
-    from sandbox.runtimes.registry import wordpress_registry
+    from sandbox.runtimes.compose import ComposeAdapter
+    from sandbox.runtimes import builtin_adapter_registry
 
     def resolve_descriptor(root, label=None):
         return sc.load_project_config(root, label=label)
@@ -126,16 +127,28 @@ def wordpress_runtime_service(cfg):
         entry = sc.registry_get(request.project_root, label=request.label)
         return {"ok": entry is not None, **(entry or {})}
 
-    adapters = wordpress_registry(
-        {"ensure": ensure, "apply": apply, "status": status},
-        capabilities={
+    dependencies = runtime_neutral_dependencies(
+        registry=sc, allowed_roots=(core.ROOT, core.BASE),
+        proxy=wordpress_proxy_facade(cfg, core=core),
+    )
+    compose = ComposeAdapter(dependencies, sc)
+    adapters = builtin_adapter_registry(
+        {"ensure": ensure, "apply": apply, "status": status}, compose=compose,
+    )
+    adapters.for_kind("wordpress").adapter.capabilities = frozenset({
+            *adapters.for_kind("wordpress").adapter.capabilities,
             "wordpress.cli", "wordpress.exec", "wordpress.rest",
             "wordpress.snapshot", "wordpress.restore", "wordpress.reset",
             "wordpress.database", "wordpress.files", "wordpress.mail",
+            "wordpress.abilities",
             "wordpress.remote-deploy", "wordpress.remote-preview",
-        },
-    )
+        })
     return RuntimeService(resolve_descriptor=resolve_descriptor, adapters=adapters)
+
+
+def wordpress_runtime_service(cfg):
+    """Backward-compatible name for the shared runtime composition root."""
+    return runtime_service(cfg)
 
 
 def preflight_instance_capability(cfg, instance: str, capability: str):
@@ -150,11 +163,11 @@ def preflight_instance_capability(cfg, instance: str, capability: str):
             message=f"instance {instance!r} has no registered project owner",
             requested_capability=capability,
         )
-    return wordpress_runtime_service(cfg).check(
+    return runtime_service(cfg).check(
         owner["root"], capability, label=owner.get("label", "default")
     )
 
 
 def preflight_project_capability(cfg, project_root: str, capability: str, *, label: str = "default"):
     """Validate a project-scoped operation before any remote or local mutation."""
-    return wordpress_runtime_service(cfg).check(project_root, capability, label=label)
+    return runtime_service(cfg).check(project_root, capability, label=label)

@@ -1061,7 +1061,7 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-stage = pathlib.Path(tempfile.mkdtemp(prefix="hermes-drive-backup-", dir=str(SANDBOX / "runtime")))
+stage = pathlib.Path(tempfile.mkdtemp(prefix="hermes-drive-backup-", dir="/tmp"))
 
 passfile = stage / "passphrase"
 passfile.write_bytes(__import__('sys').stdin.buffer.read())

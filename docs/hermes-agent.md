@@ -206,6 +206,9 @@ only the reviewed dev scope until expiry; it does not create, run, remove, or
 otherwise reconfigure jobs. Each lifecycle event is retained in the bounded,
 secret-screened Hermes state audit; approving a newer request supersedes every
 older approval for that same job, so only one approval can remain active.
+Authorization writes use an optimistic state digest under the remote lock; if
+another writer changes the state first, the operation returns `state_conflict`
+and the prompt update is rolled back.
 Malformed authorization timestamps fail closed as `invalid_state` errors rather
 than being treated as an approval or leaking an unhandled parser exception.
 

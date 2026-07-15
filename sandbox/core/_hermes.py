@@ -135,6 +135,18 @@ class HermesError(RuntimeError):
         self.retryable = retryable
 
 
+class _RemoteStateSnapshot(dict):
+    """Normalized state plus the semantic digest observed before mutation."""
+    def __init__(self, state: dict, digest: str) -> None:
+        super().__init__(state)
+        self.digest = digest
+
+
+def _state_digest(state: object) -> str:
+    payload = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _redact(value: str, entry: dict | None = None) -> str:
     text = remote.redact_ssh_connection(str(value or ""), entry)
     text = _SECRET_RE.sub(lambda m: m.group(1) + "=[redacted]", text)
@@ -509,6 +521,7 @@ def authorization_sync(remote_name: str) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     state = _remote_state_read(entry, paths)
+    expected_digest = getattr(state, "digest", None) or _state_digest(state)
     _expire_authorizations(state)
     catalog_names = {item.name for item in load_catalog()["jobs"] if item.enabled and item.kind == "agent"}
     jobs = [job for job in _cron_snapshot(entry)["jobs"]
@@ -544,7 +557,7 @@ def authorization_sync(remote_name: str) -> dict:
         _authorization_audit(state, request, "review_required")
         created.append(_authorization_view(state, request, True))
     if created:
-        _remote_state_write(entry, paths, state)
+        _remote_state_write(entry, paths, state, expected_digest=expected_digest)
     return result(True, "authorization_sync", remote_name, status="synced",
                   data={"created": created, "created_count": len(created)})
 
@@ -579,6 +592,7 @@ def authorization_request(remote_name: str, job_name: str, scope: str, replay_or
     scope, replay_origin, reason = (_valid_authorization_scope(scope), _valid_replay_origin(replay_origin),
                                     _valid_authorization_reason(reason))
     state = _remote_state_read(entry, paths)
+    expected_digest = getattr(state, "digest", None) or _state_digest(state)
     _expire_authorizations(state)
     requests = state["authorizations"]["requests"]
     if len(requests) >= _AUTH_MAX_REQUESTS:
@@ -595,7 +609,7 @@ def authorization_request(remote_name: str, job_name: str, scope: str, replay_or
                "expires_at": (now + timedelta(minutes=expires_in_minutes)).isoformat()}
     requests[request_id] = request
     _authorization_audit(state, request, "requested")
-    _remote_state_write(entry, paths, state)
+    _remote_state_write(entry, paths, state, expected_digest=expected_digest)
     return result(True, "authorization_request", remote_name, status="pending",
                   data={"request": _authorization_view(state, request, True)})
 
@@ -626,6 +640,7 @@ def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> d
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     state = _remote_state_read(entry, paths)
+    expected_digest = getattr(state, "digest", None) or _state_digest(state)
     _expire_authorizations(state)
     request_id = _valid_authorization_id(request_id)
     request = state["authorizations"]["requests"].get(request_id)
@@ -648,7 +663,7 @@ def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> d
     request["approved_at"] = _authorization_now().isoformat()
     _authorization_audit(state, request, "approved")
     try:
-        _remote_state_write(entry, paths, state)
+        _remote_state_write(entry, paths, state, expected_digest=expected_digest)
     except Exception:
         _set_cron_prompt(entry, matches[0]["id"], rollback_prompt)
         raise
@@ -676,32 +691,52 @@ def write_state(path: Path, state: dict) -> None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _remote_state_write(entry: dict, paths: dict, state: dict) -> None:
+def _remote_state_write(entry: dict, paths: dict, state: dict, *, expected_digest: str | None = None) -> None:
     payload = base64.b64encode((json.dumps(state, sort_keys=True) + "\n").encode()).decode()
     target = shlex.quote(paths["state"])
     lock = shlex.quote(paths["state"] + ".lock")
+    guard = ""
+    if expected_digest:
+        digest_script = (
+            "import hashlib,json,sys; "
+            "value=json.load(open(sys.argv[1])); "
+            "print(hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest())"
+        )
+        guard = (
+            f"if test -f {target}; then actual=$(python3 -c {shlex.quote(digest_script)} {target}); "
+            f"if test \"$actual\" != {shlex.quote(expected_digest)}; then "
+            "echo state_conflict >&2; exit 75; fi; fi; "
+        )
     command = (
         f"mkdir -p {shlex.quote(paths['sandbox_home'] + '/runtime')}; "
         f"exec 9>{lock}; flock -w 30 9; "
+        f"{guard}"
         f"tmp={target}.tmp.$$; echo {shlex.quote(payload)} | base64 -d > \"$tmp\"; "
         f"chmod 600 \"$tmp\"; mv \"$tmp\" {target}"
     )
-    _checked(entry, command, what="could not write Hermes state")
+    try:
+        _checked(entry, command, what="could not write Hermes state")
+    except HermesError as exc:
+        if "state_conflict" in str(exc):
+            raise HermesError("Hermes state changed during the authorization operation", "state_conflict", True) from exc
+        raise
 
 
 def _remote_state_read(entry: dict, paths: dict) -> dict:
     res = _ssh(entry, f"if test -f {shlex.quote(paths['state'])}; then cat {shlex.quote(paths['state'])}; fi")
     if res.returncode != 0:
         raise HermesError(_redact(res.stderr or "could not read Hermes state", entry), "state_read_failed", True)
-    raw = (res.stdout or "").strip()
+    raw_output = res.stdout or ""
+    raw = raw_output.strip()
     if not raw:
-        return _new_state()
+        return _RemoteStateSnapshot(_new_state(), _state_digest(None))
     try:
         state = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HermesError("remote Hermes state is invalid", "invalid_state") from exc
     try:
-        return _normalize_state(state)
+        digest = _state_digest(state)
+        return _RemoteStateSnapshot(_normalize_state(state), digest)
     except HermesError as exc:
         raise HermesError("remote Hermes state schema is unsupported", "invalid_state") from exc
 

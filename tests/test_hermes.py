@@ -2255,8 +2255,12 @@ class TestLocalState(unittest.TestCase):
             {"ssh": "ubuntu@example.test"},
             {"sandbox_home": "/home/ubuntu/sandbox", "state": "/home/ubuntu/sandbox/runtime/hermes.json"},
             {"schema_version": 1, "repositories": {}, "sessions": {}, "gates": {}},
+            expected_digest="a" * 64,
         )
-        self.assertIn("flock -w 30", ssh_run.call_args.args[1])
+        command = ssh_run.call_args.args[1]
+        self.assertIn("flock -w 30", command)
+        self.assertIn("state_conflict", command)
+        self.assertIn("python3 -c", command)
 
 
 if __name__ == "__main__":

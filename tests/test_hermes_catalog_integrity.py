@@ -78,7 +78,7 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         observed = self._observed_catalog()
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-        self.assertEqual(plan["retain"], ["codex-quota-requeue", "authorization-expiry", "lenzora-todo-task"])
+        self.assertEqual(plan["retain"], ["codex-quota-requeue", "authorization-expiry", "sandbox-approved-spec-task"])
 
     def test_delivery_drift_requires_reconciliation(self):
         catalog = self._catalog_with_worker_enabled()

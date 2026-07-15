@@ -33,7 +33,7 @@
 
 **CRITICAL**: Stop if any legacy WordPress config or registry assertion changes unexpectedly.
 
-- [ ] T005 [P] Add failing project-kind/default-isolation/path-validation tests for legacy WordPress, explicit Compose, dot names, and label overrides in `tests/test_project_config.py`
+- [x] T005 [P] Add failing project-kind/default-isolation/path-validation tests for legacy WordPress, explicit Compose, dot names, and label overrides in `tests/test_project_config.py`
 - [ ] T006 [P] Add failing adapter registration, capability, unsupported-kind, and result-shape tests in `tests/test_runtime_adapters.py`
 - [ ] T007 [P] Add failing additive registry compatibility tests for `kind`, `adapter`, `display_name`, `http_port`, and legacy `wordpress_port` fallback in `tests/test_sandbox.py`
 - [ ] T008 Define explicit runtime protocol, capability constants, structured results/errors, and injected dependencies in `sandbox/runtimes/base.py`

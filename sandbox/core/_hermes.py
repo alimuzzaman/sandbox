@@ -1073,9 +1073,11 @@ def _drive_backup_command(paths: dict, destination: str, backup_id: str, scope: 
         raise HermesError("drive scope must be full or incremental", "invalid_drive_scope")
     destination = validate_drive_destination(destination)
 
-    script = r'''import json
+    script = r'''import atexit
+import json
 import os
 import pathlib
+import shutil
 import subprocess
 import hashlib
 import tempfile
@@ -1123,6 +1125,7 @@ def _sha256(path):
 
 
 stage = pathlib.Path(tempfile.mkdtemp(prefix="hermes-drive-backup-", dir="/tmp"))
+atexit.register(shutil.rmtree, str(stage), ignore_errors=True)
 
 passfile = stage / "passphrase"
 passfile.write_bytes(__import__('sys').stdin.buffer.read())

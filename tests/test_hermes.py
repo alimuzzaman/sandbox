@@ -1293,6 +1293,8 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("drive-volume-fallbacks", command)
         self.assertIn('"snapshot"', command)
         self.assertIn("archive_bytes", command)
+        self.assertIn("atexit.register(shutil.rmtree", command)
+        self.assertIn("ignore_errors=True", command)
         self.assertNotIn("passphrase=", command)
 
     def test_drive_restore_reinstates_github_auth_and_services(self):

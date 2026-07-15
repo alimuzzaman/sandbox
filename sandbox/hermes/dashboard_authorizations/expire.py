@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -11,7 +12,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from authorization_core import AuthorizationError, approval_prompt, audit, expire, now, read_state, supersede_approved, write_state
+from authorization_core import (AuthorizationError, approval_prompt, audit, expire, now, read_state,
+                                state_digest, supersede_approved, write_state)
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 CONFIG = Path(os.environ.get("SANDBOX_AUTHORIZATION_CONFIG", PLUGIN_ROOT / "sandbox-authorization-config.json"))
@@ -83,6 +85,7 @@ def reconcile(*, refresh: bool = False) -> dict:
         raise AuthorizationError("authorization companion is not configured")
     state = read_state(Path(os.path.expandvars(state_path)).expanduser())
     target = Path(os.path.expandvars(state_path)).expanduser()
+    expected_digest = state_digest(state) if target.exists() else None
     catalog = _catalog(Path(os.path.expandvars(catalog_path)).expanduser())
     hermes, jobs = _hermes_bin(config), _cron_jobs()
     before = json.dumps(state, sort_keys=True)
@@ -117,14 +120,20 @@ def reconcile(*, refresh: bool = False) -> dict:
         job_id = _job_id(jobs, item["job_name"])
         approved_prompt = approval_prompt(job, item)
         if expired:
-            _edit(hermes, job_id, job["prompt"])
+            prior_state = copy.deepcopy(state)
             item["status"] = "expired"
             audit(state, item, "expired", "authorization-expiry")
             try:
-                write_state(target, state)
-            except Exception:
-                _edit(hermes, job_id, approved_prompt)
-                raise
+                write_state(target, state, expected_digest=expected_digest)
+                _edit(hermes, job_id, job["prompt"])
+            except Exception as expiry_error:
+                try:
+                    write_state(target, prior_state, expected_digest=state_digest(state))
+                    _edit(hermes, job_id, approved_prompt)
+                except Exception as rollback_error:
+                    raise AuthorizationError("authorization expiry rollback failed") from rollback_error
+                raise expiry_error
+            expected_digest = state_digest(state)
             before = json.dumps(state, sort_keys=True)
             expired_count += 1
         elif refresh:
@@ -132,7 +141,7 @@ def reconcile(*, refresh: bool = False) -> dict:
                 _edit(hermes, job_id, approved_prompt)
                 refreshed_count += 1
     if json.dumps(state, sort_keys=True) != before:
-        write_state(target, state)
+        write_state(target, state, expected_digest=expected_digest)
     return {"expired_count": expired_count, "refreshed_count": refreshed_count}
 
 

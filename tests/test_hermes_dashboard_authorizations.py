@@ -203,6 +203,31 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout), {"expired_count": 1, "refreshed_count": 0})
             self.assertEqual(core.read_state(state)["authorizations"]["requests"][item["id"]]["status"], "expired")
 
+    def test_expiry_companion_persists_state_before_editing_prompt(self):
+        companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, catalog, config = root / "state.json", root / "catalog.json", root / "config.json"
+            home, edits, hermes_bin = root / "hermes-home", root / "edits.log", root / "hermes"
+            (home / "cron").mkdir(parents=True)
+            job = {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe base"}
+            value = core.new_state()
+            item = core.create_request(value, {"job": job}, "job", "preview-overlay", "https://example.test", "safe", 60, "operator")
+            item["status"], item["expires_at"] = "approved", "2000-01-01T00:00:00+00:00"
+            core.write_state(state, value)
+            catalog.write_text(json.dumps({"jobs": [job]}))
+            config.write_text(json.dumps({"state_path": str(state), "catalog_path": str(catalog)}))
+            (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [{"id": "deadbeef1234", "name": "job", "enabled": True}]}))
+            hermes_bin.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERMES_EDIT_LOG\"\n")
+            hermes_bin.chmod(0o700)
+            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                           "HERMES_BIN": str(hermes_bin), "HERMES_EDIT_LOG": str(edits)}
+            result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
+                                    text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["expired_count"], 1)
+            self.assertEqual(core.read_state(state)["authorizations"]["requests"][item["id"]]["status"], "expired")
+
 
 class TestDashboardAuthorizationInstaller(unittest.TestCase):
     def test_default_catalog_contains_only_enabled_agent_jobs(self):

@@ -198,6 +198,26 @@ def cmd_hermes(cfg, args) -> None:
                     "cron action must be list, output, validate, create, route, run, catalog, reconcile, or verify",
                     "invalid_cron_action",
                 )
+        elif action == "authorization":
+            if args.subaction == "list":
+                payload = hermes.authorization_list(args.remote)
+            elif args.subaction == "show":
+                request_id = args.target or args.job_id
+                if not request_id:
+                    raise hermes.HermesError("authorization show requires a request id", "missing_authorization_id")
+                payload = hermes.authorization_show(args.remote, request_id)
+            elif args.subaction == "request":
+                if not args.job or not args.scope or not args.replay_origin or not args.reason:
+                    raise hermes.HermesError("authorization request requires --job, --scope, --replay-origin, and --reason", "missing_authorization_input")
+                payload = hermes.authorization_request(args.remote, args.job, args.scope, args.replay_origin,
+                                                       args.reason, args.expires_in_minutes)
+            elif args.subaction == "approve":
+                request_id = args.target or args.job_id
+                if not request_id:
+                    raise hermes.HermesError("authorization approve requires a request id", "missing_authorization_id")
+                payload = hermes.authorization_approve(args.remote, request_id, args.confirm)
+            else:
+                raise hermes.HermesError("authorization action must be list, show, request, or approve", "invalid_authorization_action")
         elif action == "repo":
             payload = _repo_action(args)
         elif action == "gateway":

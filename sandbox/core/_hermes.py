@@ -8,6 +8,7 @@ registry or exposes a new network listener.
 from __future__ import annotations
 
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
@@ -19,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit, urlunsplit
 
@@ -79,11 +80,15 @@ PUBLIC_CADDY_FRAGMENT = "/etc/caddy/conf.d/hermes-dashboard.caddy"
 PUBLIC_BASIC_FRAGMENT = "/etc/caddy/conf.d/hermes-dashboard-basic.caddy"
 PUBLIC_TUNNEL_TOKEN_FILE = "$HOME/.hermes/cloudflared-token"
 PUBLIC_TUNNEL_TOKEN_UNIT_FILE = "%h/.hermes/cloudflared-token"
-STATE_SCHEMA = 1
+STATE_SCHEMA = 2
 _REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _JOB_RE = re.compile(r"^[0-9a-f]{16}$")
 _CRON_JOB_RE = re.compile(r"^[0-9a-f]{8,32}$")
+_AUTH_REQUEST_RE = re.compile(r"^[0-9a-f]{16}$")
+_AUTH_SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_AUTH_MAX_REQUESTS = 100
+_AUTH_MAX_AUDIT = 200
 _SECRET_RE = re.compile(r"(?i)\b(token|password|secret|authorization|cookie|session)\b\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
 _BARE_SECRET_RE = re.compile(
     r"(?ix)(?:"
@@ -355,7 +360,8 @@ def read_state(path: Path) -> dict:
 
 
 def _new_state() -> dict:
-    return {"schema_version": STATE_SCHEMA, "repositories": {}, "sessions": {}, "gates": {}}
+    return {"schema_version": STATE_SCHEMA, "repositories": {}, "sessions": {}, "gates": {},
+            "authorizations": {"requests": {}, "audit": []}}
 
 
 def _normalize_state(data: dict) -> dict:
@@ -363,7 +369,7 @@ def _normalize_state(data: dict) -> dict:
     if not isinstance(data, dict):
         raise HermesError("unsupported Hermes state schema", "invalid_state")
     schema = data.get("schema_version", 0)
-    if schema == 0:
+    if schema in (0, 1):
         data = dict(data)
         data["schema_version"] = STATE_SCHEMA
     elif schema != STATE_SCHEMA:
@@ -372,7 +378,185 @@ def _normalize_state(data: dict) -> dict:
         data.setdefault(key, {})
         if not isinstance(data[key], dict):
             raise HermesError("invalid Hermes state collection", "invalid_state")
+    authorizations = data.setdefault("authorizations", {"requests": {}, "audit": []})
+    if not isinstance(authorizations, dict):
+        raise HermesError("invalid Hermes authorization collection", "invalid_state")
+    authorizations.setdefault("requests", {})
+    authorizations.setdefault("audit", [])
+    if not isinstance(authorizations["requests"], dict) or not isinstance(authorizations["audit"], list):
+        raise HermesError("invalid Hermes authorization collection", "invalid_state")
     return data
+
+
+def _authorization_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _valid_authorization_id(value: str) -> str:
+    value = (value or "").strip().lower()
+    if not _AUTH_REQUEST_RE.fullmatch(value):
+        raise HermesError("authorization request id is invalid", "invalid_authorization_id")
+    return value
+
+
+def _valid_authorization_scope(value: str) -> str:
+    value = (value or "").strip().lower()
+    if not _AUTH_SCOPE_RE.fullmatch(value):
+        raise HermesError("authorization scope must be a lowercase slug", "invalid_authorization_scope")
+    return value
+
+
+def _valid_replay_origin(value: str) -> str:
+    parsed = urlsplit((value or "").strip())
+    if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+        raise HermesError("replay origin must be an HTTPS origin without credentials or path", "invalid_replay_origin")
+    return urlunsplit(("https", parsed.netloc.lower(), "", "", ""))
+
+
+def _valid_authorization_reason(value: str) -> str:
+    value = (value or "").strip()
+    if not 1 <= len(value) <= 500 or "\n" in value or _contains_credential(value):
+        raise HermesError("authorization reason must be 1-500 non-secret characters", "invalid_authorization_reason")
+    return value
+
+
+def _authorization_fingerprint(job_name: str, scope: str, replay_origin: str, reason: str) -> str:
+    payload = json.dumps({"job_name": job_name, "scope": scope, "replay_origin": replay_origin,
+                          "reason": reason}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _authorization_audit(state: dict, request: dict, event: str) -> None:
+    audit = state["authorizations"]["audit"]
+    audit.append({"request_id": request["id"], "event": event, "at": _authorization_now().isoformat(),
+                  "fingerprint": request["fingerprint"]})
+    del audit[:-_AUTH_MAX_AUDIT]
+
+
+def _expire_authorizations(state: dict) -> None:
+    now = _authorization_now()
+    for request in state["authorizations"]["requests"].values():
+        if request.get("status") == "pending" and datetime.fromisoformat(request["expires_at"]) <= now:
+            request["status"] = "expired"
+            _authorization_audit(state, request, "expired")
+
+
+def _catalog_authorization_job(name: str, paths: dict) -> dict:
+    for item in load_catalog()["jobs"]:
+        if item.name == name and item.enabled and item.kind == "agent":
+            return render_entry(item, paths)
+    raise HermesError("authorization job must be an enabled catalog-managed agent", "invalid_authorization_job")
+
+
+def _authorization_view(state: dict, request: dict, detail: bool) -> dict:
+    keys = ("id", "job_name", "scope", "replay_origin", "rationale", "fingerprint", "status", "created_at", "expires_at", "approved_at")
+    view = {key: request.get(key) for key in keys if request.get(key) is not None}
+    if detail:
+        view["audit"] = [event for event in state["authorizations"]["audit"] if event["request_id"] == request["id"]]
+    return view
+
+
+def authorization_list(remote_name: str) -> dict:
+    entry = _require_remote(remote_name)
+    state = _remote_state_read(entry, _paths(entry))
+    _expire_authorizations(state)
+    requests = state["authorizations"]["requests"]
+    rows = [_authorization_view(state, request, False) for request in requests.values()]
+    rows.sort(key=lambda row: (row["status"] != "pending", row["created_at"]), reverse=False)
+    return result(True, "authorization_list", remote_name, status="ok", data={"requests": rows})
+
+
+def authorization_show(remote_name: str, request_id: str) -> dict:
+    entry = _require_remote(remote_name)
+    state = _remote_state_read(entry, _paths(entry))
+    _expire_authorizations(state)
+    request_id = _valid_authorization_id(request_id)
+    request = state["authorizations"]["requests"].get(request_id)
+    if not request:
+        raise HermesError("authorization request was not found", "authorization_not_found")
+    return result(True, "authorization_show", remote_name, status=request["status"],
+                  data={"request": _authorization_view(state, request, True)})
+
+
+def authorization_request(remote_name: str, job_name: str, scope: str, replay_origin: str, reason: str,
+                          expires_in_minutes: int = 1440) -> dict:
+    if not isinstance(expires_in_minutes, int) or not 1 <= expires_in_minutes <= 1440:
+        raise HermesError("authorization expiry must be between 1 and 1440 minutes", "invalid_authorization_expiry")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    job = _catalog_authorization_job((job_name or "").strip(), paths)
+    scope, replay_origin, reason = (_valid_authorization_scope(scope), _valid_replay_origin(replay_origin),
+                                    _valid_authorization_reason(reason))
+    state = _remote_state_read(entry, paths)
+    _expire_authorizations(state)
+    requests = state["authorizations"]["requests"]
+    if len(requests) >= _AUTH_MAX_REQUESTS:
+        raise HermesError("authorization request limit reached", "authorization_limit_reached")
+    for request in requests.values():
+        if request.get("job_name") == job["name"] and request.get("status") == "pending":
+            request["status"] = "superseded"
+            _authorization_audit(state, request, "superseded")
+    now = _authorization_now()
+    request_id = secrets.token_hex(8)
+    request = {"id": request_id, "job_name": job["name"], "scope": scope, "replay_origin": replay_origin,
+               "rationale": reason, "fingerprint": _authorization_fingerprint(job["name"], scope, replay_origin, reason),
+               "status": "pending", "created_at": now.isoformat(),
+               "expires_at": (now + timedelta(minutes=expires_in_minutes)).isoformat()}
+    requests[request_id] = request
+    _authorization_audit(state, request, "requested")
+    _remote_state_write(entry, paths, state)
+    return result(True, "authorization_request", remote_name, status="pending",
+                  data={"request": _authorization_view(state, request, True)})
+
+
+def _set_cron_prompt(entry: dict, job_id: str, prompt: str) -> None:
+    paths = _paths(entry)
+    command = f"{paths['launcher']} cron edit {shlex.quote(job_id)} --prompt {shlex.quote(prompt)}"
+    res = _ssh(entry, command, timeout=30)
+    if res.returncode != 0:
+        raise HermesError(_redact(res.stderr or res.stdout or "Hermes cron prompt update failed", entry)[:1000],
+                          "authorization_prompt_update_failed", True)
+
+
+def _authorization_prompt(job: dict, request: dict) -> str:
+    return job["prompt"].rstrip() + "\n\n" + (
+        "SANDBOX AUTHORIZATION: This is the sole approved exception for this run. "
+        f"Request {request['id']} authorizes only scope {request['scope']} against replay origin "
+        f"{request['replay_origin']}. Rationale: {request['rationale']}. "
+        "Do not broaden this authorization or perform any other protected action.\n"
+    )
+
+
+def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> dict:
+    if not confirm:
+        raise HermesError("authorization approval requires --confirm", "confirmation_required")
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    state = _remote_state_read(entry, paths)
+    _expire_authorizations(state)
+    request_id = _valid_authorization_id(request_id)
+    request = state["authorizations"]["requests"].get(request_id)
+    if not request:
+        raise HermesError("authorization request was not found", "authorization_not_found")
+    if request.get("status") != "pending":
+        raise HermesError("authorization request is not pending", "authorization_not_pending")
+    job = _catalog_authorization_job(request["job_name"], paths)
+    matches = [item for item in _cron_snapshot(entry)["jobs"] if item.get("name") == job["name"] and item.get("enabled")]
+    if len(matches) != 1 or not _CRON_JOB_RE.fullmatch(str(matches[0].get("id") or "")):
+        raise HermesError("matching catalog cron job was not found", "authorization_cron_job_not_found")
+    prompt = _authorization_prompt(job, request)
+    _set_cron_prompt(entry, matches[0]["id"], prompt)
+    request["status"] = "approved"
+    request["approved_at"] = _authorization_now().isoformat()
+    _authorization_audit(state, request, "approved")
+    try:
+        _remote_state_write(entry, paths, state)
+    except Exception:
+        _set_cron_prompt(entry, matches[0]["id"], job["prompt"])
+        raise
+    return result(True, "authorization_approve", remote_name, status="approved", job_id=matches[0]["id"],
+                  data={"request": _authorization_view(state, request, True)})
 
 
 def write_state(path: Path, state: dict) -> None:

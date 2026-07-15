@@ -419,10 +419,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     preview_p.add_argument("--json", action="store_true", help="print JSON")
 
     hermes_p = sub.add_parser("hermes", help="Install and operate Hermes Agent on a configured remote")
-    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive"],
+    hermes_p.add_argument("action", choices=["install", "setup", "doctor", "status", "chat", "run", "job", "cron", "repo", "gateway", "worktree", "update", "backup", "cleanup", "policy", "health", "acceptance", "dashboard", "state", "drive", "authorization"],
         help="core action, or repo/gateway/dashboard subcommand group")
     hermes_p.add_argument("subaction", nargs="?", default=None,
-        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore")
+        help="repo: auth|clone|list|sync; job: status|kill; cron: list|output|validate|create|route|run|catalog|reconcile|verify; gateway: setup|install|start|stop|restart|status|logs|converge; worktree: list|inspect|preserve; update: plan|apply; backup: create|list|restore; policy: show|set; acceptance: v2; state: setup|sync|restore; drive: setup|backup|list|restore; authorization: list|show|request|approve")
     hermes_p.add_argument("target", nargs="?", default=None,
         help="repo auth provider, or an optional subcommand target")
     hermes_p.add_argument("--remote", required=True, help="configured remote name")
@@ -436,6 +436,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--token-stdin", action="store_true",
         help="read a fine-grained GitHub repository token from stdin for `repo auth github`")
     hermes_p.add_argument("--name", default=None, help="managed repository name for clone")
+    hermes_p.add_argument("--job", default=None, help="catalog-managed Hermes job name for authorization")
     hermes_p.add_argument("--ref", default=None, help="branch, tag, or ref to clone")
     hermes_p.add_argument("--prompt", default=None, help="one-shot Hermes prompt")
     hermes_p.add_argument("--schedule", default=None, help="Hermes cron expression or interval")
@@ -443,6 +444,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--profile", choices=["luna", "terra", "sol"], default="terra",
         help="validated Sandbox route for a cron job (default: terra)")
     hermes_p.add_argument("--no-worktree", action="store_true", help="run against the primary checkout")
+    hermes_p.add_argument("--scope", default=None, help="bounded authorization scope slug")
+    hermes_p.add_argument("--replay-origin", default=None, help="exact HTTPS origin approved for replay")
+    hermes_p.add_argument("--reason", default=None, help="non-secret authorization rationale")
+    hermes_p.add_argument("--expires-in-minutes", type=int, default=1440, help="authorization request expiry (1-1440)")
     hermes_p.add_argument("--async", dest="run_async", action="store_true", help="return a detached job id")
     hermes_p.add_argument("--timeout", type=int, default=1200, help="one-shot timeout in seconds")
     hermes_p.add_argument("--allow", dest="allowlist", action="append", default=None,

@@ -92,12 +92,15 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(hermes._valid_authorization_scope("preview-overlay"), "preview-overlay")
         self.assertEqual(hermes._valid_replay_origin("https://Replay.Example.test/"), "https://replay.example.test")
         self.assertEqual(hermes._valid_authorization_reason("bounded review"), "bounded review")
-        for value in ("https://example.test/path", "http://example.test", "https://u:p@example.test"):
+        for value in ("https://example.test/path", "http://example.test", "https://u:p@example.test",
+                      "https://example.test\r\nX-Injected: value"):
             with self.subTest(origin=value):
                 with self.assertRaises(hermes.HermesError):
                     hermes._valid_replay_origin(value)
         with self.assertRaises(hermes.HermesError):
             hermes._valid_authorization_reason("token=secret-value-that-must-not-be-stored")
+        with self.assertRaises(hermes.HermesError):
+            hermes._valid_authorization_reason("review\r\nforbidden")
         with self.assertRaises(hermes.HermesError):
             hermes._valid_authorization_id("not-an-id")
 

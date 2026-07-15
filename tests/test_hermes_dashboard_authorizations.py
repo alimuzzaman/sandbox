@@ -48,6 +48,10 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             core.create_request(state, catalog, "job", "preview-overlay", "https://lenzora.dev", "token=not-safe", 60, "op")
         with self.assertRaises(core.AuthorizationError):
             core.create_request(state, catalog, "other", "preview-overlay", "https://lenzora.dev", "safe", 60, "op")
+        with self.assertRaises(core.AuthorizationError):
+            core.valid_origin("https://lenzora.dev\r\nX-Injected: value")
+        with self.assertRaises(core.AuthorizationError):
+            core.valid_reason("review\tforbidden")
 
     def test_equivalent_pending_request_is_reused(self):
         state = core.new_state()

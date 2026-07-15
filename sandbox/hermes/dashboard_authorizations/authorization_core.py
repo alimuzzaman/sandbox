@@ -40,7 +40,10 @@ def valid_scope(value: str) -> str:
 
 
 def valid_origin(value: str) -> str:
-    parsed = urlsplit((value or "").strip())
+    value = (value or "").strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise AuthorizationError("replay origin contains unsafe control text")
+    parsed = urlsplit(value)
     if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
             or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
         raise AuthorizationError("replay origin must be an HTTPS origin without credentials or path")
@@ -49,7 +52,8 @@ def valid_origin(value: str) -> str:
 
 def valid_reason(value: str) -> str:
     value = (value or "").strip()
-    if not 1 <= len(value) <= 500 or "\n" in value or _SECRET.search(value):
+    if (not 1 <= len(value) <= 500 or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            or _SECRET.search(value)):
         raise AuthorizationError("rationale must be 1-500 non-secret characters")
     return value
 

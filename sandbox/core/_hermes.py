@@ -514,28 +514,164 @@ def _drive_destination(entry: dict) -> str:
     return validate_drive_destination(destination)
 
 
-def _drive_backup_command(paths: dict, destination: str, backup_id: str) -> str:
-    """Create a full encrypted recovery point; passphrase arrives only on stdin."""
-    home = shlex.quote(paths["sandbox_home"])
-    dest = shlex.quote(destination)
-    registry_script = (
-        "import json,pathlib; p=pathlib.Path(" + repr(paths["sandbox_home"]) + ") / 'runtime' / 'registry.json'; "
-        "d=json.loads(p.read_text()) if p.exists() else {}; entries=(d.get('instances') or d).values(); "
-        "print(' '.join(sorted(str(v.get('instance')) for v in entries if isinstance(v,dict) and v.get('instance'))))"
-    )
+def _drive_backup_command(paths: dict, destination: str, backup_id: str, scope: str = "full") -> str:
+    """Create a full or incremental encrypted recovery point; passphrase arrives only on stdin."""
+    if scope not in {"full", "incremental"}:
+        raise HermesError("drive scope must be full or incremental", "invalid_drive_scope")
+    destination = validate_drive_destination(destination)
+
+    script = r'''import json
+import os
+import pathlib
+import subprocess
+import hashlib
+
+HOME = __HOME__
+SB = __SB__
+DESTINATION = __DESTINATION__
+BACKUP_ID = __BACKUP_ID__
+SCOPE = __SCOPE__
+
+
+def _run(command, capture=False):
+    kwargs = {
+        "stdout": subprocess.PIPE if capture else subprocess.DEVNULL,
+        "stderr": subprocess.STDOUT,
+        "cwd": HOME,
+        "text": True,
+    }
+    result = subprocess.run(command, **kwargs)
+    if result.returncode != 0:
+        raise SystemExit(result.stdout or "command failed")
+    return result
+
+
+def _read_instances():
+    registry = pathlib.Path(HOME) / "runtime" / "registry.json"
+    if not registry.exists():
+        return []
+    data = json.loads(registry.read_text())
+    entries = data.get("instances") if isinstance(data, dict) else {}
+    if not entries:
+        entries = data
+    for value in entries.values() if isinstance(entries, dict) else []:
+        if isinstance(value, dict) and value.get("instance"):
+            yield str(value.get("instance"))
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+stage = pathlib.Path('/tmp').joinpath('hermes-drive-backup')
+stage.mkdir(parents=True, exist_ok=True)
+
+passfile = stage / "passphrase"
+passfile.write_bytes(__import__('sys').stdin.buffer.read())
+
+archive = stage / f"{BACKUP_ID}.tar.gz"
+cipher = stage / f"{BACKUP_ID}.tar.gz.gpg"
+manifest = stage / f"{BACKUP_ID}.manifest.json"
+state = stage / f"{BACKUP_ID}.state.snar"
+fallback = pathlib.Path(HOME) / "runtime" / f".drive-volume-fallbacks-{BACKUP_ID}"
+fallback.mkdir(parents=True, exist_ok=True)
+
+instances = list(_read_instances())
+for instance in instances:
+        env = dict(os.environ)
+        env["SANDBOX_INSTANCE"] = instance
+        result = subprocess.run([SB, "snapshot", f"drive-{BACKUP_ID}", "--force"], text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False, cwd=HOME)
+    if result.returncode == 0:
+        print(f"Hermes Drive: snapshot {instance} complete", file=__import__('sys').stderr)
+        continue
+    msg = (result.stdout or "").lower()
+    if "address already in use" in msg or "cannot assign requested address" in msg or "permission denied" in msg:
+        print(f"Hermes Drive: snapshot for {instance} hit host-port conflict; using fallback", file=__import__('sys').stderr)
+    else:
+        print(f"Hermes Drive: snapshot for {instance} failed; using fallback", file=__import__('sys').stderr)
+    backup_tar = fallback / f"{instance}-mysql.tar"
+    with backup_tar.open("wb") as out:
+        docker_result = subprocess.run(["docker", "cp", f"sandbox-{instance}-db-1:/var/lib/mysql", "-"],
+                                      stdout=out, stderr=subprocess.PIPE, text=False, cwd=HOME, check=False)
+    if docker_result.returncode != 0:
+        raise SystemExit((docker_result.stderr or b"").decode(errors="replace").strip())
+
+base_id = ""
+chain_id = BACKUP_ID
+if SCOPE == "incremental":
+    manifests = _run(["rclone", "lsf", "--files-only", DESTINATION], capture=True).stdout.splitlines()
+    manifest_names = [name.strip() for name in manifests if name.strip().endswith(".manifest.json")]
+    if not manifest_names:
+        raise SystemExit(1)
+    base_id = manifest_names[-1][:-14]
+    previous = stage / f"{base_id}.manifest.json"
+    _run(["rclone", "copyto", f"{DESTINATION}/{base_id}.manifest.json", str(previous)], capture=True)
+    if previous.exists():
+        base_manifest = json.loads(previous.read_text())
+        base_scope = base_manifest.get("scope", "full")
+        if base_scope not in {"full", "incremental"}:
+            raise SystemExit(1)
+        base_state = base_manifest.get("state_file", f"{base_id}.state.snar")
+        chain_id = base_manifest.get("chain_id") or base_id
+        previous_state = stage / f"{base_id}.state.snar"
+        _run(["rclone", "copyto", f"{DESTINATION}/{base_state}", str(previous_state)], capture=True)
+        if previous_state.exists():
+            previous_state.replace(state)
+
+_run(["tar", "--ignore-failed-read", "--absolute-names", "--listed-incremental", str(state),
+      "-czf", str(archive),
+      f"{HOME}/.hermes", f"{HOME}/.config/gh", f"{HOME}/.config/rclone",
+      "--exclude", f"{HOME}/.hermes/hermes-agent",
+      "--exclude", f"{HOME}/.hermes/hermes-agent.restore.*",
+      "--exclude", f"{HOME}/.hermes/node",
+      "--exclude", f"{HOME}/runtime/dl-cache",
+      "--exclude", f"{HOME}/runtime/hermes-jobs"],
+     capture=True)
+_run(["rm", "-rf", str(fallback)], capture=True)
+
+_run(["gpg", "--batch", "--yes", "--pinentry-mode", "loopback", "--passphrase-file", str(passfile),
+      "--symmetric", "--cipher-algo", "AES256", "--output", str(cipher), str(archive)], capture=True)
+
+manifest.write_text(json.dumps({
+    "schema_version": 2,
+    "id": BACKUP_ID,
+    "scope": SCOPE,
+    "chain_id": chain_id,
+    "base_id": base_id,
+    "archive": f"{BACKUP_ID}.tar.gz.gpg",
+    "state_file": f"{BACKUP_ID}.state.snar",
+    "plain_sha256": _sha256(archive),
+    "cipher_sha256": _sha256(cipher),
+    "excluded": ["container-images", "package-caches", "runtime-sockets"],
+}))
+
+_run(["rclone", "copyto", "--stats-one-line", "--stats=10s", str(cipher),
+      f"{DESTINATION}/{BACKUP_ID}.tar.gz.gpg"], capture=True)
+_run(["rclone", "copyto", str(manifest), f"{DESTINATION}/{BACKUP_ID}.manifest.json"], capture=True)
+_run(["rclone", "copyto", str(state), f"{DESTINATION}/{BACKUP_ID}.state.snar"], capture=True)
+
+print(f"scope={SCOPE}")
+print(f"chain_id={chain_id}")
+print(f"base_id={base_id}")
+print(f"archive_bytes={cipher.stat().st_size}")
+'''
+
+    script = script.replace("__HOME__", json.dumps(pathlib.Path(paths["sandbox_home"]).as_posix()))
+    script = script.replace("__SB__", json.dumps(paths["sb"]))
+    script = script.replace("__DESTINATION__", json.dumps(destination))
+    script = script.replace("__BACKUP_ID__", json.dumps(backup_id))
+    script = script.replace("__SCOPE__", json.dumps(scope))
+
     return (
-        "set -eu; umask 077; stage=$(mktemp -d); passfile=\"$stage/passphrase\"; "
-        "trap 'rm -rf \"$stage\"' EXIT; cat > \"$passfile\"; test -s \"$passfile\"; "
-        "command -v rclone >/dev/null 2>&1; command -v gpg >/dev/null 2>&1; "
-        f"archive=\"$stage/{backup_id}.tar.gz\"; cipher=\"$stage/{backup_id}.tar.gz.gpg\"; manifest=\"$stage/{backup_id}.manifest.json\"; fallback={home}/runtime/.drive-volume-fallbacks-{backup_id}; mkdir -p \"$fallback\"; printf '%s\\n' 'Hermes Drive: snapshotting WordPress instances' >&2; "
-        f"for instance in $(python3 -c {shlex.quote(registry_script)}); do if ! SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} snapshot drive-{backup_id} --force >/dev/null; then docker cp \"sandbox-$instance-db-1:/var/lib/mysql\" - > \"$fallback/$instance-mysql.tar\"; fi; done; "
-        f"printf '%s\\n' 'Hermes Drive: archiving full state' >&2; tar --ignore-failed-read --absolute-names --exclude=\"$HOME/.hermes/hermes-agent\" --exclude=\"$HOME/.hermes/hermes-agent.restore.*\" --exclude=\"$HOME/.hermes/node\" --exclude={home}/runtime/dl-cache --exclude={home}/runtime/hermes-jobs -czf \"$archive\" \"$HOME/.hermes\" \"$HOME/.config/gh\" \"$HOME/.config/rclone\" {home}; "
-        "rm -rf \"$fallback\"; plain_sha=$(sha256sum \"$archive\" | awk '{print $1}'); printf '%s\\n' 'Hermes Drive: encrypting archive' >&2; "
-        "gpg --batch --yes --pinentry-mode loopback --passphrase-file \"$passfile\" --symmetric --cipher-algo AES256 --output \"$cipher\" \"$archive\"; "
-        "cipher_sha=$(sha256sum \"$cipher\" | awk '{print $1}'); "
-        f"printf '{{\"schema_version\":1,\"id\":\"{backup_id}\",\"scope\":\"full\",\"archive\":\"{backup_id}.tar.gz.gpg\",\"plain_sha256\":\"%s\",\"cipher_sha256\":\"%s\",\"excluded\":[\"container-images\",\"package-caches\",\"runtime-sockets\"]}}\\n' \"$plain_sha\" \"$cipher_sha\" > \"$manifest\"; "
-        f"printf '%s\\n' 'Hermes Drive: uploading encrypted archive' >&2; rclone copyto --stats-one-line --stats=10s \"$cipher\" {dest}/{backup_id}.tar.gz.gpg; printf '%s\\n' 'Hermes Drive: publishing manifest' >&2; rclone copyto \"$manifest\" {dest}/{backup_id}.manifest.json; "
-        f"printf 'backup_id={backup_id}\\narchive_bytes=%s\\n' \"$(wc -c < \"$cipher\")\""
+        "set -eu; umask 077; "
+        "python3 - <<'PY'\n"
+        f"{script}\n"
+        "PY\n"
     )
 
 
@@ -554,7 +690,11 @@ def drive_backup(remote_name: str, passphrase: bytes, confirm: bool) -> dict:
         raise HermesError(_redact(stderr or stdout or "Drive backup failed", entry)[:1000], "drive_backup_failed", True)
     values = dict(line.split("=", 1) for line in (completed.stdout or b"").decode(errors="replace").splitlines() if "=" in line)
     return result(True, "drive_backup", remote_name, status="backed_up",
-                  data={"backup_id": backup_id, "scope": "full", "archive_bytes": int(values.get("archive_bytes", "0"))})
+                  data={"backup_id": backup_id,
+                        "scope": values.get("scope", "full"),
+                        "chain_id": values.get("chain_id", backup_id),
+                        "base_id": values.get("base_id", ""),
+                        "archive_bytes": int(values.get("archive_bytes", "0"))})
 
 
 def drive_list(remote_name: str) -> dict:
@@ -573,20 +713,61 @@ def _drive_restore_command(paths: dict, destination: str, backup_id: str) -> str
         "set -eu; umask 077; stage=$(mktemp -d \"$HOME/.hermes-restore.XXXXXX\"); passfile=\"$stage/passphrase\"; "
         "trap 'rm -rf \"$stage\"' EXIT; cat > \"$passfile\"; test -s \"$passfile\"; "
         "command -v rclone >/dev/null 2>&1; command -v gpg >/dev/null 2>&1; "
-        f"rclone copyto {dest}/{backup_id}.manifest.json \"$stage/manifest.json\"; rclone copyto {dest}/{backup_id}.tar.gz.gpg \"$stage/archive.gpg\"; "
-        f"python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d.get(\"schema_version\") == 1 and d.get(\"id\") == sys.argv[2] and d.get(\"scope\") == \"full\"' \"$stage/manifest.json\" {shlex.quote(backup_id)}; "
-        "expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"cipher_sha256\"])' \"$stage/manifest.json\"); actual=$(sha256sum \"$stage/archive.gpg\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; "
-        "gpg --batch --yes --pinentry-mode loopback --passphrase-file \"$passfile\" --decrypt --output \"$stage/archive.tar.gz\" \"$stage/archive.gpg\"; "
-        "expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"plain_sha256\"])' \"$stage/manifest.json\"); actual=$(sha256sum \"$stage/archive.tar.gz\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; "
-        f"tar -tzf \"$stage/archive.tar.gz\" | python3 -c 'import sys; home=sys.argv[1].rstrip(\"/\")+\"/\"; sandbox=sys.argv[2].rstrip(\"/\")+\"/\"; paths=[p.lstrip(\"/\") for p in sys.stdin.read().splitlines()]; assert all(not p.startswith(\"../\") and (\"/\"+p).startswith(home) or (\"/\"+p).startswith(sandbox) for p in paths)' \"$HOME\" {home}; "
-        "mkdir -p \"$stage/extract\"; tar -C \"$stage/extract\" --transform='s,^/,,' -xzf \"$stage/archive.tar.gz\"; "
-        f"new_home=\"$stage/extract$HOME\"; new_sandbox=\"$stage/extract{paths['sandbox_home']}\"; test -d \"$new_home/.hermes\"; test -d \"$new_sandbox\"; "
+        f"python3 - \"{backup_id}\" {dest} \"$stage\" <<'PY' > \"$stage/plan.txt\"\n"
+        "import json\n"
+        "import pathlib\n"
+        "import subprocess\n\n"
+        "import sys\n"
+        "current = sys.argv[1]\n"
+        "destination = sys.argv[2]\n"
+        "stage = pathlib.Path(sys.argv[3])\n"
+        "seen = []\n"
+        "history = set()\n"
+        "while True:\n"
+        "  manifest = stage / f'{current}.manifest.json'\n"
+        "  cp = subprocess.run(['rclone', 'copyto', f'{destination}/{current}.manifest.json', str(manifest)], capture_output=True, text=True)\n"
+        "  if cp.returncode != 0:\n"
+        "    raise SystemExit(1)\n"
+        "  data = json.loads(manifest.read_text())\n"
+        "  scope = data.get('scope', 'full')\n"
+        "  if scope not in {'full', 'incremental'}:\n"
+        "    raise SystemExit(1)\n"
+        "  if current in history:\n"
+        "    raise SystemExit(1)\n"
+        "  history.add(current)\n"
+        "  seen.append((current, data))\n"
+        "  if scope == 'full':\n"
+        "    break\n"
+        "  current = data.get('base_id')\n"
+        "  if not current:\n"
+        "    raise SystemExit(1)\n"
+        "print('CHAIN_ID=' + (seen[-1][1].get('chain_id') or seen[-1][0]))\n"
+        "for rid, _ in reversed(seen):\n"
+        "  print(rid)\n"
+        "PY\n"
+        "while IFS= read -r restore_id; do\n"
+        "  if test -z \"$restore_id\"; then continue; fi\n"
+        "  if test \"$restore_id\" = CHAIN_ID=*; then continue; fi\n"
+        "  manifest=\"$stage/$restore_id.manifest.json\"\n"
+        "  archive=\"$stage/$restore_id.tar.gz.gpg\"\n"
+        "  rclone copyto {dest}/\"$restore_id\".tar.gz.gpg \"$archive\"\n"
+        "  rclone copyto {dest}/\"$restore_id\".manifest.json \"$manifest\"\n"
+        "  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(\"cipher_sha256\",\"\"))' \"$manifest\"); "
+        "actual=$(sha256sum \"$archive\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; \n"
+        "gpg --batch --yes --pinentry-mode loopback --passphrase-file \"$passfile\" --decrypt --output \"$stage/$restore_id.tar.gz\" \"$archive\"; "
+        "expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(\"plain_sha256\",\"\"))' \"$manifest\"); "
+        "actual=$(sha256sum \"$stage/$restore_id.tar.gz\" | awk '{print $1}'); test \"$expected\" = \"$actual\"; "
+        "tar -tzf \"$stage/$restore_id.tar.gz\" | python3 -c 'import sys; home=sys.argv[1].rstrip(\"/\")+\"/\"; sandbox=sys.argv[2].rstrip(\"/\")+\"/\"; entries=[p.lstrip(\"/\") for p in sys.stdin.read().splitlines()]; assert all(not p.startswith(\"../\") and ((\"/\"+p).startswith(home) or (\"/\"+p).startswith(sandbox)) for p in entries)' \"$HOME\" {home}; "
+        "mkdir -p \"$stage/extract\"; tar -C \"$stage/extract\" --transform='s,^/,,' -xzf \"$stage/$restore_id.tar.gz\"; \n"
+        "done < <(grep -v '^CHAIN_ID=' \"$stage/plan.txt\")\n"
+        "chain_id=$(sed -n 's/^CHAIN_ID=//p' \"$stage/plan.txt\" | head -n1)\n"
+        "new_home=\"$stage/extract$HOME\"; new_sandbox=\"$stage/extract" + paths['sandbox_home'] + "\"; test -d \"$new_home/.hermes\"; test -d \"$new_sandbox\"; "
         "systemctl --user stop hermes-gateway-sandbox.service hermes-dashboard-sandbox.service 2>/dev/null || true; "
         f"previous_home=\"$HOME/.hermes.pre-restore\"; previous_sandbox={home}.pre-restore; previous_gh=\"$HOME/.config/gh.pre-restore\"; previous_rclone=\"$HOME/.config/rclone.pre-restore\"; rm -rf \"$previous_home\" \"$previous_sandbox\" \"$previous_gh\" \"$previous_rclone\"; "
         "test ! -e \"$HOME/.hermes\" || mv \"$HOME/.hermes\" \"$previous_home\"; "
         "test ! -e \"$HOME/.config/gh\" || mv \"$HOME/.config/gh\" \"$previous_gh\"; test ! -e \"$HOME/.config/rclone\" || mv \"$HOME/.config/rclone\" \"$previous_rclone\"; "
         f"test ! -e {home} || mv {home} \"$previous_sandbox\"; mv \"$new_home/.hermes\" \"$HOME/.hermes\"; mkdir -p \"$HOME/.config\"; test ! -d \"$new_home/.config/gh\" || mv \"$new_home/.config/gh\" \"$HOME/.config/gh\"; test ! -d \"$new_home/.config/rclone\" || mv \"$new_home/.config/rclone\" \"$HOME/.config/rclone\"; mv \"$new_sandbox\" {home}; "
-        f"fallback={home}/runtime/.drive-volume-fallbacks-{backup_id}; if test -d \"$fallback\"; then for file in \"$fallback\"/*-mysql.tar; do test -f \"$file\" || continue; instance=$(basename \"$file\" -mysql.tar); SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; container=\"sandbox-$instance-db-1\"; docker stop \"$container\" >/dev/null; image=$(docker inspect \"$container\" --format '{{{{.Config.Image}}}}'); volume=$(docker inspect \"$container\" --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/var/lib/mysql\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'); test -n \"$volume\"; docker run --rm --entrypoint /bin/sh -v \"$volume:/dest\" -v \"$file:/backup.tar:ro\" \"$image\" -c 'find /dest -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +; tar -C /dest --strip-components=1 -xf /backup.tar'; SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; done; fi; "
+        f"fallback={home}/runtime/.drive-volume-fallbacks-{backup_id}; if test -d \"$fallback\"; then for file in \"$fallback\"/*-mysql.tar; do test -f \"$file\" || continue; instance=$(basename \"$file\" -mysql.tar); SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; container=\"sandbox-$instance-db-1\"; docker stop \"$container\" >/dev/null; image=$(docker inspect \"$container\" --format '{{{{.Config.Image}}}}'); volume=$(docker inspect \"$container\" --format '{{{{range .Mounts}}}}{{{{if eq .Destination \"/var/lib/mysql\"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}'); test -n \"$volume\"; docker run --rm --user 0 --entrypoint /bin/sh -v \"$volume:/dest\" -v \"$file:/backup.tar:ro\" \"$image\" -c 'find /dest -mindepth 1 -maxdepth 1 -exec rm -rf {{}} +; tar -C /dest --strip-components=1 -xf /backup.tar'; SANDBOX_INSTANCE=\"$instance\" {shlex.quote(paths['sb'])} up >/dev/null; done; fi; "
         "systemctl --user daemon-reload 2>/dev/null || true; systemctl --user start hermes-gateway-sandbox.service 2>/dev/null || true; systemctl --user start hermes-dashboard-sandbox.service 2>/dev/null || true; "
         "printf '%s\\n' restored"
     )

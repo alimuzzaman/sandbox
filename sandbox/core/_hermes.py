@@ -434,6 +434,16 @@ def _valid_authorization_reason(value: str) -> str:
     return value
 
 
+def _authorization_expiry(request: dict) -> datetime:
+    try:
+        expiry = datetime.fromisoformat(request["expires_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HermesError("authorization request has an invalid expiry", "invalid_state") from exc
+    if expiry.tzinfo is None:
+        raise HermesError("authorization request has an invalid expiry", "invalid_state")
+    return expiry
+
+
 def _authorization_fingerprint(job_name: str, scope: str, replay_origin: str, reason: str) -> str:
     payload = json.dumps({"job_name": job_name, "scope": scope, "replay_origin": replay_origin,
                           "reason": reason}, sort_keys=True, separators=(",", ":"))
@@ -450,7 +460,7 @@ def _authorization_audit(state: dict, request: dict, event: str) -> None:
 def _expire_authorizations(state: dict) -> None:
     now = _authorization_now()
     for request in state["authorizations"]["requests"].values():
-        if request.get("status") == "pending" and datetime.fromisoformat(request["expires_at"]) <= now:
+        if request.get("status") == "pending" and _authorization_expiry(request) <= now:
             request["status"] = "expired"
             _authorization_audit(state, request, "expired")
 

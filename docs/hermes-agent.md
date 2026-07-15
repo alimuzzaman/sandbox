@@ -202,6 +202,8 @@ only the reviewed dev scope until expiry; it does not create, run, remove, or
 otherwise reconfigure jobs. Each lifecycle event is retained in the bounded,
 secret-screened Hermes state audit; approving a newer request supersedes every
 older approval for that same job, so only one approval can remain active.
+Malformed authorization timestamps fail closed as `invalid_state` errors rather
+than being treated as an approval or leaking an unhandled parser exception.
 
 The installed Hermes release does not retain cron output, so output scanning is
 not used for authorization. A cron without a configured template reports its

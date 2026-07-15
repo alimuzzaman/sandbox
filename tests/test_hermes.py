@@ -161,6 +161,20 @@ class TestValidation(unittest.TestCase):
             hermes.authorization_approve("test", "a" * 16, False)
         self.assertEqual(caught.exception.code, "confirmation_required")
 
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths", return_value={})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_rejects_malformed_expiry_as_invalid_state(self, require_remote, paths, read_state):
+        state = hermes._new_state()
+        state["authorizations"]["requests"]["a" * 16] = {
+            "id": "a" * 16, "status": "pending", "expires_at": "not-a-timestamp",
+            "created_at": "2026-07-15T00:00:00+00:00",
+        }
+        read_state.return_value = state
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.authorization_list("test")
+        self.assertEqual(caught.exception.code, "invalid_state")
+
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [

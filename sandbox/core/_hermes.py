@@ -421,6 +421,19 @@ def _normalize_state(data: dict) -> dict:
     if (any(not request_fields <= set(request) for request in authorizations["requests"].values())
             or any(not audit_fields <= set(event) for event in authorizations["audit"])):
         raise HermesError("invalid Hermes authorization record", "invalid_state")
+    valid_statuses = {"pending", "approved", "expired", "superseded", "review_required"}
+    for request_id, request in authorizations["requests"].items():
+        if (request.get("id") != request_id or not _AUTH_REQUEST_RE.fullmatch(request_id) or
+                not isinstance(request.get("status"), str) or request["status"] not in valid_statuses or
+                any(not isinstance(request.get(field), str) for field in request_fields) or
+                not re.fullmatch(r"[0-9a-f]{64}", request["fingerprint"])):
+            raise HermesError("invalid Hermes authorization record", "invalid_state")
+    for event in authorizations["audit"]:
+        if (not isinstance(event["request_id"], str) or not _AUTH_REQUEST_RE.fullmatch(event["request_id"]) or
+                not isinstance(event["event"], str) or not event["event"] or
+                any(not isinstance(event.get(field), str) for field in audit_fields) or
+                not re.fullmatch(r"[0-9a-f]{64}", event["fingerprint"])):
+            raise HermesError("invalid Hermes authorization record", "invalid_state")
     return data
 
 

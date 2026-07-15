@@ -252,6 +252,12 @@ class TestValidation(unittest.TestCase):
                 "id": "a" * 16, "status": "pending", "created_at": "now",
                 "expires_at": "later"}}, "audit": []}})
 
+    def test_authorization_state_rejects_mismatched_ids_statuses_and_digests(self):
+        request = {"id": "b" * 16, "status": "unknown", "created_at": "now",
+                   "expires_at": "later", "fingerprint": "c" * 64}
+        with self.assertRaisesRegex(hermes.HermesError, "authorization record"):
+            hermes._normalize_state({"authorizations": {"requests": {"a" * 16: request}, "audit": []}})
+
     @patch("sandbox.core._hermes._remote_state_write")
     @patch("sandbox.core._hermes._remote_state_read")
     @patch("sandbox.core._hermes._paths", return_value={})

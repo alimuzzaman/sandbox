@@ -22,7 +22,7 @@ Add an authorization subcommand and MCP wrappers backed by the existing locked r
 
 **Project Type**: CLI/MCP control-plane feature
 
-**Performance Goals**: List/show within one bounded remote state read; approval within one state write plus one bounded cron edit
+**Performance Goals**: List/show within one bounded remote state read; approval within one state write, one bounded cron edit, and at most one compensating state write when prompt delivery fails
 
 **Constraints**: Default deny; no credentials in state or output; no raw remote commands outside the existing facade; no job creation/removal; explicit confirmation for approval
 
@@ -64,7 +64,7 @@ tests/test_hermes.py             # facade and command tests
 docs/hermes-agent.md             # operator workflow
 ```
 
-**Structure Decision**: Extend the existing Hermes facade and wrappers. Authorization state belongs in the same atomic remote state document as its scheduler metadata; no new daemon, datastore, or network endpoint is needed.
+**Structure Decision**: Extend the existing Hermes facade and wrappers. Authorization state remains in the locked Sandbox state document, while scheduler prompts remain managed by Hermes cron. The facade coordinates the separate resources with state-first compare-and-swap and compensating rollback; no distributed transaction, daemon, datastore, or network endpoint is introduced.
 
 ## Complexity Tracking
 

@@ -25,4 +25,4 @@
 
 ## Lifecycle
 
-`pending → approved`; `pending → expired`; `pending → superseded`. No other transition is permitted. Approving edits the matching job prompt only after state validation succeeds.
+`pending → approved`; `pending → expired`; `pending → superseded`. No other transition is permitted. Approval CAS-commits the state transition before editing the matching job prompt; prompt failure triggers a compensating state CAS, and a competing state writer is rejected before prompt mutation.

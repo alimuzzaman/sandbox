@@ -8,6 +8,12 @@
 
 **Input**: User description: "Add tools to review and authorize Hermes blocked work with immutable scoped approvals, audit evidence, expiration, and scheduler integration."
 
+## Clarifications
+
+### Session 2026-07-16
+
+- Q: How should consistency between authorization state and the scheduler prompt be guaranteed? → A: Commit the authorization state with a compare-and-swap before prompt delivery; on prompt failure, restore the prior state with a second compare-and-swap, and reject competing writers before prompt mutation.
+
 ## User Scenarios & Testing *(mandatory)*
 
 <!--
@@ -68,27 +74,26 @@ An operator or trusted control-plane workflow can create a structured request fo
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+No additional user stories are required; review, approval, and request creation cover the
+supported operator and trusted-workflow journeys.
 
 ### Edge Cases
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
--->
-
-- A request expires before approval.
-- An approved request is replaced by a newer pending request for the same job.
-- The scheduled job is absent or is not catalog-managed when approval is attempted.
-- A concurrent approval races with another approval or request creation.
-- Request rationale or remote output contains secret-like material.
+- A request expires before approval; listing/show reports it as expired, approval is rejected,
+  and the expiry audit event is recorded at most once.
+- An approved request is replaced by a newer pending request for the same job; the older request
+  becomes superseded and no more than one approved request remains active for that job.
+- The scheduled job is absent, duplicated, disabled, or not catalog-managed when approval is
+  attempted; approval is rejected before state or scheduler mutation.
+- A concurrent approval or request creation races with another writer; exactly one state CAS may
+  succeed, a losing approval returns `state_conflict` before prompt mutation, and audit records
+  from the winning transition are retained.
+- Prompt delivery fails after state commit; a second CAS restores the prior authorization state,
+  and failure is reported as retryable rather than leaving an approved state without its context.
+- Request rationale or remote output contains secret-like material; the request is rejected or
+  the output is withheld/redacted before it reaches operator-facing output.
 
 ## Requirements *(mandatory)*
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
--->
 
 ### Functional Requirements
 
@@ -96,7 +101,7 @@ An operator or trusted control-plane workflow can create a structured request fo
 - **FR-002**: System MUST allow requests only for catalog-managed scheduled jobs and store an immutable request fingerprint derived from the reviewed fields.
 - **FR-003**: System MUST require a valid HTTPS replay origin without credentials, a bounded slug scope, and rationale free of credential-like material.
 - **FR-004**: System MUST require an explicit confirmation for approval and allow approval only from the pending state before expiry.
-- **FR-005**: System MUST append bounded, secret-screened audit events for request and approval lifecycle actions.
+- **FR-005**: System MUST append bounded, secret-screened audit events for request and approval lifecycle actions, retaining no more than 200 audit events and no more than 100 stored requests.
 - **FR-006**: System MUST update only the matching scheduled job with its trusted catalog prompt plus the approved request context; it MUST NOT create, remove, or otherwise reconfigure jobs.
 - **FR-007**: System MUST reject missing, stale, expired, already-approved, or mismatched requests without changing remote state or scheduler state.
 
@@ -108,27 +113,18 @@ An operator or trusted control-plane workflow can create a structured request fo
 
 ## Success Criteria *(mandatory)*
 
-<!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
--->
-
 ### Measurable Outcomes
 
-- **SC-001**: An operator can list and inspect any stored request in one command with only sanitized, structured fields.
-- **SC-002**: A confirmed approval updates the corresponding scheduled-job prompt and remote authorization state atomically from the operator’s perspective.
-- **SC-003**: Every invalid lifecycle transition is rejected without writing state or changing a cron job.
-- **SC-004**: Focused automated tests cover request validation, fingerprinting, expiry, state transitions, prompt delivery, and CLI/MCP forwarding.
+- **SC-001**: In every verified list/show run, an operator can inspect a stored request in one command with only sanitized, structured fields and no prompt body or credential-like value.
+- **SC-002**: In every verified approval race, the winning state transition is CAS-committed before prompt delivery; a losing writer performs zero prompt mutations, and a prompt-delivery failure restores the prior state with a second CAS.
+- **SC-003**: In every verified invalid lifecycle transition, the operation returns a stable error and performs zero state writes and zero cron mutations.
+- **SC-004**: The focused automated suite covers request validation, fingerprinting, expiry, state transitions, concurrency conflict, prompt rollback, and CLI/MCP forwarding; the repository suite remains green.
 
 ## Assumptions
-
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right assumptions based on reasonable defaults
-  chosen when the feature description did not specify certain details.
--->
 
 - The existing configured Sandbox remote is the trusted operator control plane; no multi-user identity system is introduced.
 - Authorization expires after 24 hours by default; an optional shorter expiry is accepted.
 - The exact replay origin is an HTTPS origin, not a URL containing a path, query, fragment, or credentials.
 - Hermes cron supports in-place prompt editing, and only catalog-managed jobs are eligible for authorization context delivery.
+- Scheduler state and authorization state are separate remote resources; consistency is therefore defined as CAS-guarded state-first commit with compensating rollback, not an unavailable distributed transaction.
+- Live deployment and acceptance of the Lenzora companion remain separately protected operational work and are not implied by fixture or read-only evidence.

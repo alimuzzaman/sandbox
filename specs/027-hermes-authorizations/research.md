@@ -6,7 +6,7 @@
 
 **Decision**: Store a fingerprinted request in the existing remote Hermes state and approve only its pending, unexpired state.
 
-**Rationale**: OWASP recommends default-deny, least privilege, server-side authorization, and sufficient audit logging. The state file already provides an atomic, locked control-plane boundary.
+**Rationale**: OWASP recommends default-deny, least privilege, server-side authorization, and sufficient audit logging. The state file provides a locked compare-and-swap control-plane boundary; scheduler prompt delivery is coordinated separately with compensating rollback because the two resources cannot share a distributed transaction.
 
 **Alternatives considered**: Free-form prompt acknowledgements were rejected because they are not structured, durable, or auditable.
 

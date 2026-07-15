@@ -34,6 +34,9 @@ can enter the encrypted publication pipeline.
 Filesystem capture preserves declared in-root symlinks as links while rejecting links whose
 resolved targets escape the allowed root.
 
+Archive validation also rejects duplicate members and special device/FIFO nodes before restore,
+preventing ambiguous replacement or unsafe filesystem materialization.
+
 Schedule plans render the reviewed profile selection and remote target into the disabled
 service command, including the explicit confirmation required when an operator later activates
 the schedule.

@@ -17,18 +17,24 @@ def _member_name(root: Path, path: Path) -> str:
 
 
 def validate_archive(path: str | Path) -> tuple[str, ...]:
-    """Reject traversal and escaping link targets before a restore can use it."""
+    """Reject traversal, ambiguous members, and special nodes before restore."""
     names = []
+    seen = set()
     with tarfile.open(path, "r") as archive:
         for member in archive.getmembers():
             name = member.name
             if name.startswith("/") or name == ".." or name.startswith("../") or "/../" in name:
                 raise RecoveryError("archive contains unsafe member", "unsafe_archive")
+            if name in seen:
+                raise RecoveryError("archive contains duplicate member", "unsafe_archive")
+            if member.isdev() or member.isfifo():
+                raise RecoveryError("archive contains a special file", "unsafe_archive")
             if member.issym() or member.islnk():
                 target = Path(member.name).parent / member.linkname
                 if target.is_absolute() or ".." in target.parts:
                     raise RecoveryError("archive link escapes staging root", "unsafe_archive")
             names.append(name)
+            seen.add(name)
     return tuple(names)
 
 

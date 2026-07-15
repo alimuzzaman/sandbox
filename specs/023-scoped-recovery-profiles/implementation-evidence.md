@@ -191,6 +191,9 @@ with regression coverage for partial writes and no secret exposure in command ar
 Filesystem capture now archives an in-root symlink as a symlink rather than following it into
 target contents, while still resolving the target for allowed-root confinement.
 
+Archive validation now rejects duplicate member names and device/FIFO nodes in addition to
+traversal and escaping-link checks.
+
 Schedule rendering now carries selected profile IDs and the reviewed remote into the fixed
 recovery command, with explicit confirmation in the disabled unit; activation remains a
 separate protected operation.

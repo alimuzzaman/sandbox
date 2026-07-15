@@ -52,3 +52,18 @@ class TestFilesystemCapture(unittest.TestCase):
                 item = tarfile.TarInfo("ok-link"); item.type = tarfile.SYMTYPE; item.linkname = "../../outside"; opened.addfile(item)
             with self.assertRaisesRegex(RecoveryError, "escapes"):
                 validate_archive(archive)
+
+    def test_rejects_duplicate_and_special_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            duplicate = Path(directory) / "duplicate.tar"
+            with tarfile.open(duplicate, "w") as opened:
+                first = tarfile.TarInfo("same"); first.size = 0; opened.addfile(first)
+                second = tarfile.TarInfo("same"); second.size = 0; opened.addfile(second)
+            with self.assertRaisesRegex(RecoveryError, "duplicate"):
+                validate_archive(duplicate)
+            special = Path(directory) / "special.tar"
+            with tarfile.open(special, "w") as opened:
+                item = tarfile.TarInfo("device"); item.type = tarfile.CHRTYPE; item.devmajor = 1; item.devminor = 3
+                opened.addfile(item)
+            with self.assertRaisesRegex(RecoveryError, "special"):
+                validate_archive(special)

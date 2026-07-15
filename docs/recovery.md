@@ -36,6 +36,8 @@ resolved targets escape the allowed root.
 
 Archive validation also rejects duplicate members and special device/FIFO nodes before restore,
 preventing ambiguous replacement or unsafe filesystem materialization.
+Member names are canonicalized before duplicate/traversal checks, so dot-segment aliases cannot
+silently produce ambiguous restore paths.
 
 Schedule plans render the reviewed profile selection and remote target into the disabled
 service command, including the explicit confirmation required when an operator later activates

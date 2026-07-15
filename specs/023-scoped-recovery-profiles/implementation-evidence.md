@@ -219,3 +219,7 @@ through RecoveryService.create; malformed declarations fail before adapter invoc
 The MCP recovery_create tool now routes explicit backup_id, profiles, and artifact-path inputs
 through the same service boundary; confirmation, materialization warnings, and configured-secret
 checks remain service-owned.
+
+Archive member validation now rejects dot segments and normalized path aliases before restore,
+closing an ambiguity in traversal and duplicate-member checks; filesystem regression tests cover
+both cases.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from .errors import RecoveryError
 
@@ -23,18 +24,21 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
     with tarfile.open(path, "r") as archive:
         for member in archive.getmembers():
             name = member.name
-            if name.startswith("/") or name == ".." or name.startswith("../") or "/../" in name:
+            raw_parts = name.split("/")
+            if (not name or name.startswith("/") or ".." in raw_parts or "." in raw_parts):
                 raise RecoveryError("archive contains unsafe member", "unsafe_archive")
-            if name in seen:
+            canonical_name = str(PurePosixPath(name))
+            if canonical_name in seen:
                 raise RecoveryError("archive contains duplicate member", "unsafe_archive")
             if member.isdev() or member.isfifo():
                 raise RecoveryError("archive contains a special file", "unsafe_archive")
             if member.issym() or member.islnk():
-                target = Path(member.name).parent / member.linkname
-                if target.is_absolute() or ".." in target.parts:
+                link_parts = PurePosixPath(member.linkname).parts
+                target = PurePosixPath(*PurePosixPath(member.name).parent.parts, *link_parts)
+                if PurePosixPath(member.linkname).is_absolute() or ".." in link_parts or ".." in target.parts:
                     raise RecoveryError("archive link escapes staging root", "unsafe_archive")
-            names.append(name)
-            seen.add(name)
+            names.append(canonical_name)
+            seen.add(canonical_name)
     return tuple(names)
 
 

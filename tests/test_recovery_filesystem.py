@@ -67,3 +67,18 @@ class TestFilesystemCapture(unittest.TestCase):
                 opened.addfile(item)
             with self.assertRaisesRegex(RecoveryError, "special"):
                 validate_archive(special)
+
+    def test_rejects_dot_segments_and_normalized_duplicate_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            traversal = Path(directory) / "dot.tar"
+            with tarfile.open(traversal, "w") as opened:
+                item = tarfile.TarInfo("a/.."); item.size = 0; opened.addfile(item)
+            with self.assertRaisesRegex(RecoveryError, "unsafe"):
+                validate_archive(traversal)
+
+            duplicate = Path(directory) / "normalized-duplicate.tar"
+            with tarfile.open(duplicate, "w") as opened:
+                first = tarfile.TarInfo("a/b"); first.size = 0; opened.addfile(first)
+                second = tarfile.TarInfo("a/./b"); second.size = 0; opened.addfile(second)
+            with self.assertRaisesRegex(RecoveryError, "unsafe"):
+                validate_archive(duplicate)

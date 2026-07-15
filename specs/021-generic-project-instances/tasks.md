@@ -36,7 +36,7 @@
 - [x] T005 [P] Add failing project-kind/default-isolation/path-validation tests for legacy WordPress, explicit Compose, dot names, and label overrides in `tests/test_project_config.py`
 - [x] T006 [P] Add failing adapter registration, capability, unsupported-kind, and result-shape tests in `tests/test_runtime_adapters.py`
 - [x] T007 [P] Add failing additive registry compatibility tests for `kind`, `adapter`, `display_name`, `http_port`, and legacy `wordpress_port` fallback in `tests/test_sandbox.py`
-- [ ] T008 Define explicit runtime protocol, capability constants, structured results/errors, and injected dependencies in `sandbox/runtimes/base.py`
+- [x] T008 Define explicit runtime protocol, capability constants, structured results/errors, and injected dependencies in `sandbox/runtimes/base.py`
 - [ ] T009 Implement explicit built-in adapter registration and kind selection without wildcard imports in `sandbox/runtimes/__init__.py`
 - [ ] T010 Implement the WordPress compatibility adapter by delegating to current lifecycle behavior in `sandbox/runtimes/wordpress.py`
 - [ ] T011 Split common versus WordPress defaults, select kind before normalization, and scope plugin-slug validation to WordPress in `sandbox_core.py`

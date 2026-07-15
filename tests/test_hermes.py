@@ -1307,6 +1307,10 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn(".config/rclone", command)
         self.assertIn("gpg --batch", command)
         self.assertIn("drive-volume-fallbacks", command)
+        self.assertIn("id_pattern.fullmatch", command)
+        self.assertIn("data.get('id') != current", command)
+        self.assertIn("data.get('archive') != f'{current}.tar.gz.gpg'", command)
+        self.assertIn("cipher_sha256", command)
         self.assertIn("docker run --rm", command)
         self.assertIn("systemctl --user start hermes-gateway-sandbox.service", command)
 

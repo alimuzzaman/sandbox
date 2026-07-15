@@ -77,6 +77,11 @@ class HermesStateRepository:
                     os.fsync(stream.fileno())
                 os.chmod(temporary, 0o600)
                 os.replace(temporary, self.path)
+                directory_fd = os.open(str(self.path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)

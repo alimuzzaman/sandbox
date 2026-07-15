@@ -70,6 +70,13 @@ class TestHermesState(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(list(path.parent.glob("hermes.json.*")), [repo.lock_path])
 
+    def test_atomic_replace_syncs_the_parent_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = HermesStateRepository(Path(root) / "hermes.json")
+            with patch("sandbox.hermes.state.os.fsync") as fsync:
+                repo.write(HermesState())
+            self.assertEqual(fsync.call_count, 2)
+
     def test_legacy_collections_survive_compatible_read_and_rewrite(self):
         """US7 seam: state extraction must not discard legacy control-plane data."""
         with tempfile.TemporaryDirectory() as root:

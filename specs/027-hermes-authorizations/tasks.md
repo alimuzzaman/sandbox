@@ -68,3 +68,11 @@
 - T006–T008 require T002 and use the validated state model.
 - T009–T011 require T002 and may follow T006 because approval relies on request creation.
 - T012–T013 follow all implementation tasks.
+
+## Phase 9: Convergence
+
+- [ ] T021 [US2] Perform the missing live Lenzora catalog-companion deployment, reconciliation, and pending-request acceptance check from T017 with explicit operator authorization; verify no approval, production access, or scheduler reconfiguration occurs (FR-004, FR-006, FR-007; missing).
+- [ ] T022 [P] Verify the repaired Hermes upstream remote can fetch signed update history without changing the installed checkout, and record the bounded operator procedure (plan: live proof; missing).
+- [ ] T023 Add a concurrency regression and guarded state-transition mechanism proving competing authorization approvals cannot lose audit/state updates or leave a mismatched cron prompt (FR-007; partial).
+- [ ] T024 Resolve the remaining Spec-Kit placeholder sections in `spec.md` through the canonical specify/clarify workflows, including measurable edge-case acceptance criteria and assumptions (spec quality; partial).
+- [ ] T025 Refresh `quickstart.md` with current focused/full test counts and clearly separate fixture evidence from unperformed live acceptance (SC-004; partial).

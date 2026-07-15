@@ -22,6 +22,11 @@ def _canonical_ciphertext_keys(set_id: str) -> tuple[str, ...]:
     return (f"sets/{set_id}/archive.bin", f"sets/{set_id}/archive.tar.gpg")
 
 
+def _valid_digest(value: object) -> bool:
+    return (isinstance(value, str) and len(value) == 64 and
+            not any(char not in "0123456789abcdef" for char in value))
+
+
 def verify_manifest(drive, set_id: str) -> dict:
     try:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
@@ -39,12 +44,29 @@ def verify_manifest(drive, set_id: str) -> dict:
     digest = manifest["ciphertext_sha256"]
     size = manifest["ciphertext_size"]
     if (not isinstance(manifest["ciphertext_object"], str) or
-            not isinstance(digest, str) or len(digest) != 64 or
-            any(char not in "0123456789abcdef" for char in digest) or
+            not _valid_digest(digest) or
             isinstance(size, bool) or not isinstance(size, int) or size < 1):
         raise RecoveryError("recovery manifest fields are invalid", "invalid_manifest")
     if manifest["ciphertext_object"] not in _canonical_ciphertext_keys(set_id):
         raise RecoveryError("recovery ciphertext is not bound to its manifest", "invalid_manifest")
+    if manifest["ciphertext_object"].endswith("archive.tar.gpg"):
+        profiles = manifest.get("profiles")
+        artifacts = manifest.get("artifacts")
+        if (compatibility != _COMPATIBILITY or not isinstance(profiles, list) or not profiles or
+                not all(isinstance(profile, str) and profile for profile in profiles) or
+                len(set(profiles)) != len(profiles) or not isinstance(artifacts, list) or not artifacts):
+            raise RecoveryError("recovery staged manifest is incomplete", "invalid_manifest")
+        names = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or set(("name", "sha256", "size")) - set(artifact):
+                raise RecoveryError("recovery artifact record is invalid", "invalid_manifest")
+            name, artifact_digest, artifact_size = artifact["name"], artifact["sha256"], artifact["size"]
+            if (not isinstance(name, str) or not name or name in names or not _valid_digest(artifact_digest) or
+                    isinstance(artifact_size, bool) or not isinstance(artifact_size, int) or artifact_size < 1):
+                raise RecoveryError("recovery artifact record is invalid", "invalid_manifest")
+            names.append(name)
+        if "plaintext_sha256" in manifest and not _valid_digest(manifest["plaintext_sha256"]):
+            raise RecoveryError("recovery plaintext digest is invalid", "invalid_manifest")
     ciphertext = drive.get(manifest["ciphertext_object"])
     if not isinstance(ciphertext, bytes) or (len(ciphertext) != size or
             hashlib.sha256(ciphertext).hexdigest() != digest):

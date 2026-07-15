@@ -36,3 +36,7 @@ See [setup contract](contracts/setup.md) for convergence and non-goals.
 On 2026-07-12, `python3 -m unittest tests.test_hermes -v` passed 94 tests and
 `git diff --check` passed. Fresh-server acceptance remains pending explicit approval
 because it requires provider authentication and an operator-selected remote.
+
+On 2026-07-16, the separately approved replay of Hermes status, V2 acceptance,
+and gateway status on `scaleway-sandbox` succeeded; no messaging platform was
+activated. The managed gateway had one owner and the V2 gate was current/passed.

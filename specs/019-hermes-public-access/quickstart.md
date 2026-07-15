@@ -68,3 +68,13 @@ git diff --check
 Focused verification passed 114 tests. The full suite completed successfully with its
 existing subprocess `ResourceWarning` output. Live acceptance remains pending explicit
 approval for the Cloudflare account and `scaleway-sandbox`.
+
+## Authorized live read-only acceptance — 2026-07-16
+
+`dashboard doctor`, `dashboard exposure-status`, and `dashboard expose --plan`
+completed successfully on `scaleway-sandbox`. The dashboard was healthy and
+loopback-only; the exact Access policy required MFA and the tunnel target was
+`127.0.0.1:9120`. An anonymous HTTPS request to `https://hermes.asb.bd/`
+redirected to Cloudflare Access. No public listener or direct-origin route was
+created or changed. Authenticated MFA browser and WebSocket reconnect evidence
+was not claimed in this CLI-only replay.

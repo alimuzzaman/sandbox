@@ -17,3 +17,12 @@ printf '%s' "$RECOVERY_PASSPHRASE" | ./sb hermes drive restore \
 The passphrase must come from the operator's password manager. It is not stored
 on Drive, in the remote, or in Sandbox configuration. Test restore only on a
 disposable replacement remote before resetting the primary server.
+
+## Live acceptance attempt — 2026-07-16
+
+Drive setup succeeded on `scaleway-sandbox`, and `drive list` continued to show
+only the two pre-existing manifest objects. The authorized encrypted backup was
+attempted through passphrase stdin, but the remote streamed command terminated
+before returning a backup manifest after stale disposable-instance snapshot
+handling. No new manifest or restore was claimed; T007, T009, T011, and T012
+remain open pending successful bounded backup and disposable restore verification.

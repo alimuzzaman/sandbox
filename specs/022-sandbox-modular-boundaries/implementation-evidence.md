@@ -1617,3 +1617,23 @@ specified by this module plus shared injected service contracts.
   canonical `compose_file` resolver after wildcard-import removal; the focused
   post-fix pass (`tests.test_modularity`, CLI, generic Compose, and Sandbox)
   passed 102 tests.
+
+## Authorized remote replay and final local gates — 2026-07-16
+
+The later explicit authorization allowed non-Lenzora remote work. Sandbox
+replayed remote list, Hermes/gateway status, V2 acceptance, dashboard doctor and
+exposure plan, cron catalog/validation/reconcile preview, backup list, health,
+and worktree inventory against `scaleway-sandbox`. Both configured remotes were
+reachable. The managed gateway had one active owner and zero restarts; the
+legacy unit was inactive/disabled. V2 acceptance passed, the dashboard stayed
+loopback-only, the exact MFA-required Access policy and tunnel target were
+reported, and an anonymous HTTPS probe redirected to Cloudflare Access. Cron
+reconciliation failed closed because controlled-state fingerprints were
+unavailable; no cron mutation was applied. Health reported pre-existing cron
+drift/failure and one stale session outside this change's mutation scope.
+
+Final local gates: `./.cli-venv/bin/python -m unittest discover -s tests -q`
+passed 687 tests with one skip; `./sb selftest` passed; `git diff --check`
+passed. T086 and T099 remain open because authenticated browser/WebSocket
+reconnect evidence and a successful remote backup-create result were not
+obtained. No backup, restore, deletion, or schedule claim is made.

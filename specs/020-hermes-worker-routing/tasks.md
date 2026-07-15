@@ -42,7 +42,7 @@
 
 - [x] T009 [P] Document the worker model map, Luna limitation, provider-auth prerequisite, and explicit gateway activation in `docs/hermes-agent.md`.
 - [x] T010 Run `python3 -m unittest tests.test_hermes -v` and `git diff --check`; record results in `specs/020-hermes-worker-routing/quickstart.md`.
-- [ ] T011 Perform a separately approved fresh-remote acceptance after provider authentication; do not activate messaging platforms as part of this feature.
+- [X] T011 Perform a separately approved fresh-remote acceptance after provider authentication; do not activate messaging platforms as part of this feature.
 
 ## Dependencies and Implementation Strategy
 

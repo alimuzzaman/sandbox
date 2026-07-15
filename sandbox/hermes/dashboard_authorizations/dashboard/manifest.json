@@ -2,7 +2,7 @@
   "name": "sandbox-authorizations",
   "label": "Authorizations",
   "description": "Sandbox-scoped Hermes authorization review and approval controls",
-  "icon": "ShieldCheck",
+  "icon": "Shield",
   "version": "1.0.0",
   "tab": {"path": "/sandbox-authorizations", "position": "after:cron"},
   "entry": "dist/index.js",

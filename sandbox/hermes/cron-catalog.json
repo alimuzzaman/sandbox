@@ -9,7 +9,7 @@
       "prompt": "",
       "profile": null,
       "workdir_template": "{repo_root}/lenzora",
-      "enabled": false,
+      "enabled": true,
       "deliver": "local"
     },
     {

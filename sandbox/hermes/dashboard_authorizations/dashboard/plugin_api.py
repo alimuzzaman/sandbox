@@ -5,15 +5,20 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+if str(PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(PLUGIN_ROOT))
 
 from authorization_core import AuthorizationError, create_request, expire, read_state, view, write_state
 
 router = APIRouter()
 ROOT = Path(os.environ.get("SANDBOX_AUTHORIZATION_HOME", Path.home() / ".hermes" / "sandbox-authorizations"))
-CONFIG = Path(__file__).resolve().parents[1] / "sandbox-authorization-config.json"
+CONFIG = PLUGIN_ROOT / "sandbox-authorization-config.json"
 try:
     _CONFIG = json.loads(CONFIG.read_text())
 except (OSError, ValueError):
@@ -26,8 +31,10 @@ _REVIEW_REQUIRED = re.compile(r"^REVIEW_REQUIRED\s*(?:[—:-]\s*)?(.+)$", re.MUL
 
 
 def _actor(request: Request) -> str:
-    principal = getattr(request.state, "principal", None) or getattr(request.state, "user", None)
-    value = getattr(principal, "user_id", None) or getattr(principal, "id", None) or (principal if isinstance(principal, str) else None)
+    if not getattr(request.app.state, "auth_required", False):
+        raise HTTPException(403, "dashboard authentication is required")
+    session = getattr(request.state, "session", None)
+    value = getattr(session, "user_id", None)
     if not isinstance(value, str) or not value.strip():
         raise HTTPException(403, "authenticated dashboard principal required")
     return value.strip()[:128]
@@ -68,7 +75,8 @@ async def health():
 
 
 @router.get("/requests")
-async def list_requests():
+async def list_requests(request: Request):
+    _actor(request)
     state = _state()
     write_state(STATE, state)
     rows = [view(state, item) for item in state["authorizations"]["requests"].values()]
@@ -77,7 +85,8 @@ async def list_requests():
 
 
 @router.get("/requests/{request_id}")
-async def show_request(request_id: str):
+async def show_request(request_id: str, request: Request):
+    _actor(request)
     if not _ID.fullmatch(request_id):
         raise HTTPException(404, "authorization request was not found")
     state = _state()

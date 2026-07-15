@@ -65,7 +65,7 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         catalog = deepcopy(self.catalog)
         worker = next(entry for entry in catalog["jobs"] if entry.name == "lenzora-todo-task")
         return {"schema_version": catalog["schema_version"], "jobs": [
-            replace(entry, enabled=True) if entry.name == "lenzora-todo-task" else entry
+            replace(entry, enabled=entry.name == "lenzora-todo-task")
             for entry in catalog["jobs"]
         ]}
 
@@ -78,7 +78,7 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         observed = self._observed_catalog()
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-        self.assertEqual(plan["retain"], [])
+        self.assertEqual(plan["retain"], ["codex-quota-requeue"])
         self.assertNotIn("prompt", str(plan).lower())
 
     def test_delivery_drift_requires_reconciliation(self):

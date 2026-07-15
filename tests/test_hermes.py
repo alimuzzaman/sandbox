@@ -59,7 +59,7 @@ def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
 
 def _catalog_with_worker_enabled() -> dict:
     catalog = load_catalog()
-    return {"jobs": [replace(entry, enabled=True) if entry.name == "lenzora-todo-task" else entry
+    return {"jobs": [replace(entry, enabled=entry.name == "lenzora-todo-task")
                       for entry in catalog["jobs"]], "schema_version": catalog["schema_version"]}
 
 
@@ -160,7 +160,7 @@ class TestValidation(unittest.TestCase):
             "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
             "lenzora-todo-task",
         ])
-        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [])
+        self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], ["codex-quota-requeue"])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
         self.assertEqual(worker.profile, "terra")
@@ -410,7 +410,7 @@ class TestSchedulerReliability(unittest.TestCase):
     def test_force_reconcile_bypasses_missing_hashes_then_requires_exact_final_snapshot(
             self, snapshot, require_remote, paths, ssh, checked, prepare, install_scripts, create):
         initial = _exact_catalog_snapshot(paths.return_value)
-        del initial["jobs"][0]["prompt_sha256"]
+        del next(job for job in initial["jobs"] if not job["no_agent"])["prompt_sha256"]
         final = _exact_catalog_snapshot(paths.return_value)
         snapshot.side_effect = [initial, final]
 

@@ -516,3 +516,8 @@ catalog. A standalone SSH remote must supply a separate, non-secret catalog:
 The tab only authorizes enabled catalog agent jobs. It requires the upstream
 Hermes dashboard to supply an authenticated principal for every mutation and
 records that principal in the local authorization audit trail.
+
+On dashboards whose plugin rescan endpoint is session-gated, installation is
+reported as `pending_activation`; restart the existing Hermes dashboard service
+when you are ready to make the new tab visible. Sandbox does not restart it
+automatically.

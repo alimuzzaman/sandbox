@@ -3711,18 +3711,21 @@ if test -e "$target"; then mv "$target" "$backup"; fi
 mv "$stage/{DASHBOARD_AUTHORIZATION_PLUGIN}" "$target"
 mv "$target/catalog.json" "$config/catalog.json"
 chmod 600 "$config/catalog.json" "$target/sandbox-authorization-config.json"
-if ! curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null; then
-  rm -rf "$target"; test ! -e "$backup" || mv "$backup" "$target"; exit 1
+activation=restart_required
+if curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null; then
+  activation=rescanned
 fi
-if ! curl -fsS http://127.0.0.1:{selected_port}/api/plugins/{DASHBOARD_AUTHORIZATION_PLUGIN}/health >/dev/null; then
-  rm -rf "$target"; test ! -e "$backup" || mv "$backup" "$target"; exit 1
-fi
+printf 'activation=%s\n' "$activation"
 rm -rf "$backup"'''
     _checked(entry, "mkdir -p \"$HOME/.hermes/plugins\"", timeout=30, what="could not prepare Hermes plugin directory")
     uploaded = _ssh_stdin(entry, command, archive, timeout=120)
     if uploaded.returncode != 0:
         raise HermesError(_redact(uploaded.stderr.decode(errors="replace") or "dashboard plugin install failed", entry)[:1000],
                           "dashboard_ui_install_failed", True)
-    return result(True, f"dashboard_ui_{action}", remote_name, status="installed",
+    output = (uploaded.stdout or b"").decode(errors="replace") if isinstance(uploaded.stdout, bytes) else str(uploaded.stdout or "")
+    activation = "rescanned" if "activation=rescanned" in output else "restart_required"
+    return result(True, f"dashboard_ui_{action}", remote_name,
+                  status="installed" if activation == "rescanned" else "pending_activation",
                   data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN, "version": DASHBOARD_AUTHORIZATION_VERSION,
-                        "catalog_jobs": [item["name"] for item in catalog["jobs"]]})
+                        "catalog_jobs": [item["name"] for item in catalog["jobs"]], "activation": activation,
+                        "next": None if activation == "rescanned" else "restart the Hermes dashboard to activate the plugin"})

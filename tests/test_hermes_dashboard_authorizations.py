@@ -4,8 +4,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import sys
 import tarfile
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -69,6 +71,7 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
             names = set(bundle.getnames())
             self.assertIn("sandbox-authorizations/dashboard/manifest.json", names)
             self.assertIn("sandbox-authorizations/dashboard/plugin_api.py", names)
+            self.assertIn("sandbox-authorizations/dashboard/dist/index.js", names)
             self.assertIn("sandbox-authorizations/catalog.json", names)
             config = json.load(bundle.extractfile("sandbox-authorizations/sandbox-authorization-config.json"))
             self.assertEqual(config["state_path"], "/home/test/runtime/hermes.json")
@@ -91,6 +94,62 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
         with self.assertRaises(hermes.HermesError) as uninstall:
             hermes.dashboard_ui_action("test", "uninstall")
         self.assertEqual(uninstall.exception.code, "confirmation_required")
+
+    @patch("sandbox.core._hermes._ssh_stdin")
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_standalone_install_requires_catalog_and_uses_plugin_rescan(self, get_remote, checked, stdin):
+        get_remote.return_value = {"ssh": "u@example.test", "provisioned": False}
+        with self.assertRaises(hermes.HermesError) as missing:
+            hermes.dashboard_ui_action("standalone", "install", confirm=True)
+        self.assertEqual(missing.exception.code, "authorization_catalog_required")
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            catalog.write_text(json.dumps({"schema_version": 1, "jobs": [
+                {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe base prompt"}
+            ]}))
+            stdin.return_value = type("Result", (), {"returncode": 0, "stdout": b"activation=rescanned\n", "stderr": b""})()
+            result = hermes.dashboard_ui_action("standalone", "install", catalog_path=str(catalog), confirm=True)
+        self.assertEqual(result["status"], "installed")
+        command = stdin.call_args.args[1]
+        self.assertIn("hermes dashboard --status", command)
+        self.assertIn("/api/dashboard/plugins/rescan", command)
+        self.assertIn("activation=restart_required", command)
+
+
+class TestDashboardAuthorizationAuth(unittest.TestCase):
+    def test_plugin_requires_hermes_authenticated_session(self):
+        class Router:
+            def get(self, *_args, **_kwargs): return lambda fn: fn
+            def post(self, *_args, **_kwargs): return lambda fn: fn
+        class HttpError(Exception):
+            def __init__(self, status_code, detail): self.status_code, self.detail = status_code, detail
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.APIRouter, fake_fastapi.HTTPException, fake_fastapi.Request = Router, HttpError, object
+        plugin_path = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/plugin_api.py"
+        module_name = "dashboard_authorization_plugin_test"
+        old_fastapi, old_module = sys.modules.get("fastapi"), sys.modules.get(module_name)
+        sys.modules["fastapi"] = fake_fastapi
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+            plugin = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(plugin)
+            request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(auth_required=True)),
+                                            state=types.SimpleNamespace(session=types.SimpleNamespace(user_id="reviewer")))
+            self.assertEqual(plugin._actor(request), "reviewer")
+            request.app.state.auth_required = False
+            with self.assertRaises(HttpError) as blocked:
+                plugin._actor(request)
+            self.assertEqual(blocked.exception.status_code, 403)
+        finally:
+            sys.modules.pop(module_name, None)
+            if old_fastapi is None:
+                sys.modules.pop("fastapi", None)
+            else:
+                sys.modules["fastapi"] = old_fastapi
+            if old_module is not None:
+                sys.modules[module_name] = old_module
 
 
 if __name__ == "__main__":

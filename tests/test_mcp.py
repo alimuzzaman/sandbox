@@ -33,7 +33,8 @@ print("HERMES", int({
     'hermes_worktree_list', 'hermes_worktree_inspect', 'hermes_worktree_preserve',
     'hermes_gateway_converge',
     'hermes_cron_catalog', 'hermes_cron_reconcile', 'hermes_cron_verify',
-    'hermes_repo_sync',
+    'hermes_repo_sync', 'hermes_authorization_sync', 'hermes_authorization_list', 'hermes_authorization_show',
+    'hermes_authorization_request', 'hermes_authorization_approve',
 } <= names))
 import tools.hermes as hermes
 calls = []
@@ -50,6 +51,11 @@ hermes.hermes_cron_create("remote", "every 4h", "bounded work", profile="terra",
 hermes.hermes_cron_route("remote", "3359664aaf91", profile="terra", confirm=True)
 hermes.hermes_cron_run("remote", "3359664aaf91", confirm=True)
 hermes.hermes_cron_output("remote", "3359664aaf91", lines=50)
+hermes.hermes_authorization_sync("remote")
+hermes.hermes_authorization_list("remote")
+hermes.hermes_authorization_show("remote", "0123456789abcdef")
+hermes.hermes_authorization_request("remote", "lenzora-todo-task", "preview-overlay", "https://replay.example.test", "bounded review")
+hermes.hermes_authorization_approve("remote", "0123456789abcdef", confirm=True)
 hermes.hermes_health("remote")
 hermes.hermes_worktree_list("remote")
 hermes.hermes_repo_sync("remote", "sandbox", confirm=True)
@@ -123,17 +129,25 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertEqual(calls[9][0][1:3], ["cron", "run"])
         self.assertEqual(calls[10][0][1:3], ["cron", "output"])
         self.assertEqual(calls[10][0][-2:], ["--lines", "50"])
-        self.assertEqual(calls[11][0][1], "health")
-        self.assertEqual(calls[12][0][1:3], ["worktree", "list"])
-        self.assertEqual(calls[13][0][1:3], ["repo", "sync"])
-        self.assertIn("--confirm", calls[13][0])
-        self.assertIn("--confirm", calls[14][0])
-        self.assertEqual(calls[15][0][1:3], ["cron", "catalog"])
-        self.assertIn("--force-replace", calls[16][0])
-        self.assertEqual(calls[17][0][1:3], ["cron", "verify"])
-        self.assertEqual(calls[18][0][1:3], ["worktree", "inspect"])
-        self.assertEqual(calls[19][0][1:3], ["worktree", "preserve"])
+        self.assertEqual(calls[11][0][1:3], ["authorization", "sync"])
+        self.assertEqual(calls[12][0][1:3], ["authorization", "list"])
+        self.assertEqual(calls[13][0][1:3], ["authorization", "show"])
+        self.assertEqual(calls[14][0][1:3], ["authorization", "request"])
+        self.assertIn("--job", calls[14][0])
+        self.assertIn("--replay-origin", calls[14][0])
+        self.assertEqual(calls[15][0][1:3], ["authorization", "approve"])
+        self.assertIn("--confirm", calls[15][0])
+        self.assertEqual(calls[16][0][1], "health")
+        self.assertEqual(calls[17][0][1:3], ["worktree", "list"])
+        self.assertEqual(calls[18][0][1:3], ["repo", "sync"])
+        self.assertIn("--confirm", calls[18][0])
         self.assertIn("--confirm", calls[19][0])
+        self.assertEqual(calls[20][0][1:3], ["cron", "catalog"])
+        self.assertIn("--force-replace", calls[21][0])
+        self.assertEqual(calls[22][0][1:3], ["cron", "verify"])
+        self.assertEqual(calls[23][0][1:3], ["worktree", "inspect"])
+        self.assertEqual(calls[24][0][1:3], ["worktree", "preserve"])
+        self.assertIn("--confirm", calls[24][0])
         timeout_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_TIMEOUT "))
         self.assertIn("timed out", timeout_line.lower())
         instance_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_INSTANCE "))

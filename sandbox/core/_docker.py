@@ -130,7 +130,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     command: >
       bash -c "sed -i 's|AllowOverride None|AllowOverride All|g' /etc/apache2/apache2.conf
       ; ( while [ ! -f /var/www/html/wp-load.php ]; do sleep 1; done
-      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown -R www-data:www-data /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
+      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown -R www-data:www-data /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
       docker-entrypoint.sh apache2-foreground"
     environment:
       WORDPRESS_DB_HOST: db:3306
@@ -174,6 +174,14 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     depends_on:
       db:
         condition: service_healthy
+    # The WordPress bind mount can leave wp-content/plugins owned by the host
+    # user, while PHP-FPM runs as www-data. Reconcile the install destination
+    # during bootstrap so wp.org and wp-admin plugin installs can create a slug
+    # directory (the Apache variant uses the same repair loop).
+    command: >
+      bash -c "( while [ ! -f /var/www/html/wp-load.php ]; do sleep 1; done
+      ; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do mkdir -p /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup ; chown -R www-data:www-data /var/www/html/wp-content/plugins /var/www/html/wp-content/upgrade /var/www/html/wp-content/upgrade-temp-backup /var/www/html/wp-content/uploads 2>/dev/null || true ; sleep 4 ; done ) &
+      docker-entrypoint.sh php-fpm"
     # php-fpm listens on :9000 internally; nginx reaches it as wp:9000.
     # No published port — only nginx is web-facing.
     environment:

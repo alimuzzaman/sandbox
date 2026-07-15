@@ -146,6 +146,42 @@ def hermes_cron_output(remote: str, job_id: str, lines: int = 200) -> dict:
 
 
 @mcp.tool()
+def hermes_authorization_sync(remote: str) -> dict:
+    """Create review-only drafts from the latest non-secret REVIEW_REQUIRED cron results."""
+    return _run_sb(["hermes", "authorization", "sync", "--remote", remote], 60)
+
+
+@mcp.tool()
+def hermes_authorization_list(remote: str) -> dict:
+    """List sanitized Hermes authorization requests. This call is read-only."""
+    return _run_sb(["hermes", "authorization", "list", "--remote", remote], 30)
+
+
+@mcp.tool()
+def hermes_authorization_show(remote: str, request_id: str) -> dict:
+    """Show one sanitized Hermes authorization request and its audit history."""
+    return _run_sb(["hermes", "authorization", "show", request_id, "--remote", remote], 30)
+
+
+@mcp.tool()
+def hermes_authorization_request(remote: str, job: str, scope: str, replay_origin: str,
+                                 reason: str, expires_in_minutes: int = 1440) -> dict:
+    """Create a bounded pending request for an enabled catalog-managed Hermes job."""
+    return _run_sb(["hermes", "authorization", "request", "--remote", remote, "--job", job,
+                    "--scope", scope, "--replay-origin", replay_origin, "--reason", reason,
+                    "--expires-in-minutes", str(expires_in_minutes)], 30)
+
+
+@mcp.tool()
+def hermes_authorization_approve(remote: str, request_id: str, confirm: bool = False) -> dict:
+    """Approve exactly one pending request and deliver its context to the matching cron job."""
+    args = ["hermes", "authorization", "approve", request_id, "--remote", remote]
+    if confirm:
+        args.append("--confirm")
+    return _run_sb(args, 60)
+
+
+@mcp.tool()
 def hermes_health(remote: str) -> dict:
     """Read aggregated gateway, scheduler, cron, and worktree health."""
     return _run_sb(["hermes", "health", "--remote", remote], 90)

@@ -57,6 +57,93 @@ def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
 
 
 class TestValidation(unittest.TestCase):
+    @patch("sandbox.core._hermes.cron_output")
+    @patch("sandbox.core._hermes._cron_snapshot")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_sync_creates_one_review_draft_per_blocker(
+            self, require_remote, paths, read_state, write_state, snapshot, output):
+        paths.return_value = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                              "worktrees": "/home/u/worktrees"}
+        state = hermes._new_state()
+        read_state.return_value = state
+        snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
+        output.return_value = {"status": "available", "data": {"output": "REVIEW_REQUIRED — exact origin required"}}
+        first = hermes.authorization_sync("test")
+        second = hermes.authorization_sync("test")
+        self.assertEqual(first["data"]["created_count"], 1)
+        self.assertEqual(second["data"]["created_count"], 0)
+        request = next(iter(state["authorizations"]["requests"].values()))
+        self.assertEqual(request["status"], "review_required")
+        self.assertEqual(request["blocker"], "exact origin required")
+        self.assertEqual(write_state.call_count, 1)
+
+    def test_authorization_validates_scope_origin_reason_and_identifier(self):
+        self.assertEqual(hermes._valid_authorization_scope("preview-overlay"), "preview-overlay")
+        self.assertEqual(hermes._valid_replay_origin("https://Replay.Example.test/"), "https://replay.example.test")
+        self.assertEqual(hermes._valid_authorization_reason("bounded review"), "bounded review")
+        for value in ("https://example.test/path", "http://example.test", "https://u:p@example.test"):
+            with self.subTest(origin=value):
+                with self.assertRaises(hermes.HermesError):
+                    hermes._valid_replay_origin(value)
+        with self.assertRaises(hermes.HermesError):
+            hermes._valid_authorization_reason("token=secret-value-that-must-not-be-stored")
+        with self.assertRaises(hermes.HermesError):
+            hermes._valid_authorization_id("not-an-id")
+
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_request_supersedes_pending_request(self, require_remote, paths, read_state, write_state):
+        paths.return_value = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                              "worktrees": "/home/u/worktrees"}
+        state = hermes._new_state()
+        read_state.return_value = state
+        first = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
+                                             "https://replay.example.test", "first review", 60)
+        second = hermes.authorization_request("test", "lenzora-todo-task", "preview-overlay",
+                                              "https://replay.example.test", "second review", 60)
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(second["status"], "pending")
+        requests = state["authorizations"]["requests"]
+        self.assertEqual(sum(item["status"] == "pending" for item in requests.values()), 1)
+        self.assertIn("superseded", [item["event"] for item in state["authorizations"]["audit"]])
+        self.assertEqual(write_state.call_count, 2)
+
+    @patch("sandbox.core._hermes._set_cron_prompt")
+    @patch("sandbox.core._hermes._cron_snapshot")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_approval_updates_only_matching_prompt(self, require_remote, paths, read_state,
+                                                                  write_state, snapshot, set_prompt):
+        paths.return_value = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                              "worktrees": "/home/u/worktrees"}
+        state = hermes._new_state()
+        request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
+                   "replay_origin": "https://replay.example.test", "rationale": "bounded review",
+                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "expires_at": "2099-07-15T00:00:00+00:00"}
+        state["authorizations"]["requests"][request["id"]] = request
+        read_state.return_value = state
+        snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
+        out = hermes.authorization_approve("test", request["id"], True)
+        self.assertEqual(out["status"], "approved")
+        self.assertEqual(request["status"], "approved")
+        self.assertEqual(set_prompt.call_count, 1)
+        self.assertIn("preview-overlay", set_prompt.call_args.args[2])
+        self.assertIn("https://replay.example.test", set_prompt.call_args.args[2])
+        write_state.assert_called_once()
+
+    def test_authorization_approval_requires_confirmation(self):
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.authorization_approve("test", "a" * 16, False)
+        self.assertEqual(caught.exception.code, "confirmation_required")
+
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
@@ -2028,13 +2115,13 @@ class TestRemoteCommands(unittest.TestCase):
 class TestLocalState(unittest.TestCase):
     def test_unversioned_legacy_state_migrates_in_memory(self):
         state = hermes._normalize_state({"repositories": {"repo": {}}})
-        self.assertEqual(state["schema_version"], 1)
+        self.assertEqual(state["schema_version"], hermes.STATE_SCHEMA)
         self.assertEqual(state["sessions"], {})
 
     def test_state_round_trip_is_owner_only(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "hermes.json"
-            hermes.write_state(path, {"schema_version": 1, "repositories": {}})
+            hermes.write_state(path, {"schema_version": hermes.STATE_SCHEMA, "repositories": {}})
             self.assertEqual(hermes.read_state(path)["repositories"], {})
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.with_name("hermes.json.lock").stat().st_mode & 0o777, 0o600)

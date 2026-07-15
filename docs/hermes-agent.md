@@ -175,6 +175,38 @@ Spec-Kit templates, scripts, and Codex skill workflows available in the isolated
 worktree when Lenzora's legacy `.Codex` command bundle is absent. These local
 tooling files are excluded from Git status and never alter Lenzora's tracked
 source merely to bootstrap the workflow.
+
+## Authorization requests
+
+When a bounded scheduled task needs an explicit human decision, create a
+structured request rather than placing approval language in a prompt. Requests
+are limited to enabled catalog-managed agent jobs and bind a lowercase scope,
+an exact HTTPS replay origin, and a non-secret rationale. List and review them
+before approving:
+
+```bash
+./sb hermes authorization list --remote scaleway-sandbox --json
+./sb hermes authorization sync --remote scaleway-sandbox --json
+./sb hermes authorization show REQUEST_ID --remote scaleway-sandbox --json
+./sb hermes authorization request --remote scaleway-sandbox \
+  --job lenzora-todo-task --scope preview-overlay \
+  --replay-origin https://replay.example.test \
+  --reason 'Approved bounded preview-overlay replay work' --json
+./sb hermes authorization approve REQUEST_ID --remote scaleway-sandbox --confirm --json
+```
+
+Approval is default-deny: it only accepts an existing pending, unexpired
+request and updates only the matching cron job's prompt with the reviewed
+context. It does not create, run, remove, or reconcile jobs. Each lifecycle
+event is retained in the bounded, secret-screened Hermes state audit; a newer
+pending request for the same job supersedes the earlier one.
+
+`authorization sync` scans the latest saved output for each enabled
+catalog-managed agent job. A terminal `REVIEW_REQUIRED` result becomes a
+review-only draft containing its sanitized blocker and source fingerprint. The
+draft is not executable and cannot be approved until an operator creates the
+separate scoped request with the exact replay origin.
+
 Monitor scripts return zero only after a valid inspection or legitimate no-work
 result. Missing files, malformed output, timeouts, and command failures return
 nonzero, and scripts never add/remove their own cron job.

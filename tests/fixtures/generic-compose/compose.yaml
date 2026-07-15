@@ -1,0 +1,23 @@
+services:
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - project_marker:/var/lib/generic-project-marker
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        printf 'generic-compose-fixture\n' > /var/lib/generic-project-marker/marker.txt
+        exec nginx -g 'daemon off;'
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+volumes:
+  project_marker:
+    name: generic-compose-fixture-marker

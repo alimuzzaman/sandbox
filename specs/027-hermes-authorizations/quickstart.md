@@ -38,8 +38,11 @@ resume only that reviewed scope until `expires_at`; the local five-minute
 
 ## Local verification refresh (2026-07-16)
 
-- `./.cli-venv/bin/python -m unittest tests.test_hermes` — 145 tests passed.
-- `./.cli-venv/bin/python -m unittest discover -s tests -p 'test_recovery_*.py' -q` — 78 tests passed.
-- `./.cli-venv/bin/python -m unittest discover -s tests -q` — 712 tests passed, 1 skipped.
+- `./.cli-venv/bin/python -m unittest tests.test_hermes` — 146 tests passed.
+- `./.cli-venv/bin/python -m unittest discover -s tests -p 'test_recovery_*.py' -q` — 81 tests passed.
+- `./.cli-venv/bin/python -m unittest discover -s tests -q` — 717 tests passed, 1 skipped.
 - This refresh performed no additional live remote acceptance, approval, deployment, deletion,
   schedule activation, or production recovery operation; the live evidence above remains historical.
+- Authorization approval concurrency is fixture-proven: state CAS conflicts fail before prompt
+  mutation, and prompt-delivery failures restore the prior state with a second CAS. A live race
+  drill remains unperformed.

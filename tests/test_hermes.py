@@ -182,9 +182,36 @@ class TestValidation(unittest.TestCase):
             with self.assertRaises(hermes.HermesError) as caught:
                 hermes.authorization_approve("test", request["id"], True)
         self.assertEqual(caught.exception.code, "state_conflict")
-        self.assertEqual(set_prompt.call_count, 2)
-        self.assertIn("Expires at 2099-07-15T00:00:00+00:00", set_prompt.call_args_list[0].args[2])
-        self.assertNotIn("Expires at 2099-07-15T00:00:00+00:00", set_prompt.call_args_list[1].args[2])
+        self.assertEqual(set_prompt.call_count, 0)
+
+    @patch("sandbox.core._hermes._set_cron_prompt")
+    @patch("sandbox.core._hermes._cron_snapshot")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_prompt_failure_rolls_back_state_with_cas(
+            self, require_remote, paths, read_state, write_state, snapshot, set_prompt):
+        paths.return_value = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                              "worktrees": "/home/u/worktrees"}
+        state = hermes._new_state()
+        request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
+                   "replay_origin": "https://replay.example.test", "rationale": "bounded review",
+                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "expires_at": "2099-07-15T00:00:00+00:00"}
+        state["authorizations"]["requests"][request["id"]] = request
+        read_state.return_value = state
+        snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
+        set_prompt.side_effect = hermes.HermesError("prompt update failed", "authorization_prompt_update_failed", True)
+        with patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled()):
+            with self.assertRaises(hermes.HermesError) as caught:
+                hermes.authorization_approve("test", request["id"], True)
+        self.assertEqual(caught.exception.code, "authorization_prompt_update_failed")
+        self.assertEqual(write_state.call_count, 2)
+        self.assertEqual(write_state.call_args_list[1].args[2]["authorizations"]["requests"][request["id"]]["status"],
+                         "pending")
+        self.assertEqual(write_state.call_args_list[1].kwargs["expected_digest"],
+                         hermes._state_digest(write_state.call_args_list[0].args[2]))
 
     def test_authorization_approval_requires_confirmation(self):
         with self.assertRaises(hermes.HermesError) as caught:

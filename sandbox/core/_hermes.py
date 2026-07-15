@@ -8,6 +8,7 @@ registry or exposes a new network listener.
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
@@ -653,20 +654,21 @@ def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> d
     if len(matches) != 1 or not _CRON_JOB_RE.fullmatch(str(matches[0].get("id") or "")):
         raise HermesError("matching catalog cron job was not found", "authorization_cron_job_not_found")
     prompt = _authorization_prompt(job, request)
-    prior = [item for item in state["authorizations"]["requests"].values()
-             if item.get("job_name") == request["job_name"] and item.get("status") == "approved"]
-    rollback_prompt = job["prompt"] if not prior else _authorization_prompt(
-        job, max(prior, key=lambda item: (str(item.get("approved_at") or ""), str(item.get("created_at") or ""), item["id"])))
-    _set_cron_prompt(entry, matches[0]["id"], prompt)
+    original_state = copy.deepcopy(state)
     _supersede_approved_authorizations(state, request["job_name"], request_id)
     request["status"] = "approved"
     request["approved_at"] = _authorization_now().isoformat()
     _authorization_audit(state, request, "approved")
+    _remote_state_write(entry, paths, state, expected_digest=expected_digest)
     try:
-        _remote_state_write(entry, paths, state, expected_digest=expected_digest)
-    except Exception:
-        _set_cron_prompt(entry, matches[0]["id"], rollback_prompt)
-        raise
+        _set_cron_prompt(entry, matches[0]["id"], prompt)
+    except Exception as prompt_error:
+        try:
+            _remote_state_write(entry, paths, original_state, expected_digest=_state_digest(state))
+        except Exception as rollback_error:
+            raise HermesError("authorization state rollback failed after prompt update failure",
+                              "authorization_state_rollback_failed", True) from rollback_error
+        raise prompt_error
     return result(True, "authorization_approve", remote_name, status="approved", job_id=matches[0]["id"],
                   data={"request": _authorization_view(state, request, True)})
 

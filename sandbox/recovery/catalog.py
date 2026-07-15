@@ -49,7 +49,9 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
         document = json.loads(Path(path).read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise RecoveryError(f"could not load recovery catalog: {exc}", "invalid_catalog") from exc
-    if document.get("schema_version") != 1 or not isinstance(document.get("profiles"), list):
+    if (not isinstance(document, dict) or document.get("schema_version") != 1 or
+            isinstance(document.get("schema_version"), bool) or
+            not isinstance(document.get("profiles"), list)):
         raise RecoveryError("recovery catalog schema_version 1 and profiles are required", "invalid_catalog")
     profiles = []
     seen = set()
@@ -61,6 +63,15 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
             raise RecoveryError("profile id is invalid or duplicated", "invalid_catalog")
         if raw.get("source_type") not in _SOURCE_TYPES or raw.get("capture_mode") not in _CAPTURE_MODES:
             raise RecoveryError(f"profile {profile_id} has an unknown adapter or mode", "invalid_catalog")
+        for field in ("scope", "consistency", "sensitivity", "restore_target", "verification",
+                      "retention_class", "schedule_class"):
+            if field in raw and not isinstance(raw[field], str):
+                raise RecoveryError(f"profile {profile_id} field {field} must be a string", "invalid_catalog")
+        if "version" in raw and (isinstance(raw["version"], bool) or
+                                  not isinstance(raw["version"], int) or raw["version"] < 1):
+            raise RecoveryError(f"profile {profile_id} version is invalid", "invalid_catalog")
+        if "enabled" in raw and not isinstance(raw["enabled"], bool):
+            raise RecoveryError(f"profile {profile_id} enabled must be boolean", "invalid_catalog")
         for value in raw.values():
             if not _safe_value(value):
                 raise RecoveryError(f"profile {profile_id} contains command text", "invalid_catalog")

@@ -27,6 +27,14 @@ class TestRecoveryCatalog(unittest.TestCase):
             with self.assertRaises(RecoveryError):
                 load_catalog(path)
 
+    def test_malformed_top_level_and_typed_fields_fail_closed(self):
+        documents = [[], {"schema_version": 1, "profiles": [{"id": "fixture", "enabled": "false"}]}]
+        with tempfile.TemporaryDirectory() as root:
+            for index, document in enumerate(documents):
+                path = Path(root) / f"catalog-{index}.json"; path.write_text(json.dumps(document))
+                with self.assertRaises(RecoveryError):
+                    load_catalog(path)
+
     def test_command_text_and_secret_metadata_fail_closed(self):
         document = {"schema_version": 1, "profiles": [{
             "id": "fixture", "scope": "test", "source_type": "filesystem",

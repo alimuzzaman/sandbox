@@ -57,6 +57,29 @@ def _exact_catalog_snapshot(paths: dict[str, str]) -> dict:
 
 
 class TestValidation(unittest.TestCase):
+    @patch("sandbox.core._hermes.cron_output")
+    @patch("sandbox.core._hermes._cron_snapshot")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_sync_creates_one_review_draft_per_blocker(
+            self, require_remote, paths, read_state, write_state, snapshot, output):
+        paths.return_value = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+                              "worktrees": "/home/u/worktrees"}
+        state = hermes._new_state()
+        read_state.return_value = state
+        snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
+        output.return_value = {"status": "available", "data": {"output": "REVIEW_REQUIRED — exact origin required"}}
+        first = hermes.authorization_sync("test")
+        second = hermes.authorization_sync("test")
+        self.assertEqual(first["data"]["created_count"], 1)
+        self.assertEqual(second["data"]["created_count"], 0)
+        request = next(iter(state["authorizations"]["requests"].values()))
+        self.assertEqual(request["status"], "review_required")
+        self.assertEqual(request["blocker"], "exact origin required")
+        self.assertEqual(write_state.call_count, 1)
+
     def test_authorization_validates_scope_origin_reason_and_identifier(self):
         self.assertEqual(hermes._valid_authorization_scope("preview-overlay"), "preview-overlay")
         self.assertEqual(hermes._valid_replay_origin("https://Replay.Example.test/"), "https://replay.example.test")

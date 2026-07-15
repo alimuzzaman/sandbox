@@ -89,6 +89,7 @@ _AUTH_REQUEST_RE = re.compile(r"^[0-9a-f]{16}$")
 _AUTH_SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _AUTH_MAX_REQUESTS = 100
 _AUTH_MAX_AUDIT = 200
+_REVIEW_REQUIRED_RE = re.compile(r"^REVIEW_REQUIRED\s*(?:[—:-]\s*)?(.+)$", re.MULTILINE)
 _SECRET_RE = re.compile(r"(?i)\b(token|password|secret|authorization|cookie|session)\b\s*[=:]\s*(?:bearer\s+)?[^\s,;]+")
 _BARE_SECRET_RE = re.compile(
     r"(?ix)(?:"
@@ -450,11 +451,57 @@ def _catalog_authorization_job(name: str, paths: dict) -> dict:
 
 
 def _authorization_view(state: dict, request: dict, detail: bool) -> dict:
-    keys = ("id", "job_name", "scope", "replay_origin", "rationale", "fingerprint", "status", "created_at", "expires_at", "approved_at")
+    keys = ("id", "job_name", "scope", "replay_origin", "rationale", "blocker", "source_fingerprint",
+            "fingerprint", "status", "created_at", "expires_at", "approved_at")
     view = {key: request.get(key) for key in keys if request.get(key) is not None}
     if detail:
         view["audit"] = [event for event in state["authorizations"]["audit"] if event["request_id"] == request["id"]]
     return view
+
+
+def authorization_sync(remote_name: str) -> dict:
+    """Capture terminal REVIEW_REQUIRED results as review-only authorization drafts."""
+    entry = _require_remote(remote_name)
+    paths = _paths(entry)
+    state = _remote_state_read(entry, paths)
+    _expire_authorizations(state)
+    catalog_names = {item.name for item in load_catalog()["jobs"] if item.enabled and item.kind == "agent"}
+    jobs = [job for job in _cron_snapshot(entry)["jobs"]
+            if job.get("name") in catalog_names and job.get("enabled")]
+    created = []
+    requests = state["authorizations"]["requests"]
+    for job in jobs:
+        job_id = str(job.get("id") or "")
+        if not _CRON_JOB_RE.fullmatch(job_id):
+            continue
+        output = cron_output(remote_name, job_id, 200)
+        if output.get("status") != "available":
+            continue
+        match = _REVIEW_REQUIRED_RE.search(str(output.get("data", {}).get("output") or ""))
+        if not match:
+            continue
+        blocker = _redact(match.group(1).strip())[:500]
+        if not blocker or _contains_credential(blocker):
+            continue
+        source_fingerprint = hashlib.sha256(f"{job_id}\n{blocker}".encode()).hexdigest()
+        if any(request.get("source_fingerprint") == source_fingerprint for request in requests.values()):
+            continue
+        for request in requests.values():
+            if request.get("job_name") == job["name"] and request.get("status") == "review_required":
+                request["status"] = "superseded"
+                _authorization_audit(state, request, "superseded")
+        now = _authorization_now()
+        request = {"id": secrets.token_hex(8), "job_name": job["name"], "blocker": blocker,
+                   "source_fingerprint": source_fingerprint, "fingerprint": source_fingerprint,
+                   "status": "review_required", "created_at": now.isoformat(),
+                   "expires_at": (now + timedelta(days=7)).isoformat()}
+        requests[request["id"]] = request
+        _authorization_audit(state, request, "review_required")
+        created.append(_authorization_view(state, request, True))
+    if created:
+        _remote_state_write(entry, paths, state)
+    return result(True, "authorization_sync", remote_name, status="synced",
+                  data={"created": created, "created_count": len(created)})
 
 
 def authorization_list(remote_name: str) -> dict:
@@ -494,7 +541,7 @@ def authorization_request(remote_name: str, job_name: str, scope: str, replay_or
     if len(requests) >= _AUTH_MAX_REQUESTS:
         raise HermesError("authorization request limit reached", "authorization_limit_reached")
     for request in requests.values():
-        if request.get("job_name") == job["name"] and request.get("status") == "pending":
+        if request.get("job_name") == job["name"] and request.get("status") in {"pending", "review_required"}:
             request["status"] = "superseded"
             _authorization_audit(state, request, "superseded")
     now = _authorization_now()

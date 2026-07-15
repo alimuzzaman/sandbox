@@ -186,6 +186,7 @@ before approving:
 
 ```bash
 ./sb hermes authorization list --remote scaleway-sandbox --json
+./sb hermes authorization sync --remote scaleway-sandbox --json
 ./sb hermes authorization show REQUEST_ID --remote scaleway-sandbox --json
 ./sb hermes authorization request --remote scaleway-sandbox \
   --job lenzora-todo-task --scope preview-overlay \
@@ -199,6 +200,12 @@ request and updates only the matching cron job's prompt with the reviewed
 context. It does not create, run, remove, or reconcile jobs. Each lifecycle
 event is retained in the bounded, secret-screened Hermes state audit; a newer
 pending request for the same job supersedes the earlier one.
+
+`authorization sync` scans the latest saved output for each enabled
+catalog-managed agent job. A terminal `REVIEW_REQUIRED` result becomes a
+review-only draft containing its sanitized blocker and source fingerprint. The
+draft is not executable and cannot be approved until an operator creates the
+separate scoped request with the exact replay origin.
 
 Monitor scripts return zero only after a valid inspection or legitimate no-work
 result. Missing files, malformed output, timeouts, and command failures return

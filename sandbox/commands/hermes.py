@@ -199,7 +199,9 @@ def cmd_hermes(cfg, args) -> None:
                     "invalid_cron_action",
                 )
         elif action == "authorization":
-            if args.subaction == "list":
+            if args.subaction == "sync":
+                payload = hermes.authorization_sync(args.remote)
+            elif args.subaction == "list":
                 payload = hermes.authorization_list(args.remote)
             elif args.subaction == "show":
                 request_id = args.target or args.job_id
@@ -217,7 +219,7 @@ def cmd_hermes(cfg, args) -> None:
                     raise hermes.HermesError("authorization approve requires a request id", "missing_authorization_id")
                 payload = hermes.authorization_approve(args.remote, request_id, args.confirm)
             else:
-                raise hermes.HermesError("authorization action must be list, show, request, or approve", "invalid_authorization_action")
+                raise hermes.HermesError("authorization action must be sync, list, show, request, or approve", "invalid_authorization_action")
         elif action == "repo":
             payload = _repo_action(args)
         elif action == "gateway":

@@ -12,6 +12,12 @@
    ./sb hermes authorization list --remote scaleway-sandbox --json
    ```
 
+   To capture current terminal `REVIEW_REQUIRED` results as review-only drafts:
+
+   ```sh
+   ./sb hermes authorization sync --remote scaleway-sandbox --json
+   ```
+
 3. Create a request only after you have the exact scope and deployed HTTPS origin:
 
    ```sh
@@ -31,3 +37,4 @@
 
 - `python3 -m unittest tests.test_hermes tests.test_cli tests.test_mcp` — 158 tests passed.
 - `./sb hermes authorization list --remote scaleway-sandbox --json` — returned `ok: true`, `status: ok`, and an empty request collection without scheduler mutation.
+- `./sb hermes authorization sync --remote scaleway-sandbox --json` — created one `review_required` draft for `lenzora-todo-task`; no approval or cron trigger occurred.

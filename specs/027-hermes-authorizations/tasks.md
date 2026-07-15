@@ -43,6 +43,7 @@
 
 - [X] T012 Document request, review, approval, expiry, and scheduler behavior in `docs/hermes-agent.md`.
 - [X] T013 Run focused tests and `./sb hermes authorization list --remote scaleway-sandbox --json`; record sanitized evidence in `specs/027-hermes-authorizations/quickstart.md`.
+- [X] T014 Add `authorization sync` to convert terminal `REVIEW_REQUIRED` outputs into review-only drafts and verify it against the active Lenzora job.
 
 ## Dependencies and Execution Order
 

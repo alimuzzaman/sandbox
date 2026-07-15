@@ -8,7 +8,7 @@ from sandbox.services.process import ProcessResult
 
 
 class DumpRunner:
-    def __init__(self, payload=b"dump"):
+    def __init__(self, payload=b"-- MariaDB dump\nCREATE TABLE app (id int);\n"):
         self.payload, self.calls = payload, []
 
     def run(self, argv, **kwargs):
@@ -20,13 +20,14 @@ class DumpRunner:
 
 class TestDatabaseCapture(unittest.TestCase):
     def test_postgresql_uses_native_consistent_dump_without_credentials(self):
-        runner = DumpRunner()
+        runner = DumpRunner(b"PGDMP\x00custom dump")
         with tempfile.TemporaryDirectory() as directory:
             outcome = DatabaseCapture(runner).capture("postgresql", "app", Path(directory) / "app.dump")
         command = runner.calls[0][0]
         self.assertEqual(command[:2], ("pg_dump", "--format=custom"))
         self.assertNotIn("password", " ".join(command).lower())
         self.assertEqual(outcome["warnings"], ())
+        self.assertTrue(outcome["format_validated"])
 
     def test_mariadb_uses_single_transaction_and_warns_on_ddl(self):
         runner = DumpRunner()
@@ -41,3 +42,9 @@ class TestDatabaseCapture(unittest.TestCase):
                 DatabaseCapture(DumpRunner()).capture("mariadb", "app", Path(directory) / "app.sql", nontransactional=True)
             with self.assertRaisesRegex(RecoveryError, "empty"):
                 DatabaseCapture(DumpRunner(b"")).capture("postgresql", "app", Path(directory) / "app.dump")
+
+    def test_rejects_nonempty_dump_with_invalid_engine_format(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RecoveryError, "format"):
+                DatabaseCapture(DumpRunner(b"not a dump")).capture(
+                    "postgresql", "app", Path(directory) / "app.dump")

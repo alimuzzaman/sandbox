@@ -25,3 +25,6 @@ not only profiles that completed earlier in the restore order.
 Recovery listing reports complete manifests, incomplete remote sets, malformed or unverifiable
 sets, structurally legacy objects, and locally pending encrypted artifacts separately. The
 legacy pending key remains as a compatibility alias for incomplete remote objects.
+
+Database capture rejects empty output and performs format-aware validation before an artifact
+can enter the encrypted publication pipeline.

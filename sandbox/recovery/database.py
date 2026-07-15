@@ -8,6 +8,7 @@ as an argument to this module.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Mapping, Protocol, Sequence
 
 from .errors import RecoveryError
@@ -60,4 +61,20 @@ class DatabaseCapture:
             raise RecoveryError("database dump command failed", "database_dump_failed")
         if not target.exists() or target.stat().st_size == 0:
             raise RecoveryError("database dump is empty", "empty_database_dump")
-        return {"path": target, "engine": engine, "warnings": warnings, "argv": command}
+        self._validate_format(engine, target)
+        return {"path": target, "engine": engine, "warnings": warnings, "argv": command,
+                "format_validated": True}
+
+    @staticmethod
+    def _validate_format(engine: str, target: Path) -> None:
+        payload = target.read_bytes()
+        if engine == "postgresql":
+            if not payload.startswith(b"PGDMP"):
+                raise RecoveryError("PostgreSQL dump format is invalid", "invalid_database_dump")
+            return
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RecoveryError("SQL dump format is invalid", "invalid_database_dump") from exc
+        if not re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", text, re.IGNORECASE):
+            raise RecoveryError("SQL dump format is invalid", "invalid_database_dump")

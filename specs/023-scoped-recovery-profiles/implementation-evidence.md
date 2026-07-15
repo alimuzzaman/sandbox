@@ -178,3 +178,6 @@ return to their pre-restore contents.
 Recovery listing now classifies complete, incomplete, legacy, locally pending, and
 unverifiable objects without decrypting archives; the existing pending response key remains
 available as an incomplete-object compatibility alias.
+
+Database capture now validates PostgreSQL custom-dump signatures and MariaDB/MySQL SQL-shaped
+output after the native command succeeds, rejecting non-empty but invalid dump artifacts.

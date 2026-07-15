@@ -91,6 +91,19 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
                 "id": "a" * 16, "status": "pending", "created_at": "now",
                 "expires_at": "later"}}, "audit": []}})
 
+    def test_state_and_inputs_reject_type_coercion_and_bad_record_identity(self):
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state({"schema_version": True})
+        request = {"id": "b" * 16, "status": "unknown", "created_at": "now",
+                   "expires_at": "later", "fingerprint": "c" * 64}
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state({"authorizations": {"requests": {"a" * 16: request}, "audit": []}})
+        catalog = {"job": {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}}
+        with self.assertRaises(core.AuthorizationError):
+            core.create_request(core.new_state(), catalog, "job", "scope", "https://example.test", "safe", True, "op")
+        with self.assertRaises(core.AuthorizationError):
+            core.valid_reason(123)
+
     def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
         companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
         with tempfile.TemporaryDirectory() as directory:

@@ -33,14 +33,14 @@ def now() -> datetime:
 
 
 def valid_scope(value: str) -> str:
-    value = (value or "").strip().lower()
+    value = value.strip().lower() if isinstance(value, str) else ""
     if not _SCOPE.fullmatch(value):
         raise AuthorizationError("scope must be a lowercase slug")
     return value
 
 
 def valid_origin(value: str) -> str:
-    value = (value or "").strip()
+    value = value.strip() if isinstance(value, str) else ""
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise AuthorizationError("replay origin contains unsafe control text")
     parsed = urlsplit(value)
@@ -51,7 +51,7 @@ def valid_origin(value: str) -> str:
 
 
 def valid_reason(value: str) -> str:
-    value = (value or "").strip()
+    value = value.strip() if isinstance(value, str) else ""
     if (not 1 <= len(value) <= 500 or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or _SECRET.search(value)):
         raise AuthorizationError("rationale must be 1-500 non-secret characters")
@@ -69,7 +69,8 @@ def new_state() -> dict:
 
 
 def normalize_state(state: object) -> dict:
-    if not isinstance(state, dict) or state.get("schema_version", 2) != 2:
+    if (not isinstance(state, dict) or isinstance(state.get("schema_version", 2), bool) or
+            state.get("schema_version", 2) != 2):
         raise AuthorizationError("unsupported authorization state")
     state.setdefault("schema_version", 2)
     auth = state.setdefault("authorizations", {"requests": {}, "audit": []})
@@ -84,6 +85,19 @@ def normalize_state(state: object) -> dict:
     if (any(not request_fields <= set(request) for request in auth["requests"].values())
             or any(not audit_fields <= set(event) for event in auth["audit"])):
         raise AuthorizationError("invalid authorization state")
+    statuses = {"pending", "approved", "expired", "superseded", "review_required"}
+    for request_id, request in auth["requests"].items():
+        if (not isinstance(request_id, str) or request.get("id") != request_id or not _ID.fullmatch(request_id) or
+                not isinstance(request.get("status"), str) or request["status"] not in statuses or
+                any(not isinstance(request.get(field), str) for field in request_fields) or
+                not re.fullmatch(r"[0-9a-f]{64}", request["fingerprint"])):
+            raise AuthorizationError("invalid authorization state")
+    for event in auth["audit"]:
+        if (not isinstance(event.get("request_id"), str) or not _ID.fullmatch(event["request_id"]) or
+                not isinstance(event.get("event"), str) or not event["event"] or
+                any(not isinstance(event.get(field), str) for field in audit_fields) or
+                not re.fullmatch(r"[0-9a-f]{64}", event["fingerprint"])):
+            raise AuthorizationError("invalid authorization state")
     return state
 
 
@@ -111,13 +125,18 @@ def write_state(path: Path, state: dict) -> None:
             os.chmod(temporary, 0o600)
             temporary.replace(path)
             path.chmod(0o600)
+            directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def audit(state: dict, request: dict, event: str, actor: str | None = None) -> None:
     item = {"request_id": request["id"], "event": event, "at": now().isoformat(), "fingerprint": request["fingerprint"]}
-    if actor:
+    if isinstance(actor, str) and actor:
         item["actor"] = actor[:128]
     state["authorizations"]["audit"].append(item)
     del state["authorizations"]["audit"][:-MAX_AUDIT]
@@ -175,9 +194,11 @@ def view(state: dict, request: dict, detail: bool = False) -> dict:
 
 def create_request(state: dict, catalog: dict[str, dict], job_name: str, scope: str, origin: str,
                    rationale: str, expiry_minutes: int, actor: str) -> dict:
-    if not isinstance(expiry_minutes, int) or not 1 <= expiry_minutes <= 1440:
+    if (isinstance(expiry_minutes, bool) or not isinstance(expiry_minutes, int) or
+            not 1 <= expiry_minutes <= 1440):
         raise AuthorizationError("expiry must be between 1 and 1440 minutes")
-    job = catalog.get((job_name or "").strip())
+    job_name = job_name.strip() if isinstance(job_name, str) else ""
+    job = catalog.get(job_name)
     if not job:
         raise AuthorizationError("job is not an enabled authorization catalog entry")
     scope, origin, rationale = valid_scope(scope), valid_origin(origin), valid_reason(rationale)
@@ -202,9 +223,11 @@ def create_request(state: dict, catalog: dict[str, dict], job_name: str, scope: 
 def ensure_request(state: dict, catalog: dict[str, dict], job_name: str, scope: str, origin: str,
                    rationale: str, expiry_minutes: int, actor: str) -> tuple[dict, bool]:
     """Return an equivalent pending request instead of creating cron-run duplicates."""
-    if not isinstance(expiry_minutes, int) or not 1 <= expiry_minutes <= 1440:
+    if (isinstance(expiry_minutes, bool) or not isinstance(expiry_minutes, int) or
+            not 1 <= expiry_minutes <= 1440):
         raise AuthorizationError("expiry must be between 1 and 1440 minutes")
-    if not catalog.get((job_name or "").strip()):
+    job_name = job_name.strip() if isinstance(job_name, str) else ""
+    if not catalog.get(job_name):
         raise AuthorizationError("job is not an enabled authorization catalog entry")
     scope, origin, rationale = valid_scope(scope), valid_origin(origin), valid_reason(rationale)
     expire(state)

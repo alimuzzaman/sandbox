@@ -33,5 +33,12 @@ class TestRecoveryPlanner(unittest.TestCase):
             with self.assertRaises(RecoveryError):
                 resolver.resolve("root", "missing")
 
+    def test_profile_selection_rejects_non_string_values(self):
+        catalog = load_catalog(Path(__file__).parents[1] / "config" / "recovery-profiles.json")
+        with self.assertRaisesRegex(RecoveryError, "selection"):
+            build_plan(catalog, (1,))
+        with self.assertRaisesRegex(RecoveryError, "selection"):
+            build_plan(catalog, ["control-plane"])
+
 
 if __name__ == "__main__": unittest.main()

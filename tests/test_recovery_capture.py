@@ -92,6 +92,15 @@ class TestRecoveryCapture(unittest.TestCase):
                 StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root).publish_files(
                     "fixture-set", {"artifact": source}, profiles=("fixture",))
 
+    def test_file_capture_rejects_non_string_set_and_artifact_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.write_bytes(b"data")
+            coordinator = StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root)
+            with self.assertRaisesRegex(RecoveryError, "invalid"):
+                coordinator.publish_files(123, {"artifact": source}, profiles=("fixture",))
+            with self.assertRaisesRegex(RecoveryError, "invalid"):
+                coordinator.publish_files("fixture-set", {123: source}, profiles=("fixture",))
+
     def test_file_capture_rejects_source_changed_during_archive(self):
         class FileCrypto:
             def encrypt_file(self, source, target): Path(target).write_bytes(Path(source).read_bytes())

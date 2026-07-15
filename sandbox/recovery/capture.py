@@ -15,7 +15,8 @@ from .integrity import sha256_file
 
 
 def _valid_set_id(set_id: str) -> bool:
-    return bool(set_id) and set_id == Path(set_id).name and set_id.replace("-", "").replace("_", "").isalnum()
+    return (isinstance(set_id, str) and bool(set_id) and set_id == Path(set_id).name and
+            set_id.replace("-", "").replace("_", "").isalnum())
 
 
 class CaptureCoordinator:
@@ -77,7 +78,8 @@ class StagingCaptureCoordinator:
             records = []
             with tarfile.open(archive, "w") as output:
                 for name, source in sorted(artifacts.items()):
-                    if not name or name.startswith("/") or ".." in Path(name).parts:
+                    if (not isinstance(name, str) or not name or name.startswith("/") or
+                            ".." in Path(name).parts):
                         raise RecoveryError("recovery artifact name is invalid", "invalid_artifact")
                     source = Path(source)
                     before = self._file_snapshot(source)

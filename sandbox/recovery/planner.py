@@ -28,6 +28,8 @@ class PathResolver:
 
 def build_plan(catalog: RecoveryCatalog, selected: tuple[str, ...] = (), *, resolver: PathResolver | None = None) -> RecoveryPlan:
     by_id = catalog.by_id()
+    if not isinstance(selected, tuple) or not all(isinstance(profile_id, str) and profile_id for profile_id in selected):
+        raise RecoveryError("recovery profile selection is invalid", "invalid_profile_selection")
     requested = set(selected or by_id)
     if requested - set(by_id):
         raise RecoveryError("unknown recovery profile selection", "unknown_profile")

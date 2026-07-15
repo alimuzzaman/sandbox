@@ -47,6 +47,9 @@ When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the s
 the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;
 missing secret configuration leaves capture unavailable rather than guessing sources.
 
+The GnuPG passphrase descriptor handoff handles partial pipe writes and fails closed on a
+non-progressing descriptor, without placing the passphrase in argv or process output.
+
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before
 capture is considered ready.

@@ -185,6 +185,9 @@ prefix, allowing legacy objects outside that prefix to be reported without mutat
 Database capture now validates PostgreSQL custom-dump signatures and MariaDB/MySQL SQL-shaped
 output after the native command succeeds, rejecting non-empty but invalid dump artifacts.
 
+GnuPG descriptor writing now loops until the inherited passphrase buffer is fully transferred,
+with regression coverage for partial writes and no secret exposure in command arguments.
+
 Filesystem capture now archives an in-root symlink as a symlink rather than following it into
 target contents, while still resolving the target for allowed-root confinement.
 

@@ -24,6 +24,25 @@ class TestGpgCrypto(unittest.TestCase):
         self.assertNotIn(secret, " ".join(map(str, argv)))
         self.assertIn("--passphrase-fd", argv)
 
+    def test_passphrase_descriptor_handles_partial_writes(self):
+        writes = []
+        def partial_write(_fd, payload):
+            if not writes:
+                writes.append(bytes(payload[:1]))
+                return 1
+            writes.append(bytes(payload))
+            return len(payload)
+        def fake_run(argv, **kwargs):
+            Path(argv[argv.index("--output") + 1]).write_bytes(b"ciphertext")
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("sandbox.recovery.crypto.os.write", side_effect=partial_write), \
+                patch("sandbox.recovery.crypto.subprocess.run", fake_run):
+            source = Path(directory) / "plain"; source.write_bytes(b"payload")
+            GpgCrypto("fixture-passphrase").encrypt_file(source, Path(directory) / "cipher")
+        self.assertEqual(b"".join(writes), b"fixture-passphrase\n")
+        self.assertGreater(len(writes), 1)
+
     def test_requires_a_nonempty_secret_channel(self):
         with self.assertRaisesRegex(RecoveryError, "passphrase"):
             GpgCrypto("")

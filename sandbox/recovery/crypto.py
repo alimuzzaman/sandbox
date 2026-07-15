@@ -35,7 +35,12 @@ class GpgCrypto:
     def _run(self, argv: list[str], *, input_path: Path, output_path: Path) -> None:
         read_fd, write_fd = os.pipe()
         try:
-            os.write(write_fd, self._passphrase.encode() + b"\n")
+            pending = self._passphrase.encode() + b"\n"
+            while pending:
+                written = os.write(write_fd, pending)
+                if written <= 0:
+                    raise RecoveryError("could not write recovery passphrase descriptor", "passphrase_pipe_failed")
+                pending = pending[written:]
             os.close(write_fd); write_fd = -1
             command = [self.executable, "--batch", "--yes", "--pinentry-mode", "loopback",
                        "--passphrase-fd", str(read_fd), *argv, "--output", str(output_path), str(input_path)]

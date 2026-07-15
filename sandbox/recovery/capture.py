@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import tarfile
 import tempfile
 from datetime import datetime, timezone
@@ -67,7 +68,7 @@ class StagingCaptureCoordinator:
             raise RecoveryError("recovery set id is invalid", "invalid_set_id")
         if not artifacts or not profiles:
             raise RecoveryError("recovery set requires artifacts and profiles", "empty_set")
-        if not all(Path(value).is_file() and Path(value).stat().st_size for value in artifacts.values()):
+        if not all(self._is_regular_nonempty_file(Path(value)) for value in artifacts.values()):
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
         stage = self._stage()
         verified_ciphertext = None
@@ -79,9 +80,12 @@ class StagingCaptureCoordinator:
                     if not name or name.startswith("/") or ".." in Path(name).parts:
                         raise RecoveryError("recovery artifact name is invalid", "invalid_artifact")
                     source = Path(source)
+                    before = self._file_snapshot(source)
                     output.add(source, arcname=name, recursive=False)
+                    if self._file_snapshot(source) != before:
+                        raise RecoveryError("recovery artifact changed during capture", "source_changed")
                     records.append({"name": name, "sha256": sha256_file(source),
-                                    "size": source.stat().st_size})
+                                    "size": before[2]})
             ciphertext = stage / "archive.tar.gpg"
             self.crypto.encrypt_file(archive, ciphertext)
             plaintext_hash = self.crypto.verify_file(archive, ciphertext)
@@ -122,3 +126,21 @@ class StagingCaptureCoordinator:
             temporary.unlink(missing_ok=True)
             raise
         return target
+
+    @staticmethod
+    def _is_regular_nonempty_file(path: Path) -> bool:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            return False
+        return stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0
+
+    @classmethod
+    def _file_snapshot(cls, path: Path) -> tuple[int, int, int, int]:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise RecoveryError("recovery artifact is unavailable", "missing_artifact") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+            raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)

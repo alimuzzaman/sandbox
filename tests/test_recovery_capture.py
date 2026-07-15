@@ -83,3 +83,32 @@ class TestRecoveryCapture(unittest.TestCase):
             self.assertTrue(saved.is_file())
             self.assertTrue(saved.read_bytes().startswith(b"cipher:"))
             self.assertEqual(list(root.glob("set-*")), [])
+
+    def test_file_capture_rejects_symlink_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; target = root / "target"
+            target.write_bytes(b"data"); source.symlink_to(target)
+            with self.assertRaisesRegex(RecoveryError, "unavailable"):
+                StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+
+    def test_file_capture_rejects_source_changed_during_archive(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"before")
+            original_open = __import__("sandbox.recovery.capture", fromlist=["tarfile"]).tarfile.open
+            class Archive:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def add(self, source, *, arcname, recursive): source.write_bytes(b"after")
+            module = __import__("sandbox.recovery.capture", fromlist=["tarfile"])
+            module.tarfile.open = lambda *args, **kwargs: Archive()
+            try:
+                with self.assertRaisesRegex(RecoveryError, "changed"):
+                    StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=root).publish_files(
+                        "fixture-set", {"artifact": source}, profiles=("fixture",))
+            finally:
+                module.tarfile.open = original_open

@@ -175,18 +175,18 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(worker.profile, "terra")
         self.assertEqual(scheduled_route(worker.profile).effort, "medium")
         self.assertEqual(worker.schedule, "17 */4 * * *")
-        self.assertIn("Begin specs/021-generic-project-instances now at T001", worker.prompt)
-        self.assertIn("user explicitly authorizes implementation", worker.prompt)
-        self.assertIn("Do not inventory every spec before working", worker.prompt)
-        self.assertIn("Work continuously through dependency-ready local tasks", worker.prompt)
-        self.assertIn("Do not stop merely because one task completed", worker.prompt)
+        self.assertIn("hermes/autonomous-backlog", worker.prompt)
+        self.assertIn("permits routine local implementation", worker.prompt)
+        self.assertIn("Do not inventory every spec", worker.prompt)
+        self.assertIn("Continue through dependency-ready tasks", worker.prompt)
+        self.assertIn("do not stop after one task", worker.prompt)
         self.assertIn("NO_BACKLOG_WORK", worker.prompt)
-        self.assertIn("Never return an empty or SILENT response", worker.prompt)
+        self.assertIn("Finish with exactly one non-empty terminal result", worker.prompt)
         rendered = render_entry(worker, {
             "repo_root": "/home/u/sandbox/hermes-repos", "sandbox_home": "/home/u/sandbox",
             "worktrees": "/home/u/sandbox/runtime/hermes-worktrees",
         })
-        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/sandbox-remaining-spec-tasks")
+        self.assertEqual(rendered["workdir"], "/home/u/sandbox/runtime/hermes-worktrees/sandbox-autonomous-backlog")
 
     def test_remote_install_validates_catalog_scripts_without_retired_names(self):
         script = (ROOT / "scripts/install-remote.sh").read_text()

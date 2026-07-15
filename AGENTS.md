@@ -10,13 +10,13 @@
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
 - **"Add" / "build" / "implement" →** `load_workflow('build-feature')`.
 - **Recovery →** use `./sb recovery`; never substitute raw `gpg`, `rclone`, Docker, or SSH.
-- **About to commit / push / tag / open or merge a PR →** stop, stage diff, name what changed, wait for explicit approval. Approval for one action is never approval for the next.
+- **Verified routine work →** stage, commit, and push to the active approved work branch automatically. Never force-push, tag, release, deploy, open/merge a PR, or write directly to `main` without explicit approval.
 
 ---
 
 ## Non-negotiable rules
 
-**Git & shipping.** Never `git commit`, `git push`, force-push, tag, `gh pr create`, or `gh pr merge` without the user saying so for that specific action. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+**Git & shipping.** After required checks pass, agents may `git commit` and `git push` regular work to the current approved work branch. `main`, force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 

@@ -140,6 +140,7 @@ A Sandbox maintainer can add or evolve a runtime adapter and its CLI/MCP capabil
 - Initialization may inspect common Astro/package metadata but does not execute repository commands until the developer explicitly confirms or runs the resulting boot operation.
 - The work is maintained as small, independently verifiable increments. Modularity debt outside files touched by the generic adapter is recorded for future work rather than repaired in this feature.
 - One worker is the default execution model for this side project; parallel work is optional only for independent tests or review and does not justify overlapping file ownership.
+- A remote generic-service deployment requires a committed service build contract (Dockerfile, Compose service definition, health endpoint, storage mount, and route configuration) before Sandbox may create DNS or proxy routes. Discovery of replay application source alone is insufficient to deploy it.
 
 ## Out of Scope
 

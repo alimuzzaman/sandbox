@@ -110,17 +110,22 @@ def audit(state: dict, request: dict, event: str, actor: str | None = None) -> N
     del state["authorizations"]["audit"][:-MAX_AUDIT]
 
 
-def approval_prompt(job: dict, request: dict) -> str:
-    """Render the sole, time-bounded prompt extension for an approved request."""
-    prompt = job.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise AuthorizationError("authorization job has no base prompt")
+def _expiry(request: dict) -> datetime:
     try:
         expiry = datetime.fromisoformat(request["expires_at"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AuthorizationError("authorization request has an invalid expiry") from exc
     if expiry.tzinfo is None:
         raise AuthorizationError("authorization request has an invalid expiry")
+    return expiry
+
+
+def approval_prompt(job: dict, request: dict) -> str:
+    """Render the sole, time-bounded prompt extension for an approved request."""
+    prompt = job.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise AuthorizationError("authorization job has no base prompt")
+    _expiry(request)
     return prompt.rstrip() + "\n\n" + (
         "SANDBOX AUTHORIZATION: This is the sole approved exception for this run. "
         f"Request {request['id']} authorizes only scope {request['scope']} against replay origin "
@@ -141,7 +146,7 @@ def supersede_approved(state: dict, job_name: str, keep_id: str, actor: str) -> 
 
 def expire(state: dict) -> None:
     for request in state["authorizations"]["requests"].values():
-        if request.get("status") == "pending" and datetime.fromisoformat(request["expires_at"]) <= now():
+        if request.get("status") == "pending" and _expiry(request) <= now():
             request["status"] = "expired"
             audit(state, request, "expired")
 

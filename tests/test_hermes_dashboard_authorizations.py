@@ -70,6 +70,15 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
         self.assertIn(item["expires_at"], prompt)
         self.assertIn("at or after expiry", prompt)
 
+    def test_expiry_rejects_malformed_timestamp(self):
+        state = core.new_state()
+        state["authorizations"]["requests"]["a" * 16] = {
+            "id": "a" * 16, "status": "pending", "expires_at": "not-a-timestamp",
+            "fingerprint": "b" * 64,
+        }
+        with self.assertRaises(core.AuthorizationError):
+            core.expire(state)
+
     def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
         companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
         with tempfile.TemporaryDirectory() as directory:

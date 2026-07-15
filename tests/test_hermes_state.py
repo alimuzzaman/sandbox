@@ -44,6 +44,18 @@ class TestHermesState(unittest.TestCase):
             self.assertEqual(repo.lock_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_read_and_write_reject_boolean_schema_and_non_mapping_fields(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hermes.json"
+            repo = HermesStateRepository(path)
+            path.write_text('{"schema_version": true}')
+            with self.assertRaises(HermesStateError):
+                repo.read()
+            with self.assertRaises(HermesStateError):
+                repo.write(HermesState(installation=[]))
+            with self.assertRaises(HermesStateError):
+                repo.write(HermesState(schema_version=True))
+
     def test_interrupted_atomic_replace_keeps_the_previous_document(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "hermes.json"

@@ -44,7 +44,8 @@ class HermesStateRepository:
             raise HermesStateError(f"invalid Hermes state: {exc}") from exc
         if not isinstance(value, dict):
             raise HermesStateError("invalid Hermes state: root must be an object")
-        if value.get("schema_version", 1) != 1:
+        if (isinstance(value.get("schema_version", 1), bool) or
+                value.get("schema_version", 1) != 1):
             raise HermesStateError("unsupported Hermes state schema")
         for field in ("installation", "sessions"):
             if field in value and value[field] is not None and not isinstance(value[field], dict):
@@ -58,7 +59,10 @@ class HermesStateRepository:
         )
 
     def write(self, state: HermesState) -> None:
-        if state.schema_version != 1:
+        if (isinstance(state.schema_version, bool) or state.schema_version != 1 or
+                not isinstance(state.installation, (dict, type(None))) or
+                not isinstance(state.sessions, (dict, type(None))) or
+                not isinstance(state.extra, (dict, type(None)))):
             raise HermesStateError("unsupported Hermes state schema")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path.touch(mode=0o600, exist_ok=True)

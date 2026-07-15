@@ -35,3 +35,11 @@ resume only that reviewed scope until `expires_at`; the local five-minute
 - `./sb hermes cron verify 040044cc36a6 --remote scaleway-sandbox --timeout 120 --confirm --json` — the `authorization-expiry` cron completed successfully after refreshing the approved dev-only request with its expiry guard.
 - `./sb hermes dashboard doctor --remote scaleway-sandbox --json` — dashboard v1.0.6 is healthy, loopback-only, and uses Hermes's upstream session authentication; the revoker superseded the prior approval so exactly one Lenzora approval remains active.
 - `git fetch --dry-run --tags --prune origin` in the installed Hermes checkout — completed after restoring the canonical upstream remote; no checkout update was applied.
+
+## Local verification refresh (2026-07-16)
+
+- `./.cli-venv/bin/python -m unittest tests.test_hermes` — 145 tests passed.
+- `./.cli-venv/bin/python -m unittest discover -s tests -p 'test_recovery_*.py' -q` — 78 tests passed.
+- `./.cli-venv/bin/python -m unittest discover -s tests -q` — 712 tests passed, 1 skipped.
+- This refresh performed no additional live remote acceptance, approval, deployment, deletion,
+  schedule activation, or production recovery operation; the live evidence above remains historical.

@@ -75,4 +75,4 @@
 - [ ] T022 [P] Verify the repaired Hermes upstream remote can fetch signed update history without changing the installed checkout, and record the bounded operator procedure (plan: live proof; missing).
 - [ ] T023 Add a concurrency regression and guarded state-transition mechanism proving competing authorization approvals cannot lose audit/state updates or leave a mismatched cron prompt (FR-007; partial).
 - [ ] T024 Resolve the remaining Spec-Kit placeholder sections in `spec.md` through the canonical specify/clarify workflows, including measurable edge-case acceptance criteria and assumptions (spec quality; partial).
-- [ ] T025 Refresh `quickstart.md` with current focused/full test counts and clearly separate fixture evidence from unperformed live acceptance (SC-004; partial).
+- [X] T025 Refresh `quickstart.md` with current focused/full test counts and clearly separate fixture evidence from unperformed live acceptance (SC-004; partial).

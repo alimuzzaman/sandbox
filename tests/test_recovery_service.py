@@ -37,6 +37,23 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual(listed["data"]["pending"][0]["Path"], "sets/pending/archive.bin")
         self.assertEqual(listed["data"]["incomplete"][0]["Path"], "sets/pending/archive.bin")
 
+    def test_create_validates_catalog_and_materialization_before_capture(self):
+        class Capture:
+            def publish_files(self, *args, **kwargs):
+                raise AssertionError("capture must not run")
+        service = RecoveryService(RecoveryCatalog(1, ()), capture=Capture())
+        unknown = service.create("set", {"artifact": "/tmp/artifact"}, ("missing",), confirm=True)
+        self.assertEqual(unknown["error"]["code"], "unknown_profile")
+
+        from sandbox.recovery.models import RecoveryProfile
+        profile = RecoveryProfile("fixture", "test", "filesystem", ("host-manifest:fixture",),
+                                  ("source",), "full", "stable", (), "encrypted", "target",
+                                  "verify", "standard")
+        service = RecoveryService(RecoveryCatalog(1, (profile,)), capture=Capture())
+        blocked = service.create("set", {"artifact": "/tmp/artifact"}, ("fixture",), confirm=True)
+        self.assertEqual(blocked["error"]["code"], "capture_not_ready")
+        self.assertIn("warnings", blocked["data"])
+
     def test_list_classifies_complete_legacy_unverifiable_and_local_pending_sets(self):
         drive = MemoryDrive()
         CaptureCoordinator(FixtureCrypto(), drive).publish("complete", {"artifact": b"payload"})

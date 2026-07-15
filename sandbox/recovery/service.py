@@ -51,6 +51,22 @@ class RecoveryService:
         if not confirm:
             return result(False, "create", remote=remote, error=RecoveryError(
                 "recovery create requires explicit confirmation", "confirmation_required"))
+        if not profiles:
+            return result(False, "create", remote=remote, error=RecoveryError(
+                "recovery create requires selected profiles", "missing_profiles"))
+        try:
+            plan = build_plan(self.catalog, profiles)
+        except RecoveryError as exc:
+            return result(False, "create", remote=remote, error=exc)
+        if plan.warnings:
+            return result(False, "create", remote=remote,
+                          data={"profiles": plan.profiles, "warnings": plan.warnings},
+                          error=RecoveryError(
+                              "recovery capture inputs require explicit materialization",
+                              "capture_not_ready"))
+        if not artifacts:
+            return result(False, "create", remote=remote, error=RecoveryError(
+                "recovery create requires captured artifacts", "empty_set"))
         if self.capture is None:
             return result(False, "create", remote=remote, error=RecoveryError(
                 "recovery capture is not configured", "recovery_not_configured"))

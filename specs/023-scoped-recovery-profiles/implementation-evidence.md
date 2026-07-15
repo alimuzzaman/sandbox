@@ -208,3 +208,7 @@ roots and leaves capture unavailable when the secret channel is absent.
 
 Planner output now warns when host-manifest roots remain symbolic or a profile combines multiple
 source kinds, making clear that the result is review-only until explicit adapter materialization.
+
+RecoveryService.create now revalidates the selected catalog profiles and planner warnings before
+invoking capture, rejecting unknown/missing profiles, unresolved materialization, and empty
+artifact sets without invoking the adapter.

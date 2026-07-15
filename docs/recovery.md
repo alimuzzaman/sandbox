@@ -56,3 +56,7 @@ non-progressing descriptor, without placing the passphrase in argv or process ou
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before
 capture is considered ready.
+
+The service rechecks that catalog/materialization boundary immediately before capture and
+rejects unknown profiles, missing profile selections, unresolved warnings, and empty artifact
+sets before invoking an adapter.

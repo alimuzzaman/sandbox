@@ -31,6 +31,14 @@
 
 **Specs via spec-kit.** `speckit-specify` → `speckit-clarify` → `speckit-plan` → `speckit-tasks`. Never hand-author `specs/<n>/spec.md`.
 
+**Module boundaries.** New config schemas, runtime adapters, CLI commands, and MCP
+groups register through explicit manifests/contracts. Do not add consumers of
+`sandbox_core.py`, `sandbox.registry.COMMANDS`, `sandbox.hermes.facade`, or the MCP
+`app.py` helper namespace, and do not read registry/state JSON directly. Capability
+checks happen before side effects; shared services own mechanisms, adapters own
+runtime policy. Compatibility facades are rollback controls and require parity
+evidence plus explicit human approval before removal.
+
 ---
 
 ## Plugin code rules

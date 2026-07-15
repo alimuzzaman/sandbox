@@ -1,20 +1,42 @@
 from __future__ import annotations
-import json
-import os
-import shlex
 import subprocess
 from pathlib import Path
-import httpx
-from mcp.server.fastmcp import FastMCP
-import re as _re
+
+from dependencies import ToolDependencies
+
+
+# Bound only by register(); importing this group must neither initialize app nor
+# register tools.  The compatibility functions below retain their public names.
+SANDBOX_ROOT: Path
+PROXY_TLD: str
+_core: object
+_load_sandbox_yml: object
+_project_instance: object
+_resolve_instance: object
+_safe_json: object
+_site_url: object
+
+
+def register(server, dependencies: ToolDependencies) -> None:
+    """Bind the explicit instance context and register this group's tools."""
+    global SANDBOX_ROOT, PROXY_TLD, _core, _load_sandbox_yml
+    global _project_instance, _resolve_instance, _safe_json, _site_url
+    SANDBOX_ROOT = dependencies.require("sandbox_root")
+    PROXY_TLD = dependencies.require("proxy_tld")
+    _core = dependencies.require("core")
+    _load_sandbox_yml = dependencies.require("load_sandbox_yml")
+    _project_instance = dependencies.require("project_instance")
+    _resolve_instance = dependencies.require("resolve_instance")
+    _safe_json = dependencies.require("safe_json")
+    _site_url = dependencies.require("site_url")
+    for tool in (
+        ensure_instance, destroy_instance, recreate_instance, setup_domains,
+        secure_instance, apply_config,
+    ):
+        server.tool()(tool)
 
 
 
-from app import *  # noqa: F401,F403
-
-
-
-@mcp.tool()
 def ensure_instance(project_dir: str, label: str = "default", create: bool = False) -> dict:
     """Ensure a sandbox WordPress instance exists for `project_dir`, creating it
     on demand, and return {ok, instance, url, ports, status, root, source, label}.
@@ -58,7 +80,6 @@ def ensure_instance(project_dir: str, label: str = "default", create: bool = Fal
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "ensure failed").strip()[:1000]}
 
-@mcp.tool()
 def destroy_instance(project_dir: str, label: str | None = None) -> dict:
     """Stop and permanently delete the sandbox instance for `project_dir`
     (+ `label`, when the root owns more than one).
@@ -87,7 +108,6 @@ def destroy_instance(project_dir: str, label: str | None = None) -> dict:
                 "message": f"Instance '{inst}' deleted. Call ensure_instance to recreate."}
     return {"ok": False, "error": (res.stderr or res.stdout or "delete failed").strip()[:1000]}
 
-@mcp.tool()
 def recreate_instance(project_dir: str, label: str | None = None) -> dict:
     """Destroy and immediately recreate the sandbox instance for `project_dir`
     (+ `label`, when the root owns more than one).
@@ -161,7 +181,6 @@ def recreate_instance(project_dir: str, label: str | None = None) -> dict:
     return {"ok": False, "code": res2.returncode,
             "error": (res2.stderr or res2.stdout or "ensure failed after destroy").strip()[:1000]}
 
-@mcp.tool()
 def setup_domains(tld: str = "") -> dict:
     """Set up clean, trusted HTTPS for the sandbox: assign every instance a
     <name>.<tld> domain, start the Caddy proxy, mint per-instance certs, and
@@ -187,7 +206,6 @@ def setup_domains(tld: str = "") -> dict:
     out = ((res.stdout or "") + (res.stderr or "")).strip()
     return {"ok": res.returncode == 0, "code": res.returncode, "output": out[:2000]}
 
-@mcp.tool()
 def secure_instance(project_dir: str, label: str | None = None) -> dict:
     """Give the project's instance a trusted https://<name>.<tld> URL without a
     recreate — assigns its domain (if missing), mints the cert, wires the proxy
@@ -216,7 +234,6 @@ def secure_instance(project_dir: str, label: str | None = None) -> dict:
     return {"ok": True, "instance": inst, "url": _site_url(_resolve_instance(inst)),
             "output": out}
 
-@mcp.tool()
 def apply_config(project_dir: str, label: str | None = None) -> dict:
     """Reconcile a RUNNING instance with its current project config WITHOUT
     dropping the database or uploads — the non-destructive alternative to

@@ -15,6 +15,19 @@ There is **no central catalog**; each plugin self-describes here.
 
 ## Resolution order
 
+The loader discovers the common project descriptor and selects `kind` **before**
+applying runtime defaults. Missing `kind` is compatibility shorthand for
+`"wordpress"`; explicit WordPress and omitted-kind documents normalize the same.
+WordPress-only fields are owned by the WordPress schema rather than the common
+descriptor. New schemas register through `sandbox.config.registry` and must not
+add kind branches to CLI, MCP, registry persistence, or `sandbox_core.py`.
+
+`sandbox_core.load_project_config` remains a compatibility facade for existing
+callers, not a new extension API. New application code consumes the descriptor and
+runtime services from `sandbox.application.context`. Registry files likewise go
+through the project-registry repository so locking, version checks, unknown-field
+preservation, and atomic replacement remain consistent.
+
 For any project directory, the effective config is resolved as (highest
 priority last):
 

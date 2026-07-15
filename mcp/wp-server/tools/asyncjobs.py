@@ -1,7 +1,7 @@
 from __future__ import annotations
 import subprocess
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, _safe_json, mcp
 
 
 @mcp.tool()

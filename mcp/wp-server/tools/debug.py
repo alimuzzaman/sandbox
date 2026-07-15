@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, _project_instance, mcp
 
 
 def _sb(inst: str, *args: str) -> subprocess.CompletedProcess:

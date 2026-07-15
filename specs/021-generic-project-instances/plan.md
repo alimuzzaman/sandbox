@@ -1,5 +1,13 @@
 # Implementation Plan: Generic Project Instances
 
+> **Status (2026-07-14): implementation-blocked.** Feature 022 established the
+> descriptor/schema registry, project-registry repository, capability-aware runtime
+> service, WordPress adapter, bounded side-effect services, and explicit CLI/MCP
+> manifests. Replan this feature against those owners before implementation. Do not
+> reintroduce `sandbox_core.py` config/registry logic, central parser edits, MCP
+> `app.py` dependencies, or direct proxy/process policy. Unblocking requires the
+> feature-022 final live parity/review gates and explicit human approval.
+
 **Branch**: `codex/hermes-public-access` | **Date**: 2026-07-12 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/021-generic-project-instances/spec.md`
@@ -42,6 +50,19 @@ Add explicit, local Docker Compose project support to the existing per-project i
 Post-design re-check: the adapter contract, additive data model, explicit capability errors, and incremental tasks preserve all six principles. No constitutional exception is required for new code. Pre-existing modularity debt remains a tracked residual risk.
 
 ## Project Structure
+
+### Responsibilities moved by feature 022
+
+| Original 021 responsibility | Current owner to target during replan |
+|---|---|
+| kind-before-default config | `sandbox/config/` descriptors, registry, and schemas |
+| registry locking/migration | `sandbox/project_registry/` and public facade |
+| capability dispatch | `sandbox/application/runtime_service.py` + `sandbox/runtimes/` |
+| process/HTTP/port/path/proxy mechanisms | `sandbox/services/` |
+| command ownership | `sandbox/commands/manifest.py` + `CommandSpec` |
+| MCP group ownership | `mcp/wp-server/tools/manifest.py` + `ToolGroupSpec` |
+
+The Compose adapter and Astro preset remain unimplemented feature-021 scope.
 
 ### Documentation (this feature)
 

@@ -18,7 +18,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
-from sandbox.application.context import wordpress_runtime_service
+from sandbox.application.context import wordpress_runtime_dependencies, wordpress_runtime_service
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -38,7 +38,8 @@ def cmd_up(cfg: dict, args) -> None:
     # the https URL. Cheap + silent; passwordless via the sudoers rule.
     dom = inst_cfg.get("domain")
     if dom and dom.endswith(f".{_tld(inst_cfg)}") and proxy_available():
-        _ensure_proxy_up(cfg)
+        proxy = wordpress_runtime_dependencies(cfg).proxy
+        proxy.apply(proxy.plan(dom, inst_cfg["wordpress_port"]))
     # Reconcile the declared service set on every boot.  In particular, this
     # removes stale sidecars left behind after switching web-server modes
     # (for example an old nginx service), so repeated setup cannot accumulate

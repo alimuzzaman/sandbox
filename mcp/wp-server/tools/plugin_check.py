@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from app import *  # noqa: F401,F403
+from app import SANDBOX_ROOT, _safe_json, mcp
 
 
 def _plugin_check_error(message: str, *, action: str = "check",

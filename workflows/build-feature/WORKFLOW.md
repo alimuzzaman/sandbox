@@ -212,6 +212,10 @@ For each slice from Phase 2:
    - Sanitize input / escape output; SQL through $wpdb->prepare only
    - Prefix every option/transient/post-meta/hook/JS handle/CSS handle with the plugin slug
    - WP APIs over raw PHP (wp_remote_get not curl; wp_enqueue_script not inline <script>)
+   - Sandbox control-plane features register through the schema/adapter/command/MCP
+     manifests, use repository and bounded-service contracts, and preflight
+     capabilities before side effects. Never extend a compatibility facade or read
+     registry/state files directly.
 
 After the last slice, run the FULL VERIFICATION PLAN from Phase 2 —
 every success criterion + every edge case row. Each must produce

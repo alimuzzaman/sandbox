@@ -18,13 +18,16 @@ class HermesState:
     schema_version: int = 1
     installation: dict[str, Any] | None = None
     sessions: dict[str, Any] | None = None
+    extra: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        value = dict(self.extra or {})
+        value.update({
             "schema_version": self.schema_version,
             "installation": dict(self.installation or {}),
             "sessions": dict(self.sessions or {}),
-        }
+        })
+        return value
 
 
 class HermesStateRepository:
@@ -39,12 +42,19 @@ class HermesStateRepository:
             value = json.loads(self.path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise HermesStateError(f"invalid Hermes state: {exc}") from exc
+        if not isinstance(value, dict):
+            raise HermesStateError("invalid Hermes state: root must be an object")
         if value.get("schema_version", 1) != 1:
             raise HermesStateError("unsupported Hermes state schema")
+        for field in ("installation", "sessions"):
+            if field in value and value[field] is not None and not isinstance(value[field], dict):
+                raise HermesStateError(f"invalid Hermes state: {field} must be an object")
+        known = {"schema_version", "installation", "sessions"}
         return HermesState(
             schema_version=1,
             installation=value.get("installation") or {},
             sessions=value.get("sessions") or {},
+            extra={key: item for key, item in value.items() if key not in known},
         )
 
     def write(self, state: HermesState) -> None:

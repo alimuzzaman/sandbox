@@ -20,6 +20,17 @@ class TestBoundedProcessRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             BoundedProcessRunner().run("echo unsafe")
 
+    def test_timeout_returns_a_redacted_bounded_result(self):
+        secret = "timeout-secret-sentinel"
+        runner = BoundedProcessRunner(secret_values=(secret,))
+        result = runner.run(
+            [sys.executable, "-c", f"import time; print('{secret}'); time.sleep(1)"],
+            timeout=0.01,
+        )
+        self.assertEqual(result.returncode, 124)
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertIn("timed out", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

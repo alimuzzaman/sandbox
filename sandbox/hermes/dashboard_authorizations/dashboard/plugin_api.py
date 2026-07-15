@@ -15,7 +15,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from authorization_core import AuthorizationError, create_request, expire, read_state, view, write_state
+from authorization_core import AuthorizationError, approval_prompt, audit, expire, read_state, supersede_approved, view, write_state
 
 router = APIRouter()
 ROOT = Path(os.environ.get("SANDBOX_AUTHORIZATION_HOME", Path.home() / ".hermes" / "sandbox-authorizations"))
@@ -28,7 +28,6 @@ STATE = Path(os.path.expandvars(str(_CONFIG.get("state_path", ROOT / "state.json
 CATALOG = Path(os.path.expandvars(str(_CONFIG.get("catalog_path", ROOT / "catalog.json")))).expanduser()
 CRON_JOBS = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "cron" / "jobs.json"
 _ID = re.compile(r"^[0-9a-f]{16}$")
-_REVIEW_REQUIRED = re.compile(r"^REVIEW_REQUIRED\s*(?:[—:-]\s*)?(.+)$", re.MULTILINE)
 
 
 def _hermes_bin() -> str:
@@ -92,7 +91,7 @@ def _cron_jobs() -> list[dict]:
 
 @router.get("/health")
 async def health():
-    return {"plugin": "sandbox-authorizations", "version": "1.0.1", "catalog_configured": CATALOG.exists()}
+    return {"plugin": "sandbox-authorizations", "version": "1.0.6", "catalog_configured": CATALOG.exists()}
 
 
 @router.get("/requests")
@@ -117,54 +116,6 @@ async def show_request(request_id: str, request: Request):
     return {"request": view(state, item, True)}
 
 
-@router.post("/requests")
-async def request_authorization(request: Request):
-    actor = _actor(request)
-    try:
-        body = await request.json()
-        state = _state()
-        item = create_request(state, _catalog(), body.get("job_name"), body.get("scope"), body.get("replay_origin"), body.get("rationale"), body.get("expires_in_minutes", 1440), actor)
-        write_state(STATE, state)
-        return {"request": view(state, item, True)}
-    except (AuthorizationError, TypeError, ValueError) as exc:
-        raise _failure(exc) from exc
-
-
-@router.post("/sync")
-async def sync(request: Request):
-    actor = _actor(request)
-    state, catalog, created = _state(), _catalog(), []
-    from authorization_core import audit, now
-    jobs = _cron_jobs()
-    if not any(isinstance(job.get("last_output"), str) for job in jobs):
-        raise HTTPException(409, "this Hermes version does not persist cron output for review synchronization")
-    for job in jobs:
-        if job.get("name") not in catalog or not job.get("enabled") or not isinstance(job.get("id"), str):
-            continue
-        text = str(job.get("last_output") or "")
-        match = _REVIEW_REQUIRED.search(text)
-        if not match:
-            continue
-        blocker = match.group(1).strip()[:500]
-        if not blocker or re.search(r"(?i)\b(?:token|password|secret)\b\s*[:=]", blocker):
-            continue
-        source = __import__("hashlib").sha256((job["id"] + "\n" + blocker).encode()).hexdigest()
-        if any(item.get("source_fingerprint") == source for item in state["authorizations"]["requests"].values()):
-            continue
-        for item in state["authorizations"]["requests"].values():
-            if item.get("job_name") == job["name"] and item.get("status") == "review_required":
-                item["status"] = "superseded"
-                audit(state, item, "superseded", actor)
-        item = {"id": __import__("secrets").token_hex(8), "job_name": job["name"], "blocker": blocker,
-                "source_fingerprint": source, "fingerprint": source, "status": "review_required",
-                "created_at": now().isoformat(), "expires_at": (now() + __import__("datetime").timedelta(days=7)).isoformat()}
-        state["authorizations"]["requests"][item["id"]] = item
-        audit(state, item, "review_required", actor)
-        created.append(view(state, item, True))
-    write_state(STATE, state)
-    return {"created_count": len(created), "created": created}
-
-
 @router.post("/requests/{request_id}/approve")
 async def approve(request_id: str, request: Request):
     actor = _actor(request)
@@ -183,16 +134,20 @@ async def approve(request_id: str, request: Request):
         matches = [job_row for job_row in jobs if job_row.get("name") == item["job_name"] and job_row.get("enabled")]
         if len(matches) != 1 or not isinstance(matches[0].get("id"), str):
             raise AuthorizationError("matching catalog cron job was not found")
-        prompt = job["prompt"].rstrip() + "\n\nSANDBOX AUTHORIZATION: This is the sole approved exception for this run. Request %s authorizes only scope %s against replay origin %s. Rationale: %s. Do not broaden this authorization or perform any other protected action.\n" % (item["id"], item["scope"], item["replay_origin"], item["rationale"])
+        prompt = approval_prompt(job, item)
+        prior = [value for value in state["authorizations"]["requests"].values()
+                 if value.get("job_name") == item["job_name"] and value.get("status") == "approved"]
+        rollback_prompt = job["prompt"] if not prior else approval_prompt(
+            job, max(prior, key=lambda value: (str(value.get("approved_at") or ""), str(value.get("created_at") or ""), value["id"])))
         subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", prompt], text=True, capture_output=True, check=True, timeout=30)
+        supersede_approved(state, item["job_name"], item["id"], actor)
         item["status"] = "approved"
         item["approved_at"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-        from authorization_core import audit
         audit(state, item, "approved", actor)
         try:
             write_state(STATE, state)
         except Exception:
-            subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", job["prompt"]], text=True, capture_output=True, check=False, timeout=30)
+            subprocess.run([HERMES, "cron", "edit", matches[0]["id"], "--prompt", rollback_prompt], text=True, capture_output=True, check=False, timeout=30)
             raise
         return {"request": view(state, item, True)}
     except (AuthorizationError, subprocess.SubprocessError, OSError, ValueError) as exc:

@@ -110,6 +110,35 @@ def audit(state: dict, request: dict, event: str, actor: str | None = None) -> N
     del state["authorizations"]["audit"][:-MAX_AUDIT]
 
 
+def approval_prompt(job: dict, request: dict) -> str:
+    """Render the sole, time-bounded prompt extension for an approved request."""
+    prompt = job.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise AuthorizationError("authorization job has no base prompt")
+    try:
+        expiry = datetime.fromisoformat(request["expires_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AuthorizationError("authorization request has an invalid expiry") from exc
+    if expiry.tzinfo is None:
+        raise AuthorizationError("authorization request has an invalid expiry")
+    return prompt.rstrip() + "\n\n" + (
+        "SANDBOX AUTHORIZATION: This is the sole approved exception for this run. "
+        f"Request {request['id']} authorizes only scope {request['scope']} against replay origin "
+        f"{request['replay_origin']}. Rationale: {request['rationale']}. "
+        f"Expires at {request['expires_at']}. Before any protected action, compare the current UTC time; "
+        "at or after expiry, do not perform that action and report REVIEW_REQUIRED. "
+        "Do not broaden this authorization or perform any other protected action.\n"
+    )
+
+
+def supersede_approved(state: dict, job_name: str, keep_id: str, actor: str) -> None:
+    """Keep exactly one active approval for a catalog job."""
+    for item in state["authorizations"]["requests"].values():
+        if item.get("job_name") == job_name and item.get("status") == "approved" and item.get("id") != keep_id:
+            item["status"] = "superseded"
+            audit(state, item, "superseded", actor)
+
+
 def expire(state: dict) -> None:
     for request in state["authorizations"]["requests"].values():
         if request.get("status") == "pending" and datetime.fromisoformat(request["expires_at"]) <= now():
@@ -150,3 +179,19 @@ def create_request(state: dict, catalog: dict[str, dict], job_name: str, scope: 
     requests[request["id"]] = request
     audit(state, request, "requested", actor)
     return request
+
+
+def ensure_request(state: dict, catalog: dict[str, dict], job_name: str, scope: str, origin: str,
+                   rationale: str, expiry_minutes: int, actor: str) -> tuple[dict, bool]:
+    """Return an equivalent pending request instead of creating cron-run duplicates."""
+    if not isinstance(expiry_minutes, int) or not 1 <= expiry_minutes <= 1440:
+        raise AuthorizationError("expiry must be between 1 and 1440 minutes")
+    if not catalog.get((job_name or "").strip()):
+        raise AuthorizationError("job is not an enabled authorization catalog entry")
+    scope, origin, rationale = valid_scope(scope), valid_origin(origin), valid_reason(rationale)
+    expire(state)
+    wanted = fingerprint(job_name, scope, origin, rationale)
+    for item in state["authorizations"]["requests"].values():
+        if item.get("status") == "pending" and item.get("fingerprint") == wanted:
+            return item, False
+    return create_request(state, catalog, job_name, scope, origin, rationale, expiry_minutes, actor), True

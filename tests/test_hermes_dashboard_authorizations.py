@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,85 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
         with self.assertRaises(core.AuthorizationError):
             core.create_request(state, catalog, "other", "preview-overlay", "https://lenzora.dev", "safe", 60, "op")
 
+    def test_equivalent_pending_request_is_reused(self):
+        state = core.new_state()
+        catalog = {"job": {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}}
+        first, created = core.ensure_request(state, catalog, "job", "preview-overlay", "https://lenzora.dev", "safe", 60, "cron:job")
+        second, repeated = core.ensure_request(state, catalog, "job", "preview-overlay", "https://lenzora.dev", "safe", 60, "cron:job")
+        self.assertTrue(created)
+        self.assertFalse(repeated)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(state["authorizations"]["requests"]), 1)
+        with self.assertRaises(core.AuthorizationError):
+            core.ensure_request(state, {}, "job", "preview-overlay", "https://lenzora.dev", "safe", 60, "cron:job")
+
+    def test_approval_prompt_carries_the_reviewed_expiry(self):
+        state = core.new_state()
+        job = {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe base prompt"}
+        item = core.create_request(state, {"job": job}, "job", "preview-overlay", "https://lenzora.dev",
+                                   "safe", 60, "operator")
+        prompt = core.approval_prompt(job, item)
+        self.assertIn(item["expires_at"], prompt)
+        self.assertIn("at or after expiry", prompt)
+
+    def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
+        companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, catalog, config = root / "state.json", root / "catalog.json", root / "config.json"
+            home, edits, hermes = root / "hermes-home", root / "edits.log", root / "hermes"
+            (home / "cron").mkdir(parents=True)
+            expired_job = {"name": "expired-job", "kind": "agent", "enabled": True, "prompt": "expired base prompt"}
+            current_job = {"name": "current-job", "kind": "agent", "enabled": True, "prompt": "current base prompt"}
+            catalog.write_text(json.dumps({"jobs": [expired_job, current_job]}))
+            value = core.new_state()
+            expired = core.create_request(value, {"expired-job": expired_job}, "expired-job", "preview-overlay", "https://lenzora.dev",
+                                          "expired", 60, "operator")
+            current = core.create_request(value, {"current-job": current_job}, "current-job", "preview-overlay", "https://lenzora.dev",
+                                          "current", 60, "operator")
+            expired.update({"status": "approved", "expires_at": "2000-01-01T00:00:00+00:00"})
+            current.update({"status": "approved", "expires_at": "2999-01-01T00:00:00+00:00"})
+            core.write_state(state, value)
+            config.write_text(json.dumps({"state_path": str(state), "catalog_path": str(catalog)}))
+            (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [
+                {"id": "deadbeef1234", "name": "expired-job", "enabled": True},
+                {"id": "cafefeed1234", "name": "current-job", "enabled": True},
+            ]}))
+            hermes.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERMES_EDIT_LOG\"\n")
+            hermes.chmod(0o700)
+            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "HERMES_HOME": str(home),
+                           "HERMES_BIN": str(hermes), "HERMES_EDIT_LOG": str(edits)}
+            result = subprocess.run([sys.executable, str(companion), "--refresh"], env=environment,
+                                    text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"expired_count": 1, "refreshed_count": 1})
+            persisted = core.read_state(state)
+            self.assertEqual(persisted["authorizations"]["requests"][expired["id"]]["status"], "expired")
+            self.assertIn({"request_id": expired["id"], "event": "expired", "at": persisted["authorizations"]["audit"][-1]["at"],
+                           "fingerprint": expired["fingerprint"], "actor": "authorization-expiry"}, persisted["authorizations"]["audit"])
+            output = edits.read_text()
+            self.assertIn("expired base prompt", output)
+            self.assertIn("Expires at 2999-01-01T00:00:00+00:00", output)
+
+    def test_companion_creates_only_a_shipped_template(self):
+        companion = ROOT / "sandbox/hermes/dashboard_authorizations/request.py"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, catalog, templates, config = root / "state.json", root / "catalog.json", root / "templates.json", root / "config.json"
+            catalog.write_text(json.dumps({"jobs": [{"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}]}))
+            templates.write_text(json.dumps({"templates": [{"id": "fixed", "job_name": "job", "scope": "preview-overlay", "replay_origin": "https://lenzora.dev", "rationale": "safe", "expires_in_minutes": 60}]}))
+            config.write_text(json.dumps({"state_path": str(state), "catalog_path": str(catalog)}))
+            environment = {**os.environ, "SANDBOX_AUTHORIZATION_CONFIG": str(config), "SANDBOX_AUTHORIZATION_TEMPLATES": str(templates)}
+            first = subprocess.run([sys.executable, str(companion), "--template", "fixed"], env=environment, text=True, capture_output=True, check=False)
+            second = subprocess.run([sys.executable, str(companion), "--template", "fixed"], env=environment, text=True, capture_output=True, check=False)
+            denied = subprocess.run([sys.executable, str(companion), "--template", "other"], env=environment, text=True, capture_output=True, check=False)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertTrue(json.loads(first.stdout)["created"])
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertFalse(json.loads(second.stdout)["created"])
+            self.assertEqual(denied.returncode, 2)
+            self.assertEqual(len(core.read_state(state)["authorizations"]["requests"]), 1)
+
 
 class TestDashboardAuthorizationInstaller(unittest.TestCase):
     def test_default_catalog_contains_only_enabled_agent_jobs(self):
@@ -76,6 +156,9 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
             self.assertIn("sandbox-authorizations/dashboard/manifest.json", names)
             self.assertIn("sandbox-authorizations/dashboard/plugin_api.py", names)
             self.assertIn("sandbox-authorizations/dashboard/dist/index.js", names)
+            self.assertIn("sandbox-authorizations/request.py", names)
+            self.assertIn("sandbox-authorizations/expire.py", names)
+            self.assertIn("sandbox-authorizations/authorization-templates.json", names)
             self.assertIn("sandbox-authorizations/catalog.json", names)
             self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
             config = json.load(bundle.extractfile("sandbox-authorizations/sandbox-authorization-config.json"))
@@ -87,6 +170,12 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
         bundle = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/dist/index.js"
         checked = subprocess.run([node, "--check", str(bundle)], text=True, capture_output=True, check=False)
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_dashboard_bundle_is_review_and_approve_only(self):
+        bundle = (ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/dist/index.js").read_text()
+        self.assertNotIn("Request authorization", bundle)
+        self.assertNotIn("Sync review-required output", bundle)
+        self.assertIn("Review and approve", bundle)
 
     @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._paths")

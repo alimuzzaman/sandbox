@@ -12,19 +12,13 @@
    ./sb hermes authorization list --remote scaleway-sandbox --json
    ```
 
-   To capture current terminal `REVIEW_REQUIRED` results as review-only drafts:
+3. An eligible cron creates a pending request from its fixed shipped template
+when it needs that authorization. The dashboard cannot create requests or scan
+cron output on this Hermes release.
 
-   ```sh
-   ./sb hermes authorization sync --remote scaleway-sandbox --json
-   ```
-
-3. Create a request only after you have the exact scope and deployed HTTPS origin:
-
-   ```sh
-   ./sb hermes authorization request --remote scaleway-sandbox --job lenzora-todo-task --scope preview-overlay --replay-origin https://example.test --reason 'Approved bounded preview-overlay replay work' --json
-   ```
-
-4. Review the returned ID, then explicitly approve it:
+4. Review the returned ID, then explicitly approve it. The matching job can
+resume only that reviewed scope until `expires_at`; the local five-minute
+`authorization-expiry` cron restores the catalog prompt at expiry.
 
    ```sh
    ./sb hermes authorization show REQUEST_ID --remote scaleway-sandbox --json
@@ -35,6 +29,9 @@
 
 ## Evidence (2026-07-15)
 
-- `python3 -m unittest tests.test_hermes tests.test_cli tests.test_mcp` — 158 tests passed.
-- `./sb hermes authorization list --remote scaleway-sandbox --json` — returned `ok: true`, `status: ok`, and an empty request collection without scheduler mutation.
-- `./sb hermes authorization sync --remote scaleway-sandbox --json` — created one `review_required` draft for `lenzora-todo-task`; no approval or cron trigger occurred.
+- `./.cli-venv/bin/python -m unittest tests.test_hermes_dashboard_authorizations tests.test_hermes_catalog_integrity tests.test_hermes tests.test_mcp` — 161 tests passed.
+- `./sb hermes cron reconcile --remote scaleway-sandbox --confirm --json` — converged the quota checker and `lenzora-todo-task` without production access.
+- `python3 ~/.hermes/plugins/sandbox-authorizations/request.py --template lenzora-preview-overlay` — created pending request `da112b4384f5ff86`; no approval or cron prompt edit occurred.
+- `./sb hermes cron verify 040044cc36a6 --remote scaleway-sandbox --timeout 120 --confirm --json` — the `authorization-expiry` cron completed successfully after refreshing the approved dev-only request with its expiry guard.
+- `./sb hermes dashboard doctor --remote scaleway-sandbox --json` — dashboard v1.0.6 is healthy, loopback-only, and uses Hermes's upstream session authentication; the revoker superseded the prior approval so exactly one Lenzora approval remains active.
+- `git fetch --dry-run --tags --prune origin` in the installed Hermes checkout — completed after restoring the canonical upstream remote; no checkout update was applied.

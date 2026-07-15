@@ -178,34 +178,34 @@ source merely to bootstrap the workflow.
 
 ## Authorization requests
 
-When a bounded scheduled task needs an explicit human decision, create a
-structured request rather than placing approval language in a prompt. Requests
-are limited to enabled catalog-managed agent jobs and bind a lowercase scope,
-an exact HTTPS replay origin, and a non-secret rationale. List and review them
-before approving:
+When a configured scheduled task needs an explicit human decision, it creates a
+structured pending request from its shipped authorization template. The cron
+cannot select a different scope or origin, and it cannot approve the request.
+The dashboard is review-and-approve only; it has no manual request form or
+output-sync control. List and review requests before approving:
 
 ```bash
 ./sb hermes authorization list --remote scaleway-sandbox --json
-./sb hermes authorization sync --remote scaleway-sandbox --json
 ./sb hermes authorization show REQUEST_ID --remote scaleway-sandbox --json
-./sb hermes authorization request --remote scaleway-sandbox \
-  --job lenzora-todo-task --scope preview-overlay \
-  --replay-origin https://replay.example.test \
-  --reason 'Approved bounded preview-overlay replay work' --json
 ./sb hermes authorization approve REQUEST_ID --remote scaleway-sandbox --confirm --json
 ```
 
 Approval is default-deny: it only accepts an existing pending, unexpired
 request and updates only the matching cron job's prompt with the reviewed
-context. It does not create, run, remove, or reconcile jobs. Each lifecycle
-event is retained in the bounded, secret-screened Hermes state audit; a newer
-pending request for the same job supersedes the earlier one.
+context. The injected context repeats its exact expiry and tells the worker to
+stop and report `REVIEW_REQUIRED` at or after that time. The local
+`authorization-expiry` cron runs every five minutes: it restores the committed
+base prompt and records an `expired` audit event after an approval expires. It
+also repairs a stale approved prompt after plugin deployment, without creating
+or approving a request. Approval therefore lets the matching worker resume
+only the reviewed dev scope until expiry; it does not create, run, remove, or
+otherwise reconfigure jobs. Each lifecycle event is retained in the bounded,
+secret-screened Hermes state audit; approving a newer request supersedes every
+older approval for that same job, so only one approval can remain active.
 
-`authorization sync` scans the latest saved output for each enabled
-catalog-managed agent job. A terminal `REVIEW_REQUIRED` result becomes a
-review-only draft containing its sanitized blocker and source fingerprint. The
-draft is not executable and cannot be approved until an operator creates the
-separate scoped request with the exact replay origin.
+The installed Hermes release does not retain cron output, so output scanning is
+not used for authorization. A cron without a configured template reports its
+blocker normally and never creates an authorization request.
 
 Monitor scripts return zero only after a valid inspection or legitimate no-work
 result. Missing files, malformed output, timeouts, and command failures return
@@ -372,6 +372,10 @@ planned and never uses insecure mode.
 ```
 
 `update apply`, `backup restore`, and non-dry-run cleanup require `--confirm`.
+Sandbox verifies that the installed Hermes checkout retains the canonical
+upstream `origin`; if Hermes's own updater reports a missing remote, do not run
+an ad-hoc pull or reset. Use the verified Sandbox update workflow after the
+remote has been repaired and its release plan reviewed.
 `acceptance v2` is read-only: it reports the revision-bound evidence written by
 the approved live recovery suite. It never offers an override or a way to set a
 passing gate manually. Until every required check is recorded against the

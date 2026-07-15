@@ -45,6 +45,21 @@
 - [X] T013 Run focused tests and `./sb hermes authorization list --remote scaleway-sandbox --json`; record sanitized evidence in `specs/027-hermes-authorizations/quickstart.md`.
 - [X] T014 Add `authorization sync` to convert terminal `REVIEW_REQUIRED` outputs into review-only drafts and verify it against the active Lenzora job.
 
+## Phase 6: Convergence
+
+- [X] T015 Replace unavailable Hermes output synchronization with a catalog-templated local companion that an eligible cron can use to create only a pending authorization request (FR-002, FR-003, FR-005; partial).
+- [X] T016 Make the dashboard review-and-approve only: remove manual request and output-sync controls, make lifecycle state and expiry clear, and require the dialog to restate the exact pending scope, origin, and job (US1/AC1, US2/AC1; partial).
+- [X] T017 Configure the Lenzora catalog job to invoke the bounded companion only for its configured authorization template; deploy, reconcile, and verify that it creates a pending request without approval or production access (FR-004, FR-006, FR-007; missing).
+- [X] T018 Verify the repaired Hermes upstream remote can fetch the signed update history without updating the installed checkout, and record the operator workflow (plan: live proof; missing).
+
+## Phase 7: Convergence
+
+- [X] T019 Enforce approved authorization expiry by delivering an expiry-bearing prompt and running a bounded revoker that restores the catalog prompt (FR-004, FR-006, FR-007; partial).
+
+## Phase 8: Convergence
+
+- [X] T020 Ensure approval replacement leaves at most one active approved request per catalog job (FR-005, FR-007; partial).
+
 ## Dependencies and Execution Order
 
 - T001 before T002–T011.

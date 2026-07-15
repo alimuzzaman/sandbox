@@ -137,16 +137,23 @@ class TestValidation(unittest.TestCase):
                    "replay_origin": "https://replay.example.test", "rationale": "bounded review",
                    "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
                    "expires_at": "2099-07-15T00:00:00+00:00"}
+        prior = {**request, "id": "c" * 16, "fingerprint": "d" * 64, "status": "approved",
+                 "approved_at": "2026-07-14T00:00:00+00:00"}
         state["authorizations"]["requests"][request["id"]] = request
+        state["authorizations"]["requests"][prior["id"]] = prior
         read_state.return_value = state
         snapshot.return_value = {"jobs": [{"id": "deadbeef1234", "name": "lenzora-todo-task", "enabled": True}]}
         with patch.object(hermes, "load_catalog", return_value=_catalog_with_worker_enabled()):
             out = hermes.authorization_approve("test", request["id"], True)
         self.assertEqual(out["status"], "approved")
         self.assertEqual(request["status"], "approved")
+        self.assertEqual(prior["status"], "superseded")
+        self.assertIn("superseded", [event["event"] for event in state["authorizations"]["audit"]])
         self.assertEqual(set_prompt.call_count, 1)
         self.assertIn("preview-overlay", set_prompt.call_args.args[2])
         self.assertIn("https://replay.example.test", set_prompt.call_args.args[2])
+        self.assertIn("Expires at 2099-07-15T00:00:00+00:00", set_prompt.call_args.args[2])
+        self.assertIn("at or after expiry", set_prompt.call_args.args[2])
         write_state.assert_called_once()
 
     def test_authorization_approval_requires_confirmation(self):
@@ -157,11 +164,11 @@ class TestValidation(unittest.TestCase):
     def test_committed_cron_catalog_is_strict_and_fingerprinted(self):
         catalog = load_catalog()
         self.assertEqual([job.name for job in catalog["jobs"]], [
-            "codex-quota-requeue", "lenzora-kanban-dispatch", "sandbox-approved-spec-task",
-            "lenzora-todo-task",
+            "codex-quota-requeue", "authorization-expiry", "lenzora-kanban-dispatch",
+            "sandbox-approved-spec-task", "lenzora-todo-task",
         ])
         self.assertEqual([job.name for job in catalog["jobs"] if job.enabled], [
-            "codex-quota-requeue", "lenzora-todo-task",
+            "codex-quota-requeue", "authorization-expiry", "lenzora-todo-task",
         ])
         self.assertEqual(len(catalog_fingerprint(catalog)), 64)
         worker = catalog["jobs"][-1]
@@ -1086,6 +1093,7 @@ class TestProfileRendering(unittest.TestCase):
             hermes.validate_dashboard_fqdn("https://hermes.example.com")
         unit = hermes._dashboard_unit(9120)
         self.assertIn("--host 127.0.0.1 --port 9120 --no-open --tui", unit)
+        self.assertIn("TimeoutStartSec=180", unit)
         self.assertNotIn("--insecure", unit)
         self.assertIn("NoNewPrivileges=true", unit)
 
@@ -1305,6 +1313,8 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertIn("--branch v2026.7.7.2", command)
         self.assertIn("--commit " + "a" * 40, command)
         self.assertIn("--non-interactive", command)
+        self.assertIn('remote get-url origin', command)
+        self.assertIn('remote add origin https://github.com/NousResearch/hermes-agent.git', command)
         self.assertIn("--skip-setup", command)
         self.assertIn("verify-tag", command)
         self.assertIn("allowed_signers", command)

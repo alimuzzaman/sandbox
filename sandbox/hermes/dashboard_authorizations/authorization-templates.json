@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "id": "lenzora-preview-overlay",
+      "job_name": "lenzora-todo-task",
+      "scope": "preview-overlay",
+      "replay_origin": "https://lenzora.dev",
+      "rationale": "Dev-only preview-overlay work requires an explicit human authorization.",
+      "expires_in_minutes": 1440
+    }
+  ]
+}

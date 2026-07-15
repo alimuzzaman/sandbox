@@ -76,7 +76,7 @@ DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
 DASHBOARD_AUTHORIZATION_PLUGIN = "sandbox-authorizations"
-DASHBOARD_AUTHORIZATION_VERSION = "1.0.1"
+DASHBOARD_AUTHORIZATION_VERSION = "1.0.6"
 PUBLIC_DASHBOARD_FQDN = "hermes.asb.bd"
 PUBLIC_PROXY_PORT = 9120
 PUBLIC_TUNNEL_UNIT = "hermes-cloudflared.service"
@@ -447,6 +447,13 @@ def _expire_authorizations(state: dict) -> None:
             _authorization_audit(state, request, "expired")
 
 
+def _supersede_approved_authorizations(state: dict, job_name: str, keep_id: str) -> None:
+    for request in state["authorizations"]["requests"].values():
+        if request.get("job_name") == job_name and request.get("status") == "approved" and request.get("id") != keep_id:
+            request["status"] = "superseded"
+            _authorization_audit(state, request, "superseded")
+
+
 def _catalog_authorization_job(name: str, paths: dict) -> dict:
     for item in load_catalog()["jobs"]:
         if item.name == name and item.enabled and item.kind == "agent":
@@ -575,6 +582,8 @@ def _authorization_prompt(job: dict, request: dict) -> str:
         "SANDBOX AUTHORIZATION: This is the sole approved exception for this run. "
         f"Request {request['id']} authorizes only scope {request['scope']} against replay origin "
         f"{request['replay_origin']}. Rationale: {request['rationale']}. "
+        f"Expires at {request['expires_at']}. Before any protected action, compare the current UTC time; "
+        "at or after expiry, do not perform that action and report REVIEW_REQUIRED. "
         "Do not broaden this authorization or perform any other protected action.\n"
     )
 
@@ -597,14 +606,19 @@ def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> d
     if len(matches) != 1 or not _CRON_JOB_RE.fullmatch(str(matches[0].get("id") or "")):
         raise HermesError("matching catalog cron job was not found", "authorization_cron_job_not_found")
     prompt = _authorization_prompt(job, request)
+    prior = [item for item in state["authorizations"]["requests"].values()
+             if item.get("job_name") == request["job_name"] and item.get("status") == "approved"]
+    rollback_prompt = job["prompt"] if not prior else _authorization_prompt(
+        job, max(prior, key=lambda item: (str(item.get("approved_at") or ""), str(item.get("created_at") or ""), item["id"])))
     _set_cron_prompt(entry, matches[0]["id"], prompt)
+    _supersede_approved_authorizations(state, request["job_name"], request_id)
     request["status"] = "approved"
     request["approved_at"] = _authorization_now().isoformat()
     _authorization_audit(state, request, "approved")
     try:
         _remote_state_write(entry, paths, state)
     except Exception:
-        _set_cron_prompt(entry, matches[0]["id"], job["prompt"])
+        _set_cron_prompt(entry, matches[0]["id"], rollback_prompt)
         raise
     return result(True, "authorization_approve", remote_name, status="approved", job_id=matches[0]["id"],
                   data={"request": _authorization_view(state, request, True)})
@@ -1118,6 +1132,9 @@ def install(remote_name: str, version: str = SUPPORTED_TAG, commit: str | None =
         f"--branch {shlex.quote(tag)} --commit {shlex.quote(resolved)} --skip-setup --non-interactive "
         f"--dir \"$HOME/.hermes/hermes-agent\" --hermes-home \"$HOME/.hermes\"; "
         f"test \"$(git -C \"$HOME/.hermes/hermes-agent\" rev-parse HEAD)\" = {shlex.quote(resolved)}; "
+        "if git -C \"$HOME/.hermes/hermes-agent\" remote get-url origin >/dev/null 2>&1; then "
+        f"test \"$(git -C \"$HOME/.hermes/hermes-agent\" remote get-url origin)\" = {shlex.quote(HERMES_REPOSITORY_URL)}; "
+        f"else git -C \"$HOME/.hermes/hermes-agent\" remote add origin {shlex.quote(HERMES_REPOSITORY_URL)}; fi; "
         "test -x \"$HOME/.hermes/hermes-agent/venv/bin/hermes\"; mkdir -p \"$HOME/.local/bin\"; "
         "launcher_tmp=\"$HOME/.local/bin/hermes.install.$$\"; "
         "printf '%s\\n' '#!/usr/bin/env bash' 'unset PYTHONPATH' 'unset PYTHONHOME' "
@@ -3357,6 +3374,7 @@ def _dashboard_unit(port: int) -> str:
         "[Service]\n"
         "Environment=HERMES_HOME=%h/.hermes\n"
         f"ExecStart=%h/.local/bin/hermes dashboard --host {DASHBOARD_LOOPBACK_HOST} --port {port} --no-open --tui\n"
+        "TimeoutStartSec=180\n"
         "Restart=on-failure\nRestartSec=5\n"
         "NoNewPrivileges=true\nPrivateTmp=true\n"
         "[Install]\nWantedBy=default.target\n"

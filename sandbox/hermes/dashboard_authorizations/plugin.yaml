@@ -1,4 +1,4 @@
 name: sandbox-authorizations
-version: 1.0.1
+version: 1.0.6
 description: Sandbox-scoped Hermes dashboard authorization review controls.
 kind: standalone

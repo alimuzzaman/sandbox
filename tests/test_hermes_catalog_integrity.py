@@ -78,7 +78,7 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
         observed = self._observed_catalog()
         self.assertConverged(observed)
         plan = reconciliation_plan(self.catalog, observed, paths=PATHS)
-        self.assertEqual(plan["retain"], ["codex-quota-requeue", "lenzora-todo-task"])
+        self.assertEqual(plan["retain"], ["codex-quota-requeue", "authorization-expiry", "lenzora-todo-task"])
 
     def test_delivery_drift_requires_reconciliation(self):
         catalog = self._catalog_with_worker_enabled()
@@ -104,6 +104,12 @@ class TestHermesCatalogIntegrity(unittest.TestCase):
 
         self.assertTrue(plan["changes"])
         self.assertEqual(plan["retain"], [])
+
+    def test_lenzora_worker_uses_only_the_fixed_authorization_template(self):
+        worker = next(entry for entry in self.catalog["jobs"] if entry.name == "lenzora-todo-task")
+        self.assertIn("request.py --template lenzora-preview-overlay", worker.prompt)
+        self.assertIn("cannot approve it, alter scope/origin, or access lenzora.app", worker.prompt)
+        self.assertIn("existing unexpired SANDBOX AUTHORIZATION", worker.prompt)
 
     def test_incomplete_safe_observation_is_explicitly_blocked(self):
         catalog = self._catalog_with_worker_enabled()

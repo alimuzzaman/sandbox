@@ -1180,6 +1180,11 @@ class TestProfileRendering(unittest.TestCase):
             "gdrive:hermes-backups", "20260711T000000Z-deadbeef",
         )
         self.assertIn('SANDBOX = pathlib.Path("/home/u/sandbox")', command)
+        marker = "python3 - <<'PY'"
+        start = command.index(marker) + len(marker) + 1
+        end = command.rindex("\nPY\n")
+        generated = command[start:end]
+        compile(generated, "<drive-backup>", "exec")
         self.assertIn('f"{HOME}/.hermes"', command)
         self.assertIn('f"{HOME}/.config/gh"', command)
         self.assertIn('f"{HOME}/.config/rclone"', command)

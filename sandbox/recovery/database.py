@@ -28,7 +28,8 @@ class DatabaseCapture:
     @staticmethod
     def command(engine: str, database: str, destination: str | Path, *,
                 nontransactional: bool = False, ddl_risk: bool = False) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        if not database or any(char in database for char in "\n\r\0"):
+        if (not isinstance(database, str) or not database or database.startswith("-") or
+                any(char in database for char in "\n\r\0")):
             raise RecoveryError("database name is invalid", "invalid_database")
         if nontransactional:
             raise RecoveryError(
@@ -52,6 +53,8 @@ class DatabaseCapture:
     def capture(self, engine: str, database: str, destination: str | Path, *,
                 env: Mapping[str, str] | None = None, nontransactional: bool = False,
                 ddl_risk: bool = False, timeout: float = 3600) -> dict:
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+            raise RecoveryError("database dump timeout is invalid", "invalid_database_timeout")
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         command, warnings = self.command(engine, database, target,

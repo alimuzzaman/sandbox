@@ -43,6 +43,14 @@ class TestDatabaseCapture(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryError, "empty"):
                 DatabaseCapture(DumpRunner(b"")).capture("postgresql", "app", Path(directory) / "app.dump")
 
+    def test_rejects_option_like_database_names_and_invalid_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = DatabaseCapture(DumpRunner())
+            with self.assertRaisesRegex(RecoveryError, "database name"):
+                capture.capture("mariadb", "--all", Path(directory) / "app.sql")
+            with self.assertRaisesRegex(RecoveryError, "timeout"):
+                capture.capture("mariadb", "app", Path(directory) / "app.sql", timeout=0)
+
     def test_rejects_nonempty_dump_with_invalid_engine_format(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RecoveryError, "format"):

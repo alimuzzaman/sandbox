@@ -1179,18 +1179,17 @@ class TestProfileRendering(unittest.TestCase):
             {"sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb", "state": "/home/u/sandbox/runtime/hermes.json"},
             "gdrive:hermes-backups", "20260711T000000Z-deadbeef",
         )
-        self.assertIn("$HOME/.hermes", command)
-        self.assertIn("$HOME/.config/gh", command)
-        self.assertIn("$HOME/.config/rclone", command)
-        self.assertIn("--exclude=\"$HOME/.hermes/hermes-agent\"", command)
-        self.assertIn("gpg --batch", command)
-        self.assertIn("rclone copyto", command)
-        self.assertIn("entries=", command)
+        self.assertIn('HOME = "/home/u/sandbox"', command)
+        self.assertIn('f"{HOME}/.hermes"', command)
+        self.assertIn('f"{HOME}/.config/gh"', command)
+        self.assertIn('f"{HOME}/.config/rclone"', command)
+        self.assertIn('"--batch"', command)
+        self.assertIn('"copyto"', command)
         self.assertIn("instance", command)
-        self.assertIn("docker cp", command)
+        self.assertIn('"docker", "cp"', command)
         self.assertIn("drive-volume-fallbacks", command)
-        self.assertIn("snapshotting WordPress instances", command)
-        self.assertIn("uploading encrypted archive", command)
+        self.assertIn('"snapshot"', command)
+        self.assertIn("archive_bytes", command)
         self.assertNotIn("passphrase=", command)
 
     def test_drive_restore_reinstates_github_auth_and_services(self):

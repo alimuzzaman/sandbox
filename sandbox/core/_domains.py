@@ -496,7 +496,7 @@ def site_url(inst_cfg: dict) -> str:
     that won't resolve on a clean box, so the browser hangs ("loading forever").
     localhost:<port> always works because the WP container publishes that port.
     """
-    port = inst_cfg["wordpress_port"]
+    port = inst_cfg.get("http_port", inst_cfg["wordpress_port"])
     dom = inst_cfg.get("domain")
     # herd (host) instances are served by Herd at https://<name>.test — no
     # docker port, no .tst proxy. `herd secure` runs during provisioning.

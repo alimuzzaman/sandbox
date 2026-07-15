@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable
 
 from .descriptors import discover_project_kind
+from .compose import ComposeSchemaProvider
 from .registry import SchemaRegistry
 from .wordpress import WordPressSchemaProvider
 
@@ -17,7 +18,7 @@ def resolve_project_config(
     root_finder: Callable | None = None,
 ) -> dict:
     """Select a schema before invoking any kind-specific normalization."""
-    root = root_finder(project_dir) if root_finder else Path(project_dir).expanduser().resolve()
+    root = root_finder(project_dir) if root_finder else Path(project_dir).expanduser()
     kind = discover_project_kind(root)
     registry = schemas or SchemaRegistry()
     if registry.get("wordpress") is None:
@@ -25,6 +26,8 @@ def resolve_project_config(
             "wordpress", WordPressSchemaProvider(legacy_loader),
             owner="sandbox.config.wordpress", order=10,
         )
+    if registry.get("compose") is None:
+        registry.register("compose", ComposeSchemaProvider(), owner="sandbox.config.compose", order=20)
     spec = registry.get(kind)
     if spec is None:
         raise ValueError(f"unsupported project kind: {kind}")

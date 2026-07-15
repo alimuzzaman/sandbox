@@ -2111,14 +2111,19 @@ def cron_create(remote_name: str, schedule: str, prompt: str, *, name: str | Non
                 workdir: str | None, profile: str, confirm: bool) -> dict:
     if not confirm:
         raise HermesError("cron creation requires --confirm", "confirmation_required")
-    schedule = (schedule or "").strip()
-    if not schedule or len(schedule) > 128 or "\n" in schedule:
+    if not isinstance(schedule, str):
         raise HermesError("cron schedule must be between 1 and 128 characters", "invalid_cron_schedule")
-    if not prompt or len(prompt) > 32000:
+    schedule = schedule.strip()
+    if not schedule or len(schedule) > 128 or any(char in schedule for char in "\n\r\0"):
+        raise HermesError("cron schedule must be between 1 and 128 characters", "invalid_cron_schedule")
+    if not isinstance(prompt, str) or not prompt or len(prompt) > 32000 or "\0" in prompt:
         raise HermesError("prompt must be between 1 and 32000 characters", "invalid_prompt")
-    if name is not None and (not name.strip() or len(name) > 120 or "\n" in name):
+    if name is not None and (not isinstance(name, str) or not name.strip() or len(name) > 120 or
+                             any(char in name for char in "\n\r\0")):
         raise HermesError("cron name must be between 1 and 120 characters", "invalid_cron_name")
     if workdir is not None:
+        if not isinstance(workdir, str) or any(char in workdir for char in "\r\n\0"):
+            raise HermesError("cron workdir must be an absolute normalized path", "invalid_cron_workdir")
         path = PurePosixPath(workdir)
         if not path.is_absolute() or ".." in path.parts:
             raise HermesError("cron workdir must be an absolute normalized path", "invalid_cron_workdir")

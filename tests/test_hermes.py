@@ -340,6 +340,18 @@ class TestValidation(unittest.TestCase):
         self.assertIn("cron create 'every 1h' bounded", command)
         self.assertNotIn("--schedule", command)
 
+    def test_cron_create_rejects_malformed_text_before_remote_lookup(self):
+        for kwargs, code in (
+            ({"schedule": 3600, "prompt": "safe"}, "invalid_cron_schedule"),
+            ({"schedule": "daily", "prompt": "unsafe\0prompt"}, "invalid_prompt"),
+            ({"schedule": "daily", "prompt": "safe", "workdir": 7}, "invalid_cron_workdir"),
+        ):
+            with self.subTest(code=code), self.assertRaises(hermes.HermesError) as caught:
+                hermes.cron_create("test", kwargs.pop("schedule"), kwargs.pop("prompt"),
+                                   name=None, workdir=kwargs.pop("workdir", None),
+                                   profile="terra", confirm=True, **kwargs)
+            self.assertEqual(caught.exception.code, code)
+
 
 class TestSchedulerReliability(unittest.TestCase):
     def setUp(self):

@@ -65,3 +65,21 @@ class TestRecoveryCapture(unittest.TestCase):
                     "fixture-set", {"artifact": source}, profiles=("fixture",))
             self.assertNotIn("sets/fixture-set/manifest.json", drive.objects)
             self.assertEqual(list(root.glob("set-*")), [])
+
+    def test_verified_ciphertext_is_preserved_for_retry_after_remote_failure(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(b"cipher:" + Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        class BrokenDrive(MemoryDrive):
+            def verify_file(self, key, source): raise RecoveryError("offline", "drive_verification_failed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            pending = root / "pending"
+            with self.assertRaises(RecoveryError):
+                StagingCaptureCoordinator(FileCrypto(), BrokenDrive(), staging_root=root,
+                                          pending_root=pending).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+            saved = pending / "fixture-set.archive.tar.gpg"
+            self.assertTrue(saved.is_file())
+            self.assertTrue(saved.read_bytes().startswith(b"cipher:"))
+            self.assertEqual(list(root.glob("set-*")), [])

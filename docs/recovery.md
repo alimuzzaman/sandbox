@@ -14,3 +14,7 @@ Retention planning is policy-driven: callers may retain a configured number of n
 qualifying sets and protect every set newer than a minimum age. Inventory entries with
 invalid or missing timezone-aware timestamps are protected rather than guessed. Plans remain
 side-effect-free, and deletion still requires confirmation plus a fresh candidate list.
+
+When a staging coordinator is configured with an owner-only pending directory, a verified
+encrypted artifact is retained there if remote publication or verification fails. The pending
+artifact is immutable by set ID and can be retried without recapturing the source.

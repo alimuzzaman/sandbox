@@ -166,3 +166,7 @@ timezone-aware clock, protects malformed timestamps, and remains confirmation-ga
 Restore planning also rejects ciphertext objects that are not canonically bound to their set ID.
 The focused recovery suite passes 61 tests; no capture, restore, schedule activation, or
 remote deletion was performed.
+
+The staging coordinator now optionally preserves a verified encrypted artifact in an owner-only
+pending directory when remote publication fails; incomplete runs still never publish a complete
+manifest, and staging cleanup remains guaranteed.

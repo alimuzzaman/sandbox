@@ -49,9 +49,11 @@ class StagingCaptureCoordinator:
     already validated artifact files, keeping database/filesystem/Git mechanics
     separate from publication ordering.
     """
-    def __init__(self, crypto, drive, *, staging_root: str | Path | None = None, clock=None) -> None:
+    def __init__(self, crypto, drive, *, staging_root: str | Path | None = None,
+                 pending_root: str | Path | None = None, clock=None) -> None:
         self.crypto, self.drive = crypto, drive
         self.staging_root = Path(staging_root) if staging_root else None
+        self.pending_root = Path(pending_root) if pending_root else None
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
     def _stage(self) -> Path:
@@ -68,6 +70,7 @@ class StagingCaptureCoordinator:
         if not all(Path(value).is_file() and Path(value).stat().st_size for value in artifacts.values()):
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
         stage = self._stage()
+        verified_ciphertext = None
         try:
             archive = stage / "archive.tar"
             records = []
@@ -82,6 +85,7 @@ class StagingCaptureCoordinator:
             ciphertext = stage / "archive.tar.gpg"
             self.crypto.encrypt_file(archive, ciphertext)
             plaintext_hash = self.crypto.verify_file(archive, ciphertext)
+            verified_ciphertext = ciphertext
             cipher_key = f"sets/{set_id}/archive.tar.gpg"
             self.drive.put_file(cipher_key, ciphertext)
             self.drive.verify_file(cipher_key, ciphertext)
@@ -96,5 +100,25 @@ class StagingCaptureCoordinator:
             # This write is intentionally last: the manifest is the sole complete-set marker.
             self.drive.put(f"sets/{set_id}/manifest.json", json.dumps(manifest, sort_keys=True).encode())
             return manifest
+        except BaseException:
+            if verified_ciphertext is not None and self.pending_root is not None:
+                self._preserve_pending(set_id, verified_ciphertext)
+            raise
         finally:
             shutil.rmtree(stage, ignore_errors=True)
+
+    def _preserve_pending(self, set_id: str, ciphertext: Path) -> Path:
+        self.pending_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.pending_root, 0o700)
+        target = self.pending_root / f"{set_id}.archive.tar.gpg"
+        if target.exists():
+            raise RecoveryError("pending recovery artifact already exists", "pending_artifact_exists")
+        temporary = target.with_name(target.name + ".pending")
+        try:
+            shutil.copyfile(ciphertext, temporary)
+            os.chmod(temporary, 0o600)
+            temporary.replace(target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return target

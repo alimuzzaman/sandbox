@@ -224,6 +224,9 @@ Archive member validation now rejects dot segments and normalized path aliases b
 closing an ambiguity in traversal and duplicate-member checks; filesystem regression tests cover
 both cases.
 
+Filesystem restore extraction now opts into Python's `tarfile` data filter on Python 3.12+ while
+retaining the validated Python 3.11 path for the supported baseline.
+
 Recovery listing now reuses manifest verification, including ciphertext SHA-256 and canonical
 set-object binding, instead of treating matching object size as sufficient evidence of completeness.
 The verifier also rejects non-object JSON manifests with the stable invalid-manifest error path.

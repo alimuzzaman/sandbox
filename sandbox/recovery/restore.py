@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tarfile
 import tempfile
 from typing import Mapping
@@ -162,7 +163,10 @@ class FilesystemRestoreAdapter:
         extracted = self._workspace / "extracted"
         extracted.mkdir()
         with tarfile.open(plaintext, "r") as archive:
-            archive.extractall(extracted)
+            if sys.version_info >= (3, 12):
+                archive.extractall(extracted, filter="data")
+            else:
+                archive.extractall(extracted)
         self._stage = extracted
 
     def swap(self) -> None:

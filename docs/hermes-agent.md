@@ -496,7 +496,14 @@ secret reference, not a password argument:
 # Hermes dashboard authorization plugin
 
 Install the Sandbox-owned authorization tab on a compatible Hermes dashboard
-without modifying Hermes itself:
+without modifying Hermes itself. The installer registers the minimal
+dashboard-only plugin in Hermes's `plugins.enabled` list; it grants no tool
+overrides or agent tools:
+
+On a loopback-only Hermes dashboard, Hermes validates its injected dashboard
+session token before the plugin route runs. Because that mode has no named
+principal, dashboard audit entries use the explicit actor `loopback-session`.
+OAuth and Basic Auth dashboards retain their verified user identifier.
 
 ```sh
 ./sb hermes dashboard-ui install --remote NAME --confirm
@@ -513,9 +520,10 @@ catalog. A standalone SSH remote must supply a separate, non-secret catalog:
   --authorization-catalog /absolute/path/to/catalog.json --confirm
 ```
 
-The tab only authorizes enabled catalog agent jobs. It requires the upstream
-Hermes dashboard to supply an authenticated principal for every mutation and
-records that principal in the local authorization audit trail.
+The tab only authorizes enabled catalog agent jobs. Every mutation stays behind
+Hermes's existing dashboard session middleware; it records either Hermes's
+verified principal or the explicit `loopback-session` actor in the local audit
+trail. It adds no login, password, cookie, or second authorization service.
 
 On dashboards whose plugin rescan endpoint is session-gated, installation is
 reported as `pending_activation`; restart the existing Hermes dashboard service

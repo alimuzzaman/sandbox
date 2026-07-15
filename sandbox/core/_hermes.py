@@ -76,7 +76,7 @@ DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"
 DASHBOARD_LOOPBACK_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
 DASHBOARD_AUTHORIZATION_PLUGIN = "sandbox-authorizations"
-DASHBOARD_AUTHORIZATION_VERSION = "1.0.0"
+DASHBOARD_AUTHORIZATION_VERSION = "1.0.1"
 PUBLIC_DASHBOARD_FQDN = "hermes.asb.bd"
 PUBLIC_PROXY_PORT = 9120
 PUBLIC_TUNNEL_UNIT = "hermes-cloudflared.service"
@@ -3638,7 +3638,7 @@ def _dashboard_authorization_archive(catalog: dict, state_path: str) -> bytes:
     with io.BytesIO() as data:
         with tarfile.open(fileobj=data, mode="w:gz") as archive:
             for path in source.rglob("*"):
-                if path.is_file():
+                if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
                     archive.add(path, arcname=f"{DASHBOARD_AUTHORIZATION_PLUGIN}/{path.relative_to(source)}")
             for name, payload in (("catalog.json", catalog), ("sandbox-authorization-config.json", config)):
                 encoded = json.dumps(payload, sort_keys=True, indent=2).encode() + b"\n"
@@ -3678,12 +3678,20 @@ def dashboard_ui_action(remote_name: str, action: str, *, catalog_path: str | No
                       status="installed" if observed.returncode == 0 else "not_installed",
                       data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN, "version": DASHBOARD_AUTHORIZATION_VERSION})
     if action == "uninstall":
-        command = (
-            "set -eu; "
-            f"test \"{DASHBOARD_AUTHORIZATION_PLUGIN}\" = sandbox-authorizations; "
-            f"rm -rf {plugin_root}; "
-            f"curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null || true"
-        )
+        command = f'''set -eu
+hermes_bin="${{HERMES_BIN:-}}"
+if test -z "$hermes_bin"; then hermes_bin="$(command -v hermes || true)"; fi
+if test -z "$hermes_bin" && test -x "$HOME/.hermes/hermes-agent/venv/bin/hermes"; then
+  hermes_bin="$HOME/.hermes/hermes-agent/venv/bin/hermes"
+fi
+test -n "$hermes_bin"
+target={plugin_root}
+config={config_root}
+if test -d "$target"; then
+  "$hermes_bin" plugins disable {DASHBOARD_AUTHORIZATION_PLUGIN} >/dev/null
+fi
+rm -rf "$target" "$config"
+curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null || true'''
         _checked(entry, command, timeout=60, what="could not uninstall dashboard authorization plugin")
         return result(True, "dashboard_ui_uninstall", remote_name, status="uninstalled",
                       data={"plugin": DASHBOARD_AUTHORIZATION_PLUGIN})
@@ -3692,8 +3700,13 @@ def dashboard_ui_action(remote_name: str, action: str, *, catalog_path: str | No
     catalog = _dashboard_authorization_catalog(catalog_path)
     archive = _dashboard_authorization_archive(catalog, paths["state"])
     command = f'''set -eu
-command -v hermes >/dev/null
-hermes dashboard --status >/dev/null
+hermes_bin="${{HERMES_BIN:-}}"
+if test -z "$hermes_bin"; then hermes_bin="$(command -v hermes || true)"; fi
+if test -z "$hermes_bin" && test -x "$HOME/.hermes/hermes-agent/venv/bin/hermes"; then
+  hermes_bin="$HOME/.hermes/hermes-agent/venv/bin/hermes"
+fi
+test -n "$hermes_bin"
+"$hermes_bin" dashboard --status >/dev/null
 root="$HOME/.hermes/plugins"
 config="$HOME/.hermes/sandbox-authorizations"
 target="$root/{DASHBOARD_AUTHORIZATION_PLUGIN}"
@@ -3711,6 +3724,7 @@ if test -e "$target"; then mv "$target" "$backup"; fi
 mv "$stage/{DASHBOARD_AUTHORIZATION_PLUGIN}" "$target"
 mv "$target/catalog.json" "$config/catalog.json"
 chmod 600 "$config/catalog.json" "$target/sandbox-authorization-config.json"
+"$hermes_bin" plugins enable {DASHBOARD_AUTHORIZATION_PLUGIN} --no-allow-tool-override >/dev/null
 activation=restart_required
 if curl -fsS http://127.0.0.1:{selected_port}/api/dashboard/plugins/rescan >/dev/null; then
   activation=rescanned

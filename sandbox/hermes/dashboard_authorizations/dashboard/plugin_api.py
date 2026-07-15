@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,19 +26,38 @@ except (OSError, ValueError):
     _CONFIG = {}
 STATE = Path(os.path.expandvars(str(_CONFIG.get("state_path", ROOT / "state.json")))).expanduser()
 CATALOG = Path(os.path.expandvars(str(_CONFIG.get("catalog_path", ROOT / "catalog.json")))).expanduser()
-HERMES = os.environ.get("HERMES_BIN", str(Path.home() / ".local" / "bin" / "hermes"))
+CRON_JOBS = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "cron" / "jobs.json"
 _ID = re.compile(r"^[0-9a-f]{16}$")
 _REVIEW_REQUIRED = re.compile(r"^REVIEW_REQUIRED\s*(?:[—:-]\s*)?(.+)$", re.MULTILINE)
 
 
+def _hermes_bin() -> str:
+    candidates = (
+        os.environ.get("HERMES_BIN"),
+        _CONFIG.get("hermes_bin"),
+        shutil.which("hermes"),
+        str(Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "hermes"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return "hermes"
+
+
+HERMES = _hermes_bin()
+
+
 def _actor(request: Request) -> str:
-    if not getattr(request.app.state, "auth_required", False):
-        raise HTTPException(403, "dashboard authentication is required")
-    session = getattr(request.state, "session", None)
-    value = getattr(session, "user_id", None)
-    if not isinstance(value, str) or not value.strip():
-        raise HTTPException(403, "authenticated dashboard principal required")
-    return value.strip()[:128]
+    if getattr(request.app.state, "auth_required", False):
+        session = getattr(request.state, "session", None)
+        value = getattr(session, "user_id", None)
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(403, "authenticated dashboard principal required")
+        return value.strip()[:128]
+    # Hermes's loopback auth middleware validates the injected session token
+    # before any /api/plugins route reaches this handler. That mode has no
+    # user principal, so preserve the distinct, intentionally generic actor.
+    return "loopback-session"
 
 
 def _catalog() -> dict[str, dict]:
@@ -59,19 +79,20 @@ def _failure(exc: Exception) -> HTTPException:
     return HTTPException(400, str(exc) if isinstance(exc, AuthorizationError) else "authorization operation failed")
 
 
-def _cron_json(*args: str) -> dict:
-    completed = subprocess.run([HERMES, "cron", *args, "--json"], text=True, capture_output=True, check=False, timeout=30)
-    if completed.returncode:
-        raise HTTPException(502, "Hermes cron command failed")
+def _cron_jobs() -> list[dict]:
     try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(502, "Hermes cron returned invalid data") from exc
+        raw = json.loads(CRON_JOBS.read_text())
+        jobs = raw.get("jobs") if isinstance(raw, dict) else raw
+    except (OSError, ValueError) as exc:
+        raise HTTPException(502, "Hermes cron state is unavailable") from exc
+    if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+        raise HTTPException(502, "Hermes cron state is invalid")
+    return jobs
 
 
 @router.get("/health")
 async def health():
-    return {"plugin": "sandbox-authorizations", "version": "1.0.0", "catalog_configured": CATALOG.exists()}
+    return {"plugin": "sandbox-authorizations", "version": "1.0.1", "catalog_configured": CATALOG.exists()}
 
 
 @router.get("/requests")
@@ -114,11 +135,13 @@ async def sync(request: Request):
     actor = _actor(request)
     state, catalog, created = _state(), _catalog(), []
     from authorization_core import audit, now
-    for job in _cron_json("list").get("jobs", []):
+    jobs = _cron_jobs()
+    if not any(isinstance(job.get("last_output"), str) for job in jobs):
+        raise HTTPException(409, "this Hermes version does not persist cron output for review synchronization")
+    for job in jobs:
         if job.get("name") not in catalog or not job.get("enabled") or not isinstance(job.get("id"), str):
             continue
-        output = _cron_json("output", job["id"])
-        text = str(output.get("output") or output.get("data", {}).get("output") or "")
+        text = str(job.get("last_output") or "")
         match = _REVIEW_REQUIRED.search(text)
         if not match:
             continue
@@ -156,7 +179,7 @@ async def approve(request_id: str, request: Request):
         job = _catalog().get(item["job_name"])
         if not job:
             raise AuthorizationError("authorization job is not cataloged")
-        jobs = _cron_json("list").get("jobs", [])
+        jobs = _cron_jobs()
         matches = [job_row for job_row in jobs if job_row.get("name") == item["job_name"] and job_row.get("enabled")]
         if len(matches) != 1 or not isinstance(matches[0].get("id"), str):
             raise AuthorizationError("matching catalog cron job was not found")

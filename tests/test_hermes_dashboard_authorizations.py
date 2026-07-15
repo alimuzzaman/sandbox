@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -69,12 +71,22 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
         archive = hermes._dashboard_authorization_archive(catalog, "/home/test/runtime/hermes.json")
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
             names = set(bundle.getnames())
+            self.assertIn("sandbox-authorizations/plugin.yaml", names)
+            self.assertIn("sandbox-authorizations/__init__.py", names)
             self.assertIn("sandbox-authorizations/dashboard/manifest.json", names)
             self.assertIn("sandbox-authorizations/dashboard/plugin_api.py", names)
             self.assertIn("sandbox-authorizations/dashboard/dist/index.js", names)
             self.assertIn("sandbox-authorizations/catalog.json", names)
+            self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
             config = json.load(bundle.extractfile("sandbox-authorizations/sandbox-authorization-config.json"))
             self.assertEqual(config["state_path"], "/home/test/runtime/hermes.json")
+
+    def test_dashboard_bundle_has_valid_javascript_syntax(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node.js is required to validate the dashboard bundle")
+        bundle = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/dist/index.js"
+        checked = subprocess.run([node, "--check", str(bundle)], text=True, capture_output=True, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
     @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._paths")
@@ -95,6 +107,17 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
             hermes.dashboard_ui_action("test", "uninstall")
         self.assertEqual(uninstall.exception.code, "confirmation_required")
 
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_uninstall_disables_the_plugin_before_removing_owned_files(self, get_remote, checked):
+        get_remote.return_value = {"ssh": "u@example.test", "provisioned": False}
+        result = hermes.dashboard_ui_action("standalone", "uninstall", confirm=True)
+        self.assertEqual(result["status"], "uninstalled")
+        command = checked.call_args.args[1]
+        self.assertIn('"$hermes_bin" plugins disable sandbox-authorizations', command)
+        self.assertIn('rm -rf "$target" "$config"', command)
+        self.assertLess(command.index("plugins disable"), command.index("rm -rf"))
+
     @patch("sandbox.core._hermes._ssh_stdin")
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes.remote.get_remote")
@@ -112,7 +135,10 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
             result = hermes.dashboard_ui_action("standalone", "install", catalog_path=str(catalog), confirm=True)
         self.assertEqual(result["status"], "installed")
         command = stdin.call_args.args[1]
-        self.assertIn("hermes dashboard --status", command)
+        self.assertIn('hermes_bin="${HERMES_BIN:-}"', command)
+        self.assertIn('$HOME/.hermes/hermes-agent/venv/bin/hermes', command)
+        self.assertIn('"$hermes_bin" dashboard --status', command)
+        self.assertIn('plugins enable sandbox-authorizations --no-allow-tool-override', command)
         self.assertIn("/api/dashboard/plugins/rescan", command)
         self.assertIn("activation=restart_required", command)
 
@@ -139,9 +165,12 @@ class TestDashboardAuthorizationAuth(unittest.TestCase):
                                             state=types.SimpleNamespace(session=types.SimpleNamespace(user_id="reviewer")))
             self.assertEqual(plugin._actor(request), "reviewer")
             request.app.state.auth_required = False
-            with self.assertRaises(HttpError) as blocked:
-                plugin._actor(request)
-            self.assertEqual(blocked.exception.status_code, 403)
+            self.assertEqual(plugin._actor(request), "loopback-session")
+            with tempfile.TemporaryDirectory() as directory:
+                jobs = Path(directory) / "jobs.json"
+                jobs.write_text(json.dumps({"jobs": [{"id": "cron-id", "name": "job", "enabled": True}]}))
+                plugin.CRON_JOBS = jobs
+                self.assertEqual(plugin._cron_jobs()[0]["name"], "job")
         finally:
             sys.modules.pop(module_name, None)
             if old_fastapi is None:

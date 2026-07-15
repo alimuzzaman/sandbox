@@ -3,7 +3,7 @@
   "label": "Authorizations",
   "description": "Sandbox-scoped Hermes authorization review and approval controls",
   "icon": "Shield",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "tab": {"path": "/sandbox-authorizations", "position": "after:cron"},
   "entry": "dist/index.js",
   "api": "plugin_api.py"

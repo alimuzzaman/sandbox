@@ -67,6 +67,26 @@ class TestRuntimeService(unittest.TestCase):
         self.assertIsInstance(result, OperationError)
         self.assertEqual(result.code, "invalid_adapter_result")
 
+    def test_mismatched_adapter_result_identity_is_rejected(self):
+        from sandbox.application.runtime_service import RuntimeService
+        from sandbox.runtimes.base import AdapterRegistry, OperationError, OperationRequest, OperationResult
+
+        class MismatchedAdapter:
+            capabilities = frozenset({"status"})
+
+            def invoke(self, request):
+                return OperationResult(True, "start", request.project_root, "other")
+
+        adapters = AdapterRegistry()
+        adapters.register("test", MismatchedAdapter(), kinds=("test",), owner="tests")
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label=None: {"kind": "test"},
+            adapters=adapters,
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertIsInstance(result, OperationError)
+        self.assertEqual(result.code, "invalid_adapter_result")
+
     def test_unknown_kind_returns_structured_error(self):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes.base import AdapterRegistry, OperationError, OperationRequest

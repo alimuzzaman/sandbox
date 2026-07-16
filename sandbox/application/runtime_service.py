@@ -74,10 +74,16 @@ class RuntimeService:
             return error
         spec = self._adapters.for_kind(kind)
         result = spec.adapter.invoke(request)
-        if not isinstance(result, OperationResult):
+        expected_adapter_label = kind
+        valid_result = isinstance(result, OperationResult)
+        mismatch = False
+        if valid_result:
+            mismatch = (result.operation != request.operation or
+                        result.project_kind != expected_adapter_label)
+        if not valid_result or mismatch:
             return OperationError(
                 code="invalid_adapter_result",
-                message="runtime adapter returned an invalid operation result",
+                message="runtime adapter returned an invalid or mismatched operation result",
                 project_kind=kind,
                 requested_capability=request.operation,
             )

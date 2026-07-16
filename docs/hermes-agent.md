@@ -77,6 +77,8 @@ database container or failed volume export aborts the backup rather than creatin
 a partial full-scope recovery point.
 Incremental capture selects the lexically latest valid timestamped recovery ID and
 rejects malformed or cross-bound manifest metadata before reusing a state chain.
+Restore also requires every linked manifest to carry the same chain ID before
+decrypting or replacing any state.
 
 ## Trust boundary
 

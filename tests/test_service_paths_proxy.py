@@ -40,6 +40,24 @@ class TestPathsAndProxy(unittest.TestCase):
         manager.remove("fixture.test")
         self.assertEqual(calls, [("apply", "fixture.test", 8080), ("remove", "fixture.test")])
 
+    def test_proxy_rejects_malformed_hosts_ports_and_plans(self):
+        manager = CallbackProxyManager(apply_route=lambda *_: None, remove_route=lambda *_: None)
+        for hostname, port in (
+            ("", 8080), ("bad host", 8080), ("bad/host", 8080),
+            ("-bad.test", 8080), ("fixture.test", True), ("fixture.test", 0),
+        ):
+            with self.subTest(hostname=hostname, port=port), self.assertRaises(ValueError):
+                manager.plan(hostname, port)
+        for plan in (
+            {"hostname": "fixture.test", "port": 8080, "extra": True},
+            {"hostname": "bad host", "port": 8080},
+            {"hostname": "fixture.test", "port": True},
+        ):
+            with self.subTest(plan=plan), self.assertRaises(ValueError):
+                manager.apply(plan)
+        with self.assertRaises(ValueError):
+            manager.remove("bad\nhost")
+
     def test_rollback_failure_does_not_mask_apply_failure(self):
         def fail_apply(hostname, port):
             raise RuntimeError("apply failed")

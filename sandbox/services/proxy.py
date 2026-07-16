@@ -1,4 +1,26 @@
-from typing import Any, Callable, Mapping, Protocol
+import re
+from collections.abc import Mapping
+from typing import Any, Callable, Protocol
+
+_HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _valid_hostname(hostname: object) -> bool:
+    if not isinstance(hostname, str) or not 1 <= len(hostname) <= 253:
+        return False
+    if hostname.endswith("."):
+        hostname = hostname[:-1]
+    return bool(hostname) and all(
+        len(label) <= 63 and _HOST_LABEL.fullmatch(label)
+        for label in hostname.split(".")
+    )
+
+
+def _validate_route(hostname: object, port: object) -> tuple[str, int]:
+    if (not _valid_hostname(hostname) or isinstance(port, bool) or
+            not isinstance(port, int) or not 1 <= port <= 65535):
+        raise ValueError("valid hostname and port are required")
+    return hostname, port
 
 class ProxyManager(Protocol):
     def plan(self, hostname: str, port: int) -> Mapping[str, Any]: ...
@@ -18,19 +40,20 @@ class CallbackProxyManager:
         self._validate_plan = validate_plan
 
     def plan(self, hostname: str, port: int) -> Mapping[str, Any]:
-        if not hostname or port < 1 or port > 65535:
-            raise ValueError("valid hostname and port are required")
+        hostname, port = _validate_route(hostname, port)
         plan = {"hostname": hostname, "port": port}
         if self._validate_plan is not None:
             self._validate_plan(plan)
         return plan
 
     def apply(self, plan: Mapping[str, Any]) -> None:
+        if not isinstance(plan, Mapping) or set(plan) != {"hostname", "port"}:
+            raise ValueError("proxy plan is invalid")
+        hostname, port = _validate_route(plan["hostname"], plan["port"])
         if self._validate_plan is not None:
             self._validate_plan(plan)
-        hostname = str(plan["hostname"])
         try:
-            self._apply_route(hostname, int(plan["port"]))
+            self._apply_route(hostname, port)
         except Exception:
             try:
                 self._remove_route(hostname)
@@ -41,4 +64,5 @@ class CallbackProxyManager:
             raise
 
     def remove(self, hostname: str) -> None:
+        _validate_route(hostname, 1)
         self._remove_route(hostname)

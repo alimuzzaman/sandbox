@@ -26,7 +26,7 @@ class TestGitCapture(unittest.TestCase):
     def test_records_remote_revision_and_excludes_sensitive_dirty_state(self):
         info = GitCapture(GitRunner()).provenance(".")
         self.assertEqual(info["revision"], "deadbeef")
-        self.assertEqual(info["remote"], "git@example.test:site.git")
+        self.assertEqual(info["remote"], "example.test:site.git")
         self.assertEqual(info["dirty"], (" M README.md",))
         self.assertEqual(info["ignored_sensitive"], ("?? .env",))
 
@@ -41,6 +41,17 @@ class TestGitCapture(unittest.TestCase):
 
         info = GitCapture(CredentialRunner()).provenance(".")
         self.assertEqual(info["remote"], "https://example.test/site.git")
+
+    def test_provenance_redacts_scp_style_remote_userinfo(self):
+        class ScpCredentialRunner(GitRunner):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if tuple(argv)[1:4] == ("remote", "get-url", "origin"):
+                    return ProcessResult(tuple(argv), 0, "token:secret@example.test:site.git\n", "")
+                return result
+
+        self.assertEqual(GitCapture(ScpCredentialRunner()).provenance(".")["remote"],
+                         "example.test:site.git")
 
     def test_bundle_is_verified_after_creation(self):
         runner = GitRunner()

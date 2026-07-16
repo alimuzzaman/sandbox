@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 794 tests in 42.743s — OK (skipped=1)
+Ran 795 tests in 41.409s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -338,6 +338,9 @@ The filesystem module now includes an injected GNU-tar adapter that requests ACL
 numeric-owner preservation plus `--one-file-system`, validates the resulting archive, and
 atomically publishes it with owner-only permissions. The portable Python adapter remains explicit
 about its ACL/xattr limitation.
+
+Git provenance redaction now covers scp-style userinfo in addition to URL credentials, query
+strings, and fragments; the resulting metadata retains only the host/repository identity.
 
 RecoveryService now exposes an explicit in-process `restore_apply` boundary: it accepts only a
 typed plan and caller-owned adapters, re-verifies the remote manifest before confirmation-gated

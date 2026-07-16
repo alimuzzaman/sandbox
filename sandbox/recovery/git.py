@@ -18,6 +18,7 @@ class GitRunner(Protocol):
 
 _SENSITIVE_NAMES = (".env", "id_rsa", "id_ed25519", ".pem", ".key", "credentials")
 _URL_USERINFO = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+_SCP_USERINFO = re.compile(r"^[^/@\s]+@(?P<host>[^:\s]+:)")
 
 
 def _redact_remote_url(value: str) -> str:
@@ -25,6 +26,8 @@ def _redact_remote_url(value: str) -> str:
     value = _URL_USERINFO.sub(r"\g<scheme>", value)
     if "://" in value:
         value = value.split("?", 1)[0].split("#", 1)[0]
+    else:
+        value = _SCP_USERINFO.sub(r"\g<host>", value)
     return value
 
 

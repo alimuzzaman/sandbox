@@ -38,8 +38,9 @@ manifest provenance is not printed outside JSON mode.
 Result envelopes also redact credential-bearing remote URLs and bearer values at the top-level
 boundary, not only inside operation data.
 
-Git provenance strips URL userinfo, query strings, and fragments before it can enter a recovery
-manifest, so embedded credentials and token-bearing remote URLs are not retained as metadata.
+Git provenance strips URL and scp-style userinfo, query strings, and fragments before it can enter
+a recovery manifest, so embedded credentials and token-bearing remote URLs are not retained as
+metadata.
 Git bundles and working-tree patches are written to owner-only temporary files and atomically
 published only after bundle verification; failed generation cannot leave a partial final artifact.
 

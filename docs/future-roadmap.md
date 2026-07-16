@@ -1,6 +1,6 @@
 # Sandbox Future Roadmap
 
-Reviewed: 2026-07-09
+Reviewed: 2026-07-16
 
 This roadmap is based on the current worktree, specs, and docs. It is not a wish list:
 items are included because an existing spec/doc/test surface names the gap, or because a
@@ -17,7 +17,9 @@ Green local evidence from the latest review pass:
 
 - `.cli-venv/bin/python -m unittest -q tests/test_plugin_check.py` passes.
 - Full suite: `/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests`
-  passed from this worktree: 250 tests, 2 skipped.
+  passed from this worktree: 828 tests, 1 skipped.
+- Capability-gated MCP tools now resolve the repository package path before importing
+  shared runtime services; the MCP smoke test covers launches from the server directory.
 
 Live external evidence still matters. Several specs explicitly say unit tests are not
 enough for "done."

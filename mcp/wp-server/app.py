@@ -143,6 +143,13 @@ def _project_instance(project_dir: str, label: str | None = None):
 
 def _require_project_capability(project_dir: str, label: str | None, capability: str):
     """Return an MCP error before tool-specific helpers run, or None."""
+    # The MCP server is normally launched from ``mcp/wp-server`` (or an
+    # installed wrapper), so the repository root is not guaranteed to be on
+    # Python's import path.  Capability-gated tools still use the shared
+    # runtime package; make that import location explicit before importing it.
+    import sys
+    if str(SANDBOX_ROOT) not in sys.path:
+        sys.path.insert(0, str(SANDBOX_ROOT))
     from sandbox.application.context import wordpress_runtime_service
     from sandbox.core._config import load_config
 

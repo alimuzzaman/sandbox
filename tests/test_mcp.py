@@ -88,6 +88,12 @@ instance = instances.ensure_instance("/tmp/hermes-worktree")
 print("HERMES_INSTANCE", json.dumps([instance, instance_calls]))
 import tools.wp as wp_tools
 import tools.data as data_tools
+import app as mcp_app
+import sys as _sys
+_mcp_root = str(mcp_app.SANDBOX_ROOT)
+_sys.path = [entry for entry in _sys.path if entry != _mcp_root]
+capability_import = mcp_app._require_project_capability("/tmp/project", None, "wordpress.cli")
+print("CAPABILITY_IMPORT", json.dumps(capability_import))
 invalid_mode = wp_tools.run_tests("/tmp/project", mode="not-a-mode")
 print("TEST_MODE_INVALID", json.dumps(invalid_mode))
 wp_tools._require_project_capability = lambda *_args: None
@@ -249,6 +255,13 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertFalse(wp_result["ok"])
         self.assertFalse(db_result["ok"])
         self.assertEqual(side_effects, [])
+        capability_import_line = next(line for line in r.stdout.splitlines()
+                                      if line.startswith("CAPABILITY_IMPORT "))
+        capability_import = __import__("json").loads(
+            capability_import_line.removeprefix("CAPABILITY_IMPORT ")
+        )
+        if capability_import:
+            self.assertNotIn("No module named 'sandbox'", capability_import.get("error", ""))
 
 
 if __name__ == "__main__":

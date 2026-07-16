@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import stat
 from typing import Protocol, Sequence
 
@@ -14,6 +15,15 @@ class GitRunner(Protocol):
 
 
 _SENSITIVE_NAMES = (".env", "id_rsa", "id_ed25519", ".pem", ".key", "credentials")
+_URL_USERINFO = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+
+
+def _redact_remote_url(value: str) -> str:
+    """Keep repository identity while removing URL credential and query material."""
+    value = _URL_USERINFO.sub(r"\g<scheme>", value)
+    if "://" in value:
+        value = value.split("?", 1)[0].split("#", 1)[0]
+    return value
 
 
 def _validate_git_token(value: str, field: str, *, allow_dash: bool = False) -> str:
@@ -44,7 +54,7 @@ class GitCapture:
         root = Path(root).resolve()
         remote = _validate_git_token(remote, "remote")
         revision = self._text(("git", "rev-parse", "HEAD"), root)
-        remote_url = self._text(("git", "remote", "get-url", remote), root)
+        remote_url = _redact_remote_url(self._text(("git", "remote", "get-url", remote), root))
         status = self._text(("git", "status", "--porcelain=v1", "--untracked-files=all"), root)
         dirty = tuple(line for line in status.splitlines() if line)
         ignored_sensitive = tuple(line for line in dirty if any(name in line.lower() for name in _SENSITIVE_NAMES))

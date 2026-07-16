@@ -29,6 +29,18 @@ class TestGitCapture(unittest.TestCase):
         self.assertEqual(info["dirty"], (" M README.md",))
         self.assertEqual(info["ignored_sensitive"], ("?? .env",))
 
+    def test_provenance_redacts_remote_url_credentials_and_query(self):
+        class CredentialRunner(GitRunner):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if tuple(argv)[1:4] == ("remote", "get-url", "origin"):
+                    return ProcessResult(tuple(argv), 0,
+                                         "https://token:secret@example.test/site.git?access_token=secret#fragment\n", "")
+                return result
+
+        info = GitCapture(CredentialRunner()).provenance(".")
+        self.assertEqual(info["remote"], "https://example.test/site.git")
+
     def test_bundle_is_verified_after_creation(self):
         runner = GitRunner()
         with tempfile.TemporaryDirectory() as directory:

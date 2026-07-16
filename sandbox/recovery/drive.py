@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -15,7 +16,7 @@ _DESTINATION = re.compile(r"^[A-Za-z0-9_.-]+:[^\n\r]*$")
 class RcloneDrive:
     """Immutable rclone object store with upload and downloaded-hash verification."""
     def __init__(self, runner, destination: str) -> None:
-        if not _DESTINATION.fullmatch(destination):
+        if not isinstance(destination, str) or not _DESTINATION.fullmatch(destination):
             raise RecoveryError("rclone destination is invalid", "invalid_destination")
         remote_path = destination.split(":", 1)[1]
         if ".." in Path(remote_path).parts:
@@ -23,6 +24,8 @@ class RcloneDrive:
         self.runner, self.destination = runner, destination.rstrip("/")
 
     def _remote(self, key: str) -> str:
+        if not isinstance(key, str):
+            raise RecoveryError("recovery object key is invalid", "invalid_object_key")
         if key == "":
             return self.destination
         if key.startswith("/") or ".." in Path(key).parts:
@@ -43,7 +46,11 @@ class RcloneDrive:
 
     def put_file(self, key: str, source: str | Path) -> None:
         source = Path(source)
-        if not source.is_file() or not source.stat().st_size:
+        try:
+            metadata = source.lstat()
+        except OSError:
+            metadata = None
+        if metadata is None or not stat.S_ISREG(metadata.st_mode) or not metadata.st_size:
             raise RecoveryError("recovery upload source is unavailable", "invalid_upload_source")
         # copyto does not delete unrelated Drive objects; --immutable refuses overwrite.
         self._ok(self.runner.run(("rclone", "copyto", "--immutable", str(source), self._remote(key)), timeout=3600), "drive_upload_failed")
@@ -63,6 +70,12 @@ class RcloneDrive:
 
     def verify_file(self, key: str, source: str | Path) -> None:
         source = Path(source)
+        try:
+            metadata = source.lstat()
+        except OSError:
+            metadata = None
+        if metadata is None or not stat.S_ISREG(metadata.st_mode) or not metadata.st_size:
+            raise RecoveryError("recovery verification source is unavailable", "invalid_verification_source")
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-verify-") as directory:
             downloaded = Path(directory) / "object"
             self._ok(self.runner.run(("rclone", "copyto", self._remote(key), str(downloaded)), timeout=3600), "drive_download_failed")

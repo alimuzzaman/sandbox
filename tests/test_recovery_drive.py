@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from sandbox.recovery.drive import MemoryDrive, RcloneDrive
 from sandbox.recovery.errors import RecoveryError
@@ -38,3 +40,13 @@ class TestDrive(unittest.TestCase):
         runner = RcloneRunner(); drive = RcloneDrive(runner, "gdrive:recovery")
         drive.list("")
         self.assertEqual(runner.calls[-1][0][2:], ("--recursive", "gdrive:recovery"))
+
+    def test_rclone_rejects_symlink_upload_sources_and_non_string_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); target = root / "target"; link = root / "link"
+            target.write_bytes(b"payload"); link.symlink_to(target)
+            drive = RcloneDrive(RcloneRunner(), "gdrive:recovery")
+            with self.assertRaisesRegex(RecoveryError, "upload source"):
+                drive.put_file("sets/a/archive.bin", link)
+            with self.assertRaises(RecoveryError):
+                drive.get(123)

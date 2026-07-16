@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sandbox.recovery.capture import CaptureCoordinator, StagingCaptureCoordinator
 from sandbox.recovery.crypto import FixtureCrypto
@@ -169,3 +170,26 @@ class TestRecoveryCapture(unittest.TestCase):
                         "fixture-set", {"artifact": source}, profiles=("fixture",))
             finally:
                 module.tarfile.open = original_open
+
+    def test_manifest_digest_uses_verified_source_snapshot(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            module = __import__("sandbox.recovery.capture", fromlist=["sha256_file"])
+            original = module.sha256_file
+            calls = 0
+
+            def snapshot_digest(path):
+                nonlocal calls
+                if Path(path) == source:
+                    calls += 1
+                    return "a" * 64 if calls <= 2 else "b" * 64
+                return original(path)
+
+            with mock.patch.object(module, "sha256_file", side_effect=snapshot_digest):
+                receipt = StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=root).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+            self.assertEqual(receipt["artifacts"][0]["sha256"], "a" * 64)

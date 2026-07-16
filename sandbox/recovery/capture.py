@@ -114,7 +114,7 @@ class StagingCaptureCoordinator:
                     after = self._file_snapshot(source)
                     if after != before:
                         raise RecoveryError("recovery artifact changed during capture", "source_changed")
-                    records.append({"name": name, "sha256": sha256_file(source),
+                    records.append({"name": name, "sha256": before[4],
                                     "size": before[2]})
             ciphertext = stage / "archive.tar.gpg"
             self.crypto.encrypt_file(archive, ciphertext)

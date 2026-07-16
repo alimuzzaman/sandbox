@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 782 tests in 42.773s — OK (skipped=1)
+Ran 783 tests in 42.991s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -317,6 +317,9 @@ the declared root device, rejecting cross-filesystem sources before tar creation
 
 MariaDB/MySQL validation now requires an executable SQL dump statement or recognized dump
 directive, so comment-only non-empty output cannot pass capture validation.
+
+Staged manifest artifact records now reuse the digest from the verified pre/post source snapshot
+instead of re-reading the source after the mutation check.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

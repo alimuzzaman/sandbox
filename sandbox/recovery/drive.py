@@ -16,7 +16,8 @@ _DESTINATION = re.compile(r"^[A-Za-z0-9_.-]+:[^\n\r]*$")
 class RcloneDrive:
     """Immutable rclone object store with upload and downloaded-hash verification."""
     def __init__(self, runner, destination: str) -> None:
-        if not isinstance(destination, str) or not _DESTINATION.fullmatch(destination):
+        if (not isinstance(destination, str) or "\0" in destination or
+                not _DESTINATION.fullmatch(destination)):
             raise RecoveryError("rclone destination is invalid", "invalid_destination")
         remote_path = destination.split(":", 1)[1]
         if ".." in Path(remote_path).parts:
@@ -24,7 +25,7 @@ class RcloneDrive:
         self.runner, self.destination = runner, destination.rstrip("/")
 
     def _remote(self, key: str) -> str:
-        if not isinstance(key, str):
+        if not isinstance(key, str) or "\0" in key:
             raise RecoveryError("recovery object key is invalid", "invalid_object_key")
         if key == "":
             return self.destination

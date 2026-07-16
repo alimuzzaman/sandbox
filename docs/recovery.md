@@ -112,6 +112,8 @@ Git repository records, safe names, counters, and warning strings—before retur
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
 The catalog loader likewise rejects control characters, traversal-shaped list entries, invalid
 dependency IDs, and unsafe metadata keys before profiles reach the planner.
+Control-plane declaration capture also requires a real root, tuple-typed unique relative paths,
+and regular non-symlink files; malformed declarations fail before artifact metadata is emitted.
 Drive object listings likewise require relative string paths and non-negative integer sizes;
 malformed remote metadata fails closed before set classification or retention planning.
 RecoveryService also converts malformed adapter responses into operation-specific result errors

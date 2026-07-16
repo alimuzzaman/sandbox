@@ -30,7 +30,7 @@ def _valid_digest(value: object) -> bool:
 def verify_manifest(drive, set_id: str) -> dict:
     try:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
-    except (ValueError, RecoveryError) as exc:
+    except (TypeError, ValueError, RecoveryError) as exc:
         raise RecoveryError("recovery manifest is unavailable or invalid", "invalid_manifest") from exc
     if not isinstance(manifest, dict):
         raise RecoveryError("recovery manifest is unavailable or invalid", "invalid_manifest")

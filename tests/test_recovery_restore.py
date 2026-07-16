@@ -39,6 +39,12 @@ class TestRecoveryRestore(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "manifest"):
             build_restore_plan(drive, "set-1")
 
+    def test_restore_rejects_non_text_manifest_payload(self):
+        drive = MemoryDrive()
+        drive.objects["sets/set-1/manifest.json"] = None
+        with self.assertRaisesRegex(RecoveryError, "manifest"):
+            build_restore_plan(drive, "set-1")
+
     def test_restore_rejects_malformed_ciphertext_metadata(self):
         drive = MemoryDrive()
         drive.put("sets/set-1/archive.bin", b"valid")

@@ -64,6 +64,8 @@ confirmation gate. If local multiplexing state cannot be prepared, Sandbox makes
 one ordinary SSH connection; it never replays a command after launch.
 The shared process runner also rejects shell-like string commands, NUL-bearing arguments or
 environment values, and invalid timeout bounds before a subprocess is launched.
+Runtime health probes accept only HTTP(S) URLs and finite non-negative timeouts; unsupported
+schemes and malformed probe inputs fail closed.
 
 Runtime uploads and dirty-file deployment use one streamed archive/session where
 possible. This avoids one SSH channel for every `mkdir` and `scp`; the control

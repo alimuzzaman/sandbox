@@ -58,6 +58,20 @@ class TestHttpProbe(unittest.TestCase):
         # result rather than leak an urllib transport exception.
         self.assertFalse(UrlHttpProbe().probe("http://127.0.0.1:1", timeout=0.01))
 
+    def test_rejects_non_http_schemes_and_invalid_inputs(self):
+        probe = UrlHttpProbe()
+        for url, timeout in (
+            ("file:///etc/passwd", 1),
+            ("ftp://example.test/health", 1),
+            ("http://example.test/health\x00", 1),
+            ("http://", 1),
+            ("http://example.test/health", -1),
+            ("http://example.test/health", float("nan")),
+            ("http://example.test/health", True),
+        ):
+            with self.subTest(url=url, timeout=timeout):
+                self.assertFalse(probe.probe(url, timeout=timeout))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1050,6 +1050,7 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
         fake_app.mcp = _Mcp()
         fake_app.SANDBOX_ROOT = ROOT
         fake_app._safe_json = json.loads
+        fake_app._run_sandbox_json = lambda *_args, **_kwargs: None
         old_app = sys.modules.get("app")
         sys.modules["app"] = fake_app
         try:
@@ -1075,10 +1076,10 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
             "url": "https://default-demo.sandbox.asb.bd",
             "error": None,
         }
-        fake = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=json.dumps(payload) + "\n", stderr=""
-        )
-        with patch.object(module.subprocess, "run", return_value=fake) as mock_run:
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": False, "returncode": 0, "stdout": json.dumps(payload),
+            "stderr": "", "payload": payload,
+        }) as mock_run:
             result = module.remote_deploy("/tmp/project", "myvps")
         self.assertTrue(result["ok"])
         cmd = mock_run.call_args[0][0]
@@ -1087,12 +1088,10 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
 
     def test_remote_deploy_forwards_domain_and_plugin_slug(self):
         module = self._load_tool_module()
-        fake = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"ok": True, "remote": "myvps"}) + "\n",
-            stderr="",
-        )
-        with patch.object(module.subprocess, "run", return_value=fake) as mock_run:
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": False, "returncode": 0, "stdout": "",
+            "stderr": "", "payload": {"ok": True, "remote": "myvps"},
+        }) as mock_run:
             module.remote_deploy(
                 "/tmp/project", "myvps",
                 domain="default-demo.sandbox.asb.bd",
@@ -1106,13 +1105,24 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
 
     def test_remote_deploy_redacts_ssh_target_in_error(self):
         module = self._load_tool_module()
-        fake = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="ssh: ubuntu@1.2.3.4 refused"
-        )
-        with patch.object(module.subprocess, "run", return_value=fake):
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": False, "returncode": 1, "stdout": "",
+            "stderr": "ssh: ubuntu@1.2.3.4 refused", "payload": None,
+        }):
             result = module.remote_deploy("/tmp/project", "myvps")
         self.assertNotIn("ubuntu@1.2.3.4", result["error"])
         self.assertIn("[redacted SSH target]", result["error"])
+
+    def test_remote_deploy_timeout_keeps_contract_shape(self):
+        module = self._load_tool_module()
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": True, "returncode": None, "stdout": "",
+            "stderr": "", "payload": None,
+        }):
+            result = module.remote_deploy("/tmp/project", "myvps")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["remote"], "myvps")
+        self.assertIn("timed out", result["error"])
 
 
 if __name__ == "__main__":

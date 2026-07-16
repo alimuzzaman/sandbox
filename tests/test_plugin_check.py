@@ -411,6 +411,7 @@ class TestRunPluginCheckMcpWrapper(unittest.TestCase):
         fake_app.mcp = _Mcp()
         fake_app.SANDBOX_ROOT = ROOT
         fake_app._safe_json = json.loads
+        fake_app._run_sandbox_json = lambda *_args, **_kwargs: None
         old_app = sys.modules.get("app")
         sys.modules["app"] = fake_app
         try:
@@ -427,8 +428,10 @@ class TestRunPluginCheckMcpWrapper(unittest.TestCase):
 
     def test_parse_failure_returns_documented_contract_shape(self):
         module = self._load_tool_module()
-        fake = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="boom")
-        with patch.object(module.subprocess, "run", return_value=fake):
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": False, "returncode": 2, "stdout": "",
+            "stderr": "boom", "payload": None,
+        }):
             result = module.run_plugin_check("/tmp/project")
         self.assertFalse(result["ok"])
         self.assertEqual(result["action"], "check")
@@ -442,9 +445,12 @@ class TestRunPluginCheckMcpWrapper(unittest.TestCase):
     def test_timeout_keeps_update_action_in_error_contract(self):
         module = self._load_tool_module()
         with patch.object(
-            module.subprocess,
-            "run",
-            side_effect=subprocess.TimeoutExpired(cmd="plugin-check", timeout=300),
+            module,
+            "_run_sandbox_json",
+            return_value={
+                "timed_out": True, "returncode": None, "stdout": "",
+                "stderr": "", "payload": None,
+            },
         ):
             result = module.run_plugin_check("/tmp/project", update=True)
         self.assertFalse(result["ok"])

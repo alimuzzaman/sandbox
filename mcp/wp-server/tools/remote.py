@@ -1,9 +1,7 @@
 from __future__ import annotations
-import json
 import re
-import subprocess
 
-from app import SANDBOX_ROOT, mcp
+from app import SANDBOX_ROOT, _run_sandbox_json, mcp
 
 
 def _capability_error(project_dir: str, capability: str):
@@ -13,13 +11,6 @@ def _capability_error(project_dir: str, capability: str):
     except ImportError:
         return None
     return _require_project_capability(project_dir, None, capability)
-
-
-def _json_or_text(text: str):
-    try:
-        return json.loads(text)
-    except (ValueError, TypeError):
-        return text
 
 
 _SSH_CONNECTION_RE = re.compile(
@@ -71,11 +62,8 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         cmd.extend(["--domain", domain])
     if plugin_slug:
         cmd.extend(["--plugin-slug", plugin_slug])
-    try:
-        res = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=1200, cwd=str(SANDBOX_ROOT),
-        )
-    except subprocess.TimeoutExpired:
+    res = _run_sandbox_json(cmd, 1200)
+    if res["timed_out"]:
         return {
             "ok": False,
             "remote": remote,
@@ -85,8 +73,7 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
             "url": None,
             "error": "remote_deploy timed out after 1200s",
         }
-    lines = (res.stdout or "").strip().splitlines()
-    result = _json_or_text(lines[-1]) if lines else None
+    result = res["payload"]
     if isinstance(result, dict) and "remote" in result:
         if isinstance(result.get("error"), str):
             result["error"] = _redact_ssh_connection(result["error"])
@@ -99,6 +86,6 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         "instance": None,
         "url": None,
         "error": _redact_ssh_connection(
-            (res.stderr or res.stdout or "deploy failed").strip()[:2000]
+            (res["stderr"] or res["stdout"] or "deploy failed").strip()[:2000]
         ),
     }

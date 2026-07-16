@@ -94,6 +94,18 @@ _mcp_root = str(mcp_app.SANDBOX_ROOT)
 _sys.path = [entry for entry in _sys.path if entry != _mcp_root]
 capability_import = mcp_app._require_project_capability("/tmp/project", None, "wordpress.cli")
 print("CAPABILITY_IMPORT", json.dumps(capability_import))
+class _WrapperResult:
+    returncode = 0
+    stdout = "diagnostic\\n{\\"ok\\":true}\\n"
+    stderr = ""
+_original_subprocess_run = mcp_app.subprocess.run
+mcp_app.subprocess.run = lambda *_args, **_kwargs: _WrapperResult()
+print("WRAPPER_RESULT", json.dumps(mcp_app._run_sandbox_json(["sb"], 3)))
+mcp_app.subprocess.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    subprocess.TimeoutExpired(cmd="sb", timeout=3)
+)
+print("WRAPPER_TIMEOUT", json.dumps(mcp_app._run_sandbox_json(["sb"], 3)))
+mcp_app.subprocess.run = _original_subprocess_run
 invalid_mode = wp_tools.run_tests("/tmp/project", mode="not-a-mode")
 print("TEST_MODE_INVALID", json.dumps(invalid_mode))
 wp_tools._require_project_capability = lambda *_args: None
@@ -262,6 +274,15 @@ class TestMcpServerSplit(unittest.TestCase):
         )
         if capability_import:
             self.assertNotIn("No module named 'sandbox'", capability_import.get("error", ""))
+        wrapper_line = next(line for line in r.stdout.splitlines()
+                            if line.startswith("WRAPPER_RESULT "))
+        wrapper = __import__("json").loads(wrapper_line.removeprefix("WRAPPER_RESULT "))
+        self.assertEqual(wrapper["payload"], {"ok": True})
+        self.assertFalse(wrapper["timed_out"])
+        timeout_line = next(line for line in r.stdout.splitlines()
+                            if line.startswith("WRAPPER_TIMEOUT "))
+        self.assertTrue(__import__("json").loads(
+            timeout_line.removeprefix("WRAPPER_TIMEOUT "))["timed_out"])
 
 
 if __name__ == "__main__":

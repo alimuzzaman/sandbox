@@ -17,7 +17,7 @@ Green local evidence from the latest review pass:
 
 - `.cli-venv/bin/python -m unittest -q tests/test_plugin_check.py` passes.
 - Full suite: `/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests`
-  passed from this worktree: 828 tests, 1 skipped.
+  passed from this worktree: 829 tests, 1 skipped.
 - Capability-gated MCP tools now resolve the repository package path before importing
   shared runtime services; the MCP smoke test covers launches from the server directory.
 
@@ -74,7 +74,9 @@ enough for "done."
 3. **MCP wrapper contract parity**
 
    Evidence: `remote_deploy` and `run_plugin_check` both needed review fixes so failure
-   responses matched their documented JSON contracts.
+   responses matched their documented JSON contracts. They now share the bounded
+   `_run_sandbox_json` subprocess boundary for last-JSON parsing and timeout results,
+   with wrapper-specific response shapes and redaction retained.
 
    Next work: add a shared helper/test pattern for thin MCP subprocess wrappers so new
    wrappers cannot drift on timeout/parse-failure shapes.

@@ -1,8 +1,6 @@
 from __future__ import annotations
-import json
-import subprocess
 
-from app import SANDBOX_ROOT, _safe_json, mcp
+from app import SANDBOX_ROOT, _run_sandbox_json, mcp
 
 
 def _capability_error(project_dir: str, capability: str):
@@ -62,21 +60,17 @@ def run_plugin_check(project_dir: str, update: bool = False) -> dict:
     cmd = [str(sb), "plugin-check", "--project-dir", project_dir, "--json"]
     if update:
         cmd.append("--update")
-    try:
-        res = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
-        )
-    except subprocess.TimeoutExpired:
+    res = _run_sandbox_json(cmd, 300)
+    if res["timed_out"]:
         return _plugin_check_error(
             "run_plugin_check timed out after 300s",
             action="update" if update else "check",
         )
-    lines = (res.stdout or "").strip().splitlines()
-    result = _safe_json(lines[-1]) if lines else None
+    result = res["payload"]
     if isinstance(result, dict) and "plugin_slug" in result:
         return result
     return _plugin_check_error(
-        (res.stderr or res.stdout or "plugin check failed").strip()[:2000],
+        (res["stderr"] or res["stdout"] or "plugin check failed").strip()[:2000],
         action="update" if update else "check",
-        code=res.returncode,
+        code=res["returncode"],
     )

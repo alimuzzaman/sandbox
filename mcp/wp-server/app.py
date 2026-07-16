@@ -10,7 +10,7 @@ import re as _re
 
 
 
-__all__ = ['COMPOSE_DIR', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_PROJECT', 'PROXY_TLD', 'SANDBOX_CLAUDE_MD', 'SANDBOX_INSTRUCTIONS', 'SANDBOX_ROOT', 'SANDBOX_SKILLS_DIR', 'SANDBOX_WORKFLOWS_DIR', 'TOOLS_VENV_PY', 'VISIT_SCRIPT', '_HERD_BIN_DIR', '_active_file', '_admin_creds', '_compose', '_compose_file', '_core', '_find_focus_instances', '_focus_file', '_herd_host_env', '_herd_php_bin', '_host_php_bin', '_host_run', '_host_wp_bin', '_instance_php_version', '_instance_server', '_is_herd', '_list_sandbox_skills', '_list_sandbox_workflows', '_load_sandbox_yml', '_log_path', '_mailpit_url', '_parse_skill_metadata', '_project_instance', '_project_name', '_proxy_container_running', '_require_project_capability', '_resolve_instance', '_safe_json', '_safe_resolve', '_sandbox_proxy_active', '_site_url', '_skill_prompt_body', '_valet_proxy_active', '_wp_root', '_wpcli', '_wpcli_shell', 'mcp']
+__all__ = ['COMPOSE_DIR', 'PROXY_CADDYFILE', 'PROXY_CERTS_DIR', 'PROXY_COMPOSE', 'PROXY_DIR', 'PROXY_PROJECT', 'PROXY_TLD', 'SANDBOX_CLAUDE_MD', 'SANDBOX_INSTRUCTIONS', 'SANDBOX_ROOT', 'SANDBOX_SKILLS_DIR', 'SANDBOX_WORKFLOWS_DIR', 'TOOLS_VENV_PY', 'VISIT_SCRIPT', '_HERD_BIN_DIR', '_active_file', '_admin_creds', '_compose', '_compose_file', '_core', '_find_focus_instances', '_focus_file', '_herd_host_env', '_herd_php_bin', '_host_php_bin', '_host_run', '_host_wp_bin', '_instance_php_version', '_instance_server', '_is_herd', '_list_sandbox_skills', '_list_sandbox_workflows', '_load_sandbox_yml', '_log_path', '_mailpit_url', '_parse_skill_metadata', '_project_instance', '_project_name', '_proxy_container_running', '_require_project_capability', '_resolve_instance', '_run_sandbox_json', '_safe_json', '_safe_resolve', '_sandbox_proxy_active', '_site_url', '_skill_prompt_body', '_valet_proxy_active', '_wp_root', '_wpcli', '_wpcli_shell', 'mcp']
 
 
 
@@ -560,6 +560,32 @@ def _safe_json(text: str):
         return json.loads(text)
     except (ValueError, TypeError):
         return text
+
+
+def _run_sandbox_json(command: list[str], timeout: int) -> dict:
+    """Run a sandbox subprocess and normalize its JSON boundary."""
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout,
+            cwd=str(SANDBOX_ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "timed_out": True, "returncode": None,
+            "stdout": "", "stderr": "", "payload": None,
+        }
+
+    payload = None
+    for line in reversed((result.stdout or "").splitlines()):
+        candidate = _safe_json(line)
+        if isinstance(candidate, (dict, list)):
+            payload = candidate
+            break
+    return {
+        "timed_out": False, "returncode": result.returncode,
+        "stdout": result.stdout or "", "stderr": result.stderr or "",
+        "payload": payload,
+    }
 
 def _mailpit_url(instance: str) -> str:
     port = _resolve_instance(instance)["mailpit_port"]

@@ -17,7 +17,7 @@ Green local evidence from the latest review pass:
 
 - `.cli-venv/bin/python -m unittest -q tests/test_plugin_check.py` passes.
 - Full suite: `/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests`
-  passed from this worktree: 832 tests, 1 skipped.
+  passed from this worktree: 833 tests, 1 skipped.
 - Capability-gated MCP tools now resolve the repository package path before importing
   shared runtime services; the MCP smoke test covers launches from the server directory.
 - `./sb doctor` now probes that same MCP import boundary, rather than checking only for
@@ -44,14 +44,15 @@ enough for "done."
    through a registered second MCP server. Capture `fs_read`, `visit`, `wp_cli`, and
    `run_tests` evidence from that HTTPS endpoint.
 
-2. **Plugin Check post-fix live re-run**
+2. **Plugin Check baseline acceptance**
 
-   Evidence: `docs/plugin-check.md` records two live-found bugs now fixed in unit tests:
-   absolute path to relative baseline keys, and `.distignore` auto-excludes. It explicitly
-   says both fixes together still need a real repo re-run.
+   Evidence: `docs/plugin-check.md` records the live 2026-07-16 run against
+   `alims-builder-authoring`: relative path identity is now correct, and the gate
+   reported 17 errors and 8 warnings without `../sandbox` leakage. The project has no
+   baseline, so this proves parser/scan behavior but not a baseline-gate pass.
 
-   Next work: re-run `run_plugin_check` or `./sb plugin-check` against the original real
-   plugin repo and confirm the noise drops to the expected baseline-sized signal.
+   Next work: an owner-approved `--update` run on a repository with reviewed findings,
+   followed by a non-updating pass, is still required to prove baseline acceptance.
 
 ## P1 - Reliability And Release Readiness
 

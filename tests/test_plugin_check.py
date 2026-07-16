@@ -77,6 +77,14 @@ class TestParseFindings(unittest.TestCase):
         findings = pc._parse_findings(output, root=None)
         self.assertEqual(findings[0]["file"], "/Users/dev/my-project/includes/Foo.php")
 
+    def test_root_keeps_plugin_check_relative_paths_relative(self):
+        output = (
+            "FILE: includes/Foo.php\n"
+            '[{"line":1,"column":1,"type":"ERROR","code":"some_rule","message":"m"}]\n'
+        )
+        findings = pc._parse_findings(output, root="/Users/dev/my-project")
+        self.assertEqual(findings[0]["file"], "includes/Foo.php")
+
     def test_root_relpath_never_raises_for_unrelated_paths(self):
         # os.path.relpath (not Path.relative_to) matches JS's path.relative --
         # it computes a relative path with ../ segments as needed rather than

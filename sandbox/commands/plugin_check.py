@@ -133,7 +133,14 @@ def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
         m = re.match(r"^FILE:\s*(.+)$", line)
         if m:
             raw = m.group(1).strip()
-            current_file = os.path.relpath(raw, str(root)) if root else raw
+            if root and os.path.isabs(raw):
+                current_file = os.path.relpath(raw, str(root))
+            else:
+                # Plugin Check versions differ: some report host-absolute
+                # paths, while current releases report project-relative paths.
+                # A relative path is already in baseline identity space; do
+                # not resolve it against the Sandbox checkout's cwd.
+                current_file = os.path.normpath(raw)
             continue
         trimmed = line.strip()
         if not trimmed.startswith("[") or current_file is None:

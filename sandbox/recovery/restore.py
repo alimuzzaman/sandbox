@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
+from pathlib import PurePosixPath
 import shutil
 import sys
 import tarfile
@@ -12,6 +14,7 @@ from typing import Mapping
 
 from .errors import RecoveryError
 from .filesystem import validate_archive
+from .integrity import sha256_file
 from .models import RestorePlan
 
 
@@ -219,9 +222,45 @@ class FilesystemRestoreAdapter:
     def verify(self) -> None:
         if not self.target.is_dir():
             raise RecoveryError("restored filesystem target is not a directory", "restore_verification_failed")
-        for member in self._members:
-            if not os.path.lexists(self.target / member):
-                raise RecoveryError("restored archive member is missing", "restore_verification_failed")
+        if self._workspace is None:
+            raise RecoveryError("restore checkpoint is unavailable", "restore_not_checkpointed")
+        archive_path = self._workspace / "archive.tar"
+        expected_paths = {Path(".")}
+        with tarfile.open(archive_path, "r") as archive:
+            for member in archive.getmembers():
+                name = Path(str(PurePosixPath(member.name)))
+                target = self.target / name
+                expected_paths.add(name)
+                expected_paths.update(name.parents)
+                if not os.path.lexists(target):
+                    raise RecoveryError("restored archive member is missing", "restore_verification_failed")
+                if member.isdir() and not stat.S_ISDIR(target.lstat().st_mode):
+                    raise RecoveryError("restored archive member type changed", "restore_verification_failed")
+                if member.issym():
+                    if not target.is_symlink() or target.readlink().as_posix() != member.linkname:
+                        raise RecoveryError("restored archive symlink changed", "restore_verification_failed")
+                elif member.isfile() or member.islnk():
+                    if (not stat.S_ISREG(target.lstat().st_mode) or
+                            sha256_file(target) != self._archive_member_digest(archive, member)):
+                        raise RecoveryError("restored archive member digest changed", "restore_verification_failed")
+        actual_paths = {Path(".")}
+        for current, directories, files in os.walk(self.target, followlinks=False):
+            current_path = Path(current)
+            actual_paths.update(current_path.relative_to(self.target) / name
+                                for name in directories + files)
+        if actual_paths != expected_paths:
+            raise RecoveryError("restored filesystem contains unexpected members", "restore_verification_failed")
+
+    @staticmethod
+    def _archive_member_digest(archive: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+        handle = archive.extractfile(member)
+        if handle is None:
+            raise RecoveryError("restored archive member has no content", "restore_verification_failed")
+        digest = hashlib.sha256()
+        with handle:
+            while chunk := handle.read(1_048_576):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def resume(self) -> None:
         if self._workspace is not None:

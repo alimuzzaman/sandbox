@@ -67,11 +67,32 @@ class TestDisposableRestoreApply(unittest.TestCase):
             target = root / "target"; target.mkdir(); (target / "old.txt").write_text("old")
             class BrokenAdapter(FilesystemRestoreAdapter):
                 def verify(self):
-                    self._members = ("missing.txt",)
+                    (self.target / "new.txt").unlink()
                     super().verify()
             adapter = BrokenAdapter(FileCrypto(), archive, target)
             plan = type("Plan", (), {"profiles": ("filesystem",)})()
             with self.assertRaises(RecoveryError):
+                apply_restore(plan, {"filesystem": adapter}, confirm=True)
+            self.assertEqual((target / "old.txt").read_text(), "old")
+
+    def test_filesystem_adapter_rejects_restored_content_tampering(self):
+        class FileCrypto:
+            def decrypt_file(self, source, target):
+                shutil.copyfile(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            (source / "new.txt").write_text("new")
+            archive = root / "archive.tar"
+            from sandbox.recovery.filesystem import archive_paths
+            archive_paths(source, (source / "new.txt",), archive)
+            target = root / "target"; target.mkdir(); (target / "old.txt").write_text("old")
+            class CorruptAdapter(FilesystemRestoreAdapter):
+                def verify(self):
+                    (self.target / "new.txt").write_text("tampered")
+                    super().verify()
+            adapter = CorruptAdapter(FileCrypto(), archive, target)
+            plan = type("Plan", (), {"profiles": ("filesystem",)})()
+            with self.assertRaisesRegex(RecoveryError, "digest"):
                 apply_restore(plan, {"filesystem": adapter}, confirm=True)
             self.assertEqual((target / "old.txt").read_text(), "old")
 

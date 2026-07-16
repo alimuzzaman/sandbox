@@ -53,6 +53,8 @@ Archive validation also rejects duplicate members and special device/FIFO nodes 
 preventing ambiguous replacement or unsafe filesystem materialization.
 Member names are canonicalized before duplicate/traversal checks, so dot-segment aliases cannot
 silently produce ambiguous restore paths.
+Restore verification then compares extracted member types, symlink targets, regular-file digests,
+and the complete materialized path set before reporting success.
 
 Schedule plans render the reviewed profile selection and remote target into the disabled
 service command, including the explicit confirmation required when an operator later activates

@@ -1,3 +1,4 @@
+import os
 import tarfile
 import tempfile
 import unittest
@@ -26,6 +27,19 @@ class TestFilesystemCapture(unittest.TestCase):
             receipt = FilesystemCapture().capture(root, (source,), Path(directory) / "set.tar")
             self.assertIn("ACL/xattr", receipt["warnings"][0])
             with mock.patch.object(tarfile.TarFile, "add", side_effect=lambda *args, **kwargs: source.write_text("after")):
+                with self.assertRaisesRegex(RecoveryError, "changed"):
+                    archive_paths(root, (source,), Path(directory) / "changed.tar")
+
+    def test_detects_same_size_same_mtime_content_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"; root.mkdir(); source = root / "file"; source.write_text("before")
+            original_stat = source.stat()
+
+            def mutate(*args, **kwargs):
+                source.write_text("after!")
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            with mock.patch.object(tarfile.TarFile, "add", side_effect=mutate):
                 with self.assertRaisesRegex(RecoveryError, "changed"):
                     archive_paths(root, (source,), Path(directory) / "changed.tar")
 

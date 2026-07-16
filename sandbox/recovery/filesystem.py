@@ -6,6 +6,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 
 from .errors import RecoveryError
+from .integrity import sha256_file
 
 
 def _contains_control_text(value: str) -> bool:
@@ -20,6 +21,26 @@ def _member_name(root: Path, path: Path) -> str:
     if not name or name == "." or name.startswith("../") or "/../" in name:
         raise RecoveryError("archive member path is unsafe", "invalid_source")
     return name
+
+
+def _capture_snapshot(path: Path) -> tuple:
+    records = []
+
+    def visit(current: Path, relative: Path) -> None:
+        metadata = current.lstat()
+        mode = stat.S_IFMT(metadata.st_mode)
+        record = [relative.as_posix(), mode, metadata.st_size, metadata.st_mtime_ns]
+        if stat.S_ISLNK(mode):
+            record.append(current.readlink().as_posix())
+        elif stat.S_ISREG(mode):
+            record.append(sha256_file(current))
+        records.append(tuple(record))
+        if stat.S_ISDIR(mode):
+            for child in sorted(current.iterdir(), key=lambda item: item.name):
+                visit(child, relative / child.name)
+
+    visit(path, Path("."))
+    return tuple(records)
 
 
 def validate_archive(path: str | Path) -> tuple[str, ...]:
@@ -69,11 +90,9 @@ def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: 
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(destination, "w") as archive:
         for source, member_name in members:
-            before_stat = source.lstat()
-            before = (before_stat.st_mtime_ns, before_stat.st_size)
+            before = _capture_snapshot(source)
             archive.add(source, arcname=member_name, recursive=True)
-            after_stat = source.lstat()
-            after = (after_stat.st_mtime_ns, after_stat.st_size)
+            after = _capture_snapshot(source)
             if before != after:
                 raise RecoveryError("filesystem source changed during archive", "source_changed")
     validate_archive(destination)

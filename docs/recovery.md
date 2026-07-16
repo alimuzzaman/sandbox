@@ -46,6 +46,8 @@ can enter the encrypted publication pipeline.
 
 Filesystem capture preserves declared in-root symlinks as links while rejecting links whose
 resolved targets escape the allowed root.
+Filesystem capture snapshots regular-file digests recursively before and after archiving,
+so same-size or same-mtime source rewrites are rejected as `source_changed`.
 
 Archive validation also rejects duplicate members and special device/FIFO nodes before restore,
 preventing ambiguous replacement or unsafe filesystem materialization.

@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 772 tests in 42.706s — OK (skipped=1)
+Ran 774 tests in 43.037s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

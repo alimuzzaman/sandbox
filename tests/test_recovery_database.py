@@ -51,6 +51,14 @@ class TestDatabaseCapture(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryError, "timeout"):
                 capture.capture("mariadb", "app", Path(directory) / "app.sql", timeout=0)
 
+    def test_rejects_symlink_dump_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); target = root / "target.sql"; target.write_bytes(b"keep")
+            link = root / "dump.sql"; link.symlink_to(target)
+            with self.assertRaisesRegex(RecoveryError, "destination"):
+                DatabaseCapture(DumpRunner()).capture("mariadb", "app", link)
+            self.assertEqual(target.read_bytes(), b"keep")
+
     def test_rejects_nonempty_dump_with_invalid_engine_format(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RecoveryError, "format"):

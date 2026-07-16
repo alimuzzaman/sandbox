@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import stat
 from typing import Mapping, Protocol, Sequence
 
 from .errors import RecoveryError
@@ -56,6 +57,8 @@ class DatabaseCapture:
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
             raise RecoveryError("database dump timeout is invalid", "invalid_database_timeout")
         target = Path(destination)
+        if target.is_symlink() or (target.exists() and not stat.S_ISREG(target.lstat().st_mode)):
+            raise RecoveryError("database dump destination is not a regular file", "invalid_database_destination")
         target.parent.mkdir(parents=True, exist_ok=True)
         command, warnings = self.command(engine, database, target,
                                          nontransactional=nontransactional, ddl_risk=ddl_risk)

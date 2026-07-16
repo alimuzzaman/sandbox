@@ -110,6 +110,8 @@ Drive adapter supports them, avoiding whole-archive memory materialization.
 Read-only remote inventory also validates the complete response schema—including typed mount and
 Git repository records, safe names, counters, and warning strings—before returning it;
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
+The catalog loader likewise rejects control characters, traversal-shaped list entries, invalid
+dependency IDs, and unsafe metadata keys before profiles reach the planner.
 Drive object listings likewise require relative string paths and non-negative integer sizes;
 malformed remote metadata fails closed before set classification or retention planning.
 RecoveryService also converts malformed adapter responses into operation-specific result errors

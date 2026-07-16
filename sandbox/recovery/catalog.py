@@ -28,17 +28,25 @@ class RecoveryCatalog:
         return {profile.profile_id: profile for profile in self.profiles}
 
 
+def _safe_text(value: object) -> bool:
+    return (isinstance(value, str) and bool(value) and
+            not any(ord(char) < 32 or ord(char) == 127 for char in value) and
+            not value.startswith(("sh:", "bash:")))
+
+
 def _strings(value, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+    if (not isinstance(value, list) or not all(_safe_text(item) for item in value) or
+            any(Path(item).is_absolute() or ".." in Path(item).parts for item in value)):
         raise RecoveryError(f"{field} must be a list of non-empty strings", "invalid_catalog")
     return tuple(value)
 
 
 def _safe_value(value) -> bool:
     if isinstance(value, str):
-        return "\n" not in value and not value.startswith(("sh:", "bash:"))
+        return not any(ord(char) < 32 or ord(char) == 127 for char in value) and not value.startswith(("sh:", "bash:"))
     if isinstance(value, dict):
-        return all(not _SECRET_FIELD.search(str(key)) and _safe_value(item) for key, item in value.items())
+        return all(isinstance(key, str) and _safe_text(key) and not _SECRET_FIELD.search(key)
+                   and _safe_value(item) for key, item in value.items())
     if isinstance(value, (list, tuple)):
         return all(_safe_value(item) for item in value)
     return value is None or isinstance(value, (bool, int, float))
@@ -65,7 +73,7 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
             raise RecoveryError(f"profile {profile_id} has an unknown adapter or mode", "invalid_catalog")
         for field in ("scope", "consistency", "sensitivity", "restore_target", "verification",
                       "retention_class", "schedule_class"):
-            if field in raw and not isinstance(raw[field], str):
+            if field in raw and not _safe_text(raw[field]):
                 raise RecoveryError(f"profile {profile_id} field {field} must be a string", "invalid_catalog")
         if "version" in raw and (isinstance(raw["version"], bool) or
                                   not isinstance(raw["version"], int) or raw["version"] < 1):
@@ -77,6 +85,9 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
                 raise RecoveryError(f"profile {profile_id} contains command text", "invalid_catalog")
         if not isinstance(raw.get("metadata") or {}, dict):
             raise RecoveryError(f"profile {profile_id} metadata must be an object", "invalid_catalog")
+        dependencies = _strings(raw.get("dependencies", []), "dependencies")
+        if not all(_ID.fullmatch(dependency) for dependency in dependencies):
+            raise RecoveryError(f"profile {profile_id} dependencies are invalid", "invalid_catalog")
         profile = RecoveryProfile(
             profile_id, str(raw.get("scope") or ""), raw["source_type"],
             _strings(raw.get("allowed_roots", []), "allowed_roots"),
@@ -84,7 +95,7 @@ def load_catalog(path: str | Path) -> RecoveryCatalog:
             str(raw.get("consistency") or ""), _strings(raw.get("excludes", []), "excludes"),
             str(raw.get("sensitivity") or "encrypted"), str(raw.get("restore_target") or ""),
             str(raw.get("verification") or ""), str(raw.get("retention_class") or "standard"),
-            _strings(raw.get("dependencies", []), "dependencies"), raw.get("metadata") or {},
+            dependencies, raw.get("metadata") or {},
             int(raw.get("version", 1)), bool(raw.get("enabled", True)), str(raw.get("schedule_class", "manual")),
         )
         seen.add(profile_id)

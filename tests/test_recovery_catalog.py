@@ -49,6 +49,27 @@ class TestRecoveryCatalog(unittest.TestCase):
                 load_catalog(path)
         self.assertEqual(caught.exception.code, "invalid_catalog")
 
+    def test_unsafe_paths_and_control_text_fail_closed(self):
+        base = {
+            "id": "fixture", "scope": "test", "source_type": "filesystem",
+            "allowed_roots": ["root"], "sources": ["path"], "capture_mode": "partial",
+            "consistency": "stable", "excludes": [], "sensitivity": "encrypted",
+            "restore_target": "target", "verification": "hash", "retention_class": "test",
+            "dependencies": [], "metadata": {},
+        }
+        documents = [
+            {"schema_version": 1, "profiles": [dict(base, sources=["../escape"])]},
+            {"schema_version": 1, "profiles": [dict(base, restore_target="bad\x00target")]},
+            {"schema_version": 1, "profiles": [dict(base, metadata={"bad\nkey": "value"})]},
+            {"schema_version": 1, "profiles": [dict(base, dependencies=["../other"])]},
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            for index, document in enumerate(documents):
+                path = Path(root) / f"unsafe-{index}.json"; path.write_text(json.dumps(document))
+                with self.subTest(index=index), self.assertRaises(RecoveryError) as caught:
+                    load_catalog(path)
+                self.assertEqual(caught.exception.code, "invalid_catalog")
+
     def test_duplicate_dependency_cycle_fails_closed(self):
         document = {"schema_version": 1, "profiles": []}
         base = {

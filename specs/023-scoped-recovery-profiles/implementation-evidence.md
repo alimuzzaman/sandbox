@@ -265,6 +265,8 @@ adapters before invoking any delete operation, preserving stable errors for prot
 
 The remote inventory adapter now validates its complete JSON shape—including typed mount and Git
 repository records, safe names, counters, and warning strings—before exposing it to planning callers.
+The catalog loader now rejects control characters, traversal-shaped list entries, invalid
+dependency IDs, and unsafe metadata keys before profiles reach the planner.
 RecoveryService callers now preserve the stable result envelope when an adapter raises a raw
 OS, type, or value error, using operation-specific failure codes rather than exposing exceptions.
 The human-readable recovery list surface now prints categorized counts and paths, while retaining
@@ -352,8 +354,8 @@ explicit confirmation, and a caller-owned delete adapter; fixture coverage prove
 unconfirmed requests perform no deletion.
 ```
 
-The self-test and unit suite remain fixture/local checks. The latest full verification ran 796 tests
-in 43.241s with 1 skipped. T060/T061/T069/T071/T072 and the live
+The self-test and unit suite remain fixture/local checks. The latest full verification ran 797 tests
+in 43.671s with 1 skipped. T060/T061/T069/T071/T072 and the live
 T021 catalog-companion acceptance check remain protected operations requiring their documented
 operator authorization; no production capture, restore, deletion, schedule activation, or live
 deployment was performed by this hardening audit.

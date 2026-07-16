@@ -1,3 +1,8 @@
+---
+name: bug-repro
+description: Reproduce a Sandbox or WordPress bug safely with a baseline snapshot, live evidence, and a repeatable report.
+---
+
 # Bug Reproduction
 
 The core sandbox loop. Use whenever the user reports a bug, references a

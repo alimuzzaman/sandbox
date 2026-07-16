@@ -471,9 +471,10 @@ and can usually diagnose itself.
   Compose-host validation and confirmation-gated permanent Cloudflare DNS/TLS deployment;
   personal `~/.zshrc.secrets` support; npm +
   Homebrew + curl distribution.
-- **Next** — prove the recent work live (remote VPS and Plugin Check post-fix
-  re-run), then move into remote automation. See
-  [`docs/future-roadmap.md`](docs/future-roadmap.md).
+- **Next** — protected recovery and Hermes/Lenzora acceptance remain operator-gated.
+  Use the consolidated [release-readiness checklist](docs/release-readiness.md)
+  before a release, then see [`docs/future-roadmap.md`](docs/future-roadmap.md)
+  for deferred product work.
 
 Re-run `./sb setup` after a global config change — it's idempotent.
 ## Hermes Agent

@@ -1,3 +1,8 @@
+---
+name: fix
+description: Diagnose, fix, and verify a Sandbox or WordPress bug in one evidence-driven pass.
+---
+
 # fix — one-pass bug-fix loop
 
 **Load this skill whenever the user asks you to fix a bug, debug an

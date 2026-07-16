@@ -30,6 +30,7 @@ import sandbox.core._remote as sr  # noqa: E402
 import sandbox.core._config as _cfgmod  # noqa: E402
 import sandbox.commands.remote as remote_cmd  # noqa: E402
 import sandbox.commands.deploy as deploy_cmd  # noqa: E402
+import sandbox.commands.integ as integ_cmd  # noqa: E402
 
 
 def _completed(returncode=0, stdout="", stderr=""):
@@ -783,6 +784,48 @@ class TestStartRemoteMcpServer(unittest.TestCase):
                 {"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174,
                 "secret-token", public_url="https://sandbox.example.com",
             )
+
+
+class TestRemoteDoctorChecks(unittest.TestCase):
+    def test_incomplete_remote_stops_before_network_access(self):
+        checks = sr.remote_doctor_checks({})
+        self.assertEqual(checks, [{
+            "label": "SSH configured", "ok": False,
+            "hint": "register it with `./sb remote add <name> <ssh-url>`",
+        }])
+
+    def test_authenticated_mcp_route_is_checked_without_exposing_token(self):
+        class Response:
+            status = 405
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+
+        remote = {
+            "ssh": "ubuntu@example.test", "provisioned": True,
+            "control_transport": "https", "control_url": "https://control.example.test",
+            "bearer_token": "never-print-this",
+        }
+        with patch.object(sr, "check_reachable", return_value=True), \
+             patch("urllib.request.OpenerDirector.open", return_value=Response()) as urlopen:
+            checks = sr.remote_doctor_checks(remote)
+        self.assertTrue(checks[-1]["ok"])
+        self.assertEqual(checks[-1]["label"], "MCP endpoint reachable")
+        self.assertEqual(urlopen.call_args.args[0].full_url, "https://control.example.test/mcp")
+        self.assertNotIn("never-print-this", repr(checks))
+
+
+class TestMcpHttpsTransportArguments(unittest.TestCase):
+    def test_cmd_mcp_forwards_public_url_to_the_server(self):
+        args = types.SimpleNamespace(
+            transport="streamable-http", bind="127.0.0.1", port=9174,
+            token="test-token", public_url="https://sandbox.example.com",
+        )
+        with patch("os.execv") as execv:
+            integ_cmd.cmd_mcp(None, args)
+        argv = execv.call_args.args[1]
+        self.assertEqual(argv[-2:], ["--public-url", "https://sandbox.example.com"])
 
 
 class TestConfigureHttpsProxy(unittest.TestCase):

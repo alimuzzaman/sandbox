@@ -101,6 +101,10 @@ class _WrapperResult:
 _original_subprocess_run = mcp_app.subprocess.run
 mcp_app.subprocess.run = lambda *_args, **_kwargs: _WrapperResult()
 print("WRAPPER_RESULT", json.dumps(mcp_app._run_sandbox_json(["sb"], 3)))
+mcp_app.subprocess.run = lambda *_args, **_kwargs: type("ParseFailure", (), {
+    "returncode": 2, "stdout": "diagnostic only\\n", "stderr": "bad invocation\\n",
+})()
+print("WRAPPER_PARSE_FAILURE", json.dumps(mcp_app._run_sandbox_json(["sb"], 3)))
 mcp_app.subprocess.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(
     subprocess.TimeoutExpired(cmd="sb", timeout=3)
 )
@@ -216,6 +220,22 @@ class TestMcpServerSplit(unittest.TestCase):
         call = next(line for line in r.stdout.splitlines()
                     if line.startswith("TEST_MODE_CALL "))
         self.assertIn("unit", __import__("json").loads(call.removeprefix("TEST_MODE_CALL "))[0][0])
+
+        wrapper_result = next(line for line in r.stdout.splitlines()
+                              if line.startswith("WRAPPER_RESULT "))
+        self.assertEqual(__import__("json").loads(wrapper_result.removeprefix("WRAPPER_RESULT "))["payload"], {"ok": True})
+        parse_failure = next(line for line in r.stdout.splitlines()
+                             if line.startswith("WRAPPER_PARSE_FAILURE "))
+        parse = __import__("json").loads(parse_failure.removeprefix("WRAPPER_PARSE_FAILURE "))
+        self.assertFalse(parse["timed_out"])
+        self.assertEqual(parse["returncode"], 2)
+        self.assertIsNone(parse["payload"])
+        self.assertEqual(parse["stderr"], "bad invocation\n")
+        wrapper_timeout = next(line for line in r.stdout.splitlines()
+                               if line.startswith("WRAPPER_TIMEOUT "))
+        timeout = __import__("json").loads(wrapper_timeout.removeprefix("WRAPPER_TIMEOUT "))
+        self.assertTrue(timeout["timed_out"])
+        self.assertIsNone(timeout["returncode"])
 
         calls_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_CALLS "))
         calls = __import__("json").loads(calls_line.removeprefix("HERMES_CALLS "))

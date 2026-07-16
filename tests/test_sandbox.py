@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import unittest
 import json
+import importlib
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 import sandbox.cli  # noqa: E402  (registers command modules on import)
 import sandbox.core as core  # noqa: E402
 import sandbox.core._domains as domains_core  # noqa: E402
+herd_core = importlib.import_module("sandbox.core._herd")  # noqa: E402
 from sandbox.registry import COMMANDS  # noqa: E402
 import sandbox_core  # noqa: E402
 
@@ -357,6 +359,14 @@ class TestSmallHelpers(unittest.TestCase):
     def test_herd_domain_and_db_name(self):
         self.assertEqual(core._herd_domain("myinst"), "myinst.test")
         self.assertEqual(core._herd_db_name("My-Inst"), "sandbox_my_inst")
+
+    def test_herd_wp_cli_allows_core_archive_extraction(self):
+        with mock.patch.object(herd_core, "_herd_php", return_value="/herd/php83"), \
+             mock.patch.object(herd_core, "_host_wp", return_value="/usr/local/bin/wp"):
+            self.assertEqual(
+                herd_core._herd_wp_cmd("example"),
+                ["/herd/php83", "-d", "memory_limit=512M", "/usr/local/bin/wp"],
+            )
 
     def test_extra_vol_lines(self):
         self.assertEqual(core._extra_vol_lines({}), "")

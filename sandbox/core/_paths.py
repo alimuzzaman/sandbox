@@ -310,6 +310,7 @@ function sandbox_snapshots_render() {
 	echo '<button class="button button-primary" id="sbx-take">Take snapshot</button> ';
 	echo '<label><input type="checkbox" id="sbx-force"> overwrite</label> ';
 	echo '<label title="Capture the database only (skip the uploads archive)"><input type="checkbox" id="sbx-dbonly"> DB only</label></p>';
+	echo '<p><button class="button" id="sbx-reset">Reset to fresh install</button> <span class="description">Restores the post-install database baseline; uploads are kept.</span></p>';
 	echo '<div id="sbx-msg" style="margin:8px 0"></div>';
 	echo '<table class="widefat striped" id="sbx-table"><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Meta</th><th></th></tr></thead><tbody></tbody></table>';
 	echo '</div>';
@@ -336,6 +337,10 @@ function sandbox_snapshots_render() {
       tb.appendChild(tr); }); }); }
   document.getElementById('sbx-take').onclick=function(){ var n=document.getElementById('sbx-name').value;
     say('Taking snapshot…'); call('take',{name:n,force:document.getElementById('sbx-force').checked?1:'',db_only:document.getElementById('sbx-dbonly').checked?1:''}).then(function(r){
+      if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
+  document.getElementById('sbx-reset').onclick=function(){
+    if(!confirm('Reset this database to its fresh-install baseline? Current posts, settings, and users will be replaced; uploads are kept.')){return;}
+    say('Resetting to fresh install…'); call('reset').then(function(r){
       if(r.job_id){return poll(r.job_id);} say(r.error||'error',true); }); };
   tb.addEventListener('click',function(e){ var r=e.target.getAttribute('data-r'), d=e.target.getAttribute('data-d');
     if(r&&confirm('Restore '+r+'? This REPLACES the current DB + uploads.')){ say('Restoring…');

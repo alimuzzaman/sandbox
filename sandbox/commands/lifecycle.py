@@ -539,6 +539,16 @@ def cmd_doctor(cfg, args) -> None:
     check(f"focused plugin: {focus or '—'}", True,
           hint="(optional — set with ./sb focus <slug>)")
 
+    from sandbox.core._remote import list_remotes, remote_doctor_checks
+    remotes = list_remotes()
+    print("\nRemote targets:")
+    if not remotes:
+        info("  (none configured)")
+    for name, remote in sorted(remotes.items()):
+        for remote_check in remote_doctor_checks(remote):
+            check(f"{name}: {remote_check['label']}", remote_check["ok"],
+                  hint=remote_check["hint"])
+
     print("\nLinked plugins:")
     plug_dir = plugins_dir(inst)
     if plug_dir.exists():

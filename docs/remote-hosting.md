@@ -78,7 +78,7 @@ Register the second MCP server in Claude Code:
 
 ```bash
 claude mcp add --scope user --transport http sandbox-myvps \
-  https://sandbox-control.example.com \
+  https://sandbox-control.example.com/mcp \
   --header "Authorization: Bearer <token-printed-above>"
 ```
 
@@ -277,13 +277,13 @@ plus `url` when exposure succeeds.
 
 ## 9. Known limitation / next step
 
-**Partially live-verified against a fresh Ubuntu 24.04 VPS.** A real run against
+**Live-verified against a fresh Ubuntu 24.04 VPS.** A real run against
 `alim@212.47.72.49` installed Docker CE + compose, Caddy, the staged sandbox runtime, the
 MCP venv, and the Playwright/Chromium tools venv. The remote now reports provisioned at
 `https://sandbox-control.asb.bd`; Caddy owns public `80/443` by hostname, while the MCP
 process itself binds only to `127.0.0.1:9174`. Bearer-auth probing reaches the app (auth
 failures return `401`; the verified token now reaches MCP-level responses instead).
-The same VPS has also hosted a one-shot exposed WordPress instance at
-`https://default-templately-ai-builder.sandbox.asb.bd`. The remaining Phase 0 proof is
-to register this as a second MCP server and run `fs_read`/`visit`/`wp_cli` through it.
-`specs/014-remote-vps-hosting/quickstart.md` remains the completion gate.
+The HTTPS endpoint was then registered at its `/mcp` streamable-HTTP route and
+successfully ran `fs_read`, `visit`, `wp_cli`, and `run_tests` against the VPS-side
+`html-social-share-buttons` project. `specs/014-remote-vps-hosting/quickstart.md`
+is satisfied for the public-HTTPS path.

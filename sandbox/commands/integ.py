@@ -125,6 +125,9 @@ def cmd_mcp(cfg, args) -> None:
             die("--token is required for --transport=streamable-http")
         argv += ["--transport", "streamable-http", "--bind", bind,
                  "--port", str(port), "--token", token]
+        public_url = getattr(args, "public_url", None)
+        if public_url:
+            argv += ["--public-url", public_url]
     # Replace this process with the server (FastMCP mcp.run()).
     os.execv(str(py), argv)
 

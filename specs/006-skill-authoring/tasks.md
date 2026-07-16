@@ -56,7 +56,7 @@ skill roots = repo `skills/`, `<focused-plugin>/.claude/skills/`, `~/.claude/ski
 **Goal**: a built-in skill teaches the house style.
 **Independent test**: `load_skill("skill-creator")` returns the guidance.
 
-- [~] T011b (partial) Retrofit existing built-in `skills/*/SKILL.md` with `name`/`description` frontmatter so the catalog is populated (today they open with `# H1` — skill-creator ships with frontmatter; bulk retrofit of the other built-ins is a follow-up.
+- [x] T011b Retrofit existing built-in `skills/*/SKILL.md` with `name`/`description` frontmatter so the catalog is populated. **DONE 2026-07-16:** added metadata to the five legacy built-ins (`bug-repro`, `fix`, `snapshot`, `wp-debug`, and `wp-pilot`); all built-ins now expose catalog metadata.
 - [x] T012 [US4] Author `skills/skill-creator/SKILL.md` (frontmatter, description-as-trigger, foldered-layout rule, write→load→verify loop), adapted to the Sandbox conventions.  **DONE: skills/skill-creator/SKILL.md authored**
 - [x] T013 [US4] Live verification (quickstart §7): the skill loads and reads correctly.  **DONE + live-verified: loads + reads correctly (harness surfaced it)**
 

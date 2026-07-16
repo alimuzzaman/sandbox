@@ -1,3 +1,8 @@
+---
+name: wp-pilot
+description: Operate and verify WordPress admin workflows through the Sandbox headless browser tools.
+---
+
 # wp-pilot
 
 Drive a real WordPress admin screen with a headless browser. Use it for generic

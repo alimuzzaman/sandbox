@@ -117,7 +117,8 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     """Token-authed snapshot bridge for the wp-admin mu-plugin (spec 002).
 
     Only these verbs, only for `instance`, only with the matching Bearer token:
-      GET /snapshots · POST /snapshot {name,force} · POST /restore {name}
+      GET /snapshots · POST /snapshot {name,force,db_only} · POST /restore {name}
+      POST /reset · DELETE /snapshot/<name> · GET /job/<id>
       DELETE /snapshot/<name> · GET /job/<id>
     Snapshot/restore run out-of-band via the existing job machinery so a restore
     never severs the caller's request. NO arbitrary host commands (FR-010)."""
@@ -131,7 +132,7 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     if _is_herd_instance(instance):
         return 409, {"ok": False, "error": "unsupported", "reason": "herd"}
     _ok_name = _valid_snapshot_name  # applied to EVERY name the bridge turns into
-    from sandbox.commands.data import cmd_snapshot, cmd_restore  # late: avoid cycle
+    from sandbox.commands.data import cmd_reset, cmd_snapshot, cmd_restore  # late: avoid cycle
     cfg = load_config()
 
     if method == "GET" and subpath == "/snapshots":
@@ -177,6 +178,15 @@ def _bridge_handle(method: str, instance: str, subpath: str,
         ns = _types.SimpleNamespace(resolved_instance=instance, name=name)
         jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
         return 202, {"ok": True, "job_id": jid, "name": name}
+
+    if method == "POST" and subpath == "/reset":
+        # The wp-admin proxy enforces nonce + manage_options before this
+        # token-authenticated bridge call. Run asynchronously because reset
+        # drops and imports the database, which would otherwise outlive HTTP.
+        ns = _types.SimpleNamespace(resolved_instance=instance, yes=True,
+                                    rebaseline=False)
+        jid = _start_job("reset to fresh install", lambda: cmd_reset(cfg, ns))
+        return 202, {"ok": True, "job_id": jid}
 
     if method == "DELETE" and subpath.startswith("/snapshot/"):
         from urllib.parse import unquote

@@ -28,44 +28,29 @@ Green local evidence from the latest review pass:
 Live external evidence still matters. Several specs explicitly say unit tests are not
 enough for "done."
 
-## P0 - Proof Gates Before Calling Recent Work Done
+## Completed proof gates
 
 1. **Remote VPS live validation**
 
-   Evidence: `specs/014-remote-vps-hosting/tasks.md` leaves T044 pending; `docs/remote-hosting.md`
-   says the local/unit surface is implemented but the real `remote provision` -> `deploy`
-   -> remote MCP instance pipeline is still unverified. A live run against a fresh
-   Ubuntu 24.04 VPS (`alim@212.47.72.49`) proved package/runtime bootstrap through
-   Docker, Caddy, MCP venv, and Playwright tooling after installer fixes. That run
-   exposed the old Tailscale-only assumption; the implementation now defaults to a
-   public HTTPS control endpoint and keeps Tailscale as opt-in. The VPS currently serves
-   the control endpoint at `https://sandbox-control.asb.bd`, with the MCP process bound
-   to loopback behind Caddy.
-
-   Next work: run `specs/014-remote-vps-hosting/quickstart.md` Phase 0 plus scenarios 1-5
-   through a registered second MCP server. Capture `fs_read`, `visit`, `wp_cli`, and
-   `run_tests` evidence from that HTTPS endpoint.
+   Evidence: T044 is complete. A registered second MCP client reached the HTTPS
+   `/mcp` endpoint and successfully ran `fs_read`, `visit`, `wp_cli`, and `run_tests`
+   against a VPS-side WordPress project. See `docs/remote-hosting.md`.
 
 2. **Plugin Check baseline acceptance**
 
-   Evidence: `docs/plugin-check.md` records the live 2026-07-16 run against
-   `alims-builder-authoring`: relative path identity is now correct, and the gate
-   reported 17 errors and 8 warnings without `../sandbox` leakage. The project has no
-   baseline, so this proves parser/scan behavior but not a baseline-gate pass.
+   Evidence: `alims-builder-authoring` established its owner-approved baseline at 17
+   errors and 8 warnings; an immediate non-updating rerun passed with zero new errors.
 
-   Next work: an owner-approved `--update` run on a repository with reviewed findings,
-   followed by a non-updating pass, is still required to prove baseline acceptance.
-
-## P1 - Reliability And Release Readiness
+## Completed reliability and release-readiness work
 
 1. **Turn deferred live checks into a single release checklist**
 
    Evidence: pending or partial verification is spread across specs 003, 004, 008, 009,
    013, and 014. This makes "are we ready?" harder to answer than it should be.
 
-   Next work: create one release-gate document or command that reports all deferred
-   validations: Herd parity, runtime relocation, dashboard reset/snapshot UI, Plugin
-   Check live run, and remote VPS live run.
+   Delivered: [`docs/release-readiness.md`](release-readiness.md) consolidates the
+   deferred Herd, relocation, dashboard, Plugin Check, remote, MCP-restart, and
+   protected-operation gates.
 
 2. **Doctor should know more about modern features**
 
@@ -73,7 +58,8 @@ enough for "done."
    new features added hidden dependencies: MCP venv freshness, HTTPS/Tailscale control reachability, and
    remote config shape.
 
-   Next work: extend `./sb doctor` with remaining remote and release-readiness probes.
+   Delivered: `./sb doctor` now reports each configured remote's SSH, provisioning,
+   control configuration, and authenticated MCP-route readiness without exposing secrets.
 
 3. **MCP wrapper contract parity**
 
@@ -82,8 +68,8 @@ enough for "done."
    `_run_sandbox_json` subprocess boundary for last-JSON parsing and timeout results,
    with wrapper-specific response shapes and redaction retained.
 
-   Next work: add a shared helper/test pattern for thin MCP subprocess wrappers so new
-   wrappers cannot drift on timeout/parse-failure shapes.
+   Delivered: the shared MCP smoke test now proves timeout, final-JSON selection, and
+   parse-failure behavior; the release checklist documents wrapper-specific redaction.
 
 ## P2 - Remote Hosting V2
 

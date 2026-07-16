@@ -47,7 +47,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
 ## Phase 7: US5 — Works on every driver (P1)
 
 - [x] T017 Herd path implemented (`setsid` + pinned `php<MM>`/`wp` via `_herd_wp_cmd`, `.sb-jobs/` host path, `kill -TERM -PGID`).
-- [~] T018 Herd live-verification DEFERRED — no herd instance running in this environment; Docker path fully verified. Re-verify when a herd instance exists.
+- [~] T018 Herd live-verification BLOCKED — Herd 1.29.0 is installed, but the 2026-07-16 disposable Herd provision could not complete because host MySQL at `127.0.0.1:3306` is unavailable. Linking, TLS/PHP isolation, and WordPress core download succeeded. Start/configure the operator-owned host MySQL service, then run the background-job scenario against the disposable `.test` site.
 
 ## Phase 8: Polish
 

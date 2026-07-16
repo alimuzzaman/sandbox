@@ -57,8 +57,8 @@ spec-002 dashboard mu-plugin/bridge.
 **Goal**: DB-only capture + reset from wp-admin.
 **Independent test**: dashboard toggle + button round-trip via the bridge.
 
-- [~] T012 [US3] (DEFERRED — dashboard slice) Extend the snapshot mu-plugin **template** (`_write_snapshot_muplugin`/`_SNAPSHOT_MU_TEMPLATE` in `_bridge.py`/`_paths.py`): a "DB only" capture checkbox + a "Reset to fresh install" button; add the `db_only` param to POST `/snapshot` and a new POST `/reset` route in **`_bridge_handle`** (the mu-plugin's trust-boundary bridge, not `_dash.py` — analysis F6), out-of-band + completion polling.
-- [~] T013 [US3] (DEFERRED with T012) Live verification (quickstart §5): dashboard DB-only capture + reset complete and report status.
+- [x] T012 [US3] Completed 2026-07-16: the snapshot template now has DB-only capture and a confirmed "Reset to fresh install" action; the token-authenticated bridge accepts asynchronous `POST /reset` and the UI polls the existing job endpoint. Focused bridge tests cover the reset route.
+- [~] T013 [US3] Live verification is pending a supported bridge/MCP restart: the disposable dashboard loaded successfully, but its already-running bridge returned 404 for the newly added `/reset` route. Restart the bridge/server, then repeat the DB-only capture and reset round trip.
 
 ## Phase 7: Polish & Cross-Cutting
 

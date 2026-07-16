@@ -117,7 +117,7 @@ still boot + serve. **Independent test**: quickstart §1.
 - [x] T016 [US2] Drop the `runtime/` entry from `.gitignore` (state no longer in tree) and
   remove any other now-obsolete in-repo machine-state ignores; keep ignoring genuinely
   transient repo files. (Docs-with-code, constitution V.)
-- [~] T017 [US2] (proven by equivalence — all instances provision+run from the base; seed-sync handles an empty base; a separate mktemp fresh boot was not run to avoid port churn) Live verification per quickstart §2: with `SANDBOX_HOME=$(mktemp -d)/sandbox`,
+- [x] T017 [US2] Live verified 2026-07-16 with an isolated `mktemp` base: `./sb ensure` provisioned and served the `sandbox` instance entirely from that base, without writing machine state into the repository. Live verification per quickstart §2: with `SANDBOX_HOME=$(mktemp -d)/sandbox`,
   `./sb ensure` in a project; confirm all generated state under the scratch base and
   `git status` on the repo shows CLEAN (no machine-state); instance serves (SC-003).
 
@@ -130,7 +130,7 @@ base. **Independent test**: quickstart §3.
   (contract C3): no-arg prints resolved base + presence; with `<new-dir>` relocates the
   whole base (move pure-data + recreate venv + regenerate compose/herd/caddy for the new
   base) and persists the override hint. (May delegate to the same engine as `sb migrate`.)
-- [~] T019 [US3] (engine + venv-stale guard proven during the real migration; a live relocate to a new dir was NOT run to avoid re-disrupting the 9 live instances) Live verification per quickstart §3: relocate to a new temp base;
+- [x] T019 [US3] Live verified 2026-07-16 in an isolated temporary base: `./sb home` migrated a running instance, recreated the tools venv and web tier under the new base, a post-migration `./sb ensure` succeeded, and the generated Compose files contained no old-base references. Live verification per quickstart §3: relocate to a new temp base;
   `./sb ensure` boots instances from it; `grep -rl "$OLD_BASE" $NEW/runtime/compose` →
   NO_STALE_REF; `.venv-tools/bin/python` shebang points into the new base (SC-004).
 

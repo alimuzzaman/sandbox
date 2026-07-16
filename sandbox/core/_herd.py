@@ -72,7 +72,11 @@ def _herd_wp_cmd(instance: str) -> list[str]:
     wp-cli ships as a phar with a `#!/usr/bin/env php` shebang, so invoking it
     as `<pinned-php> <wp.phar>` (instead of executing the phar directly, which
     would pick up the default `php`) is what makes `sb wp …` honor phpVersion."""
-    return [_herd_php(instance), _host_wp()]
+    # Herd's default CLI limit can be 128M, which is insufficient for
+    # `wp core download` extracting a current WordPress archive. Keep this
+    # scoped to Sandbox's host-side wp-cli calls; it does not alter the web
+    # site's PHP configuration.
+    return [_herd_php(instance), "-d", "memory_limit=512M", _host_wp()]
 
 
 def _herd(*args: str, cwd=None, check: bool = False):

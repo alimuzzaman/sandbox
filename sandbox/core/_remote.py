@@ -328,6 +328,78 @@ def check_reachable(remote: dict) -> bool:
         return False
 
 
+def remote_doctor_checks(remote: dict) -> list[dict]:
+    """Return bounded, secret-safe readiness facts for one remote target.
+
+    This is read-only: it checks recorded transport state, SSH reachability,
+    and the authenticated streamable-HTTP route without exposing a connection
+    string or bearer token. ``doctor`` owns presentation; this module owns the
+    remote-specific probe policy.
+    """
+    checks: list[dict] = []
+    ssh_configured = bool(remote.get("ssh"))
+    checks.append({"label": "SSH configured", "ok": ssh_configured,
+                   "hint": "register it with `./sb remote add <name> <ssh-url>`"})
+    if not ssh_configured:
+        return checks
+    provisioned = bool(remote.get("provisioned"))
+    checks.append({"label": "provisioned", "ok": provisioned,
+                   "hint": "run `./sb remote provision <name> --control-host <hostname>`"})
+    if not provisioned:
+        return checks
+
+    transport = remote.get("control_transport")
+    control_url = remote.get("control_url")
+    token = remote.get("bearer_token")
+    transport_ok = transport in {"https", "tailscale"}
+    checks.extend([
+        {"label": "control transport configured", "ok": transport_ok,
+         "hint": "re-provision it to record a supported control transport"},
+        {"label": "control URL configured", "ok": isinstance(control_url, str) and bool(control_url),
+         "hint": "re-provision it to record the control URL"},
+        {"label": "bearer token recorded", "ok": isinstance(token, str) and bool(token),
+         "hint": "re-provision it to mint a replacement bearer token"},
+    ])
+    reachable = check_reachable(remote)
+    checks.append({"label": "SSH reachable", "ok": reachable,
+                   "hint": "check the VPS network path and SSH service"})
+    if not (transport_ok and isinstance(control_url, str) and control_url and token and reachable):
+        return checks
+
+    parsed = urlsplit(control_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        checks.append({"label": "MCP endpoint reachable", "ok": False,
+                       "hint": "re-provision it to repair the control URL"})
+        return checks
+    path = parsed.path.rstrip("/")
+    endpoint = urlunsplit((parsed.scheme, parsed.netloc,
+                           f"{path}/mcp" if path else "/mcp", "", ""))
+    try:
+        import urllib.error
+        import urllib.request
+        request = urllib.request.Request(endpoint, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        })
+        # Doctor must probe the VPS directly. A developer's ambient HTTP proxy
+        # can otherwise transform a healthy MCP response into a false negative.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=10) as response:
+                status = response.status
+        except urllib.error.HTTPError as error:
+            status = error.code
+        # A bare authenticated GET is not a complete MCP session. FastMCP may
+        # return 400/405/406 after validating the route and bearer token; all
+        # prove the control endpoint is reachable. 401, 404, and 5xx do not.
+        endpoint_ok = status in {200, 204, 400, 405, 406}
+    except Exception:
+        endpoint_ok = False
+    checks.append({"label": "MCP endpoint reachable", "ok": endpoint_ok,
+                   "hint": "run `./sb remote up <name>` and verify its route"})
+    return checks
+
+
 def deploy_target_slug(project_root) -> str:
     """The canonical slug used to derive a project's VPS-side deploy path.
     Uses the EXACT SAME _project_slug resolution sandbox_core already uses

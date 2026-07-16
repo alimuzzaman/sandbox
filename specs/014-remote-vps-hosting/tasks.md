@@ -137,7 +137,7 @@ per `plan.md`'s Project Structure section — no placeholders below.
 - [x] T041 [P] Write `docs/remote-hosting.md` (quick-reference design doc companion, matches `docs/plugin-check.md`'s pattern; does NOT replace `docs/remote-hosting-prd.md`, which stays as the deeper research/rationale doc)
 - [x] T042 [P] Add a `README.md` mention of remote hosting (`./sb remote`/`./sb deploy`), matching this session's existing per-feature README rows
 - [x] T043 Run the full local test suite (`.cli-venv/bin/python -m unittest discover -s tests`) and confirm zero regressions — this is the FR-016/SC-004 release gate
-- [~] T044 Run `quickstart.md`'s Phase 0 spike + all 5 scenarios against a REAL, disposable VPS — Constitution Principle IV. Partial live run on fresh Ubuntu 24.04 VPS reached Docker/Caddy/runtime/MCP/tools install and provisioned HTTPS control at `https://sandbox-control.asb.bd` with MCP bound to `127.0.0.1:9174`; remaining proof is registering the second MCP server and exercising `fs_read`/`visit`/`wp_cli`/`run_tests` through it.
+- [x] T044 Run `quickstart.md`'s Phase 0 spike + all 5 scenarios against a REAL, disposable VPS — Constitution Principle IV. HTTPS MCP acceptance completed on 2026-07-16 against `scaleway-sandbox`: authenticated streamable HTTP at `https://sandbox-control.asb.bd/mcp` ran `ensure_instance`, `fs_read`, `wp_cli`, `visit`, and `run_tests` for `/home/alim/sandbox/deploy-src/html-social-share-buttons`. Results: file read succeeded, WP-CLI returned 7.0, browser visit returned HTTP 200 with no errors, and PHPUnit passed 6 tests / 12 assertions.
 
 ---
 

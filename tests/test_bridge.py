@@ -102,6 +102,11 @@ class TestBridgeHandle(unittest.TestCase):
             self.assertEqual(code, 202, raw)
             self.assertEqual(data["name"], slug, raw)
 
+    def test_reset_starts_an_out_of_band_job(self):
+        code, data = self.call("POST", "/reset")
+        self.assertEqual(code, 202)
+        self.assertEqual(data["job_id"], "job-1")
+
     # --- restore (traversal is the high-severity finding) ---
     def test_restore_traversal_400(self):
         for bad in ("..", "../../etc", "."):

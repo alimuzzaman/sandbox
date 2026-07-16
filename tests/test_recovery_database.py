@@ -64,3 +64,9 @@ class TestDatabaseCapture(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryError, "format"):
                 DatabaseCapture(DumpRunner(b"not a dump")).capture(
                     "postgresql", "app", Path(directory) / "app.dump")
+
+    def test_rejects_comment_only_sql_dump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RecoveryError, "format"):
+                DatabaseCapture(DumpRunner(b"-- generated dump\n# no statements\n")).capture(
+                    "mariadb", "app", Path(directory) / "app.sql")

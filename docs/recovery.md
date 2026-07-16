@@ -41,8 +41,8 @@ boundary, not only inside operation data.
 Git provenance strips URL userinfo, query strings, and fragments before it can enter a recovery
 manifest, so embedded credentials and token-bearing remote URLs are not retained as metadata.
 
-Database capture rejects empty output and performs format-aware validation before an artifact
-can enter the encrypted publication pipeline.
+Database capture rejects empty output and performs statement-aware format validation before an
+artifact can enter the encrypted publication pipeline; comment-only SQL is not treated as a dump.
 
 Filesystem capture preserves declared in-root symlinks as links while rejecting links whose
 resolved targets escape the allowed root.

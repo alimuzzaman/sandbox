@@ -15,6 +15,12 @@ from typing import Mapping, Protocol, Sequence
 
 from .errors import RecoveryError
 
+_SQL_STATEMENT = re.compile(
+    r"(?im)^\s*(?:CREATE|INSERT|SET|DROP|ALTER|LOCK\s+TABLES?|UNLOCK\s+TABLES?|"
+    r"DELIMITER|USE|START\s+TRANSACTION|COMMIT|BEGIN(?:\s+WORK)?)(?:\s|;|$)|"
+    r"^\s*/\*!\s*\d"
+)
+
 
 class CommandRunner(Protocol):
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
@@ -90,10 +96,10 @@ class DatabaseCapture:
                 while chunk := handle.read(1_048_576):
                     text = decoder.decode(chunk)
                     window = carry + text
-                    found = found or bool(re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", window, re.IGNORECASE))
+                    found = found or bool(_SQL_STATEMENT.search(window))
                     carry = window[-32:]
                 tail = decoder.decode(b"", final=True)
-                found = found or bool(re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", carry + tail, re.IGNORECASE))
+                found = found or bool(_SQL_STATEMENT.search(carry + tail))
         except UnicodeDecodeError as exc:
             raise RecoveryError("SQL dump format is invalid", "invalid_database_dump") from exc
         if not found:

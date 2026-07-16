@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 781 tests in 42.396s — OK (skipped=1)
+Ran 782 tests in 42.773s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -314,6 +314,9 @@ Their source snapshots also reject inode/size/mtime/digest changes during stagin
 
 Filesystem archive capture now checks every selected tree entry and resolved link target against
 the declared root device, rejecting cross-filesystem sources before tar creation.
+
+MariaDB/MySQL validation now requires an executable SQL dump statement or recognized dump
+directive, so comment-only non-empty output cannot pass capture validation.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

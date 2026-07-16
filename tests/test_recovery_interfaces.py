@@ -91,3 +91,22 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("sets/pending/archive.bin", rendered)
         self.assertIn("legacy.tar", rendered)
         self.assertIn("/tmp/retry.archive.tar.gpg", rendered)
+
+    def test_cli_verify_human_output_shows_non_secret_integrity_summary(self):
+        service = SimpleNamespace(verify=lambda *args, **kwargs: {
+            "action": "verify", "ok": True, "status": "verified", "data": {
+                "id": "set-1", "manifest": {
+                    "ciphertext_object": "sets/set-1/archive.bin",
+                    "ciphertext_sha256": "a" * 64, "ciphertext_size": 128,
+                    "provenance": {"secret": "must-not-print"},
+                },
+            }
+        })
+        output = StringIO()
+        with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                redirect_stdout(output):
+            cmd_recovery(None, self._args("verify", backup_id="set-1", json=False))
+        rendered = output.getvalue()
+        self.assertIn("id: set-1", rendered)
+        self.assertIn("ciphertext_sha256: " + "a" * 64, rendered)
+        self.assertNotIn("must-not-print", rendered)

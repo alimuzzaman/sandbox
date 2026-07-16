@@ -33,6 +33,8 @@ Complete-set listing also performs the same manifest/ciphertext hash and object-
 verification, so a same-size tampered archive is classified as unverifiable rather than complete.
 Malformed manifest JSON values are rejected as stable invalid-manifest errors rather than escaping
 through the CLI or MCP result envelope.
+Human-readable verification output includes only the set ID and ciphertext identity/digest/size;
+manifest provenance is not printed outside JSON mode.
 
 Database capture rejects empty output and performs format-aware validation before an artifact
 can enter the encrypted publication pipeline.

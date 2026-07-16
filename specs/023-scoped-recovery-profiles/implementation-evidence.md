@@ -269,12 +269,14 @@ RecoveryService callers now preserve the stable result envelope when an adapter 
 OS, type, or value error, using operation-specific failure codes rather than exposing exceptions.
 The human-readable recovery list surface now prints categorized counts and paths, while retaining
 the existing JSON envelope for automation and review tooling.
+Human-readable verification now prints the non-secret ciphertext identity, digest, and size while
+omitting manifest provenance; JSON output remains available for structured consumers.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 763 tests in 42.762s — OK (skipped=1)
+Ran 764 tests in 42.628s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

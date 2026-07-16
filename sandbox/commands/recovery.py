@@ -49,6 +49,13 @@ def _emit(payload: dict, as_json: bool) -> None:
             for item in entries:
                 if isinstance(item, dict):
                     print(f"    {item.get('Path', '(unknown)')}")
+    elif payload["action"] == "verify":
+        data = payload.get("data") or {}
+        manifest = data.get("manifest") if isinstance(data.get("manifest"), dict) else {}
+        print(f"  id: {data.get('id', '(unknown)')}")
+        for field in ("ciphertext_object", "ciphertext_sha256", "ciphertext_size"):
+            if field in manifest:
+                print(f"  {field}: {manifest[field]}")
     elif payload["action"] == "retention":
         data = payload.get("data") or {}
         protected = tuple(data.get("protected_sets") or ())

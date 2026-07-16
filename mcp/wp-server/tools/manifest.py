@@ -74,9 +74,21 @@ def _explicit_group(group_id: str):
     return register
 
 
-def built_in_tool_registry() -> ToolGroupRegistry:
+def built_in_tool_registry(group_ids: tuple[str, ...] | None = None) -> ToolGroupRegistry:
+    """Build the registry, optionally loading only selected tool groups.
+
+    The default remains the complete catalog for compatibility. Clients that
+    want a smaller MCP context can set ``SANDBOX_MCP_GROUPS`` to a comma-separated
+    allowlist before starting the server.
+    """
+    selected = set(group_ids) if group_ids is not None else set(BUILTIN_TOOL_GROUPS)
+    unknown = selected.difference(BUILTIN_TOOL_GROUPS)
+    if unknown:
+        raise ValueError(f"unknown MCP tool group(s): {', '.join(sorted(unknown))}")
     registry = ToolGroupRegistry()
     for order, group_id in enumerate(BUILTIN_TOOL_GROUPS):
+        if group_id not in selected:
+            continue
         dependencies = _EXPLICIT_GROUP_DEPENDENCIES.get(group_id, ("app",))
         register = (_explicit_group(group_id)
                     if group_id in _EXPLICIT_GROUP_DEPENDENCIES

@@ -15,7 +15,7 @@ from app import _log_path, _project_instance, _require_project_capability, _safe
 
 
 @mcp.tool()
-def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str, label: str | None = None) -> dict:
+def tail_log(lines: int = 50, file: str = "debug", *, project_dir: str, label: str | None = None) -> dict:
     """Tail a log for the project's instance.
 
     file: 'debug' (default → wp-content/debug.log), 'dump' (dump()/dd() output →
@@ -40,13 +40,14 @@ def tail_log(lines: int = 100, file: str = "debug", *, project_dir: str, label: 
     try:
         data = log_path.read_bytes()
         text = data.decode("utf-8", errors="replace")
+        lines = max(1, min(lines, 200))
         return {"ok": True, "lines": text.splitlines()[-lines:],
                 "path": str(log_path)}
     except OSError as e:
         return {"ok": False, "error": str(e)}
 
 @mcp.tool()
-def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str, label: str | None = None) -> dict:
+def fs_read(path: str, max_bytes: int = 100_000, *, project_dir: str, label: str | None = None) -> dict:
     """Read a file under the project instance's WordPress install.
 
     path is relative to the WP root — e.g. 'wp-content/themes/my-theme/style.css'.
@@ -67,6 +68,7 @@ def fs_read(path: str, max_bytes: int = 200_000, *, project_dir: str, label: str
         return {"ok": False, "error": f"not found: {path}"}
     if not target.is_file():
         return {"ok": False, "error": f"not a file: {path}"}
+    max_bytes = max(1, min(max_bytes, 200_000))
     data = target.read_bytes()[:max_bytes]
     try:
         return {"ok": True, "path": str(target.relative_to(wp_root)),

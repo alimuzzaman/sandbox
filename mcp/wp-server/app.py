@@ -336,41 +336,11 @@ def _admin_creds() -> tuple[str, str]:
     rt = (_load_sandbox_yml().get("runtime") or {}).get("admin") or {}
     return rt.get("user", "admin"), rt.get("password", "admin")
 
-SANDBOX_INSTRUCTIONS = """You're connected to the WPDeveloper Sandbox — a per-project runtime driven by MCP tools (ensure_instance, instance_status, instance_logs, instance_exec, wp_cli, wp_rest, db_query, tail_log, run_tests, visit, fs_read, ...).
+SANDBOX_INSTRUCTIONS = """Sandbox runtime tools are available.
 
-PROJECT HANDSHAKE — this is mandatory:
-- Every tool takes `project_dir`. ALWAYS pass your current working directory (or the plugin's project root if you can determine it — the dir holding sandbox.config.* / .wp-env.json / .git). The server is a separate process; it cannot see your cd, so it relies on this.
-- Before using any stack tool, call `ensure_instance(project_dir=...)`. It returns the instance + URL, booting one on demand if needed (may take ~1 min the first time). Other tools error with "call ensure_instance first" until then.
-- Generic PHP, JavaScript/Node, Docker-native, Laravel/Sail, Astro, and similar projects use the framework-neutral Compose adapter. Use `instance_status`, `instance_logs`, and `instance_exec` for them; WordPress-only tools fail closed before side effects.
-- One project directory ↔ one-or-more instances (per worktree) — a root normally has exactly one (unchanged behavior); pass `label=` to target or mint an ADDITIONAL instance of the same root (e.g. 'qa', 'php81') for side-by-side testing. Omit `label` for the default/sole instance. focus_get(project_dir) returns the project's plugin + its CLAUDE.md.
+Pass the target project root as `project_dir`. Call `ensure_instance(project_dir=...)` before instance-scoped tools; use `label` only for an additional instance. Use MCP for live runtime evidence and `./sb` for routine CLI work.
 
-ACTIVATION: engage when the user wants to run/test a plugin, names a WPDeveloper plugin, or hits a WP error / stack trace / wp-admin issue. Stay quiet on non-WP work.
-
-ADMIN ACCESS: the sandbox WP is yours — full admin via wp_cli (in-container), wp_rest (app pw), visit (auto-login on wp-admin). Creds pre-wired; never ask.
-
-REFLEXES when engaged:
-- Bug / error / stack trace / "doesn't work" → first call ensure_instance, then REPRODUCE on the live stack. Lightest tool: PHP/REST/SQL/cron → wp_cli/wp_rest/db_query/tail_log; browser-rendered → visit; tests → run_tests. Can't reproduce → BLOCKED.
-- Any WP action → MCP tool, never raw bash / docker / curl / mysql.
-- About to mutate DB / migrate / touch licensing → snapshot first.
-- About to commit / push / tag / open PR → STOP, wait for user.
-
-DEEPER CONTEXT: load_context (full guide); load_skill(name) for fix/bug-repro/snapshot/wp-debug/wp-pilot; load_workflow('build-feature') for new features.
-
-CONFIG KEYS (sandbox.config.json / sandbox.config.override.json):
-- plugins: install + activate (slugs, zip URLs, or "." for project root)
-- mappings: mount as symlink + activate (wp-path → host path; "." resolved relative to project root)
-- mappings_inactive: mount as symlink but do NOT activate — use for pro plugins that FSI/imports should activate on demand
-- user-global layer: $SANDBOX_HOME/config.json (default ~/sandbox/config.json) applies to EVERY project (under the project: project wins scalars, lists/dicts union). Declare a shared Pro plugin once as mappings_inactive there; absolute/~ host paths only.
-
-MACHINE-STATE BASE (spec 009): all generated state + per-machine config/secrets live under one base $SANDBOX_HOME (default ~/sandbox), NOT in the repo. CLI + this server resolve the same base. `./sb migrate --apply` relocates a pre-009 in-repo setup; `./sb home <dir>` moves the base. Until migrated, a fallback reads the old in-repo locations so nothing breaks.
-
-ANTI-PATTERNS — catch yourself:
-- "FIXED" from code reading. Only live MCP calls count as evidence.
-- Bug-fix slicing (edit, test, edit, test) — use load_skill('fix'): read all, batch edits, verify once.
-- Bash where an MCP tool exists.
-- 3 clarifying questions — pick likeliest interpretation, work, flag the assumption.
-
-Output: terse, evidence-first, no "I'll now do X" preamble, code refs as markdown links.
+Detailed operating rules are available on demand through `load_context`, `load_skill`, and `load_workflow`. Keep responses bounded and request detail only when needed.
 """
 
 mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)

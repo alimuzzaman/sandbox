@@ -281,6 +281,15 @@ def run(args: argparse.Namespace) -> int:
     ):
         failed = True
 
+    # Keep browser evidence useful without allowing noisy pages to flood the
+    # MCP conversation. Failure detection above intentionally runs on the full
+    # collections; only the serialized report is bounded.
+    for key in ("iframes", "console", "network_failures", "errors"):
+        values = report[key]
+        if len(values) > 100:
+            report[key] = values[:100]
+            report[f"{key}_truncated"] = True
+
     json.dump(report, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 1 if failed else 0

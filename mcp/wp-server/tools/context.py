@@ -15,7 +15,7 @@ from app import (SANDBOX_CLAUDE_MD, SANDBOX_ROOT, SANDBOX_SKILLS_DIR, SANDBOX_WO
 
 
 @mcp.tool()
-def focus_get(project_dir: str, include_claude_md: bool = True,
+def focus_get(project_dir: str, include_claude_md: bool = False,
               max_bytes: int = 16_000, label: str | None = None) -> dict:
     """Return the project's instance + focused plugin, its CLAUDE.md, and any
     skill packs it ships (so Claude can read them on demand).

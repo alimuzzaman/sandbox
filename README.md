@@ -293,10 +293,10 @@ and resolves the target instance from the registry — booting one if needed.
 | `tail_log` | Tail `wp-content/debug.log` |
 | `fs_read` / `fs_write` / `fs_list` | Read/write files under the instance's WP dir |
 | `mail_list` / `mail_get` | Read Mailpit (test SMTP inbox) |
-| `focus_get` | The project's focused plugin + its `CLAUDE.md` |
+| `focus_get` | The project's focused plugin and available skills; pass `include_claude_md=true` when the project guide is needed |
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins |
 | `import_content` | Import a WXR XML from `runtime/seeds/` |
-| `load_context` | Pull the full sandbox `CLAUDE.md` on demand (the compact summary ships automatically) |
+| `load_context` | Pull the full sandbox `CLAUDE.md` on demand |
 | `load_skill` | Pull a skill (`fix`, `bug-repro`, `snapshot`, `wp-debug`, `wp-pilot`, `fluentboards`) |
 | `load_workflow` | Pull a workflow (`build-feature`) |
 

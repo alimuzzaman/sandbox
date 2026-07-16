@@ -57,7 +57,12 @@ class _HermesCommandAdapter:
         return _run_hermes_command(arguments, timeout)
 
 
-built_in_tool_registry().compose(mcp, ToolDependencies({
+_group_filter = os.environ.get("SANDBOX_MCP_GROUPS", "").strip()
+_selected_groups = (
+    tuple(part.strip() for part in _group_filter.split(",") if part.strip())
+    if _group_filter else None
+)
+built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "app": mcp,
     "sandbox_root": SANDBOX_ROOT,
     "proxy_tld": PROXY_TLD,

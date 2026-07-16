@@ -2,6 +2,20 @@
 
 Exposes the Sandbox WordPress runtime to any MCP-speaking LLM.
 
+The MCP startup instructions are intentionally compact. Use `./sb` for routine
+setup, status, configuration, and tests; use MCP for live runtime evidence such
+as authenticated REST, browser inspection, database access, and instance logs.
+Load the full operating guide or a focused skill only when the task requires it.
+Log and file reads are bounded by default; request a larger explicit limit only
+when omitted content is relevant.
+Browser reports also cap repetitive iframe, console, network, and error entries
+at 100 items while preserving failure detection and a truncation flag.
+
+For a smaller MCP tool catalog, set `SANDBOX_MCP_GROUPS` before starting the
+server, for example `instances,runtime,wp,net,data,fs,context`. Omitting it
+preserves the complete catalog. The available groups are listed in
+`mcp/wp-server/tools/manifest.py`.
+
 ## Tools
 
 | Tool | Purpose |

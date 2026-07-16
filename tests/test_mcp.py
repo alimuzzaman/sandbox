@@ -19,7 +19,10 @@ _PROBE = """
 import os, asyncio, json, subprocess
 os.environ.setdefault("SANDBOX_ROOT", os.getcwd() + "/../..")
 import server                      # thin entry: imports app + all tools.* groups
-from app import mcp
+from app import SANDBOX_INSTRUCTIONS, mcp
+import inspect
+from tools.context import focus_get
+from tools.fs import fs_read, tail_log
 async def go():
     tools = await mcp.list_tools()
     return len(tools), len(await mcp.list_prompts()), {tool.name for tool in tools}
@@ -31,6 +34,10 @@ print("SCHEMA", json.dumps([
 ], sort_keys=True))
 print("TOOLS", t)
 print("PROMPTS", p)
+print("INSTRUCTIONS", len(SANDBOX_INSTRUCTIONS))
+print("FOCUS_DEFAULT_INCLUDE", inspect.signature(focus_get).parameters["include_claude_md"].default)
+print("OUTPUT_DEFAULTS", inspect.signature(tail_log).parameters["lines"].default,
+      inspect.signature(fs_read).parameters["max_bytes"].default)
 print("HERMES", int({
     'hermes_status', 'hermes_run', 'hermes_job_status', 'hermes_job_kill',
     'hermes_cron_list', 'hermes_cron_validate', 'hermes_cron_create',
@@ -209,6 +216,16 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertGreaterEqual(int(out["TOOLS"]), 26, r.stdout)
         self.assertGreaterEqual(int(out["PROMPTS"]), 8, r.stdout)
         self.assertEqual(out.get("HERMES"), "1", r.stdout)
+
+        instructions = next(line for line in r.stdout.splitlines()
+                            if line.startswith("INSTRUCTIONS "))
+        self.assertLessEqual(int(instructions.split()[1]), 1000, r.stdout)
+        focus_default = next(line for line in r.stdout.splitlines()
+                             if line.startswith("FOCUS_DEFAULT_INCLUDE "))
+        self.assertEqual(focus_default, "FOCUS_DEFAULT_INCLUDE False")
+        output_defaults = next(line for line in r.stdout.splitlines()
+                              if line.startswith("OUTPUT_DEFAULTS "))
+        self.assertEqual(output_defaults, "OUTPUT_DEFAULTS 50 100000")
 
         invalid = next(line for line in r.stdout.splitlines()
                        if line.startswith("TEST_MODE_INVALID "))

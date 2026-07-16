@@ -47,6 +47,13 @@ class TestMcpComposition(unittest.TestCase):
         self.assertEqual(built_in_tool_registry().group_ids(), expected)
         self.assertIn("recovery", BUILTIN_TOOL_GROUPS)
 
+    def test_builtin_group_manifest_supports_an_opt_in_small_catalog(self):
+        from tools.manifest import built_in_tool_registry
+        selected = ("instances", "runtime", "wp", "net", "data", "fs", "context")
+        self.assertEqual(built_in_tool_registry(selected).group_ids(), selected)
+        with self.assertRaisesRegex(ValueError, "unknown MCP tool group"):
+            built_in_tool_registry(("instances", "missing"))
+
     def test_builtin_groups_declare_a_compatibility_registration_boundary(self):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 

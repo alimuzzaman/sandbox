@@ -251,11 +251,16 @@ Hermes and its dashboard companion now use typed authorization-state validation,
 local/remote writes, compare-and-swap guards, transactional prompt/state ordering, rollback-safe
 expiry, and guarded template requests. Dashboard approval bodies and cron inputs fail closed.
 
+The final recovery-adapter pass now rejects malformed rclone listing payloads, control characters
+in destinations and object keys, non-regular or empty downloaded objects, and malformed fixture
+artifact maps/manifests. These checks preserve stable recovery errors and prevent untrusted remote
+or fixture data from being silently treated as an empty or valid recovery set.
+
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 748 tests in 42.692s — OK (skipped=1)
+Ran 755 tests in 42.959s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

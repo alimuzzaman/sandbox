@@ -17,7 +17,7 @@
 2. Run a pure-unit fixture:
 
    ```sh
-   ./sb test unit --project-dir /path/to/fixture
+   ./sb test --project-dir /path/to/fixture unit
    ```
 
    Expected: PHPUnit runs without WordPress suite provisioning, test DB creation,
@@ -26,7 +26,7 @@
 ## Integration mode
 
 ```sh
-./sb test integration --project-dir /path/to/wordpress-project
+./sb test --project-dir /path/to/wordpress-project integration -- --testsuite integration
 ```
 
 Expected: existing external WordPress suite, polyfills, isolated `wp_tests` database,
@@ -36,7 +36,7 @@ and PHPUnit behavior remain in use.
 
 ```sh
 ./sb test --project-dir /path/to/project
-./sb test unit --project-dir /path/to/project
+./sb test --project-dir /path/to/project unit
 ```
 
 The explicit mode wins over `tests.suite`; auto selects unit only for an unambiguous

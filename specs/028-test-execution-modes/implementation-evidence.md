@@ -28,3 +28,14 @@
 The full suite emits expected negative-path diagnostics and one existing urllib
 `ResourceWarning`; the process exits successfully. No production capture, restore,
 deletion, deployment, or external mutation was performed.
+
+## Follow-up live acceptance — 2026-07-16
+
+- MCP-first `run_tests` against `templately-modular-rewrite` was attempted but the
+  already-running MCP process still returned its pre-restart `No module named 'sandbox'`
+  import failure; the CLI fallback was used after that diagnostic.
+- `./sb test --project-dir /Users/alim/Sites/git/templately-modular-rewrite integration -- --testsuite integration`
+  provisioned the cached WordPress 7.0 suite, PHPUnit 9.6.34, polyfills, and isolated
+  `wp_tests` database, then ran 101 integration tests with 349 assertions.
+- The harness path completed; two existing Templately Theme Builder behavior tests failed.
+  No Sandbox harness error, source edit, composer change, or baseline update occurred.

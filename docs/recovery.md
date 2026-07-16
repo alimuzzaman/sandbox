@@ -89,6 +89,8 @@ The GnuPG passphrase descriptor handoff handles partial pipe writes and fails cl
 non-progressing descriptor, without placing the passphrase in argv or process output.
 Ciphertext verification also requires the plaintext digest to remain stable before and after
 decryption, preventing a source rewrite from being reported as a valid verification.
+GnuPG outputs are created with exclusive owner-only pending files; stale pending paths are
+rejected rather than overwritten, and successful outputs remain mode `0600`.
 
 Retention planning now inventories the configured destination, verifies each complete manifest
 and ciphertext binding, and tests decryption with the current inherited crypto channel before

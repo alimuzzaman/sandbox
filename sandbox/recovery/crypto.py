@@ -56,17 +56,33 @@ class GpgCrypto:
                 os.close(write_fd)
             os.close(read_fd)
 
+    @staticmethod
+    def _create_pending(path: Path) -> None:
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise RecoveryError("pending recovery output already exists", "pending_output_exists") from exc
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+
     def encrypt_file(self, plaintext: str | Path, ciphertext: str | Path) -> Path:
         source, target = Path(plaintext), Path(ciphertext)
         target.parent.mkdir(parents=True, exist_ok=True)
         pending = target.with_name(target.name + ".pending")
+        created = False
         try:
+            self._create_pending(pending); created = True
             self._run(["--symmetric", "--cipher-algo", "AES256"], input_path=source, output_path=pending)
-            if not pending.exists() or not pending.stat().st_size:
+            os.chmod(pending, 0o600)
+            if not pending.stat().st_size:
                 raise RecoveryError("ciphertext is empty", "gpg_failed")
             pending.replace(target)
+            os.chmod(target, 0o600)
         except BaseException:
-            pending.unlink(missing_ok=True)
+            if created:
+                pending.unlink(missing_ok=True)
             raise
         return target
 
@@ -74,13 +90,18 @@ class GpgCrypto:
         source, target = Path(ciphertext), Path(plaintext)
         target.parent.mkdir(parents=True, exist_ok=True)
         pending = target.with_name(target.name + ".pending")
+        created = False
         try:
+            self._create_pending(pending); created = True
             self._run(["--decrypt"], input_path=source, output_path=pending)
-            if not pending.exists():
+            os.chmod(pending, 0o600)
+            if not pending.stat().st_size:
                 raise RecoveryError("decrypted plaintext is absent", "gpg_failed")
             pending.replace(target)
+            os.chmod(target, 0o600)
         except BaseException:
-            pending.unlink(missing_ok=True)
+            if created:
+                pending.unlink(missing_ok=True)
             raise
         return target
 

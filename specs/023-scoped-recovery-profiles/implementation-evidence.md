@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 784 tests in 41.651s — OK (skipped=1)
+Ran 786 tests in 43.026s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -323,6 +323,9 @@ instead of re-reading the source after the mutation check.
 
 GnuPG decrypt-and-hash verification now compares stable plaintext digests before and after the
 decrypt check, rejecting source mutation rather than returning a second unbound digest.
+
+GnuPG encryption/decryption now uses exclusive `0600` pending outputs, rejects stale pending
+paths without deleting them, and enforces owner-only mode on committed outputs.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

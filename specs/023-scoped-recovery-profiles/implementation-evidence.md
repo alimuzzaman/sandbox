@@ -257,6 +257,7 @@ Current verification:
 ./.cli-venv/bin/python -m unittest discover -s tests -q
 Ran 748 tests in 42.692s — OK (skipped=1)
 ./sb selftest
+✓ selftest: passed
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

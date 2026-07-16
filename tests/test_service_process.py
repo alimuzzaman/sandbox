@@ -39,6 +39,20 @@ class TestBoundedProcessRunner(unittest.TestCase):
         with self.assertRaises(ValueError):
             BoundedProcessRunner(secret_values=(123,))
 
+    def test_run_rejects_unsafe_arguments_environment_and_timeout(self):
+        runner = BoundedProcessRunner()
+        invalid_calls = (
+            (("echo", "bad\x00arg"), {}, None),
+            (("echo",), {"BAD\x00KEY": "value"}, None),
+            (("echo",), {"BAD": "bad\x00value"}, None),
+            (("echo",), {}, float("nan")),
+            (("echo",), {}, -1),
+            (("echo",), {}, True),
+        )
+        for argv, env, timeout in invalid_calls:
+            with self.subTest(argv=argv, env=env, timeout=timeout), self.assertRaises(ValueError):
+                runner.run(argv, env=env, timeout=timeout)
+
 
 if __name__ == "__main__":
     unittest.main()

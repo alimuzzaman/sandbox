@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Mapping, Protocol, Sequence
 import os
 import subprocess
@@ -42,7 +43,20 @@ class BoundedProcessRunner:
             timeout: float | None = None) -> ProcessResult:
         if isinstance(argv, (str, bytes)) or not argv:
             raise ValueError("argv must be a non-empty argument sequence")
-        command = tuple(str(item) for item in argv)
+        if (not all(isinstance(item, str) and "\x00" not in item for item in argv)
+                or not argv[0]):
+            raise ValueError("argv must contain non-empty NUL-free strings")
+        if (timeout is not None and
+                (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
+                 not math.isfinite(timeout) or timeout < 0)):
+            raise ValueError("timeout must be a finite non-negative number")
+        if env is not None:
+            if not isinstance(env, Mapping) or not all(
+                    isinstance(key, str) and key and "\x00" not in key and
+                    isinstance(value, str) and "\x00" not in value
+                    for key, value in env.items()):
+                raise ValueError("env must contain NUL-free string keys and values")
+        command = tuple(argv)
         try:
             result = subprocess.run(
                 command, cwd=cwd, env={**os.environ, **dict(env or {})},

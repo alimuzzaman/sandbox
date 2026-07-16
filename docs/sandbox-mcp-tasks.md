@@ -236,8 +236,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - **Bonus fix landed here:** `instance delete` now also drops the project→instance registry
   entry (`registry_remove`) — previously a stale "ready" record survived a delete.
 - **Still open:** booting nginx/litespeed pinned instances was verified only via deterministic
-  image-string generation (the apache acceptance path booted for real); a no-WP Brain/Monkey
-  fast path for `tests` is still TODO (carried from T1.3/T1.4).
+  image-string generation (the apache acceptance path booted for real). The no-WP
+  Brain/Monkey fast path for `tests` is implemented and covered by
+  `specs/028-test-execution-modes/`; external-plugin acceptance remains a separate gate.
 - **Files:** `sb` (`resolve_instances`, `_web_image`/`_cli_image`, the `_web_*` builders,
   `ensure_instance`, `cmd_install`, `cmd_instance` delete).
 - **Do:** `phpVersion`/`wpVersion`/`core` resolve to the image tag

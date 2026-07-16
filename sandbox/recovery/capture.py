@@ -23,9 +23,20 @@ class CaptureCoordinator:
     def __init__(self, crypto, drive) -> None:
         self.crypto, self.drive = crypto, drive
 
+    @staticmethod
+    def _validate_artifacts(artifacts: object) -> dict[str, bytes]:
+        if not isinstance(artifacts, dict) or not artifacts:
+            raise RecoveryError("recovery set has no artifacts", "empty_set")
+        for name, value in artifacts.items():
+            if (not isinstance(name, str) or not name or name.startswith("/") or
+                    ".." in Path(name).parts or any(ord(char) < 32 or ord(char) == 127 for char in name) or
+                    not isinstance(value, bytes) or not value):
+                raise RecoveryError("recovery artifact is invalid", "invalid_artifact")
+        return artifacts
+
     def publish(self, set_id: str, artifacts: dict[str, bytes]) -> dict:
         if not _valid_set_id(set_id): raise RecoveryError("recovery set id is invalid", "invalid_set_id")
-        if not artifacts: raise RecoveryError("recovery set has no artifacts", "empty_set")
+        artifacts = self._validate_artifacts(artifacts)
         payload = b"".join(name.encode() + b"\0" + value for name, value in sorted(artifacts.items()))
         ciphertext = self.crypto.encrypt(payload); cipher_key = f"sets/{set_id}/archive.bin"
         self.drive.put(cipher_key, ciphertext)
@@ -38,10 +49,14 @@ class CaptureCoordinator:
         return manifest
 
     def verify(self, set_id: str) -> bool:
-        manifest = json.loads(self.drive.get(f"sets/{set_id}/manifest.json"))
-        cipher = self.drive.get(manifest["ciphertext_object"])
-        return (manifest.get("status") == "complete" and hashlib.sha256(cipher).hexdigest() == manifest["ciphertext_sha256"]
-                and len(cipher) == manifest["ciphertext_size"])
+        if not _valid_set_id(set_id):
+            return False
+        try:
+            from .restore import verify_manifest
+            verify_manifest(self.drive, set_id)
+        except (KeyError, TypeError, ValueError, RecoveryError):
+            return False
+        return True
 
 
 class StagingCaptureCoordinator:

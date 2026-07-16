@@ -33,6 +33,19 @@ class TestRecoveryCapture(unittest.TestCase):
             coordinator.publish("set-1", {"artifact.txt": b"payload"})
         self.assertNotIn("sets/set-1/manifest.json", drive.objects)
 
+    def test_capture_rejects_malformed_artifacts_with_stable_error(self):
+        coordinator = CaptureCoordinator(FixtureCrypto(), MemoryDrive())
+        for artifacts in ({"artifact": b""}, {"../outside": b"payload"}, {"artifact": "payload"}, None):
+            with self.subTest(artifacts=artifacts):
+                with self.assertRaisesRegex(RecoveryError, "artifact|artifacts"):
+                    coordinator.publish("set-1", artifacts)
+
+    def test_capture_verify_returns_false_for_malformed_manifest(self):
+        drive = MemoryDrive()
+        drive.put("sets/set-1/manifest.json", b"not-json")
+        self.assertFalse(CaptureCoordinator(FixtureCrypto(), drive).verify("set-1"))
+        self.assertFalse(CaptureCoordinator(FixtureCrypto(), drive).verify("../outside"))
+
     def test_existing_complete_set_is_never_overwritten_by_retry(self):
         drive = MemoryDrive(); coordinator = CaptureCoordinator(FixtureCrypto(), drive)
         coordinator.publish("set-1", {"artifact.txt": b"payload"})

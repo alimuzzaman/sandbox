@@ -71,11 +71,17 @@ def apply_retention(plan: RetentionPlan, delete, *, confirm: bool = False,
                     fresh_candidates: tuple[str, ...] | None = None) -> dict:
     if not confirm:
         raise RecoveryError("retention deletion requires explicit confirmation", "confirmation_required")
-    if fresh_candidates is not None and tuple(fresh_candidates) != plan.candidates:
-        raise RecoveryError("retention candidates are stale", "stale_retention_plan")
-    if (not plan.destination_prefix.endswith("/") or ".." in plan.destination_prefix.split("/") or
-            not all(_valid_set_id(set_id) for set_id in plan.candidates)):
+    try:
+        destination_prefix = plan.destination_prefix
+        candidates = tuple(plan.candidates)
+    except (AttributeError, TypeError) as exc:
+        raise RecoveryError("retention plan is invalid", "invalid_retention_plan") from exc
+    if (not isinstance(destination_prefix, str) or
+            not destination_prefix.endswith("/") or ".." in destination_prefix.split("/") or
+            not all(_valid_set_id(set_id) for set_id in candidates)):
         raise RecoveryError("retention plan contains an unsafe candidate", "invalid_retention_plan")
-    for set_id in plan.candidates:
-        delete(f"{plan.destination_prefix}{set_id}")
-    return {"status": "deleted", "candidates": plan.candidates}
+    if fresh_candidates is not None and tuple(fresh_candidates) != candidates:
+        raise RecoveryError("retention candidates are stale", "stale_retention_plan")
+    for set_id in candidates:
+        delete(f"{destination_prefix}{set_id}")
+    return {"status": "deleted", "candidates": candidates}

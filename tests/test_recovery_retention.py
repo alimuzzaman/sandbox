@@ -56,3 +56,7 @@ class TestRecoveryRetention(unittest.TestCase):
         plan = type("Plan", (), {"destination_prefix": "sets/", "candidates": ("../outside",)})()
         with self.assertRaisesRegex(RecoveryError, "unsafe"):
             apply_retention(plan, lambda _path: self.fail("delete must not run"), confirm=True)
+
+    def test_retention_rejects_malformed_plan_with_stable_error(self):
+        with self.assertRaisesRegex(RecoveryError, "invalid"):
+            apply_retention(object(), lambda _path: self.fail("delete must not run"), confirm=True)

@@ -49,3 +49,5 @@ class TestRecoveryRetention(unittest.TestCase):
         self.assertEqual(plan.candidates, ())
         with self.assertRaises(RecoveryError): build_retention_plan("sets/", (), keep_count=0)
         with self.assertRaises(RecoveryError): build_retention_plan("sets/", (), minimum_age=timedelta(days=-1))
+        with self.assertRaisesRegex(RecoveryError, "metadata"):
+            build_retention_plan("sets/", ("legacy-id",))

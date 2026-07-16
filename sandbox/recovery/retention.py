@@ -10,7 +10,13 @@ from .models import RetentionPlan
 def _normalise(prefix: str, sets) -> tuple[dict, ...]:
     if not prefix or not prefix.endswith("/") or ".." in prefix.split("/"):
         raise RecoveryError("retention destination prefix is invalid", "invalid_retention_prefix")
-    return tuple(item for item in sets if isinstance(item, dict))
+    try:
+        observed = tuple(sets)
+    except TypeError as exc:
+        raise RecoveryError("retention inventory is invalid", "invalid_retention_inventory") from exc
+    if not all(isinstance(item, dict) for item in observed):
+        raise RecoveryError("retention inventory requires set metadata", "invalid_retention_inventory")
+    return observed
 
 
 def _created_at(item: dict) -> datetime | None:

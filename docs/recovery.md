@@ -123,6 +123,8 @@ and rollback steps; it never applies the plan. JSON remains the structured contr
 In-process callers can use `RecoveryService.restore_apply` with an explicit `RestorePlan` and
 adapter mapping; the service re-verifies the manifest first, requires confirmation, and never
 discovers a target. CLI/MCP apply remains separately protected until disposable adapters are wired.
+The matching `retention_apply` boundary requires a typed plan, a fresh candidate tuple, explicit
+confirmation, and a caller-owned delete adapter; it does not infer or perform deletion itself.
 
 The service rechecks that catalog/materialization boundary immediately before capture and
 rejects unknown profiles, missing profile selections, unresolved warnings, and empty artifact

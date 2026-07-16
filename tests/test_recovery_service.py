@@ -207,6 +207,19 @@ class TestRecoveryService(unittest.TestCase):
         invalid = service.restore_apply(object(), {}, confirm=True)
         self.assertEqual(invalid["error"]["code"], "invalid_restore_plan")
 
+    def test_retention_apply_requires_fresh_candidates_and_confirmation(self):
+        from sandbox.recovery.models import RetentionPlan
+        plan = RetentionPlan("sets/", ("new",), ("old",))
+        service = RecoveryService(RecoveryCatalog(1, ()), drive=MemoryDrive())
+        deleted = []
+        stale = service.retention_apply(plan, deleted.append, confirm=True)
+        self.assertEqual(stale["error"]["code"], "stale_retention_plan")
+        blocked = service.retention_apply(plan, deleted.append, fresh_candidates=("old",))
+        self.assertEqual(blocked["error"]["code"], "confirmation_required")
+        applied = service.retention_apply(plan, deleted.append, fresh_candidates=("old",), confirm=True)
+        self.assertTrue(applied["ok"])
+        self.assertEqual(deleted, ["sets/old"])
+
     def test_context_composes_capture_only_with_destination_and_secret_channel(self):
         from sandbox.recovery import context
         with patch.dict("os.environ", {

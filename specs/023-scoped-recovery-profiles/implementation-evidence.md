@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 793 tests in 43.451s — OK (skipped=1)
+Ran 794 tests in 42.743s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -343,6 +343,10 @@ RecoveryService now exposes an explicit in-process `restore_apply` boundary: it 
 typed plan and caller-owned adapters, re-verifies the remote manifest before confirmation-gated
 execution, and returns a stable envelope. CLI/MCP apply remains intentionally unconfigured for
 production targets.
+
+RecoveryService also exposes a typed `retention_apply` boundary requiring a fresh candidate tuple,
+explicit confirmation, and a caller-owned delete adapter; fixture coverage proves stale and
+unconfirmed requests perform no deletion.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

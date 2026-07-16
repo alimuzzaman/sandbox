@@ -297,3 +297,28 @@ class RecoveryService:
         return result(True, "restore", remote=remote, status=outcome["status"], data={
             "set_id": plan.set_id, "events": outcome["events"],
         })
+
+    def retention_apply(self, plan, delete, *, fresh_candidates: tuple[str, ...] | None = None,
+                        confirm: bool = False, remote: str | None = None) -> dict:
+        """Apply a reviewed retention plan only with a caller-supplied fresh candidate list."""
+        from .models import RetentionPlan
+        if not isinstance(plan, RetentionPlan):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "retention plan is invalid", "invalid_retention_plan"))
+        if fresh_candidates is None or not isinstance(fresh_candidates, tuple):
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "fresh retention candidates are required", "stale_retention_plan"))
+        if self.drive is None:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery Drive is not configured", "recovery_not_configured"))
+        try:
+            from .retention import apply_retention
+            outcome = apply_retention(plan, delete, confirm=confirm, fresh_candidates=fresh_candidates)
+        except RecoveryError as exc:
+            return result(False, "retention", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery retention apply failed", "retention_failed"))
+        return result(True, "retention", remote=remote, status=outcome["status"], data={
+            "candidates": outcome["candidates"], "requires_confirmation": False,
+        })

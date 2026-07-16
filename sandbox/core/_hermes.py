@@ -1230,7 +1230,7 @@ if SCOPE == "incremental":
         if previous_state.exists():
             previous_state.replace(state)
 
-_run(["tar", "--ignore-failed-read", "--absolute-names", "--listed-incremental", str(state),
+_run(["tar", "--absolute-names", "--listed-incremental", str(state),
       "--exclude", f"{HOME}/.hermes/hermes-agent",
       "--exclude", f"{HOME}/.hermes/hermes-agent.restore.*",
       "--exclude", f"{HOME}/.hermes/node",
@@ -1261,8 +1261,8 @@ manifest.write_text(json.dumps({
 
 _run(["rclone", "copyto", "--stats-one-line", "--stats=10s", str(cipher),
       f"{DESTINATION}/{BACKUP_ID}.tar.gz.gpg"], capture=True)
-_run(["rclone", "copyto", str(manifest), f"{DESTINATION}/{BACKUP_ID}.manifest.json"], capture=True)
 _run(["rclone", "copyto", str(state), f"{DESTINATION}/{BACKUP_ID}.state.snar"], capture=True)
+_run(["rclone", "copyto", str(manifest), f"{DESTINATION}/{BACKUP_ID}.manifest.json"], capture=True)
 
 print(f"scope={SCOPE}")
 print(f"chain_id={chain_id}")

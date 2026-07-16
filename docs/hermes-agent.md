@@ -69,6 +69,9 @@ upload. The passphrase travels over SSH standard input and is never persisted,
 logged, or sent to Drive. Keep it in a password manager: neither Drive nor the
 server can recover a lost passphrase. Restore is deliberately confirmation-gated
 and must first be exercised on a disposable replacement remote.
+Capture fails on unreadable archive inputs, and publication uploads the encrypted
+archive and incremental state before the manifest. The manifest is the final
+completion marker, so interrupted captures are not advertised as restorable.
 
 ## Trust boundary
 

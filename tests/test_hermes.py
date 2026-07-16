@@ -1400,6 +1400,12 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("str(fallback)", command)
         self.assertIn("ignore_errors=True", command)
         self.assertNotIn("passphrase=", command)
+        self.assertNotIn('"--ignore-failed-read"', command)
+        archive_upload = command.index('f"{DESTINATION}/{BACKUP_ID}.tar.gz.gpg"')
+        state_upload = command.index('f"{DESTINATION}/{BACKUP_ID}.state.snar"')
+        manifest_upload = command.index('f"{DESTINATION}/{BACKUP_ID}.manifest.json"')
+        self.assertLess(archive_upload, state_upload)
+        self.assertLess(state_upload, manifest_upload)
 
     def test_drive_restore_reinstates_github_auth_and_services(self):
         command = hermes._drive_restore_command(

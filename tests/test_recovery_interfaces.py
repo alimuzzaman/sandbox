@@ -71,3 +71,23 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("protected: new", output.getvalue())
         self.assertIn("candidates: old", output.getvalue())
         self.assertIn("unclassified: legacy (invalid_manifest)", output.getvalue())
+
+    def test_cli_list_human_output_shows_categorized_paths(self):
+        service = SimpleNamespace(list=lambda *args, **kwargs: {
+            "action": "list", "ok": True, "status": "listed", "data": {
+                "complete_manifests": ({"Path": "sets/new/manifest.json"},),
+                "incomplete": ({"Path": "sets/pending/archive.bin"},),
+                "legacy": ({"Path": "legacy.tar"},),
+                "unverifiable": ({"Path": "sets/broken/manifest.json"},),
+                "locally_pending": ({"Path": "/tmp/retry.archive.tar.gpg"},),
+            }
+        })
+        output = StringIO()
+        with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                redirect_stdout(output):
+            cmd_recovery(None, self._args("list", json=False))
+        rendered = output.getvalue()
+        self.assertIn("complete: 1", rendered)
+        self.assertIn("sets/pending/archive.bin", rendered)
+        self.assertIn("legacy.tar", rendered)
+        self.assertIn("/tmp/retry.archive.tar.gpg", rendered)

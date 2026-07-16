@@ -267,12 +267,14 @@ The remote inventory adapter now validates its complete JSON shape—including p
 containers, mounts, repositories, and warnings—before exposing the result to planning callers.
 RecoveryService callers now preserve the stable result envelope when an adapter raises a raw
 OS, type, or value error, using operation-specific failure codes rather than exposing exceptions.
+The human-readable recovery list surface now prints categorized counts and paths, while retaining
+the existing JSON envelope for automation and review tooling.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 762 tests in 43.580s — OK (skipped=1)
+Ran 763 tests in 42.762s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

@@ -27,6 +27,8 @@ sets, structurally legacy objects, and locally pending encrypted artifacts separ
 legacy pending key remains as a compatibility alias for incomplete remote objects.
 The read-only listing includes the configured destination root so legacy objects outside the
 new sets prefix are visible for review.
+Human-readable `sb recovery list` output prints each category and its paths; `--json` remains the
+stable machine-readable envelope.
 Complete-set listing also performs the same manifest/ciphertext hash and object-binding checks as
 verification, so a same-size tampered archive is classified as unverifiable rather than complete.
 Malformed manifest JSON values are rejected as stable invalid-manifest errors rather than escaping

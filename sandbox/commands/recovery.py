@@ -39,6 +39,16 @@ def _emit(payload: dict, as_json: bool) -> None:
     elif payload["action"] == "plan":
         for artifact in payload["data"]["artifacts"]:
             print(f"  {artifact['profile_id']}: {artifact['capture_mode']} ({artifact['rationale']})")
+    elif payload["action"] == "list":
+        data = payload.get("data") or {}
+        for label, key in (("complete", "complete_manifests"), ("incomplete", "incomplete"),
+                           ("legacy", "legacy"), ("unverifiable", "unverifiable"),
+                           ("locally pending", "locally_pending")):
+            entries = tuple(data.get(key) or ())
+            print(f"  {label}: {len(entries)}")
+            for item in entries:
+                if isinstance(item, dict):
+                    print(f"    {item.get('Path', '(unknown)')}")
     elif payload["action"] == "retention":
         data = payload.get("data") or {}
         protected = tuple(data.get("protected_sets") or ())

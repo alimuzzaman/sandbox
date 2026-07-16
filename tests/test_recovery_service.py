@@ -178,6 +178,35 @@ class TestRecoveryService(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["data"]["requires_confirmation"])
 
+    def test_restore_apply_reverifies_plan_and_uses_explicit_adapters(self):
+        drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-apply", {"artifact": b"payload"})
+        from sandbox.recovery.restore import build_restore_plan
+        plan = build_restore_plan(drive, "set-apply", ("fixture",))
+        events = []
+        class Adapter:
+            def checkpoint(self): events.append("checkpoint")
+            def quiesce(self): events.append("quiesce")
+            def stage(self): events.append("stage")
+            def swap(self): events.append("swap")
+            def import_(self): events.append("import")
+            def verify(self): events.append("verify")
+            def resume(self): events.append("resume")
+            def rollback(self): events.append("rollback")
+            def __getattr__(self, name):
+                if name == "import": return self.import_
+                raise AttributeError(name)
+        service = RecoveryService(RecoveryCatalog(1, ()), drive=drive)
+        blocked = service.restore_apply(plan, {"fixture": Adapter()})
+        self.assertEqual(blocked["error"]["code"], "confirmation_required")
+        applied = service.restore_apply(plan, {"fixture": Adapter()}, confirm=True)
+        self.assertTrue(applied["ok"])
+        self.assertEqual(events, ["checkpoint", "quiesce", "stage", "swap", "import", "verify", "resume"])
+
+    def test_restore_apply_rejects_stale_or_malformed_plan_before_adapter(self):
+        service = RecoveryService(RecoveryCatalog(1, ()), drive=MemoryDrive())
+        invalid = service.restore_apply(object(), {}, confirm=True)
+        self.assertEqual(invalid["error"]["code"], "invalid_restore_plan")
+
     def test_context_composes_capture_only_with_destination_and_secret_channel(self):
         from sandbox.recovery import context
         with patch.dict("os.environ", {

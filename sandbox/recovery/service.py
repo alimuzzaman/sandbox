@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
+from typing import Mapping
 
 from .catalog import RecoveryCatalog
 from .errors import RecoveryError, result
@@ -272,4 +273,27 @@ class RecoveryService:
             "set_id": plan.set_id, "profiles": plan.profiles, "actions": plan.actions,
             "checkpoints": plan.checkpoints, "rollback": plan.rollback,
             "requires_confirmation": plan.requires_confirmation,
+        })
+
+    def restore_apply(self, plan, adapters: Mapping[str, object], *, confirm: bool = False,
+                      remote: str | None = None) -> dict:
+        """Apply an explicit in-process restore plan; targets remain adapter-owned."""
+        from .models import RestorePlan
+        if not isinstance(plan, RestorePlan):
+            return result(False, "restore", remote=remote, error=RecoveryError(
+                "restore plan is invalid", "invalid_restore_plan"))
+        if self.drive is None:
+            return result(False, "restore", remote=remote, error=RecoveryError(
+                "recovery Drive is not configured", "recovery_not_configured"))
+        try:
+            from .restore import apply_restore, verify_manifest
+            verify_manifest(self.drive, plan.set_id)
+            outcome = apply_restore(plan, adapters, confirm=confirm)
+        except RecoveryError as exc:
+            return result(False, "restore", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "restore", remote=remote, error=RecoveryError(
+                "recovery restore apply failed", "restore_failed"))
+        return result(True, "restore", remote=remote, status=outcome["status"], data={
+            "set_id": plan.set_id, "events": outcome["events"],
         })

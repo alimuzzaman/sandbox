@@ -120,6 +120,9 @@ capture is considered ready.
 
 Human-readable restore planning prints the set, selected profiles, ordered actions, checkpoints,
 and rollback steps; it never applies the plan. JSON remains the structured contract.
+In-process callers can use `RecoveryService.restore_apply` with an explicit `RestorePlan` and
+adapter mapping; the service re-verifies the manifest first, requires confirmation, and never
+discovers a target. CLI/MCP apply remains separately protected until disposable adapters are wired.
 
 The service rechecks that catalog/materialization boundary immediately before capture and
 rejects unknown profiles, missing profile selections, unresolved warnings, and empty artifact

@@ -43,6 +43,13 @@ class TestDrive(unittest.TestCase):
         drive.list("")
         self.assertEqual(runner.calls[-1][0][2:], ("--recursive", "gdrive:recovery"))
 
+    def test_rclone_downloads_to_a_file_without_loading_object_in_adapter(self):
+        runner = RcloneRunner(); drive = RcloneDrive(runner, "gdrive:recovery")
+        with tempfile.TemporaryDirectory() as directory:
+            target = drive.get_file("sets/a/archive.bin", Path(directory) / "archive")
+            self.assertEqual(target.read_bytes(), b"payload")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
     def test_rclone_rejects_malformed_listing_payloads(self):
         class MalformedRunner(RcloneRunner):
             def __init__(self, payload):

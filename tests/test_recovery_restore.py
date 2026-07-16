@@ -7,7 +7,7 @@ from sandbox.recovery.capture import CaptureCoordinator
 from sandbox.recovery.crypto import FixtureCrypto
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
-from sandbox.recovery.restore import apply_restore, build_restore_plan
+from sandbox.recovery.restore import apply_restore, build_restore_plan, verify_manifest
 
 
 class TestRecoveryRestore(unittest.TestCase):
@@ -16,6 +16,18 @@ class TestRecoveryRestore(unittest.TestCase):
         plan = build_restore_plan(drive, "set-1", ("fixture",))
         self.assertTrue(plan.requires_confirmation)
         self.assertEqual(plan.checkpoints, ("checkpoint:fixture",))
+
+    def test_manifest_verification_uses_file_download_for_ciphertext(self):
+        class StreamingDrive(MemoryDrive):
+            def __init__(self):
+                super().__init__(); self.reject_ciphertext_get = False
+            def get(self, key):
+                if self.reject_ciphertext_get and key.endswith("archive.bin"):
+                    raise AssertionError("ciphertext must use get_file")
+                return super().get(key)
+        drive = StreamingDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("stream", {"a": b"b"})
+        drive.reject_ciphertext_get = True
+        self.assertEqual(verify_manifest(drive, "stream")["id"], "stream")
 
     def test_incomplete_manifest_is_rejected(self):
         drive = MemoryDrive(); drive.put("sets/set-1/manifest.json", b'{"schema_version": 1, "status": "incomplete"}')

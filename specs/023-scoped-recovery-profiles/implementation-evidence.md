@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 788 tests in 42.609s — OK (skipped=1)
+Ran 790 tests in 44.595s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -329,6 +329,10 @@ paths without deleting them, and enforces owner-only mode on committed outputs.
 
 Git bundle and patch artifacts now use owner-only temporary files and atomic replacement; failed
 bundle generation leaves neither a partial destination nor a pending temporary artifact.
+
+Drive adapters now expose file downloads for large objects. Manifest ciphertext verification and
+GnuPG retention checks use those temporary files and streaming hashes instead of loading a full
+recovery archive into process memory; the fixture suite proves the ciphertext path uses `get_file`.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

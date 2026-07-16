@@ -100,6 +100,8 @@ classifying candidates. Sets with an unavailable current passphrase or invalid t
 reported as unclassified instead of disappearing from the plan. It remains non-destructive;
 `--keep-count` and `--minimum-age-days` control the plan, while deletion remains separately
 protected.
+Large ciphertext verification and retention decryption use streamed file downloads when the
+Drive adapter supports them, avoiding whole-archive memory materialization.
 
 Read-only remote inventory also validates the complete response schema before returning it;
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.

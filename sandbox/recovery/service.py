@@ -179,20 +179,23 @@ class RecoveryService:
         if crypto is None:
             return False
         try:
-            ciphertext = self.drive.get(ciphertext_key)
-            decrypt = getattr(crypto, "decrypt", None)
-            if callable(decrypt):
-                decrypt(ciphertext)
-                return True
             decrypt_file = getattr(crypto, "decrypt_file", None)
-            if not callable(decrypt_file):
-                return False
             with tempfile.TemporaryDirectory(prefix="sandbox-recovery-retention-") as directory:
                 source = Path(directory) / "archive.gpg"
                 plaintext = Path(directory) / "archive"
-                source.write_bytes(ciphertext)
-                decrypt_file(source, plaintext)
-                return plaintext.is_file()
+                if callable(decrypt_file):
+                    get_file = getattr(self.drive, "get_file", None)
+                    if callable(get_file):
+                        get_file(ciphertext_key, source)
+                    else:
+                        source.write_bytes(self.drive.get(ciphertext_key))
+                    decrypt_file(source, plaintext)
+                    return plaintext.is_file()
+            decrypt = getattr(crypto, "decrypt", None)
+            if callable(decrypt):
+                decrypt(self.drive.get(ciphertext_key))
+                return True
+            return False
         except (OSError, RecoveryError, TypeError, ValueError):
             return False
 

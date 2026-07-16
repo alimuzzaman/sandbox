@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import tempfile
+import shutil
 from pathlib import Path
 
 from .errors import RecoveryError
@@ -70,12 +72,28 @@ class RcloneDrive:
         self._ok(self.runner.run(("rclone", "copyto", "--immutable", str(source), self._remote(key)), timeout=3600), "drive_upload_failed")
 
     def get(self, key: str) -> bytes:
-        remote = self._remote(key)
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-download-") as directory:
             target = Path(directory) / "object"
-            self._ok(self.runner.run(("rclone", "copyto", remote, str(target)), timeout=3600), "drive_download_failed")
-            self._downloaded_file(target)
+            self.get_file(key, target)
             return target.read_bytes()
+
+    def get_file(self, key: str, target: str | Path) -> Path:
+        remote = self._remote(key)
+        target = Path(target)
+        if target.is_symlink() or (target.exists() and not stat.S_ISREG(target.lstat().st_mode)):
+            raise RecoveryError("Drive download target is invalid", "invalid_download_target")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_directory = Path(tempfile.mkdtemp(prefix="sandbox-recovery-download-", dir=target.parent))
+        os.chmod(temporary_directory, 0o700)
+        temporary = temporary_directory / "object"
+        try:
+            self._ok(self.runner.run(("rclone", "copyto", remote, str(temporary)), timeout=3600), "drive_download_failed")
+            self._downloaded_file(temporary)
+            os.replace(temporary, target)
+            os.chmod(target, 0o600)
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+        return target
 
     def verify(self, key: str, payload: bytes) -> None:
         if hashlib.sha256(self.get(key)).digest() != hashlib.sha256(payload).digest():
@@ -125,6 +143,22 @@ class MemoryDrive:
     def get(self, key: str) -> bytes:
         try: return self.objects[key]
         except KeyError as exc: raise RecoveryError("recovery object is absent", "object_missing") from exc
+    def get_file(self, key: str, target: str | Path) -> Path:
+        target = Path(target)
+        if target.is_symlink() or (target.exists() and not stat.S_ISREG(target.lstat().st_mode)):
+            raise RecoveryError("Drive download target is invalid", "invalid_download_target")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = self.objects[key]
+        except KeyError as exc:
+            raise RecoveryError("recovery object is absent", "object_missing") from exc
+        temporary = target.with_name(target.name + ".pending")
+        if temporary.exists() or temporary.is_symlink():
+            raise RecoveryError("Drive download target is invalid", "invalid_download_target")
+        temporary.write_bytes(payload)
+        os.chmod(temporary, 0o600)
+        temporary.replace(target)
+        return target
     def verify(self, key: str, payload: bytes) -> None:
         if self.get(key) != payload: raise RecoveryError("Drive object hash does not match", "drive_verification_failed")
     def put_file(self, key: str, source: str | Path) -> None:

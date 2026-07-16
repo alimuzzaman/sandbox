@@ -37,6 +37,20 @@ def _valid_artifact_name(value: object) -> bool:
             not any(ord(char) < 32 or ord(char) == 127 for char in value))
 
 
+def _verify_remote_ciphertext(drive, key: str, digest: str, size: int) -> None:
+    with tempfile.TemporaryDirectory(prefix="sandbox-recovery-verify-") as directory:
+        target = Path(directory) / "ciphertext"
+        get_file = getattr(drive, "get_file", None)
+        if callable(get_file):
+            get_file(key, target)
+        else:
+            target.write_bytes(drive.get(key))
+        metadata = target.lstat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size or
+                sha256_file(target) != digest):
+            raise RecoveryError("recovery ciphertext does not match manifest", "ciphertext_verification_failed")
+
+
 def verify_manifest(drive, set_id: str) -> dict:
     try:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
@@ -77,10 +91,7 @@ def verify_manifest(drive, set_id: str) -> dict:
             names.append(name)
         if "plaintext_sha256" in manifest and not _valid_digest(manifest["plaintext_sha256"]):
             raise RecoveryError("recovery plaintext digest is invalid", "invalid_manifest")
-    ciphertext = drive.get(manifest["ciphertext_object"])
-    if not isinstance(ciphertext, bytes) or (len(ciphertext) != size or
-            hashlib.sha256(ciphertext).hexdigest() != digest):
-        raise RecoveryError("recovery ciphertext does not match manifest", "ciphertext_verification_failed")
+    _verify_remote_ciphertext(drive, manifest["ciphertext_object"], digest, size)
     return manifest
 
 

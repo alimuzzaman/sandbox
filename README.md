@@ -37,12 +37,13 @@ phpunit tests** — no central catalog, nothing to pre-register.
 > **Note:** This is a major rewrite to the per-project model hosted at
 > [`templately/sandbox`](https://github.com/templately/sandbox). Install:
 
-**Prerequisites:** Docker (running) · Python 3.9+ · Claude Code (or any
-MCP client). On a fresh machine, run the OS bootstrap script first:
+**Prerequisites:** A running Docker-compatible engine (Docker Desktop or
+OrbStack on macOS) · Python 3.9+ · Claude Code (or any MCP client). On a fresh
+machine, run the OS bootstrap script first:
 
 ```bash
 # macOS
-bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop → Reader.md
+bash scripts/install-macos.sh   # Homebrew → python3 → Docker Desktop/OrbStack → Reader.md
 
 # Ubuntu / Debian
 bash scripts/install-ubuntu.sh  # apt (python3+venv) → Docker CE

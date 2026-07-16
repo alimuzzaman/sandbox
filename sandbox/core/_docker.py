@@ -631,8 +631,8 @@ def _docker_preflight() -> int:
         problems += 1
         print("  ✗ docker not found in PATH")
         if pm == "brew":
-            print("      Docker Desktop installs the app; you then OPEN it once")
-            print("      (accept the license) before `docker` works.")
+            print("      Install Docker Desktop or OrbStack, then start it so the")
+            print("      Docker CLI and Compose plugin can reach its engine.")
             if _offer_install("Docker Desktop", "brew install --cask docker"):
                 print("      → now OPEN Docker Desktop once, then re-run `./sb setup`.")
         elif pm == "pacman":
@@ -669,10 +669,16 @@ def _docker_preflight() -> int:
                 print(f"        then re-run:  ./sb setup")
                 return problems
         problems += 1
-        print("  ✗ docker is installed but not running")
-        start_cmd = ("open -a Docker" if sys.platform == "darwin"
+        engine = "Docker"
+        if sys.platform == "darwin":
+            context = subprocess.run(["docker", "context", "show"],
+                                     capture_output=True, text=True)
+            if context.returncode == 0 and context.stdout.strip() == "orbstack":
+                engine = "OrbStack"
+        print(f"  ✗ docker is installed but {engine} is not running")
+        start_cmd = (f"open -a {engine}" if sys.platform == "darwin"
                      else "sudo systemctl start docker")
-        if _offer_install("Docker", start_cmd, verb="Start"):
+        if _offer_install(engine, start_cmd, verb="Start"):
             # Give the daemon a moment, then re-check so setup can continue.
             import time
             print("      waiting for the Docker daemon…")
@@ -694,8 +700,8 @@ def _docker_preflight() -> int:
     if r.returncode != 0:
         problems += 1
         print("  ✗ `docker compose` plugin not available")
-        print("      (it ships with Docker Desktop — usually means an old/CE")
-        print("       Docker without the v2 plugin)")
+        print("      (it ships with Docker Desktop and OrbStack; otherwise this")
+        print("       usually means an older Docker engine without the v2 plugin)")
         print("      → install Compose v2: https://docs.docker.com/compose/install/")
     else:
         print(f"  ✓ {r.stdout.strip()}")

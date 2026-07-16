@@ -2,6 +2,7 @@
 # Bootstrap Sandbox on macOS from zero.
 #
 # Installs (with your confirmation): Homebrew, python3, Docker Desktop.
+# OrbStack is also supported when it provides the active Docker context.
 # Installs Reader.md by default when Homebrew is available, unless explicitly
 # skipped. Then hands off to ./install.sh which runs `./sb setup`.
 #
@@ -55,16 +56,22 @@ else
     fi
 fi
 
-# --- Docker Desktop ---------------------------------------------------------
-step "3/4  Docker Desktop"
+# --- Docker-compatible engine ----------------------------------------------
+step "3/4  Docker-compatible engine"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     ok "Docker already running"
 elif command -v docker >/dev/null 2>&1; then
-    warn "docker found but daemon is not running — open Docker Desktop and try again."
+    ENGINE_NAME="Docker Desktop"
+    ENGINE_APP="Docker"
+    if [[ "$(docker context show 2>/dev/null || true)" == "orbstack" ]]; then
+        ENGINE_NAME="OrbStack"
+        ENGINE_APP="OrbStack"
+    fi
+    warn "docker found but daemon is not running — open $ENGINE_NAME and try again."
     warn "Then re-run this script or continue with:  ./install.sh"
-    open -a Docker 2>/dev/null || true
+    open -a "$ENGINE_APP" 2>/dev/null || true
 else
-    warn "Docker Desktop not found (https://www.docker.com/products/docker-desktop/)"
+    warn "No Docker-compatible engine found. Install Docker Desktop or OrbStack."
     if ask "Docker Desktop via Homebrew"; then
         brew install --cask docker
         printf '\n  %s→ Open Docker Desktop once to accept the license, then%s\n' "$Y" "$N"

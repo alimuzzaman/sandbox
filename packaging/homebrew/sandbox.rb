@@ -32,8 +32,8 @@ class Sandbox < Formula
 
   def caveats
     <<~EOS
-      sandbox drives Docker. Install Docker Desktop (or a compatible engine) and
-      start it before using the stack:
+      sandbox drives Docker. Install and start Docker Desktop, OrbStack, or another
+      Docker-compatible engine before using the stack:
         sandbox setup                       # one-time: build MCP venv, wire Claude
         cd your-plugin && sandbox init      # scaffold config, boot an instance
         sandbox test                        # run the plugin's phpunit tests

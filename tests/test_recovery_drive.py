@@ -42,6 +42,23 @@ class TestDrive(unittest.TestCase):
         drive.list("")
         self.assertEqual(runner.calls[-1][0][2:], ("--recursive", "gdrive:recovery"))
 
+    def test_rclone_rejects_malformed_listing_payloads(self):
+        class MalformedRunner(RcloneRunner):
+            def __init__(self, payload):
+                super().__init__()
+                self.payload = payload
+
+            def run(self, argv, **kwargs):
+                if argv[1] == "lsjson":
+                    return ProcessResult(tuple(argv), 0, self.payload, "")
+                return super().run(argv, **kwargs)
+
+        for payload in ('{"Path":"sets/a/manifest.json"}', '[{"Path":"sets/a"}, "bad"]'):
+            with self.subTest(payload=payload):
+                drive = RcloneDrive(MalformedRunner(payload), "gdrive:recovery")
+                with self.assertRaisesRegex(RecoveryError, "listing"):
+                    drive.list()
+
     def test_rclone_rejects_symlink_upload_sources_and_non_string_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); target = root / "target"; link = root / "link"

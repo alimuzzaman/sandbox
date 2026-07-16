@@ -91,7 +91,9 @@ class RcloneDrive:
             items = json.loads(result.stdout or "[]")
         except ValueError as exc:
             raise RecoveryError("Drive listing is invalid", "drive_list_failed") from exc
-        return tuple(item for item in items if isinstance(item, dict))
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise RecoveryError("Drive listing is invalid", "drive_list_failed")
+        return tuple(items)
 
 
 class MemoryDrive:

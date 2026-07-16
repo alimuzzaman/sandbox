@@ -25,6 +25,10 @@ class BoundedProcessRunner:
 
     def __init__(self, *, max_output: int = 1_048_576,
                  secret_values: Sequence[str] = ()) -> None:
+        if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output < 0:
+            raise ValueError("max_output must be a non-negative integer")
+        if not all(isinstance(value, str) for value in secret_values):
+            raise ValueError("secret_values must contain strings")
         self.max_output = max_output
         self._secrets = tuple(value for value in secret_values if value)
 

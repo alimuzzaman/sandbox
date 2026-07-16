@@ -31,6 +31,14 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertIn("timed out", result.stderr)
 
+    def test_constructor_rejects_invalid_bounds_and_secret_types(self):
+        with self.assertRaises(ValueError):
+            BoundedProcessRunner(max_output=-1)
+        with self.assertRaises(ValueError):
+            BoundedProcessRunner(max_output=True)
+        with self.assertRaises(ValueError):
+            BoundedProcessRunner(secret_values=(123,))
+
 
 if __name__ == "__main__":
     unittest.main()

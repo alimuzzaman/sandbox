@@ -605,6 +605,7 @@ class TestSchedulerReliability(unittest.TestCase):
     def test_cron_output_reads_only_latest_bounded_valid_job_output(self, require_remote, checked):
         checked.return_value = _completed(stdout=json.dumps({
             "found": True, "file": "2026-07-13.md", "output": "completed one task", "truncated": False,
+            "format_supported": True, "secret_like": False, "source": "saved-output",
         }))
         out = hermes.cron_output("test", "deadbeef1234", 50)
         self.assertEqual(out["status"], "available")
@@ -622,10 +623,20 @@ class TestSchedulerReliability(unittest.TestCase):
 
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_cron_output_rejects_malformed_response_shapes(self, require_remote, checked):
+        for payload in ([], {"found": "yes", "file": None, "output": "", "truncated": False}):
+            with self.subTest(payload=payload):
+                checked.return_value = _completed(stdout=json.dumps(payload))
+                with self.assertRaisesRegex(hermes.HermesError, "invalid") as caught:
+                    hermes.cron_output("test", "deadbeef1234", 50)
+                self.assertEqual(caught.exception.code, "invalid_cron_output")
+
+    @patch("sandbox.core._hermes._checked")
+    @patch("sandbox.core._hermes._require_remote", return_value={})
     def test_cron_output_reports_secret_like_saved_response_as_withheld(self, require_remote, checked):
         checked.return_value = _completed(stdout=json.dumps({
             "found": True, "file": "run.md", "output": "", "format_supported": True,
-            "secret_like": True, "truncated": False,
+            "secret_like": True, "source": "saved-output", "truncated": False,
         }))
         out = hermes.cron_output("test", "deadbeef1234", 50)
         self.assertEqual(out["status"], "withheld")

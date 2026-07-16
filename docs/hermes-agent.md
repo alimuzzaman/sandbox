@@ -154,6 +154,8 @@ local-file delivery rather than an external messaging destination.
 Malformed or incomplete cron state—including a missing `jobs` collection or
 non-object job records—is rejected as `invalid_cron_state`; it is never
 silently reduced to an empty scheduler inventory.
+Cron output responses likewise require the documented common fields and found-state metadata;
+wrong shapes return `invalid_cron_output` instead of being coerced into a status.
 
 The source of truth is `sandbox/hermes/cron-catalog.json`; its scripts live in
 `sandbox/hermes/cron_scripts/` and are installed by setup, update, restore, and

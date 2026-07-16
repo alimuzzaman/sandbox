@@ -1819,7 +1819,18 @@ print(json.dumps({"found": True, "file": path.name,
         data = json.loads(res.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise HermesError("Hermes cron output was invalid", "invalid_cron_output") from exc
-    data["output"] = _redact(str(data.get("output") or ""), entry)
+    required = {"found", "file", "output", "truncated"}
+    if (not isinstance(data, dict) or not required <= set(data) or
+            not isinstance(data["found"], bool) or
+            (data["file"] is not None and not isinstance(data["file"], str)) or
+            not isinstance(data["output"], str) or not isinstance(data["truncated"], bool)):
+        raise HermesError("Hermes cron output was invalid", "invalid_cron_output")
+    if data["found"] and (
+            not isinstance(data.get("format_supported"), bool) or
+            not isinstance(data.get("secret_like"), bool) or
+            not isinstance(data.get("source"), str)):
+        raise HermesError("Hermes cron output was invalid", "invalid_cron_output")
+    data["output"] = _redact(data["output"], entry)
     output_status = "never_run"
     if data.get("found"):
         output_status = "withheld" if data.get("secret_like") or not data.get("format_supported", True) else "available"

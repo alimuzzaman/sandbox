@@ -73,3 +73,26 @@ class TestDrive(unittest.TestCase):
                 drive.get("sets/a\0unsafe")
             with self.assertRaises(RecoveryError):
                 drive.get("sets/a\nunsafe")
+
+    def test_rclone_rejects_non_regular_download_targets(self):
+        class InvalidDownloadRunner(RcloneRunner):
+            def __init__(self, kind):
+                super().__init__()
+                self.kind = kind
+
+            def run(self, argv, **kwargs):
+                if argv[1] == "copyto" and str(argv[2]).startswith("gdrive:"):
+                    target = Path(argv[3])
+                    if self.kind == "directory":
+                        target.mkdir()
+                    else:
+                        source = target.with_name("source")
+                        source.write_bytes(b"payload")
+                        target.symlink_to(source)
+                return ProcessResult(tuple(argv), 0, "", "")
+
+        for kind in ("directory", "symlink"):
+            with self.subTest(kind=kind):
+                drive = RcloneDrive(InvalidDownloadRunner(kind), "gdrive:recovery")
+                with self.assertRaisesRegex(RecoveryError, "download is invalid"):
+                    drive.get("sets/a/archive.bin")

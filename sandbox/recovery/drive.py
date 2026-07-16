@@ -42,6 +42,15 @@ class RcloneDrive:
         if result.returncode != 0:
             raise RecoveryError("Drive operation failed", code)
 
+    @staticmethod
+    def _downloaded_file(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise RecoveryError("Drive object was not downloaded", "object_missing") from exc
+        if not stat.S_ISREG(metadata.st_mode) or not metadata.st_size:
+            raise RecoveryError("Drive object download is invalid", "invalid_download")
+
     def put(self, key: str, payload: bytes) -> None:
         remote = self._remote(key)
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-upload-") as directory:
@@ -65,8 +74,7 @@ class RcloneDrive:
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-download-") as directory:
             target = Path(directory) / "object"
             self._ok(self.runner.run(("rclone", "copyto", remote, str(target)), timeout=3600), "drive_download_failed")
-            if not target.exists():
-                raise RecoveryError("Drive object was not downloaded", "object_missing")
+            self._downloaded_file(target)
             return target.read_bytes()
 
     def verify(self, key: str, payload: bytes) -> None:
@@ -84,7 +92,8 @@ class RcloneDrive:
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-verify-") as directory:
             downloaded = Path(directory) / "object"
             self._ok(self.runner.run(("rclone", "copyto", self._remote(key), str(downloaded)), timeout=3600), "drive_download_failed")
-            if not downloaded.exists() or sha256_file(source) != sha256_file(downloaded):
+            self._downloaded_file(downloaded)
+            if sha256_file(source) != sha256_file(downloaded):
                 raise RecoveryError("Drive object hash does not match", "drive_verification_failed")
 
     def list(self, prefix: str = "sets") -> tuple[dict, ...]:

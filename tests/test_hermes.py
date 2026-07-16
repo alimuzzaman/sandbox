@@ -2408,6 +2408,7 @@ class TestLocalState(unittest.TestCase):
         self.assertIn("python3 -c", command)
         self.assertIn("trap 'rm -f", command)
         self.assertIn("os.fsync", command)
+        self.assertIn("elif test", command)
 
 
 if __name__ == "__main__":

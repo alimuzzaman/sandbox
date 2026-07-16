@@ -718,10 +718,13 @@ def _remote_state_write(entry: dict, paths: dict, state: dict, *, expected_diges
             "value=json.load(open(sys.argv[1])); "
             "print(hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest())"
         )
+        missing_digest = _state_digest(None)
         guard = (
             f"if test -f {target}; then actual=$(python3 -c {shlex.quote(digest_script)} {target}); "
             f"if test \"$actual\" != {shlex.quote(expected_digest)}; then "
-            "echo state_conflict >&2; exit 75; fi; fi; "
+            "echo state_conflict >&2; exit 75; fi; "
+            f"elif test {shlex.quote(expected_digest)} != {shlex.quote(missing_digest)}; then "
+            "echo state_conflict >&2; exit 75; fi; "
         )
     command = (
         f"mkdir -p {shlex.quote(paths['sandbox_home'] + '/runtime')}; "

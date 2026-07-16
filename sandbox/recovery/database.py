@@ -8,6 +8,7 @@ as an argument to this module.
 from __future__ import annotations
 
 from pathlib import Path
+import codecs
 import re
 import stat
 from typing import Mapping, Protocol, Sequence
@@ -73,14 +74,27 @@ class DatabaseCapture:
 
     @staticmethod
     def _validate_format(engine: str, target: Path) -> None:
-        payload = target.read_bytes()
         if engine == "postgresql":
-            if not payload.startswith(b"PGDMP"):
+            with target.open("rb") as handle:
+                signature = handle.read(5)
+            if signature != b"PGDMP":
                 raise RecoveryError("PostgreSQL dump format is invalid", "invalid_database_dump")
             return
+        if engine not in {"mariadb", "mysql"}:
+            raise RecoveryError("database engine is not supported", "unsupported_database")
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        found = False
+        carry = ""
         try:
-            text = payload.decode("utf-8")
+            with target.open("rb") as handle:
+                while chunk := handle.read(1_048_576):
+                    text = decoder.decode(chunk)
+                    window = carry + text
+                    found = found or bool(re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", window, re.IGNORECASE))
+                    carry = window[-32:]
+                tail = decoder.decode(b"", final=True)
+                found = found or bool(re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", carry + tail, re.IGNORECASE))
         except UnicodeDecodeError as exc:
             raise RecoveryError("SQL dump format is invalid", "invalid_database_dump") from exc
-        if not re.search(r"(?:CREATE|INSERT|SET|DROP|ALTER|/\*!|--|#)", text, re.IGNORECASE):
+        if not found:
             raise RecoveryError("SQL dump format is invalid", "invalid_database_dump")

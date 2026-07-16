@@ -6,6 +6,45 @@ import shlex
 from .errors import RecoveryError
 
 
+def _safe_text(value, *, allow_empty=True):
+    return (isinstance(value, str) and (allow_empty or bool(value))
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value))
+
+
+def _valid_mounts(value):
+    if not isinstance(value, dict):
+        return False
+    fields = {"type", "name", "destination", "rw"}
+    return all(
+        _safe_text(container, allow_empty=False)
+        and isinstance(records, list)
+        and all(
+            isinstance(record, dict)
+            and set(record) == fields
+            and all(_safe_text(record[field]) for field in fields - {"rw"})
+            and isinstance(record["rw"], bool)
+            for record in records
+        )
+        for container, records in value.items()
+    )
+
+
+def _valid_repositories(value):
+    if not isinstance(value, dict):
+        return False
+    fields = {"head", "branch", "dirty_count", "untracked_count"}
+    return all(
+        _safe_text(project, allow_empty=False)
+        and isinstance(record, dict)
+        and set(record) == fields
+        and _safe_text(record["head"])
+        and _safe_text(record["branch"])
+        and all(isinstance(record[field], int) and not isinstance(record[field], bool)
+                and record[field] >= -1 for field in ("dirty_count", "untracked_count"))
+        for project, record in value.items()
+    )
+
+
 class SandboxRemoteInventory:
     """Read-only discovery of Sandbox-managed hosting roots and service names."""
 
@@ -75,18 +114,17 @@ print(json.dumps({'host_projects': hosts, 'runtime_environments': runtimes,
             raise RecoveryError("remote inventory returned invalid data", "inventory_failed") from exc
         if (not isinstance(data, dict) or
                 not isinstance(data.get("host_projects"), list) or
-                not all(isinstance(item, str) for item in data["host_projects"]) or
+                not all(_safe_text(item, allow_empty=False) for item in data["host_projects"]) or
                 not isinstance(data.get("runtime_environments"), dict) or
-                not all(isinstance(value, list) and all(isinstance(item, str) for item in value)
-                        for value in data["runtime_environments"].values()) or
+                not all(_safe_text(project, allow_empty=False)
+                        and isinstance(value, list)
+                        and all(_safe_text(item, allow_empty=False) for item in value)
+                        for project, value in data["runtime_environments"].items()) or
                 not isinstance(data.get("managed_containers"), list) or
-                not all(isinstance(item, str) for item in data["managed_containers"]) or
-                not isinstance(data.get("mounts"), dict) or
-                not all(isinstance(value, list) and all(isinstance(item, dict) for item in value)
-                        for value in data["mounts"].values()) or
-                not isinstance(data.get("repositories"), dict) or
-                not all(isinstance(value, dict) for value in data["repositories"].values()) or
+                not all(_safe_text(item, allow_empty=False) for item in data["managed_containers"]) or
+                not _valid_mounts(data.get("mounts")) or
+                not _valid_repositories(data.get("repositories")) or
                 not isinstance(data.get("warnings"), list) or
-                not all(isinstance(item, str) for item in data["warnings"])):
+                not all(_safe_text(item, allow_empty=False) for item in data["warnings"])):
             raise RecoveryError("remote inventory returned invalid data", "inventory_failed")
         return {"sandbox_home": home, **data}

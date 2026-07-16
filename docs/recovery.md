@@ -107,7 +107,8 @@ protected.
 Large ciphertext verification and retention decryption use streamed file downloads when the
 Drive adapter supports them, avoiding whole-archive memory materialization.
 
-Read-only remote inventory also validates the complete response schema before returning it;
+Read-only remote inventory also validates the complete response schema—including typed mount and
+Git repository records, safe names, counters, and warning strings—before returning it;
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
 Drive object listings likewise require relative string paths and non-negative integer sizes;
 malformed remote metadata fails closed before set classification or retention planning.

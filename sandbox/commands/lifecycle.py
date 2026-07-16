@@ -17,7 +17,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sandbox.core import (
     BASE, HERD_DB_HOST, HERD_DB_PASSWORD, HERD_DB_PORT, HERD_DB_USER,
-    MCP_VENV, ROOT, SECRETS_ENV, _autologin_mu_plugin, _bridge_token_for,
+    MCP_DIR, MCP_VENV, ROOT, SECRETS_ENV, _autologin_mu_plugin, _bridge_token_for,
     _convert_multisite, _core, _ensure_bridge_server, _ensure_litespeed_htaccess,
     _ensure_proxy_up,
     _herd_db_name, _instance_reachable, _is_herd_instance, _local_yaml,
@@ -380,6 +380,28 @@ def wp_is_installed(instance: str) -> bool:
                    check=False, capture=True)
     return result.returncode == 0
 
+
+def _probe_mcp_server() -> tuple[bool, str]:
+    """Check the MCP server import boundary without starting a server."""
+    python = MCP_VENV / "bin" / "python"
+    if not python.exists():
+        return False, "MCP venv is missing"
+    probe = (
+        "import server; "
+        "from app import _require_project_capability; "
+        "_require_project_capability('/tmp/sandbox-doctor-probe', None, 'wordpress.cli')"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", probe], cwd=str(MCP_DIR),
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "import failed").strip()[:500]
+    return True, ""
+
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
@@ -482,6 +504,12 @@ def cmd_doctor(cfg, args) -> None:
               hint=f"rerun ./sb install --instance {inst} to refresh the password")
     check("wp-mcp venv built", (MCP_VENV / "bin" / "python").exists(),
           hint="./sb mcp-install")
+    mcp_ok, mcp_detail = _probe_mcp_server()
+    mcp_hint = "./sb mcp-install, then restart the MCP client"
+    if mcp_detail:
+        mcp_hint += f" ({mcp_detail})"
+    check("MCP server importable", mcp_ok,
+          hint=mcp_hint)
 
     print("\nState:")
     # Per-project model: the instance maps to a project root in the registry.

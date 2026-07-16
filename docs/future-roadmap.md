@@ -17,9 +17,11 @@ Green local evidence from the latest review pass:
 
 - `.cli-venv/bin/python -m unittest -q tests/test_plugin_check.py` passes.
 - Full suite: `/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests`
-  passed from this worktree: 829 tests, 1 skipped.
+  passed from this worktree: 832 tests, 1 skipped.
 - Capability-gated MCP tools now resolve the repository package path before importing
   shared runtime services; the MCP smoke test covers launches from the server directory.
+- `./sb doctor` now probes that same MCP import boundary, rather than checking only for
+  the venv file, and reports a restart/install hint when it is unhealthy.
 
 Live external evidence still matters. Several specs explicitly say unit tests are not
 enough for "done."

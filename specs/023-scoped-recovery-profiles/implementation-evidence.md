@@ -275,12 +275,14 @@ Human-readable restore planning now prints the non-mutating action, checkpoint, 
 summary so an operator can review the plan before any separately protected apply operation.
 Human-readable schedule planning now prints the disabled state and generated units without
 installing or enabling them; activation remains separately protected.
+Scheduler execution now preserves failed/skipped action results instead of converting every
+non-exceptional action return into `complete`, keeping pruning eligibility fail closed.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 766 tests in 41.478s — OK (skipped=1)
+Ran 767 tests in 42.187s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

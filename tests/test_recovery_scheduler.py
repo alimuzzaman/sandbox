@@ -49,3 +49,15 @@ class TestRecoveryScheduler(unittest.TestCase):
         lock.release()
         self.assertEqual(run_with_lock(lock, lambda: called.append(1), resource_ok=lambda: False)["reason"], "resource_gate")
         self.assertEqual(called, [])
+
+    def test_action_result_preserves_failed_and_skipped_outcomes(self):
+        failed = run_with_lock(RecordingLock(), lambda: {
+            "ok": False, "error": {"code": "capture_failed"},
+        })
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["reason"], "capture_failed")
+        skipped = run_with_lock(RecordingLock(), lambda: {
+            "status": "skipped", "reason": "capture_in_progress",
+        })
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["reason"], "capture_in_progress")

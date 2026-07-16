@@ -52,6 +52,8 @@ service command, including the explicit confirmation required when an operator l
 the schedule.
 Human-readable schedule output includes the disabled flag and generated service/timer units;
 activation remains a separate protected operation.
+The scheduler also propagates failed or skipped action envelopes, so a run cannot be reported as
+complete—and become eligible for downstream pruning—when capture did not complete.
 
 The filesystem restore adapter is target-explicit and injectable: it decrypts into owner-only
 staging, validates archive members, uses Python's `data` tar filter on supported runtimes,

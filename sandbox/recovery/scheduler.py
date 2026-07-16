@@ -74,7 +74,16 @@ def run_with_lock(lock, action, *, resource_ok=lambda: True) -> dict:
     try:
         if not resource_ok():
             return {"status": "skipped", "reason": "resource_gate"}
-        action()
+        outcome = action()
+        if isinstance(outcome, dict):
+            error = outcome.get("error") if isinstance(outcome.get("error"), dict) else {}
+            if outcome.get("ok") is False or outcome.get("status") == "failed":
+                return {"status": "failed", "reason": str(
+                    error.get("code") or outcome.get("reason") or "action_failed"),
+                        "result": outcome}
+            if outcome.get("status") == "skipped":
+                return {"status": "skipped", "reason": str(
+                    outcome.get("reason") or "action_skipped"), "result": outcome}
         return {"status": "complete"}
     finally:
         lock.release()

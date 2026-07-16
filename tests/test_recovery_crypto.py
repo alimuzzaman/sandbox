@@ -65,6 +65,17 @@ class TestGpgCrypto(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse((Path(str(target) + ".pending")).exists())
 
+    def test_verification_rejects_plaintext_mutation_between_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "plain"; source.write_bytes(b"payload")
+            ciphertext = Path(directory) / "cipher"; ciphertext.write_bytes(b"ciphertext")
+            crypto = GpgCrypto("fixture")
+            crypto.decrypt_file = lambda _source, target: Path(target).write_bytes(b"payload")
+            with patch("sandbox.recovery.crypto.sha256_file",
+                       side_effect=("a" * 64, "a" * 64, "b" * 64)):
+                with self.assertRaisesRegex(RecoveryError, "changed"):
+                    crypto.verify_file(source, ciphertext)
+
     @unittest.skipUnless(shutil.which("gpg"), "GnuPG is unavailable")
     def test_real_gpg_fixture_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -87,6 +87,8 @@ missing secret configuration leaves capture unavailable rather than guessing sou
 
 The GnuPG passphrase descriptor handoff handles partial pipe writes and fails closed on a
 non-progressing descriptor, without placing the passphrase in argv or process output.
+Ciphertext verification also requires the plaintext digest to remain stable before and after
+decryption, preventing a source rewrite from being reported as a valid verification.
 
 Retention planning now inventories the configured destination, verifies each complete manifest
 and ciphertext binding, and tests decryption with the current inherited crypto channel before

@@ -86,9 +86,12 @@ class GpgCrypto:
 
     def verify_file(self, plaintext: str | Path, ciphertext: str | Path) -> str:
         source = Path(plaintext)
+        source_digest = sha256_file(source)
         with tempfile.TemporaryDirectory(prefix="sandbox-recovery-verify-") as directory:
             restored = Path(directory) / "restored"
             self.decrypt_file(ciphertext, restored)
-            if sha256_file(source) != sha256_file(restored):
+            if source_digest != sha256_file(restored):
                 raise RecoveryError("decrypted ciphertext hash does not match", "ciphertext_verification_failed")
-        return sha256_file(source)
+        if source_digest != sha256_file(source):
+            raise RecoveryError("plaintext changed during ciphertext verification", "source_changed")
+        return source_digest

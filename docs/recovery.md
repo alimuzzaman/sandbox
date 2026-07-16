@@ -68,6 +68,9 @@ protected.
 
 Read-only remote inventory also validates the complete response schema before returning it;
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
+RecoveryService also converts malformed adapter responses into operation-specific result errors
+(`inventory_failed`, `list_failed`, `capture_failed`, `verify_failed`, `retention_failed`, or
+`restore_failed`) instead of leaking raw Python exceptions.
 
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before

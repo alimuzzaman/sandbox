@@ -55,6 +55,9 @@ class RecoveryService:
                 data["remote_inventory"] = self.inventory.discover(remote)
             except RecoveryError as exc:
                 return result(False, "plan", remote=remote, error=exc)
+            except (OSError, TypeError, ValueError) as exc:
+                return result(False, "plan", remote=remote, error=RecoveryError(
+                    "remote inventory returned invalid data", "inventory_failed"))
         return result(True, "plan", remote=remote, status="planned", data=data)
 
     def create(self, set_id: str, artifacts: dict, profiles: tuple[str, ...], *,
@@ -85,6 +88,9 @@ class RecoveryService:
             manifest = self.capture.publish_files(set_id, artifacts, profiles=profiles, provenance=provenance)
         except RecoveryError as exc:
             return result(False, "create", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "create", remote=remote, error=RecoveryError(
+                "recovery capture failed", "capture_failed"))
         return result(True, "create", remote=remote, status="complete", data={"manifest": manifest})
 
     def list(self, remote: str | None = None) -> dict:
@@ -129,6 +135,9 @@ class RecoveryService:
                         local_pending.append({"Path": str(path), "Size": path.stat().st_size})
         except RecoveryError as exc:
             return result(False, "list", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "list", remote=remote, error=RecoveryError(
+                "recovery listing is invalid", "list_failed"))
         return result(True, "list", remote=remote, status="listed", data={
             "complete_manifests": tuple(complete),
             "incomplete": tuple(incomplete),
@@ -147,6 +156,9 @@ class RecoveryService:
             manifest = verify_manifest(self.drive, set_id)
         except RecoveryError as exc:
             return result(False, "verify", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "verify", remote=remote, error=RecoveryError(
+                "recovery verification failed", "verify_failed"))
         return result(True, "verify", remote=remote, status="verified", data={"id": set_id, "manifest": manifest})
 
     def _current_passphrase_verifies(self, ciphertext_key: str) -> bool:
@@ -218,6 +230,9 @@ class RecoveryService:
             )
         except RecoveryError as exc:
             return result(False, "retention", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "retention", remote=remote, error=RecoveryError(
+                "recovery retention inventory is invalid", "retention_failed"))
         return result(True, "retention", remote=remote, status="planned", data={
             "destination_prefix": plan.destination_prefix,
             "protected_sets": plan.protected_sets,
@@ -236,6 +251,9 @@ class RecoveryService:
             plan = build_restore_plan(self.drive, set_id, profiles, dependencies=dependencies)
         except RecoveryError as exc:
             return result(False, "restore", remote=remote, error=exc)
+        except (OSError, TypeError, ValueError) as exc:
+            return result(False, "restore", remote=remote, error=RecoveryError(
+                "recovery restore plan is invalid", "restore_failed"))
         return result(True, "restore", remote=remote, status="planned", data={
             "set_id": plan.set_id, "profiles": plan.profiles, "actions": plan.actions,
             "checkpoints": plan.checkpoints, "rollback": plan.rollback,

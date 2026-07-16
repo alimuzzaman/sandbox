@@ -265,12 +265,14 @@ adapters before invoking any delete operation, preserving stable errors for prot
 
 The remote inventory adapter now validates its complete JSON shape—including projects, runtimes,
 containers, mounts, repositories, and warnings—before exposing the result to planning callers.
+RecoveryService callers now preserve the stable result envelope when an adapter raises a raw
+OS, type, or value error, using operation-specific failure codes rather than exposing exceptions.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 761 tests in 43.218s — OK (skipped=1)
+Ran 762 tests in 43.580s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

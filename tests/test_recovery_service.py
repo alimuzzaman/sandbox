@@ -28,6 +28,23 @@ class TestRecoveryService(unittest.TestCase):
         self.assertEqual(payload["action"], "plan")
         self.assertEqual(payload["error"]["code"], "unknown_profile")
 
+    def test_malformed_inventory_and_listing_adapters_keep_stable_envelopes(self):
+        class BrokenInventory:
+            def discover(self, _remote):
+                raise TypeError("malformed inventory")
+
+        planned = RecoveryService(RecoveryCatalog(1, ()), inventory=BrokenInventory()).plan(remote="test")
+        self.assertFalse(planned["ok"])
+        self.assertEqual(planned["error"]["code"], "inventory_failed")
+
+        class BrokenDrive:
+            def list(self, _prefix):
+                raise TypeError("malformed listing")
+
+        listed = RecoveryService(RecoveryCatalog(1, ()), drive=BrokenDrive()).list()
+        self.assertFalse(listed["ok"])
+        self.assertEqual(listed["error"]["code"], "list_failed")
+
     def test_create_requires_confirmation_and_list_classifies_pending_objects(self):
         drive = MemoryDrive()
         service = RecoveryService(RecoveryCatalog(1, ()), drive=drive)

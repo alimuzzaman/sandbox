@@ -1409,6 +1409,10 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("id_pattern = re.compile", command)
         self.assertIn("name.strip()[:-14]", command)
         self.assertIn('base_manifest.get("id") != base_id', command)
+        self.assertIn("database container unavailable for {instance}", command)
+        self.assertIn("database snapshot unavailable for {instance}", command)
+        self.assertNotIn("database container unavailable for {instance}; continuing", command)
+        self.assertNotIn("database snapshot unavailable for {instance}; continuing", command)
 
     def test_drive_restore_reinstates_github_auth_and_services(self):
         command = hermes._drive_restore_command(

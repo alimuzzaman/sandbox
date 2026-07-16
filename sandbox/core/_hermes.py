@@ -1197,17 +1197,16 @@ for instance in instances:
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     text=False, cwd=HOME, check=False)
     if inspect_result.returncode != 0:
-        print(f"Hermes Drive: database container unavailable for {instance}; continuing", file=__import__('sys').stderr)
-        continue
+        raise SystemExit(f"Hermes Drive: database container unavailable for {instance}")
     with backup_tar.open("wb") as out:
         docker_result = subprocess.run(["docker", "cp", f"{container}:/var/lib/mysql", "-"],
                                        stdout=out, stderr=subprocess.PIPE, text=False, cwd=HOME, check=False)
     if docker_result.returncode != 0:
-        print(f"Hermes Drive: database snapshot unavailable for {instance}; continuing", file=__import__('sys').stderr)
         try:
             backup_tar.unlink()
         except FileNotFoundError:
             pass
+        raise SystemExit(f"Hermes Drive: database snapshot unavailable for {instance}")
 
 base_id = ""
 chain_id = BACKUP_ID

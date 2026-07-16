@@ -72,6 +72,9 @@ and must first be exercised on a disposable replacement remote.
 Capture fails on unreadable archive inputs, and publication uploads the encrypted
 archive and incremental state before the manifest. The manifest is the final
 completion marker, so interrupted captures are not advertised as restorable.
+Required WordPress database snapshots are fail-closed as well: an unavailable
+database container or failed volume export aborts the backup rather than creating
+a partial full-scope recovery point.
 Incremental capture selects the lexically latest valid timestamped recovery ID and
 rejects malformed or cross-bound manifest metadata before reusing a state chain.
 

@@ -96,6 +96,30 @@ class TestGenericComposeAdapter(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "argv list"):
                 adapter.invoke(OperationRequest(str(root), "exec", arguments={"argv": "sh -c id"}))
 
+    def test_descriptor_validation_rejects_command_ambiguous_fields(self):
+        invalid = (
+            {"service": "web\nbad"},
+            {"internal_port": True},
+            {"health_path": "healthz"},
+            {"health_path": "/health\x00z"},
+            {"http_port": 70000},
+        )
+        for changes in invalid:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+                adapter, _, _, registry = self.make_adapter(root)
+                registry.descriptor.update(changes)
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    adapter.invoke(OperationRequest(str(root), "status"))
+
+    def test_constructor_rejects_unbounded_or_non_positive_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for timeout in (0, -1, float("nan"), True):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    ComposeAdapter(self.make_adapter(root)[0].dependencies, object(), timeout=timeout)
+
 
 if __name__ == "__main__":
     unittest.main()

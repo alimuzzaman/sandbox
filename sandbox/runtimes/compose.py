@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -12,6 +13,11 @@ from .base import OperationRequest, OperationResult, RuntimeDependencies
 
 
 _SAFE = re.compile(r"[^a-z0-9-]+")
+_SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
+
+
+def _valid_port(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535
 
 
 class ComposeAdapter:
@@ -26,6 +32,9 @@ class ComposeAdapter:
     kinds = ("compose",)
 
     def __init__(self, dependencies: RuntimeDependencies, registry: Any, *, timeout: float = 120.0):
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
+                not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("Compose timeout must be a finite positive number")
         self.dependencies = dependencies
         self.registry = registry
         self.timeout = timeout
@@ -43,13 +52,30 @@ class ComposeAdapter:
 
     def _descriptor(self, request: OperationRequest) -> dict[str, Any]:
         descriptor = self.registry.load_project_config(request.project_root, label=request.label)
-        if descriptor.get("kind") != "compose":
+        if not isinstance(descriptor, dict) or descriptor.get("kind") != "compose":
             raise ValueError("project is not configured as a generic Compose project")
-        compose_file = Path(descriptor["compose_file"]).resolve()
-        root = Path(descriptor["root"]).resolve() if descriptor.get("root") else Path(request.project_root).resolve()
-        compose_file.relative_to(root)
+        try:
+            compose_file = Path(descriptor["compose_file"]).resolve()
+            root = (Path(descriptor["root"]).resolve() if descriptor.get("root")
+                    else Path(request.project_root).resolve())
+            compose_file.relative_to(root)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            raise ValueError("Compose descriptor paths are invalid") from exc
+        if not root.is_dir():
+            raise ValueError("Compose project root does not exist")
         if not compose_file.is_file():
             raise ValueError(f"Compose file does not exist: {compose_file}")
+        service = descriptor.get("service")
+        if not isinstance(service, str) or not _SAFE_SERVICE.fullmatch(service):
+            raise ValueError("Compose service name is invalid")
+        if not _valid_port(descriptor.get("internal_port")):
+            raise ValueError("Compose internal port is invalid")
+        health_path = descriptor.get("health_path")
+        if (not isinstance(health_path, str) or not health_path.startswith("/") or
+                not health_path or any(ord(char) < 32 or ord(char) == 127 for char in health_path)):
+            raise ValueError("Compose health path is invalid")
+        if "http_port" in descriptor and descriptor["http_port"] is not None and not _valid_port(descriptor["http_port"]):
+            raise ValueError("Compose HTTP port is invalid")
         return {**descriptor, "root": str(root), "compose_file": str(compose_file)}
 
     def _record(self, request: OperationRequest, **fields: Any) -> dict[str, Any] | None:
@@ -127,7 +153,8 @@ class ComposeAdapter:
         commands = {"start": ["start", service], "stop": ["stop", service], "logs": ["logs", "--no-color", service], "apply": ["up", "-d", "--force-recreate", service], "destroy": ["down"]}
         if op == "exec":
             command = request.arguments.get("argv")
-            if not isinstance(command, (list, tuple)) or not command or any(not isinstance(x, str) or not x for x in command):
+            if (not isinstance(command, (list, tuple)) or not command or
+                    any(not isinstance(x, str) or not x or "\x00" in x for x in command)):
                 raise ValueError("generic exec requires a non-empty argv list")
             commands[op] = ["exec", "-T", service, *command]
         if op not in commands:

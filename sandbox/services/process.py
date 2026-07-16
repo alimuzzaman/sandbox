@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import threading
 from typing import Mapping, Protocol, Sequence
 import os
 import subprocess
@@ -57,23 +58,48 @@ class BoundedProcessRunner:
                     for key, value in env.items()):
                 raise ValueError("env must contain NUL-free string keys and values")
         command = tuple(argv)
-        try:
-            result = subprocess.run(
-                command, cwd=cwd, env={**os.environ, **dict(env or {})},
-                timeout=timeout, capture_output=True, text=True, shell=False,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            def output(value: str | bytes | None) -> str:
-                return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+        process = subprocess.Popen(
+            command, cwd=cwd, env={**os.environ, **dict(env or {})},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+        )
+        output: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
 
+        def drain(name: str, stream) -> None:
+            while True:
+                chunk = stream.read(65_536)
+                if not chunk:
+                    return
+                remaining = self.max_output - len(output[name])
+                if remaining > 0:
+                    output[name].extend(chunk[:remaining])
+
+        readers = tuple(
+            threading.Thread(target=drain, args=(name, stream), daemon=True)
+            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        )
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            for reader in readers:
+                reader.join()
+            process.stdout.close()
+            process.stderr.close()
             return ProcessResult(
                 command,
                 124,
-                self._redact(output(exc.stdout)),
-                self._redact(output(exc.stderr) + "\nprocess timed out"),
+                self._redact(bytes(output["stdout"]).decode(errors="replace")),
+                self._redact(bytes(output["stderr"]).decode(errors="replace") + "\nprocess timed out"),
             )
+        for reader in readers:
+            reader.join()
+        process.stdout.close()
+        process.stderr.close()
         return ProcessResult(
-            command, result.returncode,
-            self._redact(result.stdout or ""), self._redact(result.stderr or ""),
+            command, process.returncode,
+            self._redact(bytes(output["stdout"]).decode(errors="replace")),
+            self._redact(bytes(output["stderr"]).decode(errors="replace")),
         )

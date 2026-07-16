@@ -31,6 +31,13 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertIn("timed out", result.stderr)
 
+    def test_large_output_is_drained_without_exceeding_the_bound(self):
+        runner = BoundedProcessRunner(max_output=128)
+        result = runner.run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 10_000_000)"])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout), 128)
+        self.assertEqual(result.stderr, "")
+
     def test_constructor_rejects_invalid_bounds_and_secret_types(self):
         with self.assertRaises(ValueError):
             BoundedProcessRunner(max_output=-1)

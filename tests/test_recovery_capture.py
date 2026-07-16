@@ -1,4 +1,5 @@
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +114,40 @@ class TestRecoveryCapture(unittest.TestCase):
                 coordinator.publish_files(123, {"artifact": source}, profiles=("fixture",))
             with self.assertRaisesRegex(RecoveryError, "invalid"):
                 coordinator.publish_files("fixture-set", {123: source}, profiles=("fixture",))
+
+    def test_file_capture_rejects_malformed_profiles_and_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.write_bytes(b"data")
+            coordinator = StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root)
+            with self.assertRaisesRegex(RecoveryError, "requires artifacts and profiles"):
+                coordinator.publish_files("fixture-set", {"artifact": source}, profiles=["fixture"])
+            with self.assertRaisesRegex(RecoveryError, "provenance"):
+                coordinator.publish_files("fixture-set", {"artifact": source},
+                                          profiles=("fixture",), provenance=[])
+
+    def test_file_capture_detects_content_change_even_when_metadata_is_restored(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"before")
+            original_open = __import__("sandbox.recovery.capture", fromlist=["tarfile"]).tarfile.open
+            class Archive:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def add(self, source, *, arcname, recursive):
+                    metadata = source.stat()
+                    source.write_bytes(b"after!")
+                    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            module = __import__("sandbox.recovery.capture", fromlist=["tarfile"])
+            module.tarfile.open = lambda *args, **kwargs: Archive()
+            try:
+                with self.assertRaisesRegex(RecoveryError, "changed"):
+                    StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=root).publish_files(
+                        "fixture-set", {"artifact": source}, profiles=("fixture",))
+            finally:
+                module.tarfile.open = original_open
 
     def test_file_capture_rejects_source_changed_during_archive(self):
         class FileCrypto:

@@ -82,8 +82,19 @@ class StagingCaptureCoordinator:
                       profiles: tuple[str, ...], provenance: dict | None = None) -> dict:
         if not _valid_set_id(set_id):
             raise RecoveryError("recovery set id is invalid", "invalid_set_id")
-        if not artifacts or not profiles:
+        if (not isinstance(artifacts, dict) or not artifacts or
+                not isinstance(profiles, tuple) or not profiles or
+                not all(isinstance(profile, str) and profile and
+                        not any(ord(char) < 32 or ord(char) == 127 for char in profile)
+                        for profile in profiles) or len(set(profiles)) != len(profiles)):
             raise RecoveryError("recovery set requires artifacts and profiles", "empty_set")
+        if provenance is not None and not isinstance(provenance, dict):
+            raise RecoveryError("recovery provenance is invalid", "invalid_provenance")
+        for name, value in artifacts.items():
+            if (not isinstance(name, str) or not name or name.startswith("/") or
+                    ".." in Path(name).parts or any(ord(char) < 32 or ord(char) == 127 for char in name) or
+                    not isinstance(value, (str, Path))):
+                raise RecoveryError("recovery artifact name is invalid", "invalid_artifact")
         if not all(self._is_regular_nonempty_file(Path(value)) for value in artifacts.values()):
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
         stage = self._stage()
@@ -94,12 +105,14 @@ class StagingCaptureCoordinator:
             with tarfile.open(archive, "w") as output:
                 for name, source in sorted(artifacts.items()):
                     if (not isinstance(name, str) or not name or name.startswith("/") or
-                            ".." in Path(name).parts):
+                            ".." in Path(name).parts or
+                            any(ord(char) < 32 or ord(char) == 127 for char in name)):
                         raise RecoveryError("recovery artifact name is invalid", "invalid_artifact")
                     source = Path(source)
                     before = self._file_snapshot(source)
                     output.add(source, arcname=name, recursive=False)
-                    if self._file_snapshot(source) != before:
+                    after = self._file_snapshot(source)
+                    if after != before:
                         raise RecoveryError("recovery artifact changed during capture", "source_changed")
                     records.append({"name": name, "sha256": sha256_file(source),
                                     "size": before[2]})
@@ -153,11 +166,12 @@ class StagingCaptureCoordinator:
         return stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0
 
     @classmethod
-    def _file_snapshot(cls, path: Path) -> tuple[int, int, int, int]:
+    def _file_snapshot(cls, path: Path) -> tuple[int, int, int, int, str]:
         try:
             metadata = path.lstat()
         except OSError as exc:
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact") from exc
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
-        return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns,
+                sha256_file(path))

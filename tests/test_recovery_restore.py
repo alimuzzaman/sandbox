@@ -70,6 +70,19 @@ class TestRecoveryRestore(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "artifact"):
             build_restore_plan(drive, "set-1")
 
+    def test_restore_rejects_unsafe_staged_artifact_name(self):
+        drive = MemoryDrive(); ciphertext = b"valid"
+        drive.put("sets/set-unsafe/archive.tar.gpg", ciphertext)
+        drive.put("sets/set-unsafe/manifest.json", json.dumps({
+            "schema_version": 1, "id": "set-unsafe", "status": "complete",
+            "restore_compatibility": "sandbox-recovery-v1", "profiles": ["fixture"],
+            "artifacts": [{"name": "../artifact", "sha256": hashlib.sha256(b"x").hexdigest(), "size": 1}],
+            "ciphertext_object": "sets/set-unsafe/archive.tar.gpg",
+            "ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest(), "ciphertext_size": len(ciphertext),
+        }).encode())
+        with self.assertRaisesRegex(RecoveryError, "artifact"):
+            build_restore_plan(drive, "set-unsafe")
+
     def test_plan_rejects_bad_hash_compatibility_space_and_dependencies(self):
         drive = MemoryDrive(); CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"a": b"b"})
         drive.objects["sets/set-1/archive.bin"] = b"changed"

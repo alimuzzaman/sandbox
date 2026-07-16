@@ -27,6 +27,12 @@ def _valid_digest(value: object) -> bool:
             not any(char not in "0123456789abcdef" for char in value))
 
 
+def _valid_artifact_name(value: object) -> bool:
+    return (isinstance(value, str) and bool(value) and not value.startswith("/") and
+            ".." not in Path(value).parts and
+            not any(ord(char) < 32 or ord(char) == 127 for char in value))
+
+
 def verify_manifest(drive, set_id: str) -> dict:
     try:
         manifest = json.loads(drive.get(f"sets/{set_id}/manifest.json"))
@@ -61,7 +67,7 @@ def verify_manifest(drive, set_id: str) -> dict:
             if not isinstance(artifact, dict) or set(("name", "sha256", "size")) - set(artifact):
                 raise RecoveryError("recovery artifact record is invalid", "invalid_manifest")
             name, artifact_digest, artifact_size = artifact["name"], artifact["sha256"], artifact["size"]
-            if (not isinstance(name, str) or not name or name in names or not _valid_digest(artifact_digest) or
+            if (not _valid_artifact_name(name) or name in names or not _valid_digest(artifact_digest) or
                     isinstance(artifact_size, bool) or not isinstance(artifact_size, int) or artifact_size < 1):
                 raise RecoveryError("recovery artifact record is invalid", "invalid_manifest")
             names.append(name)

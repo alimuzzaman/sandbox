@@ -1648,7 +1648,7 @@ from pathlib import Path
 
 path = Path.home() / ".hermes" / "cron" / "jobs.json"
 data = json.loads(path.read_text()) if path.exists() else {"jobs": []}
-if not isinstance(data, dict) or not isinstance(data.get("jobs", []), list):
+if not isinstance(data, dict) or "jobs" not in data or not isinstance(data["jobs"], list):
     raise ValueError("invalid Hermes cron jobs collection")
 if not all(isinstance(job, dict) for job in data["jobs"]):
     raise ValueError("invalid Hermes cron job record")

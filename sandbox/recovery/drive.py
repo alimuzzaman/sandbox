@@ -13,10 +13,14 @@ from .integrity import sha256_file
 _DESTINATION = re.compile(r"^[A-Za-z0-9_.-]+:[^\n\r]*$")
 
 
+def _has_control(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
 class RcloneDrive:
     """Immutable rclone object store with upload and downloaded-hash verification."""
     def __init__(self, runner, destination: str) -> None:
-        if (not isinstance(destination, str) or "\0" in destination or
+        if (not isinstance(destination, str) or _has_control(destination) or
                 not _DESTINATION.fullmatch(destination)):
             raise RecoveryError("rclone destination is invalid", "invalid_destination")
         remote_path = destination.split(":", 1)[1]
@@ -25,7 +29,7 @@ class RcloneDrive:
         self.runner, self.destination = runner, destination.rstrip("/")
 
     def _remote(self, key: str) -> str:
-        if not isinstance(key, str) or "\0" in key:
+        if not isinstance(key, str) or _has_control(key):
             raise RecoveryError("recovery object key is invalid", "invalid_object_key")
         if key == "":
             return self.destination

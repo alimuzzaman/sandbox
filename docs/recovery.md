@@ -48,6 +48,8 @@ Filesystem capture preserves declared in-root symlinks as links while rejecting 
 resolved targets escape the allowed root.
 Filesystem capture snapshots regular-file digests recursively before and after archiving,
 so same-size or same-mtime source rewrites are rejected as `source_changed`.
+It also rejects source trees and link targets that cross the declared root filesystem's device
+boundary; cross-filesystem capture requires a separately reviewed adapter.
 
 Archive validation also rejects duplicate members and special device/FIFO nodes before restore,
 preventing ambiguous replacement or unsafe filesystem materialization.

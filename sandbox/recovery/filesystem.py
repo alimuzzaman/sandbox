@@ -43,6 +43,19 @@ def _capture_snapshot(path: Path) -> tuple:
     return tuple(records)
 
 
+def _validate_filesystem_boundary(path: Path, root_device: int) -> None:
+    metadata = path.lstat()
+    if metadata.st_dev != root_device:
+        raise RecoveryError("filesystem source crosses a mount boundary", "cross_filesystem")
+    mode = stat.S_IFMT(metadata.st_mode)
+    if stat.S_ISLNK(mode):
+        if path.resolve().lstat().st_dev != root_device:
+            raise RecoveryError("filesystem link crosses a mount boundary", "cross_filesystem")
+    elif stat.S_ISDIR(mode):
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            _validate_filesystem_boundary(child, root_device)
+
+
 def validate_archive(path: str | Path) -> tuple[str, ...]:
     """Reject traversal, ambiguous members, and special nodes before restore."""
     names = []
@@ -73,6 +86,7 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
 
 def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: str | Path) -> Path:
     root = Path(root).resolve(); destination = Path(destination)
+    root_device = root.stat().st_dev
     if destination.is_symlink() or (destination.exists() and not stat.S_ISREG(destination.lstat().st_mode)):
         raise RecoveryError("archive destination is not a regular file", "invalid_destination")
     members = []
@@ -86,6 +100,7 @@ def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: 
         # Preserve the declared link while validating its resolved target remains inside root.
         _member_name(root, source.resolve())
         if not source.exists(): raise RecoveryError("archive member is absent", "missing_source")
+        _validate_filesystem_boundary(source, root_device)
         members.append((source, member_name))
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(destination, "w") as archive:

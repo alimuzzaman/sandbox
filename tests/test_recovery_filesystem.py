@@ -6,7 +6,8 @@ from unittest import mock
 from pathlib import Path
 
 from sandbox.recovery.errors import RecoveryError
-from sandbox.recovery.filesystem import FilesystemCapture, archive_paths, validate_archive
+from sandbox.recovery.filesystem import (FilesystemCapture, _validate_filesystem_boundary,
+                                         archive_paths, validate_archive)
 
 
 class TestFilesystemCapture(unittest.TestCase):
@@ -53,6 +54,12 @@ class TestFilesystemCapture(unittest.TestCase):
                 member = opened.getmember("link.txt")
                 self.assertTrue(member.issym())
                 self.assertEqual(member.linkname, "target.txt")
+
+    def test_rejects_sources_crossing_a_mount_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"; root.mkdir(); source = root / "file"; source.write_text("value")
+            with self.assertRaisesRegex(RecoveryError, "mount boundary"):
+                _validate_filesystem_boundary(source, source.stat().st_dev + 1)
 
     def test_rejects_member_traversal_and_escaping_link(self):
         with tempfile.TemporaryDirectory() as directory:

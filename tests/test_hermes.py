@@ -1406,6 +1406,9 @@ class TestProfileRendering(unittest.TestCase):
         manifest_upload = command.index('f"{DESTINATION}/{BACKUP_ID}.manifest.json"')
         self.assertLess(archive_upload, state_upload)
         self.assertLess(state_upload, manifest_upload)
+        self.assertIn("id_pattern = re.compile", command)
+        self.assertIn("name.strip()[:-14]", command)
+        self.assertIn('base_manifest.get("id") != base_id', command)
 
     def test_drive_restore_reinstates_github_auth_and_services(self):
         command = hermes._drive_restore_command(

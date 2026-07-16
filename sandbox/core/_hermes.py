@@ -1115,6 +1115,7 @@ def _drive_backup_command(paths: dict, destination: str, backup_id: str, scope: 
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import hashlib
@@ -1212,14 +1213,22 @@ base_id = ""
 chain_id = BACKUP_ID
 if SCOPE == "incremental":
     manifests = _run(["rclone", "lsf", "--files-only", DESTINATION], capture=True).stdout.splitlines()
-    manifest_names = [name.strip() for name in manifests if name.strip().endswith(".manifest.json")]
+    id_pattern = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
+    manifest_names = sorted(
+        name.strip()[:-14] for name in manifests
+        if name.strip().endswith(".manifest.json") and
+        id_pattern.fullmatch(name.strip()[:-14]))
     if not manifest_names:
         raise SystemExit(1)
-    base_id = manifest_names[-1][:-14]
+    base_id = manifest_names[-1]
     previous = stage / f"{base_id}.manifest.json"
     _run(["rclone", "copyto", f"{DESTINATION}/{base_id}.manifest.json", str(previous)], capture=True)
     if previous.exists():
         base_manifest = json.loads(previous.read_text())
+        if (base_manifest.get("id") != base_id or
+                base_manifest.get("archive") != f"{base_id}.tar.gz.gpg" or
+                base_manifest.get("state_file") != f"{base_id}.state.snar"):
+            raise SystemExit(1)
         base_scope = base_manifest.get("scope", "full")
         if base_scope not in {"full", "incremental"}:
             raise SystemExit(1)

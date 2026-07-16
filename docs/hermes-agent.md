@@ -72,6 +72,8 @@ and must first be exercised on a disposable replacement remote.
 Capture fails on unreadable archive inputs, and publication uploads the encrypted
 archive and incremental state before the manifest. The manifest is the final
 completion marker, so interrupted captures are not advertised as restorable.
+Incremental capture selects the lexically latest valid timestamped recovery ID and
+rejects malformed or cross-bound manifest metadata before reusing a state chain.
 
 ## Trust boundary
 

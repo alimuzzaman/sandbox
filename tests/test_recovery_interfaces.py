@@ -127,3 +127,17 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("set_id: set-1", rendered)
         self.assertIn("actions: verify, swap", rendered)
         self.assertIn("rollback: restore state", rendered)
+
+    def test_cli_schedule_human_output_shows_disabled_units(self):
+        output = StringIO()
+        payload = {"action": "schedule", "ok": True, "status": "planned", "data": {
+            "units": {"enabled": "false", "service": "[Service]\nExecStart=sb recovery create",
+                      "timer": "[Timer]\nOnCalendar=daily"},
+        }}
+        from sandbox.commands.recovery import _emit
+        with redirect_stdout(output):
+            _emit(payload, False)
+        rendered = output.getvalue()
+        self.assertIn("enabled: false", rendered)
+        self.assertIn("ExecStart=sb recovery create", rendered)
+        self.assertIn("OnCalendar=daily", rendered)

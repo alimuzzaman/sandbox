@@ -273,12 +273,14 @@ Human-readable verification now prints the non-secret ciphertext identity, diges
 omitting manifest provenance; JSON output remains available for structured consumers.
 Human-readable restore planning now prints the non-mutating action, checkpoint, and rollback
 summary so an operator can review the plan before any separately protected apply operation.
+Human-readable schedule planning now prints the disabled state and generated units without
+installing or enabling them; activation remains separately protected.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 765 tests in 42.706s — OK (skipped=1)
+Ran 766 tests in 41.478s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

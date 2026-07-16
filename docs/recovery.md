@@ -50,6 +50,8 @@ silently produce ambiguous restore paths.
 Schedule plans render the reviewed profile selection and remote target into the disabled
 service command, including the explicit confirmation required when an operator later activates
 the schedule.
+Human-readable schedule output includes the disabled flag and generated service/timer units;
+activation remains a separate protected operation.
 
 The filesystem restore adapter is target-explicit and injectable: it decrypts into owner-only
 staging, validates archive members, uses Python's `data` tar filter on supported runtimes,

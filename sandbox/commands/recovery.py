@@ -62,6 +62,16 @@ def _emit(payload: dict, as_json: bool) -> None:
         for label in ("profiles", "actions", "checkpoints", "rollback"):
             values = tuple(data.get(label) or ())
             print(f"  {label}: {', '.join(str(value) for value in values) or '(none)'}")
+    elif payload["action"] == "schedule":
+        data = payload.get("data") or {}
+        units = data.get("units") if isinstance(data.get("units"), dict) else {}
+        print(f"  enabled: {units.get('enabled', 'false')}")
+        for name in ("service", "timer"):
+            unit = units.get(name)
+            if isinstance(unit, str):
+                print(f"  {name}:")
+                for line in unit.splitlines():
+                    print(f"    {line}")
     elif payload["action"] == "retention":
         data = payload.get("data") or {}
         protected = tuple(data.get("protected_sets") or ())

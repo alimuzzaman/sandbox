@@ -67,6 +67,13 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("--help")
         self.assertIn("selftest", r.stdout + r.stderr)
 
+    def test_test_command_lists_explicit_modes(self):
+        r = run_sb("test", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("auto", r.stdout)
+        self.assertIn("unit", r.stdout)
+        self.assertIn("integration", r.stdout)
+
     def test_help_lists_hermes_control_plane(self):
         r = run_sb("--help")
         self.assertEqual(r.returncode, 0, r.stderr)

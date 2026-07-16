@@ -164,17 +164,17 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   `COMPOSER_HOME`/`COMPOSER_ALLOW_SUPERUSER`), then runs `php phpunit.phar` in the bind-mounted
   plugin dir with the suite (`/wordpress-phpunit`) + polyfills + `wp-tests-config.php`
   (defining `WP_TESTS_PHPUNIT_POLYFILLS_PATH`). Added the `run_tests` MCP tool (21 tools total)
-  returning `{ok, passed, summary, output}`.
-- **Follow-ups:** `sandbox test` mutates the plugin's `composer.lock` when the lock is
+  returning `{ok, passed, summary, output}`; the mode extension adds a resolved `mode` field.
+- **Follow-ups:** `sandbox test` can still mutate the plugin's `composer.lock` when the lock is
   incompatible (acceptable, but note it) and leaves `.phpunit.result.cache`; both live in the
-  plugin repo. A `--testsuite unit|integration` selector and a no-WP (pure Brain/Monkey) fast
-  path are still TODO.
+  plugin repo. The explicit `auto|unit|integration` selector and no-WP pure-unit runner are
+  now implemented; a fresh external-plugin acceptance run remains separately protected.
 - **Files:** `sb` (new `cmd_test` + subparser) + `server.py` (`run_tests` tool).
-- **Do:** `sandbox test [unit|integration] [-- <phpunit args>]`. Auto-detect shape from the
-  plugin's bootstrap (`WP_UnitTestCase` → run harness; Brain/Monkey → just phpunit at cwd).
-  Exec `docker compose exec -w <plugin> wp phpunit -c phpunit.xml.dist <args>` with the env
-  from T1.1/T1.2. Use `lsphp` on litespeed instances. `run_tests` returns
-  `{ passed, failed, failures[] }`.
+- **Do:** `sandbox test [auto|unit|integration] [-- <phpunit args>]`. Auto-detection is
+  read-only and conservative: WordPress, mixed, unknown, or unsafe evidence selects
+  integration; only Brain/Monkey-only evidence selects unit. Unit mode uses project
+  Composer dependencies and PHPUnit without WP suite/DB/environment setup. `run_tests`
+  accepts the same optional `mode` and adds the resolved mode to its existing result.
 - **Verify:** see T1.4.
 
 ### [x] T1.4 — Validate against both shapes (acceptance)
@@ -185,8 +185,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
   polyfills). The `run_tests` MCP tool returns the same green summary.
 - **Findings / still open:** disable-comments' *own* suite is red — its `setUp()` lacks the
   `: void` the modern PHPUnit Polyfills require (a real, pre-existing plugin-test bug, not a
-  harness issue). templately validation (its own instance + elementor) and a dedicated pure
-  Brain/Monkey (no-WP) example are deferred.
+  harness issue). templately validation (its own instance + elementor) remains deferred;
+  the pure Brain/Monkey (no-WP) runner is now covered by the feature's fixture gate.
 - **Do:** focus templately → `sandbox test integration` runs its `tests/integration/**`
   `WP_UnitTestCase` tests **green**, with **zero edits** to the plugin and **without**
   `wp-phpunit` required in its composer (sandbox provides the suite). Focus disable-comments →

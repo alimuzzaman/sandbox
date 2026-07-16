@@ -88,6 +88,19 @@ instance = instances.ensure_instance("/tmp/hermes-worktree")
 print("HERMES_INSTANCE", json.dumps([instance, instance_calls]))
 import tools.wp as wp_tools
 import tools.data as data_tools
+invalid_mode = wp_tools.run_tests("/tmp/project", mode="not-a-mode")
+print("TEST_MODE_INVALID", json.dumps(invalid_mode))
+wp_tools._require_project_capability = lambda *_args: None
+wp_tools._project_instance = lambda *_args: ("fixture", None)
+class TestRunResult:
+    returncode = 0
+    stdout = "  mode:       unit\\nOK (1 test, 1 assertion)\\n"
+    stderr = ""
+test_calls = []
+wp_tools.subprocess.run = lambda cmd, **kwargs: test_calls.append([cmd, kwargs]) or TestRunResult()
+print("TEST_MODE_FORWARD", json.dumps(wp_tools.run_tests(
+    "/tmp/project", mode="unit", phpunit_args="--filter Example")))
+print("TEST_MODE_CALL", json.dumps(test_calls))
 rejection = {"ok": False, "error": "blocked before side effects"}
 wp_side_effects = []
 wp_tools._require_project_capability = lambda *_args: rejection
@@ -174,6 +187,17 @@ class TestMcpServerSplit(unittest.TestCase):
         self.assertGreaterEqual(int(out["TOOLS"]), 26, r.stdout)
         self.assertGreaterEqual(int(out["PROMPTS"]), 8, r.stdout)
         self.assertEqual(out.get("HERMES"), "1", r.stdout)
+
+        invalid = next(line for line in r.stdout.splitlines()
+                       if line.startswith("TEST_MODE_INVALID "))
+        self.assertEqual(__import__("json").loads(invalid.removeprefix("TEST_MODE_INVALID "))["error"],
+                         "test mode must be auto, unit, or integration")
+        forwarded = next(line for line in r.stdout.splitlines()
+                         if line.startswith("TEST_MODE_FORWARD "))
+        self.assertEqual(__import__("json").loads(forwarded.removeprefix("TEST_MODE_FORWARD "))["mode"], "unit")
+        call = next(line for line in r.stdout.splitlines()
+                    if line.startswith("TEST_MODE_CALL "))
+        self.assertIn("unit", __import__("json").loads(call.removeprefix("TEST_MODE_CALL "))[0][0])
 
         calls_line = next(line for line in r.stdout.splitlines() if line.startswith("HERMES_CALLS "))
         calls = __import__("json").loads(calls_line.removeprefix("HERMES_CALLS "))

@@ -101,19 +101,26 @@ def wp_rest(method: str, path: str, body: dict | None = None,
 
 @mcp.tool()
 def run_tests(project_dir: str, phpunit_args: str = "",
-             label: str | None = None) -> dict:
-    """Run the plugin's phpunit tests against an externally-provisioned WP test
-    harness — the WP test suite, phpunit, polyfills, and an isolated wp_tests DB
-    are all supplied by Sandbox (none need to be in the plugin's composer).
+             label: str | None = None, mode: str | None = None) -> dict:
+    """Run the plugin's PHPUnit tests in unit or integration mode.
+
+    Integration mode uses the externally-provisioned WP test suite, polyfills,
+    and isolated wp_tests DB. Unit mode uses project Composer dependencies and
+    PHPUnit without the WordPress test harness or test database.
 
     project_dir: the plugin project (its instance must exist — call
       ensure_instance first).
     phpunit_args: optional args passed through to phpunit (e.g. "--filter Foo"
       or a specific test file path).
+    mode: optional `auto`, `unit`, or `integration` override.
 
-    Returns {ok, passed, summary, output}. This is live evidence — prefer it to
-    asserting a fix works from code reading.
+    Returns {ok, passed, summary, output, mode}. This is live evidence — prefer
+    it to asserting a fix works from code reading.
     """
+    if mode is not None and mode not in {"auto", "unit", "integration"}:
+        return {"ok": False, "passed": False, "summary": None,
+                "output": "", "mode": None,
+                "error": "test mode must be auto, unit, or integration"}
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error
@@ -124,6 +131,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     cmd = [str(sb), "test", "--project-dir", project_dir]
     if label:
         cmd += ["--label", label]
+    if mode:
+        cmd += [mode]
     if phpunit_args.strip():
         cmd += ["--", *shlex.split(phpunit_args)]
     try:
@@ -134,11 +143,13 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
     import re as _re
     m = _re.search(r"(OK \(\d+ test.*?\)|FAILURES!.*|ERRORS!.*|Tests: \d.*)", out)
+    resolved = _re.search(r"^\s*mode:\s+(auto|unit|integration)\s*$", out, _re.MULTILINE)
     return {
         "ok": res.returncode == 0,
         "passed": res.returncode == 0,
         "summary": m.group(1) if m else None,
         "output": out[-4000:],
+        "mode": resolved.group(1) if resolved else None,
     }
 
 

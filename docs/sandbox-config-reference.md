@@ -175,12 +175,23 @@ file path.
   // Preferred WordPress port. null → auto-assigned from the free range.
   "port": null,
 
-  // Test shape. "auto" detects WP_UnitTestCase (integration) vs Brain/Monkey.
+  // Test environment. auto selects unit only for unambiguous Brain/Monkey-only
+  // evidence; unknown, mixed, and WordPress-marked projects use integration.
   "tests": { "suite": "auto" }   // auto | unit | integration
 }
 ```
 
 All fields are optional; omitted fields take the defaults above.
+
+### Test modes
+
+`sandbox test` accepts an optional `auto`, `unit`, or `integration` mode. An explicit
+mode overrides `tests.suite`; otherwise `auto` performs bounded, read-only inspection
+of project-local PHPUnit/Composer/test files. WordPress markers, mixed markers,
+unknown projects, and unsafe paths fail closed to integration. Unit mode skips the
+WordPress test suite, polyfills, isolated test database, and `WP_TESTS_*` environment;
+integration mode retains the existing externally provisioned harness. `--provision-only`
+is integration-only.
 
 ### Project slug
 

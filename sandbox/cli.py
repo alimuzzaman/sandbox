@@ -258,7 +258,9 @@ Per-project (each plugin carries its own sandbox.config.json):
              "server is behind a reverse proxy")
 
     ts = sub.add_parser("test",
-        help="Run the plugin's phpunit tests (externally-provisioned WP harness)")
+        help="Run plugin unit or integration tests")
+    ts.add_argument("mode", nargs="?", choices=("auto", "unit", "integration"),
+        help="test environment (default: configured suite or conservative auto)")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
     ts.add_argument("--label", default=None,

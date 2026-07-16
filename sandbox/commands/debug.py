@@ -120,13 +120,7 @@ def cmd_introspect(cfg, args) -> None:
         ok(f"{t}: {count} entries → {out_path.relative_to(ROOT)}")
 
 def cmd_test(cfg, args) -> None:
-    """`./sb test [--project-dir DIR] [--label LABEL] [--provision-only] [-- <phpunit args>]`
-    — provision the (cached) external WP test harness (suite + phpunit + polyfills
-    + composer + the isolated wp_tests DB + sandbox wp-tests-config.php) for a
-    project's instance, then run phpunit at the plugin dir. `--label` selects
-    which of the project's instances to test, when it owns more than one
-    (multi-instance-per-root, e.g. a matrix cell); omitted defaults to the
-    sole/default instance — unchanged behavior for single-instance projects."""
+    """Run a project's resolved unit or integration PHPUnit environment."""
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)
@@ -145,26 +139,47 @@ def cmd_test(cfg, args) -> None:
     # layer (if present) applies — the first load above only existed to find root.
     pconf = sc.load_project_config(pd, label=entry.get("label"))
     inst = entry["instance"]
+    try:
+        mode = resolve_test_mode(
+            pconf["root"], configured=pconf.get("tests", {}).get("suite", "auto"),
+            explicit=getattr(args, "mode", None),
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        die(str(exc))
+    if getattr(args, "provision_only", False) and mode == "unit":
+        die("--provision-only is only valid for integration test mode")
 
-    info("Provisioning test harness (cached)…")
-    h = _provision_test_harness(inst, pconf)
-    suite, tools, config = h["suite"], h["tools"], h["config"]
-    ok("Test harness ready:")
-    print(f"  instance:   {inst}")
-    print(f"  WP suite:   {suite}")
-    print(f"  phpunit:    {tools['phpunit']}")
-    print(f"  composer:   {tools['composer']}")
-    print(f"  polyfills:  {tools['polyfills']}")
-    tests_db = (_herd_tests_db(inst) if entry.get("server") == "herd"
-                else TESTS_DB_NAME)
-    print(f"  tests DB:   {tests_db} (prefix wptests_)")
-    print(f"  config:     {config}")
+    print(f"  mode:       {mode}")
+    if mode == "integration":
+        info("Provisioning test harness (cached)…")
+        h = _provision_test_harness(inst, pconf)
+        suite, tools, config = h["suite"], h["tools"], h["config"]
+        ok("Test harness ready:")
+        print(f"  instance:   {inst}")
+        print(f"  WP suite:   {suite}")
+        print(f"  phpunit:    {tools['phpunit']}")
+        print(f"  composer:   {tools['composer']}")
+        print(f"  polyfills:  {tools['polyfills']}")
+        tests_db = (_herd_tests_db(inst) if entry.get("server") == "herd"
+                    else TESTS_DB_NAME)
+        print(f"  tests DB:   {tests_db} (prefix wptests_)")
+        print(f"  config:     {config}")
+        if getattr(args, "provision_only", False):
+            return
+    else:
+        tools = _ensure_test_runner_tools()
+        suite = None
+        print(f"  instance:   {inst}")
+        print(f"  phpunit:    {tools['phpunit']}")
+        print(f"  composer:   {tools['composer']}")
 
-    if getattr(args, "provision_only", False):
-        return
     extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
     print()
-    if entry.get("server") == "herd":
+    if mode == "unit" and entry.get("server") == "herd":
+        code = _run_tests_unit_herd(inst, pconf["root"], tools, extra)
+    elif mode == "unit":
+        code = _run_tests_unit(inst, pconf["root"], tools, extra)
+    elif entry.get("server") == "herd":
         code = _run_tests_herd(inst, pconf["root"], suite, tools, extra)
     else:
         code = _run_tests(inst, pconf["root"], suite, tools, extra)

@@ -63,6 +63,25 @@ from unittest import mock
 
 
 class TestProjectConfig(unittest.TestCase):
+    def test_wordpress_test_suite_config_is_validated(self):
+        from sandbox.config.facade import resolve_project_config
+
+        for suite in ("auto", "unit", "integration"):
+            with self.subTest(suite=suite):
+                legacy = mock.Mock(return_value={"tests": {"suite": suite}})
+                result = resolve_project_config(Path("/tmp/project"), legacy_loader=legacy)
+                self.assertEqual(result["tests"], {"suite": suite})
+
+    def test_wordpress_test_suite_config_rejects_malformed_values(self):
+        from sandbox.config.facade import resolve_project_config
+
+        for tests in (None, [], {"suite": "coverage"}, {"suite": 1}):
+            with self.subTest(tests=tests), self.assertRaises(ValueError):
+                resolve_project_config(
+                    Path("/tmp/project"),
+                    legacy_loader=mock.Mock(return_value={"tests": tests}),
+                )
+
     def test_legacy_config_defaults_to_wordpress_without_generic_normalization(self):
         from sandbox.config.facade import resolve_project_config
 

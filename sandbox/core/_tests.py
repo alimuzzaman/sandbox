@@ -14,6 +14,94 @@ import threading
 from contextlib import redirect_stdout, redirect_stderr
 
 
+TEST_MODES = frozenset(("auto", "unit", "integration"))
+_TEST_SCAN_BYTES = 256 * 1024
+_TEST_SCAN_FILES = 512
+_WORDPRESS_TEST_MARKERS = (
+    "WP_UnitTestCase", "WP_TESTS_DIR", "tests_add_filter",
+    "wp-phpunit", "includes/bootstrap.php",
+)
+_UNIT_TEST_MARKERS = ("Brain\\Monkey", "brain/monkey")
+
+
+def normalize_test_mode(value, *, allow_none: bool = True) -> str | None:
+    """Validate a test-mode token without coercing untrusted input."""
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or value not in TEST_MODES:
+        raise ValueError("test mode must be auto, unit, or integration")
+    return value
+
+
+def _safe_test_file(root: Path, path: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _test_evidence_files(root: Path) -> tuple[tuple[Path, ...], bool]:
+    """Return bounded project-local test files and whether unsafe paths appeared."""
+    files: list[Path] = []
+    unsafe = False
+    candidates = [
+        root / "composer.json", root / "phpunit.xml", root / "phpunit.xml.dist",
+        root / "bootstrap.php", root / "tests" / "bootstrap.php",
+    ]
+    tests_dir = root / "tests"
+    if tests_dir.is_dir():
+        try:
+            candidates.extend(tests_dir.rglob("*.php"))
+        except OSError:
+            unsafe = True
+    for candidate in candidates:
+        if len(files) >= _TEST_SCAN_FILES:
+            unsafe = True
+            break
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        safe = _safe_test_file(root, candidate)
+        if safe is None:
+            unsafe = True
+            continue
+        files.append(safe)
+    return tuple(dict.fromkeys(files)), unsafe
+
+
+def detect_test_mode(project_root: str | Path) -> str:
+    """Classify local test evidence without executing project code.
+
+    Integration is the fail-closed result for unknown, mixed, or unsafe evidence.
+    """
+    root = Path(project_root).expanduser().resolve()
+    files, unsafe = _test_evidence_files(root)
+    wordpress = False
+    pure_unit = False
+    for path in files:
+        try:
+            text = path.read_text(errors="replace")[:_TEST_SCAN_BYTES]
+        except OSError:
+            unsafe = True
+            continue
+        wordpress = wordpress or any(marker in text for marker in _WORDPRESS_TEST_MARKERS)
+        pure_unit = pure_unit or any(marker in text for marker in _UNIT_TEST_MARKERS)
+    if unsafe or wordpress or not pure_unit:
+        return "integration"
+    return "unit"
+
+
+def resolve_test_mode(project_root: str | Path, *, configured: str = "auto",
+                      explicit: str | None = None) -> str:
+    """Resolve explicit > configured > conservative auto mode."""
+    configured = normalize_test_mode(configured, allow_none=False)
+    explicit = normalize_test_mode(explicit)
+    if explicit is not None:
+        return explicit
+    return configured if configured != "auto" else detect_test_mode(project_root)
+
+
 def _ensure_wp_test_suite(wp_version) -> Path:
     """Sparse-clone wordpress-develop's tests/phpunit at the WP version (trunk
     for latest/unpinned). Cached; returns the tests/phpunit dir."""
@@ -58,8 +146,8 @@ def _download(url: str, dest: Path) -> None:
     os.replace(tmp, dest)
 
 
-def _ensure_test_tools() -> dict:
-    """Download phpunit.phar + composer.phar and clone polyfills (cached)."""
+def _ensure_test_runner_tools() -> dict:
+    """Download the PHPUnit and Composer tools shared by all test modes."""
     TEST_TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     phpunit = TEST_TOOLS_DIR / "phpunit.phar"
     if not phpunit.exists():
@@ -69,6 +157,12 @@ def _ensure_test_tools() -> dict:
     if not composer.exists():
         info("downloading composer.phar…")
         _download(_COMPOSER_PHAR_URL, composer)
+    return {"phpunit": phpunit, "composer": composer}
+
+
+def _ensure_test_tools() -> dict:
+    """Download integration tools, including the externally supplied polyfills."""
+    tools = _ensure_test_runner_tools()
     poly = TEST_TOOLS_DIR / "phpunit-polyfills"
     if not (poly / "phpunitpolyfills-autoload.php").exists():
         if poly.exists():
@@ -76,7 +170,7 @@ def _ensure_test_tools() -> dict:
         info("cloning phpunit-polyfills…")
         _git_q("clone", "--depth", "1", "--branch", _POLYFILLS_TAG,
                _POLYFILLS_REPO, str(poly))
-    return {"phpunit": phpunit, "composer": composer, "polyfills": poly}
+    return {**tools, "polyfills": poly}
 
 
 def _ensure_tests_db(instance: str) -> None:
@@ -128,12 +222,11 @@ def _write_wp_tests_config() -> Path:
     return path
 
 
-def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> int:
-    """composer install (the plugin's OWN dev deps) if needed, then run phpunit
-    with the external harness mounted. The project root is bind-mounted at the
-    identical path in-container, so it doubles as the phpunit workdir. Streams
-    output; returns the phpunit exit code."""
+def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path) -> None:
+    """Install only the project's Composer dependencies in a bounded container."""
     plug = str(root)
+    if not (Path(root) / "composer.json").is_file():
+        return
     if not (Path(root) / "vendor" / "autoload.php").exists():
         info("composer install (plugin dev deps)…")
         # --no-plugins: skip composer/installers etc. (not needed to build the
@@ -157,7 +250,7 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
         base = ["run", "--rm", "-u", "0:0",
                 "-e", "COMPOSER_HOME=/tmp/composer",
                 "-e", "COMPOSER_ALLOW_SUPERUSER=1",
-                "-v", f"{tools['composer']}:/composer.phar:ro",
+                "-v", f"{composer}:/composer.phar:ro",
                 # Mount the project root at its own path so composer (and phpunit
                 # below) see it even when the project lives OUTSIDE plugins_home
                 # (the base compose only bind-mounts plugins_home).
@@ -171,6 +264,12 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
             info("locked install failed (stale lock) — running composer update…")
             compose(*base, f"{ensure_git}; php /composer.phar update {flags}",
                     instance=inst, check=False)
+
+
+def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> int:
+    """Run PHPUnit with the external WordPress harness mounted."""
+    plug = str(root)
+    _ensure_project_dependencies_docker(inst, root, tools["composer"])
     info("running phpunit…")
     r = compose("run", "--rm",
                 "-v", f"{suite}:/wordpress-phpunit",
@@ -183,6 +282,19 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
                 "-e", "WP_TESTS_PHPUNIT_POLYFILLS_PATH=/wp-phpunit-polyfills",
                 "-w", plug, "--entrypoint", "php", "wpcli",
                 "/phpunit.phar", *extra,
+                instance=inst, check=False)
+    return getattr(r, "returncode", 1)
+
+
+def _run_tests_unit(inst: str, root: str, tools: dict, extra: list) -> int:
+    """Run a pure PHPUnit suite without WordPress harness or test DB setup."""
+    plug = str(root)
+    _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    info("running pure PHPUnit unit suite…")
+    r = compose("run", "--rm", "--no-deps",
+                "-v", f"{tools['phpunit']}:/phpunit.phar:ro",
+                "-v", f"{plug}:{plug}", "-w", plug,
+                "--entrypoint", "php", "wpcli", "/phpunit.phar", *extra,
                 instance=inst, check=False)
     return getattr(r, "returncode", 1)
 

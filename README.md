@@ -162,8 +162,9 @@ Then, from the plugin directory:
 cd ~/dev/embedpress
 sandbox init      # scaffold sandbox.config.json (or convert .wp-env.json),
                   #   boot a per-directory instance, provision the test harness
-sandbox test      # run the plugin's phpunit tests on the externally-provisioned
-                  #   WP suite — zero WP-testing deps in the plugin's composer.json
+sandbox test      # auto-select unit or integration mode and run PHPUnit
+sandbox test unit       # pure PHPUnit; skips WP suite, polyfills, and test DB
+sandbox test integration # externally-provisioned WP suite + isolated test DB
 sandbox ensure    # just boot/refresh this project's instance (create-if-missing)
 ```
 
@@ -182,10 +183,13 @@ work in the plugin and ask Claude to test/fix/build.
 ### The test harness (the core value)
 
 Sandbox provides the WP test suite, phpunit, the Yoast polyfills, composer, and
-an isolated `wp_tests` database **externally** — mounted only at test time — so
-a plugin's `composer.json` stays clean. `sandbox test` auto-detects the shape
-(`WP_UnitTestCase` integration vs. Brain/Monkey pure-unit) and runs it; the
-`run_tests` MCP tool returns the same pass/fail summary as live evidence.
+an isolated `wp_tests` database **externally** for integration tests — mounted
+only at test time — so a plugin's `composer.json` stays clean. `sandbox test`
+resolves `tests.suite` (`auto`, `unit`, or `integration`); auto selects unit only
+for unambiguous Brain/Monkey-only evidence and conservatively selects integration
+otherwise. Unit mode uses project Composer dependencies and PHPUnit without the WP
+suite, polyfills, test DB, or `WP_TESTS_*` environment. The `run_tests` MCP tool
+accepts the same optional `mode` and returns the resolved mode with its summary.
 
 Version pins resolve server-aware: `phpVersion: "8.1"` boots `wordpress:php8.1`
 on apache, the `-fpm` flavor on nginx, and an OpenLiteSpeed `lsphp81` image on

@@ -230,27 +230,28 @@ def _write_wp_tests_config_herd(instance: str) -> Path:
     return path
 
 
-def _run_tests_herd(inst: str, root: str, suite: Path, tools: dict,
-                    extra: list) -> int:
-    """Host twin of _run_tests: composer install (if the plugin has a
-    composer.json) and phpunit both run on the instance's PINNED PHP
-    (php_version) — no containers. The suite/polyfills/phpunit live at real
-    host paths already (runtime/), so no mounts are needed; only the env
-    wiring differs. Using the pinned binary (not the generic `php`) is what
-    makes test runs execute on the project's PHP, matching CI/production."""
+def _ensure_project_dependencies_herd(inst: str, root: str, composer: Path) -> None:
+    """Install only project Composer dependencies with Herd's pinned PHP."""
     php = _herd_php(inst)
     root_p = Path(root)
-    if (root_p / "composer.json").exists() \
-            and not (root_p / "vendor" / "autoload.php").exists():
-        info(f"composer install (plugin dev deps, host PHP {php})…")
-        r = subprocess.run([php, str(tools["composer"]), "install",
-                            "--no-interaction", "--no-progress", "--no-plugins"],
-                           cwd=root)
-        if r.returncode != 0:
-            info("locked install failed (stale lock) — running composer update…")
-            subprocess.run([php, str(tools["composer"]), "update",
-                            "--no-interaction", "--no-progress", "--no-plugins"],
-                           cwd=root)
+    if not (root_p / "composer.json").is_file() or (root_p / "vendor" / "autoload.php").exists():
+        return
+    info(f"composer install (plugin dev deps, host PHP {php})…")
+    r = subprocess.run([php, str(composer), "install",
+                        "--no-interaction", "--no-progress", "--no-plugins"],
+                       cwd=root)
+    if r.returncode != 0:
+        info("locked install failed (stale lock) — running composer update…")
+        subprocess.run([php, str(composer), "update",
+                        "--no-interaction", "--no-progress", "--no-plugins"],
+                       cwd=root)
+
+
+def _run_tests_herd(inst: str, root: str, suite: Path, tools: dict,
+                    extra: list) -> int:
+    """Run PHPUnit with Herd's pinned PHP and the WordPress test environment."""
+    php = _herd_php(inst)
+    _ensure_project_dependencies_herd(inst, root, tools["composer"])
     info(f"running phpunit (host PHP {php})…")
     env = {**os.environ,
            "WP_TESTS_DIR": str(suite),
@@ -258,3 +259,11 @@ def _run_tests_herd(inst: str, root: str, suite: Path, tools: dict,
     r = subprocess.run([php, str(tools["phpunit"]), *extra],
                        cwd=root, env=env)
     return r.returncode
+
+
+def _run_tests_unit_herd(inst: str, root: str, tools: dict, extra: list) -> int:
+    """Run a pure PHPUnit suite with Herd's pinned PHP and no WP environment."""
+    php = _herd_php(inst)
+    _ensure_project_dependencies_herd(inst, root, tools["composer"])
+    info(f"running pure PHPUnit unit suite (host PHP {php})…")
+    return subprocess.run([php, str(tools["phpunit"]), *extra], cwd=root).returncode

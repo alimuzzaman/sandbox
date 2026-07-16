@@ -133,7 +133,9 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 ## Common loops
 
 - **Working on plugin** → `cd` into repo (or pass `project_dir`); `sandbox init` if new, else `ensure_instance`; `focus_get`.
-- **Tests** → `run_tests(project_dir)`.
+- **Tests** → `run_tests(project_dir, mode="unit"|"integration")`; omit `mode` for
+  conservative `auto` resolution. Unit mode skips the WordPress harness/database;
+  integration mode uses the externally provisioned WP test environment.
 - **E2E across fresh sites** → `run_e2e(project_dir, workers=N)` — each worker gets its own fresh instance, not a shared one.
 - **Run a repo's GitHub Actions CI locally** → `ci_plan(workflow)` to see what it would do (safe, no execution), then `ci_run(project_dir, workflow)` — deploy/publish steps are skipped unless `allow_deploy=true`.
 - **Bug fix** → `load_skill('fix')` (snapshot → reproduce → fix → verify).

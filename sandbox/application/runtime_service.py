@@ -43,21 +43,7 @@ class RuntimeService:
                 requested_capability=capability,
             )
 
-    def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
-        error = self.check(request.project_root, request.operation, label=request.label)
-        if error is not None:
-            return error
-        kind, error = self._resolve_kind(request.project_root, label=request.label,
-                                         capability=request.operation)
-        if error is not None:
-            return error
-        spec = self._adapters.for_kind(kind)
-        return spec.adapter.invoke(request)
-
-    def check(self, project_root: str, capability: str, *, label: str = "default") -> OperationError | None:
-        kind, error = self._resolve_kind(project_root, label=label, capability=capability)
-        if error is not None:
-            return error
+    def _capability_error(self, kind: str, capability: str) -> OperationError | None:
         spec = self._adapters.for_kind(kind)
         if spec is None:
             return OperationError(
@@ -77,3 +63,20 @@ class RuntimeService:
                 suggestion="Use an operation listed in available_capabilities.",
             )
         return None
+
+    def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
+        kind, error = self._resolve_kind(request.project_root, label=request.label,
+                                         capability=request.operation)
+        if error is not None:
+            return error
+        error = self._capability_error(kind, request.operation)
+        if error is not None:
+            return error
+        spec = self._adapters.for_kind(kind)
+        return spec.adapter.invoke(request)
+
+    def check(self, project_root: str, capability: str, *, label: str = "default") -> OperationError | None:
+        kind, error = self._resolve_kind(project_root, label=label, capability=capability)
+        if error is not None:
+            return error
+        return self._capability_error(kind, capability)

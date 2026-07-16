@@ -36,6 +36,7 @@ class TestRuntimeService(unittest.TestCase):
         self.assertIsInstance(result, OperationResult)
         self.assertTrue(result.ok)
         self.assertEqual(calls[-1], ("adapter.invoke", "status"))
+        self.assertEqual([call[0] for call in calls], ["descriptor.resolve", "adapter.invoke"])
 
     def test_unsupported_capability_returns_before_adapter(self):
         from sandbox.runtimes.base import OperationError, OperationRequest

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 from typing import Protocol, Sequence
 
 from .errors import RecoveryError
@@ -21,6 +22,11 @@ def _validate_git_token(value: str, field: str, *, allow_dash: bool = False) -> 
             any(char in value for char in "\r\n\0")):
         raise RecoveryError(f"Git {field} is invalid", f"invalid_git_{field}")
     return value
+
+
+def _validate_destination(target: Path) -> None:
+    if target.is_symlink() or (target.exists() and not stat.S_ISREG(target.lstat().st_mode)):
+        raise RecoveryError("Git destination is not a regular file", "invalid_git_destination")
 
 
 class GitCapture:
@@ -51,6 +57,7 @@ class GitCapture:
         _validate_git_token(revision, "revision")
         if target.name.startswith("-") or any(char in str(target) for char in "\r\n\0"):
             raise RecoveryError("Git bundle destination is invalid", "invalid_git_destination")
+        _validate_destination(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         result = self.runner.run(("git", "bundle", "create", str(target), revision), cwd=str(root), timeout=300)
         if result.returncode != 0:
@@ -67,9 +74,11 @@ class GitCapture:
             raise RecoveryError("sensitive files cannot be added to a Git patch", "sensitive_git_patch")
         if any(char in str(destination) for char in "\r\n\0"):
             raise RecoveryError("Git patch destination is invalid", "invalid_git_destination")
+        target = Path(destination)
+        _validate_destination(target)
         result = self.runner.run(("git", "diff", "--binary", "--", *paths), cwd=str(root), timeout=60)
         if result.returncode != 0 or not result.stdout:
             raise RecoveryError("Git patch generation failed", "git_patch_failed")
-        target = Path(destination); target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(result.stdout)
         return target

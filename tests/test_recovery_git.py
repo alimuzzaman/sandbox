@@ -53,3 +53,15 @@ class TestGitCapture(unittest.TestCase):
                 capture.create_bundle(".", Path(directory) / "changes.bundle", "--all")
             with self.assertRaisesRegex(Exception, "destination"):
                 capture.create_bundle(".", Path(directory) / "-bundle", "HEAD")
+
+    def test_rejects_symlink_bundle_and_patch_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); target = root / "target"; target.write_bytes(b"keep")
+            bundle = root / "bundle"; bundle.symlink_to(target)
+            patch = root / "patch"; patch.symlink_to(target)
+            capture = GitCapture(GitRunner())
+            with self.assertRaisesRegex(Exception, "destination"):
+                capture.create_bundle(".", bundle, "HEAD")
+            with self.assertRaisesRegex(Exception, "destination"):
+                capture.create_patch(".", patch, ("README.md",))
+            self.assertEqual(target.read_bytes(), b"keep")

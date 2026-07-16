@@ -36,8 +36,8 @@ Compose file and declares the public service and container port:
 The adapter supports `ensure`, `status`, `start`, `stop`, `logs`, bounded argv
 `exec`, `apply`, and non-destructive `destroy`. Sandbox writes only its
 loopback port overlay under `$SANDBOX_HOME/runtime/projects/<instance>/`; it
-validates the Compose service name, internal/host port range, health path, and
-descriptor roots before writing that overlay or invoking Docker.
+validates the Compose service name, internal/host port range, health path, label
+override, and descriptor roots before writing that overlay or invoking Docker.
 does not rewrite the project's Compose file, infer or execute package scripts,
 or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
 database, Mailpit, WordPress filesystem, abilities, snapshots) fail before

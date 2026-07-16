@@ -121,6 +121,45 @@ class TestProjectConfig(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "compose file.*project root"):
                 resolve_project_config(root, legacy_loader=mock.Mock())
 
+    def test_compose_descriptor_rejects_unsafe_route_fields(self):
+        from sandbox.config.facade import resolve_project_config
+
+        cases = (
+            {"service": "web\nbad"},
+            {"health_path": "/health\x00z"},
+            {"http_port": True},
+            {"http_port": 70000},
+        )
+        for changes in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                descriptor = {
+                    "kind": "compose", "compose": {
+                        "file": "compose.yaml", "service": "web", "internal_port": 80,
+                        "health_path": "/healthz",
+                    },
+                }
+                descriptor["compose"].update(changes)
+                (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+                (root / "sandbox.config.json").write_text(json.dumps(descriptor))
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    resolve_project_config(root, legacy_loader=mock.Mock())
+
+    def test_compose_descriptor_rejects_unsafe_label_override(self):
+        from sandbox.config.facade import resolve_project_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            (root / "sandbox.config.json").write_text(json.dumps({
+                "kind": "compose", "compose": {
+                    "file": "compose.yaml", "service": "web", "internal_port": 80,
+                    "health_path": "/",
+                },
+            }))
+            with self.assertRaisesRegex(ValueError, "label"):
+                resolve_project_config(root, label="../escape", legacy_loader=mock.Mock())
+
     def test_dot_named_project_and_label_override_preserve_display_name(self):
         from sandbox.config.facade import resolve_project_config
 

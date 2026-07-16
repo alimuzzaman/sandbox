@@ -297,13 +297,14 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 775 tests in 42.979s — OK (skipped=1)
+Ran 776 tests in 42.095s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
 The filesystem restore adapter now verifies regular-file content digests, symlink targets,
 member types, and the complete extracted path set after the atomic swap. A disposable regression
 test tampers with a restored file before verification and proves rollback returns the prior target.
+It also rejects a symlink or non-directory restore target before creating a checkpoint.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

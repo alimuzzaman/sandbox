@@ -64,10 +64,11 @@ activation remains a separate protected operation.
 The scheduler also propagates failed or skipped action envelopes, so a run cannot be reported as
 complete—and become eligible for downstream pruning—when capture did not complete.
 
-The filesystem restore adapter is target-explicit and injectable: it decrypts into owner-only
-staging, validates archive members, uses Python's `data` tar filter on supported runtimes,
-checkpoints the target, swaps atomically, verifies expected members, and restores the checkpoint
-on failure. It is not automatically wired to production targets.
+The filesystem restore adapter is target-explicit and injectable: it rejects symlink/non-directory
+targets before checkpointing, decrypts into owner-only staging, validates archive members, uses
+Python's `data` tar filter on supported runtimes, checkpoints the target, swaps atomically,
+verifies expected members, and restores the checkpoint on failure. It is not automatically wired
+to production targets.
 
 When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the service composes
 the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;

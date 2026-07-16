@@ -179,6 +179,8 @@ class FilesystemRestoreAdapter:
     def checkpoint(self) -> None:
         if not self.ciphertext.is_file():
             raise RecoveryError("restore ciphertext is unavailable", "missing_ciphertext")
+        if self.target.is_symlink() or (self.target.exists() and not self.target.is_dir()):
+            raise RecoveryError("restore target must be a directory", "invalid_restore_target")
         self.target.parent.mkdir(parents=True, exist_ok=True)
         self._workspace = Path(tempfile.mkdtemp(prefix=f".{self.target.name}.recovery-",
                                                  dir=self.target.parent))

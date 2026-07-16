@@ -96,6 +96,24 @@ class TestDisposableRestoreApply(unittest.TestCase):
                 apply_restore(plan, {"filesystem": adapter}, confirm=True)
             self.assertEqual((target / "old.txt").read_text(), "old")
 
+    def test_filesystem_adapter_rejects_symlink_target_before_checkpoint(self):
+        class FileCrypto:
+            def decrypt_file(self, source, target):
+                shutil.copyfile(source, target)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            (source / "new.txt").write_text("new")
+            archive = root / "archive.tar"
+            from sandbox.recovery.filesystem import archive_paths
+            archive_paths(source, (source / "new.txt",), archive)
+            real_target = root / "real-target"; real_target.mkdir()
+            target = root / "target"; target.symlink_to(real_target, target_is_directory=True)
+            adapter = FilesystemRestoreAdapter(FileCrypto(), archive, target)
+            with self.assertRaisesRegex(RecoveryError, "target"):
+                adapter.checkpoint()
+            self.assertTrue(target.is_symlink())
+            self.assertFalse(list(root.glob(".target.recovery-*")))
+
     def test_failed_later_profile_restores_prior_file_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); first = root / "first"; second = root / "second"

@@ -16,6 +16,9 @@ class PathResolver:
     def resolve(self, root: str, source: str) -> Path:
         if root not in self.roots:
             raise RecoveryError("unknown recovery allowed root", "invalid_root")
+        if (not isinstance(source, str) or not source or Path(source).is_absolute() or
+                any(ord(char) < 32 or ord(char) == 127 for char in source)):
+            raise RecoveryError("recovery source must be a safe relative path", "invalid_source")
         path = (self.roots[root] / source).resolve()
         try:
             path.relative_to(self.roots[root])

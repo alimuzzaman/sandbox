@@ -31,6 +31,10 @@ class TestRecoveryPlanner(unittest.TestCase):
             with self.assertRaises(RecoveryError):
                 resolver.resolve("root", "../outside")
             with self.assertRaises(RecoveryError):
+                resolver.resolve("root", str(allowed / "ok"))
+            with self.assertRaises(RecoveryError):
+                resolver.resolve("root", "bad\npath")
+            with self.assertRaises(RecoveryError):
                 resolver.resolve("root", "missing")
 
     def test_profile_selection_rejects_non_string_values(self):

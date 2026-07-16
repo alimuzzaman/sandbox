@@ -58,6 +58,32 @@ class TestRuntimeService(unittest.TestCase):
         self.assertIsInstance(result, OperationError)
         self.assertEqual(result.code, "unsupported_kind")
 
+    def test_malformed_descriptor_returns_structured_error_before_adapter(self):
+        from sandbox.application.runtime_service import RuntimeService
+        from sandbox.runtimes.base import AdapterRegistry, OperationError, OperationRequest
+
+        calls = []
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label=None: calls.append(root) or [],
+            adapters=AdapterRegistry(),
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertIsInstance(result, OperationError)
+        self.assertEqual(result.code, "invalid_descriptor")
+        self.assertEqual(result.requested_capability, "status")
+        self.assertEqual(calls, ["/tmp/project"])
+
+    def test_descriptor_kind_with_whitespace_is_rejected(self):
+        from sandbox.application.runtime_service import RuntimeService
+        from sandbox.runtimes.base import AdapterRegistry, OperationRequest
+
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label=None: {"kind": "bad kind"},
+            adapters=AdapterRegistry(),
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertEqual(result.code, "invalid_descriptor")
+
     def test_wordpress_adapter_delegates_and_normalizes_dict(self):
         from sandbox.runtimes.base import OperationRequest, OperationResult
         from sandbox.runtimes.wordpress import WordPressAdapter

@@ -121,6 +121,7 @@ def write_state(path: Path, state: dict, *, expected_digest: str | None = None) 
     with lock_path.open("a+") as lock:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        temporary = None
         try:
             if expected_digest is not None:
                 if not path.exists():
@@ -132,9 +133,11 @@ def write_state(path: Path, state: dict, *, expected_digest: str | None = None) 
                 if state_digest(current) != expected_digest:
                     raise AuthorizationError("authorization state changed")
             with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
+                temporary = Path(handle.name)
                 json.dump(state, handle, sort_keys=True, indent=2)
                 handle.write("\n")
-                temporary = Path(handle.name)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.chmod(temporary, 0o600)
             temporary.replace(path)
             path.chmod(0o600)
@@ -144,6 +147,8 @@ def write_state(path: Path, state: dict, *, expected_digest: str | None = None) 
             finally:
                 os.close(directory_fd)
         finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 

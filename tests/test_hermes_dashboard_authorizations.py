@@ -118,6 +118,15 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
             with self.assertRaises(core.AuthorizationError):
                 core.write_state(path, state, expected_digest=expected)
 
+    def test_state_write_cleans_a_temp_file_when_serialization_fails(self):
+        state = core.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            with patch.object(core.json, "dump", side_effect=RuntimeError("serialization failed")):
+                with self.assertRaises(RuntimeError):
+                    core.write_state(path, state)
+            self.assertEqual(sorted(item.name for item in Path(directory).iterdir()), ["state.json.lock"])
+
     def test_expiry_companion_revokes_expired_approval_and_refreshes_current_one(self):
         companion = ROOT / "sandbox/hermes/dashboard_authorizations/expire.py"
         with tempfile.TemporaryDirectory() as directory:

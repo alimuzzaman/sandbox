@@ -1648,6 +1648,10 @@ from pathlib import Path
 
 path = Path.home() / ".hermes" / "cron" / "jobs.json"
 data = json.loads(path.read_text()) if path.exists() else {"jobs": []}
+if not isinstance(data, dict) or not isinstance(data.get("jobs", []), list):
+    raise ValueError("invalid Hermes cron jobs collection")
+if not all(isinstance(job, dict) for job in data["jobs"]):
+    raise ValueError("invalid Hermes cron job record")
 guard = base64.b64decode(sys.argv[1]).decode()
 config_path = Path.home() / ".hermes" / "config.yaml"
 
@@ -1688,9 +1692,7 @@ def safe_effort(value):
 
 configured_effort = safe_effort(config_effort())
 safe = []
-for job in data.get("jobs", []):
-    if not isinstance(job, dict):
-        continue
+for job in data["jobs"]:
     reason = ""
     job_id = str(job.get("id") or "")
     dumps = sorted((Path.home() / ".hermes" / "sessions").glob(f"request_dump_cron_{job_id}_*.json"),

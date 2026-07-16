@@ -151,6 +151,8 @@ profile setting while each default-profile cron job receives an explicit,
 validated provider/model snapshot. `cron validate` is read-only. Creation,
 routing repair, and triggering require `--confirm`, and creation always uses
 local-file delivery rather than an external messaging destination.
+Malformed or non-object cron job records are rejected as `invalid_cron_state`;
+they are never silently reduced to an empty scheduler inventory.
 
 The source of truth is `sandbox/hermes/cron-catalog.json`; its scripts live in
 `sandbox/hermes/cron_scripts/` and are installed by setup, update, restore, and

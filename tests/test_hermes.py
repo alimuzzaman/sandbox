@@ -516,6 +516,24 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertNotIn("prompt", agent)
 
     @patch("sandbox.core._hermes._checked")
+    def test_cron_snapshot_rejects_malformed_jobs_collection(self, checked):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            cron = home / ".hermes" / "cron"
+            cron.mkdir(parents=True)
+            (cron / "jobs.json").write_text(json.dumps({"jobs": ["malformed"]}))
+
+            def execute_snapshot(_, command, **__):
+                run = subprocess.run(shlex.split(command), text=True, capture_output=True, check=False,
+                                     env={**os.environ, "HOME": str(home)})
+                return _completed(run.returncode, run.stdout, run.stderr)
+
+            checked.side_effect = execute_snapshot
+            with self.assertRaises(hermes.HermesError) as caught:
+                hermes._cron_snapshot({})
+        self.assertEqual(caught.exception.code, "invalid_cron_state")
+
+    @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._paths", return_value={
         "repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",

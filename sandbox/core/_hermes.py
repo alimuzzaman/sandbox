@@ -663,6 +663,14 @@ def authorization_approve(remote_name: str, request_id: str, confirm: bool) -> d
         raise HermesError("authorization request was not found", "authorization_not_found")
     if request.get("status") != "pending":
         raise HermesError("authorization request is not pending", "authorization_not_pending")
+    try:
+        expected_fingerprint = _authorization_fingerprint(
+            request["job_name"], request["scope"], request["replay_origin"], request["rationale"])
+    except (KeyError, TypeError):
+        raise HermesError("authorization request record is invalid", "invalid_authorization_record")
+    if request.get("fingerprint") != expected_fingerprint:
+        raise HermesError("authorization request fingerprint does not match its fields",
+                          "authorization_fingerprint_mismatch")
     job = _catalog_authorization_job(request["job_name"], paths)
     matches = [item for item in _cron_snapshot(entry)["jobs"] if item.get("name") == job["name"] and item.get("enabled")]
     if len(matches) != 1 or not _CRON_JOB_RE.fullmatch(str(matches[0].get("id") or "")):

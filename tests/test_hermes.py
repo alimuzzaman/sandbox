@@ -138,9 +138,11 @@ class TestValidation(unittest.TestCase):
         state = hermes._new_state()
         request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
                    "replay_origin": "https://replay.example.test", "rationale": "bounded review",
-                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "fingerprint": hermes._authorization_fingerprint("lenzora-todo-task", "preview-overlay",
+                                                                      "https://replay.example.test", "bounded review"),
+                   "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
                    "expires_at": "2099-07-15T00:00:00+00:00"}
-        prior = {**request, "id": "c" * 16, "fingerprint": "d" * 64, "status": "approved",
+        prior = {**request, "id": "c" * 16, "status": "approved",
                  "approved_at": "2026-07-14T00:00:00+00:00"}
         state["authorizations"]["requests"][request["id"]] = request
         state["authorizations"]["requests"][prior["id"]] = prior
@@ -172,7 +174,9 @@ class TestValidation(unittest.TestCase):
         state = hermes._new_state()
         request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
                    "replay_origin": "https://replay.example.test", "rationale": "bounded review",
-                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "fingerprint": hermes._authorization_fingerprint("lenzora-todo-task", "preview-overlay",
+                                                                      "https://replay.example.test", "bounded review"),
+                   "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
                    "expires_at": "2099-07-15T00:00:00+00:00"}
         state["authorizations"]["requests"][request["id"]] = request
         read_state.return_value = state
@@ -197,7 +201,9 @@ class TestValidation(unittest.TestCase):
         state = hermes._new_state()
         request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
                    "replay_origin": "https://replay.example.test", "rationale": "bounded review",
-                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "fingerprint": hermes._authorization_fingerprint("lenzora-todo-task", "preview-overlay",
+                                                                      "https://replay.example.test", "bounded review"),
+                   "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
                    "expires_at": "2099-07-15T00:00:00+00:00"}
         state["authorizations"]["requests"][request["id"]] = request
         read_state.return_value = state
@@ -212,6 +218,26 @@ class TestValidation(unittest.TestCase):
                          "pending")
         self.assertEqual(write_state.call_args_list[1].kwargs["expected_digest"],
                          hermes._state_digest(write_state.call_args_list[0].args[2]))
+
+    @patch("sandbox.core._hermes._set_cron_prompt")
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes._remote_state_read")
+    @patch("sandbox.core._hermes._paths", return_value={})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    def test_authorization_approval_rejects_tampered_fingerprint_before_mutation(
+            self, require_remote, paths, read_state, write_state, set_prompt):
+        state = hermes._new_state()
+        request = {"id": "a" * 16, "job_name": "lenzora-todo-task", "scope": "preview-overlay",
+                   "replay_origin": "https://replay.example.test", "rationale": "changed scope",
+                   "fingerprint": "b" * 64, "status": "pending", "created_at": "2026-07-15T00:00:00+00:00",
+                   "expires_at": "2099-07-15T00:00:00+00:00"}
+        state["authorizations"]["requests"][request["id"]] = request
+        read_state.return_value = state
+        with self.assertRaises(hermes.HermesError) as caught:
+            hermes.authorization_approve("test", request["id"], True)
+        self.assertEqual(caught.exception.code, "authorization_fingerprint_mismatch")
+        write_state.assert_not_called()
+        set_prompt.assert_not_called()
 
     def test_authorization_approval_requires_confirmation(self):
         with self.assertRaises(hermes.HermesError) as caught:

@@ -214,6 +214,9 @@ older approval for that same job, so only one approval can remain active.
 Authorization approval persists the state with an optimistic digest under the
 remote lock before updating the matching cron prompt. If another writer changes
 the state first, the operation returns `state_conflict` before prompt mutation.
+Before approval, Sandbox recomputes the request fingerprint from the stored job,
+scope, replay origin, and rationale; a mismatched record is rejected before any
+state write or prompt mutation.
 If prompt delivery fails, the state transition is rolled back with a second
 compare-and-swap, preventing an approved state from being left with an unrelated
 prompt.

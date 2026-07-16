@@ -8,6 +8,21 @@ from sandbox.services.proxy import CallbackProxyManager
 
 
 class TestPathsAndProxy(unittest.TestCase):
+    def test_path_policy_rejects_broad_roots_and_malformed_inputs(self):
+        with self.assertRaisesRegex(ValueError, "too broad"):
+            AllowedRootPathPolicy(("/",))
+        with self.assertRaisesRegex(ValueError, "sequence"):
+            AllowedRootPathPolicy("/tmp")
+        with tempfile.TemporaryDirectory() as root:
+            policy = AllowedRootPathPolicy((root,))
+            for path in ("bad\x00path", 123):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    policy.require_allowed(path)
+            with self.assertRaisesRegex(ValueError, "parts"):
+                policy.artifact_path(root)
+            with self.assertRaisesRegex(ValueError, "parts"):
+                policy.artifact_path(root, 123)
+
     def test_paths_fail_closed_outside_root(self):
         with tempfile.TemporaryDirectory() as root:
             policy = AllowedRootPathPolicy((root,))

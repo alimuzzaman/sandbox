@@ -2393,6 +2393,15 @@ class TestLocalState(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.with_name("hermes.json.lock").stat().st_mode & 0o777, 0o600)
 
+    def test_state_write_cleans_temp_file_when_serialization_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hermes.json"
+            state = {"schema_version": hermes.STATE_SCHEMA, "repositories": {}}
+            with patch.object(hermes.json, "dump", side_effect=RuntimeError("serialization failed")):
+                with self.assertRaises(RuntimeError):
+                    hermes.write_state(path, state)
+            self.assertEqual(sorted(item.name for item in Path(directory).iterdir()), ["hermes.json.lock"])
+
     @patch("sandbox.core._hermes.remote.ssh_run")
     def test_remote_state_writes_hold_a_bounded_lock(self, ssh_run):
         ssh_run.return_value = _completed()

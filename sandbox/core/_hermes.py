@@ -695,15 +695,25 @@ def write_state(path: Path, state: dict) -> None:
     with lock_path.open("a+") as lock:
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        temp_name = None
         try:
             with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
+                temp_name = handle.name
                 json.dump(state, handle, indent=2, sort_keys=True)
                 handle.write("\n")
-                temp_name = handle.name
+                handle.flush()
+                os.fsync(handle.fileno())
             os.chmod(temp_name, 0o600)
             Path(temp_name).replace(path)
             path.chmod(0o600)
+            directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
+            if temp_name is not None:
+                Path(temp_name).unlink(missing_ok=True)
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 

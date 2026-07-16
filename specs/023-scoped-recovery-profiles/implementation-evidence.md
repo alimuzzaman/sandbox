@@ -256,11 +256,15 @@ in destinations and object keys, non-regular or empty downloaded objects, and ma
 artifact maps/manifests. These checks preserve stable recovery errors and prevent untrusted remote
 or fixture data from being silently treated as an empty or valid recovery set.
 
+The retention CLI now prints protected, candidate, and unclassified sets in human-readable mode;
+JSON output and the confirmation-gated deletion boundary are unchanged, making reviewable prune
+plans visible without requiring machine parsing.
+
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 755 tests in 42.959s — OK (skipped=1)
+Ran 756 tests in 42.308s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

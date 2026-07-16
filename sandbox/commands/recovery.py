@@ -39,6 +39,15 @@ def _emit(payload: dict, as_json: bool) -> None:
     elif payload["action"] == "plan":
         for artifact in payload["data"]["artifacts"]:
             print(f"  {artifact['profile_id']}: {artifact['capture_mode']} ({artifact['rationale']})")
+    elif payload["action"] == "retention":
+        data = payload.get("data") or {}
+        protected = tuple(data.get("protected_sets") or ())
+        candidates = tuple(data.get("candidates") or ())
+        print(f"  protected: {', '.join(protected) or '(none)'}")
+        print(f"  candidates: {', '.join(candidates) or '(none)'}")
+        for item in data.get("unclassified") or ():
+            if isinstance(item, dict):
+                print(f"  unclassified: {item.get('id', '(unknown)')} ({item.get('reason', 'unknown')})")
 
 
 def _parse_artifacts(values: list[str]) -> dict[str, Path]:

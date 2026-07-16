@@ -2,6 +2,8 @@ import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from io import StringIO
+from contextlib import redirect_stdout
 
 from sandbox.commands.recovery import cmd_recovery
 
@@ -54,3 +56,18 @@ class TestRecoveryInterfaces(unittest.TestCase):
         with patch("sandbox.commands.recovery.recovery_service", return_value=service):
             cmd_recovery(None, self._args("retention", keep_count=3, minimum_age_days=7))
         self.assertEqual(calls, [((None,), {"keep_count": 3, "minimum_age_days": 7})])
+
+    def test_cli_retention_human_output_shows_reviewable_plan(self):
+        service = SimpleNamespace(retention_plan=lambda *args, **kwargs: {
+            "action": "retention", "ok": True, "status": "planned", "data": {
+                "protected_sets": ("new",), "candidates": ("old",),
+                "unclassified": ({"id": "legacy", "reason": "invalid_manifest"},),
+            }
+        })
+        output = StringIO()
+        with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                redirect_stdout(output):
+            cmd_recovery(None, self._args("retention", json=False))
+        self.assertIn("protected: new", output.getvalue())
+        self.assertIn("candidates: old", output.getvalue())
+        self.assertIn("unclassified: legacy (invalid_manifest)", output.getvalue())

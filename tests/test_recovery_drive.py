@@ -54,7 +54,9 @@ class TestDrive(unittest.TestCase):
                     return ProcessResult(tuple(argv), 0, self.payload, "")
                 return super().run(argv, **kwargs)
 
-        for payload in ('{"Path":"sets/a/manifest.json"}', '[{"Path":"sets/a"}, "bad"]'):
+        for payload in ('{"Path":"sets/a/manifest.json"}', '[{"Path":"sets/a"}, "bad"]',
+                        '[{"Path":7}]', '[{"Path":"../outside"}]',
+                        '[{"Path":"sets/a", "Size":true}]'):
             with self.subTest(payload=payload):
                 drive = RcloneDrive(MalformedRunner(payload), "gdrive:recovery")
                 with self.assertRaisesRegex(RecoveryError, "listing"):

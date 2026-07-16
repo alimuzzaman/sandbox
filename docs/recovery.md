@@ -81,6 +81,8 @@ protected.
 
 Read-only remote inventory also validates the complete response schema before returning it;
 malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
+Drive object listings likewise require relative string paths and non-negative integer sizes;
+malformed remote metadata fails closed before set classification or retention planning.
 RecoveryService also converts malformed adapter responses into operation-specific result errors
 (`inventory_failed`, `list_failed`, `capture_failed`, `verify_failed`, `retention_failed`, or
 `restore_failed`) instead of leaking raw Python exceptions.

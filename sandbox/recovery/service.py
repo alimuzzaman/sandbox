@@ -19,6 +19,16 @@ def _set_id(path: str) -> str | None:
     return candidate
 
 
+def _listing_path(item: object) -> str:
+    if not isinstance(item, dict) or not isinstance(item.get("Path"), str):
+        raise RecoveryError("recovery listing contains an invalid path", "invalid_drive_listing")
+    path = item["Path"]
+    if (not path or path.startswith("/") or ".." in Path(path).parts or
+            any(ord(char) < 32 or ord(char) == 127 for char in path)):
+        raise RecoveryError("recovery listing contains an invalid path", "invalid_drive_listing")
+    return path
+
+
 def _retention_timestamp_valid(value: object) -> bool:
     if not isinstance(value, str) or not value:
         return False
@@ -102,7 +112,7 @@ class RecoveryService:
             groups: dict[str, list[dict]] = {}
             legacy: list[dict] = []
             for item in objects:
-                path = str(item.get("Path", ""))
+                path = _listing_path(item)
                 set_id = _set_id(path)
                 if set_id is None:
                     legacy.append(item)
@@ -113,7 +123,7 @@ class RecoveryService:
             incomplete: list[dict] = []
             unverifiable: list[dict] = []
             for set_id, group in sorted(groups.items()):
-                manifests = [item for item in group if str(item.get("Path", "")).endswith("/manifest.json")]
+                manifests = [item for item in group if _listing_path(item).endswith("/manifest.json")]
                 if not manifests:
                     incomplete.extend(group)
                     continue
@@ -202,8 +212,9 @@ class RecoveryService:
 
             objects = self.drive.list("")
             manifest_ids = sorted({set_id for item in objects
-                                   if (set_id := _set_id(str(item.get("Path", ""))))
-                                   and str(item.get("Path", "")).endswith("/manifest.json")})
+                                   if (path := _listing_path(item))
+                                   and (set_id := _set_id(path))
+                                   and path.endswith("/manifest.json")})
             observed = []
             unclassified = []
             for set_id in manifest_ids:

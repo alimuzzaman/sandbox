@@ -52,6 +52,14 @@ class TestRecoveryService(unittest.TestCase):
         self.assertFalse(listed["ok"])
         self.assertEqual(listed["error"]["code"], "list_failed")
 
+        class MalformedDrive:
+            def list(self, _prefix):
+                return ({"Path": 7},)
+
+        malformed = RecoveryService(RecoveryCatalog(1, ()), drive=MalformedDrive()).list()
+        self.assertFalse(malformed["ok"])
+        self.assertEqual(malformed["error"]["code"], "invalid_drive_listing")
+
     def test_create_requires_confirmation_and_list_classifies_pending_objects(self):
         drive = MemoryDrive()
         service = RecoveryService(RecoveryCatalog(1, ()), drive=drive)

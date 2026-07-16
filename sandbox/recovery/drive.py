@@ -106,6 +106,13 @@ class RcloneDrive:
             raise RecoveryError("Drive listing is invalid", "drive_list_failed") from exc
         if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
             raise RecoveryError("Drive listing is invalid", "drive_list_failed")
+        for item in items:
+            path = item.get("Path")
+            size = item.get("Size")
+            if (not isinstance(path, str) or not path or _has_control(path) or path.startswith("/") or
+                    ".." in Path(path).parts or
+                    (size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0))):
+                raise RecoveryError("Drive listing is invalid", "drive_list_failed")
         return tuple(items)
 
 

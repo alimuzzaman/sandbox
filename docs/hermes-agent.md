@@ -79,6 +79,9 @@ Incremental capture selects the lexically latest valid timestamped recovery ID a
 rejects malformed or cross-bound manifest metadata before reusing a state chain.
 Restore also requires every linked manifest to carry the same chain ID before
 decrypting or replacing any state.
+The replacement phase is guarded by a rollback trap: if a later move, database
+import, or verification step fails, prior roots are restored and previously active
+services are restarted before the staged directory is removed.
 
 ## Trust boundary
 

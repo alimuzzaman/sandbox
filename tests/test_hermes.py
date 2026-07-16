@@ -1434,6 +1434,9 @@ class TestProfileRendering(unittest.TestCase):
         self.assertIn("--no-same-owner", command)
         self.assertIn("docker run --rm", command)
         self.assertIn("systemctl --user start hermes-gateway-sandbox.service", command)
+        self.assertIn("restore_path()", command)
+        self.assertIn("trap rollback EXIT", command)
+        self.assertIn("committed=1", command)
 
     @patch("sandbox.core._hermes._ssh")
     @patch("sandbox.core._hermes._dashboard_listeners")

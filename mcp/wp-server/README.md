@@ -11,10 +11,11 @@ when omitted content is relevant.
 Browser reports also cap repetitive iframe, console, network, and error entries
 at 100 items while preserving failure detection and a truncation flag.
 
-For a smaller MCP tool catalog, set `SANDBOX_MCP_GROUPS` before starting the
-server, for example `instances,runtime,wp,net,data,fs,context`. Omitting it
-preserves the complete catalog. The available groups are listed in
-`mcp/wp-server/tools/manifest.py`.
+The default MCP catalog is the 32-tool core set: `instances,runtime,wp,net,
+data,fs,context`. To enable extra groups, set `SANDBOX_MCP_GROUPS` before
+starting the server, for example `instances,runtime,wp,net,data,fs,context,
+debug,mail`. Set it to `all` for the complete catalog. Available groups are
+listed in `mcp/wp-server/tools/manifest.py`.
 
 ## Tools
 

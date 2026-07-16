@@ -150,7 +150,7 @@ class TestMcpServerSplit(unittest.TestCase):
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT)})
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all"})
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         schema_line = next(line for line in r.stdout.splitlines() if line.startswith("SCHEMA "))
         actual = __import__("json").loads(schema_line.removeprefix("SCHEMA "))
@@ -207,7 +207,7 @@ class TestMcpServerSplit(unittest.TestCase):
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "SANDBOX_ROOT": str(ROOT)})
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all"})
         self.assertEqual(r.returncode, 0, f"server import failed:\n{r.stderr}")
         out = dict(
             line.split() for line in r.stdout.split("\n")

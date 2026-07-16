@@ -13,6 +13,10 @@ BUILTIN_TOOL_GROUPS = (
     "plugin_check", "remote", "hermes", "recovery",
 )
 
+DEFAULT_MCP_GROUPS = (
+    "instances", "runtime", "wp", "net", "data", "fs", "context",
+)
+
 # Groups in this map are import-safe and bind only the dependencies their public
 # functions use. All other groups retain the bounded legacy app compatibility
 # bridge until they are migrated independently.
@@ -77,9 +81,8 @@ def _explicit_group(group_id: str):
 def built_in_tool_registry(group_ids: tuple[str, ...] | None = None) -> ToolGroupRegistry:
     """Build the registry, optionally loading only selected tool groups.
 
-    The default remains the complete catalog for compatibility. Clients that
-    want a smaller MCP context can set ``SANDBOX_MCP_GROUPS`` to a comma-separated
-    allowlist before starting the server.
+    Clients can set ``SANDBOX_MCP_GROUPS`` to a comma-separated allowlist before
+    starting the server; ``all`` selects the complete catalog.
     """
     selected = set(group_ids) if group_ids is not None else set(BUILTIN_TOOL_GROUPS)
     unknown = selected.difference(BUILTIN_TOOL_GROUPS)

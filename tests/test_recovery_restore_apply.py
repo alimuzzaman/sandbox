@@ -8,7 +8,8 @@ from sandbox.recovery.crypto import FixtureCrypto
 from sandbox.recovery.drive import MemoryDrive
 from sandbox.recovery.errors import RecoveryError
 from sandbox.recovery.restore import apply_restore, build_restore_plan
-from sandbox.recovery.restore import FilesystemRestoreAdapter
+from sandbox.recovery.restore import (ControlPlaneRestoreAdapter, DatabaseRestoreAdapter,
+                                      FilesystemRestoreAdapter, GitRestoreAdapter)
 
 
 class FileSwapAdapter:
@@ -149,3 +150,61 @@ class TestDisposableRestoreApply(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "required operations"):
             apply_restore(plan, {"filesystem": adapter}, confirm=True)
         self.assertEqual(adapter.events, [])
+
+    def test_database_restore_adapter_validates_and_stages_with_callbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); dump = root / "dump.sql"
+            dump.write_text("CREATE TABLE example (id INT);\n")
+            events = []
+            adapter = DatabaseRestoreAdapter(
+                "mariadb", dump,
+                checkpoint=lambda: events.append("checkpoint") or "snapshot",
+                apply=lambda staged: events.append(("apply", staged.read_text())),
+                verify=lambda: events.append("verify"),
+                rollback=lambda state: events.append(("rollback", state)),
+                quiesce=lambda: events.append("quiesce"),
+                resume=lambda: events.append("resume"),
+            )
+            plan = type("Plan", (), {"profiles": ("database",)})()
+            result = apply_restore(plan, {"database": adapter}, confirm=True)
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(events, ["checkpoint", "quiesce", ("apply", "CREATE TABLE example (id INT);\n"),
+                                      "verify", "resume"])
+
+    def test_source_restore_adapters_roll_back_callback_state_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); artifact = root / "artifact.bin"; artifact.write_bytes(b"declaration")
+            events = []
+            adapter = ControlPlaneRestoreAdapter(
+                artifact,
+                checkpoint=lambda: "control-checkpoint",
+                apply=lambda staged: events.append(("apply", staged.read_bytes())),
+                verify=lambda: (_ for _ in ()).throw(RuntimeError("verification failed")),
+                rollback=lambda state: events.append(("rollback", state)),
+            )
+            plan = type("Plan", (), {"profiles": ("control-plane",)})()
+            with self.assertRaisesRegex(RecoveryError, "rollback"):
+                apply_restore(plan, {"control-plane": adapter}, confirm=True)
+            self.assertEqual(events, [("apply", b"declaration"), ("rollback", "control-checkpoint")])
+
+            GitRestoreAdapter(
+                artifact,
+                checkpoint=lambda: None,
+                apply=lambda _staged: None,
+                verify=lambda: None,
+                rollback=lambda _state: None,
+            )
+
+    def test_source_restore_adapter_rejects_artifact_mutation_during_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact.bin"; artifact.write_bytes(b"before")
+            adapter = ControlPlaneRestoreAdapter(
+                artifact,
+                checkpoint=lambda: artifact.write_bytes(b"after!") or "checkpoint",
+                apply=lambda _staged: self.fail("apply must not run"),
+                verify=lambda: None,
+                rollback=lambda _state: None,
+            )
+            plan = type("Plan", (), {"profiles": ("control-plane",)})()
+            with self.assertRaisesRegex(RecoveryError, "changed"):
+                apply_restore(plan, {"control-plane": adapter}, confirm=True)

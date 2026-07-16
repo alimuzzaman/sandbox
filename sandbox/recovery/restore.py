@@ -10,9 +10,10 @@ import shutil
 import sys
 import tarfile
 import tempfile
-from typing import Mapping
+from typing import Any, Callable, Mapping
 
 from .errors import RecoveryError
+from .database import DatabaseCapture
 from .filesystem import validate_archive
 from .integrity import sha256_file
 from .models import RestorePlan
@@ -158,6 +159,110 @@ def apply_restore(plan: RestorePlan, adapters: Mapping[str, object], *, confirm:
             raise
         raise RecoveryError("restore apply failed and rollback was attempted", "restore_apply_failed") from exc
     return {"status": "complete", "events": tuple(events)}
+
+
+def _validate_restore_artifact(path: Path) -> tuple[int, int, int, int, str]:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RecoveryError("restore artifact is unavailable", "missing_restore_artifact") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0:
+        raise RecoveryError("restore artifact is invalid", "invalid_restore_artifact")
+    return (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, sha256_file(path))
+
+
+class CallbackRestoreAdapter:
+    """Safe lifecycle wrapper for source-specific, explicitly injected restore callbacks."""
+
+    def __init__(self, source: str | Path, *, checkpoint: Callable[[], Any],
+                 apply: Callable[[Path], Any], verify: Callable[[], Any],
+                 rollback: Callable[[Any], Any], quiesce: Callable[[], Any] | None = None,
+                 resume: Callable[[], Any] | None = None,
+                 validate: Callable[[Path], Any] | None = None) -> None:
+        self.source = Path(source)
+        self._checkpoint_fn = checkpoint
+        self._apply_fn = apply
+        self._verify_fn = verify
+        self._rollback_fn = rollback
+        self._quiesce_fn = quiesce or (lambda: None)
+        self._resume_fn = resume or (lambda: None)
+        self._validate_fn = validate or _validate_restore_artifact
+        self._checkpoint_state = None
+        self._source_snapshot: tuple[int, int, int, int, str] | None = None
+        self._workspace: Path | None = None
+        self._staged: Path | None = None
+
+    def checkpoint(self) -> None:
+        self._source_snapshot = _validate_restore_artifact(self.source)
+        self._checkpoint_state = self._checkpoint_fn()
+        self._workspace = Path(tempfile.mkdtemp(prefix="sandbox-restore-"))
+        os.chmod(self._workspace, 0o700)
+
+    def quiesce(self) -> None:
+        self._quiesce_fn()
+
+    def stage(self) -> None:
+        if self._workspace is None:
+            raise RecoveryError("restore checkpoint is unavailable", "restore_not_checkpointed")
+        self._staged = self._workspace / "artifact"
+        shutil.copyfile(self.source, self._staged)
+        os.chmod(self._staged, 0o600)
+        self._validate_fn(self._staged)
+        if self._source_snapshot != _validate_restore_artifact(self.source):
+            raise RecoveryError("restore artifact changed during staging", "source_changed")
+
+    def swap(self) -> None:
+        if self._staged is None:
+            raise RecoveryError("restore stage is unavailable", "restore_not_staged")
+
+    def import_(self) -> None:
+        if self._staged is None:
+            raise RecoveryError("restore stage is unavailable", "restore_not_staged")
+        self._apply_fn(self._staged)
+
+    def verify(self) -> None:
+        self._verify_fn()
+
+    def resume(self) -> None:
+        try:
+            self._resume_fn()
+        finally:
+            self._cleanup()
+
+    def rollback(self) -> None:
+        try:
+            self._rollback_fn(self._checkpoint_state)
+        finally:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        if self._workspace is not None:
+            shutil.rmtree(self._workspace, ignore_errors=True)
+        self._workspace = None
+        self._staged = None
+        self._source_snapshot = None
+
+    def __getattr__(self, name: str):
+        if name == "import":
+            return self.import_
+        raise AttributeError(name)
+
+
+class DatabaseRestoreAdapter(CallbackRestoreAdapter):
+    """Logical database restore lifecycle with format validation and injected operations."""
+
+    def __init__(self, engine: str, dump: str | Path, **callbacks) -> None:
+        if engine not in {"postgresql", "mariadb", "mysql"}:
+            raise RecoveryError("database engine is not supported", "unsupported_database")
+        super().__init__(dump, validate=lambda path: DatabaseCapture._validate_format(engine, path), **callbacks)
+
+
+class ControlPlaneRestoreAdapter(CallbackRestoreAdapter):
+    """Control-plane artifact restore with explicit checkpoint/import/verification callbacks."""
+
+
+class GitRestoreAdapter(CallbackRestoreAdapter):
+    """Git bundle or patch restore with explicit, caller-owned Git verification callbacks."""
 
 
 class FilesystemRestoreAdapter:

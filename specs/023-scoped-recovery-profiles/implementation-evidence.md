@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 777 tests in 42.667s — OK (skipped=1)
+Ran 780 tests in 42.231s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -307,6 +307,10 @@ test tampers with a restored file before verification and proves rollback return
 It also rejects a symlink or non-directory restore target before creating a checkpoint.
 The restore coordinator preflights checkpoint/quiesce/stage/swap/import/verify/resume/rollback
 operations and rejects incomplete adapters before invoking any operation.
+Database, control-plane, and Git restore adapters now share an injectable callback lifecycle;
+database dumps receive format validation, all sources are copied into owner-only staging, and
+failure-injection tests prove callback checkpoint rollback without invoking production services.
+Their source snapshots also reject inode/size/mtime/digest changes during staging.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

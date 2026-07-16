@@ -71,6 +71,12 @@ verifies expected members, and restores the checkpoint on failure. It is not aut
 to production targets. The restore coordinator preflights every required adapter operation before
 checkpointing any profile, so malformed adapters fail without partial restore work.
 
+Database, control-plane, and Git restore adapters use the same explicit callback lifecycle. They
+validate and stage a caller-supplied artifact, then delegate checkpoint, import, verification,
+resume, and rollback to injected services; no database credentials, Git commands, or production
+targets are inferred by the recovery module. Artifact inode/size/mtime/digest changes during
+staging are rejected before import.
+
 When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the service composes
 the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;
 missing secret configuration leaves capture unavailable rather than guessing sources.

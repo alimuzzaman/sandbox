@@ -236,3 +236,30 @@ that complete sets are manifest-verified, decrypted with the current crypto adap
 to deterministic keep-count candidates without deleting remote objects. Verified sets with stale
 or unavailable passphrase material, or invalid timestamps, remain explicitly unclassified rather
 than being silently omitted.
+
+## Subsequent local hardening audit
+
+The follow-up review applied the same research-derived fail-closed and durability rules across
+the remaining boundaries. Artifact capture now rejects symlink/non-regular destinations and
+sources, detects source mutation, bounds inherited GnuPG passphrases, streams database-format
+validation, and rejects unsafe archive/control text. Git and rclone outputs reject symlink
+destinations, option-like tokens, NUL text, and malformed object keys. Recovery manifests,
+catalogs, profile selections, schedules, source paths, and remote inventory uncertainty are
+validated or surfaced explicitly rather than coerced.
+
+Hermes and its dashboard companion now use typed authorization-state validation, crash-durable
+local/remote writes, compare-and-swap guards, transactional prompt/state ordering, rollback-safe
+expiry, and guarded template requests. Dashboard approval bodies and cron inputs fail closed.
+
+Current verification:
+
+```text
+./.cli-venv/bin/python -m unittest discover -s tests -q
+Ran 748 tests in 42.692s — OK (skipped=1)
+./sb selftest
+```
+
+The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live
+T021 catalog-companion acceptance check remain protected operations requiring their documented
+operator authorization; no production capture, restore, deletion, schedule activation, or live
+deployment was performed by this hardening audit.

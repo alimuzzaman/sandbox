@@ -133,6 +133,15 @@ def apply_restore(plan: RestorePlan, adapters: Mapping[str, object], *, confirm:
             adapter = adapters.get(profile)
             if adapter is None:
                 raise RecoveryError("restore adapter is unavailable", "missing_restore_adapter")
+            required = ("checkpoint", "quiesce", "stage", "swap", "import", "verify", "resume", "rollback")
+            try:
+                missing = tuple(name for name in required if not callable(getattr(adapter, name)))
+            except AttributeError as exc:
+                raise RecoveryError("restore adapter is missing required operations", "invalid_restore_adapter") from exc
+            except Exception as exc:
+                raise RecoveryError("restore adapter is invalid", "invalid_restore_adapter") from exc
+            if missing:
+                raise RecoveryError("restore adapter is missing required operations", "invalid_restore_adapter")
             touched.append(profile)
             for operation in ("checkpoint", "quiesce", "stage", "swap", "import", "verify", "resume"):
                 getattr(adapter, operation)()

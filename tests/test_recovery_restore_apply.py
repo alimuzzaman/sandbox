@@ -128,3 +128,24 @@ class TestDisposableRestoreApply(unittest.TestCase):
             self.assertIn("rollback", adapters["first"].events)
             self.assertEqual(second.read_bytes(), b"before-second")
             self.assertIn("rollback", adapters["second"].events)
+
+    def test_invalid_adapter_fails_before_any_operation(self):
+        class IncompleteAdapter:
+            def __init__(self): self.events = []
+            def checkpoint(self): self.events.append("checkpoint")
+            def quiesce(self): self.events.append("quiesce")
+            def stage(self): self.events.append("stage")
+            def swap(self): self.events.append("swap")
+            def import_(self): self.events.append("import")
+            def verify(self): self.events.append("verify")
+            def resume(self): self.events.append("resume")
+            def __getattr__(self, name):
+                if name == "import":
+                    return self.import_
+                raise AttributeError(name)
+
+        adapter = IncompleteAdapter()
+        plan = type("Plan", (), {"profiles": ("filesystem",)})()
+        with self.assertRaisesRegex(RecoveryError, "required operations"):
+            apply_restore(plan, {"filesystem": adapter}, confirm=True)
+        self.assertEqual(adapter.events, [])

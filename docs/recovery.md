@@ -68,7 +68,8 @@ The filesystem restore adapter is target-explicit and injectable: it rejects sym
 targets before checkpointing, decrypts into owner-only staging, validates archive members, uses
 Python's `data` tar filter on supported runtimes, checkpoints the target, swaps atomically,
 verifies expected members, and restores the checkpoint on failure. It is not automatically wired
-to production targets.
+to production targets. The restore coordinator preflights every required adapter operation before
+checkpointing any profile, so malformed adapters fail without partial restore work.
 
 When RECOVERY_RCLONE_DESTINATION and RECOVERY_PASSPHRASE are both present, the service composes
 the GnuPG and immutable rclone capture coordinator. Artifact paths remain explicit inputs;

@@ -6,8 +6,8 @@ from unittest import mock
 from pathlib import Path
 
 from sandbox.recovery.errors import RecoveryError
-from sandbox.recovery.filesystem import (FilesystemCapture, _validate_filesystem_boundary,
-                                         archive_paths, validate_archive)
+from sandbox.recovery.filesystem import (FilesystemCapture, GnuTarFilesystemCapture,
+                                         _validate_filesystem_boundary, archive_paths, validate_archive)
 
 
 class TestFilesystemCapture(unittest.TestCase):
@@ -60,6 +60,27 @@ class TestFilesystemCapture(unittest.TestCase):
             root = Path(directory) / "root"; root.mkdir(); source = root / "file"; source.write_text("value")
             with self.assertRaisesRegex(RecoveryError, "mount boundary"):
                 _validate_filesystem_boundary(source, source.stat().st_dev + 1)
+
+    def test_gnu_tar_adapter_enables_metadata_flags_and_atomic_publication(self):
+        class Runner:
+            def __init__(self): self.calls = []
+            def run(self, argv, **kwargs):
+                self.calls.append((argv, kwargs))
+                archive_path = Path(argv[argv.index("--file") + 1])
+                with tarfile.open(archive_path, "w") as archive:
+                    item = tarfile.TarInfo("data.txt"); item.size = 5
+                    archive.addfile(item, __import__("io").BytesIO(b"value"))
+                return type("Result", (), {"returncode": 0})()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"; root.mkdir(); (root / "data.txt").write_text("value")
+            target = Path(directory) / "set.tar"; runner = Runner()
+            receipt = GnuTarFilesystemCapture(runner).capture(root, ("data.txt",), target)
+            self.assertEqual(receipt["warnings"], ())
+            command = runner.calls[0][0]
+            for flag in ("--acls", "--xattrs", "--numeric-owner", "--one-file-system"):
+                self.assertIn(flag, command)
+            self.assertEqual(validate_archive(target), ("data.txt",))
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
     def test_rejects_member_traversal_and_escaping_link(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -54,6 +54,9 @@ Filesystem capture snapshots regular-file digests recursively before and after a
 so same-size or same-mtime source rewrites are rejected as `source_changed`.
 It also rejects source trees and link targets that cross the declared root filesystem's device
 boundary; cross-filesystem capture requires a separately reviewed adapter.
+For hosts with GNU tar, `GnuTarFilesystemCapture` is the explicit injected adapter for ACL/xattr
+preservation and numeric ownership; it also enables `--one-file-system` and validates/atomically
+publishes the resulting archive.
 
 Archive validation also rejects duplicate members and special device/FIFO nodes before restore,
 preventing ambiguous replacement or unsafe filesystem materialization.

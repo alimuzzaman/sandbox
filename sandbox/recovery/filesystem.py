@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import tarfile
+import os
+import shutil
 import stat
 from pathlib import Path
 from pathlib import PurePosixPath
+import tempfile
+from typing import Protocol
 
 from .errors import RecoveryError
 from .integrity import sha256_file
@@ -56,6 +60,24 @@ def _validate_filesystem_boundary(path: Path, root_device: int) -> None:
             _validate_filesystem_boundary(child, root_device)
 
 
+def _validated_sources(root: Path, paths: tuple[str | Path, ...]) -> tuple[tuple[Path, str], ...]:
+    root_device = root.stat().st_dev
+    members = []
+    for raw in paths:
+        raw_path = Path(raw)
+        source = raw_path if raw_path.is_absolute() else root / raw_path
+        source = source.parent.resolve() / source.name
+        member_name = _member_name(root, source)
+        _member_name(root, source.resolve())
+        if not source.exists():
+            raise RecoveryError("archive member is absent", "missing_source")
+        _validate_filesystem_boundary(source, root_device)
+        members.append((source, member_name))
+    if not members:
+        raise RecoveryError("archive requires at least one source", "empty_source")
+    return tuple(members)
+
+
 def validate_archive(path: str | Path) -> tuple[str, ...]:
     """Reject traversal, ambiguous members, and special nodes before restore."""
     names = []
@@ -86,22 +108,9 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
 
 def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: str | Path) -> Path:
     root = Path(root).resolve(); destination = Path(destination)
-    root_device = root.stat().st_dev
     if destination.is_symlink() or (destination.exists() and not stat.S_ISREG(destination.lstat().st_mode)):
         raise RecoveryError("archive destination is not a regular file", "invalid_destination")
-    members = []
-    for raw in paths:
-        raw_path = Path(raw)
-        source = raw_path if raw_path.is_absolute() else root / raw_path
-        # Canonicalize parent-directory aliases (including macOS /var -> /private)
-        # without resolving the final entry, so a final symlink remains archivable.
-        source = source.parent.resolve() / source.name
-        member_name = _member_name(root, source)
-        # Preserve the declared link while validating its resolved target remains inside root.
-        _member_name(root, source.resolve())
-        if not source.exists(): raise RecoveryError("archive member is absent", "missing_source")
-        _validate_filesystem_boundary(source, root_device)
-        members.append((source, member_name))
+    members = _validated_sources(root, paths)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(destination, "w") as archive:
         for source, member_name in members:
@@ -125,3 +134,54 @@ class FilesystemCapture:
         archive = archive_paths(root, paths, destination)
         return {"path": archive, "members": validate_archive(archive),
                 "warnings": ("ACL/xattr preservation requires the GNU-tar server adapter",)}
+
+
+class TarRunner(Protocol):
+    def run(self, argv, *, cwd: str | None = None, timeout: float | None = None): ...
+
+
+class GnuTarFilesystemCapture:
+    """Injectable GNU-tar adapter for ACL/xattr-preserving filesystem capture."""
+
+    def __init__(self, runner: TarRunner, *, executable: str = "tar") -> None:
+        if not isinstance(executable, str) or not executable or any(ord(char) < 32 for char in executable):
+            raise RecoveryError("tar executable is invalid", "invalid_tar_executable")
+        self.runner, self.executable = runner, executable
+
+    def capture(self, root: str | Path, paths: tuple[str | Path, ...], destination: str | Path,
+                *, excludes: tuple[str, ...] = (), timeout: float = 3600) -> dict:
+        root = Path(root).resolve()
+        destination = Path(destination)
+        if destination.is_symlink() or (destination.exists() and not stat.S_ISREG(destination.lstat().st_mode)):
+            raise RecoveryError("archive destination is not a regular file", "invalid_destination")
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+            raise RecoveryError("tar capture timeout is invalid", "invalid_tar_timeout")
+        for pattern in excludes:
+            if (not isinstance(pattern, str) or not pattern or pattern.startswith("-") or
+                    Path(pattern).is_absolute() or ".." in Path(pattern).parts or _contains_control_text(pattern)):
+                raise RecoveryError("tar exclusion is invalid", "invalid_tar_exclude")
+        members = _validated_sources(root, paths)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_directory = Path(tempfile.mkdtemp(prefix="sandbox-gnu-tar-", dir=destination.parent))
+        os.chmod(temporary_directory, 0o700)
+        temporary = temporary_directory / "archive.tar"
+        argv = [self.executable, "--create", "--file", str(temporary), "--acls", "--xattrs",
+                "--numeric-owner", "--one-file-system"]
+        argv.extend(f"--exclude={pattern}" for pattern in excludes)
+        argv.extend(("--", *(name for _source, name in members)))
+        before = tuple((name, _capture_snapshot(source)) for source, name in members)
+        try:
+            result = self.runner.run(tuple(argv), cwd=str(root), timeout=timeout)
+            if result.returncode != 0:
+                raise RecoveryError("GNU tar capture failed", "tar_capture_failed")
+            after = tuple((name, _capture_snapshot(source)) for source, name in members)
+            if after != before:
+                raise RecoveryError("filesystem source changed during archive", "source_changed")
+            if not temporary.is_file() or not temporary.stat().st_size:
+                raise RecoveryError("GNU tar archive is empty", "tar_capture_failed")
+            archive_members = validate_archive(temporary)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+            return {"path": destination, "members": archive_members, "warnings": (), "argv": tuple(argv)}
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)

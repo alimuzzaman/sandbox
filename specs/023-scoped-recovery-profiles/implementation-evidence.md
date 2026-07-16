@@ -297,7 +297,7 @@ Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 790 tests in 44.595s — OK (skipped=1)
+Ran 791 tests in 43.290s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 
@@ -333,6 +333,11 @@ bundle generation leaves neither a partial destination nor a pending temporary a
 Drive adapters now expose file downloads for large objects. Manifest ciphertext verification and
 GnuPG retention checks use those temporary files and streaming hashes instead of loading a full
 recovery archive into process memory; the fixture suite proves the ciphertext path uses `get_file`.
+
+The filesystem module now includes an injected GNU-tar adapter that requests ACL/xattr and
+numeric-owner preservation plus `--one-file-system`, validates the resulting archive, and
+atomically publishes it with owner-only permissions. The portable Python adapter remains explicit
+about its ACL/xattr limitation.
 ```
 
 The self-test and unit suite remain fixture/local checks. T060/T061/T069/T071/T072 and the live

@@ -9,6 +9,14 @@ from sandbox.services.ports import SocketPortAllocator
 
 
 class TestPortAllocator(unittest.TestCase):
+    def test_allocator_is_loopback_only_and_validates_preferred_port(self):
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            SocketPortAllocator("0.0.0.0")
+        allocator = SocketPortAllocator()
+        for preferred in (0, 65536, True, "8080"):
+            with self.subTest(preferred=preferred), self.assertRaises(ValueError):
+                allocator.reserve(preferred)
+
     def test_allocates_and_rejects_collision(self):
         allocator = SocketPortAllocator()
         port = allocator.allocate()

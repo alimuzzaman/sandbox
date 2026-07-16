@@ -2406,6 +2406,8 @@ class TestLocalState(unittest.TestCase):
         self.assertIn("flock -w 30", command)
         self.assertIn("state_conflict", command)
         self.assertIn("python3 -c", command)
+        self.assertIn("trap 'rm -f", command)
+        self.assertIn("os.fsync", command)
 
 
 if __name__ == "__main__":

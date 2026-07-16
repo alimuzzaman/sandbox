@@ -727,8 +727,11 @@ def _remote_state_write(entry: dict, paths: dict, state: dict, *, expected_diges
         f"mkdir -p {shlex.quote(paths['sandbox_home'] + '/runtime')}; "
         f"exec 9>{lock}; flock -w 30 9; "
         f"{guard}"
-        f"tmp={target}.tmp.$$; echo {shlex.quote(payload)} | base64 -d > \"$tmp\"; "
-        f"chmod 600 \"$tmp\"; mv \"$tmp\" {target}"
+        f"tmp={target}.tmp.$$; trap 'rm -f \"$tmp\"' EXIT; "
+        f"echo {shlex.quote(payload)} | base64 -d > \"$tmp\"; "
+        f"chmod 600 \"$tmp\"; mv \"$tmp\" {target}; "
+        f"python3 -c {shlex.quote('import os,sys; fd=os.open(os.path.dirname(sys.argv[1]), os.O_RDONLY | getattr(os, \"O_DIRECTORY\", 0)); os.fsync(fd); os.close(fd)')} {target}; "
+        "trap - EXIT"
     )
     try:
         _checked(entry, command, what="could not write Hermes state")

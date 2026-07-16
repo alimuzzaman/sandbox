@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .errors import RecoveryError
 from .models import RetentionPlan
@@ -32,6 +33,11 @@ def _created_at(item: dict) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _valid_set_id(value: object) -> bool:
+    return (isinstance(value, str) and bool(value) and value == Path(value).name and
+            value.replace("-", "").replace("_", "").isalnum())
+
+
 def build_retention_plan(
     prefix: str,
     complete_set_ids: tuple[str, ...] | tuple[dict, ...],
@@ -51,7 +57,7 @@ def build_retention_plan(
     observed = _normalise(prefix, complete_set_ids)
     valid = [item for item in observed if item.get("prefix") == prefix and item.get("status") == "complete"
              and item.get("verified") is True and item.get("passphrase_current") is True
-             and item.get("id") and _created_at(item) is not None]
+             and _valid_set_id(item.get("id")) and _created_at(item) is not None]
     ordered = sorted(valid, key=lambda item: (_created_at(item), str(item["id"])))
     age_floor = reference - minimum_age
     retained = {item["id"] for item in ordered[-keep_count:]}
@@ -67,6 +73,9 @@ def apply_retention(plan: RetentionPlan, delete, *, confirm: bool = False,
         raise RecoveryError("retention deletion requires explicit confirmation", "confirmation_required")
     if fresh_candidates is not None and tuple(fresh_candidates) != plan.candidates:
         raise RecoveryError("retention candidates are stale", "stale_retention_plan")
+    if (not plan.destination_prefix.endswith("/") or ".." in plan.destination_prefix.split("/") or
+            not all(_valid_set_id(set_id) for set_id in plan.candidates)):
+        raise RecoveryError("retention plan contains an unsafe candidate", "invalid_retention_plan")
     for set_id in plan.candidates:
         delete(f"{plan.destination_prefix}{set_id}")
     return {"status": "deleted", "candidates": plan.candidates}

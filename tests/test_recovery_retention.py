@@ -51,3 +51,8 @@ class TestRecoveryRetention(unittest.TestCase):
         with self.assertRaises(RecoveryError): build_retention_plan("sets/", (), minimum_age=timedelta(days=-1))
         with self.assertRaisesRegex(RecoveryError, "metadata"):
             build_retention_plan("sets/", ("legacy-id",))
+
+    def test_retention_rejects_unsafe_candidate_ids_before_delete(self):
+        plan = type("Plan", (), {"destination_prefix": "sets/", "candidates": ("../outside",)})()
+        with self.assertRaisesRegex(RecoveryError, "unsafe"):
+            apply_retention(plan, lambda _path: self.fail("delete must not run"), confirm=True)

@@ -73,4 +73,20 @@ print(json.dumps({'host_projects': hosts, 'runtime_environments': runtimes,
             data = json.loads((completed.stdout or "").splitlines()[-1])
         except (IndexError, json.JSONDecodeError) as exc:
             raise RecoveryError("remote inventory returned invalid data", "inventory_failed") from exc
+        if (not isinstance(data, dict) or
+                not isinstance(data.get("host_projects"), list) or
+                not all(isinstance(item, str) for item in data["host_projects"]) or
+                not isinstance(data.get("runtime_environments"), dict) or
+                not all(isinstance(value, list) and all(isinstance(item, str) for item in value)
+                        for value in data["runtime_environments"].values()) or
+                not isinstance(data.get("managed_containers"), list) or
+                not all(isinstance(item, str) for item in data["managed_containers"]) or
+                not isinstance(data.get("mounts"), dict) or
+                not all(isinstance(value, list) and all(isinstance(item, dict) for item in value)
+                        for value in data["mounts"].values()) or
+                not isinstance(data.get("repositories"), dict) or
+                not all(isinstance(value, dict) for value in data["repositories"].values()) or
+                not isinstance(data.get("warnings"), list) or
+                not all(isinstance(item, str) for item in data["warnings"])):
+            raise RecoveryError("remote inventory returned invalid data", "inventory_failed")
         return {"sandbox_home": home, **data}

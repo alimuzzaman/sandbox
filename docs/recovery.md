@@ -66,6 +66,9 @@ reported as unclassified instead of disappearing from the plan. It remains non-d
 `--keep-count` and `--minimum-age-days` control the plan, while deletion remains separately
 protected.
 
+Read-only remote inventory also validates the complete response schema before returning it;
+malformed JSON shapes fail as `inventory_failed` rather than being partially consumed.
+
 Plans with symbolic host-manifest roots or composite source declarations report explicit
 materialization warnings. Those warnings must be resolved by a target-bound adapter before
 capture is considered ready.

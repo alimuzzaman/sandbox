@@ -263,11 +263,14 @@ plans visible without requiring machine parsing.
 The retention apply boundary also rejects malformed freshness snapshots and non-callable deletion
 adapters before invoking any delete operation, preserving stable errors for protected workflows.
 
+The remote inventory adapter now validates its complete JSON shape—including projects, runtimes,
+containers, mounts, repositories, and warnings—before exposing the result to planning callers.
+
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 757 tests in 41.915s — OK (skipped=1)
+Ran 761 tests in 43.218s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

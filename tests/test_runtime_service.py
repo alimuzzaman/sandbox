@@ -47,6 +47,26 @@ class TestRuntimeService(unittest.TestCase):
         self.assertEqual(result.code, "unsupported_capability")
         self.assertEqual(calls, [("descriptor.resolve", "/tmp/project", "default")])
 
+    def test_invalid_adapter_result_is_rejected_at_service_boundary(self):
+        from sandbox.application.runtime_service import RuntimeService
+        from sandbox.runtimes.base import AdapterRegistry, OperationError, OperationRequest
+
+        class InvalidAdapter:
+            capabilities = frozenset({"status"})
+
+            def invoke(self, request):
+                return {"ok": True}
+
+        adapters = AdapterRegistry()
+        adapters.register("test", InvalidAdapter(), kinds=("test",), owner="tests")
+        service = RuntimeService(
+            resolve_descriptor=lambda root, label=None: {"kind": "test"},
+            adapters=adapters,
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "status"))
+        self.assertIsInstance(result, OperationError)
+        self.assertEqual(result.code, "invalid_adapter_result")
+
     def test_unknown_kind_returns_structured_error(self):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes.base import AdapterRegistry, OperationError, OperationRequest

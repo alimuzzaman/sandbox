@@ -73,7 +73,15 @@ class RuntimeService:
         if error is not None:
             return error
         spec = self._adapters.for_kind(kind)
-        return spec.adapter.invoke(request)
+        result = spec.adapter.invoke(request)
+        if not isinstance(result, OperationResult):
+            return OperationError(
+                code="invalid_adapter_result",
+                message="runtime adapter returned an invalid operation result",
+                project_kind=kind,
+                requested_capability=request.operation,
+            )
+        return result
 
     def check(self, project_root: str, capability: str, *, label: str = "default") -> OperationError | None:
         kind, error = self._resolve_kind(project_root, label=label, capability=capability)

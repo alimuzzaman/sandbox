@@ -35,6 +35,8 @@ Malformed manifest JSON values are rejected as stable invalid-manifest errors ra
 through the CLI or MCP result envelope.
 Human-readable verification output includes only the set ID and ciphertext identity/digest/size;
 manifest provenance is not printed outside JSON mode.
+Result envelopes also redact credential-bearing remote URLs and bearer values at the top-level
+boundary, not only inside operation data.
 
 Git provenance strips URL userinfo, query strings, and fragments before it can enter a recovery
 manifest, so embedded credentials and token-bearing remote URLs are not retained as metadata.

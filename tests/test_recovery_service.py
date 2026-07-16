@@ -22,6 +22,13 @@ class TestRecoveryService(unittest.TestCase):
         self.assertNotIn("visible", rendered)
         self.assertEqual(payload["error"]["code"], "blocked")
 
+    def test_result_redacts_credential_bearing_remote_and_bearer_values(self):
+        payload = result(True, "plan", remote="https://user:secret@example.test/recovery",
+                         data={"authorization": "Bearer live-secret"})
+        self.assertEqual(payload["remote"], "https://example.test/recovery")
+        self.assertEqual(payload["data"]["authorization"], "[redacted]")
+        self.assertNotIn("live-secret", str(payload))
+
     def test_unknown_profile_returns_stable_failure_envelope(self):
         payload = RecoveryService(RecoveryCatalog(1, ())).plan(("missing",))
         self.assertFalse(payload["ok"])

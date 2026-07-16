@@ -95,3 +95,12 @@ class TestFilesystemCapture(unittest.TestCase):
                 item = tarfile.TarInfo("link"); item.type = tarfile.SYMTYPE; item.linkname = "target\n"; opened.addfile(item)
             with self.assertRaisesRegex(RecoveryError, "unsafe"):
                 validate_archive(link_archive)
+
+    def test_rejects_symlink_archive_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"; root.mkdir(); (root / "file").write_text("value")
+            target = Path(directory) / "target.tar"; target.write_bytes(b"keep")
+            link = Path(directory) / "archive.tar"; link.symlink_to(target)
+            with self.assertRaisesRegex(RecoveryError, "destination"):
+                archive_paths(root, (root / "file",), link)
+            self.assertEqual(target.read_bytes(), b"keep")

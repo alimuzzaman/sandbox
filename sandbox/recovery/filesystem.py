@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tarfile
+import stat
 from pathlib import Path
 from pathlib import PurePosixPath
 
@@ -51,6 +52,8 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
 
 def archive_paths(root: str | Path, paths: tuple[str | Path, ...], destination: str | Path) -> Path:
     root = Path(root).resolve(); destination = Path(destination)
+    if destination.is_symlink() or (destination.exists() and not stat.S_ISREG(destination.lstat().st_mode)):
+        raise RecoveryError("archive destination is not a regular file", "invalid_destination")
     members = []
     for raw in paths:
         raw_path = Path(raw)

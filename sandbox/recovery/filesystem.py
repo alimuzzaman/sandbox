@@ -7,6 +7,10 @@ from pathlib import PurePosixPath
 from .errors import RecoveryError
 
 
+def _contains_control_text(value: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
 def _member_name(root: Path, path: Path) -> str:
     try:
         name = str(path.relative_to(root))
@@ -25,7 +29,8 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
         for member in archive.getmembers():
             name = member.name
             raw_parts = name.split("/")
-            if (not name or name.startswith("/") or ".." in raw_parts or "." in raw_parts):
+            if (not name or _contains_control_text(name) or name.startswith("/") or
+                    ".." in raw_parts or "." in raw_parts):
                 raise RecoveryError("archive contains unsafe member", "unsafe_archive")
             canonical_name = str(PurePosixPath(name))
             if canonical_name in seen:
@@ -33,6 +38,8 @@ def validate_archive(path: str | Path) -> tuple[str, ...]:
             if member.isdev() or member.isfifo():
                 raise RecoveryError("archive contains a special file", "unsafe_archive")
             if member.issym() or member.islnk():
+                if _contains_control_text(member.linkname):
+                    raise RecoveryError("archive link contains unsafe text", "unsafe_archive")
                 link_parts = PurePosixPath(member.linkname).parts
                 target = PurePosixPath(*PurePosixPath(member.name).parent.parts, *link_parts)
                 if PurePosixPath(member.linkname).is_absolute() or ".." in link_parts or ".." in target.parts:

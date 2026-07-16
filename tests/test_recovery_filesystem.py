@@ -82,3 +82,16 @@ class TestFilesystemCapture(unittest.TestCase):
                 second = tarfile.TarInfo("a/./b"); second.size = 0; opened.addfile(second)
             with self.assertRaisesRegex(RecoveryError, "unsafe"):
                 validate_archive(duplicate)
+
+    def test_rejects_control_text_in_member_and_link_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            member_archive = Path(directory) / "control-member.tar"
+            with tarfile.open(member_archive, "w") as opened:
+                item = tarfile.TarInfo("unsafe\nname"); item.size = 0; opened.addfile(item)
+            with self.assertRaisesRegex(RecoveryError, "unsafe"):
+                validate_archive(member_archive)
+            link_archive = Path(directory) / "control-link.tar"
+            with tarfile.open(link_archive, "w") as opened:
+                item = tarfile.TarInfo("link"); item.type = tarfile.SYMTYPE; item.linkname = "target\n"; opened.addfile(item)
+            with self.assertRaisesRegex(RecoveryError, "unsafe"):
+                validate_archive(link_archive)

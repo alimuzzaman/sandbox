@@ -80,8 +80,15 @@ def apply_retention(plan: RetentionPlan, delete, *, confirm: bool = False,
             not destination_prefix.endswith("/") or ".." in destination_prefix.split("/") or
             not all(_valid_set_id(set_id) for set_id in candidates)):
         raise RecoveryError("retention plan contains an unsafe candidate", "invalid_retention_plan")
-    if fresh_candidates is not None and tuple(fresh_candidates) != candidates:
-        raise RecoveryError("retention candidates are stale", "stale_retention_plan")
+    if fresh_candidates is not None:
+        try:
+            current_candidates = tuple(fresh_candidates)
+        except TypeError as exc:
+            raise RecoveryError("retention freshness data is invalid", "invalid_retention_plan") from exc
+        if current_candidates != candidates:
+            raise RecoveryError("retention candidates are stale", "stale_retention_plan")
+    if not callable(delete):
+        raise RecoveryError("retention delete adapter is invalid", "invalid_retention_plan")
     for set_id in candidates:
         delete(f"{destination_prefix}{set_id}")
     return {"status": "deleted", "candidates": candidates}

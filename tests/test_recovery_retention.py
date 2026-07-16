@@ -60,3 +60,15 @@ class TestRecoveryRetention(unittest.TestCase):
     def test_retention_rejects_malformed_plan_with_stable_error(self):
         with self.assertRaisesRegex(RecoveryError, "invalid"):
             apply_retention(object(), lambda _path: self.fail("delete must not run"), confirm=True)
+
+    def test_retention_rejects_malformed_freshness_and_delete_adapters(self):
+        plan = build_retention_plan("sets/", (
+            {"id": "old", "prefix": "sets/", "status": "complete", "verified": True,
+             "passphrase_current": True, "created_at": "2025-12-01T00:00:00+00:00"},
+            {"id": "new", "prefix": "sets/", "status": "complete", "verified": True,
+             "passphrase_current": True, "created_at": "2026-01-02T00:00:00+00:00"},
+        ), now=self.NOW)
+        with self.assertRaisesRegex(RecoveryError, "freshness"):
+            apply_retention(plan, lambda _path: None, confirm=True, fresh_candidates=object())
+        with self.assertRaisesRegex(RecoveryError, "delete adapter"):
+            apply_retention(plan, None, confirm=True)

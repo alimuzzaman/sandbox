@@ -260,11 +260,14 @@ The retention CLI now prints protected, candidate, and unclassified sets in huma
 JSON output and the confirmation-gated deletion boundary are unchanged, making reviewable prune
 plans visible without requiring machine parsing.
 
+The retention apply boundary also rejects malformed freshness snapshots and non-callable deletion
+adapters before invoking any delete operation, preserving stable errors for protected workflows.
+
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 756 tests in 42.308s — OK (skipped=1)
+Ran 757 tests in 41.915s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

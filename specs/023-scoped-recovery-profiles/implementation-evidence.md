@@ -278,6 +278,21 @@ installing or enabling them; activation remains separately protected.
 Scheduler execution now preserves failed/skipped action results instead of converting every
 non-exceptional action return into `complete`, keeping pruning eligibility fail closed.
 
+CLI integration spot check (2026-07-16, local and read-only):
+
+```text
+./sb recovery schedule
+recovery schedule: planned
+  enabled: false
+  ... ExecStart=/usr/bin/flock -n %t/sandbox-recovery-recovery-daily.lock ...
+  ... RandomizedDelaySec=15m ...
+./sb recovery retention --json -> ok=false, code=recovery_not_configured
+./sb recovery list --json -> ok=false, code=recovery_not_configured
+```
+
+No Drive object, scheduler unit, filesystem, database, or production state was changed by this
+spot check.
+
 Current verification:
 
 ```text

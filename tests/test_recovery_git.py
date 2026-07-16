@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import stat
 from pathlib import Path
 
 from sandbox.recovery.git import GitCapture
@@ -45,6 +46,7 @@ class TestGitCapture(unittest.TestCase):
         runner = GitRunner()
         with tempfile.TemporaryDirectory() as directory:
             bundle = GitCapture(runner).create_bundle(".", Path(directory) / "changes.bundle", "deadbeef")
+            self.assertEqual(stat.S_IMODE(bundle.stat().st_mode), 0o600)
         self.assertTrue(any(call[0][1:3] == ("bundle", "verify") for call in runner.calls))
         self.assertEqual(bundle.name, "changes.bundle")
 
@@ -77,3 +79,23 @@ class TestGitCapture(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "destination"):
                 capture.create_patch(".", patch, ("README.md",))
             self.assertEqual(target.read_bytes(), b"keep")
+
+    def test_failed_bundle_creation_leaves_no_partial_destination(self):
+        class BrokenRunner(GitRunner):
+            def run(self, argv, **kwargs):
+                if tuple(argv)[1:3] == ("bundle", "create"):
+                    Path(argv[3]).write_bytes(b"partial")
+                    return ProcessResult(tuple(argv), 1, "", "failed")
+                return super().run(argv, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "changes.bundle"
+            with self.assertRaisesRegex(Exception, "creation"):
+                GitCapture(BrokenRunner()).create_bundle(".", target, "HEAD")
+            self.assertFalse(target.exists())
+            self.assertEqual(list(Path(directory).glob(".*.pending")), [])
+
+    def test_patch_is_published_atomically_with_owner_only_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "changes.patch"
+            patch = GitCapture(GitRunner()).create_patch(".", target, ("README.md",))
+            self.assertEqual(stat.S_IMODE(patch.stat().st_mode), 0o600)

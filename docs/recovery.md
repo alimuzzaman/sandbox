@@ -40,6 +40,8 @@ boundary, not only inside operation data.
 
 Git provenance strips URL userinfo, query strings, and fragments before it can enter a recovery
 manifest, so embedded credentials and token-bearing remote URLs are not retained as metadata.
+Git bundles and working-tree patches are written to owner-only temporary files and atomically
+published only after bundle verification; failed generation cannot leave a partial final artifact.
 
 Database capture rejects empty output and performs statement-aware format validation before an
 artifact can enter the encrypted publication pipeline; comment-only SQL is not treated as a dump.

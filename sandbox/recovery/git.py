@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import re
 import stat
+import tempfile
 from typing import Protocol, Sequence
 
 from .errors import RecoveryError
@@ -39,6 +41,13 @@ def _validate_destination(target: Path) -> None:
         raise RecoveryError("Git destination is not a regular file", "invalid_git_destination")
 
 
+def _temporary_destination(target: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".pending", dir=target.parent)
+    os.fchmod(descriptor, 0o600)
+    os.close(descriptor)
+    return Path(name)
+
+
 class GitCapture:
     def __init__(self, runner: GitRunner) -> None:
         self.runner = runner
@@ -69,16 +78,23 @@ class GitCapture:
             raise RecoveryError("Git bundle destination is invalid", "invalid_git_destination")
         _validate_destination(target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = self.runner.run(("git", "bundle", "create", str(target), revision), cwd=str(root), timeout=300)
-        if result.returncode != 0:
-            raise RecoveryError("git bundle creation failed", "git_bundle_failed")
-        check = self.runner.run(("git", "bundle", "verify", str(target)), cwd=str(root), timeout=60)
-        if check.returncode != 0 or not target.exists() or target.stat().st_size == 0:
-            raise RecoveryError("git bundle verification failed", "git_bundle_invalid")
+        temporary = _temporary_destination(target)
+        try:
+            result = self.runner.run(("git", "bundle", "create", str(temporary), revision), cwd=str(root), timeout=300)
+            if result.returncode != 0:
+                raise RecoveryError("git bundle creation failed", "git_bundle_failed")
+            check = self.runner.run(("git", "bundle", "verify", str(temporary)), cwd=str(root), timeout=60)
+            if check.returncode != 0 or not temporary.is_file() or not temporary.stat().st_size:
+                raise RecoveryError("git bundle verification failed", "git_bundle_invalid")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
         return target
 
     def create_patch(self, root: str | Path, destination: str | Path, paths: tuple[str, ...]) -> Path:
-        if not paths or any(not path or Path(path).is_absolute() or ".." in Path(path).parts for path in paths):
+        if (not paths or any(not path or Path(path).is_absolute() or ".." in Path(path).parts or
+                             any(ord(char) < 32 or ord(char) == 127 for char in path) for path in paths)):
             raise RecoveryError("Git patch paths are invalid", "invalid_git_patch")
         if any(any(name in path.lower() for name in _SENSITIVE_NAMES) for path in paths):
             raise RecoveryError("sensitive files cannot be added to a Git patch", "sensitive_git_patch")
@@ -87,8 +103,14 @@ class GitCapture:
         target = Path(destination)
         _validate_destination(target)
         result = self.runner.run(("git", "diff", "--binary", "--", *paths), cwd=str(root), timeout=60)
-        if result.returncode != 0 or not result.stdout:
+        if result.returncode != 0 or not isinstance(result.stdout, str) or not result.stdout:
             raise RecoveryError("Git patch generation failed", "git_patch_failed")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(result.stdout)
+        temporary = _temporary_destination(target)
+        try:
+            temporary.write_text(result.stdout)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
         return target

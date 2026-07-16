@@ -111,6 +111,41 @@ class TestJsonRepository(ContractMixin, unittest.TestCase):
             self.assertTrue(self.path.with_name("registry.lock").exists())
         self.assertFalse(self.path.exists())
 
+    def test_json_repository_rejects_invalid_persisted_identity(self):
+        from sandbox.project_registry.base import RegistryCorruption
+        from sandbox.project_registry.json import JsonRegistryRepository
+
+        self.path.write_text(json.dumps({"version": 2, "instances": {
+            "/tmp/project::bad label": {
+                "root": "/tmp/project", "label": "bad label", "is_default": True,
+            },
+        }}))
+        with self.assertRaises(RegistryCorruption):
+            JsonRegistryRepository(self.path).all()
+
+    def test_json_repository_backfills_identity_omitted_by_older_v2_writer(self):
+        from sandbox.project_registry.json import JsonRegistryRepository
+
+        key = "/tmp/project"
+        self.path.write_text(json.dumps({"version": 2, "instances": {
+            key: {"root": "/tmp/project", "instance": "fixture"},
+        }}))
+        record = JsonRegistryRepository(self.path).all()[key]
+        self.assertEqual(record["label"], "default")
+        self.assertTrue(record["is_default"])
+        stored = json.loads(self.path.read_text())["instances"][key]
+        self.assertEqual(stored["label"], "default")
+
+    def test_repositories_reject_broad_roots_and_unsafe_labels(self):
+        from sandbox.project_registry.json import JsonRegistryRepository
+        from sandbox.project_registry.memory import MemoryRegistryRepository
+
+        for repo in (JsonRegistryRepository(self.path), MemoryRegistryRepository()):
+            with self.subTest(repository=type(repo).__name__), self.assertRaises(ValueError):
+                repo.put("/", "default")
+            with self.subTest(repository=type(repo).__name__), self.assertRaises(ValueError):
+                repo.put("/tmp/project", "bad label")
+
 
 if __name__ == "__main__":
     unittest.main()

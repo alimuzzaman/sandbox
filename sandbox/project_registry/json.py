@@ -14,12 +14,14 @@ from .base import (
     RegistryRecord,
     UnsupportedRegistryVersion,
 )
+from .validation import (
+    backfill_record_identity,
+    canonical_root,
+    validate_label,
+    validate_record_identity,
+)
 
 CURRENT_VERSION = 2
-
-
-def _canonical(root: str) -> str:
-    return str(Path(root).expanduser().resolve())
 
 
 class JsonRegistryRepository:
@@ -92,7 +94,13 @@ class JsonRegistryRepository:
     def _read_current(self) -> tuple[dict[str, Any], bool]:
         value = self._read()
         migrated = value.get("version", 1) < CURRENT_VERSION
-        return (self._migrate_v1(value) if migrated else value), migrated
+        current = self._migrate_v1(value) if migrated else value
+        identity_migrated = False
+        for key, record in current["instances"].items():
+            identity_migrated = backfill_record_identity(key, record) or identity_migrated
+        for key, record in current["instances"].items():
+            validate_record_identity(key, record)
+        return current, migrated or identity_migrated
 
     def all(self) -> dict[str, RegistryRecord]:
         with self.transaction():
@@ -102,7 +110,7 @@ class JsonRegistryRepository:
             return {key: dict(record) for key, record in value["instances"].items()}
 
     def list_for_root(self, root: str) -> list[RegistryRecord]:
-        canonical = _canonical(root)
+        canonical = canonical_root(root)
         records = [record for record in self.all().values() if record.get("root") == canonical]
         records.sort(key=lambda item: (not item.get("is_default"), item.get("label", "")))
         return records
@@ -116,7 +124,8 @@ class JsonRegistryRepository:
         return next((item for item in records if item.get("is_default")), None)
 
     def put(self, root: str, label: str = "default", **fields: Any) -> RegistryRecord:
-        canonical = _canonical(root)
+        canonical = canonical_root(root)
+        label = validate_label(label)
         key = f"{canonical}::{label}"
         with self.transaction():
             value, _migrated = self._read_current()
@@ -138,7 +147,9 @@ class JsonRegistryRepository:
             return dict(record)
 
     def remove(self, root: str, label: str | None = None) -> bool:
-        canonical = _canonical(root)
+        canonical = canonical_root(root)
+        if label is not None:
+            label = validate_label(label)
         with self.transaction():
             value, _migrated = self._read_current()
             matches = [

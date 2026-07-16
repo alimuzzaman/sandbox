@@ -62,7 +62,7 @@ add kind branches to CLI, MCP, registry persistence, or `sandbox_core.py`.
 callers, not a new extension API. New application code consumes the descriptor and
 runtime services from `sandbox.application.context`. Registry files likewise go
 through the project-registry repository so locking, version checks, unknown-field
-preservation, and atomic replacement remain consistent.
+preservation, identity validation/backfill, and atomic replacement remain consistent.
 
 For any project directory, the effective config is resolved as (highest
 priority last):

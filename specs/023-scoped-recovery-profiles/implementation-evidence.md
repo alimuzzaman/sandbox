@@ -271,12 +271,14 @@ The human-readable recovery list surface now prints categorized counts and paths
 the existing JSON envelope for automation and review tooling.
 Human-readable verification now prints the non-secret ciphertext identity, digest, and size while
 omitting manifest provenance; JSON output remains available for structured consumers.
+Human-readable restore planning now prints the non-mutating action, checkpoint, and rollback
+summary so an operator can review the plan before any separately protected apply operation.
 
 Current verification:
 
 ```text
 ./.cli-venv/bin/python -m unittest discover -s tests -q
-Ran 764 tests in 42.628s — OK (skipped=1)
+Ran 765 tests in 42.706s — OK (skipped=1)
 ./sb selftest
 ✓ selftest: passed
 ```

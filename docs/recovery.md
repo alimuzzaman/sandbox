@@ -80,6 +80,9 @@ Plans with symbolic host-manifest roots or composite source declarations report 
 materialization warnings. Those warnings must be resolved by a target-bound adapter before
 capture is considered ready.
 
+Human-readable restore planning prints the set, selected profiles, ordered actions, checkpoints,
+and rollback steps; it never applies the plan. JSON remains the structured contract.
+
 The service rechecks that catalog/materialization boundary immediately before capture and
 rejects unknown profiles, missing profile selections, unresolved warnings, and empty artifact
 sets before invoking an adapter.

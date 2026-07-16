@@ -56,6 +56,12 @@ def _emit(payload: dict, as_json: bool) -> None:
         for field in ("ciphertext_object", "ciphertext_sha256", "ciphertext_size"):
             if field in manifest:
                 print(f"  {field}: {manifest[field]}")
+    elif payload["action"] == "restore":
+        data = payload.get("data") or {}
+        print(f"  set_id: {data.get('set_id', '(unknown)')}")
+        for label in ("profiles", "actions", "checkpoints", "rollback"):
+            values = tuple(data.get(label) or ())
+            print(f"  {label}: {', '.join(str(value) for value in values) or '(none)'}")
     elif payload["action"] == "retention":
         data = payload.get("data") or {}
         protected = tuple(data.get("protected_sets") or ())

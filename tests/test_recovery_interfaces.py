@@ -110,3 +110,20 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("id: set-1", rendered)
         self.assertIn("ciphertext_sha256: " + "a" * 64, rendered)
         self.assertNotIn("must-not-print", rendered)
+
+    def test_cli_restore_human_output_shows_reviewable_plan(self):
+        service = SimpleNamespace(restore_plan=lambda *args, **kwargs: {
+            "action": "restore", "ok": True, "status": "planned", "data": {
+                "set_id": "set-1", "profiles": ("control-plane",),
+                "actions": ("verify", "swap"), "checkpoints": ("state",),
+                "rollback": ("restore state",),
+            }
+        })
+        output = StringIO()
+        with patch("sandbox.commands.recovery.recovery_service", return_value=service), \
+                redirect_stdout(output):
+            cmd_recovery(None, self._args("restore", backup_id="set-1", json=False))
+        rendered = output.getvalue()
+        self.assertIn("set_id: set-1", rendered)
+        self.assertIn("actions: verify, swap", rendered)
+        self.assertIn("rollback: restore state", rendered)

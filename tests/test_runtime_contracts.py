@@ -42,12 +42,26 @@ class TestRuntimeContracts(unittest.TestCase):
                 adapters.register(adapter_id, object(), kinds=kinds, owner=owner, order=order)
 
     def test_operation_contract_is_immutable_and_secret_safe(self):
-        from sandbox.runtimes.base import OperationError, OperationRequest
+        from sandbox.runtimes.base import OperationError, OperationRequest, OperationResult
 
         request = OperationRequest(project_root="/tmp/project", operation="status")
         self.assertEqual(request.operation, "status")
         with self.assertRaises(Exception):
             request.operation = "destroy"
+        for field, value in (("project_root", ""), ("operation", "bad operation"),
+                             ("label", "bad label"), ("arguments", [])):
+            with self.subTest(field=field):
+                values = {"project_root": "/tmp/project", "operation": "status",
+                          "label": "default", "arguments": {}}
+                values[field] = value
+                with self.assertRaises(ValueError):
+                    OperationRequest(**values)
+        with self.assertRaises(ValueError):
+            OperationRequest("/tmp/\nproject", "status")
+        with self.assertRaises(ValueError):
+            OperationResult(True, "status", "/tmp/project", "wordpress", [])
+        with self.assertRaises(ValueError):
+            OperationResult(1, "status", "/tmp/project", "wordpress")
         error = OperationError(
             code="unsupported_capability",
             message="status is unavailable",

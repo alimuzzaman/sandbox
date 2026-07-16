@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping as ABCMapping
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -20,6 +21,22 @@ def _registry_order(value: object) -> int:
 
 def _is_text_sequence(value: object) -> bool:
     return not isinstance(value, (str, bytes))
+
+
+def _transport_text(value: object, label: str, *, allow_spaces: bool = True) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} is invalid")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{label} is invalid")
+    if not allow_spaces and any(char.isspace() for char in value):
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _transport_mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, ABCMapping):
+        raise ValueError(f"{label} must be a mapping")
+    return dict(value)
 
 
 CAPABILITY_ENSURE = "ensure"
@@ -80,7 +97,10 @@ class OperationRequest:
     arguments: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "arguments", MappingProxyType(dict(self.arguments)))
+        object.__setattr__(self, "project_root", _transport_text(self.project_root, "project root"))
+        object.__setattr__(self, "operation", _transport_text(self.operation, "operation", allow_spaces=False))
+        object.__setattr__(self, "label", _transport_text(self.label, "project label", allow_spaces=False))
+        object.__setattr__(self, "arguments", MappingProxyType(_transport_mapping(self.arguments, "operation arguments")))
 
 
 @dataclass(frozen=True)
@@ -92,7 +112,12 @@ class OperationResult:
     data: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
+        if not isinstance(self.ok, bool):
+            raise ValueError("operation result status is invalid")
+        object.__setattr__(self, "operation", _transport_text(self.operation, "operation", allow_spaces=False))
+        object.__setattr__(self, "project_root", _transport_text(self.project_root, "project root"))
+        object.__setattr__(self, "project_kind", _transport_text(self.project_kind, "project kind", allow_spaces=False))
+        object.__setattr__(self, "data", MappingProxyType(_transport_mapping(self.data, "operation result data")))
 
 
 @dataclass(frozen=True)

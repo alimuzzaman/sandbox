@@ -25,8 +25,10 @@ class GpgCrypto:
     """Symmetric GnuPG adapter using a dedicated inherited passphrase descriptor."""
 
     def __init__(self, passphrase: str, *, executable: str = "gpg") -> None:
-        if not passphrase:
+        if not isinstance(passphrase, str) or not passphrase:
             raise RecoveryError("recovery passphrase is unavailable", "missing_passphrase")
+        if len(passphrase) > 4096:
+            raise RecoveryError("recovery passphrase is too long", "invalid_passphrase")
         if any(char in passphrase for char in "\r\n\0"):
             raise RecoveryError("recovery passphrase contains unsafe control text", "invalid_passphrase")
         self._passphrase = passphrase

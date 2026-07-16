@@ -51,6 +51,12 @@ class TestGpgCrypto(unittest.TestCase):
         with self.assertRaisesRegex(RecoveryError, "control text"):
             GpgCrypto("fixture\npassphrase")
 
+    def test_rejects_non_string_and_unbounded_passphrases(self):
+        with self.assertRaises(RecoveryError):
+            GpgCrypto(123)
+        with self.assertRaisesRegex(RecoveryError, "too long"):
+            GpgCrypto("x" * 4097)
+
     def test_interruption_removes_pending_ciphertext(self):
         with tempfile.TemporaryDirectory() as directory, patch("sandbox.recovery.crypto.subprocess.run", side_effect=OSError("interrupted")):
             source = Path(directory) / "plain"; target = Path(directory) / "cipher"; source.write_bytes(b"payload")

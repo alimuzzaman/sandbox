@@ -48,6 +48,18 @@ class TestMcpDoctorProbe(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, "")
 
+    def test_project_plugin_check_declaration_uses_resolved_config(self):
+        with patch.object(lifecycle, "_core") as core:
+            core.return_value.load_project_config.return_value = {
+                "plugins_resolved": {"plugin-check": {"active": True}}
+            }
+            self.assertTrue(lifecycle._project_declares_plugin_check("/tmp/project"))
+
+    def test_project_without_plugin_check_is_not_probed(self):
+        with patch.object(lifecycle, "_core") as core:
+            core.return_value.load_project_config.return_value = {"plugins_resolved": {}}
+            self.assertFalse(lifecycle._project_declares_plugin_check("/tmp/project"))
+
 
 if __name__ == "__main__":
     unittest.main()

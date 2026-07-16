@@ -402,6 +402,16 @@ def _probe_mcp_server() -> tuple[bool, str]:
         return False, (result.stderr or result.stdout or "import failed").strip()[:500]
     return True, ""
 
+
+def _project_declares_plugin_check(project_root: str | Path) -> bool:
+    """Return whether the resolved project config opts into Plugin Check."""
+    try:
+        project = _core().load_project_config(str(project_root))
+    except Exception:
+        return False
+    plugins = project.get("plugins_resolved") or project.get("plugins") or {}
+    return isinstance(plugins, dict) and "plugin-check" in plugins
+
 def cmd_doctor(cfg, args) -> None:
     """Audit the whole stack and report what's broken."""
     inst = args.resolved_instance
@@ -517,6 +527,13 @@ def cmd_doctor(cfg, args) -> None:
     proj_root = owner.get("root") if owner else None
     check(f"project: {proj_root or '—'}", True,
           hint="cd into a plugin repo and run `./sb ensure` to register one")
+    if proj_root and _project_declares_plugin_check(proj_root):
+        installed = wpcli(["plugin", "is-installed", "plugin-check"],
+                          instance=inst, check=False, capture=True)
+        active = wpcli(["plugin", "is-active", "plugin-check"],
+                       instance=inst, check=False, capture=True)
+        check("Plugin Check available", installed.returncode == 0 and active.returncode == 0,
+              hint=f"./sb apply --project-dir {proj_root} or remove plugin-check from project config")
     ff = focus_file(inst)
     focus = ff.read_text().strip() if ff.exists() else None
     check(f"focused plugin: {focus or '—'}", True,

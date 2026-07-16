@@ -17,11 +17,13 @@ Green local evidence from the latest review pass:
 
 - `.cli-venv/bin/python -m unittest -q tests/test_plugin_check.py` passes.
 - Full suite: `/Users/alim/Sites/git/sandbox/.cli-venv/bin/python -m unittest discover -s tests`
-  passed from this worktree: 833 tests, 1 skipped.
+  passed from this worktree: 835 tests, 1 skipped.
 - Capability-gated MCP tools now resolve the repository package path before importing
   shared runtime services; the MCP smoke test covers launches from the server directory.
 - `./sb doctor` now probes that same MCP import boundary, rather than checking only for
   the venv file, and reports a restart/install hint when it is unhealthy.
+- When a project declares Plugin Check, `doctor` now verifies that the tool is installed
+  and active before Plugin Check calls are attempted.
 
 Live external evidence still matters. Several specs explicitly say unit tests are not
 enough for "done."
@@ -68,11 +70,10 @@ enough for "done."
 2. **Doctor should know more about modern features**
 
    Evidence: roadmap/readiness docs already treat `doctor` as the health surface, while
-   new features added hidden dependencies: MCP venv freshness, Plugin Check installability,
-   HTTPS/Tailscale control reachability, and
+   new features added hidden dependencies: MCP venv freshness, HTTPS/Tailscale control reachability, and
    remote config shape.
 
-   Next work: extend `./sb doctor` with feature probes and actionable messages.
+   Next work: extend `./sb doctor` with remaining remote and release-readiness probes.
 
 3. **MCP wrapper contract parity**
 

@@ -356,8 +356,8 @@ explicit confirmation, and a caller-owned delete adapter; fixture coverage prove
 unconfirmed requests perform no deletion.
 ```
 
-The self-test and unit suite remain fixture/local checks. The latest full verification ran 812 tests
-in 43.988s with 1 skipped. T060/T061/T069/T071/T072 and the live
+The self-test and unit suite remain fixture/local checks. The latest full verification ran 813 tests
+in 43.476s with 1 skipped. T060/T061/T069/T071/T072 and the live
 T021 catalog-companion acceptance check remain protected operations requiring their documented
 operator authorization; no production capture, restore, deletion, schedule activation, or live
 deployment was performed by this hardening audit.

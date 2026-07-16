@@ -5,6 +5,23 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
 
+def _registry_text(value: object, label: str) -> str:
+    if (not isinstance(value, str) or not value or
+            any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in value)):
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _registry_order(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("registry order is invalid")
+    return value
+
+
+def _is_text_sequence(value: object) -> bool:
+    return not isinstance(value, (str, bytes))
+
+
 CAPABILITY_ENSURE = "ensure"
 CAPABILITY_STATUS = "status"
 CAPABILITY_START = "start"
@@ -113,6 +130,9 @@ class SchemaRegistry:
         self._items: dict[str, SchemaSpec] = {}
 
     def register(self, kind: str, provider: Any, *, owner: str, order: int = 100) -> SchemaSpec:
+        kind = _registry_text(kind, "schema kind")
+        owner = _registry_text(owner, "schema owner")
+        order = _registry_order(order)
         if kind in self._items:
             raise ValueError(f"duplicate schema kind: {kind}")
         spec = SchemaSpec(kind=kind, provider=provider, owner=owner, order=order)
@@ -142,9 +162,17 @@ class AdapterRegistry:
 
     def register(self, adapter_id: str, adapter: Any, *, kinds: Sequence[str], owner: str,
                  order: int = 100) -> AdapterSpec:
+        adapter_id = _registry_text(adapter_id, "adapter id")
+        owner = _registry_text(owner, "adapter owner")
+        order = _registry_order(order)
+        values = kinds
+        if not _is_text_sequence(values):
+            raise ValueError("adapter kinds must be a sequence")
+        normalized = tuple(_registry_text(kind, "adapter kind") for kind in values)
+        if not normalized or len(set(normalized)) != len(normalized):
+            raise ValueError("adapter kinds must be unique and non-empty")
         if adapter_id in self._items:
             raise ValueError(f"duplicate adapter: {adapter_id}")
-        normalized = tuple(kinds)
         for kind in normalized:
             prior = self._kind_owners.get(kind)
             if prior is not None:

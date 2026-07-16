@@ -63,6 +63,8 @@ callers, not a new extension API. New application code consumes the descriptor a
 runtime services from `sandbox.application.context`. Registry files likewise go
 through the project-registry repository so locking, version checks, unknown-field
 preservation, identity validation/backfill, and atomic replacement remain consistent.
+Schema and adapter registrations also require non-empty, control-free identities,
+unique owned kinds, and integer ordering values.
 
 For any project directory, the effective config is resolved as (highest
 priority last):

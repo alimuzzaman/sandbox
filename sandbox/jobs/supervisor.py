@@ -77,19 +77,22 @@ def run_descriptor(path: str | Path) -> int:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
         output.finish("stdout"); output.finish("stderr")
+        integrity = output.complete()
         if descriptor.get("artifact_paths"):
             collect_artifacts(storage, repository, job_id, project_root=descriptor["cwd"],
                               declared_paths=tuple(descriptor["artifact_paths"]))
         if timed_out:
-            repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code, termination_reason="deadline_exceeded")
+            repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code,
+                termination_reason="deadline_exceeded", output_completeness="complete", integrity_sha256=integrity)
             return 124
         if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
-                termination_reason="cancelled_by_request")
+                termination_reason="cancelled_by_request", output_completeness="complete", integrity_sha256=integrity)
             return 130
         target = Lifecycle.SUCCEEDED if return_code == 0 else Lifecycle.FAILED
         repository.transition(job_id, target, exit_code=return_code,
-            termination_reason=None if return_code == 0 else "exit_nonzero")
+            termination_reason=None if return_code == 0 else "exit_nonzero",
+            output_completeness="complete", integrity_sha256=integrity)
         return 0 if return_code == 0 else 1
     except OutputError as exc:
         repository.transition(job_id, Lifecycle.FAILED, termination_reason="output_storage_failed", result_json=json.dumps({"error": str(exc)}))

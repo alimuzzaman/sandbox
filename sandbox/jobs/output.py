@@ -146,6 +146,13 @@ class JobOutputStore:
         self._index(stream, complete=True)
         return event
 
+    def complete(self) -> str:
+        """Seal all retained stream indexes and return combined integrity hash."""
+        self._index("stdout", complete=True)
+        self._index("stderr", complete=True)
+        self._index("combined", complete=True)
+        return hashlib.sha256(self._events_path.read_bytes()).hexdigest() if self._events_path.exists() else hashlib.sha256(b"").hexdigest()
+
     def _append_ready(self, stream: str, content: bytes, *, timestamp: float | None) -> OutputEvent | None:
         if not content:
             return None

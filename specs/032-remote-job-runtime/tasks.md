@@ -66,7 +66,7 @@ CI stories.
 - [X] T027 Compose shared job dependencies at CLI and MCP composition roots in `sandbox/application/context.py` and `mcp/wp-server/tools/manifest.py`
 - [X] T028 Run all foundational tests and the existing config/runtime/architecture suites with `.cli-venv/bin/python -m unittest tests.test_job_models tests.test_job_registry tests.test_runtime_config tests.test_target_resolution tests.test_job_process_identity tests.test_job_contracts tests.test_config_descriptors tests.test_project_config tests.test_runtime_contracts tests.test_runtime_adapters tests.test_architecture_boundaries -v`
 - [X] T029 Inspect the SQLite schema and atomic idempotency behavior through the public repository test fixture and append evidence to `specs/032-remote-job-runtime/implementation-evidence.md`
-- [ ] T030 Commit and push the passing foundational increment with `sandbox/jobs/`, config manifest/runtime policy, shared application composition, and its tests
+- [X] T030 Commit and push the passing foundational increment with `sandbox/jobs/`, config manifest/runtime policy, shared application composition, and its tests
 
 **Checkpoint**: Durable contracts, target resolution, profiles, process identity, and
 repository transactions are independently tested and available to all stories.
@@ -96,19 +96,19 @@ complete retained stdout/stderr/combined output.
 
 ### Implementation for User Story 1
 
-- [ ] T039 [US1] Implement streaming secret redaction with cross-chunk overlap and explicit redaction failure in `sandbox/jobs/output.py`
+- [X] T039 [US1] Implement streaming secret redaction with cross-chunk overlap and explicit redaction failure in `sandbox/jobs/output.py`
 - [ ] T040 [US1] Implement separate segmented stdout/stderr byte stores and append-only combined event ordering in `sandbox/jobs/output.py`
 - [ ] T041 [US1] Implement opaque cursor encoding/validation and bounded stream/offset/tail/line/time/base64 retrieval in `sandbox/jobs/output.py`
 - [ ] T042 [US1] Implement full/smart/errors/sampled/quiet and declarative named custom presentation policies in `sandbox/jobs/output.py`
 - [ ] T043 [US1] Implement the detached supervisor entrypoint, lease wait heartbeat, child session/process group launch, non-blocking local pipe drainage, and atomic finalization in `sandbox/jobs/supervisor.py`
 - [ ] T044 [US1] Implement deadline enforcement, TERM/grace/KILL cleanup of owned descendants, output/storage failure promotion, and terminal integrity hashes in `sandbox/jobs/supervisor.py`
 - [ ] T045 [US1] Implement submit/get/list/read-output use cases and idempotent launch recovery in `sandbox/application/job_service.py`
-- [ ] T046 [US1] Implement the host-local service transport and detached supervisor launcher with every standard descriptor disconnected in `sandbox/transports/jobs.py`
+- [X] T046 [US1] Implement the host-local service transport and detached supervisor launcher with every standard descriptor disconnected in `sandbox/transports/jobs.py`
 - [ ] T047 [US1] Extend exact-working-tree deployment to return commit/dirty-manifest/deploy identities and workspace target paths in `sandbox/commands/deploy.py` and `sandbox/core/_remote.py`
 - [ ] T048 [US1] Implement bounded remote `sb` JSON invocation, timeout/error redaction, and reconnectable job reads in `sandbox/transports/remote_jobs.py`
 - [ ] T049 [US1] Add remote-aware explicit-argv `exec` and `test` submission/follow behavior in `sandbox/commands/runtime.py` while preserving local Compose execution
-- [ ] T050 [US1] Add feature-owned job status/list/output/follow command parsers and renderers in `sandbox/commands/jobs_runtime.py` and register them in `sandbox/commands/manifest.py`
-- [ ] T051 [US1] Add MCP `job_start`, `job_status`, `job_list`, `job_output`, and bounded `job_follow` tools in `mcp/wp-server/tools/jobs.py`
+- [X] T050 [US1] Add feature-owned job status/list/output/follow command parsers and renderers in `sandbox/commands/jobs_runtime.py` and register them in `sandbox/commands/manifest.py`
+- [X] T051 [US1] Add MCP `job_start`, `job_status`, `job_list`, `job_output`, and bounded `job_follow` tools in `mcp/wp-server/tools/jobs.py`
 - [ ] T052 [US1] Extend MCP `run_tests` and `instance_exec` with optional target/workspace/deadline/output settings and preserved compatibility keys in `mcp/wp-server/tools/debug.py` and `mcp/wp-server/tools/runtime.py`
 - [ ] T053 [US1] Implement optional monotonic rate-limited MCP progress summaries in `mcp/wp-server/tools/jobs.py` without making notifications durable state
 - [ ] T054 [US1] Run the US1 tests plus existing async/runtime/MCP suites with `.cli-venv/bin/python -m unittest tests.test_job_output tests.test_output_profiles tests.test_job_output_cursor tests.test_job_supervisor tests.test_job_service tests.test_remote_job_transport tests.test_job_cli tests.test_job_mcp tests.test_asyncjobs tests.test_runtime_transport tests.test_mcp_composition -v`

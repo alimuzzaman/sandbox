@@ -24,3 +24,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   atomic first-submit/replay behavior (`False`, then `True`), and tables for jobs,
   process identities, heartbeats, leases, output streams/events, metrics, artifacts,
   and compatibility differences.
+- Commit/push: `767a678 feat: add durable job foundation` on `codex/remote-job-runtime`.
+
+## US1 checkpoint: detached retained output
+
+- Date: 2026-07-18
+- Command: `./sb --help | rg "job-(start|status|output|list)"`
+- Result: PASS; all four feature-owned durable job CLI commands are registered.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output tests.test_output_profiles tests.test_job_output_cursor tests.test_job_supervisor tests.test_job_service tests.test_remote_job_transport tests.test_architecture_boundaries tests.test_command_composition tests.test_mcp_composition -v`
+- Result: PASS, 34 tests in 1.056 seconds.
+- Command: `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`
+- Result: PASS, 5 tests in 0.001 seconds.
+- Commit/push: `47062bc feat: add durable detached job execution` on `codex/remote-job-runtime`.

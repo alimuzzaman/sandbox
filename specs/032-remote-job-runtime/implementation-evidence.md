@@ -380,3 +380,33 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   host-serialized while workspaces remain isolated; GitHub upload-artifact is
   replaced with durable Sandbox collection using a bound workspace; and a CI
   leaf is not misclassified as a matrix parent during dependency reconciliation.
+
+## T155: completion reconciliation and final regression
+
+- Reconciliation date: 2026-07-19. T153 and T154 are checked only because their
+  retained remote results above were observed. T155 is checked because this
+  reconciliation and regression were performed; it does not imply completion of
+  any older unchecked implementation or measurement task.
+- Full CLI regression: `.cli-venv/bin/python -m unittest discover -s tests -q`
+  completed successfully with exit code 0. The discovered suite contains 969
+  tests. Dedicated MCP transport regression
+  `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`
+  passed 5 tests. `bash -n scripts/install-remote.sh` and `git diff --check`
+  also passed.
+- Current remote evidence is limited to observations actually made: authenticated
+  `scaleway-sandbox` service migration; Node Compose execution; WordPress
+  integration plus create/status/reset/destroy lifecycle; compatible and
+  blocked remote CI preflight; the three-child compatible CI parent; retained
+  artifact retrieval; retry; and cleanup. No unobserved test output is claimed
+  for the early `sb`-PATH failure or other retained failed attempts.
+- Remaining unchecked rows intentionally remain open where their requested
+  artifact does not exist or was not observed, including the broad legacy test
+  inventories and implementation rows (T031-T140), remote workspace mutable
+  rerun/database proof (T142), CI/MCP parity beyond the CLI evidence (T143),
+  host-restart reconciliation (T144), durable async/Hermes routing parity
+  (T146), remote E2E and disconnect fixtures (T147), and the broader Node/PHP/
+  timeout/measurement/security/quickstart acceptance set (T148 and T136-T140).
+  These are recorded as remaining gates rather than silently checked.
+- Worktree integrity at reconciliation: `git diff --check` was clean; no files
+  under `runtime/wp/` or `vendor/` were changed. The only untracked path is the
+  user-owned `specs/033-agent-aware-remote-sync/`, preserved without edits.

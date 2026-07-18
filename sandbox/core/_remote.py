@@ -887,8 +887,12 @@ def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> s
 
 def _remote_mcp_runtime_revision() -> str:
     """Return a non-secret local runtime identity that survives staged uploads."""
-    source = Path(__file__).read_bytes()
-    return hashlib.sha256(source).hexdigest()[:24]
+    root = Path(__file__).resolve().parents[2]
+    parts = (Path(__file__), root / "mcp" / "wp-server" / "server.py")
+    digest = hashlib.sha256()
+    for source in parts:
+        digest.update(source.read_bytes())
+    return digest.hexdigest()[:24]
 
 
 def remote_mcp_service_record(bind: str, port: int, public_url: str | None = None) -> dict:

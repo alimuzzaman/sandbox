@@ -918,6 +918,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertEqual(status["legacy_pidfile"], "present")
         command = mock_ssh_run.call_args.args[1]
         self.assertIn("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", command)
+        self.assertEqual(len(record["runtime_revision"]), 24)
         self.assertIn("ss -H -ltn", command)
         self.assertIn("urllib.request", command)
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)

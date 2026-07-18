@@ -43,4 +43,4 @@ commit/push plus protected actions.
 - [x] T012 Run focused command/composition tests in `tests/test_cli.py` and `tests/test_command_composition.py`
 - [x] T013 Run generic Compose live execution from `tests/fixtures/generic-compose`
 - [x] T014 Run full test suite and documentation diff checks
-- [ ] T015 Commit and push verified completed work on the active branch
+- [x] T015 Commit and push verified completed work on the active branch

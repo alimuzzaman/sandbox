@@ -491,7 +491,7 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
     # prevent one cell's cleanup from removing another cell's runner container.
     sc = _core()
     try:
-        with sc.project_lock(Path(sc.RUNTIME_DIR) / ".ci-act"):
+        with sc.project_lock(RUNTIME_DIR / ".ci-act"):
             res = subprocess.run(cmd, capture_output=True, text=True,
                                  cwd=str(root), timeout=timeout)
     except subprocess.TimeoutExpired:

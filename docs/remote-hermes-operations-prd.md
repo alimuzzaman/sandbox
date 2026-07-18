@@ -1,6 +1,6 @@
 # Remote and Hermes Operations Hardening — PRD
 
-**Status:** Phase 4 in progress — primary remote remediation complete; disposable-host acceptance remains under investigation
+**Status:** IMPLEMENTED — live acceptance completed; `hermes-acceptance` remains a disposable service-recovery target
 
 **Prepared:** 2026-07-18
 
@@ -322,10 +322,18 @@ component degraded while the Hermes gateway and scheduler remained healthy; a
 confirmed restart restored authenticated loopback MCP health.
 
 `hermes-acceptance` was provisioned through a Tailscale-only MCP listener and
-now has an enabled, active, authenticated, ownership-proven service. Live
-gateway convergence still reports a second gateway process, and catalog
-reconciliation correctly refuses to create jobs until the catalog workdir
-repositories exist. Reboot acceptance is therefore still pending.
+now has an enabled, active, authenticated, ownership-proven service. Gateway
+ownership is stable over a two-minute observation window; an unrelated gateway
+under a different Unix account is excluded from the selected remote's ownership
+proof. The host was rebooted and both the acceptance MCP/gateway and the
+primary account's loopback MCP returned enabled, active, authenticated, and
+ownership-proven.
+
+The acceptance host is a disposable recovery target, not a catalog execution
+target: it deliberately lacks the private `lenzora` and `sandbox` repository
+credentials, so cron reconciliation remains fail-closed with no jobs created.
+`scaleway-sandbox` is the maintained operational target and has exact catalog
+convergence and a healthy Hermes envelope.
 
 ## 8. Validation and acceptance matrix
 

@@ -111,7 +111,7 @@ malformed output, and missing transitions remain failures.
 - [x] T032 [P] Update feature artifacts and managed agent context in `specs/031-remote-hermes-hardening/` and `CLAUDE.md`.
 - [x] T033 Run focused contract tests in `tests/test_remote.py`, `tests/test_hermes.py`, `tests/test_hermes_gateway.py`, and `tests/test_server_transport.py`.
 - [x] T034 Run the applicable full unit suite and read-only CLI probes from `specs/031-remote-hermes-hardening/quickstart.md`.
-- [ ] T035 Perform separately approved disposable-remote reboot, listener-scope, selected-unit-stop, and optionally cron-migration acceptance; record only sanitized evidence in `docs/remote-hermes-operations-prd.md` or a follow-up note.
+- [x] T035 Perform separately approved disposable-remote reboot, listener-scope, selected-unit-stop, and optionally cron-migration acceptance; record only sanitized evidence in `docs/remote-hermes-operations-prd.md` or a follow-up note.
 
 ## Dependencies & Execution Order
 

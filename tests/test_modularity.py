@@ -68,7 +68,7 @@ class TestModularityInventory(unittest.TestCase):
         self.assertEqual(
             audit_metrics(),
             {
-                "cli_commands": 68,
+                "cli_commands": 70,
                 "mcp_tools": 50,
                 "wildcard_imports": 20,
                 "runtime_kind_branches": 41,

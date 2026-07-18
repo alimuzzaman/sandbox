@@ -1,8 +1,7 @@
 <!--
 Sync Impact Report
-- Version change: 1.0.0 → 1.0.1   (PATCH: registry path is base-relative,
-    `$SANDBOX_HOME/runtime/registry.json` — spec 009 moved all machine-state
-    under a per-user base; the registry remains authoritative, location only)
+- Version change: 1.0.1 → 1.0.2   (PATCH: verified routine commits and pushes
+    are automatic; destructive Git operations remain protected)
 - Modified principles: n/a (first version; template placeholders replaced)
 - Added sections: Core Principles (6), Additional Constraints, Development Workflow, Governance
 - Removed sections: none
@@ -86,8 +85,10 @@ shared tooling; a half-removed feature bricks every developer who pulls it.
 - Risky or sweeping changes to `sb` / `sandbox_core.py` / `server.py` happen on a branch
   and are staged into separately verified commits; each stage is smoke-tested live
   (`sb status` / `sb doctor` / `sb wp …` from a real project dir) before the next.
-- Git actions (commit, push, tag, PR) require explicit per-action user approval; approval
-  for one action is never approval for the next. No emojis in code or commit messages.
+- After required checks pass, completed work MUST be committed and pushed to
+  the active branch automatically. Force-pushes, tags, releases, deployments,
+  PR creation, and PR merges still require explicit approval. No emojis in
+  code or commit messages.
 
 ## Governance
 
@@ -101,4 +102,4 @@ Versioning policy (semantic): MAJOR = backward-incompatible governance/principle
 redefinition; MINOR = a new principle/section or materially expanded guidance; PATCH =
 clarifications and non-semantic refinements.
 
-**Version**: 1.0.1 | **Ratified**: 2026-06-21 | **Last Amended**: 2026-06-23
+**Version**: 1.0.2 | **Ratified**: 2026-06-21 | **Last Amended**: 2026-07-18

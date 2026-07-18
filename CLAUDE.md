@@ -4,20 +4,20 @@
 
 ## Reflexes (fire automatically)
 
-- **First contact →** `focus_get`, skim `git log -10`, read the focused plugin's `CLAUDE.md` + relevant `.claude/skills/<area>/SKILL.md`. Once.
-- **Skills / workflows → MCP tools, not `Read`/`cat`.** Call `load_workflow('<name>')` or `load_skill('<name>')`.
+- **First contact →** `./sb guide --project-dir .`, skim `git log -10`, read the relevant `./sb skill show <name>`. MCP is optional.
+- **Skills / workflows → CLI-first.** Use `./sb skill show <name>` and `./sb guide`; `load_workflow` / `load_skill` are MCP alternatives.
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
-- **Anything WP-touching →** MCP tool first. `wp_cli` not `docker compose exec`. `wp_rest` not `curl`. `db_query` not `mysql`. Bash for `git`, `grep`, `find` only.
+- **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
-- **"Add" / "build" / "implement" →** `load_workflow('build-feature')`.
-- **About to commit / push / tag / open or merge a PR →** stop, stage diff, name what changed, wait for explicit approval. Approval for one action is never approval for the next.
+- **"Add" / "build" / "implement" →** follow the relevant local skill; use MCP workflow loading only when that integration is active.
+- **After required checks pass →** stage, commit, and push the active branch automatically. Never force-push, tag, release, deploy, or open/merge a PR without explicit approval.
 
 ---
 
 ## Non-negotiable rules
 
-**Git & shipping.** Never `git commit`, `git push`, force-push, tag, `gh pr create`, or `gh pr merge` without the user saying so for that specific action. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+**Git & shipping.** After required checks pass, commit and push the relevant completed work to the active branch automatically, including `main`. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 

@@ -1080,6 +1080,58 @@ class TestDeployEnsureExpose(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertIn("remote ensure returned no 'instance'", result["error"])
 
+    def test_generic_deploy_can_ensure_and_expose_without_wordpress_calls(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock(project_dir=str(root), remote="myvps", json=True,
+                                 ensure=True, expose=True,
+                                 domain="app.example.com", plugin_slug=None)
+                instance = {"instance": "demo", "label": "default", "kind": "compose",
+                            "http_port": 4321, "url": "http://127.0.0.1:4321"}
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value={
+                    "root": str(root), "kind": "compose"}), \
+                     patch("sandbox.commands.deploy.preflight_project_capability", return_value=None), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=instance), \
+                     patch.object(sr, "activate_remote_plugin") as activate, \
+                     patch.object(sr, "set_remote_instance_url") as set_url, \
+                     patch.object(sr, "configure_instance_https_route") as route, \
+                     patch("builtins.print") as printed:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(printed.call_args[0][0])
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["url"], "https://app.example.com")
+                self.assertEqual(result["instance"]["url"], "https://app.example.com")
+                route.assert_called_once_with(sr.get_remote("myvps"), "app.example.com", 4321)
+                activate.assert_not_called()
+                set_url.assert_not_called()
+
+    def test_generic_plugin_slug_is_rejected_before_remote_mutation(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                args = MagicMock(project_dir=d, remote="myvps", json=True,
+                                 ensure=True, expose=False, plugin_slug="nope")
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value={
+                    "root": d, "kind": "compose"}), \
+                     patch("sandbox.commands.deploy.preflight_project_capability", return_value=None), \
+                     patch.object(sr, "get_remote") as get_remote, \
+                     patch("builtins.print") as printed:
+                    with self.assertRaises(SystemExit):
+                        deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(printed.call_args[0][0])
+                self.assertIn("--plugin-slug", result["error"])
+                get_remote.assert_not_called()
+
 
 class TestRemoteDeployMcpWrapper(unittest.TestCase):
     def _load_tool_module(self):
@@ -1145,6 +1197,20 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
         self.assertIn("default-demo.sandbox.asb.bd", cmd)
         self.assertIn("--plugin-slug", cmd)
         self.assertIn("demo", cmd)
+
+    def test_remote_deploy_uses_runtime_aware_mcp_preflight_when_available(self):
+        module = self._load_tool_module()
+        calls = []
+        app = types.ModuleType("app")
+        app._require_project_deployment_capability = lambda project_dir: calls.append(project_dir)
+        with patch.dict(sys.modules, {"app": app}), \
+             patch.object(module, "_run_sandbox_json", return_value={
+                 "timed_out": False, "returncode": 0, "stdout": "",
+                 "stderr": "", "payload": {"ok": True, "remote": "myvps"},
+             }):
+            result = module.remote_deploy("/tmp/generic-project", "myvps")
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["/tmp/generic-project"])
 
     def test_remote_deploy_redacts_ssh_target_in_error(self):
         module = self._load_tool_module()

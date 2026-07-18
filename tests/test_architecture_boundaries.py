@@ -46,7 +46,7 @@ class TestArchitectureBoundaries(unittest.TestCase):
         from sandbox.registry import COMMANDS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 68)
+        self.assertEqual(len(COMMANDS), 70)
         self.assertEqual(validate_builtin_command_coverage(), ())
 
         import sys

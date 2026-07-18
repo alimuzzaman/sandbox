@@ -15,7 +15,7 @@ from app import (
     _resolve_instance, _safe_json, _site_url, mcp,
 )
 from dependencies import ToolDependencies
-from tools.manifest import DEFAULT_MCP_GROUPS, built_in_tool_registry
+from tools.manifest import DEFAULT_MCP_GROUPS, built_in_tool_registry, project_default_groups
 
 
 def _runtime_service():
@@ -58,11 +58,22 @@ class _HermesCommandAdapter:
 
 
 _group_filter = os.environ.get("SANDBOX_MCP_GROUPS", "").strip()
+_project_scope = os.environ.get("SANDBOX_MCP_PROJECT_DIR", "").strip()
+if _project_scope and not _group_filter:
+    try:
+        _project_kind = _core().load_project_config(_project_scope).get("kind", "wordpress")
+        _scoped_groups = project_default_groups(_project_kind)
+    except Exception as exc:
+        raise RuntimeError(f"could not build scoped MCP catalog: {exc}") from exc
+else:
+    _scoped_groups = None
 _selected_groups = (
     None if _group_filter.lower() == "all" else
     tuple(part.strip() for part in _group_filter.split(",") if part.strip())
     if _group_filter else DEFAULT_MCP_GROUPS
 )
+if _scoped_groups is not None:
+    _selected_groups = _scoped_groups
 built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "app": mcp,
     "sandbox_root": SANDBOX_ROOT,

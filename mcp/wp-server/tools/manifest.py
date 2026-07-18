@@ -17,6 +17,28 @@ DEFAULT_MCP_GROUPS = (
     "instances", "runtime", "wp", "net", "data", "fs", "context",
 )
 
+# A scoped server advertises only tools useful to its declared runtime.  The
+# unscoped default above remains compatible with the existing one-server,
+# many-project registration model; clients that want a precise catalog start
+# `sb mcp --project-dir PROJECT` instead.
+WORDPRESS_PROJECT_GROUPS = (
+    "instances", "wp", "net", "data", "fs", "mail", "context", "remote",
+)
+COMPOSE_PROJECT_GROUPS = (
+    "instances", "runtime", "net", "remote",
+)
+
+
+def project_default_groups(project_kind: str) -> tuple[str, ...]:
+    """Return the smallest useful MCP catalog for an explicit runtime kind."""
+    groups = {
+        "wordpress": WORDPRESS_PROJECT_GROUPS,
+        "compose": COMPOSE_PROJECT_GROUPS,
+    }.get(project_kind)
+    if groups is None:
+        raise ValueError(f"no MCP catalog is defined for project kind {project_kind!r}")
+    return groups
+
 # Groups in this map are import-safe and bind only the dependencies their public
 # functions use. All other groups retain the bounded legacy app compatibility
 # bridge until they are migrated independently.

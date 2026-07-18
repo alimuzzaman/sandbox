@@ -40,7 +40,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 68)
+        self.assertEqual(len(COMMANDS), 70)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 
@@ -66,6 +66,25 @@ class TestResolutionGate(unittest.TestCase):
     def test_help_lists_selftest(self):
         r = run_sb("--help")
         self.assertIn("selftest", r.stdout + r.stderr)
+
+    def test_cli_first_runtime_commands_are_visible(self):
+        r = run_sb("--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("exec", r.stdout)
+        self.assertIn("guide", r.stdout)
+
+    def test_guide_is_available_without_an_instance(self):
+        r = run_sb("guide", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        guide = json.loads(r.stdout)
+        self.assertEqual(guide["mode"], "cli-first")
+        self.assertEqual(guide["project_kind"], "compose")
+        self.assertIn("sandbox-cli", guide["skill"])
+
+    def test_exec_requires_an_instance_outside_a_project(self):
+        r = run_sb("exec", "--", "echo", "hello")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no sandbox instance", r.stderr + r.stdout)
 
     def test_test_command_lists_explicit_modes(self):
         r = run_sb("test", "--help")

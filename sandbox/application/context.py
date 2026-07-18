@@ -132,6 +132,11 @@ def runtime_service(cfg):
         proxy=wordpress_proxy_facade(cfg, core=core),
     )
     compose = ComposeAdapter(dependencies, sc)
+    compose.capabilities = frozenset({
+        *compose.capabilities,
+        "compose.exec",
+        "compose.remote-deploy",
+    })
     adapters = builtin_adapter_registry(
         {"ensure": ensure, "apply": apply, "status": status}, compose=compose,
     )

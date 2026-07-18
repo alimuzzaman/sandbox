@@ -17,6 +17,13 @@ starting the server, for example `instances,runtime,wp,net,data,fs,context,
 debug,mail`. Set it to `all` for the complete catalog. Available groups are
 listed in `mcp/wp-server/tools/manifest.py`.
 
+For a focused project registration, start the server with `./sb mcp
+--project-dir /path/to/project`. Sandbox resolves the project's explicit runtime
+before registration: a Compose project receives only `instances,runtime,net,remote`,
+while WordPress receives `instances,wp,net,data,fs,mail,context,remote`. This keeps
+WordPress tools out of generic project catalogs and generic runtime exec/log tools out
+of WordPress catalogs. `SANDBOX_MCP_GROUPS` remains an explicit operator override.
+
 ## Tools
 
 | Tool | Purpose |

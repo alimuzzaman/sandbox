@@ -40,16 +40,24 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
     remote: which registered, provisioned remote to deploy to (see `./sb remote
       list`) — required, no default is inferred.
 
-    ensure: when true, boot/refresh the remote WordPress instance after deploy.
-    expose: when true, add/update the public HTTPS route and set WP home/siteurl.
+    ensure: when true, boot/refresh the remote project instance after deploy.
+    expose: when true, add/update the public HTTPS route. WordPress additionally
+      updates home/siteurl; generic Compose projects retain their own URL policy.
     domain: optional public hostname, e.g.
       default-templately-ai-builder.sandbox.asb.bd. If omitted with expose=true,
       CLI defaults to default-<project-slug>.sandbox.asb.bd.
-    plugin_slug: optional slug to activate after ensure. Defaults to project slug.
+    plugin_slug: optional WordPress-only slug to activate after ensure. Defaults to
+      project slug; generic projects reject this argument.
 
     Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url, error}.
     """
-    capability_error = _capability_error(project_dir, "wordpress.remote-deploy")
+    try:
+        from app import _require_project_deployment_capability
+    except ImportError:
+        # Command-forwarding unit harnesses do not compose the full app.
+        capability_error = _capability_error(project_dir, "wordpress.remote-deploy")
+    else:
+        capability_error = _require_project_deployment_capability(project_dir)
     if capability_error:
         return capability_error
     sb = SANDBOX_ROOT / "sb"

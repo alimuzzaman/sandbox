@@ -137,6 +137,16 @@ DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)
 defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
 public URL path unless they explicitly opt out.
 
+### Generic Compose projects
+
+The same command works for an explicit non-WordPress Compose project. Its
+`sandbox.config.json` must declare `kind: "compose"`, the public Compose service,
+the service's internal port, and a health path. `deploy --ensure` transfers the
+working tree and runs the normal generic lifecycle on the remote; `--expose` routes
+the resulting generic HTTP port through Caddy and returns the public URL. No plugin
+activation or WordPress URL update is performed. `--plugin-slug` is WordPress-only and
+is rejected for generic projects so an accidental flag cannot be silently ignored.
+
 ## 5. Using a remote instance
 
 Once deployed, boot and use it exactly like a local project — but by running commands

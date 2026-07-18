@@ -10,6 +10,12 @@ from sandbox.application.context import preflight_project_capability
 import sandbox.core._remote as sr
 
 
+_REMOTE_DEPLOY_CAPABILITIES = {
+    "wordpress": "wordpress.remote-deploy",
+    "compose": "compose.remote-deploy",
+}
+
+
 # See docs/remote-hosting.md and specs/014-remote-vps-hosting/ for the full design
 # this module implements. `./sb deploy` is a ONE-WAY, ON-DEMAND push of local
 # project state (committed + uncommitted) to a provisioned remote -- never a
@@ -60,9 +66,16 @@ def cmd_deploy(cfg, args) -> None:
     except ValueError as e:
         _fail(remote_name, str(e), as_json)
     root = Path(pconf["root"])
-    capability_error = preflight_project_capability(cfg, str(root), "wordpress.remote-deploy")
+    project_kind = pconf.get("kind", "wordpress")
+    capability = _REMOTE_DEPLOY_CAPABILITIES.get(project_kind)
+    if capability is None:
+        _fail(remote_name, f"project kind {project_kind!r} does not support remote deployment", as_json)
+    is_wordpress = capability == "wordpress.remote-deploy"
+    capability_error = preflight_project_capability(cfg, str(root), capability)
     if capability_error is not None:
         _fail(remote_name, capability_error.message, as_json)
+    if not is_wordpress and getattr(args, "plugin_slug", None):
+        _fail(remote_name, "--plugin-slug is only supported for WordPress projects", as_json)
 
     if not remote_name:
         _fail(
@@ -93,12 +106,13 @@ def cmd_deploy(cfg, args) -> None:
             if not isinstance(instance, dict):
                 raise RuntimeError("remote ensure did not return an instance object")
             instance_name = _require_instance_field(instance, "instance")
-            plugin_slug = (
-                getattr(args, "plugin_slug", None)
-                or pconf.get("slug")
-                or sr.deploy_target_slug(root)
-            )
-            sr.activate_remote_plugin(entry, target, instance_name, plugin_slug)
+            if is_wordpress:
+                plugin_slug = (
+                    getattr(args, "plugin_slug", None)
+                    or pconf.get("slug")
+                    or sr.deploy_target_slug(root)
+                )
+                sr.activate_remote_plugin(entry, target, instance_name, plugin_slug)
         if getattr(args, "expose", False):
             label = instance.get("label") or "default"
             domain = (
@@ -106,14 +120,19 @@ def cmd_deploy(cfg, args) -> None:
                 or sr.default_instance_domain(label, sr.deploy_target_slug(root))
             )
             public_url = f"https://{domain}"
-            wordpress_port = int(_require_instance_field(instance, "wordpress_port"))
-            sr.configure_instance_https_route(entry, domain, wordpress_port)
-            sr.set_remote_instance_url(entry, target, public_url)
+            port_field = "wordpress_port" if is_wordpress else "http_port"
+            port = int(_require_instance_field(instance, port_field))
+            if not 1 <= port <= 65535:
+                raise RuntimeError(f"remote ensure returned invalid {port_field!r}")
+            sr.configure_instance_https_route(entry, domain, port)
+            if is_wordpress:
+                sr.set_remote_instance_url(entry, target, public_url)
             instance["url"] = public_url
-            instance["login_url"] = sr.rewrite_instance_url(
-                instance.get("login_url"), public_url
-            ) if instance.get("login_url") else ""
-            instance["admin_url"] = f"{public_url}/wp-admin/"
+            if is_wordpress:
+                instance["login_url"] = sr.rewrite_instance_url(
+                    instance.get("login_url"), public_url
+                ) if instance.get("login_url") else ""
+                instance["admin_url"] = f"{public_url}/wp-admin/"
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         result = {"ok": False, "remote": remote_name, "pushed_commit": None,
                  "uncommitted_files_applied": 0, "instance": None, "url": None,

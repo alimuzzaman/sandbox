@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
 sys.path.insert(0, str(MCP_ROOT))
@@ -53,6 +54,42 @@ class TestMcpComposition(unittest.TestCase):
         self.assertEqual(built_in_tool_registry(selected).group_ids(), selected)
         with self.assertRaisesRegex(ValueError, "unknown MCP tool group"):
             built_in_tool_registry(("instances", "missing"))
+
+    def test_runtime_scoped_catalogs_hide_irrelevant_tools(self):
+        from tools.manifest import project_default_groups
+
+        wordpress = project_default_groups("wordpress")
+        compose = project_default_groups("compose")
+        self.assertIn("wp", wordpress)
+        self.assertNotIn("runtime", wordpress)
+        self.assertIn("runtime", compose)
+        self.assertNotIn("wp", compose)
+        self.assertIn("remote", wordpress)
+        self.assertIn("remote", compose)
+        with self.assertRaisesRegex(ValueError, "no MCP catalog"):
+            project_default_groups("unsupported")
+
+    def test_cli_scoped_mcp_forwards_canonical_project_root(self):
+        import sandbox.commands.integ as integ
+
+        args = type("Args", (), {
+            "project_dir": "/tmp/project", "transport": "stdio",
+        })()
+        project = {"root": "/canonical/project", "kind": "compose"}
+        with patch.object(integ, "MCP_VENV", Path(sys.executable).parent.parent), \
+             patch.object(integ, "MCP_DIR", Path("/tmp/mcp-server")), \
+             patch.object(integ, "_core") as core, \
+             patch.object(integ.os, "execv", side_effect=SystemExit) as execv, \
+             patch.dict(integ.os.environ, {}, clear=False):
+            core.return_value.load_project_config.return_value = project
+            with patch.object(Path, "exists", return_value=True):
+                with self.assertRaises(SystemExit):
+                    integ.cmd_mcp({}, args)
+            self.assertEqual(integ.os.environ["SANDBOX_MCP_PROJECT_DIR"], "/canonical/project")
+            self.assertEqual(execv.call_args.args[1], [
+                str(Path(sys.executable).parent.parent / "bin" / "python"),
+                "/tmp/mcp-server/server.py",
+            ])
 
     def test_builtin_groups_declare_a_compatibility_registration_boundary(self):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry

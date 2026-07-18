@@ -169,6 +169,20 @@ def _require_project_capability(project_dir: str, label: str | None, capability:
         "required_capability": capability,
         "available_capabilities": list(error.available_capabilities),
     }
+
+
+def _require_project_deployment_capability(project_dir: str, label: str | None = None):
+    """Capability preflight for the runtime-aware remote deployment tool."""
+    import sys
+    if str(SANDBOX_ROOT) not in sys.path:
+        sys.path.insert(0, str(SANDBOX_ROOT))
+    import sandbox_core as sc
+    try:
+        descriptor = sc.load_project_config(project_dir)
+        capability = f"{descriptor.get('kind', 'wordpress')}.remote-deploy"
+    except Exception as exc:
+        return {"ok": False, "error": f"project capability resolution failed: {exc}"}
+    return _require_project_capability(project_dir, label, capability)
     if len(entries) == 1:
         return entries[0]["instance"], None
     default = next((e for e in entries if e.get("is_default")), None)

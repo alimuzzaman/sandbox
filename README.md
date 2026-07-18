@@ -25,7 +25,7 @@ New code must use the bounded service or registration contract. Their consumer s
 are frozen by architecture tests; removal requires parity evidence and separate
 human approval.
 
-**MCP-first and per-project.** Each plugin repo carries its own
+**CLI-first, per-project, and MCP-optional.** Each plugin repo carries its own
 `sandbox.config.json`. You `cd` into a plugin, and a single MCP server boots a
 WordPress instance for that directory on demand and runs the plugin's **real
 phpunit tests** — no central catalog, nothing to pre-register.
@@ -65,8 +65,8 @@ instead, where it behaves exactly like the Ubuntu path above.
 git clone -b main https://github.com/templately/sandbox.git
 cd sandbox
 ./sb global           # puts `sb` on your PATH (do this first)
-./sb mcp-install      # builds the MCP server's Python venv
-./sb setup            # registers the MCP server with Claude + wires everything
+./sb setup            # prepares the CLI and local runtime
+./sb guide            # show the runtime-aware CLI catalog
 ./sb domains setup    # optional: clean no-port URLs → https://<name>.<tld>
 ```
 
@@ -246,13 +246,13 @@ and hands it the keys.
 | **Find every site** | Reads the file the report names; misses the Pro-side mirror. | Greps every call site across the plugin AND its `-pro` sibling in one pass. |
 | **Fix** | Edit, ask you to test, edit again. 3–5 rounds. | Batch-edits every affected file in one pass. |
 | **Verify** | "Looks right," or `php -l`. | Re-triggers the failing call → confirms the output flipped → `EVIDENCE.after`. Or `sandbox test` → green. |
-| **Ship** | Commit + push + card update in one breath. | Stops at the working tree. Each of commit / push / card-move waits for your "go." |
+| **Ship** | Stops at the working tree. | Commits and pushes verified completed work on the active branch automatically. |
 
 **Build a new feature.** `load_workflow('build-feature')` → Phase 1 ESTABLISH
 (verb-led title, size class, live-verifiable success criteria, out-of-scope,
 edge cases) → Phase 2 PLAN (reuse audit naming every existing helper/table/route
 it'll ride on; cross-surface grep) → Phase 3 BUILD (vertical slices, each
-verified by an MCP call; non-negotiables — auth, sanitize-in/escape-out, slug
+verified by an `sb` CLI/MCP call; non-negotiables — auth, sanitize-in/escape-out, slug
 prefixing — enforced per Edit). Final `STATUS: SHIPPED` block pairs every
 success criterion with live evidence + rollout notes.
 
@@ -262,13 +262,29 @@ screenshot, DOM, and console errors without you switching tabs.
 ### The two underlying patterns
 
 1. **Live evidence is the only evidence.** Every "fixed" / "shipped" /
-   "verified" is backed by an MCP call (or a test run) against the running
+   "verified" is backed by an `sb` CLI/MCP call (or a test run) against the running
    WordPress — not a claim from reading code.
-2. **The work stops at the working tree.** Commits, pushes, card updates, PRs —
-   all wait for explicit confirmation. The sandbox makes Claude powerful; the
-   gates make sure that power doesn't outrun your intent.
+2. **Verified changes ship as a normal Git update.** Sandbox commits and pushes
+   the active branch after required checks. Force-pushes, tags, releases,
+   deployments, and PR actions remain explicit.
 
 ---
+
+## CLI-first operation (MCP optional)
+
+Use the same runtime operations without an MCP client:
+
+```bash
+./sb guide --project-dir .        # runtime-aware command catalog
+./sb skill show sandbox-cli       # CLI-first operating skill
+./sb ensure                       # start/reconcile local instance
+./sb exec -- sh -lc 'npm test'    # generic Compose projects only
+./sb deploy --remote <name> --ensure --expose
+```
+
+`./sb mcp --project-dir .` remains available for an MCP-capable client. It is
+runtime-scoped: generic Compose projects do not load WordPress tools, and
+WordPress projects do not load generic container-exec tools.
 
 ## What Claude can do — the MCP tools
 

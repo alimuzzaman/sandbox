@@ -43,6 +43,13 @@ or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
 database, Mailpit, WordPress filesystem, abilities, snapshots) fail before
 their side effects with a capability error.
 
+Generic Compose projects can also use the normal registered-remote workflow.
+Their declaration must include the public service, internal port, and health path
+shown above; `./sb deploy --project-dir /path/to/project --remote NAME --ensure
+--expose --domain app.example.com --json` transfers the working tree, ensures the
+remote Compose service, probes its health, and routes the declared service over
+HTTPS. It does not activate a plugin or run WordPress URL updates.
+
 `sb init --type astro` is a convenience preset: it reads `package.json` and
 the lockfile/configuration without executing project code, then writes an
 explicit `sandbox.config.json` and `sandbox.compose.yml` for review. PHP,

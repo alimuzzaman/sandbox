@@ -2,21 +2,21 @@
 
 ## Reflexes (fire automatically)
 
-- **First contact →** `focus_get`, skim `git log -10`, read the focused plugin's `AGENTS.md` + relevant `.Codex/skills/<area>/SKILL.md`. Once.
-- **Skills / workflows → MCP tools, not `Read`/`cat`.** Call `load_workflow('<name>')` or `load_skill('<name>')`.
+- **First contact →** run `./sb guide --project-dir .`, skim `git log -10`, then read the relevant skill with `./sb skill show <name>`. Use MCP only when the client specifically needs it.
+- **Skills / workflows → CLI-first.** Use `./sb skill show <name>` and the command catalog from `./sb guide`; `load_workflow` / `load_skill` remain MCP alternatives.
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
-- **Anything WP-touching →** MCP tool first. `wp_cli` not `docker compose exec`. `wp_rest` not `curl`. `db_query` not `mysql`. Bash for `git`, `grep`, `find` only.
+- **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
-- **"Add" / "build" / "implement" →** `load_workflow('build-feature')`.
+- **"Add" / "build" / "implement" →** follow the applicable local skill; use MCP workflow loading only when that integration is active.
 - **Recovery →** use `./sb recovery`; never substitute raw `gpg`, `rclone`, Docker, or SSH.
-- **Verified routine work →** stage, commit, and push to the active approved work branch automatically. Never force-push, tag, release, deploy, open/merge a PR, or write directly to `main` without explicit approval.
+- **Verified work →** stage, commit, and push the active branch automatically. Never force-push, tag, release, deploy, or open/merge a PR without explicit approval.
 
 ---
 
 ## Non-negotiable rules
 
-**Git & shipping.** After required checks pass, agents may `git commit` and `git push` regular work to the current approved work branch. `main`, force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+**Git & shipping.** After required checks pass, agents must `git commit` and `git push` the relevant completed work to the active branch automatically, including `main`. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 
@@ -164,5 +164,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/028-test-execution-modes/plan.md
+at specs/030-cli-first-operation/plan.md
 <!-- SPECKIT END -->

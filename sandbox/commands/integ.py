@@ -98,6 +98,11 @@ def cmd_mcp(cfg, args) -> None:
     Register once (then `cd` into any plugin and use the tools):
         claude mcp add --scope user sandbox -- ./sb mcp
 
+    Add `--project-dir DIR` when registering a project-specific MCP server. It
+    exposes the compact runtime-relevant catalog: generic Compose projects get
+    lifecycle/exec/network/deploy tools; WordPress projects get WordPress and
+    content tools instead of generic container-exec tools.
+
     `--transport streamable-http` (spec 014, remote VPS hosting) is started by
     `./sb remote provision` on a VPS, never invoked directly for local use —
     it binds to `--bind` (which MUST be a Tailscale interface address, never
@@ -110,6 +115,13 @@ def cmd_mcp(cfg, args) -> None:
     if not server.exists():
         die(f"MCP server not found at {server}")
     argv = [str(py), str(server)]
+    project_dir = getattr(args, "project_dir", None)
+    if isinstance(project_dir, str) and project_dir:
+        try:
+            project = _core().load_project_config(project_dir)
+        except Exception as exc:
+            die(f"invalid --project-dir {project_dir!r}: {exc}")
+        os.environ["SANDBOX_MCP_PROJECT_DIR"] = str(project["root"])
     transport = getattr(args, "transport", "stdio")
     if transport == "streamable-http":
         bind = getattr(args, "bind", None)

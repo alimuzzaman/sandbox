@@ -240,6 +240,8 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     mcp_p = sub.add_parser("mcp",
         help="Run the MCP server over stdio (register: claude mcp add --scope user sandbox -- ./sb mcp)")
+    mcp_p.add_argument("--project-dir", default=None,
+        help="scope the catalog to this project's runtime (hides irrelevant tools)")
     mcp_p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio",
         help="stdio (default, local use) or streamable-http (spec 014 remote "
              "hosting -- started by `./sb remote provision` on the VPS, never "
@@ -385,14 +387,14 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--remote", dest="remote", required=True,
         help="which registered, provisioned remote to deploy to")
     deploy_p.add_argument("--ensure", action="store_true",
-        help="after deploying, boot/refresh the remote WordPress instance")
+        help="after deploying, boot/refresh the remote project instance")
     deploy_p.add_argument("--expose", action="store_true",
         help="after ensuring, expose the remote instance through public HTTPS")
     deploy_p.add_argument("--domain", default=None,
         help="public hostname for --expose; default is "
              "default-<project-slug>.sandbox.asb.bd")
     deploy_p.add_argument("--plugin-slug", default=None,
-        help="plugin slug to activate after --ensure; default is the project slug")
+        help="WordPress-only plugin slug to activate after --ensure; defaults to project slug")
     deploy_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
@@ -718,7 +720,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         "up", "down", "status", "logs", "shell", "install", "wp", "seed", "visit",
         "doctor", "clean", "snapshot", "restore", "snapshots", "update", "open",
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
-        "abilities", "job", "jobs", "dump", "qm", "reset",
+        "abilities", "job", "jobs", "dump", "qm", "reset", "exec",
     }
     if chosen is None:
         if args.cmd in INSTANCE_SCOPED:

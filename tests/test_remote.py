@@ -669,6 +669,7 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertEqual(ssh_args[0], "ssh")
         self.assertIn("ubuntu@1.2.3.4", ssh_args)
         self.assertIn("sb-src", ssh_args[-1])
+        self.assertNotIn("rm -rf", ssh_args[-1])
         self.assertEqual(mock_run.call_args_list[1][1]["input"], b"tarball")
         self.assertFalse(mock_run.call_args_list[1][1]["text"])
 
@@ -791,6 +792,7 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         command = mock_ssh_run.call_args.args[1]
         self.assertIn("/proc/$legacy_pid/cmdline", command)
         self.assertIn("/proc/$legacy_pid/cwd", command)
+        self.assertIn("sb-src (deleted)", command)
         self.assertIn("kill \"$legacy_pid\"", command)
         self.assertNotIn("pathlib.Path('/proc')", command)
         self.assertIn("SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\"", command)

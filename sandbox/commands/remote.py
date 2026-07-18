@@ -197,7 +197,6 @@ def _upload_runtime_source(ssh_target: str) -> None:
     tar_cmd.extend(["-czf", "-", "."])
     remote_cmd = (
         "set -e; sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
-        "rm -rf \"$sandbox_home/sb-src\"; "
         "mkdir -p \"$sandbox_home/sb-src\"; "
         "tar -xzf - -C \"$sandbox_home/sb-src\""
     )

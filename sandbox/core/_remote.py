@@ -1090,7 +1090,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "case \"$legacy_pid\" in ''|*[!0-9]*) exit 42;; esac; "
         "test -r \"/proc/$legacy_pid/cmdline\"; legacy_cwd=$(readlink \"/proc/$legacy_pid/cwd\"); "
         "legacy_cmd=$(tr '\\0' ' ' < \"/proc/$legacy_pid/cmdline\"); "
-        "test \"$legacy_cwd\" = \"$HOME/sandbox/sb-src\"; "
+        "case \"$legacy_cwd\" in \"$HOME/sandbox/sb-src\"|\"$HOME/sandbox/sb-src (deleted)\") ;; *) exit 42;; esac; "
         "case \"$legacy_cmd\" in *'--transport streamable-http'*'--bind " + bind + "'*'--port " + str(port) + "'*) ;; *) exit 42;; esac; fi; "
     )
     unit_ownership_preflight = (

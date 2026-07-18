@@ -11,10 +11,10 @@ optional adapter for MCP-capable clients.
 
 ## Start with the runtime guide
 
-From the project root, run:
+From any configured project directory, run:
 
 ```bash
-./sb guide --project-dir .
+sb guide --project-dir .
 ```
 
 Use `--json` when a structured command catalog is useful. The guide is runtime
@@ -24,27 +24,27 @@ commands; WordPress projects receive WordPress commands.
 ## Generic Compose projects
 
 ```bash
-./sb init --type compose          # first-time project setup
-./sb ensure                       # create/start/reconcile the local instance
-./sb status                       # runtime state and URL
-./sb logs                         # public service logs
-./sb exec -- <argv...>            # explicit argv in the declared service
-./sb deploy --remote <name> --ensure --expose
+sb init --type compose          # first-time project setup
+sb ensure                       # create/start/reconcile the local instance
+sb status                       # runtime state and URL
+sb logs                         # public service logs
+sb exec -- <argv...>            # explicit argv in the declared service
+sb deploy --remote <name> --ensure --expose
 ```
 
 Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
-required, make the boundary explicit, for example `./sb exec -- sh -lc 'npm
+required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
 test'`.
 
 ## WordPress projects
 
 ```bash
-./sb init
-./sb ensure
-./sb status
-./sb wp -- plugin list
-./sb test
-./sb deploy --remote <name> --ensure --expose
+sb init
+sb ensure
+sb status
+sb wp -- plugin list
+sb test
+sb deploy --remote <name> --ensure --expose
 ```
 
 Use WordPress-specific commands only when the project guide reports a
@@ -60,6 +60,6 @@ after the push succeeds.
 
 ## MCP remains available
 
-Use `./sb mcp --project-dir .` only when an MCP client needs live tool calls.
+Use `sb mcp --project-dir .` only when an MCP client needs live tool calls.
 It remains runtime-scoped, so a generic project does not receive WordPress
 tools and a WordPress project does not receive generic container-exec tools.

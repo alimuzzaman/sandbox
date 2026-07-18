@@ -121,6 +121,33 @@ def cmd_introspect(cfg, args) -> None:
 
 def cmd_test(cfg, args) -> None:
     """Run a project's resolved unit or integration PHPUnit environment."""
+    if getattr(args, "mode", None) == "matrix":
+        from sandbox.commands.jobs_runtime import cmd_job_matrix
+        remainder = list(getattr(args, "passthrough", ()) or ())
+        local = bool(getattr(args, "local", False)); remote = getattr(args, "remote", None)
+        workspaces = list(getattr(args, "workspace", None) or [])
+        timeout = getattr(args, "timeout", 900); output_profile = getattr(args, "output_profile", "smart")
+        as_json = bool(getattr(args, "json", False))
+        # ``argparse.REMAINDER`` intentionally preserves all tokens after the
+        # positional mode. Parse the durable matrix subset here so the natural
+        # `sb test matrix --workspace cell -- <argv>` spelling remains valid.
+        command = []
+        while remainder:
+            token = remainder.pop(0)
+            if token == "--": command = remainder; break
+            if token == "--local": local = True; continue
+            if token == "--remote" and remainder: remote = remainder.pop(0); continue
+            if token == "--workspace" and remainder: workspaces.append(remainder.pop(0)); continue
+            if token == "--timeout" and remainder: timeout = int(remainder.pop(0)); continue
+            if token == "--output-profile" and remainder: output_profile = remainder.pop(0); continue
+            if token == "--json": as_json = True; continue
+            command.append(token)
+        cmd_job_matrix(cfg, _types.SimpleNamespace(
+            command=command, project_dir=getattr(args, "project_dir", None) or os.getcwd(),
+            local=local, remote=remote, workspace=workspaces, timeout=timeout,
+            output_profile=output_profile, json=as_json,
+        ))
+        return
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)

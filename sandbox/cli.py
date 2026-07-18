@@ -261,7 +261,7 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     ts = sub.add_parser("test",
         help="Run plugin unit or integration tests")
-    ts.add_argument("mode", nargs="?", choices=("auto", "unit", "integration"),
+    ts.add_argument("mode", nargs="?", choices=("auto", "unit", "integration", "matrix"),
         help="test environment (default: configured suite or conservative auto)")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
@@ -271,6 +271,13 @@ Per-project (each plugin carries its own sandbox.config.json):
              "default: the sole/default instance")
     ts.add_argument("--provision-only", dest="provision_only", action="store_true",
         help="set up the harness but don't run phpunit")
+    test_target = ts.add_mutually_exclusive_group()
+    test_target.add_argument("--local", action="store_true", help="run a durable local matrix")
+    test_target.add_argument("--remote", help="run a durable remote matrix")
+    ts.add_argument("--workspace", action="append", default=None,
+        help="isolated matrix workspace label (repeatable; mode=matrix)")
+    ts.add_argument("--timeout", type=int, default=900, help="durable matrix job deadline")
+    ts.add_argument("--output-profile", default="smart", help="durable matrix output profile")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="args after `--` are passed to phpunit (e.g. --filter foo)")
 

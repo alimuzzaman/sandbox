@@ -40,7 +40,7 @@ class TestResolutionGate(unittest.TestCase):
         from sandbox.registry import COMMANDS, COMMAND_SPECS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 76)
+        self.assertEqual(len(COMMANDS), 77)
         self.assertEqual(tuple(sorted(COMMANDS)), tuple(sorted(COMMAND_SPECS.names())))
         self.assertEqual(validate_builtin_command_coverage(), ())
 

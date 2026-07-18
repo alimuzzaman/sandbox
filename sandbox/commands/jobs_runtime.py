@@ -75,6 +75,12 @@ def configure_cancel_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_metrics_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--json", action="store_true")
+
+
 def cmd_job_start(_cfg, args) -> None:
     command = list(args.command or ())
     if command[:1] == ["--"]:
@@ -155,10 +161,20 @@ def cmd_job_cancel(_cfg, args) -> None:
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cancelling")
 
 
+def cmd_job_metrics(_cfg, args) -> None:
+    result = durable_job_dependencies()["job_service"].read_metrics(args.job_id, limit=args.limit)
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        for item in result["samples"]:
+            print(json.dumps(item, sort_keys=True))
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
     CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global"),
     CommandSpec("job-output", cmd_job_output, configure=configure_output_parser, owner=__name__, scope="global"),
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
+    CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
 ))

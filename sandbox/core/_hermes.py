@@ -2702,6 +2702,14 @@ def health(remote_name: str) -> dict:
             service_reasons.append("remote_mcp_inactive")
         if not remote_service["linger"]:
             service_reasons.append("user_linger_disabled")
+        if remote_service.get("listener_state") == "unknown":
+            service_reasons.append("remote_mcp_listener_unknown")
+        elif not remote_service.get("listener_expected"):
+            service_reasons.append("remote_mcp_listener_unexpected")
+        if remote_service.get("auth_state") == "unknown":
+            service_reasons.append("remote_mcp_auth_unknown")
+        elif not remote_service.get("authenticated"):
+            service_reasons.append("remote_mcp_auth_failed")
         if remote_service["ownership"] == "unknown":
             service_reasons.append("remote_mcp_unknown")
         elif remote_service["ownership"] != "proven":
@@ -2710,7 +2718,8 @@ def health(remote_name: str) -> dict:
                                     "reasons": service_reasons, "evidence": remote_service}
         degraded_reasons.extend(service_reasons)
     else:
-        components["remote_mcp"] = {"status": "not_applicable", "reasons": [], "evidence": {}}
+        components["remote_mcp"] = {"status": "degraded", "reasons": ["remote_mcp_not_migrated"], "evidence": {}}
+        degraded_reasons.append("remote_mcp_not_migrated")
     gateway_reasons = []
     if not diagnostic["ok"]:
         gateway_reasons.append("prerequisites")

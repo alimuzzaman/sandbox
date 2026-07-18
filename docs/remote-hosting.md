@@ -290,6 +290,11 @@ MCP tool:
 It mirrors `run_tests`/`run_plugin_check`'s calling convention and returns `instance`
 plus `url` when exposure succeeds.
 
+`remote service status` checks the selected unit's non-secret ownership marker and
+runtime revision, expected bind/port, systemd activity/enablement, user linger, local
+listener scope, and an authenticated `/mcp` probe. It treats unavailable evidence as
+degraded; it never reads a credential into command arguments or output.
+
 ## 9. Known limitation / next step
 
 **Live-verified against a fresh Ubuntu 24.04 VPS.** A real run against

@@ -887,7 +887,7 @@ class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_targets_only_the_proven_service_unit(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
-            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nmarker=1\n"),
+            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\n"),
             _completed(returncode=0),
         ]
         remote = {"ssh": "ubuntu@1.2.3.4", "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174)}
@@ -903,6 +903,44 @@ class TestStopRemoteMcpServer(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ownership_unknown"):
             sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
         self.assertEqual(mock_ssh_run.call_count, 1)
+
+
+class TestRemoteMcpServiceStatus(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\n")
+        record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
+        status = sr.remote_mcp_service_status({"ssh": "ubuntu@1.2.3.4", "mcp_service": record})
+        self.assertEqual(status["ownership"], "proven")
+        self.assertTrue(status["listener_expected"])
+        self.assertTrue(status["authenticated"])
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", command)
+        self.assertIn("ss -H -ltn", command)
+        self.assertIn("urllib.request", command)
+        self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
+        self.assertNotIn("bearer_token", command)
+
+    @patch("sandbox.core._remote.remote_mcp_service_status")
+    @patch("sandbox.core._remote.check_reachable", return_value=True)
+    @patch("urllib.request.build_opener")
+    def test_doctor_includes_owned_service_recovery_evidence(self, opener, reachable, status):
+        class Response:
+            status = 405
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        opener.return_value.open.return_value = Response()
+        status.return_value = {"ownership": "proven", "enabled": True, "active": True,
+                               "linger": True, "listener_expected": True, "authenticated": True}
+        checks = sr.remote_doctor_checks({
+            "ssh": "ubuntu@example.test", "provisioned": True,
+            "control_transport": "https", "control_url": "https://control.example.test",
+            "bearer_token": "a" * 64,
+            "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174, "https://control.example.test"),
+        })
+        self.assertTrue(all(item["ok"] for item in checks))
+        self.assertIn("MCP reboot recovery", [item["label"] for item in checks])
 
 
 class TestRemoteServiceCommand(unittest.TestCase):

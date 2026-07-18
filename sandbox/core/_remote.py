@@ -399,6 +399,26 @@ def remote_doctor_checks(remote: dict) -> list[dict]:
         endpoint_ok = False
     checks.append({"label": "MCP endpoint reachable", "ok": endpoint_ok,
                    "hint": "run `./sb remote up <name>` and verify its route"})
+    service_record = remote.get("mcp_service")
+    if not isinstance(service_record, dict):
+        checks.append({"label": "MCP service ownership", "ok": False,
+                       "hint": "run `./sb remote service migrate <name> --plan` and review the protected migration"})
+        return checks
+    try:
+        service = remote_mcp_service_status(remote)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        service = {"ownership": "unknown", "enabled": False, "active": False,
+                   "linger": False, "listener_expected": False, "authenticated": False}
+    checks.extend([
+        {"label": "MCP service ownership", "ok": service.get("ownership") == "proven",
+         "hint": "review remote service status and run its confirmed migration if ownership is ambiguous"},
+        {"label": "MCP reboot recovery", "ok": bool(service.get("enabled") and service.get("linger")),
+         "hint": "enable the selected Sandbox user service and user lingering through confirmed migration"},
+        {"label": "MCP listener scope", "ok": bool(service.get("listener_expected")),
+         "hint": "inspect the selected service bind/port; public or unknown listeners are not accepted"},
+        {"label": "MCP service authentication", "ok": bool(service.get("authenticated")),
+         "hint": "inspect the selected service credential file and authenticated /mcp route"},
+    ])
     return checks
 
 
@@ -865,6 +885,12 @@ def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> s
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
+def _remote_mcp_runtime_revision() -> str:
+    """Return a non-secret local runtime identity that survives staged uploads."""
+    source = Path(__file__).read_bytes()
+    return hashlib.sha256(source).hexdigest()[:24]
+
+
 def remote_mcp_service_record(bind: str, port: int, public_url: str | None = None) -> dict:
     if not _remote_mcp_bind_allowed(bind):
         raise ValueError("remote MCP bind must be loopback or a Tailscale address")
@@ -872,8 +898,10 @@ def remote_mcp_service_record(bind: str, port: int, public_url: str | None = Non
         raise ValueError("remote MCP port must be between 1 and 65535")
     return {
         "service_name": REMOTE_MCP_SERVICE,
+        "transport": "https" if ipaddress.ip_address(bind).is_loopback else "tailscale",
         "bind": bind,
         "port": port,
+        "runtime_revision": _remote_mcp_runtime_revision(),
         "ownership_marker": _remote_mcp_marker(bind, port, public_url),
     }
 
@@ -903,6 +931,7 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) 
         "Type=simple",
         f"EnvironmentFile={_REMOTE_MCP_UNIT_ENV}",
         f"Environment=SANDBOX_REMOTE_MCP_MARKER={record['ownership_marker']}",
+        f"Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION={record['runtime_revision']}",
         "WorkingDirectory=%h/sandbox/sb-src",
         "ExecStart=%h/sandbox/sb-src/sb mcp --transport streamable-http "
         f"--bind {shlex.quote(bind)} --port {port}{public_arg}",
@@ -920,11 +949,40 @@ def remote_mcp_service_status(remote: dict) -> dict:
     record = dict(remote.get("mcp_service") or {})
     expected = record.get("service_name") == REMOTE_MCP_SERVICE
     marker = record.get("ownership_marker") if isinstance(record.get("ownership_marker"), str) else ""
+    revision = record.get("runtime_revision") if isinstance(record.get("runtime_revision"), str) else ""
+    bind = record.get("bind") if isinstance(record.get("bind"), str) else ""
+    port = record.get("port") if isinstance(record.get("port"), int) else 0
     marker_probe = (
         f"if test -f $HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
         f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_MARKER=' + marker)} "
-        f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo marker=1; else echo marker=0; fi; "
+        f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
+        f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + revision)} "
+        f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
+        f"grep -Fq {shlex.quote('--bind ' + bind + ' --port ' + str(port))} "
+        f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo ownership=proven; else echo ownership=ambiguous; fi; "
         if marker else "echo marker=0; "
+    )
+    listener_probe = (
+        f"if command -v ss >/dev/null 2>&1; then listener=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk 'NR==1 {{print $4}}'); "
+        f"case \"$listener\" in {shlex.quote(bind + ':' + str(port))}|{shlex.quote('[' + bind + ']:' + str(port))}) echo listener=expected;; '') echo listener=missing;; *) echo listener=unexpected;; esac; "
+        "else echo listener=unknown; fi; "
+        if bind and port else "echo listener=unknown; "
+    )
+    auth_program = (
+        "import sys, urllib.error, urllib.request; from pathlib import Path; "
+        "lines=Path(sys.argv[3]).read_text().splitlines(); "
+        "matches=[line.split('=',1)[1] for line in lines if line.startswith('SANDBOX_REMOTE_MCP_TOKEN=')]; "
+        "token=matches[0] if len(matches)==1 else ''; "
+        "url='http://%s:%s/mcp' % (sys.argv[1], sys.argv[2]); "
+        "request=urllib.request.Request(url, headers={'Authorization':'Bearer '+token}); "
+        "\ntry:\n urllib.request.urlopen(request, timeout=5); print('auth=ok')\n"
+        "except urllib.error.HTTPError as exc:\n print('auth=ok' if exc.code != 401 else 'auth=failed')\n"
+        "except Exception:\n print('auth=unknown')"
+    )
+    auth_probe = (
+        f"if test -r {_REMOTE_MCP_ENV}; then python3 -c {shlex.quote(auth_program)} "
+        f"{shlex.quote(bind)} {port} {_REMOTE_MCP_ENV}; else echo auth=unknown; fi; "
+        if bind and port else "echo auth=unknown; "
     )
     command = (
         "if ! command -v systemctl >/dev/null 2>&1; then echo unavailable; exit 0; fi; "
@@ -932,24 +990,28 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"printf 'pid='; systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true; "
         "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        + marker_probe
+        + marker_probe + listener_probe + auth_probe
     )
     res = ssh_run(remote, command, timeout=20)
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "marker"}:
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "listener", "auth"}:
             values[key] = value.strip().lower()
     installed = values.get("enabled") not in {"", "not-found", "unknown"}
     active = values.get("active") == "active"
     enabled = values.get("enabled") == "enabled"
     linger = values.get("linger") == "yes"
-    ownership = "proven" if expected and installed and values.get("marker") == "1" else "missing" if not installed else "ambiguous"
+    ownership = "proven" if expected and installed and values.get("ownership") == "proven" else "missing" if not installed else "ambiguous"
     return {
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
         "service_name": REMOTE_MCP_SERVICE if expected else None,
         "pid_present": values.get("pid", "0") not in {"", "0"},
+        "listener_expected": values.get("listener") == "expected",
+        "authenticated": values.get("auth") == "ok",
+        "listener_state": values.get("listener", "unknown"),
+        "auth_state": values.get("auth", "unknown"),
         "bind": record.get("bind"), "port": record.get("port"),
     }
 

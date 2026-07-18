@@ -37,9 +37,9 @@ class MatrixTests(unittest.TestCase):
             service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None,
                                  launcher=launched.append)
             source = SourceIdentity("s")
-            upstream = JobSubmission("test", temp, "p", "local", "build", ("echo", "build"), 60,
+            upstream = JobSubmission("ci", temp, "p", "local", "build", ("echo", "build"), 60,
                 source, workspace_mode="isolated")
-            downstream = JobSubmission("test", temp, "p", "local", "unit", ("echo", "unit"), 60,
+            downstream = JobSubmission("ci", temp, "p", "local", "unit", ("echo", "unit"), 60,
                 source, workspace_mode="isolated", depends_on=("build",))
             result = service.submit_matrix([upstream, downstream])
             child = {item["workspace"]: item for item in result["children"]}

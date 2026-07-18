@@ -145,7 +145,11 @@ class JobService:
 
     def get(self, job_id: str, *, reconcile: bool = True):
         snapshot = self.repository.snapshot(job_id)
-        if snapshot["kind"] in {"matrix", "ci", "plan"}:
+        # A CI matrix's children are themselves kind="ci".  Treat only an
+        # actual aggregate (or a dedicated matrix/plan record) as a parent;
+        # otherwise a dependency-ready CI child would never reach its
+        # scheduler/launcher during status reconciliation.
+        if snapshot["kind"] in {"matrix", "plan"} or self.repository.children(job_id):
             return self._get_parent(snapshot)
         if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
             dependency_state, dependency_reason = self._dependency_state(snapshot)

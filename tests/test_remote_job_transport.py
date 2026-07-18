@@ -82,6 +82,22 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("project-workspace-", commands[0])
         self.assertNotIn("project.workspace-", commands[0])
 
+    def test_workspace_prepare_has_a_scoped_root_owned_file_recovery(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
+                                         "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
+            SourceIdentity("ignored"), remote_name="r"))
+        prepare = commands[0]
+        self.assertIn("docker run --rm --user 0:0", prepare)
+        self.assertIn("/srv/project-workspace-", prepare)
+        self.assertIn("find /workspace -mindepth 1 -maxdepth 1", prepare)
+
     def test_remote_runtime_exec_ensures_and_executes_in_the_deployed_instance(self):
         calls = []
         transport = RemoteJobTransport(

@@ -106,9 +106,25 @@ class RemoteJobTransport:
         # Project resolution derives a slug from the deployed workspace name;
         # use hyphens so the copied path remains a valid project root.
         workspace_path = f"{source_path}-workspace-{suffix}"
-        command = shlex.join(["rm", "-rf", workspace_path]) + " && " + shlex.join(
+        # A prior generic Compose run may have written dependency files as
+        # container root into its bind-mounted checkout.  First use the normal
+        # unprivileged cleanup; only when that fails, use a narrowly mounted
+        # disposable root cleaner for this one deterministic workspace.  This
+        # keeps persistent labels reusable without broad host deletion or
+        # requiring the remote account to have passwordless sudo.
+        clean = shlex.join(["rm", "-rf", workspace_path])
+        root_clean = shlex.join([
+            "docker", "run", "--rm", "--user", "0:0", "--volume",
+            f"{workspace_path}:/workspace", "alpine:3.20", "sh", "-c",
+            "find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
+        ])
+        command = (
+            f"if [ -e {shlex.quote(workspace_path)} ] && ! {clean} 2>/dev/null; then "
+            f"{root_clean} && {clean}; fi && "
+            + shlex.join(
             ["mkdir", "-p", workspace_path]) + " && " + shlex.join(
             ["cp", "-a", f"{source_path}/.", workspace_path])
+        )
         result = self.ssh_run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
             raise RemoteJobTransportError("remote workspace preparation failed")

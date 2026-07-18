@@ -101,7 +101,7 @@ complete retained stdout/stderr/combined output.
 - [ ] T041 [US1] Implement opaque cursor encoding/validation and bounded stream/offset/tail/line/time/base64 retrieval in `sandbox/jobs/output.py`
 - [ ] T042 [US1] Implement full/smart/errors/sampled/quiet and declarative named custom presentation policies in `sandbox/jobs/output.py`
 - [ ] T043 [US1] Implement the detached supervisor entrypoint, lease wait heartbeat, child session/process group launch, non-blocking local pipe drainage, and atomic finalization in `sandbox/jobs/supervisor.py`
-- [ ] T044 [US1] Implement deadline enforcement, TERM/grace/KILL cleanup of owned descendants, output/storage failure promotion, and terminal integrity hashes in `sandbox/jobs/supervisor.py`
+- [X] T044 [US1] Implement deadline enforcement, TERM/grace/KILL cleanup of owned descendants, output/storage failure promotion, and terminal integrity hashes in `sandbox/jobs/supervisor.py`
 - [ ] T045 [US1] Implement submit/get/list/read-output use cases and idempotent launch recovery in `sandbox/application/job_service.py`
 - [X] T046 [US1] Implement the host-local service transport and detached supervisor launcher with every standard descriptor disconnected in `sandbox/transports/jobs.py`
 - [ ] T047 [US1] Extend exact-working-tree deployment to return commit/dirty-manifest/deploy identities and workspace target paths in `sandbox/commands/deploy.py` and `sandbox/core/_remote.py`

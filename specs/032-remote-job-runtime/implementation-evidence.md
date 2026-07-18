@@ -56,4 +56,5 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - `0e01dc1` adds linked retries and explicit terminal-job log/artifact cleanup.
 - `ce54edd` queues conflicting durable submissions, dispatches them after lease release, and prevents reset/destroy while a workspace lease is active.
 - `0f8b231` adds explicit isolated matrix submission. Live local smoke submitted `matrix-a` and `matrix-b`; both completed successfully with distinct supervisor/child PIDs, retained output, and metric records.
+- `db0148d` seals stdout, stderr, and combined indexes on terminal finalization and records a terminal combined-output integrity hash.
 - Validation: focused job, workspace, CI, architecture, CLI composition, MCP composition, MCP schema, and server transport suites passed. A full local discovery run advanced through the CLI boundary but the existing `instances` test blocked on a live Docker Compose `ps` operation for a pre-existing instance; it was terminated without changing runtime state.

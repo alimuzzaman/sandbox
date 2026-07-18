@@ -1025,6 +1025,19 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
+    def test_tailscale_service_migration_omits_control_url_from_unit_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="tailscale", tailscale_host="100.64.1.2",
+                              control_url="http://100.64.1.2:9174", bearer_token="a" * 64)
+                args = types.SimpleNamespace(name="migrate", ssh_url="myvps", confirm=False, plan=False)
+                with patch.object(remote_cmd.sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "absent"}), \
+                     patch.object(remote_cmd.sr, "migrate_remote_mcp_service", return_value={"status": "planned", "service": {}}) as migrate, \
+                     patch("builtins.print"):
+                    remote_cmd._cmd_service(args, as_json=True)
+                self.assertIsNone(migrate.call_args.args[4])
+
     def test_service_migration_plan_records_read_only_legacy_evidence(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):

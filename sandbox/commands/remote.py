@@ -56,12 +56,17 @@ def _cmd_service(args, as_json: bool) -> None:
             token = entry.get("bearer_token")
             if not isinstance(token, str) or not token:
                 raise ValueError("remote service token is unavailable; provision the remote first")
+            # Tailscale is a direct private bind, not a public reverse-proxy
+            # origin. Passing its control URL as ``public_url`` changes the
+            # service ownership marker and makes a valid existing unit look
+            # foreign during a routine migration.
+            public_url = entry.get("control_url") if transport == "https" else None
             observed = sr.remote_mcp_service_status(entry)
             if confirmed:
                 _upload_runtime_source(entry["ssh"])
             plan = sr.migrate_remote_mcp_service(
                 entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
-                entry.get("control_url"), confirm=confirmed,
+                public_url, confirm=confirmed,
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
             )
             plan["observed"] = observed

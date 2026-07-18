@@ -211,10 +211,18 @@ def durable_job_dependencies():
         import shlex
         from sandbox.core import _remote
         remote = _remote.get_remote(resolved_target.remote_name)
-        deployed = _remote.deploy_exact_working_tree(remote, resolved_target.project_root)
-        workspace_path = _remote.prepare_remote_workspace(
-            remote, resolved_target.project_root, resolved_target.workspace_label,
-            deployed_path=deployed["target_path"])
+        deployed = None
+        if action == "create":
+            deployed = _remote.deploy_exact_working_tree(remote, resolved_target.project_root)
+            workspace_path = _remote.prepare_remote_workspace(
+                remote, resolved_target.project_root, resolved_target.workspace_label,
+                deployed_path=deployed["target_path"])
+        else:
+            # Observation and lifecycle operations must address the existing
+            # reusable workspace; recreating its copy here would erase the
+            # state that status/reset/destroy are meant to inspect.
+            workspace_path = _remote.remote_workspace_path(
+                remote, resolved_target.project_root, resolved_target.workspace_label)
         sb = _remote.remote_sb_path(remote)
         if action in {"reset", "destroy"}:
             busy_command = shlex.join([

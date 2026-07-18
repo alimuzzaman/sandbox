@@ -318,6 +318,12 @@ class TestCheckReachable(unittest.TestCase):
 
 
 class TestDeployTargetPath(unittest.TestCase):
+    @patch("sandbox.core._remote.deploy_target_path", return_value="/srv/deploy/project")
+    def test_workspace_path_matches_durable_job_slug(self, _target_path):
+        path = sr.remote_workspace_path({}, "/local/path/project", "node-unit")
+        self.assertTrue(path.startswith("/srv/deploy/project-workspace-"))
+        self.assertNotIn(".workspace-", path)
+
     @patch("subprocess.run")
     def test_resolves_using_project_slug_and_remote_sandbox_home(self, mock_run):
         mock_run.return_value = _completed(returncode=0, stdout="/home/ubuntu/sandbox\n")

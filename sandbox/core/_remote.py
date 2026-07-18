@@ -477,11 +477,16 @@ def deploy_target_path(remote: dict, project_root) -> str:
 
 
 def remote_workspace_path(remote: dict, project_root, workspace_label: str) -> str:
-    """Derive a deterministic remote copy path for one workspace label."""
+    """Derive the deterministic remote copy path used by durable jobs.
+
+    The path remains a valid plugin-project slug when its deployed tree is
+    resolved by the co-located CLI. Keep this spelling aligned with
+    ``RemoteJobTransport._prepare_workspace`` and remote lifecycle commands.
+    """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", workspace_label or ""):
         raise ValueError("invalid remote workspace label")
     suffix = hashlib.sha256(workspace_label.encode()).hexdigest()[:14]
-    return f"{deploy_target_path(remote, project_root)}.workspace-{suffix}"
+    return f"{deploy_target_path(remote, project_root)}-workspace-{suffix}"
 
 
 def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,

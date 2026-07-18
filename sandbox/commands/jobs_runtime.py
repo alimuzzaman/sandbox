@@ -63,6 +63,7 @@ def configure_output_parser(parser) -> None:
     parser.add_argument("--cursor")
     parser.add_argument("--tail-bytes", type=int)
     parser.add_argument("--max-bytes", type=int, default=65536)
+    parser.add_argument("--encoding", choices=("utf8", "base64"), default="utf8")
     parser.add_argument("--follow", action="store_true")
     parser.add_argument("--wait-seconds", type=int, default=0,
                         help="bounded retained-log long poll (0 disables waiting)")
@@ -214,7 +215,8 @@ def cmd_job_output(_cfg, args) -> None:
         while True:
             result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
                 tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
-                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds)
+                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
+                encoding=args.encoding)
             if args.json: print(json.dumps(result, sort_keys=True))
             elif result.get("data"): print(result["data"], end="")
             if not args.follow: return
@@ -226,7 +228,8 @@ def cmd_job_output(_cfg, args) -> None:
     while True:
         result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
             tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
-            wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds))
+            wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
+            encoding=args.encoding))
         if args.json:
             print(json.dumps(result, sort_keys=True))
         elif result["data"]:

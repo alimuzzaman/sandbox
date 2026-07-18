@@ -120,7 +120,8 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
     try:
         if remote:
             return _remote_transport().read_output(remote, job_id, stream=stream, cursor=cursor,
-                tail_bytes=tail_bytes, max_bytes=max_bytes, wait_seconds=wait_seconds)
+                tail_bytes=tail_bytes, max_bytes=max_bytes, wait_seconds=wait_seconds,
+                encoding=encoding)
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
             tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
     except Exception as exc:

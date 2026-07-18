@@ -157,3 +157,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   asynchronous-job, CI/E2E helper, remote-hosting, architecture, and MCP contract
   coverage. Live Docker/remote acceptance remains environment-dependent and is not
   represented as a passing pure test.
+
+## Final local detached-contract smoke
+
+- Command: `./sb job-start --local --project-dir . --timeout 30 --json -- .cli-venv/bin/python -c 'print("remote-runtime-contract-ok")'`
+- Result: accepted job `15541e4b0af7d71922303715b14cc64c`; status reached
+  `succeeded` with exit code `0`, complete output indexes, retained metrics, and a
+  terminal integrity hash. `./sb job-output 15541e4b0af7d71922303715b14cc64c
+  --encoding utf8 --json` returned the retained output through the cursor contract.
+- This validates the local half of the detach/reconnect contract only; remote
+  transport acceptance still requires a provisioned disposable remote.

@@ -133,7 +133,10 @@ def cmd_exec(cfg, args) -> None:
     owner = _core().registry_find_instance(args.resolved_instance) or {}
     result = runtime_service(cfg).invoke(OperationRequest(
         project_root=project_root or owner["root"], operation="exec",
-        label=owner.get("label", "default"), arguments={"argv": command},
+        label=owner.get("label", "default"), arguments={
+            "argv": command,
+            **({"timeout": args.timeout} if getattr(args, "timeout", None) is not None else {}),
+        },
     ))
     if isinstance(result, OperationError):
         die(result.message)

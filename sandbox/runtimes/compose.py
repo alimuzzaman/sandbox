@@ -116,6 +116,16 @@ class ComposeAdapter:
         preferred = descriptor.get("http_port")
         return int(self.dependencies.ports.allocate(int(preferred)) if preferred else self.dependencies.ports.allocate())
 
+    def _operation_timeout(self, request: OperationRequest) -> float:
+        """Return the bounded deadline supplied by a durable execution job."""
+        value = request.arguments.get("timeout")
+        if value is None:
+            return self.timeout
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) or value <= 0):
+            raise ValueError("generic Compose execution timeout must be a finite positive number")
+        return float(value)
+
     def invoke(self, request: OperationRequest) -> OperationResult:
         descriptor = self._descriptor(request)
         op = request.operation
@@ -159,7 +169,10 @@ class ComposeAdapter:
             commands[op] = ["exec", "-T", service, *command]
         if op not in commands:
             raise ValueError(f"unsupported Compose operation: {op}")
-        result = self.dependencies.process.run(["docker", "compose", *project_args, *commands[op]], cwd=descriptor["root"], timeout=self.timeout)
+        result = self.dependencies.process.run(
+            ["docker", "compose", *project_args, *commands[op]], cwd=descriptor["root"],
+            timeout=self._operation_timeout(request) if op == "exec" else self.timeout,
+        )
         if result.returncode != 0:
             raise RuntimeError(result.stderr or f"Compose {op} failed")
         data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "destroy"} else "ready", output=result.stdout[-10000:])

@@ -96,6 +96,20 @@ class TestGenericComposeAdapter(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "argv list"):
                 adapter.invoke(OperationRequest(str(root), "exec", arguments={"argv": "sh -c id"}))
 
+    def test_exec_honors_a_finite_durable_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, _ = self.make_adapter(root)
+            adapter.invoke(OperationRequest(str(root), "exec", arguments={
+                "argv": ["pnpm", "test:fast"], "timeout": 1200,
+            }))
+            self.assertEqual(process.calls[-1][2], 1200.0)
+            with self.assertRaisesRegex(ValueError, "execution timeout"):
+                adapter.invoke(OperationRequest(str(root), "exec", arguments={
+                    "argv": ["pnpm", "test:fast"], "timeout": 0,
+                }))
+
     def test_descriptor_validation_rejects_command_ambiguous_fields(self):
         invalid = (
             {"service": "web\nbad"},

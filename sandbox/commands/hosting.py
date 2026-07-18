@@ -86,7 +86,11 @@ def _secret_status(validated: dict) -> tuple[dict[str, str], list[str]]:
     values: dict[str, str] = {}
     missing: list[str] = []
     mappings = {**validated["secrets"]["required"], **validated["secrets"]["generated"]}
-    for source_key in sorted(set(mappings.values())):
+    source_keys = set(mappings.values())
+    basic_auth = validated.get("basic_auth") or {}
+    if basic_auth:
+        source_keys.add(basic_auth["password_secret"])
+    for source_key in sorted(source_keys):
         value = personal_secrets.resolve_secret(source_key)
         if value:
             values[source_key] = value
@@ -95,12 +99,21 @@ def _secret_status(validated: dict) -> tuple[dict[str, str], list[str]]:
     return values, missing
 
 
+def _declared_secret_sources(validated: dict) -> set[str]:
+    mappings = {**validated["secrets"]["required"], **validated["secrets"]["generated"]}
+    sources = set(mappings.values())
+    basic_auth = validated.get("basic_auth") or {}
+    if basic_auth:
+        sources.add(basic_auth["password_secret"])
+    return sources
+
+
 def _cmd_host_secrets(validated: dict, args) -> None:
     values, missing = _secret_status(validated)
     generated = set(validated["secrets"]["generated"].values())
     set_key = getattr(args, "set_secret", None)
     if set_key:
-        declared = set(validated["secrets"]["required"].values()) | generated
+        declared = _declared_secret_sources(validated)
         if set_key not in declared:
             die(f"'{set_key}' is not declared by this hosting environment")
         value = getpass(f"Value for {set_key}: ")
@@ -118,7 +131,7 @@ def _cmd_host_secrets(validated: dict, args) -> None:
         "ok": not missing,
         "project": validated["project"],
         "environment": validated["environment"],
-        "required": sorted(set(validated["secrets"]["required"].values()) | generated),
+        "required": sorted(_declared_secret_sources(validated)),
         "present": sorted(values),
         "missing": missing,
     }
@@ -135,6 +148,16 @@ def _remote_checked(entry: dict, command: str, timeout: int = 180) -> str:
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "remote command failed").strip()[:2000])
     return result.stdout or ""
+
+
+def _remote_basic_auth_hash(entry: dict, password: str) -> str:
+    """Hash a Basic Auth password on the remote without placing it in argv."""
+    result = remote.ssh_run(entry, "caddy hash-password", timeout=60,
+                            input_data=password + "\n")
+    value = (result.stdout or "").strip()
+    if result.returncode != 0 or not value or "\n" in value or not value.startswith("$"):
+        raise RuntimeError("remote Caddy could not generate the Basic Auth password hash")
+    return value
 
 
 def _write_remote_text(entry: dict, path: str, text: str, mode: str = "0600") -> None:
@@ -383,7 +406,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
         _run_compose(entry, validated, target, runtime_dir, runtime)
         _verify_remote_health(entry, runtime)
         cert_path, key_path, certificate = _origin_certificate(entry, validated, runtime, previous_entry, client, home)
-        runtime["caddyfile"] = hosting.caddyfile(validated, runtime["loopback_port"], cert_path, key_path)
+        basic_hash = None
+        if validated.get("basic_auth"):
+            password_secret = validated["basic_auth"]["password_secret"]
+            basic_hash = _remote_basic_auth_hash(entry, secret_values[password_secret])
+        runtime["caddyfile"] = hosting.caddyfile(
+            validated, runtime["loopback_port"], cert_path, key_path, basic_hash,
+        )
         _configure_host_caddy(entry, caddy_name, runtime["caddyfile"])
         zones: dict[str, dict] = {}
         for wanted in runtime["records"]:
@@ -457,7 +486,9 @@ def cmd_host(cfg, args) -> None:
     plan["runtime"] = hosting.desired_runtime(validated, args.remote, state)
     plan["runtime"]["records"] = plan["records"]
     _, missing = _secret_status(validated)
-    plan["secrets"] = {"missing": missing, "required": sorted(set(validated["secrets"]["required"].values()) | set(validated["secrets"]["generated"].values()))}
+    plan["secrets"] = {"missing": missing, "required": sorted(_declared_secret_sources(validated))}
+    plan["basic_auth"] = {"enabled": bool(validated.get("basic_auth")),
+                           "username": (validated.get("basic_auth") or {}).get("username")}
     plan["cloudflare"] = _cloudflare_drift(plan)
     if args.action == "plan":
         _emit({"ok": True, **plan}, args.json)

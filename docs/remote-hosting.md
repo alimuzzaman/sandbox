@@ -178,6 +178,20 @@ Permanent projects may declare public values plus required/generated secret mapp
 reports names only; `--generate` creates declared generated values and `--set KEY`
 stores a required value through a hidden prompt.
 
+An environment may also protect its public origin with Basic Auth:
+
+```yaml
+basic_auth:
+  username: operator
+  password_secret: MY_SITE_BASIC_AUTH_PASSWORD
+```
+
+Set the referenced secret with `./sb host secrets --set MY_SITE_BASIC_AUTH_PASSWORD`.
+On confirmed apply, Sandbox hashes the password on the remote and renders Caddy's
+`basicauth` directive. Passwords and hashes are never committed, printed, passed in
+argv, or included in the Compose environment. The gate is disabled when the block is
+absent.
+
 ### One-time hosted WordPress login URLs
 
 A WordPress hosting environment can opt in to a short-lived admin login link by

@@ -1,6 +1,7 @@
 """Offline coverage for managed Compose hosting and Cloudflare intent."""
 import json
 import hashlib
+import subprocess
 import sys
 import tempfile
 import time
@@ -84,6 +85,37 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("redir https://আমারসোনার.বাংলা{uri} 308", rendered)
         self.assertIn("tls /cert.pem /key.pem", rendered)
 
+    def test_renders_declared_basic_auth_without_plaintext_password(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem", "$2a$hash")
+        self.assertIn("basicauth {", rendered)
+        self.assertIn("lnzr_dev $2a$hash", rendered)
+        self.assertNotIn("BASIC_AUTH_PASSWORD", rendered)
+        self.assertNotIn("plain-password", rendered)
+
+    def test_validates_basic_auth_secret_reference(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(result["basic_auth"]["password_secret"], "BASIC_AUTH_PASSWORD")
+
+    def test_rejects_basic_auth_username_with_shell_syntax(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: 'bad user'\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "basic_auth.username"):
+                hosting.validate_manifest(directory)
+
     def test_plan_never_adds_undeclared_hosts(self):
         with self._write(_manifest()) as directory:
             result = hosting.validate_manifest(directory)
@@ -98,6 +130,17 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(runtime["compose_project"], "sandbox-host-example-site-production")
         self.assertIn('127.0.0.1:', runtime["compose_override"])
         self.assertIn(f"reverse_proxy 127.0.0.1:{runtime['loopback_port']}", runtime["caddyfile"])
+
+    def test_runtime_plan_reports_basic_auth_without_a_hash(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+        runtime = hosting.desired_runtime(validated, "myvps")
+        self.assertTrue(runtime["basic_auth_enabled"])
+        self.assertNotIn("BASIC_AUTH_PASSWORD", runtime["caddyfile"])
 
     def test_accepts_opt_in_hosted_wordpress_autologin(self):
         with self._write(_manifest()) as directory:
@@ -310,6 +353,16 @@ class TestPersonalSecretFile(unittest.TestCase):
 
 
 class TestHostingSecrets(unittest.TestCase):
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_basic_auth_password_is_streamed_to_remote_hash_command(self, ssh_run):
+        ssh_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="$2a$14$generated", stderr="",
+        )
+        hashed = hosting_cmd._remote_basic_auth_hash({"ssh": "alim@example.test"}, "secret-value")
+        self.assertEqual(hashed, "$2a$14$generated")
+        self.assertEqual(ssh_run.call_args.args[1], "caddy hash-password")
+        self.assertEqual(ssh_run.call_args.kwargs["input_data"], "secret-value\n")
+
     def test_renders_declared_public_and_secret_values(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest = _manifest().replace(

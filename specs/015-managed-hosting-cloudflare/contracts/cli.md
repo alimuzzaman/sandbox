@@ -16,7 +16,13 @@ and reports desired state; with a configured token it reports Cloudflare drift.
 
 Manifest fields: `compose.files`, `compose.service`, `compose.container_port`, optional
 `compose.init_services`, `healthcheck.path`, `deploy.allowed_branches`,
-`deploy.require_clean`, `host.primary`, `host.aliases`, and `cloudflare` policy.
+`deploy.require_clean`, `host.primary`, `host.aliases`, optional
+`basic_auth.username`, `basic_auth.password_secret`, and `cloudflare` policy.
 Optional `secrets.values`, `secrets.required`, and `secrets.generated` map container
 environment keys to public values or names in `~/.zshrc.secrets`; secret values never
 appear in the manifest.
+
+`basic_auth.password_secret` is an owner-only secret-store key, not a Compose
+environment key. During confirmed apply, Sandbox streams that secret to remote Caddy's
+`hash-password` command and writes only the resulting hash to the managed Caddy
+fragment. Plan and validation output report the username and secret key name only.

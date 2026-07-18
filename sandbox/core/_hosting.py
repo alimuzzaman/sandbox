@@ -132,6 +132,26 @@ def _autologin(env: dict) -> dict | None:
     return {"user": user, "container_path": path, "ttl_seconds": ttl}
 
 
+def _basic_auth(env: dict) -> dict | None:
+    """Validate an optional origin Basic Auth gate.
+
+    The password is deliberately represented only by a secret-store reference;
+    the manifest must never contain the credential itself or a generated hash.
+    """
+    raw = env.get("basic_auth")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise HostingError("basic_auth must be a mapping")
+    username = str(raw.get("username") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", username):
+        raise HostingError("basic_auth.username must be 1-64 alphanumeric, dot, underscore, or hyphen characters")
+    password_secret = str(raw.get("password_secret") or "").strip()
+    if not _ENV_RE.fullmatch(password_secret):
+        raise HostingError("basic_auth.password_secret must be an environment variable name")
+    return {"username": username, "password_secret": password_secret}
+
+
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
     root, manifest = load_manifest(project_dir)
     if manifest.get("version") != 1:
@@ -198,7 +218,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     return {"project_root": str(root), "project": project, "environment": env_name,
             "compose": compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env),
-            "autologin": _autologin(env)}
+            "autologin": _autologin(env), "basic_auth": _basic_auth(env)}
 
 
 def state_key(remote_name: str, validated: dict) -> str:
@@ -372,6 +392,7 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
         "loopback_port": port,
         "compose_override": compose_override(validated, port),
         "caddyfile": caddyfile(validated, port),
+        "basic_auth_enabled": bool(validated.get("basic_auth")),
         "routes": validated["routes"],
         "records": [],
         "certificate_hostnames": [route["hostname"] for route in validated["routes"]],
@@ -391,10 +412,19 @@ def apply_with_rollback(apply, rollback) -> None:
         raise
 
 
-def caddyfile(validated: dict, port: int, cert_path: str | None = None, key_path: str | None = None) -> str:
+def caddyfile(validated: dict, port: int, cert_path: str | None = None,
+              key_path: str | None = None, basic_auth_hash: str | None = None) -> str:
     served = [r["hostname"] for r in validated["routes"] if r["mode"] == "serve"]
     tls = f"    tls {cert_path} {key_path}\n" if cert_path and key_path else ""
-    blocks = [f"{', '.join(served)} {{\n{tls}    reverse_proxy 127.0.0.1:{int(port)}\n}}\n"]
+    basic = ""
+    auth = validated.get("basic_auth")
+    if auth and basic_auth_hash:
+        if not basic_auth_hash.startswith("$"):
+            raise HostingError("basic_auth_hash must be a Caddy password hash")
+        basic = ("    basicauth {\n"
+                 f"        {auth['username']} {basic_auth_hash}\n"
+                 "    }\n")
+    blocks = [f"{', '.join(served)} {{\n{basic}{tls}    reverse_proxy 127.0.0.1:{int(port)}\n}}\n"]
     for route in validated["routes"]:
         if route["mode"] == "redirect":
             blocks.append(f"{route['hostname']} {{\n    redir {route['target']}{{uri}} 308\n}}\n")

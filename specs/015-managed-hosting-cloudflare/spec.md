@@ -72,6 +72,27 @@ redirects, and runtime isolation.
 3. **Given** the Lenzora manifests, **When** they are rendered, **Then** production and
    development have distinct runtime names, data volumes, and deployment policies.
 
+### User Story 4 - Persist an origin Basic Auth gate (Priority: P2)
+
+A developer can declare a shared Basic Auth gate for a hosted environment so every
+future apply regenerates the origin proxy configuration with the same protection,
+without committing the password or its hash.
+
+**Independent Test**: Validate a manifest with a Basic Auth secret reference, inspect
+the read-only plan, apply it with mocked remote hashing, and verify the generated Caddy
+configuration contains only the username and generated hash.
+
+**Acceptance Scenarios**:
+
+1. **Given** a manifest with `basic_auth.username` and `basic_auth.password_secret`,
+   **When** it is validated, **Then** the username and secret reference are accepted
+   while the password remains absent from the manifest and plan output.
+2. **Given** a configured Basic Auth secret, **When** the host is applied, **Then** the
+   password is streamed to remote Caddy hashing, the generated hash is written to the
+   managed Caddy fragment, and Caddy is validated before reload.
+3. **Given** a Basic Auth environment with a missing secret, **When** a plan or apply is
+   requested, **Then** the command reports the missing secret before remote mutation.
+
 ### Edge Cases
 
 - A zone-wide TLS-mode change with unmanaged proxied records requires an additional
@@ -102,6 +123,15 @@ redirects, and runtime isolation.
   names, loopback ports, persistent volumes, and deployment policies.
 - **FR-009**: The system MUST provide manifests for the personal static site, the IDN
   WordPress multisite, and Lenzora production/development environments.
+- **FR-010**: A hosted environment MAY declare an origin Basic Auth username and a
+  secret-store password reference; the manifest MUST NOT contain a plaintext password
+  or generated password hash.
+- **FR-011**: When Basic Auth is declared, `host apply` MUST stream the password to the
+  remote Caddy hash command without placing it in argv, logs, generated Compose
+  environment files, or persisted host state.
+- **FR-012**: The generated managed Caddy route MUST use the supported `basicauth`
+  directive, include the declared username and generated hash, and validate before
+  reload; a failed validation MUST leave the previous route active.
 
 ### Key Entities
 
@@ -124,6 +154,9 @@ redirects, and runtime isolation.
   name, and DNS record while omitting unrelated records.
 - **SC-004**: A failed apply restores the prior managed DNS and routing state in automated
   tests.
+- **SC-005**: A subsequent confirmed apply of a Basic Auth environment preserves the
+  authentication gate, and anonymous edge requests receive `401` while valid
+  credentials reach the application.
 
 ## Assumptions
 

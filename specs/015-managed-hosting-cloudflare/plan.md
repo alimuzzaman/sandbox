@@ -43,8 +43,9 @@ state in `$SANDBOX_HOME/runtime/hosts.json`
 **Performance Goals**: Offline manifest validation completes without remote or Cloudflare
 access; health verification has bounded timeouts
 
-**Constraints**: No live mutation without `host apply --confirm`; never print API tokens
-or private keys; do not delete unmanaged DNS records
+**Constraints**: No live mutation without `host apply --confirm`; never print API tokens,
+Basic Auth passwords, generated hashes, or private keys; do not delete unmanaged DNS
+records
 
 **Scale/Scope**: One developer-owned remote target hosting multiple named Compose
 environments and the three supplied project configurations
@@ -103,6 +104,12 @@ specs/015-managed-hosting-cloudflare/
 
 **Structure Decision**: Keep public command parsing in `sandbox/cli.py`, with all
 hosting behavior in focused modules beside the existing remote implementation.
+
+Basic Auth is declared by an environment's `basic_auth.username` and
+`basic_auth.password_secret`. The secret is resolved from the owner-only secret store,
+streamed to the remote Caddy `hash-password` command, and never included in the Compose
+environment or host state. The Caddy 2.6-compatible `basicauth` directive is rendered
+only after the hash is returned and the full configuration is validated.
 
 ## Complexity Tracking
 

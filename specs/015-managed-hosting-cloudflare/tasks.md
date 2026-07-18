@@ -65,6 +65,22 @@ uploads volume are owned by Apache's runtime identity after deployment.
 - [X] T026 Run the WordPress initializer as the Apache runtime identity and bake the application image with that identity's ownership.
 - [X] T027 Validate the Compose configuration and perform a disposable direct-filesystem writability check without changing WordPress content.
 
+## Phase 9: Declarative origin Basic Auth
+
+**Independent Test**: Validate a Basic Auth manifest, confirm the plan reports its
+username and missing secret safely, mock remote Caddy hashing, and verify the rendered
+fragment uses `basicauth` without containing the plaintext password.
+
+- [X] T028 Add manifest validation and secret-reference handling for optional Basic Auth.
+- [X] T029 Stream Basic Auth passwords to remote Caddy hashing and render the generated hash only after validation.
+- [X] T030 Add Basic Auth unit coverage, CLI contract documentation, and Lenzora development manifest configuration.
+- [ ] T031 Reapply the Lenzora development host and verify anonymous `401` plus authenticated `200` edge behavior.
+
+T031 remains pending until the Lenzora change is merged onto the manifest's allowed
+`dev` branch; the current checkout is `029-support-access`, so `host apply` correctly
+refuses to mutate the remote. The already-live route was separately verified with
+anonymous `401` and authenticated `200` responses.
+
 ## Dependencies
 
 T003-T008 block all user stories. User Story 1 precedes live planning. User Story 2

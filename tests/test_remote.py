@@ -831,6 +831,7 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("--public-url https://sandbox.example.com", cmd)
         self.assertIn("Restart=on-failure", cmd)
         self.assertIn("StartLimitBurst=5", cmd)
+        self.assertIn("systemctl --user reset-failed sandbox-mcp-remote.service", cmd)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_timeout_is_redacted(self, mock_ssh_run):
@@ -882,6 +883,18 @@ class TestMcpHttpsTransportArguments(unittest.TestCase):
             integ_cmd.cmd_mcp(None, args)
         argv = execv.call_args.args[1]
         self.assertEqual(argv[-2:], ["--public-url", "https://sandbox.example.com"])
+
+    def test_cmd_mcp_allows_remote_environment_token_without_argv(self):
+        args = types.SimpleNamespace(
+            transport="streamable-http", bind="127.0.0.1", port=9174,
+            token=None, public_url=None, project_dir=None,
+        )
+        with patch.dict(os.environ, {"SANDBOX_REMOTE_MCP_TOKEN": "environment-secret"}), \
+             patch("os.execv") as execv:
+            integ_cmd.cmd_mcp(None, args)
+        argv = execv.call_args.args[1]
+        self.assertNotIn("--token", argv)
+        self.assertNotIn("environment-secret", argv)
 
 
 class TestConfigureHttpsProxy(unittest.TestCase):

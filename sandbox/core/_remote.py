@@ -1127,7 +1127,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; "
         "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; fi; "
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\" || "
-        f"! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
+        f"! systemctl --user reset-failed {REMOTE_MCP_SERVICE} || ! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
         "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
     )
     try:

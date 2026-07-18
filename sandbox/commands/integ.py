@@ -127,16 +127,18 @@ def cmd_mcp(cfg, args) -> None:
         bind = getattr(args, "bind", None)
         port = getattr(args, "port", None)
         token = getattr(args, "token", None)
+        environment_token = os.environ.get("SANDBOX_REMOTE_MCP_TOKEN")
         if not bind or bind == "0.0.0.0":
             die("--bind is required for --transport=streamable-http and must "
                 "be a specific Tailscale interface address, never 0.0.0.0 "
                 "(spec FR-014 — never expose this to the public internet)")
         if not port:
             die("--port is required for --transport=streamable-http")
-        if not token:
-            die("--token is required for --transport=streamable-http")
-        argv += ["--transport", "streamable-http", "--bind", bind,
-                 "--port", str(port), "--token", token]
+        if not token and not environment_token:
+            die("--token or SANDBOX_REMOTE_MCP_TOKEN is required for --transport=streamable-http")
+        argv += ["--transport", "streamable-http", "--bind", bind, "--port", str(port)]
+        if token:
+            argv += ["--token", token]
         public_url = getattr(args, "public_url", None)
         if public_url:
             argv += ["--public-url", public_url]

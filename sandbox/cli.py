@@ -306,7 +306,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     ci_p = sub.add_parser("ci",
         help="Interpret + run a bounded subset of a GitHub Actions workflow "
              "locally against sandbox instances (see docs/ci-e2e-runner-spec.md)")
-    ci_p.add_argument("action", choices=["plan", "run"],
+    ci_p.add_argument("action", choices=["plan", "preflight", "run"],
         help="'plan': parse + classify only, execute nothing (always safe). "
              "'run': actually execute (run: steps for real; deploy-class "
              "steps skipped by default)")
@@ -342,7 +342,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="print the plan/result as JSON (for the MCP server)")
     ci_p.add_argument("--async", dest="run_async", action="store_true",
         help="(action=run only) run detached; prints {job_id} immediately — "
-             "poll with `./sb async-job <job_id>`")
+        "poll with `./sb async-job <job_id>`")
+    ci_p.add_argument("--remote", default=None, help="provisioned remote for durable CI control")
+    ci_p.add_argument("--workspace", default="ci", help="named reusable CI workspace")
+    ci_p.add_argument("--accept-difference", dest="accepted_differences", action="append", default=None,
+        help="named act compatibility difference accepted for this preflight (repeatable)")
 
     pcheck = sub.add_parser("plugin-check",
         help="Run WordPress.org's Plugin Check, gated by a committed baseline "

@@ -517,6 +517,25 @@ def cmd_ci(cfg, args) -> None:
     if not wf_path.is_file():
         die(f"workflow file not found: {wf_path}")
 
+    if action == "preflight":
+        from sandbox.ci.workflow import WorkflowError, preflight
+        project_root = getattr(args, "project_dir", None) or str(wf_path.parent.parent.parent if ".github" in wf_path.parts else Path.cwd())
+        try:
+            result = preflight(project_root, wf_path, selected_jobs=getattr(args, "jobs", None),
+                accepted_differences=getattr(args, "accepted_differences", None), safe_mode=not getattr(args, "allow_deploy", False))
+        except WorkflowError as exc:
+            die(str(exc))
+        result["target"] = {"kind": "remote" if getattr(args, "remote", None) else "local",
+                            "remote": getattr(args, "remote", None), "workspace": getattr(args, "workspace", "ci")}
+        if getattr(args, "json", False): print(json.dumps(result))
+        else:
+            print(f"preflight: {'compatible' if result['ok'] else 'blocked'}")
+            for item in result["differences"]: print(f"  {item['severity']}: {item['id']} at {item['location']}")
+            for item in result["safe_mode_actions"]: print(f"  safe mode: {item['location']} {item['action']}")
+        if not result["ok"]:
+            import sys; sys.exit(1)
+        return
+
     try:
         plan = _plan_workflow(wf_path)
     except sc.ConfigError as e:

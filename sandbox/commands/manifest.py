@@ -61,7 +61,7 @@ LEGACY_BRIDGE_COMMANDS = {
     "xdebug": "debug", "dump": "debug", "qm": "debug", "introspect": "debug",
     "test": "debug", "selftest": "debug",
     "abilities": "abilities", "job": "jobs", "jobs": "jobs", "async-job": "jobs",
-    "job-start": "jobs_runtime", "job-status": "jobs_runtime", "job-output": "jobs_runtime", "job-list": "jobs_runtime", "job-cancel": "jobs_runtime", "job-metrics": "jobs_runtime",
+    "job-start": "jobs_runtime", "job-status": "jobs_runtime", "job-output": "jobs_runtime", "job-list": "jobs_runtime", "job-cancel": "jobs_runtime", "job-metrics": "jobs_runtime", "job-matrix": "jobs_runtime",
     "workspace": "workspaces",
     "skill": "skill", "mcp": "integ", "claude": "integ", "mcp-install": "integ",
     "exec": "runtime", "guide": "runtime",

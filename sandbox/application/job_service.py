@@ -182,3 +182,14 @@ class JobService:
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
         self.repository.transition(job_id, state["lifecycle"], cleanup_state="completed") if False else None
         return {"ok": True, "job_id": job_id, "removed": removed}
+
+    def submit_matrix(self, submissions: list[JobSubmission]) -> dict:
+        if not submissions:
+            raise ValueError("matrix requires at least one child submission")
+        accepted = []
+        for submission in submissions:
+            if submission.workspace_mode != "isolated":
+                raise ValueError("matrix children require isolated workspaces")
+            accepted.append(self.submit(submission))
+        return {"ok": True, "kind": "matrix", "children": accepted,
+                "summary": {"submitted": len(accepted)}}

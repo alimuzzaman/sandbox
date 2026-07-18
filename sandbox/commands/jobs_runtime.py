@@ -86,6 +86,20 @@ def configure_metrics_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_matrix_parser(parser) -> None:
+    parser.description = "Fan out one explicit argv into isolated durable workspace jobs."
+    parser.add_argument("--project-dir", default=".")
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--local", action="store_true")
+    target.add_argument("--remote")
+    parser.add_argument("--workspace", action="append", required=True,
+                        help="isolated workspace label; repeat for each matrix cell")
+    parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--output-profile", default="smart")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("command", nargs="...")
+
+
 def cmd_job_start(_cfg, args) -> None:
     command = list(args.command or ())
     if command[:1] == ["--"]:
@@ -214,6 +228,35 @@ def cmd_job_metrics(_cfg, args) -> None:
             print(json.dumps(item, sort_keys=True))
 
 
+def cmd_job_matrix(_cfg, args) -> None:
+    command = list(args.command or ())
+    if command[:1] == ["--"]: command = command[1:]
+    if not command: _die("usage: ./sb job-matrix --workspace LABEL [--workspace LABEL] -- <argv...>")
+    dependencies = durable_job_dependencies()
+    try:
+        target = dependencies["target_service"].resolve(TargetRequest(args.project_dir, local=args.local,
+            remote=args.remote, required_capability="job.exec" if args.remote else None))
+    except TargetResolutionError as exc:
+        _die(f"{exc.code}: {exc}")
+    source = _source_identity(target.project_root)
+    submissions = [JobSubmission("test", target.project_root, hashlib.sha256(target.project_root.encode()).hexdigest(),
+        target.kind, workspace, tuple(command), args.timeout, source, remote_name=target.remote_name,
+        workspace_mode="isolated", output_profile=args.output_profile, deadline_source="explicit")
+        for workspace in args.workspace]
+    if target.kind == "remote":
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote)
+        result = {"ok": True, "kind": "matrix", "children": [transport.submit(item) for item in submissions],
+                  "summary": {"submitted": len(submissions)}}
+    else:
+        result = dependencies["job_service"].submit_matrix(submissions)
+    if args.json: print(json.dumps(result, sort_keys=True))
+    else:
+        for child in result["children"]: print(child["job_id"])
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
     CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global"),
@@ -221,4 +264,5 @@ register_specs((
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
+    CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

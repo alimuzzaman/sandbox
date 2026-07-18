@@ -70,5 +70,6 @@ once, creates deterministic per-label workspace copies from that deployed tree,
 and returns a durable parent ID with isolated child jobs for selected matrix
 cells. Inspect the parent for aggregate counts and each child for output,
 deadline, artifacts, and cleanup. Known compatibility differences must be
-accepted by exact ID; safe mode blocks deployment/release/publish side effects by
-default. Use `--local` when deliberately choosing the local `act` path.
+accepted by exact ID; safe mode neutralizes deployment/release/publish side effects
+by default and records each semantic difference in the child result. Use `--local`
+when deliberately choosing the local `act` path.

@@ -210,3 +210,21 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Remote acceptance remains pending because this workspace has no provisioned
   disposable remote. The transport tests are the evidence boundary for workspace
   path isolation and deploy-before-acceptance ordering.
+
+## Safe-mode CI and compatibility persistence increment
+
+- Implementation: remote CI safe mode now neutralizes deployment, release, publish,
+  and external-mutation steps before `act` sees them, returns a non-blocking semantic
+  difference, and records that difference on every affected durable child. Known
+  unsupported compatibility differences remain blocking until accepted by exact ID.
+- Implementation: `JobService.submit()` persists declared compatibility differences
+  for both local and co-located remote submissions, so parent/child status retrieval
+  retains the evidence after the acceptance response is gone.
+- Command: `.cli-venv/bin/python -m unittest tests.test_ci_workflow tests.test_ci tests.test_remote_ci_jobs tests.test_job_service tests.test_job_registry -v`
+- Result: PASS, 64 tests.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`
+- Result: PASS, 953 tests, 1 skipped in 84.550 seconds. The skip is the MCP server
+  transport under the CLI virtualenv because `httpx` is not installed there; the
+  dedicated `mcp/wp-server/.venv` transport run remains PASS with 5 tests.
+- Remote acceptance remains pending because this workspace has no provisioned
+  disposable remote. No CI green result is claimed without that environment.

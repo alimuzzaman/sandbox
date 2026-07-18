@@ -49,6 +49,9 @@ class JobService:
         row, replay = self.repository.accept(submission)
         if replay:
             return self._accepted(row, replay=True)
+        if submission.compatibility_differences:
+            self.repository.record_compatibility_differences(
+                row["job_id"], list(submission.compatibility_differences))
         try:
             self.storage.job_dir(row["job_id"], create=True)
             descriptor = self._descriptor(row, submission)

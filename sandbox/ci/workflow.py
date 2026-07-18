@@ -59,8 +59,15 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
         for index, step in enumerate(jobs[job_id].get("steps") or []):
             text = str(step.get("uses") or step.get("run") or "").lower()
             if any(word in text for word in ("deploy", "release", "publish", "git push", "svn commit")):
-                safe_actions.append({"location": f"jobs.{job_id}.steps[{index}]", "action": "blocked" if safe_mode else "allowed"})
-                if safe_mode: blocking.append(f"safe-mode:{job_id}:{index}")
+                location = f"jobs.{job_id}.steps[{index}]"
+                difference_id = f"safe-mode:{job_id}:{index}"
+                safe_actions.append({"id": difference_id, "location": location,
+                                     "action": "neutralized" if safe_mode else "allowed"})
+                if safe_mode:
+                    differences.append({"id": difference_id, "workflow": str(workflow_path),
+                        "location": location, "severity": "notice", "accepted": True,
+                        "detail": "deployment/release/publish step is neutralized in safe mode",
+                        "catalog_version": CATALOG_VERSION})
     return {"ok": not blocking, "compatible": not blocking, "catalog_version": CATALOG_VERSION,
             "engine": {"name": "act", "version": "observed-at-execution"},
             "runner": {"platform": "linux", "accepted": True},

@@ -526,6 +526,17 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     matrix_filter = getattr(args, "matrix_filter", None) or {}
     selected = getattr(args, "jobs", None)
     workflow_data = _load_workflow(wf_path)
+    from sandbox.ci.workflow import preflight
+    safe_gate = preflight(root, wf_path, selected_jobs=selected,
+                          accepted_differences=getattr(args, "accepted_differences", None),
+                          safe_mode=not getattr(args, "allow_deploy", False))
+    safe_mode_differences = tuple({
+        "id": action["id"], "accepted": True, "workflow": relative_workflow,
+        "location": action["location"], "severity": "notice",
+        "detail": "deployment/release/publish step was neutralized in safe mode",
+        "catalog_version": safe_gate.get("catalog_version", "unknown"),
+    } for action in safe_gate.get("safe_mode_actions", ())
+        if action.get("action") == "neutralized")
     submissions = []
     selected_jobs = [job for job in plan["jobs"] if not selected or job["id"] in selected]
     labels_by_job = {}
@@ -558,6 +569,10 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 command += ["--accept-difference", difference]
             job_source = SourceIdentity("workflow:" + hashlib.sha256(
                 f"{relative_workflow}|{job['id']}|{sorted(cell.items())}".encode()).hexdigest())
+            accepted_compatibility = tuple({"id": value, "accepted": True,
+                    "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
+                    "detail": "caller accepted compatibility difference"} for value in
+                    (getattr(args, "accepted_differences", None) or ()))
             submissions.append(JobSubmission(
                 kind="ci", project_root=root,
                 project_identity=hashlib.sha256(Path(root).resolve().as_posix().encode()).hexdigest(),
@@ -569,10 +584,7 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 depends_on=dependencies,
                 failure_policy="continue" if (job.get("continue_on_error") or not job.get("fail_fast", True))
                 else "fail-fast",
-                compatibility_differences=tuple({"id": value, "accepted": True,
-                    "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
-                    "detail": "caller accepted compatibility difference"} for value in
-                    (getattr(args, "accepted_differences", None) or ())),
+                compatibility_differences=accepted_compatibility + safe_mode_differences,
             ))
     if not submissions:
         die("no matrix cells matched --matrix-filter")

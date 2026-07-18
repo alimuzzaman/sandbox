@@ -17,6 +17,7 @@ from .process import capture_process_identity
 from .registry import JobRepository
 from .storage import JobStorage
 from .artifacts import collect as collect_artifacts
+from .metrics import append as append_metric, sample as sample_metric
 
 
 def run_descriptor(path: str | Path) -> int:
@@ -51,8 +52,14 @@ def run_descriptor(path: str | Path) -> int:
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")
         deadline = time.monotonic() + int(descriptor["deadline_seconds"])
+        next_metric = time.monotonic()
         timed_out = False
         while selector.get_map():
+            if time.monotonic() >= next_metric and command.poll() is None:
+                metric = append_metric(storage, repository, job_id, sample_metric(command.pid))
+                repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={"process_alive": True},
+                    last_metric_at=_iso(), metric_digest=str(metric.get("cpu_seconds")))
+                next_metric = time.monotonic() + 1
             if time.monotonic() >= deadline and command.poll() is None:
                 timed_out = True
                 os.killpg(os.getpgid(command.pid), 15)

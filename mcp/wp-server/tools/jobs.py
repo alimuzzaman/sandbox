@@ -23,7 +23,7 @@ def register(server, dependencies: ToolDependencies) -> None:
     _job_service = dependencies.require("job_service")
     _target_service = dependencies.require("target_service")
     dependencies.require("workspace_service")
-    for tool in (job_start, job_status, job_list, job_output, job_follow, job_cancel,
+    for tool in (job_start, job_status, job_list, job_output, job_follow, job_metrics, job_cancel,
                  job_artifacts, job_artifact_get, job_retry, job_cleanup):
         server.tool()(tool)
 
@@ -89,6 +89,14 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536) -> dict:
     """Return one bounded long-poll output page; callers repeat with its cursor."""
     return job_output(job_id, cursor=cursor, max_bytes=max_bytes)
+
+
+def job_metrics(job_id: str, *, limit: int = 500) -> dict:
+    """Read bounded persisted CPU/RSS/I/O evidence for a durable job."""
+    try:
+        return _job_service.read_metrics(job_id, limit=limit)
+    except Exception as exc:
+        return {"ok": False, "code": "job_not_found", "error": str(exc)}
 
 
 def job_cancel(job_id: str, *, force: bool = False) -> dict:

@@ -134,6 +134,10 @@ class JobService:
     def list_artifacts(self, job_id: str):
         return self.repository.snapshot(job_id)["artifacts"]
 
+    def read_metrics(self, job_id: str, *, limit: int = 500):
+        from sandbox.jobs.metrics import read
+        return {"ok": True, "job_id": job_id, "samples": read(self.storage, job_id, limit=limit)}
+
     def get_artifact(self, job_id: str, artifact_id: str, *, offset: int = 0, max_bytes: int = 1_048_576) -> bytes:
         import base64
         for artifact in self.list_artifacts(job_id):

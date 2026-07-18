@@ -226,7 +226,7 @@ def durable_job_dependencies():
         sb = _remote.remote_sb_path(remote)
         if action in {"reset", "destroy"}:
             busy_command = shlex.join([
-                sb, "job-list", "--local", "--project-dir", workspace_path,
+                sb, "job-list", "--project-dir", workspace_path,
                 "--workspace", resolved_target.workspace_label, "--active-only", "--json",
             ])
             busy_result = _remote.ssh_run(remote, busy_command, timeout=25)

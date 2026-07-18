@@ -199,7 +199,7 @@ class TestMcpServerSplit(unittest.TestCase):
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 83)
+        self.assertEqual(len(actual), 88)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

@@ -263,7 +263,7 @@ def cmd_hermes(cfg, args) -> None:
             else:
                 raise hermes.HermesError("backup action must be create or list", "invalid_backup_action")
         elif action == "cleanup":
-            payload = hermes.cleanup(args.remote, args.confirm, args.dry_run)
+            payload = hermes.cleanup(args.remote, args.confirm, args.dry_run, args.resolve_stale)
         elif action == "policy":
             if args.subaction == "show":
                 payload = hermes.policy_show(args.remote)

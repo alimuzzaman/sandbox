@@ -1,6 +1,6 @@
 # Remote and Hermes Operations Hardening — PRD
 
-**Status:** IMPLEMENTED LOCALLY — Phase 4 live acceptance remains pending explicit operator approval
+**Status:** Phase 4 in progress — primary remote remediation complete; disposable-host acceptance remains under investigation
 
 **Prepared:** 2026-07-18
 
@@ -312,6 +312,20 @@ arguments are recorded here.
 Not performed: a scoped-stop/unrelated-process test, reboot recovery test, cron
 reconciliation or verification, gateway changes, session/worktree cleanup, and any
 change to `hermes-acceptance`. Those remain separately approval-gated.
+
+#### Follow-up live evidence — 2026-07-18
+
+`scaleway-sandbox` now has exact cron catalog convergence, no dirty managed
+worktrees, and no stale sessions after an explicit operator-confirmed dismissal.
+Its health envelope is healthy. A confirmed scoped MCP stop made only the MCP
+component degraded while the Hermes gateway and scheduler remained healthy; a
+confirmed restart restored authenticated loopback MCP health.
+
+`hermes-acceptance` was provisioned through a Tailscale-only MCP listener and
+now has an enabled, active, authenticated, ownership-proven service. Live
+gateway convergence still reports a second gateway process, and catalog
+reconciliation correctly refuses to create jobs until the catalog workdir
+repositories exist. Reboot acceptance is therefore still pending.
 
 ## 8. Validation and acceptance matrix
 

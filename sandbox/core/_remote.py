@@ -969,8 +969,9 @@ def remote_mcp_service_status(remote: dict) -> dict:
         if marker else "echo marker=0; "
     )
     listener_probe = (
-        f"if command -v ss >/dev/null 2>&1; then listener=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk 'NR==1 {{print $4}}'); "
-        f"case \"$listener\" in {shlex.quote(bind + ':' + str(port))}|{shlex.quote('[' + bind + ']:' + str(port))}) echo listener=expected;; '') echo listener=missing;; *) echo listener=unexpected;; esac; "
+        f"if command -v ss >/dev/null 2>&1; then listeners=$(ss -H -ltn 'sport = :{port}' 2>/dev/null | awk '{{print $4}}'); "
+        f"if printf '%s\\n' \"$listeners\" | grep -Fqx -- {shlex.quote(bind + ':' + str(port))} || printf '%s\\n' \"$listeners\" | grep -Fqx -- {shlex.quote('[' + bind + ']:' + str(port))}; then echo listener=expected; "
+        "elif test -z \"$listeners\"; then echo listener=missing; else echo listener=unexpected; fi; "
         "else echo listener=unknown; fi; "
         if bind and port else "echo listener=unknown; "
     )
@@ -1126,8 +1127,13 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
         "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; "
         "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; fi; "
-        "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\" || "
-        f"! systemctl --user reset-failed {REMOTE_MCP_SERVICE} || ! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
+        "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\"; then "
+        "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; "
+        # A first install has no loaded unit to reset.  Keep reset narrowly
+        # scoped, but do not let that benign condition bypass the required
+        # enablement and active-state checks below.
+        f"systemctl --user reset-failed {REMOTE_MCP_SERVICE} || true; "
+        f"if ! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
         "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
     )
     try:
@@ -1137,6 +1143,9 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if res.returncode != 0:
         if res.returncode in {42, 43}:
             raise RuntimeError("remote_service_ownership_unknown")
+        detail = redact_ssh_connection((res.stderr or res.stdout or "").strip()[:500], remote)
+        if detail:
+            raise RuntimeError(f"could not install the remote MCP service: {detail}")
         raise RuntimeError("could not install the remote MCP service")
     return {**plan, "status": "applied", "service": remote_mcp_service_record(bind, port, public_url)}
 

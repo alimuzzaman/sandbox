@@ -154,7 +154,13 @@ unset GH_FINE_GRAINED_TOKEN
 ./sb hermes worktree inspect --remote scaleway-sandbox --name sandbox-approved-spec-task --json
 ./sb hermes worktree preserve --remote scaleway-sandbox --name sandbox-approved-spec-task --json
 ./sb hermes worktree preserve --remote scaleway-sandbox --name sandbox-approved-spec-task --confirm --json
+./sb hermes cleanup --remote scaleway-sandbox --resolve-stale --confirm --json
 ```
+
+`hermes cleanup` is dry-run by default and only removes clean, completed
+worktrees after `--confirm`. A provably dead session is retained for review;
+after reviewing it, use `--resolve-stale --confirm` to record an
+operator-confirmed dismissal. This does not force-delete the session's worktree.
 
 The scheduler interface accepts only the named Sandbox routes `luna`, `terra`,
 and `sol`. It resolves provider, model, and reasoning effort as separate values;

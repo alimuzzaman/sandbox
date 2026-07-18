@@ -2756,7 +2756,19 @@ def health(remote_name: str) -> dict:
     cron_reasons = []
     if any(item["effective_status"] in {"failed", "invalid"} for item in cron_health):
         cron_reasons.append("cron_failure")
-    if any(item.get("result_protocol_error") for item in cron_health):
+    # A documented terminal marker can prove a run succeeded even when an
+    # upstream scheduler wrapper reports it as an error.  Preserve that fact in
+    # each job's evidence, but do not make healthy work degrade the control
+    # plane.  Provider failures and malformed/missing transitions still reach
+    # ``effective_status == failed|invalid`` above and remain degradations.
+    recovered_protocol_results = [
+        item["id"] for item in cron_health
+        if item.get("result_protocol_error")
+        and item.get("effective_status") == "ok"
+        and item.get("terminal_classification") == "successful_terminal"
+    ]
+    if any(item.get("result_protocol_error") and item.get("id") not in recovered_protocol_results
+           for item in cron_health):
         cron_reasons.append("cron_result_protocol_error")
     if cron_plan["changes"]:
         cron_reasons.append("cron_drift")
@@ -2779,7 +2791,8 @@ def health(remote_name: str) -> dict:
             "gateway": {**gateway, "state": gateway_state, "linger": linger, "enabled": gateway_enabled},
             "components": components,
             "cron": {"jobs": cron_health, "drift": cron_plan["changes"],
-                     "catalog_fingerprint": cron_plan["catalog_fingerprint"]},
+                     "catalog_fingerprint": cron_plan["catalog_fingerprint"],
+                     "recovered_protocol_results": recovered_protocol_results},
             "worktrees": {"count": len(worktrees),
                           "dirty_count": sum(bool(item.get("dirty")) for item in worktrees)},
             "degraded_reasons": degraded_reasons,
@@ -3103,7 +3116,8 @@ def backup_list(remote_name: str) -> dict:
                   data={"backups": backups})
 
 
-def cleanup(remote_name: str, confirm: bool, dry_run: bool = False) -> dict:
+def cleanup(remote_name: str, confirm: bool, dry_run: bool = False,
+            resolve_stale: bool = False) -> dict:
     """List or remove only clean, completed Hermes worktrees.
 
     Dirty worktrees are deliberately never candidates; the remote reports them
@@ -3112,7 +3126,14 @@ def cleanup(remote_name: str, confirm: bool, dry_run: bool = False) -> dict:
     entry = _require_remote(remote_name)
     paths = _paths(entry)
     state = _remote_state_read(entry, paths)
+    expected_digest = getattr(state, "digest", None) or _state_digest(state)
     state, stale_jobs = _reconcile_sessions(entry, paths, state)
+    if stale_jobs:
+        expected_digest = _state_digest(state)
+    stale_sessions = sorted(
+        job_id for job_id, session in state["sessions"].items()
+        if _JOB_RE.fullmatch(job_id) and session.get("state") == "stale"
+    )
     active_worktrees = {
         session.get("worktree_path") for session in state["sessions"].values()
         if session.get("state") in {"running", "stale"} and session.get("worktree_path")
@@ -3143,11 +3164,12 @@ def cleanup(remote_name: str, confirm: bool, dry_run: bool = False) -> dict:
         return result(True, "cleanup", remote_name, status="dry_run",
                       data={"clean_candidates": clean_paths, "dirty_retained": dirty,
                             "active_retained": active_paths, "stale_jobs": stale_jobs,
-                            "requires_confirm": bool(clean_paths)})
+                            "stale_sessions": stale_sessions,
+                            "requires_confirm": bool(clean_paths or (resolve_stale and stale_sessions))})
     if dry_run:
         return result(True, "cleanup", remote_name, status="dry_run",
                       data={"clean_candidates": clean_paths, "dirty_retained": dirty,
-                            "active_retained": active_paths, "stale_jobs": stale_jobs,
+                            "active_retained": active_paths, "stale_jobs": stale_jobs, "stale_sessions": stale_sessions,
                             "requires_confirm": False})
     removed = []
     for repo, path in clean:
@@ -3162,9 +3184,21 @@ def cleanup(remote_name: str, confirm: bool, dry_run: bool = False) -> dict:
         "rm -f \"$status\" \"$root.log\" \"$root.pid\" \"$root.worktree\"; done; fi"), timeout=60)
     if prune.returncode != 0:
         raise HermesError(_redact(prune.stderr or "could not prune completed Hermes job artifacts", entry), "cleanup_retention_failed", True)
+    resolved = []
+    if resolve_stale:
+        for job_id in stale_sessions:
+            session = state["sessions"][job_id]
+            session["state"] = "dismissed"
+            session["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            session["resolution"] = "operator_confirmed"
+            resolved.append(job_id)
+        if resolved:
+            _remote_state_write(entry, paths, state, expected_digest=expected_digest)
     return result(True, "cleanup", remote_name, status="completed",
                   data={"removed": removed, "dirty_retained": dirty, "active_retained": active,
-                        "stale_jobs": stale_jobs, "completed_job_retention_days": _COMPLETED_JOB_RETENTION_DAYS})
+                        "stale_jobs": stale_jobs, "stale_sessions": stale_sessions,
+                        "resolved_stale_sessions": resolved,
+                        "completed_job_retention_days": _COMPLETED_JOB_RETENTION_DAYS})
 
 
 def clone_repo(remote_name: str, url: str, name: str | None = None, ref: str | None = None) -> dict:
@@ -3520,7 +3554,7 @@ import json, os, subprocess
 from pathlib import Path
 processes=[]
 for proc in Path("/proc").iterdir():
-    if not proc.name.isdigit(): continue
+    if not proc.name.isdigit() or int(proc.name) in {os.getpid(), os.getppid()}: continue
     try: args=proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\0")
     except OSError: continue
     if any(arg.endswith("hermes") or "/hermes" in arg for arg in args) and "gateway" in args and "run" in args:
@@ -3608,7 +3642,7 @@ def gateway_process_count():
     processes = 0
     try:
         for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit():
+            if not proc.name.isdigit() or int(proc.name) in {os.getpid(), os.getppid()}:
                 continue
             try:
                 args = proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\\0")

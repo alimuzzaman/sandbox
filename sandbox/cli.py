@@ -480,6 +480,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     hermes_p.add_argument("--basic-auth-secret", default=None, help="approved secret reference for dashboard Basic Auth")
     hermes_p.add_argument("--backup-id", default=None, help="backup identifier for a protected restore")
     hermes_p.add_argument("--dry-run", action="store_true", help="show Hermes cleanup candidates without removing them")
+    hermes_p.add_argument("--resolve-stale", action="store_true",
+        help="with `hermes cleanup --confirm`, acknowledge provably dead sessions without deleting worktrees")
     hermes_p.add_argument("--max-jobs", type=int, default=None, help="maximum concurrent Hermes jobs")
     hermes_p.add_argument("--max-worktrees", type=int, default=None, help="maximum active Hermes worktrees")
     hermes_p.add_argument("--min-free-disk-mb", type=int, default=None, help="minimum free disk before launching Hermes")

@@ -2341,6 +2341,26 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(out["data"]["completed_job_retention_days"], 7)
         self.assertIn("-name '*.status'", ssh_run.call_args_list[4].args[1])
 
+    @patch("sandbox.core._hermes._remote_state_write")
+    @patch("sandbox.core._hermes.remote.ssh_run")
+    @patch("sandbox.core._hermes.remote.get_remote")
+    def test_cleanup_resolves_only_explicitly_confirmed_stale_sessions(self, get_remote, ssh_run, write_state):
+        get_remote.return_value = self.entry
+        state = {"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {
+            "0123456789abcdef": {"state": "stale", "worktree_path": None},
+        }}
+        ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox\n"),
+            _completed(stdout=json.dumps(state)),
+            _completed(stdout=""),
+            _completed(),
+        ]
+        out = hermes.cleanup("test", confirm=True, resolve_stale=True)
+        self.assertEqual(out["data"]["resolved_stale_sessions"], ["0123456789abcdef"])
+        written = write_state.call_args.args[2]
+        self.assertEqual(written["sessions"]["0123456789abcdef"]["state"], "dismissed")
+        self.assertEqual(written["sessions"]["0123456789abcdef"]["resolution"], "operator_confirmed")
+
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
     def test_job_status_reads_bounded_incremental_output(self, get_remote, ssh_run):
@@ -2510,6 +2530,30 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertIn("scheduler_unavailable", out["data"]["reasons"])
         self.assertFalse(out["data"]["components"]["scheduler"]["evidence"]["available"])
+
+    def test_health_preserves_recovered_terminal_wrapper_error_without_degrading(self):
+        entry = {**self.entry, "mcp_service": {"service_name": "sandbox-mcp-remote.service"}}
+        state = {"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {}}
+        diagnostic = {"ok": True, "data": {"checks": {}}, "error": None}
+        service = {"installed": True, "enabled": True, "active": True, "linger": True,
+                   "ownership": "proven", "listener_state": "expected", "listener_expected": True,
+                   "auth_state": "ok", "authenticated": True}
+        observed = {"jobs": [{"id": "job-1", "name": "catalog-job", "last_status": "error",
+                                "last_run_at": "now", "last_error": "RuntimeError: COMPLETED_SPEC_TASK"}]}
+        with patch.object(hermes, "doctor", return_value=diagnostic), \
+             patch.object(hermes, "_require_remote", return_value=entry), \
+             patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
+             patch.object(hermes, "_remote_state_read", return_value=state), \
+             patch.object(hermes, "_ssh", return_value=_completed(stdout="active\nyes\nenabled\n")), \
+             patch.object(hermes, "_gateway_ownership", return_value={"healthy": True, "conflict": False}), \
+             patch.object(hermes, "_cron_snapshot", return_value=observed), \
+             patch.object(hermes, "_worktree_snapshot", return_value=[]), \
+             patch.object(hermes, "reconciliation_plan", return_value={"changes": False, "catalog_fingerprint": "a" * 64}), \
+             patch.object(hermes.remote, "remote_mcp_service_status", return_value=service):
+            out = hermes.health("test")
+        self.assertTrue(out["ok"])
+        self.assertNotIn("cron_result_protocol_error", out["data"]["reasons"])
+        self.assertEqual(out["data"]["cron"]["recovered_protocol_results"], ["job-1"])
 
     @patch("sandbox.core._hermes.subprocess.run")
     @patch("sandbox.core._hermes.remote.ssh_run")

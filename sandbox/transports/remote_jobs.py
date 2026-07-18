@@ -131,7 +131,7 @@ class RemoteJobTransport:
                 # recursively submit another remote job from inside the
                 # durable job supervisor.
                 shlex.join([sb, "ensure", "--local", "--json"]),
-                shlex.join([sb, "exec", "--local", "--", *argv]),
+                shlex.join([sb, "exec", "--in-instance", "--", *argv]),
             ))
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]

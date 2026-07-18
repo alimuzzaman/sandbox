@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import time
+import argparse
 from pathlib import Path
 
 from sandbox.application.context import preflight_instance_capability, runtime_service
@@ -44,6 +45,11 @@ def configure_exec_parser(parser) -> None:
     parser.add_argument("--timeout", type=int, help="finite maximum execution time in seconds")
     parser.add_argument("--detach", action="store_true", help="return a durable job ID without waiting")
     parser.add_argument("--output-profile", default="smart", help="retained-output presentation profile")
+    # Internal controller escape hatch.  A remote durable job has already
+    # selected its VPS and owns the process/output lifecycle; it needs to
+    # invoke the project Compose service directly without recursively creating
+    # another durable job because that project's policy is remote-first.
+    parser.add_argument("--in-instance", action="store_true", help=argparse.SUPPRESS)
 
 
 def configure_guide_parser(parser) -> None:
@@ -107,12 +113,25 @@ def cmd_exec(cfg, args) -> None:
                 return
             time.sleep(.1)
 
+    project_root = None
+    if args.in_instance:
+        from sandbox.application.context import durable_job_dependencies
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import TargetRequest
+        try:
+            target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+                project_dir=str(Path.cwd()), local=True, workspace=args.workspace,
+            ))
+        except TargetResolutionError as exc:
+            die(f"{exc.code}: {exc}")
+        project_root = target.project_root
+
     capability_error = preflight_instance_capability(cfg, args.resolved_instance, "compose.exec")
     if capability_error is not None:
         die(capability_error.message)
     owner = _core().registry_find_instance(args.resolved_instance) or {}
     result = runtime_service(cfg).invoke(OperationRequest(
-        project_root=owner["root"], operation="exec",
+        project_root=project_root or owner["root"], operation="exec",
         label=owner.get("label", "default"), arguments={"argv": command},
     ))
     if isinstance(result, OperationError):

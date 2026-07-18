@@ -76,7 +76,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             SourceIdentity("ignored"), remote_name="r"))
         controller = calls[-1]
         self.assertIn("/srv/sandbox/sb-src/sb ensure --local --json", controller)
-        self.assertIn("/srv/sandbox/sb-src/sb exec --local -- npm test", controller)
+        self.assertIn("/srv/sandbox/sb-src/sb exec --in-instance -- npm test", controller)
 
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(

@@ -8,7 +8,10 @@ logic. Run from the repo root:
 import re
 import sys
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -229,6 +232,22 @@ class TestNeutralizeWorkflowForSafety(unittest.TestCase):
         self.assertEqual(original["jobs"]["build"]["steps"][2]["uses"],
                          "10up/action-wordpress-plugin-deploy@stable")
 
+
+class TestActInvocation(unittest.TestCase):
+    @patch("sandbox.commands.ci._core")
+    @patch("sandbox.commands.ci.subprocess.run")
+    @patch("sandbox.commands.ci._act_binary", return_value="act")
+    def test_bind_keeps_declared_artifacts_in_the_workspace(self, _act, run, core):
+        core.return_value.project_lock.return_value = nullcontext()
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with __import__("tempfile").TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = ci._run_cell_with_act(
+                {"wordpress_port": 8197, "instance": "ci"},
+                {"cell": {}, "job_id": "build"}, root, root / "workflow.yml",
+                root / "secrets.env", False, 30)
+        self.assertEqual(result["status"], "passed")
+        self.assertIn("--bind", run.call_args.args[0])
 
 class TestRuntimeSecrets(unittest.TestCase):
     def test_skipped_deploy_secrets_do_not_block_safe_run(self):

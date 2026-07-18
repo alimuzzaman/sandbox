@@ -472,6 +472,11 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
 
     cmd = [act_bin, "-j", job_id, "-W", str(patched_workflow_path),
            "--directory", str(root),
+           # Keep ordinary workflow output in the isolated workspace so the
+           # outer durable supervisor can retain declared artifacts. Without
+           # this, act copies the workspace into its runner container and a
+           # successful `run:` output file disappears before collection.
+           "--bind",
            "--secret-file", str(secrets_path),
            "--container-options", "--add-host=host.docker.internal:host-gateway",
            "--pull=false"]

@@ -107,7 +107,8 @@ def run_descriptor(path: str | Path) -> int:
         return 1
     except BaseException as exc:
         try:
-            repository.transition(job_id, Lifecycle.FAILED, termination_reason="supervisor_error", result_json=json.dumps({"error": type(exc).__name__}))
+            repository.transition(job_id, Lifecycle.FAILED, termination_reason="supervisor_error",
+                result_json=json.dumps({"error": type(exc).__name__, "detail": str(exc)}))
         except Exception:
             pass
         return 1

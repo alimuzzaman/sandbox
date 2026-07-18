@@ -133,7 +133,8 @@ own code still touches (for planning/mapping/safety) is:
 | `on:` triggers | Our code, informational only | `--if-event` filters; never auto-fires (§3.7) |
 | `jobs.<id>.strategy.matrix` | Our code | Expanded to cells → one sandbox instance each (§3.5) |
 | `jobs.<id>.if:`, `needs:`, `services:`, composite/reusable actions | **`act`**, for real | Not hand-implemented; verify per-workflow if in doubt |
-| Any `uses:` action (checkout, setup-*, cache, artifacts, third-party) | **`act`**, for real | Full fidelity — this is the whole point of adopting it |
+| Most `uses:` actions (checkout, setup-*, cache, third-party) | **`act`**, for real | Full fidelity — this is the whole point of adopting it |
+| `actions/upload-artifact` | Sandbox job runtime | Replaced with a local marker; declared paths are collected as retained Sandbox job artifacts because self-hosted `act` has no GitHub runtime token |
 | Deploy/publish-class `uses:` or `run:` | Our safety deny-list | Neutralized BEFORE act sees them, unless `--allow-deploy` (§3.6) |
 | `${{ secrets.* }}` | Resolved from `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file` | Never GitHub's; unresolved → fail loud before anything runs |
 
@@ -419,7 +420,7 @@ like `./sb instances`.
 - **New external dependency**: `act` (nektos/act, https://github.com/nektos/act) is now
   required for `ci run` (not `ci plan`, which stays a pure parse). `cmd_ci` checks
   `shutil.which("act")` and dies with an install hint if missing, rather than failing
-  confusingly mid-run.
+  confusingly mid-run. `remote provision` installs it on supported remote hosts.
 
 ## 6. Risks (updated)
 
@@ -433,6 +434,9 @@ like `./sb instances`.
     concrete real cases this was built against.
 - **Resource exhaustion** — unchanged from the original design: default concurrency cap
   ~4 concurrent stacks, `--concurrency` to override, queuing not "all cells at once."
+- **Concurrent `act` cleanup** — `act` does not safely namespace all Docker resources
+  across host processes. Sandbox keeps each matrix cell as an independent durable job and
+  serializes only the short `act` invocation with a host-wide lock.
 - **`act` + Apple Silicon** — act warns about container architecture on M-series chips
   (`--container-architecture linux/amd64` available if issues arise); not needed in any
   live verification run so far.

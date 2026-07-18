@@ -170,6 +170,10 @@ class TestIsDeployClass(unittest.TestCase):
         self.assertFalse(ci._is_deploy_class("anthropics/claude-code-action@beta"))
         self.assertFalse(ci._is_deploy_class("shivammathur/setup-php@v2"))
 
+    def test_upload_artifact_uses_sandbox_collection(self):
+        self.assertTrue(ci._is_upload_artifact("actions/upload-artifact@v4"))
+        self.assertFalse(ci._is_upload_artifact("actions/download-artifact@v4"))
+
 
 class TestNeutralizeWorkflowForSafety(unittest.TestCase):
     def _workflow(self):
@@ -208,6 +212,16 @@ class TestNeutralizeWorkflowForSafety(unittest.TestCase):
         patched, _ = ci._neutralize_workflow_for_safety(self._workflow(), allow_deploy=False)
         self.assertEqual(patched["jobs"]["build"]["steps"][0]["uses"], "actions/checkout@v4")
         self.assertEqual(patched["jobs"]["build"]["steps"][1]["run"], "npm run build")
+
+    def test_upload_artifact_is_replaced_with_local_collection_marker(self):
+        workflow = {"jobs": {"build": {"steps": [
+            {"uses": "actions/upload-artifact@v4", "with": {"path": "report.txt"}},
+        ]}}}
+        patched, notes = ci._neutralize_workflow_for_safety(workflow, allow_deploy=False)
+        step = patched["jobs"]["build"]["steps"][0]
+        self.assertNotIn("uses", step)
+        self.assertIn("collected after job", step["run"])
+        self.assertTrue(any("Sandbox job-artifact collection" in note for note in notes))
 
     def test_original_workflow_dict_is_not_mutated(self):
         original = self._workflow()

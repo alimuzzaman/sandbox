@@ -327,6 +327,18 @@ def _is_deploy_class(uses_ref: str) -> bool:
     return any(kw in prefix for kw in _DENY_LIST_KEYWORDS)
 
 
+def _is_upload_artifact(uses_ref: object) -> bool:
+    """Whether an action delegates artifact storage to GitHub's runner API.
+
+    ``act`` is intentionally not a hosted GitHub runner, so this action cannot
+    receive an ``ACTIONS_RUNTIME_TOKEN``.  Sandbox collects declared artifact
+    paths from the completed cell workspace instead; keep the workflow step as
+    an explicit local no-op rather than letting a token error fail a valid CI
+    run.
+    """
+    return isinstance(uses_ref, str) and uses_ref.split("@", 1)[0].lower() == "actions/upload-artifact"
+
+
 def _neutralize_workflow_for_safety(data: dict, allow_deploy: bool) -> tuple[dict, list[str]]:
     """Return a DEEP-COPIED, patched workflow dict safe to hand to `act`.
 
@@ -344,6 +356,15 @@ def _neutralize_workflow_for_safety(data: dict, allow_deploy: bool) -> tuple[dic
         for i, step in enumerate(steps):
             name = step.get("name") or step.get("uses") or "(unnamed step)"
             uses = step.get("uses")
+            if _is_upload_artifact(uses):
+                note = (f"job '{job_id}' step '{name}': upload-artifact action "
+                        "replaced with Sandbox job-artifact collection")
+                notes.append(note)
+                steps[i] = {
+                    "name": f"{name} (sandbox: collected after job)",
+                    "run": 'echo "[sandbox-ci] artifact collected after job"',
+                }
+                continue
             if uses and not allow_deploy and _is_deploy_class(uses):
                 note = (f"job '{job_id}' step '{name}': deploy-class action "
                         f"'{uses}' neutralized — pass --allow-deploy to run for real")
@@ -464,9 +485,15 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
         cmd += ["--env", f"MATRIX_{str(k).upper()}={v}"]
     cmd += (extra_act_args or [])
 
+    # ``act``'s Docker resources are not safely namespaced across independent
+    # host processes.  Matrix cells retain their independent workspaces and
+    # durable lifecycle, but the short act execution itself must serialize to
+    # prevent one cell's cleanup from removing another cell's runner container.
+    sc = _core()
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True,
-                             cwd=str(root), timeout=timeout)
+        with sc.project_lock(Path(sc.RUNTIME_DIR) / ".ci-act"):
+            res = subprocess.run(cmd, capture_output=True, text=True,
+                                 cwd=str(root), timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"status": "failed", "error": f"timed out after {timeout}s",
                 "cmd": " ".join(cmd)}

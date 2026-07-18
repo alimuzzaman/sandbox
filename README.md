@@ -301,7 +301,10 @@ working tree once, then creates one isolated retained-log child per selected job
 and matrix cell. Inspect `parent_job_id` and each child with `job-status` and
 `job-output`; the submitting SSH/MCP connection never owns the workflow pipes.
 The co-located `act` adapter runs on the remote host, which must advertise
-`job.exec` and have any workflow-specific credentials configured there.
+`job.exec` and have any workflow-specific credentials configured there. The
+remote provisioner installs `act`; GitHub's `actions/upload-artifact` is
+converted to Sandbox's retained job-artifact collection because a self-hosted
+`act` runner has no GitHub Actions runtime token.
 
 Use the same runtime operations without an MCP client:
 

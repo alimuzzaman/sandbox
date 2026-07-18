@@ -33,6 +33,36 @@ streaming process pipes across SSH. The MCP workspace tools mirror `sb
 workspace create|list|status|reset|destroy`; remote `run_tests` returns a
 durable job ID for the same observation flow.
 
+## Remote CI workflows
+
+Preflight a GitHub Actions workflow before submission. A compatible workflow
+becomes a durable parent with one isolated child per selected job and matrix
+cell; inspect the parent and children with ordinary job commands rather than
+streaming the runner over SSH.
+
+```sh
+sb ci preflight .github/workflows/ci.yml --remote scaleway-sandbox --project-dir . --json
+sb ci run .github/workflows/ci.yml --remote scaleway-sandbox --workspace ci-run --timeout 1200 --json
+sb job-status <parent-job-id> --remote scaleway-sandbox --json
+sb job-output <child-job-id> --remote scaleway-sandbox --wait-seconds 20 --json
+sb job-artifacts <child-job-id> --remote scaleway-sandbox --json
+sb job-artifact-get <child-job-id> <artifact-id> --remote scaleway-sandbox --json
+```
+
+Remote provisioning installs the co-located `act` runner. In safe mode,
+deploy/publish-shaped workflow steps are neutralized and reported as
+compatibility differences. `actions/upload-artifact` is replaced with
+Sandbox's retained job-artifact collection because self-hosted `act` has no
+GitHub runtime token; declare literal project-relative artifact paths.
+
+Retry only a terminal job, use a request ID for replay-safe control, and clean
+up only after retrieving any evidence you need:
+
+```sh
+sb job-retry <failed-job-id> --remote scaleway-sandbox --request-id ci-retry-1 --json
+sb job-cleanup <terminal-job-id> --remote scaleway-sandbox --logs --artifacts --metrics --json
+```
+
 Use this skill when MCP is unavailable, unnecessary, or would load tools for a
 different runtime. The `sb` CLI is the primary operational interface; MCP is an
 optional adapter for MCP-capable clients.

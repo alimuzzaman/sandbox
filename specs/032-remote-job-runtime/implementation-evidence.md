@@ -36,3 +36,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`
 - Result: PASS, 5 tests in 0.001 seconds.
 - Commit/push: `47062bc feat: add durable detached job execution` on `codex/remote-job-runtime`.
+
+## US1 local CLI smoke
+
+- Date: 2026-07-18
+- Command: `./sb exec --local --detach --timeout 60 -- .cli-venv/bin/python -c 'print("durable-ok")'`
+- Result: returned durable job ID `7ba1f2aa8844e1fb1edb906428bb36a0` without holding the test process's stdio.
+- Follow-up: `./sb job-status <id> --json` reported `lifecycle: succeeded`, exit code 0;
+  `./sb job-output <id>` returned the retained `durable-ok` output.
+- Command: `./sb exec --local --timeout 60 -- .cli-venv/bin/python -c 'print("wait-ok")'`
+- Result: PASS; synchronous wait rendered `wait-ok` from the same retained-output store.

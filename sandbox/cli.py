@@ -728,8 +728,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
         "abilities", "job", "jobs", "dump", "qm", "reset", "exec",
     }
+    durable_exec = args.cmd == "exec" and bool(
+        getattr(args, "local", False) or getattr(args, "remote", None) or getattr(args, "detach", False)
+    )
     if chosen is None:
-        if args.cmd in INSTANCE_SCOPED:
+        if args.cmd in INSTANCE_SCOPED and not durable_exec:
             # Distinguish "no instance at all for this cwd" from "cwd's
             # project owns MULTIPLE instances and neither --label nor a
             # default disambiguates" (multi-instance-per-root) — the latter
@@ -747,7 +750,7 @@ Per-project (each plugin carries its own sandbox.config.json):
             die("no sandbox instance for this directory. cd into a registered "
                 "project, or run `sb init` / `sb ensure` to create one."
                 + (f"\nKnown instances: {_known}" if _known else ""))
-    elif chosen not in instances and args.cmd not in PROJECT_ROUTED:
+    elif chosen not in instances and args.cmd not in PROJECT_ROUTED and not durable_exec:
         die(f"unknown instance '{chosen}'. "
             f"Known: {', '.join(sorted(instances)) or '(none)'}.")
     args.resolved_instance = chosen

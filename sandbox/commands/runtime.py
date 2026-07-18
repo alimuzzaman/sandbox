@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import time
 from pathlib import Path
 
 from sandbox.application.context import preflight_instance_capability, runtime_service
@@ -35,6 +37,13 @@ def configure_exec_parser(parser) -> None:
     parser.description = "Run an argv list in a generic Compose public service."
     parser.add_argument("command", nargs="...", help="argv after --; shell text is not inferred")
     parser.add_argument("--json", action="store_true", help="emit the runtime result as JSON")
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--local", action="store_true", help="use the host-local durable job runtime")
+    target.add_argument("--remote", help="use a provisioned remote durable job runtime")
+    parser.add_argument("--workspace", help="persistent or isolated workspace label")
+    parser.add_argument("--timeout", type=int, help="finite maximum execution time in seconds")
+    parser.add_argument("--detach", action="store_true", help="return a durable job ID without waiting")
+    parser.add_argument("--output-profile", default="smart", help="retained-output presentation profile")
 
 
 def configure_guide_parser(parser) -> None:
@@ -55,6 +64,47 @@ def cmd_exec(cfg, args) -> None:
         die("usage: ./sb exec -- <argv...>")
     if any(not isinstance(item, str) or not item or "\x00" in item for item in command):
         die("exec requires a non-empty argv list without NUL bytes")
+
+    if args.local or args.remote or args.detach:
+        from sandbox.application.context import durable_job_dependencies
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        try:
+            target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+                project_dir=str(Path.cwd()), local=args.local, remote=args.remote,
+                workspace=args.workspace,
+                required_capability="compose.remote-deploy" if args.remote else None,
+            ))
+        except TargetResolutionError as exc:
+            die(f"{exc.code}: {exc}")
+        timeout = args.timeout or 900
+        source = SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest())
+        submission = JobSubmission("exec", target.project_root,
+            hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind,
+            target.workspace_label, tuple(command), timeout, source,
+            remote_name=target.remote_name, output_profile=args.output_profile,
+            deadline_source="explicit" if args.timeout else "profile:exec")
+        if target.kind == "remote":
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+        else:
+            service = durable_job_dependencies()["job_service"]
+            accepted = service.submit(submission)
+        if args.detach or target.kind == "remote":
+            print(json.dumps(accepted) if args.json else accepted["job_id"])
+            return
+        service = durable_job_dependencies()["job_service"]
+        while True:
+            state = service.get(accepted["job_id"])
+            if state["lifecycle"] in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
+                output = service.read_output(accepted["job_id"])
+                print(json.dumps({**accepted, "result": state, "output": output}) if args.json else output["data"], end="" if not args.json else "\n")
+                if state["lifecycle"] != "succeeded":
+                    die(f"job {accepted['job_id']} {state['lifecycle']}")
+                return
+            time.sleep(.1)
 
     capability_error = preflight_instance_capability(cfg, args.resolved_instance, "compose.exec")
     if capability_error is not None:

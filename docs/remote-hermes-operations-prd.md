@@ -1,6 +1,6 @@
 # Remote and Hermes Operations Hardening — PRD
 
-**Status:** PROPOSED — ready for `speckit-specify` after operator decisions
+**Status:** IMPLEMENTED LOCALLY — Phase 4 live acceptance remains pending explicit operator approval
 
 **Prepared:** 2026-07-18
 

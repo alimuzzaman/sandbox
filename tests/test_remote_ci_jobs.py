@@ -48,6 +48,7 @@ class RemoteCIJobTests(unittest.TestCase):
                 returncode=0,
                 stdout='{"ok":true,"kind":"matrix","parent_job_id":"p","children":[]}\n'),
             remote_lookup=lambda _name: {"provisioned": True},
+            remote_sb_path=lambda _remote: "/srv/sandbox/sb-src/sb",
         )
         from sandbox.jobs.models import JobSubmission, SourceIdentity
         submissions = [JobSubmission("ci", "/p", "identity", "remote", label,
@@ -59,7 +60,7 @@ class RemoteCIJobTests(unittest.TestCase):
                         for part in calls if "--spec-json" in part)
         plan = json.loads(base64.b64decode(encoded).decode())
         self.assertEqual([item["workspace"] for item in plan], ["a", "b"])
-        self.assertEqual(plan[0]["argv"], ["sb", "ci", "run", "workflow.yml"])
+        self.assertEqual(plan[0]["argv"], ["/srv/sandbox/sb-src/sb", "ci", "run", "workflow.yml"])
 
     def test_remote_matrix_plan_carries_dependencies_and_accepted_differences(self):
         calls = []

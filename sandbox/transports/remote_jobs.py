@@ -71,8 +71,14 @@ class RemoteJobTransport:
         plan = []
         for item in submissions:
             workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label)
+            argv = list(item.argv)
+            # Matrix coordinators execute their explicit child argv on the
+            # VPS. Match single-job submission and bind nested Sandbox CLI
+            # invocations to the staged runtime rather than the host PATH.
+            if argv[:1] == ["sb"]:
+                argv[0] = self.remote_sb_path(remote)
             plan.append({"kind": item.kind, "workspace": item.workspace_label, "project_dir": workspace_path,
-                 "argv": list(item.argv),
+                 "argv": argv,
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
                  "output_profile": item.output_profile, "deadline_source": item.deadline_source,
                  "request_id": item.request_id, "cleanup_policy": item.cleanup_policy,

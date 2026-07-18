@@ -546,7 +546,11 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         pconf = {**pconf, "wpVersion": wp_version}
     root = pconf["root"]
 
-    with sc.project_lock(root):
+    # Instance names are project-scoped, but published ports and the rendered
+    # runtime config are host-scoped. Matrix cells use distinct workspace roots
+    # and would otherwise pass their per-project locks concurrently, selecting
+    # the same free Mailpit/WordPress port before either registry write lands.
+    with sc.project_lock(root), sc.project_lock(RUNTIME_DIR / ".instance-ports"):
         existing = sc.registry_get(root, label=label)
         # A remote or local host may retain a listener that is not represented
         # in the registry (for example a stale Mailpit container). Reconcile

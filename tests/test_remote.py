@@ -238,6 +238,20 @@ class TestSshRun(unittest.TestCase):
                             mock_run.assert_called_once()
 
     @patch("subprocess.run")
+    def test_ssh_retries_directly_after_a_multiplex_timeout(self, mock_run):
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd="ssh", timeout=10),
+            _completed(returncode=0, stdout="recovered"),
+        ]
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                result = sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
+        self.assertEqual(result.stdout, "recovered")
+        self.assertEqual(mock_run.call_count, 2)
+        self.assertIn("ControlMaster=auto", mock_run.call_args_list[0][0][0])
+        self.assertNotIn("ControlMaster=auto", mock_run.call_args_list[1][0][0])
+
+    @patch("subprocess.run")
     def test_scp_uses_control_options_with_custom_port(self, mock_run):
         mock_run.return_value = _completed(returncode=0)
         with tempfile.TemporaryDirectory() as runtime:

@@ -313,17 +313,30 @@ def ssh_process(remote_or_target, command: str, *, input_data=None,
     control socket. It is intentionally a single command/session API; callers
     still get an isolated remote shell and normal SSH exit status.
     """
+    multiplex = True
     try:
         _ensure_ssh_control_dir()
     except OSError:
-        args = ssh_command_args(remote_or_target, command, multiplex=False)
-    else:
-        args = ssh_command_args(remote_or_target, command)
+        multiplex = False
+    args = ssh_command_args(remote_or_target, command, multiplex=multiplex)
     is_text = input_data is None or isinstance(input_data, str)
-    return subprocess.run(
-        args, input=input_data, capture_output=True, text=is_text,
-        timeout=timeout, check=False,
-    )
+    try:
+        return subprocess.run(
+            args, input=input_data, capture_output=True, text=is_text,
+            timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        if not multiplex:
+            raise
+        # A stale ControlMaster can accept the first connection but wedge a
+        # later channel. Retry this bounded command directly once; callers
+        # retain their existing timeout/error behavior if the VPS is truly
+        # unreachable.
+        direct_args = ssh_command_args(remote_or_target, command, multiplex=False)
+        return subprocess.run(
+            direct_args, input=input_data, capture_output=True, text=is_text,
+            timeout=timeout, check=False,
+        )
 
 
 def scp_run(remote: dict, local_path: str, remote_path: str,

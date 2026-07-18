@@ -832,6 +832,8 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("Restart=on-failure", cmd)
         self.assertIn("StartLimitBurst=5", cmd)
         self.assertIn("systemctl --user reset-failed sandbox-mcp-remote.service", cmd)
+        self.assertIn("systemctl --user enable sandbox-mcp-remote.service", cmd)
+        self.assertIn("systemctl --user restart sandbox-mcp-remote.service", cmd)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_timeout_is_redacted(self, mock_ssh_run):

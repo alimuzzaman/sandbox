@@ -1177,7 +1177,11 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         # scoped, but do not let that benign condition bypass the required
         # enablement and active-state checks below.
         f"systemctl --user reset-failed {REMOTE_MCP_SERVICE} || true; "
-        f"if ! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
+        # `enable --now` does not restart an already-active unit.  The
+        # credential EnvironmentFile was replaced above, so explicitly restart
+        # the Sandbox-owned unit to ensure its bearer middleware receives the
+        # newly minted token rather than retaining an old process environment.
+        f"if ! systemctl --user enable {REMOTE_MCP_SERVICE} || ! systemctl --user restart {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
         "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
     )
     try:

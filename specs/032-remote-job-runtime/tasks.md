@@ -425,3 +425,12 @@ feature requirements rather than treated as documentation-only follow-up.
 - [ ] T147 [US3/US4/Phase 8] Add remote E2E/WordPress test-mode submission, reusable workspace failure retention/reset/destroy coverage, disconnect/resume fixtures, and artifact/output acceptance fixtures per SC-001-SC-008 (partial: remote E2E and WordPress integration submission paths exist; disposable remote lifecycle/artifact acceptance remains)
 - [ ] T148 [US4/Phase 8] Run and record disposable remote Node, PHP, WordPress, matrix, artifact, CI-compatible, CI-blocked, timeout, and cleanup acceptance with exact remote/job/source identities per SC-009 and SC-010 (missing)
 - [X] T149 [Phase 8] Complete the full pure/compatibility/architecture/MCP/local CLI regression suite and record the reproducible environment-bound MCP dependency skip before release per FR-040 and SC-010
+
+## Phase 10: Live Remote Runtime Convergence
+
+- [ ] T150 [US1] Prove generic remote `sb exec` first ensures the isolated deployed Compose instance and then executes the explicit argv in its declared service—not on the VPS host—using a disposable Node Compose project; retain the job ID, source identity, output, and terminal result per FR-005 through FR-008 and US1/AC1 (partial)
+- [ ] T151 [US1/US5] Add CLI and MCP contract coverage proving every remote job-control operation uses the staged remote `sb` path, including metrics/artifacts/cancel/retry and MCP `run_tests`/`instance_exec`, per FR-038 through FR-041 (partial)
+- [ ] T152 [US2/US5] Diagnose and repair the owned remote MCP service authentication probe on every provisioned remote; prove authenticated MCP job status/output calls without exposing credentials per FR-015, FR-038, and FR-041 (partial)
+- [ ] T153 [US3] Run disposable remote WordPress integration/E2E and reusable-workspace reset/destroy acceptance with separate runtime state and retained failure output per FR-023 through FR-030 and SC-004 through SC-008 (missing)
+- [ ] T154 [US4] Run disposable remote CI compatible/incompatible workflow acceptance, including matrix/dependency result inspection, safe-mode differences, artifacts, retry, and cleanup per FR-031 through FR-037 and SC-009 (missing)
+- [ ] T155 [Phase 8] Reconcile every spec 032 checkbox and implementation-evidence entry against current live remote results, retain only evidence actually observed, run the full regression suite, and record completion/remaining gates per FR-040 and SC-010 (partial)

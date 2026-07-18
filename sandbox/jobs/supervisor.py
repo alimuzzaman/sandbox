@@ -94,6 +94,10 @@ def run_descriptor(path: str | Path) -> int:
             pass
         return 1
     finally:
+        try:
+            repository.release_leases(job_id)
+        except Exception:
+            pass
         repository.close()
 
 

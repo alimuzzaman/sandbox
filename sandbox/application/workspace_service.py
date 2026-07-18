@@ -24,6 +24,11 @@ class WorkspaceService:
     target_service: Any
     storage: Any | None = None
     remote_control: Any | None = None
+    scheduler: Any | None = None
+
+    def _assert_not_busy(self, label: str) -> None:
+        if self.scheduler is not None and any(item["workspace_label"] == label for item in self.scheduler.active()):
+            raise RuntimeError(f"workspace {label!r} is busy with an active job")
 
     def _remote(self, target, action: str) -> dict | None:
         if target.kind != "remote":
@@ -75,6 +80,7 @@ class WorkspaceService:
 
     def reset(self, request):
         target = self.target_service.resolve(request)
+        self._assert_not_busy(target.workspace_label)
         remote = self._remote(target, "reset")
         if remote is not None: return remote
         result = self.status(request)
@@ -89,6 +95,7 @@ class WorkspaceService:
 
     def destroy(self, request):
         target = self.target_service.resolve(request)
+        self._assert_not_busy(target.workspace_label)
         remote = self._remote(target, "destroy")
         if remote is not None: return remote
         result = self.status(request)

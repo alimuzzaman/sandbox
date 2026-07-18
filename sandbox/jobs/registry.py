@@ -452,3 +452,8 @@ class JobRepository:
         ).fetchall()]
         return {**job, "process": process, "heartbeat": heartbeat,
                 "output": output, "metrics": metrics, "artifacts": artifacts}
+
+    def release_leases(self, job_id: str) -> None:
+        with self.transaction(immediate=True) as connection:
+            connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))

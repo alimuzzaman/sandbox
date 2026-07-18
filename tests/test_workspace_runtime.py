@@ -5,6 +5,9 @@ from pathlib import Path
 from sandbox.application.workspace_service import WorkspaceService
 from sandbox.jobs.models import TargetRequest
 from sandbox.jobs.storage import JobStorage
+from sandbox.jobs.scheduler import JobScheduler
+from sandbox.jobs.registry import JobRepository
+from sandbox.jobs.models import JobSubmission, SourceIdentity
 
 
 class _Target:
@@ -22,3 +25,15 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(len(service.list(request)["workspaces"]), 1)
             self.assertTrue(service.reset(request)["reset"])
             self.assertTrue(service.destroy(request)["destroyed"])
+
+    def test_reset_refuses_active_workspace_lease(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); repo = JobRepository(root / "registry.sqlite")
+            scheduler = JobScheduler(repo)
+            service = WorkspaceService(_Target(), JobStorage(temp, free_disk_reserve=0), scheduler=scheduler)
+            request = TargetRequest("/p", local=True, workspace="node-unit")
+            service.create(request)
+            job, _ = repo.accept(JobSubmission("test", "/p", "p", "local", "node-unit", ("echo", "x"), 60, SourceIdentity("s")))
+            scheduler.acquire(job)
+            with self.assertRaises(RuntimeError): service.reset(request)
+            repo.close()

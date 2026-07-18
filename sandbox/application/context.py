@@ -221,8 +221,9 @@ def durable_job_dependencies():
             raise RuntimeError("remote workspace control failed")
         return {**payload, "source": deployed}
 
-    workspace = WorkspaceService(target, storage, remote_workspace_control)
-    job = JobService(repository, storage, components, scheduler=JobScheduler(repository))
+    scheduler = JobScheduler(repository)
+    workspace = WorkspaceService(target, storage, remote_workspace_control, scheduler)
+    job = JobService(repository, storage, components, scheduler=scheduler)
     return {
         "job_service": job,
         "target_service": target,

@@ -61,9 +61,7 @@ class JobScheduler:
                                (slot, row["job_id"], timestamp, timestamp))
 
     def release(self, job_id: str) -> None:
-        with self.repository.transaction(immediate=True) as connection:
-            connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
-            connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+        self.repository.release_leases(job_id)
 
     def active(self, *, namespace: str | None = None) -> list[dict]:
         query = "SELECT * FROM workspace_leases"

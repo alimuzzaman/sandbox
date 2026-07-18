@@ -19,6 +19,7 @@ from sandbox.jobs.output import JobOutputStore
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
 from sandbox.jobs.process import ProcessIdentity, signal_owned_process_group
+from sandbox.jobs.scheduler import WorkspaceBusy
 
 
 _DETACHED_SUPERVISORS: list[subprocess.Popen] = []
@@ -46,11 +47,15 @@ class JobService:
         if replay:
             return self._accepted(row, replay=True)
         try:
-            if self.scheduler is not None:
-                self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
             self.storage.job_dir(row["job_id"], create=True)
             descriptor = self._descriptor(row, submission)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
+            if self.scheduler is not None:
+                try:
+                    self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
+                except WorkspaceBusy:
+                    self.repository.transition(row["job_id"], Lifecycle.QUEUED)
+                    return {**self._accepted(row, replay=False), "queue": {"reason": "workspace_or_capacity_busy"}}
             self._launch(descriptor_path)
         except BaseException as exc:
             if self.scheduler is not None:
@@ -86,6 +91,13 @@ class JobService:
 
     def get(self, job_id: str, *, reconcile: bool = True):
         snapshot = self.repository.snapshot(job_id)
+        if snapshot["lifecycle"] == Lifecycle.QUEUED.value and self.scheduler is not None:
+            try:
+                self.scheduler.acquire(snapshot, parallel_safe=snapshot["workspace_mode"] == "isolated")
+                self._launch(self.storage.job_dir(job_id) / "descriptor.json")
+                snapshot = self.repository.snapshot(job_id)
+            except WorkspaceBusy:
+                pass
         if reconcile:
             health, evidence = classify(snapshot)
             if snapshot["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:

@@ -95,7 +95,9 @@ class RemoteJobTransport:
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
             raise RemoteJobTransportError("remote matrix acceptance failed")
-        return {**payload, "source": {"identity": deployed["identity"], "commit": deployed["commit"],
+        return {**payload, "target": {"kind": "remote", "remote": first.remote_name,
+                                        "workspace": first.workspace_label},
+                "source": {"identity": deployed["identity"], "commit": deployed["commit"],
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
                 "workspace_path": deployed["target_path"]}
 
@@ -159,7 +161,9 @@ class RemoteJobTransport:
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
             raise RemoteJobTransportError("remote job acceptance failed")
-        return {**payload, "source": {"identity": deployed["identity"], "commit": deployed["commit"],
+        return {**payload, "target": {"kind": "remote", "remote": submission.remote_name,
+                                        "workspace": submission.workspace_label},
+                "source": {"identity": deployed["identity"], "commit": deployed["commit"],
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
                 "workspace_path": workspace_path}
 
@@ -199,7 +203,10 @@ class RemoteJobTransport:
 
     def status(self, remote_name: str, job_id: str) -> dict:
         try:
-            return self.control(remote_name, ["job-status", job_id])
+            result = self.control(remote_name, ["job-status", job_id])
+            result["target"] = {"kind": "remote", "remote": remote_name,
+                                "workspace": result.get("workspace_label")}
+            return result
         except RemoteJobTransportError as exc:
             return {"ok": False, "job_id": job_id, "lifecycle": "unknown",
                     "health": "unreachable", "target": {"kind": "remote", "remote": remote_name},

@@ -21,6 +21,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("--request-id retry", calls[2][1])
         self.assertIn("workspace-", calls[2][1])
         self.assertEqual(result["source"]["identity"], "sha256:id")
+        self.assertEqual(result["target"], {"kind": "remote", "remote": "r", "workspace": "w"})
 
     def test_status_list_cancel_and_metrics_use_bounded_json_control(self):
         commands = []

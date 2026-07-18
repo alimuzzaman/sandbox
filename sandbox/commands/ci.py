@@ -167,8 +167,13 @@ def _cell_label(label_prefix: str, run_id: str, job_id: str, cell: dict) -> str:
     names (e.g. "integration-tests") — hash (job_id, cell) into a short
     suffix instead of guessing a length budget that breaks on longer names."""
     import hashlib
-    digest = hashlib.sha1(f"{job_id}\x00{sorted(cell.items())}".encode()).hexdigest()[:6]
-    prefix = re.sub(r"[^a-z0-9-]", "", (label_prefix or "ci").lower())[:6] or "ci"
+    digest = hashlib.sha1(f"{job_id}\x00{sorted(cell.items())}".encode()).hexdigest()[:5]
+    # A remote matrix workspace is an isolated child, but a caller-provided
+    # workspace remains its visible namespace.  Preserve as much of that
+    # prefix as the 21-character label contract allows rather than silently
+    # replacing it with the historic generic ``ci`` prefix.
+    prefix_budget = max(1, 21 - len(run_id) - len(digest) - 2)
+    prefix = re.sub(r"[^a-z0-9-]", "", (label_prefix or "ci").lower())[:prefix_budget] or "ci"
     return f"{prefix}-{run_id}-{digest}"
 
 
@@ -550,8 +555,11 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     """
     from sandbox.jobs.models import JobSubmission, SourceIdentity
     timeout = int(getattr(args, "timeout", 900) or 900)
-    label_prefix = getattr(args, "label_prefix", None) or "ci"
-    run_id = _secretsmod.token_hex(4)
+    label_prefix = (getattr(args, "label_prefix", None) or
+                    getattr(target, "workspace_label", None) or "ci")
+    # Keep enough room for a caller-visible workspace prefix plus the
+    # deterministic job/cell hash inside the strict label length cap.
+    run_id = _secretsmod.token_hex(2)
     relative_workflow = os.path.relpath(wf_path.resolve(), Path(root).resolve())
     if relative_workflow.startswith(".."):
         die("remote CI workflow must be inside --project-dir")

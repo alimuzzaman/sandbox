@@ -21,6 +21,7 @@ _GUIDES = {
         ("status", "./sb status", "Inspect the declared runtime."),
         ("logs", "./sb logs", "Read service logs."),
         ("exec", "./sb exec -- <argv...>", "Run an argv list in the declared public service."),
+        ("test", "./sb test <declared-mode>", "Run a declared test command in the Compose service."),
         ("deploy", "./sb deploy --remote <name> --ensure --expose", "Deploy to a provisioned remote."),
     ),
     "wordpress": (

@@ -127,3 +127,17 @@ class RemoteCIJobTests(unittest.TestCase):
                         if item.argv[item.argv.index("--job") + 1] == "unit")
             self.assertEqual(len(unit.depends_on), 2)
             self.assertEqual(unit.failure_policy, "continue")
+
+    def test_remote_ci_child_labels_keep_the_requested_workspace_prefix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workflow = root / "ci.yml"
+            workflow.write_text("jobs:\n  unit:\n    steps:\n      - run: echo unit\n")
+            target = ResolvedTarget(str(root), "remote", "r", "lenzora-ci", "remote:r:p", {})
+            args = SimpleNamespace(timeout=60, label_prefix=None, matrix_filter={}, jobs=None,
+                                   allow_deploy=False, keep_on_fail=False, strict_provision=False,
+                                   accepted_differences=None, output_profile="smart")
+            submission = _remote_ci_submissions(target, str(root), workflow,
+                                                _plan_workflow(workflow), args)[0]
+            self.assertTrue(submission.workspace_label.startswith("lenzora-ci-"))
+            self.assertLessEqual(len(submission.workspace_label), 21)

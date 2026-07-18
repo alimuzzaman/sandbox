@@ -57,10 +57,25 @@ class ComposeSchemaProvider:
         http_port = compose.get("http_port")
         if http_port is not None and not _valid_port(http_port):
             raise ValueError("compose http_port must be a valid port")
+        tests = document.get("tests", {})
+        if not isinstance(tests, dict):
+            raise ValueError("compose tests must be an object")
+        modes = tests.get("modes", {})
+        if not isinstance(modes, dict):
+            raise ValueError("compose tests.modes must be an object")
+        normalized_modes = {}
+        for name, command in modes.items():
+            if not isinstance(name, str) or not _SAFE_LABEL.fullmatch(name):
+                raise ValueError("compose test mode name is invalid")
+            argv = command.get("argv") if isinstance(command, dict) else None
+            if not isinstance(argv, list) or not argv or any(not _safe_text(item) or not item for item in argv):
+                raise ValueError(f"compose test mode {name!r} requires a non-empty argv list")
+            normalized_modes[name] = {"argv": list(argv)}
         return {"kind": "compose", "framework": document.get("framework") or document.get("preset"),
                 "compose_file": str(path), "service": service,
                 "internal_port": port, "health_path": health_path,
                 "http_port": http_port,
+                "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",
                 "runtime": document.get("runtime"),
                 "root": str(root), "source": config_path.name}

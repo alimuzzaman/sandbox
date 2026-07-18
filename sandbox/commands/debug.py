@@ -173,6 +173,52 @@ def cmd_test(cfg, args) -> None:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:
         die(str(e))
+    # Generic Compose projects never infer package scripts. Their checked-in
+    # Sandbox descriptor declares every supported mode as an argv list.
+    if pconf.get("kind") == "compose":
+        as_json = cli_json
+        mode = getattr(args, "mode", None) or "fast"
+        declared = (pconf.get("tests") or {}).get("modes") or {}
+        if mode not in declared:
+            die(f"unknown declared Compose test mode {mode!r}; available: {', '.join(sorted(declared))}")
+        if [token for token in passthrough if token != "--"]:
+            die("declared Compose test modes do not accept extra command arguments")
+        argv = list(declared[mode]["argv"])
+        from sandbox.application.context import durable_job_dependencies
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        try:
+            target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+                project_dir=pd, local=bool(getattr(args, "local", False)),
+                remote=getattr(args, "remote", None),
+                workspace=(getattr(args, "workspace", None) or [None])[0],
+                required_capability="job.exec" if not getattr(args, "local", False) else None,
+            ))
+        except TargetResolutionError as exc:
+            die(f"{exc.code}: {exc}")
+        if target.kind == "remote":
+            submission = JobSubmission("runtime-exec", target.project_root,
+                hashlib.sha256(target.project_root.encode()).hexdigest(), "remote", target.workspace_label,
+                tuple(argv), int(getattr(args, "timeout", 900) or 900),
+                SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
+                remote_name=target.remote_name, output_profile=getattr(args, "output_profile", "smart"),
+                deadline_source="explicit")
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit(submission)
+            print(json.dumps(accepted, sort_keys=True) if as_json else accepted["job_id"])
+            return
+        entry = sc.registry_get(pconf["root"], label=getattr(args, "label", None))
+        if not entry:
+            die(f"no instance for {pconf['root']} — run `./sb ensure --project-dir {pd}` first.")
+        result = runtime_service(cfg).invoke(OperationRequest(project_root=pconf["root"], operation="exec",
+            label=entry.get("label", "default"), arguments={"argv": argv}))
+        if isinstance(result, OperationError):
+            die(result.message)
+        print(result.data.get("output", ""), end="")
+        return
     # Remote is the project-level default when configured. Submit the explicit
     # test command to the durable remote runtime before touching local instance
     # state; the remote command uses --local to prevent recursive remote

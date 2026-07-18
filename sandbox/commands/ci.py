@@ -219,6 +219,8 @@ def _plan_workflow(path: Path) -> dict:
             all_secrets.update(s.get("secrets_needed") or [])
         jobs_out.append({
             "id": job_id, "needs": job.get("needs"), "env": job.get("env"),
+            "fail_fast": bool((job.get("strategy") or {}).get("fail-fast", True)),
+            "continue_on_error": bool(job.get("continue-on-error", False)),
             "cells": [{"matrix": c} for c in cells],
             "steps": steps,
         })
@@ -525,11 +527,20 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
     selected = getattr(args, "jobs", None)
     workflow_data = _load_workflow(wf_path)
     submissions = []
-    for job in plan["jobs"]:
-        if selected and job["id"] not in selected:
-            continue
+    selected_jobs = [job for job in plan["jobs"] if not selected or job["id"] in selected]
+    labels_by_job = {}
+    cells_by_job = {}
+    for job in selected_jobs:
         matching = [item["matrix"] for item in job["cells"] if not matrix_filter or
                     all(str(item["matrix"].get(k)) == v for k, v in matrix_filter.items())]
+        cells_by_job[job["id"]] = matching
+        labels_by_job[job["id"]] = [_cell_label(label_prefix, run_id, job["id"], cell) for cell in matching]
+    for job in selected_jobs:
+        matching = cells_by_job[job["id"]]
+        needs = job.get("needs") or []
+        if isinstance(needs, str):
+            needs = [needs]
+        dependencies = tuple(label for need in needs for label in labels_by_job.get(need, ()))
         for cell in matching:
             label = _cell_label(label_prefix, run_id, job["id"], cell)
             command = ["sb", "ci", "run", relative_workflow, "--project-dir", ".",
@@ -555,6 +566,13 @@ def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -
                 deadline_seconds=timeout, source=job_source, output_profile=getattr(args, "output_profile", "smart"),
                 deadline_source="explicit", artifact_paths=tuple(_remote_ci_artifacts(
                     workflow_data.get("jobs", {}).get(job["id"], {}))),
+                depends_on=dependencies,
+                failure_policy="continue" if (job.get("continue_on_error") or not job.get("fail_fast", True))
+                else "fail-fast",
+                compatibility_differences=tuple({"id": value, "accepted": True,
+                    "workflow": relative_workflow, "location": "workflow", "severity": "accepted",
+                    "detail": "caller accepted compatibility difference"} for value in
+                    (getattr(args, "accepted_differences", None) or ())),
             ))
     if not submissions:
         die("no matrix cells matched --matrix-filter")

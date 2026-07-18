@@ -68,6 +68,8 @@ class RemoteJobTransport:
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
                  "output_profile": item.output_profile, "deadline_source": item.deadline_source,
                  "request_id": item.request_id, "cleanup_policy": item.cleanup_policy,
+                 "depends_on": list(item.depends_on), "failure_policy": item.failure_policy,
+                 "compatibility_differences": list(item.compatibility_differences),
                  "artifact_paths": list(item.artifact_paths),
                  "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
                             "dirty_digest": deployed.get("dirty_digest")}})
@@ -157,3 +159,11 @@ class RemoteJobTransport:
 
     def metrics(self, remote_name: str, job_id: str, *, limit: int = 500) -> dict:
         return self.control(remote_name, ["job-metrics", job_id, "--limit", str(limit)])
+
+    def artifacts(self, remote_name: str, job_id: str) -> dict:
+        return self.control(remote_name, ["job-artifacts", job_id])
+
+    def artifact_get(self, remote_name: str, job_id: str, artifact_id: str, *,
+                     offset: int = 0, max_bytes: int = 1_048_576) -> dict:
+        return self.control(remote_name, ["job-artifact-get", job_id, artifact_id,
+                                          "--offset", str(offset), "--max-bytes", str(max_bytes)])

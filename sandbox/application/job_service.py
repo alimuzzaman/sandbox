@@ -53,11 +53,22 @@ class JobService:
             self.storage.job_dir(row["job_id"], create=True)
             descriptor = self._descriptor(row, submission)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
+            dependency_state, dependency_reason = self._dependency_state(row)
+            if dependency_state == "blocked":
+                row = self.repository.transition(row["job_id"], Lifecycle.CANCELLED,
+                    termination_reason="dependency_failed",
+                    result_json=__import__("json").dumps({"dependencies": list(submission.depends_on)}, sort_keys=True))
+                return self._accepted(row, replay=False)
+            if dependency_state != "ready":
+                row = self.repository.transition(row["job_id"], Lifecycle.QUEUED,
+                    queue_reason=dependency_reason or "dependency")
+                return self._accepted(row, replay=False)
             if self.scheduler is not None:
                 try:
                     self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
                 except WorkspaceBusy:
-                    self.repository.transition(row["job_id"], Lifecycle.QUEUED)
+                    self.repository.transition(row["job_id"], Lifecycle.QUEUED,
+                        queue_reason="workspace_or_capacity_busy")
                     return {**self._accepted(row, replay=False), "queue": {"reason": "workspace_or_capacity_busy"}}
             self._launch(descriptor_path)
         except BaseException as exc:
@@ -66,6 +77,32 @@ class JobService:
             self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed")
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
+
+    def _dependency_state(self, row: dict) -> tuple[str, str | None]:
+        """Resolve label-based edges within a parent without touching child pipes."""
+        try:
+            labels = tuple(__import__("json").loads(row.get("depends_on_json") or "[]"))
+        except (TypeError, ValueError):
+            labels = ()
+        if not labels:
+            return "ready", None
+        parent_id = row.get("parent_job_id")
+        siblings = self.repository.children(parent_id) if parent_id else []
+        by_label = {item["workspace_label"]: item for item in siblings}
+        terminal = {item.value for item in (
+            Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+            Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+        )}
+        missing = [label for label in labels if label not in by_label]
+        if missing:
+            return "waiting", "dependency_missing"
+        dependencies = [by_label[label] for label in labels]
+        if any(item["lifecycle"] not in terminal for item in dependencies):
+            return "waiting", "dependency"
+        if row.get("failure_policy", "fail-fast") == "fail-fast" and any(
+                item["lifecycle"] != Lifecycle.SUCCEEDED.value for item in dependencies):
+            return "blocked", "dependency_failed"
+        return "ready", None
 
     def _descriptor(self, row: dict, submission: JobSubmission) -> dict:
         nonce = os.urandom(32)
@@ -87,22 +124,37 @@ class JobService:
 
     @staticmethod
     def _accepted(row: dict, *, replay: bool) -> dict:
-        return {"ok": True, "job_id": row["job_id"], "status": "accepted", "kind": row["kind"],
+        result = {"ok": True, "job_id": row["job_id"], "status": "accepted", "kind": row["kind"],
                 "target": {"kind": row["target_kind"], "remote": row["remote_name"]},
                 "workspace": row["workspace_label"], "output_profile": row["output_profile"],
                 "idempotent_replay": replay}
+        if row.get("lifecycle") == Lifecycle.QUEUED.value:
+            result["queue"] = {"reason": row.get("queue_reason") or "queued"}
+        elif row.get("lifecycle") in {item.value for item in (Lifecycle.CANCELLED, Lifecycle.FAILED)}:
+            result["lifecycle"] = row["lifecycle"]
+            result["termination_reason"] = row.get("termination_reason")
+        return result
 
     def get(self, job_id: str, *, reconcile: bool = True):
         snapshot = self.repository.snapshot(job_id)
         if snapshot["kind"] in {"matrix", "ci", "plan"}:
             return self._get_parent(snapshot)
-        if snapshot["lifecycle"] == Lifecycle.QUEUED.value and self.scheduler is not None:
-            try:
-                self.scheduler.acquire(snapshot, parallel_safe=snapshot["workspace_mode"] == "isolated")
-                self._launch(self.storage.job_dir(job_id) / "descriptor.json")
-                snapshot = self.repository.snapshot(job_id)
-            except WorkspaceBusy:
-                pass
+        if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
+            dependency_state, dependency_reason = self._dependency_state(snapshot)
+            if dependency_state == "blocked":
+                snapshot = self.repository.transition(snapshot["job_id"], Lifecycle.CANCELLED,
+                    termination_reason="dependency_failed")
+            elif dependency_state != "ready":
+                snapshot["queue_reason"] = dependency_reason or snapshot.get("queue_reason") or "dependency"
+                return snapshot
+            if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
+                try:
+                    if self.scheduler is not None:
+                        self.scheduler.acquire(snapshot, parallel_safe=snapshot["workspace_mode"] == "isolated")
+                    self._launch(self.storage.job_dir(job_id) / "descriptor.json")
+                    snapshot = self.repository.snapshot(job_id)
+                except WorkspaceBusy:
+                    snapshot["queue_reason"] = "workspace_or_capacity_busy"
         if reconcile:
             if self.scheduler is not None and snapshot["lifecycle"] in {"accepted", "queued", "running", "cancelling"}:
                 self.scheduler.renew(job_id, deadline_seconds=snapshot["deadline_seconds"])
@@ -119,6 +171,17 @@ class JobService:
     def _get_parent(self, snapshot: dict) -> dict:
         """Reconcile an aggregate without launching a fake parent process."""
         children = [self.get(child["job_id"]) for child in self.repository.children(snapshot["job_id"])]
+        if snapshot.get("failure_policy", "fail-fast") == "fail-fast" and any(
+                child["lifecycle"] in {Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
+                                        Lifecycle.INTERRUPTED.value} for child in children):
+            for child in children:
+                if child["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value,
+                                           Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
+                    try:
+                        self.cancel(child["job_id"])
+                    except RuntimeError:
+                        pass
+            children = [self.repository.snapshot(child["job_id"]) for child in self.repository.children(snapshot["job_id"])]
         terminal = {item.value for item in (
             Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
             Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
@@ -268,6 +331,8 @@ class JobService:
             deadline_source=previous["deadline_source"], stall_seconds=previous["stall_seconds"],
             cancel_on_stall=bool(previous["cancel_on_stall"]), cleanup_policy=previous["cleanup_policy"],
             environment_keys=tuple(json.loads(previous["environment_keys_json"])),
+            depends_on=tuple(json.loads(previous.get("depends_on_json") or "[]")),
+            failure_policy=previous.get("failure_policy", "fail-fast"),
         ))
 
     def cleanup(self, job_id: str, *, logs: bool = True, artifacts: bool = True,
@@ -317,6 +382,7 @@ class JobService:
                (not allow_project_variants and item.project_root != first.project_root)
                for item in submissions):
             raise ValueError("matrix children must share one target and project")
+        submissions = self._order_matrix_submissions(submissions)
         parent = JobSubmission(
             kind="matrix", project_root=first.project_root,
             project_identity=first.project_identity, target_kind=first.target_kind,
@@ -324,6 +390,8 @@ class JobService:
             argv=("sandbox-matrix-parent",), deadline_seconds=max(item.deadline_seconds for item in submissions),
             source=first.source, workspace_mode="persistent", output_profile=first.output_profile,
             execution_profile=first.execution_profile, deadline_source=first.deadline_source,
+            failure_policy="continue" if all(item.failure_policy == "continue" for item in submissions)
+            else "fail-fast",
         )
         parent_row, replay = self.repository.accept(parent)
         if replay:
@@ -336,3 +404,30 @@ class JobService:
             accepted.append(self.submit(replace(submission, parent_job_id=parent_row["job_id"])))
         return {"ok": True, "kind": "matrix", "parent_job_id": parent_row["job_id"],
                 "children": accepted, "summary": {"submitted": len(accepted)}}
+
+    @staticmethod
+    def _order_matrix_submissions(submissions: list[JobSubmission]) -> list[JobSubmission]:
+        """Topologically order label-based matrix edges before acceptance.
+
+        The registry stores edges as stable workspace labels so a remote control
+        request can be replayed without exposing internal job IDs. Ordering the
+        batch first also handles YAML where a dependent job is declared before
+        its prerequisite.
+        """
+        by_label = {item.workspace_label: item for item in submissions}
+        if len(by_label) != len(submissions):
+            raise ValueError("matrix workspace labels must be unique")
+        pending = list(submissions)
+        ordered: list[JobSubmission] = []
+        completed: set[str] = set()
+        while pending:
+            if any(label not in by_label for item in pending for label in item.depends_on):
+                raise ValueError("matrix dependency references an unknown workspace label")
+            ready = [item for item in pending if all(label in completed for label in item.depends_on)]
+            if not ready:
+                raise ValueError("matrix dependency graph contains a cycle")
+            for item in ready:
+                ordered.append(item)
+                completed.add(item.workspace_label)
+                pending.remove(item)
+        return ordered

@@ -13,7 +13,7 @@ from typing import Any, Iterator
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _INITIALIZATION_LOCK = threading.Lock()
 
 
@@ -90,6 +90,10 @@ class JobRepository:
             workspace_mode TEXT NOT NULL,
             lifecycle TEXT NOT NULL,
             health TEXT NOT NULL,
+            depends_on_json TEXT NOT NULL DEFAULT '[]',
+            failure_policy TEXT NOT NULL DEFAULT 'fail-fast',
+            queue_reason TEXT,
+            queue_position INTEGER,
             command_json TEXT NOT NULL,
             cwd_relative TEXT NOT NULL,
             environment_keys_json TEXT NOT NULL,
@@ -221,6 +225,15 @@ class JobRepository:
         """
         with self._lock:
             self.connection.executescript(schema)
+            columns = {row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")}
+            for name, declaration in (
+                ("depends_on_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("failure_policy", "TEXT NOT NULL DEFAULT 'fail-fast'"),
+                ("queue_reason", "TEXT"),
+                ("queue_position", "INTEGER"),
+            ):
+                if name not in columns:
+                    self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
             self.connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -258,7 +271,9 @@ class JobRepository:
                 submission.retry_of_job_id, submission.attempt, submission.kind,
                 submission.project_root, submission.project_identity, submission.target_kind,
                 submission.remote_name, submission.workspace_label, submission.workspace_mode,
-                Lifecycle.ACCEPTED.value, Health.UNKNOWN.value, json.dumps(list(submission.argv)),
+                Lifecycle.ACCEPTED.value, Health.UNKNOWN.value,
+                json.dumps(list(submission.depends_on)), submission.failure_policy, None, None,
+                json.dumps(list(submission.argv)),
                 submission.cwd_relative, json.dumps(list(submission.environment_keys)),
                 submission.execution_profile, submission.output_profile,
                 submission.deadline_seconds, submission.deadline_source,
@@ -271,11 +286,12 @@ class JobRepository:
                     job_id, request_id, request_digest, parent_job_id, root_job_id,
                     retry_of_job_id, attempt, kind, project_root, project_identity,
                     target_kind, remote_name, workspace_label, workspace_mode, lifecycle,
-                    health, command_json, cwd_relative, environment_keys_json,
+                    health, depends_on_json, failure_policy, queue_reason, queue_position,
+                    command_json, cwd_relative, environment_keys_json,
                     execution_profile, output_profile, deadline_seconds, deadline_source,
                     stall_seconds, cancel_on_stall, cleanup_policy, source_identity,
                     source_commit, source_dirty_digest, accepted_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id
@@ -315,7 +331,8 @@ class JobRepository:
     def transition(self, job_id: str, target: Lifecycle | str, **fields: Any) -> dict[str, Any]:
         target = Lifecycle(target)
         allowed_fields = {"exit_code", "termination_reason", "output_completeness",
-                          "cleanup_state", "integrity_sha256", "result_json", "health"}
+                          "cleanup_state", "integrity_sha256", "result_json", "health",
+                          "queue_reason", "queue_position"}
         if set(fields) - allowed_fields:
             raise ValueError("unsupported job transition fields")
         with self.transaction(immediate=True) as connection:
@@ -440,6 +457,22 @@ class JobRepository:
              fields.get("expires_at"), fields.get("status", "available"), fields.get("reason")),
         )
 
+    def record_compatibility_differences(self, job_id: str, differences: list[dict] | tuple[dict, ...]) -> None:
+        """Persist bounded CI semantic differences alongside the durable child."""
+        rows = []
+        for item in differences:
+            if not isinstance(item, dict) or not item.get("id"):
+                raise ValueError("compatibility difference is invalid")
+            rows.append((validate_job_id(job_id), str(item["id"]), str(item.get("workflow", "")),
+                         str(item.get("location", "")), str(item.get("severity", "notice")),
+                         int(bool(item.get("accepted"))), str(item.get("detail", "")),
+                         str(item.get("catalog_version", "unknown"))))
+        with self.transaction(immediate=True) as connection:
+            connection.executemany(
+                """INSERT OR REPLACE INTO compatibility_differences(
+                   job_id, difference_id, workflow_path, location, severity,
+                   accepted, detail, catalog_version) VALUES(?,?,?,?,?,?,?,?)""", rows)
+
     def snapshot(self, job_id: str) -> dict[str, Any]:
         job = self.get(job_id)
         process = self._row(self.connection.execute(
@@ -459,8 +492,13 @@ class JobRepository:
         artifacts = [dict(row) for row in self.connection.execute(
             "SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)
         ).fetchall()]
+        differences = [dict(row) for row in self.connection.execute(
+            "SELECT difference_id, workflow_path, location, severity, accepted, detail, catalog_version "
+            "FROM compatibility_differences WHERE job_id=? ORDER BY difference_id, location", (job_id,)
+        ).fetchall()]
         return {**job, "process": process, "heartbeat": heartbeat,
-                "output": output, "metrics": metrics, "artifacts": artifacts}
+                "output": output, "metrics": metrics, "artifacts": artifacts,
+                "compatibility_differences": differences}
 
     def release_leases(self, job_id: str) -> None:
         with self.transaction(immediate=True) as connection:

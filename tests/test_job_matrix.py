@@ -29,3 +29,44 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(parent["lifecycle"], "succeeded")
             self.assertEqual(parent["aggregate"]["passed"], 2)
             repo.close()
+
+    def test_dependency_edges_queue_until_prerequisite_and_then_dispatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            launched = []
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=launched.append)
+            source = SourceIdentity("s")
+            upstream = JobSubmission("test", temp, "p", "local", "build", ("echo", "build"), 60,
+                source, workspace_mode="isolated")
+            downstream = JobSubmission("test", temp, "p", "local", "unit", ("echo", "unit"), 60,
+                source, workspace_mode="isolated", depends_on=("build",))
+            result = service.submit_matrix([upstream, downstream])
+            child = {item["workspace"]: item for item in result["children"]}
+            self.assertEqual(child["unit"]["queue"]["reason"], "dependency")
+            self.assertEqual(len(launched), 1)
+            repo.transition(child["build"]["job_id"], "queued")
+            repo.transition(child["build"]["job_id"], "running")
+            repo.transition(child["build"]["job_id"], "succeeded", exit_code=0)
+            service.get(child["unit"]["job_id"])
+            self.assertEqual(len(launched), 2)
+            repo.close()
+
+    def test_failed_dependency_blocks_fail_fast_child(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None, launcher=lambda _: None)
+            source = SourceIdentity("s")
+            upstream = JobSubmission("test", temp, "p", "local", "build", ("echo", "build"), 60,
+                source, workspace_mode="isolated")
+            downstream = JobSubmission("test", temp, "p", "local", "unit", ("echo", "unit"), 60,
+                source, workspace_mode="isolated", depends_on=("build",))
+            result = service.submit_matrix([upstream, downstream])
+            child = {item["workspace"]: item for item in result["children"]}
+            repo.transition(child["build"]["job_id"], "queued")
+            repo.transition(child["build"]["job_id"], "running")
+            repo.transition(child["build"]["job_id"], "failed", exit_code=1)
+            state = service.get(child["unit"]["job_id"])
+            self.assertEqual(state["lifecycle"], "cancelled")
+            self.assertEqual(state["termination_reason"], "dependency_failed")
+            repo.close()

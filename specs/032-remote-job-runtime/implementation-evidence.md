@@ -103,3 +103,21 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Result: PASS, 101 tests.
 - Live remote acceptance remains pending because no disposable provisioned remote
   is available in this workspace.
+
+## Dependency-aware matrix and CI result increment
+
+- Implementation: durable submissions now persist label-based dependency edges,
+  failure policy, queue reason, and queue state. Matrix batches are topologically
+  ordered, dependent children wait without attaching to prerequisite stdio, fail-fast
+  children are cancelled with an explicit `dependency_failed` reason, and continue
+  policies remain independently inspectable. Remote CI carries workflow `needs`,
+  matrix fan-out dependencies, retry policy, and accepted compatibility differences
+  into the remote durable plan. Parent status continues to aggregate independent
+  child lifecycle/result records.
+- Implementation: compatibility differences are retained in the job registry and
+  snapshots; remote artifact listing and bounded artifact retrieval are available
+  through the job CLI control plane.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_registry tests.test_job_models tests.test_job_matrix tests.test_remote_ci_jobs tests.test_remote_job_transport tests.test_command_composition tests.test_architecture_boundaries -v`
+- Result: PASS, 38 tests; `git diff --check` PASS.
+- Remote acceptance remains pending because no disposable provisioned remote is
+  available in this workspace; transport tests remain the evidence boundary.

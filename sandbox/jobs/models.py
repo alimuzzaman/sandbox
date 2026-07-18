@@ -322,6 +322,9 @@ class JobSubmission:
     cleanup_policy: str = "retain"
     environment_keys: tuple[str, ...] = ()
     artifact_paths: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()
+    failure_policy: str = "fail-fast"
+    compatibility_differences: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         _safe_name(self.kind, "job kind")
@@ -362,6 +365,19 @@ class JobSubmission:
             path = Path(value)
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError("artifact path must stay within the project")
+        if not isinstance(self.depends_on, (tuple, list)):
+            raise ValueError("job dependencies must be a sequence")
+        labels = tuple(self.depends_on)
+        if len(set(labels)) != len(labels):
+            raise ValueError("job dependencies must be unique")
+        for label in labels:
+            _safe_name(label, "dependency workspace label")
+        object.__setattr__(self, "depends_on", labels)
+        if self.failure_policy not in {"fail-fast", "continue"}:
+            raise ValueError("job failure policy is invalid")
+        if not isinstance(self.compatibility_differences, (tuple, list)):
+            raise ValueError("compatibility differences must be a sequence")
+        object.__setattr__(self, "compatibility_differences", tuple(dict(item) for item in self.compatibility_differences))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -387,6 +403,9 @@ class JobSubmission:
             "attempt": self.attempt,
             "environment_keys": list(self.environment_keys),
             "artifact_paths": list(self.artifact_paths),
+            "depends_on": list(self.depends_on),
+            "failure_policy": self.failure_policy,
+            "compatibility_differences": list(self.compatibility_differences),
             "source": asdict(self.source),
         }
 

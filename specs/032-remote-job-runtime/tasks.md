@@ -416,7 +416,7 @@ Integration owner: T078/T080 + T085-T093 concurrency and interfaces
 The following gaps remain after the first implementation pass and are traced to the
 feature requirements rather than treated as documentation-only follow-up.
 
-- [ ] T141 [US3/US4] Implement dependency-aware parent coordination with declared `needs`/step edges, bounded capacity dispatch, fail-fast/continue policy, per-child queue reasons, retry relationships, and aggregate terminal outcomes for local and remote matrices per FR-027-FR-030 and US4/AC1 (partial)
+- [X] T141 [US3/US4] Implement dependency-aware parent coordination with declared `needs`/step edges, bounded capacity dispatch, fail-fast/continue policy, per-child queue reasons, retry relationships, and aggregate terminal outcomes for local and remote matrices per FR-027-FR-030 and US4/AC1
 - [ ] T142 [US3] Give each remote workspace an isolated deployed source/runtime path, serialize reset/destroy/redeploy against active leases, and prove reusable reruns do not share mutable files or databases per FR-023-FR-028 and US3/AC4 (partial)
 - [ ] T143 [US4] Complete remote CI artifact transfer, safe-mode semantic-difference persistence, child retry/cleanup policy, and parent result retrieval through CLI and MCP per FR-031-FR-037 and US4/AC3-US4/AC5 (partial)
 - [ ] T144 [US2/Phase 8] Add startup reconciliation and a durable supervisor/host-restart recovery command that classifies orphaned, unreachable, process-missing, and interrupted jobs without false success per FR-015-FR-022 (partial)

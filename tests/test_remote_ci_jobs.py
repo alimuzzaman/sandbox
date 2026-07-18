@@ -61,6 +61,33 @@ class RemoteCIJobTests(unittest.TestCase):
         self.assertEqual([item["workspace"] for item in plan], ["a", "b"])
         self.assertEqual(plan[0]["argv"], ["sb", "ci", "run", "workflow.yml"])
 
+    def test_remote_matrix_plan_carries_dependencies_and_accepted_differences(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {"target_path": "/srv/p", "commit": "c", "dirty": False,
+                               "dirty_digest": "d", "identity": "sha256:i"},
+            ssh_run=lambda _remote, command, timeout: calls.append(command) or SimpleNamespace(
+                returncode=0,
+                stdout='{"ok":true,"kind":"matrix","parent_job_id":"p","children":[]}',
+            ),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+        submissions = [
+            JobSubmission("ci", "/p", "identity", "remote", "build", ("echo", "build"), 60,
+                SourceIdentity("s"), remote_name="r", workspace_mode="isolated"),
+            JobSubmission("ci", "/p", "identity", "remote", "unit", ("echo", "unit"), 60,
+                SourceIdentity("s"), remote_name="r", workspace_mode="isolated", depends_on=("build",),
+                compatibility_differences=({"id": "act.demo", "accepted": True},)),
+        ]
+        transport.submit_many(submissions)
+        encoded = next(part.split("--spec-json ", 1)[1].split(" ", 1)[0]
+                        for part in calls if "--spec-json" in part)
+        plan = json.loads(base64.b64decode(encoded).decode())
+        unit = next(item for item in plan if item["workspace"] == "unit")
+        self.assertEqual(unit["depends_on"], ["build"])
+        self.assertEqual(unit["compatibility_differences"][0]["id"], "act.demo")
+
     def test_remote_preflight_stays_a_gate_before_submission(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -70,3 +97,32 @@ class RemoteCIJobTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("act.non-linux-runner", result["blocking"])
 
+    def test_remote_ci_preserves_needs_and_failure_policy_as_durable_edges(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workflow = root / "ci.yml"
+            workflow.write_text(
+                "jobs:\n"
+                "  build:\n"
+                "    strategy:\n"
+                "      matrix:\n"
+                "        node: [20, 22]\n"
+                "    steps:\n"
+                "      - run: echo build\n"
+                "  unit:\n"
+                "    needs: build\n"
+                "    strategy:\n"
+                "      fail-fast: false\n"
+                "    steps:\n"
+                "      - run: echo unit\n"
+            )
+            target = ResolvedTarget(str(root), "remote", "r", "ci", "remote:r:p", {})
+            args = SimpleNamespace(timeout=60, label_prefix="ci", matrix_filter={}, jobs=None,
+                                   allow_deploy=False, keep_on_fail=False, strict_provision=False,
+                                   accepted_differences=None, output_profile="smart")
+            submissions = _remote_ci_submissions(target, str(root), workflow,
+                                                  _plan_workflow(workflow), args)
+            unit = next(item for item in submissions
+                        if item.argv[item.argv.index("--job") + 1] == "unit")
+            self.assertEqual(len(unit.depends_on), 2)
+            self.assertEqual(unit.failure_policy, "continue")

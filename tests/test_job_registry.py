@@ -34,7 +34,7 @@ class JobRegistryTests(unittest.TestCase):
 
     def test_schema_uses_wal_foreign_keys_and_version(self):
         repo = self.repository()
-        self.assertEqual(repo.schema_version(), 1)
+        self.assertEqual(repo.schema_version(), 2)
         self.assertEqual(repo.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(repo.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
         names = {row[0] for row in repo.connection.execute(
@@ -110,6 +110,18 @@ class JobRegistryTests(unittest.TestCase):
         self.assertEqual(snapshot["output"][0]["bytes_stored"], 4)
         self.assertEqual(snapshot["metrics"]["samples"], 1)
         self.assertEqual(snapshot["artifacts"][0]["artifact_id"], "a1")
+
+    def test_compatibility_differences_are_durable_with_job_snapshot(self):
+        repo = self.repository()
+        row, _ = repo.accept(submission())
+        repo.record_compatibility_differences(row["job_id"], [{
+            "id": "act.safe-mode", "workflow": ".github/workflows/ci.yml",
+            "location": "jobs.release.steps[0]", "severity": "accepted",
+            "accepted": True, "detail": "publish step skipped", "catalog_version": "v1",
+        }])
+        snapshot = repo.snapshot(row["job_id"])
+        self.assertEqual(snapshot["compatibility_differences"][0]["difference_id"], "act.safe-mode")
+        self.assertEqual(snapshot["compatibility_differences"][0]["accepted"], 1)
 
 
 if __name__ == "__main__":

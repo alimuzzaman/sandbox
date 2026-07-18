@@ -90,6 +90,22 @@ def configure_metrics_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_artifacts_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("--remote")
+    parser.add_argument("--json", action="store_true")
+
+
+def configure_artifact_get_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("artifact_id")
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--max-bytes", type=int, default=1_048_576)
+    parser.add_argument("--output-file")
+    parser.add_argument("--remote")
+    parser.add_argument("--json", action="store_true")
+
+
 def configure_reconcile_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--json", action="store_true")
@@ -248,6 +264,40 @@ def cmd_job_metrics(_cfg, args) -> None:
             print(json.dumps(item, sort_keys=True))
 
 
+def cmd_job_artifacts(_cfg, args) -> None:
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).artifacts(args.remote, args.job_id)
+    else:
+        result = {"ok": True, "artifacts": durable_job_dependencies()["job_service"].list_artifacts(args.job_id)}
+    print(json.dumps(result, sort_keys=True) if args.json else "\n".join(
+        f"{item['artifact_id']} {item['display_name']} {item['size_bytes']} bytes"
+        for item in result.get("artifacts", ())))
+
+
+def cmd_job_artifact_get(_cfg, args) -> None:
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).artifact_get(args.remote, args.job_id, args.artifact_id,
+                offset=args.offset, max_bytes=args.max_bytes)
+    else:
+        data = durable_job_dependencies()["job_service"].get_artifact(args.job_id, args.artifact_id,
+            offset=args.offset, max_bytes=args.max_bytes)
+        result = {"ok": True, "job_id": args.job_id, "artifact_id": args.artifact_id,
+                  "offset": args.offset, "data": base64.b64encode(data).decode(),
+                  "bytes_read": len(data), "encoding": "base64"}
+    if args.output_file:
+        Path(args.output_file).expanduser().resolve().write_bytes(base64.b64decode(result["data"]))
+    elif args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"{result['artifact_id']} {result['bytes_read']} bytes")
+
+
 def cmd_job_reconcile(_cfg, args) -> None:
     result = durable_job_dependencies()["job_service"].reconcile_startup(limit=args.limit)
     if args.json:
@@ -287,6 +337,7 @@ def cmd_job_matrix(_cfg, args) -> None:
         except Exception as exc:
             _die(f"invalid matrix submission plan: {exc}")
         submissions = []
+        difference_by_workspace = {}
         for item in specs:
             if not isinstance(item, dict):
                 _die("invalid matrix submission plan entry")
@@ -306,8 +357,12 @@ def cmd_job_matrix(_cfg, args) -> None:
                     output_profile=item.get("output_profile", args.output_profile),
                     deadline_source=item.get("deadline_source", "explicit"),
                     request_id=item.get("request_id"), cleanup_policy=item.get("cleanup_policy", "retain"),
+                    depends_on=tuple(item.get("depends_on", ())),
+                    failure_policy=item.get("failure_policy", "fail-fast"),
                     artifact_paths=tuple(item.get("artifact_paths", ())),
+                    compatibility_differences=tuple(item.get("compatibility_differences", ())),
                 ))
+                difference_by_workspace[item["workspace"]] = tuple(item.get("compatibility_differences", ()))
             except (KeyError, TypeError, ValueError) as exc:
                 _die(f"invalid matrix submission plan entry: {exc}")
     else:
@@ -315,6 +370,7 @@ def cmd_job_matrix(_cfg, args) -> None:
             target.kind, workspace, tuple(command), args.timeout, source, remote_name=target.remote_name,
             workspace_mode="isolated", output_profile=args.output_profile, deadline_source="explicit")
             for workspace in args.workspace]
+        difference_by_workspace = {}
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -324,6 +380,13 @@ def cmd_job_matrix(_cfg, args) -> None:
     else:
         result = dependencies["job_service"].submit_matrix(
             submissions, allow_project_variants=bool(args.spec_json))
+    if args.spec_json and target.kind != "remote" and result.get("parent_job_id"):
+        accepted_children = result.get("children", ())
+        for accepted in accepted_children:
+            differences = difference_by_workspace.get(accepted.get("workspace"), ())
+            if differences:
+                dependencies["job_service"].repository.record_compatibility_differences(
+                    accepted["job_id"], list(differences))
     if args.json: print(json.dumps(result, sort_keys=True))
     else:
         for child in result["children"]: print(child["job_id"])
@@ -336,6 +399,8 @@ register_specs((
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
+    CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global"),
+    CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global"),
     CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global"),
     CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),

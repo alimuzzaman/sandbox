@@ -137,9 +137,17 @@ class RemoteJobTransport:
         elif argv[:1] == ["sb"]:
             # Test, E2E, and compatibility coordinators deliberately invoke
             # the co-located CLI with an explicit local target.  The staged
-            # runtime is not assumed to be on the VPS PATH, so preserve that
-            # policy here just as the generic instance controller does.
-            argv[0] = self.remote_sb_path(remote)
+            # runtime is not assumed to be on the VPS PATH.  They also need
+            # an instance in their freshly deployed workspace before the
+            # nested command can inspect or exercise the project.
+            sb = self.remote_sb_path(remote)
+            argv[0] = sb
+            controller = " && ".join((
+                f"cd {shlex.quote(workspace_path)}",
+                shlex.join([sb, "ensure", "--local", "--json"]),
+                shlex.join(argv),
+            ))
+            argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))

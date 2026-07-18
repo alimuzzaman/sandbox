@@ -110,7 +110,8 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace",
             ("sb", "test", "--local", "--project-dir", ".", "integration"), 60,
             SourceIdentity("ignored"), remote_name="r"))
-        self.assertIn("-- /srv/sandbox/sb-src/sb test --local --project-dir . integration", calls[-1])
+        self.assertIn("/srv/sandbox/sb-src/sb ensure --local --json", calls[-1])
+        self.assertIn("/srv/sandbox/sb-src/sb test --local --project-dir . integration", calls[-1])
 
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(

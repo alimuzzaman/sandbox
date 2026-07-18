@@ -532,6 +532,46 @@ the dump, so without the pre-reset those newer tables would survive.
 Machine/global defaults (ports base, admin creds, image defaults) live in
 `sandbox.yml`; per-machine overrides in the gitignored `sandbox.local.yml`.
 
+## Durable runtime policy
+
+`runtime` is an optional project-level policy for explicit argv development and
+test jobs. Without it Sandbox preserves local behavior. With a configured
+provisioned remote, it can make remote execution the project default:
+
+```jsonc
+{
+  "runtime": {
+    "default": "remote",                 // local | remote
+    "remote": "scaleway-sandbox",        // required for default remote
+    "workspace": "default",              // reusable label
+    "executionProfile": "unit",
+    "outputProfile": "smart",
+    "maxParallel": 4,
+    "retentionDays": 7,
+    "executionProfiles": {
+      "e2e-long": {"timeoutSeconds": 21600, "stallSeconds": 900,
+                    "cancelGraceSeconds": 60, "cleanup": "retain"}
+    },
+    "outputProfiles": {
+      "sample-20": {"mode": "sampled", "everyLines": 20,
+                    "heartbeatSeconds": 30}
+    }
+  }
+}
+```
+
+Every profile has a finite timeout (at most seven days). Built-ins are `exec`,
+`unit`, `integration`, `e2e`, `ci`, `overall`, and `overnight`; output built-ins
+are `full`, `smart`, `errors`, `sampled`, and `quiet`. Explicit `--timeout`
+overrides a profile. `--local` overrides a configured remote; `--remote NAME`
+selects a named provisioned remote.
+
+Use `sb exec … --detach -- <argv>` for long work, then read `sb job-status` and
+`sb job-output`. Output is durably retained on the execution host, not held in
+an SSH/MCP child-process pipe. Persistent named workspaces are for development;
+use isolated deterministic labels for parallel matrix cells, and reset/destroy
+them explicitly when no active lease remains.
+
 ## Hermes remote defaults
 
 `sb hermes` stores no provider credentials in project configuration. It uses an

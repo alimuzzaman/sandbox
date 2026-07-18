@@ -18,6 +18,7 @@ sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach 
 sb job-status <job-id> --json
 sb job-output <job-id> --follow
 sb workspace create --remote scaleway-sandbox --workspace node-unit
+sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ```
 
 Remote job submission deploys the exact local working tree first, including

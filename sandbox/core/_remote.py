@@ -1072,6 +1072,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise ValueError("remote MCP token has unsafe characters")
     unit = render_remote_mcp_unit(bind, port, public_url)
+    record = remote_mcp_service_record(bind, port, public_url)
     legacy_child = (
         f"echo $$ > {_MCP_PIDFILE}; exec ./sb mcp --transport streamable-http "
         f"--bind {shlex.quote(bind)} --port {port}"
@@ -1092,9 +1093,16 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "test \"$legacy_cwd\" = \"$HOME/sandbox/sb-src\"; "
         "case \"$legacy_cmd\" in *'--transport streamable-http'*'--bind " + bind + "'*'--port " + str(port) + "'*) ;; *) exit 42;; esac; fi; "
     )
+    unit_ownership_preflight = (
+        "if test -f \"$unit_path\"; then "
+        f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_MARKER=' + record['ownership_marker'])} \"$unit_path\" && "
+        f"grep -Fq {shlex.quote('--bind ' + bind + ' --port ' + str(port))} \"$unit_path\" && "
+        "grep -Fqx 'WorkingDirectory=%h/sandbox/sb-src' \"$unit_path\" || exit 43; fi; "
+    )
     command = (
         "set -eu; umask 077; mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
+        + unit_ownership_preflight +
         "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
         "had_unit=0; had_env=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
         "if test -f \"$env_path\"; then cp \"$env_path\" \"$backup/env\"; had_env=1; fi; "
@@ -1119,6 +1127,8 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("timed out installing the remote MCP service") from exc
     if res.returncode != 0:
+        if res.returncode in {42, 43}:
+            raise RuntimeError("remote_service_ownership_unknown")
         raise RuntimeError("could not install the remote MCP service")
     return {**plan, "status": "applied", "service": remote_mcp_service_record(bind, port, public_url)}
 

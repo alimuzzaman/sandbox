@@ -796,6 +796,24 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\"", command)
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_migration_refuses_to_replace_an_unproven_existing_unit(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=43)
+        with self.assertRaisesRegex(RuntimeError, "ownership_unknown"):
+            sr.migrate_remote_mcp_service({"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174, "d" * 64,
+                                          "https://sandbox.example.test", confirm=True)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_migration_unit_preflight_requires_sandbox_marker_and_runtime_path(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
+        sr.migrate_remote_mcp_service({"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174, "e" * 64,
+                                      "https://sandbox.example.test", confirm=True)
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("WorkingDirectory=%h/sandbox/sb-src", command)
+        self.assertIn(record["ownership_marker"], command)
+        self.assertIn("exit 43", command)
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_passes_public_url(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         entry = {"ssh": "ubuntu@1.2.3.4"}

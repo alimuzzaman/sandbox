@@ -125,8 +125,13 @@ class RemoteJobTransport:
             sb = self.remote_sb_path(remote)
             controller = " && ".join((
                 f"cd {shlex.quote(workspace_path)}",
-                shlex.join([sb, "ensure", "--json"]),
-                shlex.join([sb, "exec", "--", *argv]),
+                # The deployed project can itself be remote-first.  This
+                # controller is already running on its selected VPS, so it
+                # must explicitly select the co-located runtime rather than
+                # recursively submit another remote job from inside the
+                # durable job supervisor.
+                shlex.join([sb, "ensure", "--local", "--json"]),
+                shlex.join([sb, "exec", "--local", "--", *argv]),
             ))
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]

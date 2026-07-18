@@ -40,7 +40,7 @@ class TestMcpComposition(unittest.TestCase):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 
         expected = (
-            "instances", "runtime", "wp", "net", "data", "fs", "mail", "context", "cache",
+            "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
             "plugin_check", "remote", "hermes", "recovery",
         )
@@ -97,18 +97,19 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "runtime", "hermes"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "runtime", "jobs", "hermes"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
                     "project_instance", "resolve_instance", "safe_json", "site_url",
                 ),
                 "runtime": ("core", "project_instance", "runtime_service"),
+                "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "runtime", "hermes"}))
+                            if spec.group_id not in {"instances", "runtime", "jobs", "hermes"}))
 
     def test_instance_and_hermes_groups_register_against_an_isolated_fake_context(self):
         from dependencies import ToolDependencies

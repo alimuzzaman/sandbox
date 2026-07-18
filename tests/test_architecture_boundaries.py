@@ -54,7 +54,7 @@ class TestArchitectureBoundaries(unittest.TestCase):
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 19)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 20)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
@@ -67,10 +67,13 @@ class TestArchitectureBoundaries(unittest.TestCase):
     def test_new_boundary_packages_do_not_use_legacy_wildcards(self):
         roots = (
             ROOT / "sandbox" / "application",
+            ROOT / "sandbox" / "jobs",
             ROOT / "sandbox" / "config",
+            ROOT / "sandbox" / "ci",
             ROOT / "sandbox" / "project_registry",
             ROOT / "sandbox" / "runtimes",
             ROOT / "sandbox" / "services",
+            ROOT / "sandbox" / "transports",
             ROOT / "sandbox" / "hermes",
         )
         violations = []
@@ -95,13 +98,27 @@ class TestArchitectureBoundaries(unittest.TestCase):
     def test_new_modules_do_not_import_composition_roots(self):
         forbidden = re.compile(r"(?:from|import) (?:sandbox\.cli|server)(?:\s|$)")
         violations = []
-        for package in (ROOT / "sandbox" / "runtimes", ROOT / "sandbox" / "project_registry"):
+        for package in (
+            ROOT / "sandbox" / "runtimes",
+            ROOT / "sandbox" / "project_registry",
+            ROOT / "sandbox" / "jobs",
+            ROOT / "sandbox" / "transports",
+            ROOT / "sandbox" / "ci",
+        ):
             if not package.exists():
                 continue
             for path in package.rglob("*.py"):
                 if forbidden.search(path.read_text()):
                     violations.append(str(path.relative_to(ROOT)))
         self.assertEqual(violations, [])
+
+    def test_remote_job_runtime_has_explicit_manifest_owners(self):
+        command_manifest = (ROOT / "sandbox" / "commands" / "manifest.py").read_text()
+        tool_manifest = (ROOT / "mcp" / "wp-server" / "tools" / "manifest.py").read_text()
+        self.assertIn('"sandbox.commands.jobs_runtime"', command_manifest)
+        self.assertIn('"sandbox.commands.workspaces"', command_manifest)
+        self.assertIn('"jobs"', tool_manifest)
+        self.assertTrue((ROOT / "sandbox" / "jobs" / "manifest.py").is_file())
 
     def test_mcp_helpers_do_not_read_registry_json_directly(self):
         app = (ROOT / "mcp" / "wp-server" / "app.py").read_text()

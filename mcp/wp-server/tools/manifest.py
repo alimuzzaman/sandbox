@@ -8,13 +8,13 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 
 
 BUILTIN_TOOL_GROUPS = (
-    "instances", "runtime", "wp", "net", "data", "fs", "mail", "context", "cache",
+    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
     "plugin_check", "remote", "hermes", "recovery",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "runtime", "wp", "net", "data", "fs", "context",
+    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "context",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -22,10 +22,10 @@ DEFAULT_MCP_GROUPS = (
 # many-project registration model; clients that want a precise catalog start
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
-    "instances", "wp", "net", "data", "fs", "mail", "context", "remote",
+    "instances", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "runtime", "net", "remote",
+    "instances", "runtime", "jobs", "net", "remote",
 )
 
 
@@ -48,6 +48,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
         "project_instance", "resolve_instance", "safe_json", "site_url",
     ),
     "runtime": ("core", "project_instance", "runtime_service"),
+    "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
 }
 
@@ -56,6 +57,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
     "runtime": ("instance_status", "instance_logs", "instance_exec"),
+    "jobs": (),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),
     "data": ("db_query", "import_content", "wp_reset"),

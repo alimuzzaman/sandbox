@@ -22,14 +22,14 @@ validated as an increment. Shared job/storage/config/transport contracts are fou
 
 **Purpose**: Establish explicit package and composition boundaries without behavior.
 
-- [ ] T001 Create the runtime-neutral job package exports in `sandbox/jobs/__init__.py` and empty explicit registration surface in `sandbox/jobs/manifest.py`
-- [ ] T002 [P] Create application service module boundaries in `sandbox/application/job_service.py`, `sandbox/application/target_service.py`, and `sandbox/application/workspace_service.py`
-- [ ] T003 [P] Create local and remote transport protocol module boundaries in `sandbox/transports/__init__.py`, `sandbox/transports/jobs.py`, and `sandbox/transports/remote_jobs.py`
-- [ ] T004 [P] Create the CI compatibility package boundary in `sandbox/ci/__init__.py`, `sandbox/ci/compatibility.py`, and `sandbox/ci/workflow.py`
-- [ ] T005 Register feature-owned CLI module placeholders through `sandbox/commands/manifest.py` for `sandbox/commands/jobs_runtime.py` and `sandbox/commands/workspaces.py`
-- [ ] T006 Register a feature-owned MCP jobs group placeholder and dependency keys in `mcp/wp-server/tools/manifest.py` and `mcp/wp-server/tools/jobs.py`
-- [ ] T007 Add architecture-boundary assertions for every new package and manifest owner in `tests/test_architecture_boundaries.py`, `tests/test_command_composition.py`, and `tests/test_mcp_composition.py`
-- [ ] T008 Run the new composition tests with `.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_command_composition tests.test_mcp_composition -v` and record the command in `specs/032-remote-job-runtime/implementation-evidence.md`
+- [X] T001 Create the runtime-neutral job package exports in `sandbox/jobs/__init__.py` and empty explicit registration surface in `sandbox/jobs/manifest.py`
+- [X] T002 [P] Create application service module boundaries in `sandbox/application/job_service.py`, `sandbox/application/target_service.py`, and `sandbox/application/workspace_service.py`
+- [X] T003 [P] Create local and remote transport protocol module boundaries in `sandbox/transports/__init__.py`, `sandbox/transports/jobs.py`, and `sandbox/transports/remote_jobs.py`
+- [X] T004 [P] Create the CI compatibility package boundary in `sandbox/ci/__init__.py`, `sandbox/ci/compatibility.py`, and `sandbox/ci/workflow.py`
+- [X] T005 Register feature-owned CLI module placeholders through `sandbox/commands/manifest.py` for `sandbox/commands/jobs_runtime.py` and `sandbox/commands/workspaces.py`
+- [X] T006 Register a feature-owned MCP jobs group placeholder and dependency keys in `mcp/wp-server/tools/manifest.py` and `mcp/wp-server/tools/jobs.py`
+- [X] T007 Add architecture-boundary assertions for every new package and manifest owner in `tests/test_architecture_boundaries.py`, `tests/test_command_composition.py`, and `tests/test_mcp_composition.py`
+- [X] T008 Run the new composition tests with `.cli-venv/bin/python -m unittest tests.test_architecture_boundaries tests.test_command_composition tests.test_mcp_composition -v` and record the command in `specs/032-remote-job-runtime/implementation-evidence.md`
 
 ---
 

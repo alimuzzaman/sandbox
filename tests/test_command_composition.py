@@ -53,6 +53,8 @@ class TestCommandComposition(unittest.TestCase):
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
         self.assertEqual(len(COMMANDS), 70)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
+        self.assertIn("sandbox.commands.jobs_runtime", BUILTIN_COMMAND_MODULES)
+        self.assertIn("sandbox.commands.workspaces", BUILTIN_COMMAND_MODULES)
         self.assertEqual(set(COMMANDS), set(LEGACY_BRIDGE_COMMANDS))
         self.assertEqual(validate_builtin_command_coverage(), ())
 

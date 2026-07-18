@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 class JobBackend(Protocol):
@@ -10,6 +10,47 @@ class JobBackend(Protocol):
     def status(self, remote: str, job_id: str, offset: int = 0) -> dict: ...
     def cancel(self, remote: str, job_id: str) -> dict: ...
     def cleanup(self, remote: str, confirm: bool, dry_run: bool) -> dict: ...
+
+
+@dataclass(frozen=True)
+class DurableHermesJobBackend:
+    """Translate durable job service calls to Hermes' bounded legacy envelope.
+
+    All mechanisms are injected at composition time.  This keeps the Hermes
+    compatibility surface usable while preventing it from reading registry files
+    or importing the legacy remote control plane itself.
+    """
+
+    submitter: Callable[..., dict]
+    status_reader: Callable[..., dict]
+    canceler: Callable[..., dict]
+    cleaner: Callable[..., dict]
+    output_reader: Callable[..., dict] | None = None
+
+    def run(self, target: str, prompt: str, worktree: str | None = None) -> dict:
+        return dict(self.submitter(target, prompt, worktree=worktree))
+
+    def status(self, remote: str, job_id: str, offset: int = 0) -> dict:
+        result = dict(self.status_reader(remote, job_id))
+        lifecycle = result.get("lifecycle")
+        if lifecycle and "status" not in result:
+            result["status"] = "completed" if lifecycle in {
+                "succeeded", "failed", "timed_out", "cancelled", "interrupted"
+            } else "running"
+        if self.output_reader is not None:
+            page = dict(self.output_reader(remote, job_id, cursor=None,
+                                           max_bytes=1_048_576, encoding="utf8"))
+            result.setdefault("stdout", page.get("data", ""))
+            result.setdefault("bytes_read", page.get("bytes_read", 0))
+            result.setdefault("truncated", bool(page.get("has_more")))
+        result.setdefault("job_id", job_id)
+        return result
+
+    def cancel(self, remote: str, job_id: str) -> dict:
+        return dict(self.canceler(remote, job_id))
+
+    def cleanup(self, remote: str, confirm: bool, dry_run: bool) -> dict:
+        return dict(self.cleaner(remote, confirm=confirm, dry_run=dry_run))
 
 
 @dataclass

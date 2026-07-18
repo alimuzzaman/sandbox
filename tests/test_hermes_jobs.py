@@ -1,10 +1,37 @@
 import unittest
 
-from sandbox.hermes.jobs import HermesJobService
+from sandbox.hermes.jobs import DurableHermesJobBackend, HermesJobService
 from tests.fakes.hermes import RecordingJobBackend
 
 
 class TestHermesJobs(unittest.TestCase):
+    def test_durable_backend_preserves_status_and_retained_output_shape(self):
+        calls = []
+        backend = DurableHermesJobBackend(
+            submitter=lambda target, prompt, worktree=None: {"job_id": "d" * 32, "status": "running"},
+            status_reader=lambda remote, job_id: {"job_id": job_id, "lifecycle": "running"},
+            canceler=lambda remote, job_id: {"job_id": job_id, "lifecycle": "cancelling"},
+            cleaner=lambda remote, confirm=False, dry_run=True: {"status": "planned"},
+            output_reader=lambda remote, job_id, **kwargs: {"data": "retained\n", "bytes_read": 9,
+                                                              "has_more": False},
+        )
+        result = backend.status("remote", "d" * 32, offset=3)
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["stdout"], "retained\n")
+        self.assertEqual(result["bytes_read"], 9)
+
+    def test_legacy_async_adapter_rejects_invalid_ids_before_storage_calls(self):
+        called = []
+        adapter = __import__("sandbox.transports.jobs", fromlist=["LegacyAsyncJobAdapter"]).LegacyAsyncJobAdapter(
+            lambda value: value == "a" * 16,
+            lambda *args, **kwargs: called.append((args, kwargs)) or {"status": "running"},
+            lambda value: {"job_id": value, "killed": True},
+        )
+        with self.assertRaises(ValueError):
+            adapter.status("bad")
+        self.assertFalse(called)
+        self.assertEqual(adapter.status("a" * 16)["status"], "running")
+
     def test_status_cancel_and_cleanup_delegate_to_an_injected_backend(self):
         backend = RecordingJobBackend(statuses={"job-1": {"job_id": "job-1", "status": "running"}})
         service = HermesJobService(backend)

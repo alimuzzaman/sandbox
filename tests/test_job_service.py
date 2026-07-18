@@ -49,6 +49,22 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(repository.get(row["job_id"])["termination_reason"], "missing_supervisor_identity")
             repository.close()
 
+    def test_reconcile_marks_missing_child_identity_interrupted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                  launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.transition(row["job_id"], "running")
+            repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=99999999,
+                supervisor_start_identity="start", supervisor_nonce_hash="nonce", child_pid=99999998,
+                child_pgid=99999998, child_start_identity="child-start")
+            result = service.reconcile_startup()
+            self.assertEqual(result["interrupted"], [row["job_id"]])
+            self.assertEqual(repository.get(row["job_id"])["termination_reason"], "supervisor_lost")
+            repository.close()
+
     def test_retention_sweep_removes_terminal_outputs_and_marks_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

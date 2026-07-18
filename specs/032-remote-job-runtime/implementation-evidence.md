@@ -167,3 +167,26 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   --encoding utf8 --json` returned the retained output through the cursor contract.
 - This validates the local half of the detach/reconnect contract only; remote
   transport acceptance still requires a provisioned disposable remote.
+
+## Health, reconciliation, and compatibility convergence increment
+
+- Implementation: health classification now records target reachability, supervisor
+  and child identity evidence, output/activity/progress/metric ages, and sustained
+  inactivity. It distinguishes unreachable, orphaned, process-missing, quiet,
+  suspected-stalled, and stuck observations without converting a health warning into
+  a terminal success/failure. Startup reconciliation verifies the recorded child
+  identity after supervisor verification and records an interrupted result with
+  partial evidence when the child is missing or its PID/start identity no longer
+  matches.
+- Implementation: `LegacyAsyncJobAdapter` and `DurableHermesJobBackend` provide
+  explicit injected compatibility boundaries. The historic async-job identifier and
+  result contract remain unchanged; Hermes receives the durable lifecycle and
+  retained-output fields without importing the new registry or reading job files.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_health tests.test_job_service tests.test_job_process_identity tests.test_hermes_jobs tests.test_asyncjobs tests.test_architecture_boundaries -v`
+- Result: PASS, 32 tests.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`
+- Result: PASS, 952 tests, 1 skipped in 80.577 seconds. The skip is the MCP server
+  transport under the CLI virtualenv because `httpx` is not installed there; the
+  dedicated `mcp/wp-server/.venv` transport run remains PASS with 5 tests.
+- Remote acceptance remains pending because this workspace has no provisioned
+  disposable remote. No remote result is represented as a passing acceptance claim.

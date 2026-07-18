@@ -149,11 +149,15 @@ def cmd_async_job(cfg, args) -> None:
     _asyncjobs.py). NOT instance-scoped — e2e/ci jobs mint multiple instances
     themselves, so they don't fit commands/jobs.py's per-instance `job`/`jobs`
     (one wp-cli command in one container)."""
+    from sandbox.transports.jobs import LegacyAsyncJobAdapter
+    adapter = LegacyAsyncJobAdapter(valid_async_job_id, background_job_status, kill_background_job)
     jid = args.job_id
-    if not valid_async_job_id(jid):
+    try:
+        adapter._check(jid)
+    except ValueError:
         die("invalid job id (expected 16 hex chars)")
     if getattr(args, "kill", False):
-        r = kill_background_job(jid)
+        r = adapter.cancel(jid)
         if getattr(args, "json", False):
             print(json.dumps(r))
         else:
@@ -162,7 +166,7 @@ def cmd_async_job(cfg, args) -> None:
     if getattr(args, "follow", False) and not getattr(args, "json", False):
         offset = 0
         while True:
-            s = background_job_status(jid, offset=offset)
+            s = adapter.status(jid, offset=offset)
             chunk = s.get("stdout", "")
             if chunk:
                 print(chunk, end="")
@@ -171,7 +175,7 @@ def cmd_async_job(cfg, args) -> None:
                 print(f"\n[{s['status']} exit={s.get('exit_code', '?')}]")
                 return
             time.sleep(1)
-    s = background_job_status(jid, offset=int(getattr(args, "offset", 0) or 0))
+    s = adapter.status(jid, offset=int(getattr(args, "offset", 0) or 0))
     if getattr(args, "json", False):
         print(json.dumps(s))
         return

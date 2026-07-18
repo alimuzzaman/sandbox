@@ -235,7 +235,13 @@ class JobService:
         return self.repository.list(**query)
 
     def reconcile_startup(self, *, limit: int = 200) -> dict:
-        """Reconcile active jobs whose recorded supervisor identity is gone."""
+        """Reconcile active jobs whose supervisor or child identity is gone.
+
+        A process that survives a supervisor restart is not automatically healthy:
+        without a matching durable ownership record it is unsafe to claim success or
+        send signals to it.  The best available output remains retained and the job
+        is explicitly interrupted for later inspection.
+        """
         interrupted = []
         for row in self.repository.list(limit=limit):
             if row["lifecycle"] not in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
@@ -262,6 +268,32 @@ class JobService:
             expected = ProcessIdentity(process["host_boot_id"], int(supervisor_pid),
                 process["supervisor_start_identity"], process["supervisor_nonce_hash"])
             if verify_process_identity(expected, observed):
+                child_pid = process.get("child_pid")
+                child_start = process.get("child_start_identity")
+                if not child_pid or not child_start:
+                    continue
+                child_observed = capture_process_identity(int(child_pid))
+                if child_observed is not None:
+                    child_observed = ProcessIdentity(child_observed.host_boot_id, child_observed.pid,
+                        child_observed.start_identity, process["supervisor_nonce_hash"],
+                        child_observed.process_group_id)
+                child_expected = ProcessIdentity(process["host_boot_id"], int(child_pid), child_start,
+                    process["supervisor_nonce_hash"], process.get("child_pgid"))
+                if verify_process_identity(child_expected, child_observed):
+                    continue
+                reason = "child_process_missing" if child_observed is None else "child_process_identity_mismatch"
+                try:
+                    self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,
+                        termination_reason=reason, output_completeness="partial",
+                        result_json=__import__("json").dumps({
+                            "reconciled": True,
+                            "evidence": "recorded child identity is absent or no longer matches",
+                        }, sort_keys=True))
+                    if self.scheduler is not None:
+                        self.scheduler.release(row["job_id"])
+                    interrupted.append(row["job_id"])
+                except ValueError:
+                    pass
                 continue
             try:
                 self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,

@@ -16,6 +16,9 @@ from typing import Any, Protocol
 
 from sandbox.jobs.models import JobSubmission, OutputQuery
 from sandbox.jobs.output import JobOutputStore
+from sandbox.jobs.health import classify
+from sandbox.jobs.models import Lifecycle
+from sandbox.jobs.process import ProcessIdentity, signal_owned_process_group
 
 
 _DETACHED_SUPERVISORS: list[subprocess.Popen] = []
@@ -76,8 +79,15 @@ class JobService:
                 "idempotent_replay": replay}
 
     def get(self, job_id: str, *, reconcile: bool = True):
-        del reconcile
-        return self.repository.snapshot(job_id)
+        snapshot = self.repository.snapshot(job_id)
+        if reconcile:
+            health, evidence = classify(snapshot)
+            if snapshot["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+                self.repository.set_health(job_id, health, evidence)
+                snapshot = self.repository.snapshot(job_id)
+            snapshot["health"] = health.value
+            snapshot["health_evidence"] = evidence
+        return snapshot
 
     def list(self, query=None):
         query = dict(query or {})
@@ -86,3 +96,17 @@ class JobService:
     def read_output(self, job_id: str, query: OutputQuery | None = None):
         query = query or OutputQuery()
         return JobOutputStore(self.storage, self.repository, job_id).read(query)
+
+    def cancel(self, job_id: str, *, force: bool = False):
+        snapshot = self.repository.snapshot(job_id)
+        if snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            raise RuntimeError("already_terminal")
+        process = snapshot.get("process") or {}
+        if not process.get("child_pid") or not process.get("child_pgid"):
+            raise RuntimeError("process_identity_mismatch")
+        identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
+            process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
+        if not signal_owned_process_group(identity, 9 if force else 15):
+            raise RuntimeError("process_identity_mismatch")
+        self.repository.transition(job_id, Lifecycle.CANCELLING)
+        return self.repository.snapshot(job_id)

@@ -69,6 +69,12 @@ def configure_list_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_cancel_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--json", action="store_true")
+
+
 def cmd_job_start(_cfg, args) -> None:
     command = list(args.command or ())
     if command[:1] == ["--"]:
@@ -141,9 +147,18 @@ def cmd_job_list(_cfg, args) -> None:
             print(f"{item['job_id']} {item['lifecycle']} {item['workspace_label']}")
 
 
+def cmd_job_cancel(_cfg, args) -> None:
+    try:
+        result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
+    except RuntimeError as exc:
+        _die(str(exc))
+    print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cancelling")
+
+
 register_specs((
     CommandSpec("job-start", cmd_job_start, configure=configure_start_parser, owner=__name__, scope="global"),
     CommandSpec("job-status", cmd_job_status, configure=configure_status_parser, owner=__name__, scope="global"),
     CommandSpec("job-output", cmd_job_output, configure=configure_output_parser, owner=__name__, scope="global"),
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
+    CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
 ))

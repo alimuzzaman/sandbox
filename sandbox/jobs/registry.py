@@ -328,6 +328,15 @@ class JobRepository:
             )
         return self.get(job_id)
 
+    def set_health(self, job_id: str, health: Health | str, evidence: dict) -> None:
+        health = Health(health)
+        self.connection.execute("UPDATE jobs SET health=?, updated_at=? WHERE job_id=?",
+                                (health.value, _now(), validate_job_id(job_id)))
+        self.connection.execute(
+            "UPDATE heartbeats SET health_evidence_json=? WHERE job_id=?",
+            (json.dumps(evidence, sort_keys=True), job_id),
+        )
+
     def put_process_identity(self, job_id: str, *, host_boot_id: str,
                              supervisor_pid: int, supervisor_start_identity: str,
                              supervisor_nonce_hash: str, child_pid: int | None = None,

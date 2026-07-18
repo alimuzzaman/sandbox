@@ -17,6 +17,7 @@ an SSH or MCP stdio stream open.
 sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
 sb job-status <job-id> --json
 sb job-output <job-id> --follow
+sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 sb workspace create --remote scaleway-sandbox --workspace node-unit
 sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ```
@@ -25,6 +26,12 @@ Remote job submission deploys the exact local working tree first, including
 uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
+
+Output controls read retained logs in bounded pages. Use `--stream`,
+`--tail-bytes`, a cursor, or `--wait-seconds` to choose verbosity without
+streaming process pipes across SSH. The MCP workspace tools mirror `sb
+workspace create|list|status|reset|destroy`; remote `run_tests` returns a
+durable job ID for the same observation flow.
 
 Use this skill when MCP is unavailable, unnecessary, or would load tools for a
 different runtime. The `sb` CLI is the primary operational interface; MCP is an

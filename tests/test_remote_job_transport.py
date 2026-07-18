@@ -33,3 +33,23 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.metrics("r", "abc")
         self.assertTrue(all("--json" in command for command, _ in commands))
         self.assertIn("job-cancel abc --force", commands[2][0])
+
+    def test_output_controls_and_matrix_deploy_once(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda remote, root: calls.append(("deploy", root)) or {"target_path": "/srv/p", "commit": "abc", "dirty": False, "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda remote, command, timeout: calls.append(("ssh", command)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        source = SourceIdentity("ignored")
+        children = [JobSubmission("test", "/p", "p", "remote", label, ("npm", "test"), 60, source,
+            remote_name="r", workspace_mode="isolated") for label in ("a", "b")]
+        self.assertEqual(len(transport.submit_many(children)), 2)
+        self.assertEqual([item[0] for item in calls].count("deploy"), 1)
+        calls.clear()
+        transport.read_output("r", "abc", stream="stderr", cursor="cursor", tail_bytes=10,
+                              max_bytes=12, wait_seconds=2)
+        command = calls[-1][1]
+        self.assertIn("--stream stderr", command)
+        self.assertIn("--tail-bytes 10", command)
+        self.assertIn("--wait-seconds 2", command)

@@ -62,6 +62,8 @@ def configure_output_parser(parser) -> None:
     parser.add_argument("--tail-bytes", type=int)
     parser.add_argument("--max-bytes", type=int, default=65536)
     parser.add_argument("--follow", action="store_true")
+    parser.add_argument("--wait-seconds", type=int, default=0,
+                        help="bounded retained-log long poll (0 disables waiting)")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -161,7 +163,9 @@ def cmd_job_output(_cfg, args) -> None:
             remote_lookup=_remote.get_remote)
         cursor = args.cursor
         while True:
-            result = transport.read_output(args.remote, args.job_id, cursor=cursor, max_bytes=args.max_bytes)
+            result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
+                tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
+                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds)
             if args.json: print(json.dumps(result, sort_keys=True))
             elif result.get("data"): print(result["data"], end="")
             if not args.follow: return
@@ -172,7 +176,8 @@ def cmd_job_output(_cfg, args) -> None:
     cursor = args.cursor
     while True:
         result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
-            tail_bytes=args.tail_bytes, max_bytes=args.max_bytes, wait_seconds=1 if args.follow else 0))
+            tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
+            wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds))
         if args.json:
             print(json.dumps(result, sort_keys=True))
         elif result["data"]:
@@ -248,7 +253,7 @@ def cmd_job_matrix(_cfg, args) -> None:
         from sandbox.transports.remote_jobs import RemoteJobTransport
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote)
-        result = {"ok": True, "kind": "matrix", "children": [transport.submit(item) for item in submissions],
+        result = {"ok": True, "kind": "matrix", "children": transport.submit_many(submissions),
                   "summary": {"submitted": len(submissions)}}
     else:
         result = dependencies["job_service"].submit_matrix(submissions)

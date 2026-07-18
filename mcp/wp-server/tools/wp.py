@@ -101,26 +101,66 @@ def wp_rest(method: str, path: str, body: dict | None = None,
 
 @mcp.tool()
 def run_tests(project_dir: str, phpunit_args: str = "",
-             label: str | None = None, mode: str | None = None) -> dict:
+             label: str | None = None, mode: str | None = None,
+             remote: str | None = None, workspace: str | None = None,
+             timeout_seconds: int = 900, output_profile: str = "smart") -> dict:
     """Run the plugin's PHPUnit tests in unit or integration mode.
 
     Integration mode uses the externally-provisioned WP test suite, polyfills,
     and isolated wp_tests DB. Unit mode uses project Composer dependencies and
     PHPUnit without the WordPress test harness or test database.
 
-    project_dir: the plugin project (its instance must exist — call
-      ensure_instance first).
+    project_dir: the plugin project. Local execution requires an existing
+      instance; remote execution durably deploys the current tree first.
     phpunit_args: optional args passed through to phpunit (e.g. "--filter Foo"
       or a specific test file path).
     mode: optional `auto`, `unit`, or `integration` override.
 
-    Returns {ok, passed, summary, output, mode}. This is live evidence — prefer
-    it to asserting a fix works from code reading.
+    remote/workspace: optional configured remote and reusable workspace. A
+      remote call accepts a detached job and returns its job_id; use job_status
+      and job_output/job_follow for retained progress instead of streaming its
+      child process through MCP.
+
+    Returns {ok, passed, summary, output, mode}. Remote acceptance additionally
+    returns job_id and lifecycle; `passed` is null until its durable job ends.
     """
     if mode is not None and mode not in {"auto", "unit", "integration"}:
         return {"ok": False, "passed": False, "summary": None,
                 "output": "", "mode": None,
                 "error": "test mode must be auto, unit, or integration"}
+    if remote:
+        # Keep remote tests inside the shared detached runtime. The command
+        # executes from the deployed project root, so `.` names the exact tree
+        # sent by the deploy layer rather than the caller's local filesystem.
+        from sandbox.application.context import durable_job_dependencies
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        from sandbox.core import _remote
+        try:
+            dependencies = durable_job_dependencies()
+            target = dependencies["target_service"].resolve(TargetRequest(
+                project_dir=project_dir, remote=remote, workspace=workspace,
+                required_capability="job.exec"))
+            command = ["sb", "test", mode or "auto", "--local", "--project-dir", "."]
+            if phpunit_args.strip():
+                command += ["--", *shlex.split(phpunit_args)]
+            source = "sha256:" + __import__("hashlib").sha256(target.project_root.encode()).hexdigest()
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(JobSubmission(
+                    "test", target.project_root, source.removeprefix("sha256:"), "remote",
+                    target.workspace_label, tuple(command), timeout_seconds, SourceIdentity(source),
+                    remote_name=target.remote_name, output_profile=output_profile,
+                    deadline_source="explicit"))
+        except (TargetResolutionError, ValueError) as exc:
+            return {"ok": False, "passed": False, "summary": None, "output": "", "mode": mode,
+                    "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "passed": False, "summary": None, "output": "", "mode": mode,
+                    "error": f"remote durable test acceptance failed: {exc}"}
+        return {"ok": True, "passed": None, "summary": "remote test job accepted", "output": "",
+                "mode": mode or "auto", "job_id": accepted["job_id"], "lifecycle": "accepted",
+                "workspace": target.workspace_label, "remote": target.remote_name}
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error

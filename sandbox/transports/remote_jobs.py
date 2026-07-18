@@ -37,6 +37,30 @@ class RemoteJobTransport:
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("remote is not provisioned")
         deployed = self.deploy(remote, submission.project_root)
+        return self._submit_deployed(remote, deployed, submission)
+
+    def submit_many(self, submissions: list) -> list[dict]:
+        """Accept matrix children after one exact-tree deployment.
+
+        A matrix is a control-plane fan-out, not a reason to rsync the same
+        uncommitted tree repeatedly.  All children must deliberately target
+        one provisioned remote and one project root; callers use separate
+        batches for different remotes/projects.
+        """
+        if not submissions:
+            return []
+        first = submissions[0]
+        if (first.target_kind != "remote" or not first.remote_name or
+                any(item.target_kind != "remote" or item.remote_name != first.remote_name or
+                    item.project_root != first.project_root for item in submissions)):
+            raise RemoteJobTransportError("remote matrix children must share one remote and project")
+        remote = self.remote_lookup(first.remote_name)
+        if not isinstance(remote, dict) or not remote.get("provisioned"):
+            raise RemoteJobTransportError("remote is not provisioned")
+        deployed = self.deploy(remote, first.project_root)
+        return [self._submit_deployed(remote, deployed, item) for item in submissions]
+
+    def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         args = ["sb", "job-start", "--local", "--project-dir", deployed["target_path"],
@@ -53,14 +77,22 @@ class RemoteJobTransport:
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
                 "workspace_path": deployed["target_path"]}
 
-    def read_output(self, remote_name: str, job_id: str, *, cursor: str | None = None,
-                    max_bytes: int = 65536) -> dict:
+    def read_output(self, remote_name: str, job_id: str, *, stream: str = "combined",
+                    cursor: str | None = None, tail_bytes: int | None = None,
+                    max_bytes: int = 65536, wait_seconds: int = 0) -> dict:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict):
             raise RemoteJobTransportError("unknown remote")
-        args = ["sb", "job-output", job_id, "--max-bytes", str(max_bytes), "--json"]
+        args = ["sb", "job-output", job_id, "--stream", stream,
+                "--max-bytes", str(max_bytes), "--json"]
         if cursor:
             args += ["--cursor", cursor]
+        if tail_bytes is not None:
+            args += ["--tail-bytes", str(tail_bytes)]
+        # The remote job-output command performs the bounded wait against its
+        # retained output. SSH carries only the resulting page, never child IO.
+        if wait_seconds:
+            args += ["--wait-seconds", str(wait_seconds)]
         result = self.ssh_run(remote, shlex.join(args), timeout=25)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload:

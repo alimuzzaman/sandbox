@@ -20,6 +20,7 @@ they do not hold test pipes open across SSH.
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
 ./sb job-status <job-id> --json
 ./sb job-output <job-id> --follow
+./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ```
@@ -28,6 +29,13 @@ Use a named persistent workspace for development. Use deterministic isolated
 labels for parallel matrix cells, retain failures for diagnosis, and reset or
 destroy workspaces explicitly. For live remote operations, prefer the
 co-located remote MCP server and its durable job status/output tools.
+
+Output observation is control-plane only: `job-output` reads durable files in
+bounded cursor pages, including a selected stream, a tail, or a bounded
+long-poll. It never keeps the test process's stdout/stderr pipes open over SSH
+or MCP. MCP `run_tests(..., remote=..., workspace=..., timeout_seconds=...)`
+uses the same detached runtime and returns a job ID; use `job_status` and
+`job_output` to observe it.
 
 Start in any configured project with:
 

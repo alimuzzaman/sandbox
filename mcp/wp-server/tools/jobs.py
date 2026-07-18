@@ -16,15 +16,17 @@ from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity, Targ
 
 _job_service = None
 _target_service = None
+_workspace_service = None
 
 
 def register(server, dependencies: ToolDependencies) -> None:
-    global _job_service, _target_service
+    global _job_service, _target_service, _workspace_service
     _job_service = dependencies.require("job_service")
     _target_service = dependencies.require("target_service")
-    dependencies.require("workspace_service")
+    _workspace_service = dependencies.require("workspace_service")
     for tool in (job_start, job_status, job_list, job_output, job_follow, job_metrics, job_cancel,
-                 job_artifacts, job_artifact_get, job_retry, job_cleanup):
+                 job_artifacts, job_artifact_get, job_retry, job_cleanup,
+                 workspace_create, workspace_list, workspace_status, workspace_reset, workspace_destroy):
         server.tool()(tool)
 
 
@@ -133,6 +135,51 @@ def job_retry(job_id: str, *, request_id: str | None = None) -> dict:
         return _job_service.retry(job_id, request_id=request_id)
     except Exception as exc:
         return {"ok": False, "code": str(exc), "error": str(exc)}
+
+
+def _workspace_request(project_dir: str, *, local: bool, remote: str | None,
+                       workspace: str | None) -> TargetRequest:
+    return TargetRequest(project_dir=project_dir, local=local, remote=remote, workspace=workspace)
+
+
+def _workspace(action: str, project_dir: str, *, local: bool = False,
+               remote: str | None = None, workspace: str | None = None) -> dict:
+    """Use the shared namespace-aware workspace lifecycle service."""
+    try:
+        return getattr(_workspace_service, action)(_workspace_request(
+            project_dir, local=local, remote=remote, workspace=workspace))
+    except Exception as exc:
+        return {"ok": False, "code": getattr(exc, "code", "workspace_operation_failed"), "error": str(exc)}
+
+
+def workspace_create(project_dir: str, *, local: bool = False, remote: str | None = None,
+                     workspace: str | None = None) -> dict:
+    """Create (or retain) a named reusable local or provisioned-remote workspace."""
+    return _workspace("create", project_dir, local=local, remote=remote, workspace=workspace)
+
+
+def workspace_list(project_dir: str, *, local: bool = False, remote: str | None = None,
+                   workspace: str | None = None) -> dict:
+    """List workspaces in one explicit local or remote namespace."""
+    return _workspace("list", project_dir, local=local, remote=remote, workspace=workspace)
+
+
+def workspace_status(project_dir: str, *, local: bool = False, remote: str | None = None,
+                     workspace: str | None = None) -> dict:
+    """Read one workspace's lifecycle metadata without touching its contents."""
+    return _workspace("status", project_dir, local=local, remote=remote, workspace=workspace)
+
+
+def workspace_reset(project_dir: str, *, local: bool = False, remote: str | None = None,
+                    workspace: str | None = None) -> dict:
+    """Reset a non-busy workspace; active durable job leases are protected."""
+    return _workspace("reset", project_dir, local=local, remote=remote, workspace=workspace)
+
+
+def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | None = None,
+                      workspace: str | None = None) -> dict:
+    """Explicitly remove a non-busy named workspace from its selected namespace."""
+    return _workspace("destroy", project_dir, local=local, remote=remote, workspace=workspace)
 
 
 def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True) -> dict:

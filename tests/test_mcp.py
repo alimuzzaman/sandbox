@@ -165,6 +165,9 @@ class TestMcpServerSplit(unittest.TestCase):
             ("job_follow", "job_id"), ("job_metrics", "job_id"), ("job_cancel", "job_id"),
             ("job_artifacts", "job_id"), ("job_artifact_get", "artifact_id,job_id"),
             ("job_retry", "job_id"), ("job_cleanup", "job_id"),
+            ("workspace_create", "project_dir"), ("workspace_list", "project_dir"),
+            ("workspace_status", "project_dir"), ("workspace_reset", "project_dir"),
+            ("workspace_destroy", "project_dir"),
             ("wp_cli", "command,project_dir"), ("wp_exec", "command,project_dir"),
             ("wp_rest", "method,path,project_dir"), ("run_tests", "project_dir"),
             ("wp_cli_async", "command,project_dir"), ("wp_cli_job", "job_id,project_dir"),
@@ -204,7 +207,7 @@ class TestMcpServerSplit(unittest.TestCase):
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 94)
+        self.assertEqual(len(actual), 99)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

@@ -36,6 +36,22 @@ class TestMcpComposition(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "missing MCP dependency"):
             dependencies.require("unknown")
 
+    def test_workspace_tools_delegate_to_the_shared_workspace_service(self):
+        from tools import jobs
+
+        class Workspace:
+            def create(self, request):
+                return {"ok": True, "action": "create", "workspace": request.workspace,
+                        "local": request.local}
+
+        previous = jobs._workspace_service
+        try:
+            jobs._workspace_service = Workspace()
+            self.assertEqual(jobs.workspace_create("/tmp/project", local=True, workspace="dev"), {
+                "ok": True, "action": "create", "workspace": "dev", "local": True})
+        finally:
+            jobs._workspace_service = previous
+
     def test_builtin_group_manifest_is_exact_and_deterministic(self):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 

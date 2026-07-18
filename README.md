@@ -281,10 +281,15 @@ tree first, including uncommitted and untracked files; the remote supervisor
 persists process output and callers resume it by cursor rather than streaming
 child pipes over SSH.
 
+`job-output` transfers only bounded pages from those retained logs. Select a
+stream, tail, cursor, or bounded long-poll interval to suit the agent's output
+verbosity; the complete sealed log remains available for later retrieval.
+
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
 ./sb job-status <job-id> --json
 ./sb job-output <job-id> --follow
+./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ```

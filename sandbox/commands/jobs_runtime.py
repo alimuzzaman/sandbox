@@ -51,6 +51,7 @@ def configure_start_parser(parser) -> None:
 
 def configure_status_parser(parser) -> None:
     parser.add_argument("job_id")
+    parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
@@ -61,23 +62,27 @@ def configure_output_parser(parser) -> None:
     parser.add_argument("--tail-bytes", type=int)
     parser.add_argument("--max-bytes", type=int, default=65536)
     parser.add_argument("--follow", action="store_true")
+    parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_list_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_cancel_parser(parser) -> None:
     parser.add_argument("job_id")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
 def configure_metrics_parser(parser) -> None:
     parser.add_argument("job_id")
     parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
 
@@ -110,7 +115,7 @@ def cmd_job_start(_cfg, args) -> None:
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
     else:
         accepted = dependencies["job_service"].submit(submission)
-    if args.wait:
+    if args.wait and target.kind != "remote":
         while True:
             state = dependencies["job_service"].get(accepted["job_id"])
             if state["lifecycle"] in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
@@ -124,11 +129,31 @@ def cmd_job_start(_cfg, args) -> None:
 
 
 def cmd_job_status(_cfg, args) -> None:
-    result = durable_job_dependencies()["job_service"].get(args.job_id)
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).status(args.remote, args.job_id)
+    else:
+        result = durable_job_dependencies()["job_service"].get(args.job_id)
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} {result['lifecycle']} ({result['health']})")
 
 
 def cmd_job_output(_cfg, args) -> None:
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote)
+        cursor = args.cursor
+        while True:
+            result = transport.read_output(args.remote, args.job_id, cursor=cursor, max_bytes=args.max_bytes)
+            if args.json: print(json.dumps(result, sort_keys=True))
+            elif result.get("data"): print(result["data"], end="")
+            if not args.follow: return
+            state = transport.status(args.remote, args.job_id)
+            if state.get("lifecycle") in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}: return
+            cursor = result.get("cursor"); time.sleep(.2)
     service = durable_job_dependencies()["job_service"]
     cursor = args.cursor
     while True:
@@ -145,9 +170,16 @@ def cmd_job_output(_cfg, args) -> None:
 
 
 def cmd_job_list(_cfg, args) -> None:
-    result = durable_job_dependencies()["job_service"].list({"limit": args.limit})
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).list(args.remote, limit=args.limit)
+        result = result.get("jobs", result)
+    else:
+        result = durable_job_dependencies()["job_service"].list({"limit": args.limit})
     if args.json:
-        print(json.dumps(result, sort_keys=True))
+        print(json.dumps({"ok": True, "jobs": result}, sort_keys=True))
     else:
         for item in result:
             print(f"{item['job_id']} {item['lifecycle']} {item['workspace_label']}")
@@ -155,14 +187,26 @@ def cmd_job_list(_cfg, args) -> None:
 
 def cmd_job_cancel(_cfg, args) -> None:
     try:
-        result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
+        if args.remote:
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+                remote_lookup=_remote.get_remote).cancel(args.remote, args.job_id, force=args.force)
+        else:
+            result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
     except RuntimeError as exc:
         _die(str(exc))
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cancelling")
 
 
 def cmd_job_metrics(_cfg, args) -> None:
-    result = durable_job_dependencies()["job_service"].read_metrics(args.job_id, limit=args.limit)
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).metrics(args.remote, args.job_id, limit=args.limit)
+    else:
+        result = durable_job_dependencies()["job_service"].read_metrics(args.job_id, limit=args.limit)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

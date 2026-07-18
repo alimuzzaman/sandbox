@@ -19,3 +19,17 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("job-start", calls[1][1])
         self.assertIn("--request-id retry", calls[1][1])
         self.assertEqual(result["source"]["identity"], "sha256:id")
+
+    def test_status_list_cancel_and_metrics_use_bounded_json_control(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append((command, timeout)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        self.assertEqual(transport.status("r", "abc")["ok"], True)
+        self.assertEqual(transport.list("r")["jobs"], [])
+        transport.cancel("r", "abc", force=True)
+        transport.metrics("r", "abc")
+        self.assertTrue(all("--json" in command for command, _ in commands))
+        self.assertIn("job-cancel abc --force", commands[2][0])

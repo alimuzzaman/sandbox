@@ -66,3 +66,28 @@ class RemoteJobTransport:
         if getattr(result, "returncode", 1) != 0 or not payload:
             raise RemoteJobTransportError("remote output read failed")
         return payload
+
+    def control(self, remote_name: str, argv: list[str], *, timeout: int = 25) -> dict:
+        """Invoke a bounded JSON-only remote job control operation."""
+        remote = self.remote_lookup(remote_name)
+        if not isinstance(remote, dict) or not remote.get("provisioned"):
+            raise RemoteJobTransportError("unknown or unprovisioned remote")
+        result = self.ssh_run(remote, shlex.join(["sb", *argv, "--json"]), timeout=timeout)
+        payload = _last_json(getattr(result, "stdout", ""))
+        if getattr(result, "returncode", 1) != 0 or not payload:
+            raise RemoteJobTransportError("remote job control operation failed")
+        return payload
+
+    def status(self, remote_name: str, job_id: str) -> dict:
+        return self.control(remote_name, ["job-status", job_id])
+
+    def list(self, remote_name: str, *, limit: int = 50) -> dict:
+        return self.control(remote_name, ["job-list", "--limit", str(limit)])
+
+    def cancel(self, remote_name: str, job_id: str, *, force: bool = False) -> dict:
+        args = ["job-cancel", job_id]
+        if force: args.append("--force")
+        return self.control(remote_name, args)
+
+    def metrics(self, remote_name: str, job_id: str, *, limit: int = 500) -> dict:
+        return self.control(remote_name, ["job-metrics", job_id, "--limit", str(limit)])

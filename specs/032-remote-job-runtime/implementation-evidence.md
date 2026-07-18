@@ -290,3 +290,25 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_server_transport`.
 - Result: PASS, 5 tests. The WordPress transport-factory assertion runs in the
   MCP virtual environment, which owns its optional `httpx` dependency.
+
+## Remote MCP authentication convergence
+
+- Diagnosis: the remote credential file matched the locally registered bearer
+  token, but the running service returned HTTP 401. A migration replaced the
+  `EnvironmentFile` and used `systemctl enable --now`; systemd does not restart
+  an already-active unit in that case, leaving the bearer middleware with the
+  prior process environment.
+- Implementation: confirmed service migration now enables then explicitly
+  restarts the owned unit after replacing credentials. Tailscale service
+  migration no longer treats its private control URL as a public-origin identity,
+  so an existing owned Tailscale unit can be updated without a marker mismatch.
+- Command: `.cli-venv/bin/python -m unittest -v tests.test_remote
+  tests.test_hermes tests.test_mcp tests.test_mcp_composition`.
+- Result: PASS, 274 tests.
+- Live service status: both provisioned remotes reported `ownership: proven`,
+  `listener_expected: true`, and `authenticated: true` after confirmed migration.
+- Live MCP session: an authenticated Streamable HTTP client called `job_status`
+  and `job_output` against `scaleway-sandbox` for job
+  `ec418476a51bea22a15111507102b18b`; status reported `succeeded` and retained
+  output contained `node-container-pass`. The verification printed only boolean
+  outcomes and did not expose credentials or full headers.

@@ -48,6 +48,20 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.list("r")
         self.assertTrue(commands[0].startswith("/srv/sandbox/sb-src/sb job-list"))
 
+    def test_workspace_copy_path_is_slug_safe_for_remote_project_resolution(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda remote, root: {"target_path": "/srv/sandbox/project", "commit": "abc", "dirty": False,
+                                         "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
+            SourceIdentity("ignored"), remote_name="r"))
+        self.assertIn("project-workspace-", commands[0])
+        self.assertNotIn("project.workspace-", commands[0])
+
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},

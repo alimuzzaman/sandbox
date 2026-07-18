@@ -95,7 +95,9 @@ class RemoteJobTransport:
 
     def _prepare_workspace(self, remote: dict, source_path: str, label: str) -> str:
         suffix = hashlib.sha256(label.encode()).hexdigest()[:14]
-        workspace_path = f"{source_path}.workspace-{suffix}"
+        # Project resolution derives a slug from the deployed workspace name;
+        # use hyphens so the copied path remains a valid project root.
+        workspace_path = f"{source_path}-workspace-{suffix}"
         command = shlex.join(["rm", "-rf", workspace_path]) + " && " + shlex.join(
             ["mkdir", "-p", workspace_path]) + " && " + shlex.join(
             ["cp", "-a", f"{source_path}/.", workspace_path])

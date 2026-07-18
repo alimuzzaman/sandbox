@@ -150,6 +150,22 @@ def cmd_test(cfg, args) -> None:
             spec_json=None,
         ))
         return
+    # ``argparse.REMAINDER`` means an output flag after the optional mode is
+    # captured as passthrough. Preserve explicit PHPUnit arguments after
+    # ``--``, but consume the documented trailing CLI JSON flag.
+    raw_passthrough = list(getattr(args, "passthrough", None) or [])
+    cli_json = bool(getattr(args, "json", False))
+    passthrough = []
+    forwarding = False
+    for token in raw_passthrough:
+        if token == "--":
+            forwarding = True
+            passthrough.append(token)
+        elif token == "--json" and not forwarding:
+            cli_json = True
+        else:
+            passthrough.append(token)
+
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)
@@ -185,7 +201,7 @@ def cmd_test(cfg, args) -> None:
             die(str(exc))
         if getattr(args, "provision_only", False):
             die("--provision-only is only available for local integration harness setup")
-        extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
+        extra = [a for a in passthrough if a != "--"]
         # ``test`` preserves everything after its positional mode as
         # phpunit passthrough.  Keep target-selection options before the mode
         # so the nested invocation cannot accidentally resolve the deployed
@@ -207,7 +223,7 @@ def cmd_test(cfg, args) -> None:
         accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
             ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
             remote_sb_path=_remote.remote_sb_path).submit(submission)
-        if getattr(args, "json", False):
+        if cli_json:
             print(json.dumps(accepted, sort_keys=True))
         else:
             print(accepted["job_id"])
@@ -257,7 +273,7 @@ def cmd_test(cfg, args) -> None:
         print(f"  phpunit:    {tools['phpunit']}")
         print(f"  composer:   {tools['composer']}")
 
-    extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
+    extra = [a for a in passthrough if a != "--"]
     print()
     if mode == "unit" and entry.get("server") == "herd":
         code = _run_tests_unit_herd(inst, pconf["root"], tools, extra)

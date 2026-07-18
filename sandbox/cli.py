@@ -278,6 +278,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="isolated matrix workspace label (repeatable; mode=matrix)")
     ts.add_argument("--timeout", type=int, default=900, help="durable matrix job deadline")
     ts.add_argument("--output-profile", default="smart", help="durable matrix output profile")
+    ts.add_argument("--json", action="store_true",
+        help="print the durable remote submission result as JSON")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,
         help="args after `--` are passed to phpunit (e.g. --filter foo)")
 

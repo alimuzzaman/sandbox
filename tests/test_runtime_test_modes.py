@@ -10,6 +10,45 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestRuntimeTestModes(unittest.TestCase):
+    def test_trailing_json_is_not_forwarded_to_phpunit(self):
+        import sandbox.commands.debug as debug
+
+        captured = []
+        args = SimpleNamespace(
+            project_dir="/fixture", label=None, mode="integration",
+            provision_only=False, local=True, remote=None, workspace=None,
+            timeout=60, output_profile="smart", json=False,
+            passthrough=["--json"],
+        )
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"root": "/fixture", "tests": {"suite": "integration"}}
+
+            @staticmethod
+            def registry_get(_root, label=None):
+                return {"instance": "fixture", "label": "default"}
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [{"label": "default"}]
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(resolve=lambda _request: SimpleNamespace(kind="local")),
+                }), \
+                patch.object(debug, "_provision_test_harness", return_value={
+                    "suite": "/suite", "tools": {"phpunit": "phpunit", "composer": "composer", "polyfills": "polyfills"},
+                    "config": "/config",
+                }), \
+                patch.object(debug, "_run_tests", side_effect=lambda *_args: captured.append(_args[-1]) or 0):
+            debug.cmd_test({}, args)
+
+        self.assertEqual(captured, [[]])
+
     def test_shipped_pure_unit_fixture_resolves_to_unit(self):
         from sandbox.core._tests import detect_test_mode
 

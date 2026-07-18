@@ -145,3 +145,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   the existing local PHPUnit response shape is preserved.
 - Command: `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`
 - Result: PASS, 5 tests; `.cli-venv/bin/python -m unittest tests.test_mcp tests.test_architecture_boundaries -v` PASS, 12 tests.
+
+## Full pure regression increment
+
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`
+- Result: PASS, 947 tests, 1 skipped in 79.800 seconds. The skipped test is the
+  MCP server transport under the CLI virtualenv because its optional `httpx`
+  dependency is not installed there; the same transport suite passes separately
+  under `mcp/wp-server/.venv/bin/python` (5 tests).
+- The suite includes the existing local CLI, generic Compose, WordPress,
+  asynchronous-job, CI/E2E helper, remote-hosting, architecture, and MCP contract
+  coverage. Live Docker/remote acceptance remains environment-dependent and is not
+  represented as a passing pure test.

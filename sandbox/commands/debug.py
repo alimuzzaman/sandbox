@@ -147,6 +147,7 @@ def cmd_test(cfg, args) -> None:
             command=command, project_dir=getattr(args, "project_dir", None) or os.getcwd(),
             local=local, remote=remote, workspace=workspaces, timeout=timeout,
             output_profile=output_profile, json=as_json,
+            spec_json=None,
         ))
         return
     sc = _core()

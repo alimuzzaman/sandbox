@@ -214,6 +214,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
             project_dir=project_dir, local=bool(getattr(args, "local", False)), remote=remote_name,
             workspace=workspace, required_capability="job.exec"))
     except TargetResolutionError as exc:
+        # Legacy compatibility tests and callers may invoke ensure from a
+        # non-project directory without a target selector. Preserve the
+        # existing runtime preflight path in that case; explicit remote
+        # selection and configured remote errors still fail closed.
+        if exc.code == "invalid_project" and not remote_name and not getattr(args, "local", False):
+            return None
         die(f"{exc.code}: {exc}")
     if target.kind != "remote":
         return None

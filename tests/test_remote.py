@@ -762,6 +762,18 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertEqual(mock_ssh_run.call_args.kwargs["input_data"], token + "\n")
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_migration_handoff_proves_only_the_legacy_pidfile_process(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.migrate_remote_mcp_service({"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174, "c" * 64,
+                                      "https://sandbox.example.test", confirm=True, legacy_pidfile=True)
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("/proc/$legacy_pid/cmdline", command)
+        self.assertIn("/proc/$legacy_pid/cwd", command)
+        self.assertIn("kill \"$legacy_pid\"", command)
+        self.assertNotIn("pathlib.Path('/proc')", command)
+        self.assertIn("SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\"", command)
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_passes_public_url(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         entry = {"ssh": "ubuntu@1.2.3.4"}
@@ -808,8 +820,8 @@ class TestRemoteDoctorChecks(unittest.TestCase):
         with patch.object(sr, "check_reachable", return_value=True), \
              patch("urllib.request.OpenerDirector.open", return_value=Response()) as urlopen:
             checks = sr.remote_doctor_checks(remote)
-        self.assertTrue(checks[-1]["ok"])
-        self.assertEqual(checks[-1]["label"], "MCP endpoint reachable")
+        endpoint = next(check for check in checks if check["label"] == "MCP endpoint reachable")
+        self.assertTrue(endpoint["ok"])
         self.assertEqual(urlopen.call_args.args[0].full_url, "https://control.example.test/mcp")
         self.assertNotIn("never-print-this", repr(checks))
 
@@ -957,13 +969,34 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args.ssh_url = "myvps"
                 args.confirm = False
                 with patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}) as status, \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
                      patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
                 ssh_run.assert_not_called()
+                upload.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")
                 self.assertTrue(payload["data"]["legacy_pidfile_detected"])
                 self.assertNotIn("a" * 64, json.dumps(payload))
+
+    def test_confirmed_service_migration_stages_runtime_before_handoff(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="https", control_url="https://sandbox.example.test",
+                              mcp_port=9174, bearer_token="a" * 64)
+                args = MagicMock()
+                args.name = "migrate"
+                args.ssh_url = "myvps"
+                args.confirm = True
+                service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
+                with patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}), \
+                     patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(sr, "migrate_remote_mcp_service", return_value={"status": "applied", "service": service}) as migrate, \
+                     patch("builtins.print"):
+                    remote_cmd._cmd_service(args, as_json=True)
+                upload.assert_called_once_with("ubuntu@1.2.3.4")
+                self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
 
     def test_down_without_confirmation_is_plan_only(self):
         args = MagicMock()

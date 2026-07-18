@@ -640,6 +640,9 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertEqual(ssh.call_count, 1)
         self.assertEqual(create.call_count, 1)
         install_scripts.assert_called_once()
+        backup_command = checked.call_args_list[0].args[1]
+        self.assertIn("prechange_scheduler_evidence", backup_command)
+        self.assertIn("inventory_digest", backup_command)
 
     @patch("sandbox.core._hermes._create_catalog_job", side_effect=hermes.HermesError("create failed", "cron_create_failed"))
     @patch("sandbox.core._hermes._install_cron_scripts")

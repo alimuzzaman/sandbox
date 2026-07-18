@@ -278,7 +278,7 @@ reference. Summary:
 | `./sb remote provision <name> --control tailscale` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
 | `./sb remote service migrate <name> --plan --json` | Read-only systemd service migration plan |
-| `./sb remote service migrate <name> --confirm --json` | Install the protected owned service after explicit confirmation |
+| `./sb remote service migrate <name> --confirm --json` | Stage the current Sandbox runtime, then install the protected owned service after explicit confirmation |
 | `./sb remote service stop <name> --confirm --json` | Stop only the selected proven service unit |
 | `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
@@ -294,6 +294,11 @@ plus `url` when exposure succeeds.
 runtime revision, expected bind/port, systemd activity/enablement, user linger, local
 listener scope, and an authenticated `/mcp` probe. It treats unavailable evidence as
 degraded; it never reads a credential into command arguments or output.
+
+When an older PID-file-managed MCP process is detected, confirmed migration proves that
+exact process's PID, working directory, bind, and port before handing it off. If the
+new unit cannot start, its prior files are restored and only that proven legacy process
+is restarted. No generic process search or termination is used.
 
 ## 9. Known limitation / next step
 

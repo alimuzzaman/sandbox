@@ -2078,9 +2078,19 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = f"$HOME/.hermes/cron/backups/jobs-{stamp}.json"
     backup_meta = f"$HOME/.hermes/cron/backups/jobs-{stamp}.metadata.json"
+    prior_inventory_digest = _cron_inventory_digest(prior_jobs)
+    backup_evidence = {
+        "catalog_fingerprint": plan["catalog_fingerprint"],
+        "prior_inventory_digest": prior_inventory_digest,
+        "prechange_scheduler_evidence": {
+            "available": True,
+            "job_count": len(prior_jobs),
+            "inventory_digest": prior_inventory_digest,
+        },
+    }
     _checked(entry, "mkdir -p $HOME/.hermes/cron/backups; chmod 700 $HOME/.hermes/cron/backups; "
              f"if test -f $HOME/.hermes/cron/jobs.json; then cp $HOME/.hermes/cron/jobs.json {backup}; chmod 600 {backup}; fi; "
-             f"printf '%s\\n' {shlex.quote(json.dumps({'catalog_fingerprint': plan['catalog_fingerprint'], 'prior_inventory_digest': _cron_inventory_digest(prior_jobs)}, sort_keys=True))} > {backup_meta}; chmod 600 {backup_meta}",
+             f"printf '%s\\n' {shlex.quote(json.dumps(backup_evidence, sort_keys=True))} > {backup_meta}; chmod 600 {backup_meta}",
              what="Hermes cron inventory backup failed")
     removed: list[str] = []
     created: list[dict[str, str]] = []

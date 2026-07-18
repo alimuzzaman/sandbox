@@ -1044,12 +1044,14 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
 
 
 def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
-                               public_url: str | None = None, *, confirm: bool = False) -> dict:
+                               public_url: str | None = None, *, confirm: bool = False,
+                               legacy_pidfile: bool = False) -> dict:
     """Install the scoped remote service only after explicit confirmation.
 
     The token is passed through SSH stdin, never embedded in the unit or command.
     """
-    plan = remote_mcp_service_plan(remote, bind, port, public_url)
+    plan = remote_mcp_service_plan(remote, bind, port, public_url,
+                                   observed={"legacy_pidfile": "present"} if legacy_pidfile else None)
     if not confirm:
         return plan
     if not isinstance(token, str) or not token:
@@ -1057,12 +1059,33 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise ValueError("remote MCP token has unsafe characters")
     unit = render_remote_mcp_unit(bind, port, public_url)
+    legacy_child = (
+        f"echo $$ > {_MCP_PIDFILE}; exec ./sb mcp --transport streamable-http "
+        f"--bind {shlex.quote(bind)} --port {port}"
+        + (f" --public-url {shlex.quote(public_url)}" if public_url else "")
+        + " </dev/null > /tmp/sandbox-mcp-remote.log 2>&1"
+    )
+    legacy_restart = (
+        "( cd \"$HOME/sandbox/sb-src\"; "
+        "SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\" "
+        f"setsid -f sh -c {shlex.quote(legacy_child)} )"
+    )
+    legacy_preflight = (
+        f"legacy_pid=''; if test {1 if legacy_pidfile else 0} = 1; then "
+        f"test -r {_MCP_PIDFILE}; legacy_pid=$(cat {_MCP_PIDFILE}); "
+        "case \"$legacy_pid\" in ''|*[!0-9]*) exit 42;; esac; "
+        "test -r \"/proc/$legacy_pid/cmdline\"; legacy_cwd=$(readlink \"/proc/$legacy_pid/cwd\"); "
+        "legacy_cmd=$(tr '\\0' ' ' < \"/proc/$legacy_pid/cmdline\"); "
+        "test \"$legacy_cwd\" = \"$HOME/sandbox/sb-src\"; "
+        "case \"$legacy_cmd\" in *'--transport streamable-http'*'--bind " + bind + "'*'--port " + str(port) + "'*) ;; *) exit 42;; esac; fi; "
+    )
     command = (
         "set -eu; umask 077; mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
         "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
         "had_unit=0; had_env=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
         "if test -f \"$env_path\"; then cp \"$env_path\" \"$backup/env\"; had_env=1; fi; "
+        + legacy_preflight +
         "rollback() { if test \"$had_unit\" = 1; then cp \"$backup/unit\" \"$unit_path\"; else rm -f \"$unit_path\"; fi; "
         "if test \"$had_env\" = 1; then cp \"$backup/env\" \"$env_path\"; else rm -f \"$env_path\"; fi; "
         "systemctl --user daemon-reload || true; }; "
@@ -1073,9 +1096,10 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
         "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
         "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; "
+        "if test -n \"$legacy_pid\"; then kill \"$legacy_pid\"; rm -f " + _MCP_PIDFILE + "; fi; "
         "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\" || "
         f"! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
-        "rollback; exit 1; fi; rm -rf \"$backup\""
+        "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
     )
     try:
         res = ssh_run(remote, command, timeout=60, input_data=token + "\n")

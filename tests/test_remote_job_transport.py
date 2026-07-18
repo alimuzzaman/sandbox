@@ -36,6 +36,18 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertTrue(all("--json" in command for command, _ in commands))
         self.assertIn("job-cancel abc --force", commands[2][0])
 
+    def test_control_uses_the_staged_remote_cli_not_path_lookup(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        transport.list("r")
+        self.assertTrue(commands[0].startswith("/srv/sandbox/sb-src/sb job-list"))
+
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},

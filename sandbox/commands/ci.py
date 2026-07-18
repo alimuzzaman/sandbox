@@ -596,7 +596,8 @@ def _run_remote_ci(target, root: str, wf_path: Path, plan: dict, args, *, as_jso
     from sandbox.transports.remote_jobs import RemoteJobTransport
     submissions = _remote_ci_submissions(target, root, wf_path, plan, args)
     result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit_many(submissions)
+        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+        remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
     report = {"ok": True, "kind": "ci", "workflow": str(wf_path),
               "target": {"kind": target.kind, "remote": target.remote_name,
                          "workspace": target.workspace_label},

@@ -198,7 +198,8 @@ def cmd_e2e(cfg, args) -> None:
         from sandbox.transports.remote_jobs import RemoteJobTransport
         try:
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit(submission)
         except Exception as exc:
             die(f"remote E2E acceptance failed: {exc}")
         if getattr(args, "json", False): print(json.dumps(accepted, sort_keys=True))

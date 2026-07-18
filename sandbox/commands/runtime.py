@@ -88,7 +88,8 @@ def cmd_exec(cfg, args) -> None:
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit(submission)
         else:
             service = durable_job_dependencies()["job_service"]
             accepted = service.submit(submission)

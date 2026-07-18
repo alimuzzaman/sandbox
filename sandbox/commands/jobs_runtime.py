@@ -181,7 +181,8 @@ def cmd_job_start(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-            ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+            ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+            remote_sb_path=_remote.remote_sb_path).submit(submission)
     else:
         accepted = dependencies["job_service"].submit(submission)
     if args.wait and target.kind != "remote":
@@ -202,7 +203,7 @@ def cmd_job_status(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).status(args.remote, args.job_id)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
     else:
         result = durable_job_dependencies()["job_service"].get(args.job_id)
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} {result['lifecycle']} ({result['health']})")
@@ -213,7 +214,7 @@ def cmd_job_output(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path)
         cursor = args.cursor
         while True:
             result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
@@ -248,7 +249,7 @@ def cmd_job_list(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).list(args.remote, limit=args.limit,
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(args.remote, limit=args.limit,
                 project_dir=args.project_dir, workspace=args.workspace, active_only=args.active_only)
         result = result.get("jobs", result)
     else:
@@ -276,7 +277,7 @@ def cmd_job_cancel(_cfg, args) -> None:
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-                remote_lookup=_remote.get_remote).cancel(args.remote, args.job_id, force=args.force)
+                remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).cancel(args.remote, args.job_id, force=args.force)
         else:
             result = durable_job_dependencies()["job_service"].cancel(args.job_id, force=args.force)
     except RuntimeError as exc:
@@ -289,7 +290,7 @@ def cmd_job_retry(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).retry(args.remote, args.job_id, request_id=args.request_id)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).retry(args.remote, args.job_id, request_id=args.request_id)
     else:
         result = durable_job_dependencies()["job_service"].retry(args.job_id, request_id=args.request_id)
     print(json.dumps(result, sort_keys=True) if args.json else result["job_id"])
@@ -303,7 +304,7 @@ def cmd_job_cleanup(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).cleanup(args.remote, args.job_id, **options)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).cleanup(args.remote, args.job_id, **options)
     else:
         result = durable_job_dependencies()["job_service"].cleanup(args.job_id, **options)
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cleanup={result['cleanup_state']}")
@@ -436,7 +437,7 @@ def cmd_job_matrix(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path)
         result = transport.submit_many(submissions)
     else:
         result = dependencies["job_service"].submit_matrix(

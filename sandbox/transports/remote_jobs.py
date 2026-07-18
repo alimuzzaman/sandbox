@@ -27,10 +27,18 @@ def _last_json(text: str) -> dict | None:
 class RemoteJobTransport:
     """Deploy then exchange compact job-control JSON, never child stdio pipes."""
 
-    def __init__(self, *, deploy: Callable, ssh_run: Callable, remote_lookup: Callable) -> None:
+    def __init__(self, *, deploy: Callable, ssh_run: Callable, remote_lookup: Callable,
+                 remote_sb_path: Callable | None = None) -> None:
         self.deploy = deploy
         self.ssh_run = ssh_run
         self.remote_lookup = remote_lookup
+        # The VPS runtime is staged under SANDBOX_HOME; its CLI is not
+        # necessarily on PATH.  Keep the path policy injected by the remote
+        # adapter so this transport remains runtime-neutral and testable.
+        self.remote_sb_path = remote_sb_path or (lambda _remote: "sb")
+
+    def _remote_command(self, remote: dict, argv: list[str]) -> str:
+        return shlex.join([self.remote_sb_path(remote), *argv])
 
     def submit(self, submission) -> dict:
         if submission.target_kind != "remote" or not submission.remote_name:
@@ -74,10 +82,10 @@ class RemoteJobTransport:
                  "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
                             "dirty_digest": deployed.get("dirty_digest")}})
         encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
-        args = ["sb", "job-matrix", "--local", "--project-dir", deployed["target_path"],
+        args = ["job-matrix", "--local", "--project-dir", deployed["target_path"],
                 "--timeout", str(max(item.deadline_seconds for item in submissions)),
                 "--output-profile", first.output_profile, "--spec-json", encoded, "--json"]
-        result = self.ssh_run(remote, shlex.join(args), timeout=30)
+        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
             raise RemoteJobTransportError("remote matrix acceptance failed")
@@ -100,13 +108,13 @@ class RemoteJobTransport:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
-        args = ["sb", "job-start", "--local", "--project-dir", workspace_path,
+        args = ["job-start", "--local", "--project-dir", workspace_path,
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
                 "--output-profile", submission.output_profile, "--source-identity", deployed["identity"]]
         if submission.request_id:
             args += ["--request-id", submission.request_id]
         args += ["--json", "--", *submission.argv]
-        result = self.ssh_run(remote, shlex.join(args), timeout=30)
+        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
             raise RemoteJobTransportError("remote job acceptance failed")
@@ -121,7 +129,7 @@ class RemoteJobTransport:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict):
             raise RemoteJobTransportError("unknown remote")
-        args = ["sb", "job-output", job_id, "--stream", stream,
+        args = ["job-output", job_id, "--stream", stream,
                 "--max-bytes", str(max_bytes), "--encoding", encoding, "--json"]
         if cursor:
             args += ["--cursor", cursor]
@@ -131,7 +139,7 @@ class RemoteJobTransport:
         # retained output. SSH carries only the resulting page, never child IO.
         if wait_seconds:
             args += ["--wait-seconds", str(wait_seconds)]
-        result = self.ssh_run(remote, shlex.join(args), timeout=25)
+        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=25)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload:
             raise RemoteJobTransportError("remote output read failed")
@@ -142,7 +150,7 @@ class RemoteJobTransport:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("unknown or unprovisioned remote")
-        result = self.ssh_run(remote, shlex.join(["sb", *argv, "--json"]), timeout=timeout)
+        result = self.ssh_run(remote, self._remote_command(remote, [*argv, "--json"]), timeout=timeout)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload:
             raise RemoteJobTransportError("remote job control operation failed")

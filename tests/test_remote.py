@@ -763,6 +763,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 run.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")
+                self.assertFalse(payload["provisioned"])
                 self.assertTrue(payload["data"]["requires_confirm"])
 
 

@@ -276,7 +276,7 @@ def _cmd_provision(args, as_json: bool) -> None:
         public_host = _control_host(args, entry, ssh_target, as_json)
     if not _arg_true(args, "confirm"):
         result = {
-            "ok": True, "name": name, "status": "planned", "provisioned": False,
+            "ok": True, "name": name, "status": "planned", "provisioned": bool(entry.get("provisioned")),
             "control_transport": control_transport, "control_host": public_host,
             "data": {"requires_confirm": True, "action": "provision"}, "error": None,
         }

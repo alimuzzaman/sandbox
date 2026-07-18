@@ -163,7 +163,8 @@ def run_tests(project_dir: str, phpunit_args: str = "",
                 command += ["--", *shlex.split(phpunit_args)]
             source = "sha256:" + __import__("hashlib").sha256(target.project_root.encode()).hexdigest()
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(JobSubmission(
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit(JobSubmission(
                     "test", target.project_root, source.removeprefix("sha256:"), "remote",
                     target.workspace_label, tuple(command), timeout_seconds, SourceIdentity(source),
                     remote_name=target.remote_name, output_profile=output_profile,

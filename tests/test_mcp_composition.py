@@ -52,6 +52,13 @@ class TestMcpComposition(unittest.TestCase):
         finally:
             jobs._workspace_service = previous
 
+    def test_remote_job_tools_use_the_staged_remote_cli_path(self):
+        from sandbox.core import _remote
+        from tools import jobs
+
+        transport = jobs._remote_transport()
+        self.assertIs(transport.remote_sb_path, _remote.remote_sb_path)
+
     def test_builtin_group_manifest_is_exact_and_deterministic(self):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 

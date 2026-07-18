@@ -315,7 +315,7 @@ def cmd_job_metrics(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).metrics(args.remote, args.job_id, limit=args.limit)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).metrics(args.remote, args.job_id, limit=args.limit)
     else:
         result = durable_job_dependencies()["job_service"].read_metrics(args.job_id, limit=args.limit)
     if args.json:
@@ -330,7 +330,7 @@ def cmd_job_artifacts(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).artifacts(args.remote, args.job_id)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).artifacts(args.remote, args.job_id)
     else:
         result = {"ok": True, "artifacts": durable_job_dependencies()["job_service"].list_artifacts(args.job_id)}
     print(json.dumps(result, sort_keys=True) if args.json else "\n".join(
@@ -343,7 +343,7 @@ def cmd_job_artifact_get(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).artifact_get(args.remote, args.job_id, args.artifact_id,
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).artifact_get(args.remote, args.job_id, args.artifact_id,
                 offset=args.offset, max_bytes=args.max_bytes)
     else:
         data = durable_job_dependencies()["job_service"].get_artifact(args.job_id, args.artifact_id,

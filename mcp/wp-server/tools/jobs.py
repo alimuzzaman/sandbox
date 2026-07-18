@@ -23,7 +23,8 @@ def _remote_transport():
     from sandbox.core import _remote
     from sandbox.transports.remote_jobs import RemoteJobTransport
     return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote)
+        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+        remote_sb_path=_remote.remote_sb_path)
 
 
 def register(server, dependencies: ToolDependencies) -> None:
@@ -62,7 +63,8 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit(submission)
         return _job_service.submit(submission)
     except Exception as exc:
         return {"ok": False, "code": "supervisor_launch_failed", "error": str(exc)}
@@ -88,7 +90,8 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
             return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit_many(submissions)
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
         return _job_service.submit_matrix(submissions)
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"), "error": str(exc)}

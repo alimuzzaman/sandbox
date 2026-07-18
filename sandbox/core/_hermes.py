@@ -3555,7 +3555,9 @@ from pathlib import Path
 processes=[]
 for proc in Path("/proc").iterdir():
     if not proc.name.isdigit() or int(proc.name) in {os.getpid(), os.getppid()}: continue
-    try: args=proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\0")
+    try:
+        if proc.stat().st_uid != os.getuid(): continue
+        args=proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\0")
     except OSError: continue
     if any(arg.endswith("hermes") or "/hermes" in arg for arg in args) and "gateway" in args and "run" in args:
         processes.append(int(proc.name))
@@ -3645,6 +3647,8 @@ def gateway_process_count():
             if not proc.name.isdigit() or int(proc.name) in {os.getpid(), os.getppid()}:
                 continue
             try:
+                if proc.stat().st_uid != os.getuid():
+                    continue
                 args = proc.joinpath("cmdline").read_bytes().decode(errors="replace").split("\\0")
             except OSError:
                 continue

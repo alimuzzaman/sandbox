@@ -131,3 +131,38 @@ class JobService:
                     handle.seek(offset)
                     return handle.read(max_bytes)
         raise RuntimeError("artifact_not_found")
+
+    def retry(self, job_id: str, *, request_id: str | None = None):
+        import json
+        from sandbox.jobs.models import SourceIdentity
+        previous = self.repository.get(job_id)
+        if previous["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            raise RuntimeError("job_not_terminal")
+        return self.submit(JobSubmission(
+            kind=previous["kind"], project_root=previous["project_root"], project_identity=previous["project_identity"],
+            target_kind=previous["target_kind"], remote_name=previous["remote_name"], workspace_label=previous["workspace_label"],
+            workspace_mode=previous["workspace_mode"], argv=tuple(json.loads(previous["command_json"])),
+            deadline_seconds=previous["deadline_seconds"], source=SourceIdentity(previous["source_identity"], previous["source_commit"], previous["source_dirty_digest"]),
+            request_id=request_id, retry_of_job_id=job_id, parent_job_id=previous["root_job_id"],
+            attempt=int(previous["attempt"]) + 1, cwd_relative=previous["cwd_relative"],
+            execution_profile=previous["execution_profile"], output_profile=previous["output_profile"],
+            deadline_source=previous["deadline_source"], stall_seconds=previous["stall_seconds"],
+            cancel_on_stall=bool(previous["cancel_on_stall"]), cleanup_policy=previous["cleanup_policy"],
+            environment_keys=tuple(json.loads(previous["environment_keys_json"])),
+        ))
+
+    def cleanup(self, job_id: str, *, logs: bool = True, artifacts: bool = True) -> dict:
+        import shutil
+        state = self.repository.get(job_id)
+        if state["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            raise RuntimeError("active_job_protected")
+        directory = self.storage.job_dir(job_id)
+        removed = []
+        if logs:
+            output = directory / "output"
+            if output.exists(): shutil.rmtree(output); removed.append("logs")
+        if artifacts:
+            artifact_dir = directory / "artifacts"
+            if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
+        self.repository.transition(job_id, state["lifecycle"], cleanup_state="completed") if False else None
+        return {"ok": True, "job_id": job_id, "removed": removed}

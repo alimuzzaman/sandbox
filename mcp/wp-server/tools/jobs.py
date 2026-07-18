@@ -24,7 +24,7 @@ def register(server, dependencies: ToolDependencies) -> None:
     _target_service = dependencies.require("target_service")
     dependencies.require("workspace_service")
     for tool in (job_start, job_status, job_list, job_output, job_follow, job_cancel,
-                 job_artifacts, job_artifact_get):
+                 job_artifacts, job_artifact_get, job_retry, job_cleanup):
         server.tool()(tool)
 
 
@@ -117,3 +117,19 @@ def job_artifact_get(job_id: str, artifact_id: str, *, offset: int = 0,
                 "encoding": "base64"}
     except Exception as exc:
         return {"ok": False, "code": "artifact_not_found", "error": str(exc)}
+
+
+def job_retry(job_id: str, *, request_id: str | None = None) -> dict:
+    """Create a linked retry attempt without mutating the prior terminal job."""
+    try:
+        return _job_service.retry(job_id, request_id=request_id)
+    except Exception as exc:
+        return {"ok": False, "code": str(exc), "error": str(exc)}
+
+
+def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True) -> dict:
+    """Explicitly remove retained logs/artifacts for a terminal job only."""
+    try:
+        return _job_service.cleanup(job_id, logs=logs, artifacts=artifacts)
+    except Exception as exc:
+        return {"ok": False, "code": str(exc), "error": str(exc)}

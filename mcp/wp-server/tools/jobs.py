@@ -77,18 +77,18 @@ def job_list(limit: int = 50) -> dict:
 
 def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = None,
                tail_bytes: int | None = None, max_bytes: int = 65536,
-               encoding: str = "utf8") -> dict:
+               encoding: str = "utf8", wait_seconds: int = 0) -> dict:
     """Read a bounded retained output page. Returned cursors are exclusive."""
     try:
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
-            tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding))
+            tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
     except Exception as exc:
         return {"ok": False, "code": "invalid_output_query", "error": str(exc)}
 
 
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536) -> dict:
     """Return one bounded long-poll output page; callers repeat with its cursor."""
-    return job_output(job_id, cursor=cursor, max_bytes=max_bytes)
+    return job_output(job_id, cursor=cursor, max_bytes=max_bytes, wait_seconds=1)
 
 
 def job_metrics(job_id: str, *, limit: int = 500) -> dict:

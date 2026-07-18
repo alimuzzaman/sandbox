@@ -182,7 +182,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 - [ ] T081 [US3] Implement transactional workspace/host capacity leases, queue state, renewal, release, and immediate-busy suggestions in `sandbox/jobs/scheduler.py`
 - [X] T082 [US3] Implement deterministic safe isolated label generation and target namespace separation in `sandbox/jobs/scheduler.py`
 - [ ] T083 [US3] Implement parent coordinators, declared step dependencies, per-child deadlines/results, matrix capacity, fail-fast/continue, retry relationships, and aggregate status in `sandbox/jobs/scheduler.py`
-- [ ] T084 [US3] Implement persistent workspace create/list/status and exclusive reset/destroy orchestration in `sandbox/application/workspace_service.py`
+- [X] T084 [US3] Implement persistent workspace create/list/status and exclusive reset/destroy orchestration in `sandbox/application/workspace_service.py`
 - [ ] T085 [US3] Adapt existing local and remote ensure/reset/destroy mechanisms behind workspace service contracts in `sandbox/transports/jobs.py`, `sandbox/transports/remote_jobs.py`, and `sandbox/core/_remote.py`
 - [ ] T086 [US3] Enforce deploy/ensure/reset/destroy lifecycle leases and execution leases before side effects in `sandbox/application/job_service.py` and `sandbox/application/workspace_service.py`
 - [X] T087 [US3] Add `sb workspace create|list|status|reset|destroy` feature-owned command group in `sandbox/commands/workspaces.py` and register it in `sandbox/commands/manifest.py`

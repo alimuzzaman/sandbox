@@ -72,6 +72,10 @@ def run_descriptor(path: str | Path) -> int:
         if timed_out:
             repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code, termination_reason="deadline_exceeded")
             return 124
+        if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
+            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
+                termination_reason="cancelled_by_request")
+            return 130
         target = Lifecycle.SUCCEEDED if return_code == 0 else Lifecycle.FAILED
         repository.transition(job_id, target, exit_code=return_code,
             termination_reason=None if return_code == 0 else "exit_nonzero")

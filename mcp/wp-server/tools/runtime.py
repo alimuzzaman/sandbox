@@ -56,7 +56,10 @@ def instance_logs(project_dir: str, label: str | None = None) -> dict:
 
 
 def instance_exec(command: list[str], project_dir: str,
-                 label: str | None = None) -> dict:
+                 label: str | None = None, local: bool = False,
+                 remote: str | None = None, workspace: str | None = None,
+                 timeout_seconds: int | None = None,
+                 output_profile: str = "smart") -> dict:
     """Execute an argv list in the declared public service.
 
     Shell text is intentionally not accepted; callers that need a shell must
@@ -66,4 +69,9 @@ def instance_exec(command: list[str], project_dir: str,
     if not command or any(not isinstance(item, str) or not item for item in command):
         return {"ok": False, "code": "invalid_command",
                 "error": "command must be a non-empty argv list"}
+    if local or remote or workspace or timeout_seconds is not None:
+        from tools.jobs import job_start
+        job = job_start(command, project_dir, local=local, remote=remote, workspace=workspace,
+                        timeout_seconds=timeout_seconds or 900, output_profile=output_profile)
+        return {"ok": bool(job.get("ok")), "operation": "exec", **job}
     return _typed_invoke(project_dir, label, "exec", {"argv": command})

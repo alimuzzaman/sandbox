@@ -27,12 +27,13 @@ unaffected.
 
 ```bash
 ./sb remote add myvps ssh://ubuntu@203.0.113.10
-./sb remote provision myvps --control-host sandbox-control.example.com
+./sb remote provision myvps --control-host sandbox-control.example.com --confirm
 ```
 
 `provision` asks whether you want Tailscale instead of public HTTPS when run
 interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
-`--control tailscale` to opt into Tailscale explicitly.
+`--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit
+`--confirm` to inspect the selected transport without modifying the VPS.
 
 For HTTPS mode, `provision` SSHes in and, non-interactively, installs Docker CE +
 compose plugin, Caddy, the `sb` runtime itself, the MCP server venv, and the `visit`
@@ -274,8 +275,8 @@ reference. Summary:
 |---|---|
 | `./sb remote add <name> <ssh_url>` | Register a VPS target |
 | `./sb remote list` | Show configured remotes + reachability + provisioned status |
-| `./sb remote provision <name> --control-host <host>` | Fully automated install + start the remote MCP server over public HTTPS |
-| `./sb remote provision <name> --control tailscale` | Same, but use Tailscale instead of public HTTPS |
+| `./sb remote provision <name> --control-host <host> --confirm` | Fully automated install + start the remote MCP server over public HTTPS |
+| `./sb remote provision <name> --control tailscale --confirm` | Same, but use Tailscale instead of public HTTPS |
 | `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
 | `./sb remote service migrate <name> --plan --json` | Read-only systemd service migration plan |
 | `./sb remote service migrate <name> --confirm --json` | Stage the current Sandbox runtime, then install the protected owned service after explicit confirmation |

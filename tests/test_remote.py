@@ -702,6 +702,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.name = "myvps"
                 args.control = "https"
                 args.control_host = "sandbox.example.com"
+                args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)), \
                      patch.object(sr, "configure_https_proxy"), \
                      patch.object(sr, "start_remote_mcp_server"), \
@@ -722,6 +723,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.name = "myvps"
                 args.control = "tailscale"
                 args.control_host = None
+                args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
                      patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
                      patch.object(sr, "start_remote_mcp_server"), \
@@ -741,8 +743,27 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.name = "myvps"
                 args.control = "https"
                 args.control_host = None
+                args.confirm = False
                 with self.assertRaises(SystemExit):
                     remote_cmd._cmd_provision(args, as_json=True)
+
+    def test_provision_without_confirmation_is_plan_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = MagicMock()
+                args.name = "myvps"
+                args.control = "https"
+                args.control_host = "sandbox.example.com"
+                args.confirm = False
+                with patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch("subprocess.run") as run, patch("builtins.print") as printed:
+                    remote_cmd._cmd_provision(args, as_json=True)
+                upload.assert_not_called()
+                run.assert_not_called()
+                payload = json.loads(printed.call_args.args[0])
+                self.assertEqual(payload["status"], "planned")
+                self.assertTrue(payload["data"]["requires_confirm"])
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):
@@ -785,6 +806,7 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("--bind 127.0.0.1", cmd)
         self.assertIn("--public-url https://sandbox.example.com", cmd)
         self.assertIn("Restart=on-failure", cmd)
+        self.assertIn("StartLimitBurst=5", cmd)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_timeout_is_redacted(self, mock_ssh_run):
@@ -899,7 +921,7 @@ class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_stop_targets_only_the_proven_service_unit(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
-            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\n"),
+            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\n"),
             _completed(returncode=0),
         ]
         remote = {"ssh": "ubuntu@1.2.3.4", "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174)}
@@ -921,10 +943,11 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n")
+            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\npid_ownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n")
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
         status = sr.remote_mcp_service_status({"ssh": "ubuntu@1.2.3.4", "mcp_service": record})
         self.assertEqual(status["ownership"], "proven")
+        self.assertEqual(status["pid_ownership"], "proven")
         self.assertTrue(status["listener_expected"])
         self.assertTrue(status["authenticated"])
         self.assertEqual(status["legacy_pidfile"], "present")
@@ -932,7 +955,11 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", command)
         self.assertEqual(len(record["runtime_revision"]), 24)
         self.assertIn("ss -H -ltn", command)
+        self.assertIn("ControlGroup", command)
+        self.assertIn("/proc/$pid/cgroup", command)
         self.assertIn("urllib.request", command)
+        self.assertIn("response.status in (200,204,400,405,406)", command)
+        self.assertIn("exc.code in (200,204,400,405,406)", command)
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
 
@@ -1007,6 +1034,28 @@ class TestRemoteServiceCommand(unittest.TestCase):
             remote_cmd._cmd_down(args, as_json=True)
         stop.assert_not_called()
         self.assertEqual(json.loads(printed.call_args.args[0])["status"], "planned")
+
+    def test_confirmed_up_uses_the_verified_migration_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="https", control_host="sandbox.example.test",
+                              control_url="https://sandbox.example.test", mcp_port=9174,
+                              bearer_token="a" * 64)
+                args = MagicMock()
+                args.name = "myvps"
+                args.confirm = True
+                service = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
+                with patch.object(remote_cmd, "_upload_runtime_source") as upload, \
+                     patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}), \
+                     patch.object(sr, "configure_https_proxy") as proxy, \
+                     patch.object(sr, "migrate_remote_mcp_service", return_value={"status": "applied", "service": service}) as migrate, \
+                     patch("builtins.print"):
+                    remote_cmd._cmd_up(args, as_json=True)
+                upload.assert_called_once_with("ubuntu@1.2.3.4")
+                proxy.assert_called_once()
+                self.assertTrue(migrate.call_args.kwargs["confirm"])
+                self.assertTrue(migrate.call_args.kwargs["legacy_pidfile"])
 
 
 class TestDeployRequiresProvisionedRemote(unittest.TestCase):

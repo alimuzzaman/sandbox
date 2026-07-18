@@ -930,6 +930,8 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) 
         "[Unit]",
         "Description=Sandbox remote MCP control plane",
         "After=network-online.target",
+        "StartLimitIntervalSec=60",
+        "StartLimitBurst=5",
         "",
         "[Service]",
         "Type=simple",
@@ -979,8 +981,8 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "token=matches[0] if len(matches)==1 else ''; "
         "url='http://%s:%s/mcp' % (sys.argv[1], sys.argv[2]); "
         "request=urllib.request.Request(url, headers={'Authorization':'Bearer '+token}); "
-        "\ntry:\n urllib.request.urlopen(request, timeout=5); print('auth=ok')\n"
-        "except urllib.error.HTTPError as exc:\n print('auth=ok' if exc.code != 401 else 'auth=failed')\n"
+        "\ntry:\n response=urllib.request.urlopen(request, timeout=5); print('auth=ok' if response.status in (200,204,400,405,406) else 'auth=failed')\n"
+        "except urllib.error.HTTPError as exc:\n print('auth=ok' if exc.code in (200,204,400,405,406) else 'auth=failed')\n"
         "except Exception:\n print('auth=unknown')"
     )
     auth_probe = (
@@ -994,30 +996,41 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "*) if kill -0 \"$legacy_pid\" 2>/dev/null; then echo legacy_pidfile=present; else echo legacy_pidfile=stale; fi;; esac; "
         "else echo legacy_pidfile=absent; fi"
     )
+    pid_probe = (
+        f"cgroup=$(systemctl --user show {REMOTE_MCP_SERVICE} -p ControlGroup --value 2>/dev/null || true); "
+        "if test -n \"$pid\" && test \"$pid\" != 0 && test -n \"$cgroup\" && "
+        "test -r \"/proc/$pid/cgroup\" && grep -Fq \"$cgroup\" \"/proc/$pid/cgroup\"; "
+        "then echo pid_ownership=proven; "
+        "elif test -n \"$pid\" && test \"$pid\" != 0; then echo pid_ownership=ambiguous; "
+        "else echo pid_ownership=not_running; fi; "
+    )
     command = (
         "if ! command -v systemctl >/dev/null 2>&1; then echo unavailable; exit 0; fi; "
         f"printf 'enabled='; systemctl --user is-enabled {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
-        f"printf 'pid='; systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true; "
+        f"pid=$(systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true); printf 'pid=%s\\n' \"$pid\"; "
         "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        + marker_probe + listener_probe + auth_probe + legacy_probe
+        + marker_probe + pid_probe + listener_probe + auth_probe + legacy_probe
     )
     res = ssh_run(remote, command, timeout=20)
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "listener", "auth", "legacy_pidfile"}:
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "pid_ownership", "listener", "auth", "legacy_pidfile"}:
             values[key] = value.strip().lower()
     installed = values.get("enabled") not in {"", "not-found", "unknown"}
     active = values.get("active") == "active"
     enabled = values.get("enabled") == "enabled"
     linger = values.get("linger") == "yes"
-    ownership = "proven" if expected and installed and values.get("ownership") == "proven" else "missing" if not installed else "ambiguous"
+    unit_owned = expected and installed and values.get("ownership") == "proven"
+    pid_owned = values.get("pid_ownership", "unknown")
+    ownership = "proven" if unit_owned and (not active or pid_owned == "proven") else "missing" if not installed else "ambiguous"
     return {
         "installed": installed, "enabled": enabled, "active": active,
         "linger": linger, "ownership": ownership,
         "service_name": REMOTE_MCP_SERVICE if expected else None,
         "pid_present": values.get("pid", "0") not in {"", "0"},
+        "pid_ownership": pid_owned,
         "listener_expected": values.get("listener") == "expected",
         "authenticated": values.get("auth") == "ok",
         "listener_state": values.get("listener", "unknown"),

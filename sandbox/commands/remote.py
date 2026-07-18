@@ -43,6 +43,7 @@ def _cmd_service(args, as_json: bool) -> None:
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
+    confirmed = _arg_true(args, "confirm")
     try:
         if operation == "status":
             payload = {"ok": True, "name": name, "status": "observed",
@@ -56,20 +57,20 @@ def _cmd_service(args, as_json: bool) -> None:
             if not isinstance(token, str) or not token:
                 raise ValueError("remote service token is unavailable; provision the remote first")
             observed = sr.remote_mcp_service_status(entry)
-            if getattr(args, "confirm", False):
+            if confirmed:
                 _upload_runtime_source(entry["ssh"])
             plan = sr.migrate_remote_mcp_service(
                 entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
-                entry.get("control_url"), confirm=bool(getattr(args, "confirm", False)),
+                entry.get("control_url"), confirm=confirmed,
                 legacy_pidfile=observed.get("legacy_pidfile") == "present",
             )
             plan["observed"] = observed
             plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
-            if getattr(args, "confirm", False):
+            if confirmed:
                 sr.put_remote(name, mcp_service=plan["service"])
             payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
         else:
-            if not getattr(args, "confirm", False):
+            if not confirmed:
                 payload = {"ok": True, "name": name, "status": "planned",
                            "data": {"requires_confirm": True, "action": "stop"}, "error": None}
             else:
@@ -273,6 +274,17 @@ def _cmd_provision(args, as_json: bool) -> None:
     public_host = None
     if control_transport == "https":
         public_host = _control_host(args, entry, ssh_target, as_json)
+    if not _arg_true(args, "confirm"):
+        result = {
+            "ok": True, "name": name, "status": "planned", "provisioned": False,
+            "control_transport": control_transport, "control_host": public_host,
+            "data": {"requires_confirm": True, "action": "provision"}, "error": None,
+        }
+        if as_json:
+            print(json.dumps(result))
+        else:
+            print(f"'{name}' provisioning is planned; re-run with --confirm to install and start its MCP service")
+        return
     try:
         _upload_runtime_source(ssh_target)
     except (RuntimeError, subprocess.SubprocessError, OSError) as e:
@@ -352,7 +364,7 @@ def _cmd_up(args, as_json: bool) -> None:
     if not token:
         die(f"remote '{name}' is missing recorded connection details — "
             f"re-run `./sb remote provision {name}`")
-    if not getattr(args, "confirm", False):
+    if not _arg_true(args, "confirm"):
         result = {"ok": True, "name": name, "status": "planned",
                   "data": {"requires_confirm": True, "action": "start"}, "error": None}
         if as_json:
@@ -361,11 +373,16 @@ def _cmd_up(args, as_json: bool) -> None:
             print(f"'{name}' MCP service start is planned; re-run with --confirm")
         return
     try:
+        _upload_runtime_source(entry["ssh"])
+        observed = sr.remote_mcp_service_status(entry)
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"
-            sr.start_remote_mcp_server(entry, tailscale_ip, port, token)
-            sr.put_remote(name, mcp_service=sr.remote_mcp_service_record(tailscale_ip, int(port)))
+            plan = sr.migrate_remote_mcp_service(
+                entry, tailscale_ip, int(port), token, confirm=True,
+                legacy_pidfile=observed.get("legacy_pidfile") == "present",
+            )
+            sr.put_remote(name, mcp_service=plan["service"])
         else:
             public_host = entry.get("control_host")
             if not public_host:
@@ -373,9 +390,11 @@ def _cmd_up(args, as_json: bool) -> None:
                     f"re-run `./sb remote provision {name} --control-host <host>`")
             control_url = control_url or f"https://{public_host}"
             sr.configure_https_proxy(entry, public_host, port)
-            sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
-                                       public_url=control_url)
-            sr.put_remote(name, mcp_service=sr.remote_mcp_service_record("127.0.0.1", int(port), control_url))
+            plan = sr.migrate_remote_mcp_service(
+                entry, "127.0.0.1", int(port), token, public_url=control_url,
+                confirm=True, legacy_pidfile=observed.get("legacy_pidfile") == "present",
+            )
+            sr.put_remote(name, mcp_service=plan["service"])
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         die(f"could not start '{name}''s MCP server: "
             f"{sr.redact_ssh_connection(str(e), entry)}")
@@ -393,7 +412,7 @@ def _cmd_down(args, as_json: bool) -> None:
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
-    if not getattr(args, "confirm", False):
+    if not _arg_true(args, "confirm"):
         result = {"ok": True, "name": name, "status": "planned",
                   "data": {"requires_confirm": True, "action": "stop"}, "error": None}
         if as_json:

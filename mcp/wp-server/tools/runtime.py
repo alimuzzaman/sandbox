@@ -69,9 +69,23 @@ def instance_exec(command: list[str], project_dir: str,
     if not command or any(not isinstance(item, str) or not item for item in command):
         return {"ok": False, "code": "invalid_command",
                 "error": "command must be a non-empty argv list"}
-    if local or remote or workspace or timeout_seconds is not None:
-        from tools.jobs import job_start
-        job = job_start(command, project_dir, local=local, remote=remote, workspace=workspace,
-                        timeout_seconds=timeout_seconds or 900, output_profile=output_profile)
+    durable = bool(local or remote or workspace or timeout_seconds is not None)
+    if not durable:
+        # A project-level remote-first policy must route instance execution to
+        # the durable remote controller even when the MCP caller omits target
+        # options. Local projects retain the historical direct invocation.
+        try:
+            from sandbox.application.context import durable_job_dependencies
+            from sandbox.jobs.models import TargetRequest
+            target = durable_job_dependencies()["target_service"].resolve(
+                TargetRequest(project_dir=project_dir, required_capability="job.exec"))
+            durable = target.kind == "remote"
+        except Exception:
+            durable = False
+    if durable:
+        from tools.jobs import _submit_explicit_job
+        job = _submit_explicit_job(command, project_dir, local=local, remote=remote, workspace=workspace,
+                                   timeout_seconds=timeout_seconds or 900,
+                                   output_profile=output_profile, kind="runtime-exec")
         return {"ok": bool(job.get("ok")), "operation": "exec", **job}
     return _typed_invoke(project_dir, label, "exec", {"argv": command})

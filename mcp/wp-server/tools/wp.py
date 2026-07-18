@@ -13,6 +13,14 @@ import re as _re
 from app import (SANDBOX_ROOT, _compose, _herd_host_env, _host_run, _is_herd, _project_instance, _require_project_capability, _resolve_instance, _safe_json, _wp_root, _wpcli, mcp)
 
 
+def _remote_job_transport():
+    """Build the remote test transport with the staged CLI path policy."""
+    from sandbox.core import _remote
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+        remote_sb_path=_remote.remote_sb_path)
+
 
 @mcp.tool()
 def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None) -> dict:
@@ -149,8 +157,6 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
-        from sandbox.transports.remote_jobs import RemoteJobTransport
-        from sandbox.core import _remote
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
@@ -162,9 +168,7 @@ def run_tests(project_dir: str, phpunit_args: str = "",
             if phpunit_args.strip():
                 command += ["--", *shlex.split(phpunit_args)]
             source = "sha256:" + __import__("hashlib").sha256(target.project_root.encode()).hexdigest()
-            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
-                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit(JobSubmission(
+            accepted = _remote_job_transport().submit(JobSubmission(
                     "test", target.project_root, source.removeprefix("sha256:"), "remote",
                     target.workspace_label, tuple(command), timeout_seconds, SourceIdentity(source),
                     remote_name=target.remote_name, output_profile=output_profile,

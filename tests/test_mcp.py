@@ -146,6 +146,21 @@ print("CAPABILITY_REJECTION", json.dumps([
 
 @unittest.skipUnless(VENV_PY.exists(), "MCP venv not built (run: ./sb mcp-install)")
 class TestMcpServerSplit(unittest.TestCase):
+    def test_wordpress_remote_tests_bind_the_staged_cli_path(self):
+        probe = """
+from sandbox.core import _remote
+from tools import wp
+print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
+"""
+        result = subprocess.run(
+            [str(VENV_PY), "-c", probe], cwd=str(MCP_DIR),
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "SANDBOX_ROOT": str(ROOT), "SANDBOX_MCP_GROUPS": "all",
+                 "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "True")
+
     def test_public_tool_schema_snapshot(self):
         r = subprocess.run(
             [str(VENV_PY), "-c", _PROBE], cwd=str(MCP_DIR),

@@ -38,24 +38,26 @@ def register(server, dependencies: ToolDependencies) -> None:
         server.tool()(tool)
 
 
-def job_start(command: list[str], project_dir: str, *, local: bool = False,
-              remote: str | None = None, workspace: str | None = None,
-              timeout_seconds: int = 900, output_profile: str = "smart",
-              request_id: str | None = None) -> dict:
-    """Durably accept a detached explicit-argv job; output is read separately.
+def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = False,
+                         remote: str | None = None, workspace: str | None = None,
+                         timeout_seconds: int = 900, output_profile: str = "smart",
+                         request_id: str | None = None, kind: str = "exec") -> dict:
+    """Shared implementation for MCP tools that submit an explicit argv job.
 
-    The call never streams the child process's pipes over MCP.  A remote target
-    must have been deployed and expose the remote job capability.
+    ``job_start`` is a general host-job primitive. Runtime-neutral
+    ``instance_exec`` passes ``runtime-exec`` so the remote transport installs
+    the co-located instance controller before executing the argv. This helper
+    is intentionally not registered as an MCP tool.
     """
     if not command or any(not isinstance(item, str) or not item or "\x00" in item for item in command):
         return {"ok": False, "code": "invalid_argv", "error": "command must be a non-empty argv list"}
     try:
         target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
-            workspace=workspace, required_capability="job.exec" if remote else None))
+            workspace=workspace, required_capability="job.exec" if not local else None))
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_target"), "error": str(exc)}
     try:
-        submission = JobSubmission("exec", target.project_root,
+        submission = JobSubmission(kind, target.project_root,
             hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind, target.workspace_label,
             tuple(command), timeout_seconds, SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
             remote_name=target.remote_name, request_id=request_id, output_profile=output_profile)
@@ -68,6 +70,21 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
         return _job_service.submit(submission)
     except Exception as exc:
         return {"ok": False, "code": "supervisor_launch_failed", "error": str(exc)}
+
+
+def job_start(command: list[str], project_dir: str, *, local: bool = False,
+              remote: str | None = None, workspace: str | None = None,
+              timeout_seconds: int = 900, output_profile: str = "smart",
+              request_id: str | None = None) -> dict:
+    """Durably accept a detached explicit-argv host job; output is read separately.
+
+    The call never streams the child process's pipes over MCP.  Use
+    ``instance_exec`` for an argv that must execute in a declared Compose
+    service rather than the selected job host.
+    """
+    return _submit_explicit_job(command, project_dir, local=local, remote=remote,
+                                workspace=workspace, timeout_seconds=timeout_seconds,
+                                output_profile=output_profile, request_id=request_id)
 
 
 def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,

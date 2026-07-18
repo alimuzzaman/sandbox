@@ -48,6 +48,25 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.list("r")
         self.assertTrue(commands[0].startswith("/srv/sandbox/sb-src/sb job-list"))
 
+    def test_all_remote_control_operations_use_the_staged_cli_path(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        transport.cancel("r", "abc", force=True)
+        transport.metrics("r", "abc")
+        transport.artifacts("r", "abc")
+        transport.artifact_get("r", "abc", "artifact")
+        transport.retry("r", "abc", request_id="retry")
+        transport.cleanup("r", "abc")
+        self.assertEqual(len(commands), 6)
+        self.assertTrue(all(command.startswith("/srv/sandbox/sb-src/sb job-")
+                            for command in commands))
+
     def test_workspace_copy_path_is_slug_safe_for_remote_project_resolution(self):
         commands = []
         transport = RemoteJobTransport(

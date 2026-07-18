@@ -59,6 +59,17 @@ class TestMcpComposition(unittest.TestCase):
         transport = jobs._remote_transport()
         self.assertIs(transport.remote_sb_path, _remote.remote_sb_path)
 
+    def test_remote_instance_exec_submits_the_in_instance_job_kind(self):
+        from tools import jobs, runtime
+
+        accepted = {"ok": True, "job_id": "remote-job"}
+        with patch.object(jobs, "_submit_explicit_job", return_value=accepted) as submit:
+            result = runtime.instance_exec(["npm", "test"], "/tmp/project", remote="remote-a",
+                                           workspace="node-unit", timeout_seconds=120)
+        self.assertEqual(result, {"ok": True, "operation": "exec", **accepted})
+        self.assertEqual(submit.call_args.kwargs["kind"], "runtime-exec")
+        self.assertEqual(submit.call_args.kwargs["remote"], "remote-a")
+
     def test_builtin_group_manifest_is_exact_and_deterministic(self):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 

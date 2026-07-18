@@ -305,18 +305,23 @@ class JobRepository:
             raise JobNotFound(f"job {job_id!r} was not found")
         return dict(row)
 
-    def list(self, *, limit: int = 50, project_identity: str | None = None) -> list[dict[str, Any]]:
+    def list(self, *, limit: int = 50, project_identity: str | None = None,
+             workspace_label: str | None = None) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
             raise ValueError("job list limit must be between 1 and 200")
-        if project_identity is None:
-            rows = self.connection.execute(
-                "SELECT * FROM jobs ORDER BY accepted_at DESC, job_id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            rows = self.connection.execute(
-                "SELECT * FROM jobs WHERE project_identity=? "
-                "ORDER BY accepted_at DESC, job_id DESC LIMIT ?", (project_identity, limit)
-            ).fetchall()
+        clauses = []
+        values: list[Any] = []
+        if project_identity is not None:
+            clauses.append("project_identity=?")
+            values.append(project_identity)
+        if workspace_label is not None:
+            clauses.append("workspace_label=?")
+            values.append(workspace_label)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.connection.execute(
+            f"SELECT * FROM jobs{where} ORDER BY accepted_at DESC, job_id DESC LIMIT ?",
+            (*values, limit),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def children(self, parent_job_id: str) -> list[dict[str, Any]]:

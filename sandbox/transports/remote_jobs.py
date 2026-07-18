@@ -99,7 +99,8 @@ class RemoteJobTransport:
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
-        args = ["sb", "job-start", "--local", "--project-dir", deployed["target_path"],
+        workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
+        args = ["sb", "job-start", "--local", "--project-dir", workspace_path,
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
                 "--output-profile", submission.output_profile, "--source-identity", deployed["identity"]]
         if submission.request_id:
@@ -111,7 +112,7 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote job acceptance failed")
         return {**payload, "source": {"identity": deployed["identity"], "commit": deployed["commit"],
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
-                "workspace_path": deployed["target_path"]}
+                "workspace_path": workspace_path}
 
     def read_output(self, remote_name: str, job_id: str, *, stream: str = "combined",
                     cursor: str | None = None, tail_bytes: int | None = None,
@@ -155,8 +156,16 @@ class RemoteJobTransport:
                     "health": "unreachable", "target": {"kind": "remote", "remote": remote_name},
                     "error": str(exc)}
 
-    def list(self, remote_name: str, *, limit: int = 50) -> dict:
-        return self.control(remote_name, ["job-list", "--limit", str(limit)])
+    def list(self, remote_name: str, *, limit: int = 50, project_dir: str | None = None,
+             workspace: str | None = None, active_only: bool = False) -> dict:
+        args = ["job-list", "--limit", str(limit)]
+        if project_dir:
+            args += ["--local", "--project-dir", project_dir]
+        if workspace:
+            args += ["--workspace", workspace]
+        if active_only:
+            args.append("--active-only")
+        return self.control(remote_name, args)
 
     def cancel(self, remote_name: str, job_id: str, *, force: bool = False) -> dict:
         args = ["job-cancel", job_id]

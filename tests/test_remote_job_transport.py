@@ -16,8 +16,10 @@ class RemoteJobTransportTests(unittest.TestCase):
         result = transport.submit(JobSubmission("test", "/p", "p", "remote", "w", ("npm", "test"), 60,
             SourceIdentity("ignored"), remote_name="r", request_id="retry"))
         self.assertEqual(calls[0], ("deploy", "/p"))
-        self.assertIn("job-start", calls[1][1])
-        self.assertIn("--request-id retry", calls[1][1])
+        self.assertIn("workspace-", calls[1][1])
+        self.assertIn("job-start", calls[2][1])
+        self.assertIn("--request-id retry", calls[2][1])
+        self.assertIn("workspace-", calls[2][1])
         self.assertEqual(result["source"]["identity"], "sha256:id")
 
     def test_status_list_cancel_and_metrics_use_bounded_json_control(self):

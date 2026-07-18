@@ -190,3 +190,23 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   dedicated `mcp/wp-server/.venv` transport run remains PASS with 5 tests.
 - Remote acceptance remains pending because this workspace has no provisioned
   disposable remote. No remote result is represented as a passing acceptance claim.
+
+## Remote workspace execution-path convergence increment
+
+- Implementation: every remote leaf submission now deploys once, prepares the
+  deterministic label-derived workspace path, and invokes the co-located `sb`
+  control command with that workspace as its project root. Matrix children retain
+  their one-deploy fan-out and independent copied roots.
+- Implementation: `job-list` supports project/workspace and active-only filters;
+  remote workspace reset/destroy checks the remote durable registry for active jobs
+  before invoking the lifecycle mutation. This prevents a local scheduler snapshot
+  from claiming that a remote workspace is idle.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_job_transport tests.test_job_registry tests.test_job_cli tests.test_command_composition tests.test_architecture_boundaries -v`
+- Result: PASS, 26 tests.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`
+- Result: PASS, 952 tests, 1 skipped in 80.285 seconds. The skip is the MCP server
+  transport under the CLI virtualenv because `httpx` is not installed there; the
+  dedicated `mcp/wp-server/.venv` transport run remains PASS with 5 tests.
+- Remote acceptance remains pending because this workspace has no provisioned
+  disposable remote. The transport tests are the evidence boundary for workspace
+  path isolation and deploy-before-acceptance ordering.

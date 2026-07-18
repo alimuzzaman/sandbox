@@ -73,6 +73,9 @@ def configure_output_parser(parser) -> None:
 
 def configure_list_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--project-dir")
+    parser.add_argument("--workspace")
+    parser.add_argument("--active-only", action="store_true")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -245,10 +248,21 @@ def cmd_job_list(_cfg, args) -> None:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote).list(args.remote, limit=args.limit)
+            remote_lookup=_remote.get_remote).list(args.remote, limit=args.limit,
+                project_dir=args.project_dir, workspace=args.workspace, active_only=args.active_only)
         result = result.get("jobs", result)
     else:
-        result = durable_job_dependencies()["job_service"].list({"limit": args.limit})
+        from pathlib import Path
+        query = {"limit": args.limit}
+        if args.project_dir:
+            query["project_identity"] = hashlib.sha256(
+                str(Path(args.project_dir).expanduser().resolve()).encode()).hexdigest()
+        if args.workspace:
+            query["workspace_label"] = args.workspace
+        result = durable_job_dependencies()["job_service"].list(query)
+    if args.active_only:
+        result = [item for item in result if item.get("lifecycle") in {
+            "accepted", "queued", "running", "cancelling"}]
     if args.json:
         print(json.dumps({"ok": True, "jobs": result}, sort_keys=True))
     else:

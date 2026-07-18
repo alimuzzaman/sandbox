@@ -215,6 +215,19 @@ def durable_job_dependencies():
         workspace_path = _remote.prepare_remote_workspace(
             remote, resolved_target.project_root, resolved_target.workspace_label,
             deployed_path=deployed["target_path"])
+        if action in {"reset", "destroy"}:
+            sb = _remote.remote_sb_path(remote)
+            busy_command = shlex.join([
+                sb, "job-list", "--local", "--project-dir", workspace_path,
+                "--workspace", resolved_target.workspace_label, "--active-only", "--json",
+            ])
+            busy_result = _remote.ssh_run(remote, busy_command, timeout=25)
+            busy_payload = next((json.loads(line) for line in reversed((busy_result.stdout or "").splitlines())
+                                 if line.startswith("{")), None)
+            if busy_result.returncode != 0 or not busy_payload:
+                raise RuntimeError("remote workspace activity check failed")
+            if busy_payload.get("jobs"):
+                raise RuntimeError(f"workspace {resolved_target.workspace_label!r} is busy with active remote jobs")
         command = shlex.join(["sb", "workspace", action, "--local", "--project-dir",
                               workspace_path, "--workspace", resolved_target.workspace_label, "--json"])
         result = _remote.ssh_run(remote, command, timeout=60)

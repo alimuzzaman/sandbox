@@ -417,7 +417,7 @@ The following gaps remain after the first implementation pass and are traced to 
 feature requirements rather than treated as documentation-only follow-up.
 
 - [X] T141 [US3/US4] Implement dependency-aware parent coordination with declared `needs`/step edges, bounded capacity dispatch, fail-fast/continue policy, per-child queue reasons, retry relationships, and aggregate terminal outcomes for local and remote matrices per FR-027-FR-030 and US4/AC1
-- [ ] T142 [US3] Give each remote workspace an isolated deployed source/runtime path, serialize reset/destroy/redeploy against active leases, and prove reusable reruns do not share mutable files or databases per FR-023-FR-028 and US3/AC4 (partial)
+- [ ] T142 [US3] Give each remote workspace an isolated deployed source/runtime path, serialize reset/destroy/redeploy against active leases, and prove reusable reruns do not share mutable files or databases per FR-023-FR-028 and US3/AC4 (partial: deterministic leaf/matrix paths and remote active-job checks are present; disposable remote rerun/database proof remains)
 - [ ] T143 [US4] Complete remote CI artifact transfer, safe-mode semantic-difference persistence, child retry/cleanup policy, and parent result retrieval through CLI and MCP per FR-031-FR-037 and US4/AC3-US4/AC5 (partial)
 - [ ] T144 [US2/Phase 8] Add startup reconciliation and a durable supervisor/host-restart recovery command that classifies orphaned, unreachable, process-missing, and interrupted jobs without false success per FR-015-FR-022 (partial)
 - [X] T145 [Phase 8] Implement terminal-job/log/metric/artifact retention policy enforcement, storage-pressure handling, and explicit cleanup reporting per FR-014 and FR-032

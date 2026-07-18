@@ -342,3 +342,41 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   to PHPUnit. Remote workspace lifecycle uses the same slug-safe hyphenated
   path as durable job submissions and does not recreate a workspace during
   status/reset/destroy.
+
+## T154: live remote CI matrix, artifact, retry, and cleanup acceptance
+
+- Fixture: the same disposable WordPress repository, at fixture commit
+  `23e51c809a6117f3d88e2cead75c2ea96093478d`, with a compatible workflow
+  containing two `build` matrix cells, `verify` depending on `build`, one
+  `actions/upload-artifact@v4` step per build, and a publish-shaped command
+  that safe mode neutralizes. Its incompatible companion declares
+  `windows-latest` and preflight returned `ok: false` with blocking difference
+  `act.non-linux-runner`; no incompatible workflow was executed.
+- Compatible preflight returned `ok: true`, three cells, the `verify -> build`
+  dependency edge, and the non-blocking `safe-mode:verify:1` difference.
+- Final remote parent `a543676794ec972d2876bf536b3d6c11` reached `succeeded`
+  with aggregate `children: 3`, `passed: 3`, `failed: 0`. Build children
+  `7d763cc4adb9bad27a370c6e83d275b6` and
+  `ec3ffa58b0512bd91d179eb435d437ca` each reached exit code 0 in independent
+  isolated workspaces. The initially queued dependency child
+  `16c9e07106a4b58de5f8f361e27e1ac1` transitioned to running only after both
+  build children succeeded, then completed exit code 0. Its retained output
+  integrity hash is
+  `c8e7bcb10e0e3d0c3ecf3c684eea2dc8540d2671443e02a8971b780920364380`.
+- Safe-mode retained output explicitly reports that `actions/upload-artifact`
+  was collected by Sandbox after the job, and the publish-shaped verify command
+  was neutralized. The build artifacts were retained as regular `report.txt`
+  files; artifact `26d5cb0d1d98c1339f1322de` retrieved from the first build was
+  ten bytes and base64-decoded to `build-one\n`.
+- Retry and cleanup: failed earlier build
+  `11268efb676809fb83146a95fe77cebf` was retained as failure evidence, then
+  `job-retry` created attempt-2 job `b2b9964a58b424f984be1d28655015ad` with
+  request ID `t154-retry-proof-20260719`; it reached `succeeded`, exit code 0.
+  `job-cleanup 11268... --logs --artifacts --metrics` returned
+  `cleanup_state: completed` and removed logs and artifacts. Successful
+  parent/child evidence was retrieved before this cleanup.
+- Live fixes exercised by this acceptance: remote provisioning installs `act`;
+  concurrent host port allocation is serialized; `act` invocation is
+  host-serialized while workspaces remain isolated; GitHub upload-artifact is
+  replaced with durable Sandbox collection using a bound workspace; and a CI
+  leaf is not misclassified as a matrix parent during dependency reconciliation.

@@ -407,7 +407,17 @@ def cmd_job_matrix(_cfg, args) -> None:
                 project_root = target.project_root
                 if item.get("project_dir"):
                     project_root = str(Path(item["project_dir"]).expanduser().resolve())
-                    if Path(target.project_root) not in Path(project_root).parents:
+                    deployed_root = Path(target.project_root).resolve()
+                    candidate_root = Path(project_root)
+                    # Remote matrix workspaces are deterministic sibling
+                    # copies (`<deploy>-workspace-<hash>`), not descendants:
+                    # the shape keeps them valid project slugs while ensuring
+                    # they cannot escape the exact deployed source tree.
+                    isolated_sibling = (
+                        candidate_root.parent == deployed_root.parent and
+                        candidate_root.name.startswith(deployed_root.name + "-workspace-")
+                    )
+                    if deployed_root not in candidate_root.parents and not isolated_sibling:
                         raise ValueError("matrix project directory must remain under the deployed project")
                 submissions.append(JobSubmission(
                     kind=item.get("kind", "test"), project_root=project_root,

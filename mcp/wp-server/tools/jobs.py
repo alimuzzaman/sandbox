@@ -24,7 +24,7 @@ def register(server, dependencies: ToolDependencies) -> None:
     _job_service = dependencies.require("job_service")
     _target_service = dependencies.require("target_service")
     _workspace_service = dependencies.require("workspace_service")
-    for tool in (job_start, job_matrix, job_status, job_list, job_output, job_follow, job_metrics, job_reconcile, job_cancel,
+    for tool in (job_start, job_matrix, job_status, job_list, job_output, job_follow, job_metrics, job_reconcile, job_retention, job_cancel,
                  job_artifacts, job_artifact_get, job_retry, job_cleanup,
                  workspace_create, workspace_list, workspace_status, workspace_reset, workspace_destroy):
         server.tool()(tool)
@@ -135,6 +135,14 @@ def job_reconcile(*, limit: int = 200) -> dict:
         return {"ok": False, "code": "reconciliation_failed", "error": str(exc)}
 
 
+def job_retention(*, retention_days: int = 7, limit: int = 200) -> dict:
+    """Apply terminal log/metric/artifact retention to old jobs."""
+    try:
+        return _job_service.retention_sweep(retention_days=retention_days, limit=limit)
+    except Exception as exc:
+        return {"ok": False, "code": "retention_failed", "error": str(exc)}
+
+
 def job_cancel(job_id: str, *, force: bool = False) -> dict:
     """Cancel only a verified owned job process group."""
     try:
@@ -216,9 +224,10 @@ def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | No
     return _workspace("destroy", project_dir, local=local, remote=remote, workspace=workspace)
 
 
-def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True) -> dict:
+def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True,
+                metrics: bool = True) -> dict:
     """Explicitly remove retained logs/artifacts for a terminal job only."""
     try:
-        return _job_service.cleanup(job_id, logs=logs, artifacts=artifacts)
+        return _job_service.cleanup(job_id, logs=logs, artifacts=artifacts, metrics=metrics)
     except Exception as exc:
         return {"ok": False, "code": str(exc), "error": str(exc)}

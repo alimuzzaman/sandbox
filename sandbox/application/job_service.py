@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -269,7 +270,8 @@ class JobService:
             environment_keys=tuple(json.loads(previous["environment_keys_json"])),
         ))
 
-    def cleanup(self, job_id: str, *, logs: bool = True, artifacts: bool = True) -> dict:
+    def cleanup(self, job_id: str, *, logs: bool = True, artifacts: bool = True,
+                metrics: bool = True) -> dict:
         import shutil
         state = self.repository.get(job_id)
         if state["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
@@ -282,8 +284,30 @@ class JobService:
         if artifacts:
             artifact_dir = directory / "artifacts"
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
-        self.repository.transition(job_id, state["lifecycle"], cleanup_state="completed") if False else None
-        return {"ok": True, "job_id": job_id, "removed": removed}
+        if metrics:
+            metric_dir = directory / "metrics"
+            if metric_dir.exists(): shutil.rmtree(metric_dir); removed.append("metrics")
+        self.repository.set_cleanup_state(job_id, "completed")
+        return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": "completed"}
+
+    def retention_sweep(self, *, retention_days: int = 7, limit: int = 200) -> dict:
+        if isinstance(retention_days, bool) or not isinstance(retention_days, int) or retention_days < 0:
+            raise ValueError("retention_days must be a non-negative whole number")
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        cleaned = []
+        for row in self.repository.list(limit=limit):
+            if row["lifecycle"] not in {item.value for item in (
+                Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+            )} or not row.get("finished_at"):
+                continue
+            try:
+                finished = datetime.fromisoformat(row["finished_at"].replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if finished <= cutoff and row.get("cleanup_state") != "completed":
+                cleaned.append(self.cleanup(row["job_id"]))
+        return {"ok": True, "retention_days": retention_days, "cleaned": cleaned}
 
     def submit_matrix(self, submissions: list[JobSubmission]) -> dict:
         if not submissions:

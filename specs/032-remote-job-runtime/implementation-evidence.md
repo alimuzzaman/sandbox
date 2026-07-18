@@ -82,3 +82,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   this workspace. The mocked transport tests verify deploy-before-acceptance,
   one-deploy matrix submission, encoded child plans, bounded output controls, and
   remote preflight blocking without remote side effects.
+
+## Recovery and retention increment
+
+- Implementation: `job-reconcile` verifies recorded supervisor boot/PID/start
+  identity and records `interrupted` with partial-output evidence on mismatch;
+  `job-retention` applies terminal cleanup to output, metrics, and artifacts and
+  records the registry cleanup state. Both controls are available through CLI and
+  MCP.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_service tests.test_job_scheduler tests.test_job_matrix tests.test_remote_job_transport tests.test_remote_ci_jobs tests.test_mcp tests.test_architecture_boundaries tests.test_command_composition -v`
+- Result: PASS, 29 tests.

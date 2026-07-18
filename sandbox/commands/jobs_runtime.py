@@ -95,6 +95,12 @@ def configure_reconcile_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_retention_parser(parser) -> None:
+    parser.add_argument("--retention-days", type=int, default=7)
+    parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--json", action="store_true")
+
+
 def configure_matrix_parser(parser) -> None:
     parser.description = "Fan out one explicit argv into isolated durable workspace jobs."
     parser.add_argument("--project-dir", default=".")
@@ -250,6 +256,15 @@ def cmd_job_reconcile(_cfg, args) -> None:
         print(f"interrupted={len(result['interrupted'])} released={len(result['released_leases'])}")
 
 
+def cmd_job_retention(_cfg, args) -> None:
+    result = durable_job_dependencies()["job_service"].retention_sweep(
+        retention_days=args.retention_days, limit=args.limit)
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"cleaned={len(result['cleaned'])} retention_days={result['retention_days']}")
+
+
 def cmd_job_matrix(_cfg, args) -> None:
     command = list(args.command or ())
     if command[:1] == ["--"]: command = command[1:]
@@ -316,5 +331,6 @@ register_specs((
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
     CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global"),
+    CommandSpec("job-retention", cmd_job_retention, configure=configure_retention_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

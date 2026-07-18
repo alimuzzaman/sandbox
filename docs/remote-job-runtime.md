@@ -49,6 +49,9 @@ original result. Failed reusable workspaces are retained by default. Reset and
 destroy are explicit and refuse active workspace leases.
 
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
+For scheduled/maintenance cleanup, apply the configured age explicitly with
+`./sb job-retention --retention-days 7 --json`; it removes terminal output,
+metrics, and artifacts and records `cleanup_state` in the registry.
 Never delete a workspace or job directory by hand: the registry and lease store
 must remain authoritative.
 

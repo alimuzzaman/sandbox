@@ -466,3 +466,9 @@ class JobRepository:
         with self.transaction(immediate=True) as connection:
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+
+    def set_cleanup_state(self, job_id: str, state: str) -> None:
+        if not isinstance(state, str) or not state or any(ord(char) < 32 for char in state):
+            raise ValueError("cleanup state is invalid")
+        self.connection.execute("UPDATE jobs SET cleanup_state=?, updated_at=? WHERE job_id=?",
+                                (state, _now(), validate_job_id(job_id)))

@@ -16,6 +16,7 @@ from .output import JobOutputStore, OutputError
 from .process import capture_process_identity
 from .registry import JobRepository
 from .storage import JobStorage
+from .artifacts import collect as collect_artifacts
 
 
 def run_descriptor(path: str | Path) -> int:
@@ -69,6 +70,9 @@ def run_descriptor(path: str | Path) -> int:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
         output.finish("stdout"); output.finish("stderr")
+        if descriptor.get("artifact_paths"):
+            collect_artifacts(storage, repository, job_id, project_root=descriptor["cwd"],
+                              declared_paths=tuple(descriptor["artifact_paths"]))
         if timed_out:
             repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code, termination_reason="deadline_exceeded")
             return 124

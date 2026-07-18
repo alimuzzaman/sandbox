@@ -7,6 +7,7 @@ throughout the implementation sequence.
 from __future__ import annotations
 
 import hashlib
+import base64
 from pathlib import Path
 
 from dependencies import ToolDependencies
@@ -22,7 +23,8 @@ def register(server, dependencies: ToolDependencies) -> None:
     _job_service = dependencies.require("job_service")
     _target_service = dependencies.require("target_service")
     dependencies.require("workspace_service")
-    for tool in (job_start, job_status, job_list, job_output, job_follow):
+    for tool in (job_start, job_status, job_list, job_output, job_follow, job_cancel,
+                 job_artifacts, job_artifact_get):
         server.tool()(tool)
 
 
@@ -87,3 +89,31 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536) -> dict:
     """Return one bounded long-poll output page; callers repeat with its cursor."""
     return job_output(job_id, cursor=cursor, max_bytes=max_bytes)
+
+
+def job_cancel(job_id: str, *, force: bool = False) -> dict:
+    """Cancel only a verified owned job process group."""
+    try:
+        return {"ok": True, **_job_service.cancel(job_id, force=force)}
+    except Exception as exc:
+        return {"ok": False, "code": str(exc), "error": str(exc)}
+
+
+def job_artifacts(job_id: str) -> dict:
+    """List metadata for retained, project-contained job artifacts."""
+    try:
+        return {"ok": True, "artifacts": _job_service.list_artifacts(job_id)}
+    except Exception as exc:
+        return {"ok": False, "code": "job_not_found", "error": str(exc)}
+
+
+def job_artifact_get(job_id: str, artifact_id: str, *, offset: int = 0,
+                     max_bytes: int = 1_048_576) -> dict:
+    """Return one bounded base64 artifact chunk by immutable artifact ID."""
+    try:
+        data = _job_service.get_artifact(job_id, artifact_id, offset=offset, max_bytes=max_bytes)
+        return {"ok": True, "job_id": job_id, "artifact_id": artifact_id,
+                "offset": offset, "data": base64.b64encode(data).decode(), "bytes_read": len(data),
+                "encoding": "base64"}
+    except Exception as exc:
+        return {"ok": False, "code": "artifact_not_found", "error": str(exc)}

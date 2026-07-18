@@ -25,6 +25,10 @@ def _runtime_service():
 
 
 def _durable_job_dependencies():
+    import sys
+    repository_root = str(Path(__file__).resolve().parents[2])
+    if repository_root not in sys.path:
+        sys.path.insert(0, repository_root)
     from sandbox.application.context import durable_job_dependencies
     return durable_job_dependencies()
 

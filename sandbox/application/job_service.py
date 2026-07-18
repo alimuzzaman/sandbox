@@ -49,7 +49,7 @@ class JobService:
             if self.scheduler is not None:
                 self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
             self.storage.job_dir(row["job_id"], create=True)
-            descriptor = self._descriptor(row)
+            descriptor = self._descriptor(row, submission)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
             self._launch(descriptor_path)
         except BaseException as exc:
@@ -59,13 +59,14 @@ class JobService:
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
 
-    def _descriptor(self, row: dict) -> dict:
+    def _descriptor(self, row: dict, submission: JobSubmission) -> dict:
         nonce = os.urandom(32)
         return {"job_id": row["job_id"], "registry_path": str(self.repository.path),
                 "runtime_dir": str(self.storage.root.parent), "argv": __import__("json").loads(row["command_json"]),
                 "cwd": str(Path(row["project_root"]) / row["cwd_relative"]),
                 "deadline_seconds": row["deadline_seconds"], "cancel_grace_seconds": 20,
-                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None}
+                "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
+                "artifact_paths": list(submission.artifact_paths)}
 
     def _launch(self, descriptor_path: Path) -> None:
         if self.launcher:
@@ -117,3 +118,16 @@ class JobService:
             raise RuntimeError("process_identity_mismatch")
         self.repository.transition(job_id, Lifecycle.CANCELLING)
         return self.repository.snapshot(job_id)
+
+    def list_artifacts(self, job_id: str):
+        return self.repository.snapshot(job_id)["artifacts"]
+
+    def get_artifact(self, job_id: str, artifact_id: str, *, offset: int = 0, max_bytes: int = 1_048_576) -> bytes:
+        import base64
+        for artifact in self.list_artifacts(job_id):
+            if artifact["artifact_id"] == artifact_id:
+                path = self.storage.job_dir(job_id) / artifact["stored_relative_path"]
+                with path.open("rb") as handle:
+                    handle.seek(offset)
+                    return handle.read(max_bytes)
+        raise RuntimeError("artifact_not_found")

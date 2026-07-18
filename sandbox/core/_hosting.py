@@ -391,7 +391,7 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
         "compose_project": compose_project_name(validated),
         "loopback_port": port,
         "compose_override": compose_override(validated, port),
-        "caddyfile": caddyfile(validated, port),
+        "caddyfile": caddyfile(validated, port, redact_basic_auth=True),
         "basic_auth_enabled": bool(validated.get("basic_auth")),
         "routes": validated["routes"],
         "records": [],
@@ -413,17 +413,22 @@ def apply_with_rollback(apply, rollback) -> None:
 
 
 def caddyfile(validated: dict, port: int, cert_path: str | None = None,
-              key_path: str | None = None, basic_auth_hash: str | None = None) -> str:
+              key_path: str | None = None, basic_auth_hash: str | None = None,
+              *, redact_basic_auth: bool = False) -> str:
     served = [r["hostname"] for r in validated["routes"] if r["mode"] == "serve"]
     tls = f"    tls {cert_path} {key_path}\n" if cert_path and key_path else ""
     basic = ""
     auth = validated.get("basic_auth")
-    if auth and basic_auth_hash:
-        if not basic_auth_hash.startswith("$"):
+    if auth:
+        if basic_auth_hash is None:
+            if not redact_basic_auth:
+                raise HostingError("basic_auth requires a generated Caddy password hash")
+        elif not basic_auth_hash.startswith("$"):
             raise HostingError("basic_auth_hash must be a Caddy password hash")
-        basic = ("    basicauth {\n"
-                 f"        {auth['username']} {basic_auth_hash}\n"
-                 "    }\n")
+        else:
+            basic = ("    basicauth {\n"
+                     f"        {auth['username']} {basic_auth_hash}\n"
+                     "    }\n")
     blocks = [f"{', '.join(served)} {{\n{basic}{tls}    reverse_proxy 127.0.0.1:{int(port)}\n}}\n"]
     for route in validated["routes"]:
         if route["mode"] == "redirect":

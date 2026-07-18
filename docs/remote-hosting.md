@@ -190,7 +190,8 @@ Set the referenced secret with `./sb host secrets --set MY_SITE_BASIC_AUTH_PASSW
 On confirmed apply, Sandbox hashes the password on the remote and renders Caddy's
 `basicauth` directive. Passwords and hashes are never committed, printed, passed in
 argv, or included in the Compose environment. The gate is disabled when the block is
-absent.
+absent. Planning deliberately redacts the generated Caddy verifier; confirmed applies
+fail rather than silently omit a declared gate.
 
 ### One-time hosted WordPress login URLs
 

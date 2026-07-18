@@ -109,7 +109,8 @@ Basic Auth is declared by an environment's `basic_auth.username` and
 `basic_auth.password_secret`. The secret is resolved from the owner-only secret store,
 streamed to the remote Caddy `hash-password` command, and never included in the Compose
 environment or host state. The Caddy 2.6-compatible `basicauth` directive is rendered
-only after the hash is returned and the full configuration is validated.
+only after the hash is returned and the full configuration is validated. Planning
+redacts the verifier; any non-planning render without a generated hash fails closed.
 
 ## Complexity Tracking
 

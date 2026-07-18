@@ -98,6 +98,16 @@ class TestHostingManifest(unittest.TestCase):
         self.assertNotIn("BASIC_AUTH_PASSWORD", rendered)
         self.assertNotIn("plain-password", rendered)
 
+    def test_requires_hash_when_rendering_declared_basic_auth(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        with self.assertRaisesRegex(hosting.HostingError, "requires a generated Caddy password hash"):
+            hosting.caddyfile(result, 18001)
+
     def test_validates_basic_auth_secret_reference(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",
@@ -141,6 +151,7 @@ class TestHostingManifest(unittest.TestCase):
         runtime = hosting.desired_runtime(validated, "myvps")
         self.assertTrue(runtime["basic_auth_enabled"])
         self.assertNotIn("BASIC_AUTH_PASSWORD", runtime["caddyfile"])
+        self.assertNotIn("basicauth", runtime["caddyfile"])
 
     def test_accepts_opt_in_hosted_wordpress_autologin(self):
         with self._write(_manifest()) as directory:
@@ -374,6 +385,17 @@ class TestHostingSecrets(unittest.TestCase):
             rendered = hosting.render_env_file(validated, {"TEST_SECRET": "hidden value"})
             self.assertIn("PUBLIC_VALUE=fixed", rendered)
             self.assertIn("PRIVATE_VALUE='hidden value'", rendered)
+
+    def test_basic_auth_secret_is_not_rendered_into_compose_environment(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n    cloudflare:\n",
+        )
+        with TestHostingManifest()._write(manifest) as project:
+            validated = hosting.validate_manifest(project)
+        rendered = hosting.render_env_file(validated, {"BASIC_AUTH_PASSWORD": "secret-value"})
+        self.assertNotIn("BASIC_AUTH_PASSWORD", rendered)
+        self.assertNotIn("secret-value", rendered)
 
     def test_missing_declared_secret_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -95,7 +95,11 @@ def run_descriptor(path: str | Path) -> int:
             output_completeness="complete", integrity_sha256=integrity)
         return 0 if return_code == 0 else 1
     except OutputError as exc:
-        repository.transition(job_id, Lifecycle.FAILED, termination_reason="output_storage_failed", result_json=json.dumps({"error": str(exc)}))
+        pressure = "pressure" in str(exc)
+        repository.transition(job_id, Lifecycle.FAILED,
+            termination_reason="storage_pressure" if pressure else "output_storage_failed",
+            output_completeness="storage_pressure" if pressure else "write_failed",
+            result_json=json.dumps({"error": str(exc)}))
         return 1
     except BaseException as exc:
         try:

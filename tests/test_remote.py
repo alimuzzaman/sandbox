@@ -978,6 +978,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         command = mock_ssh_run.call_args.args[1]
         self.assertIn("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", command)
         self.assertEqual(len(record["runtime_revision"]), 24)
+        self.assertIn("grep -Fq -- '--bind 127.0.0.1 --port 9174'", command)
         self.assertIn("ss -H -ltn", command)
         self.assertIn("ControlGroup", command)
         self.assertIn("/proc/$pid/cgroup", command)

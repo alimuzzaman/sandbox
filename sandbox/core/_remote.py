@@ -964,7 +964,7 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
         f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_RUNTIME_REVISION=' + revision)} "
         f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
-        f"grep -Fq {shlex.quote('--bind ' + bind + ' --port ' + str(port))} "
+        f"grep -Fq -- {shlex.quote('--bind ' + bind + ' --port ' + str(port))} "
         f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo ownership=proven; else echo ownership=ambiguous; fi; "
         if marker else "echo marker=0; "
     )
@@ -1097,7 +1097,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     unit_ownership_preflight = (
         "if test -f \"$unit_path\"; then "
         f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_MARKER=' + record['ownership_marker'])} \"$unit_path\" && "
-        f"grep -Fq {shlex.quote('--bind ' + bind + ' --port ' + str(port))} \"$unit_path\" && "
+        f"grep -Fq -- {shlex.quote('--bind ' + bind + ' --port ' + str(port))} \"$unit_path\" && "
         "grep -Fqx 'WorkingDirectory=%h/sandbox/sb-src' \"$unit_path\" || exit 43; fi; "
     )
     runtime_preflight = (

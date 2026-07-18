@@ -46,3 +46,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   `./sb job-output <id>` returned the retained `durable-ok` output.
 - Command: `./sb exec --local --timeout 60 -- .cli-venv/bin/python -c 'print("wait-ok")'`
 - Result: PASS; synchronous wait rendered `wait-ok` from the same retained-output store.
+
+## Later durable runtime increments
+
+- `d1268df` adds evidence-based running-job health and identity-verified cancellation.
+- `5487a0a` adds workspace leases, deterministic isolated labels, and explicit workspace lifecycle.
+- `757ba87` adds strict, no-side-effect remote CI preflight with named `act` compatibility differences.
+- `645c738` adds bounded, contained artifact collection and retrieval.
+- `0e01dc1` adds linked retries and explicit terminal-job log/artifact cleanup.
+- Validation: focused job, workspace, CI, architecture, CLI composition, MCP composition, MCP schema, and server transport suites passed. A full local discovery run advanced through the CLI boundary but the existing `instances` test blocked on a live Docker Compose `ps` operation for a pre-existing instance; it was terminated without changing runtime state.

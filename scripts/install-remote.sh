@@ -86,6 +86,31 @@ PY
 fi
 ok "python3 + venv present"
 
+# --- act (remote CI execution engine) -----------------------------------
+# Remote CI jobs run on this host's Docker daemon, so the provisioned runtime
+# must include the same supported engine as the local CI command. Install the
+# official architecture-specific release only when it is absent.
+log "installing act"
+if command -v act >/dev/null 2>&1; then
+    ok "act already present"
+else
+    ACT_ARCH="$(dpkg --print-architecture)"
+    case "$ACT_ARCH" in
+        amd64) ACT_ARCH="x86_64" ;;
+        arm64) ACT_ARCH="arm64" ;;
+        *) echo "unsupported architecture for act: $ACT_ARCH" >&2; exit 1 ;;
+    esac
+    ACT_TMP="$(mktemp -d)"
+    trap 'rm -rf "$ACT_TMP"' EXIT
+    curl -fsSL "https://github.com/nektos/act/releases/latest/download/act_Linux_${ACT_ARCH}.tar.gz" \
+        | tar -xz -C "$ACT_TMP"
+    $SUDO install -m 0755 "$ACT_TMP/act" /usr/local/bin/act
+    rm -rf "$ACT_TMP"
+    trap - EXIT
+    ok "act installed"
+fi
+act --version >/dev/null
+
 # --- sandbox runtime -----------------------------------------------------
 SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}"
 mkdir -p "$SANDBOX_HOME"

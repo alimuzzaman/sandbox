@@ -228,3 +228,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   dedicated `mcp/wp-server/.venv` transport run remains PASS with 5 tests.
 - Remote acceptance remains pending because this workspace has no provisioned
   disposable remote. No CI green result is claimed without that environment.
+
+## Remote E2E submission increment
+
+- Implementation: `sb e2e` and MCP `run_e2e` accept `--local`/`--remote` and a
+  reusable workspace label. Remote E2E validates the Playwright configuration
+  before deployment, then submits the co-located E2E coordinator as a detached
+  durable job with an explicit finite deadline. The co-located coordinator retains
+  its existing per-worker isolated instance behavior.
+- Command: `.cli-venv/bin/python -m unittest -q tests.test_e2e tests.test_cli tests.test_mcp tests.test_architecture_boundaries && git diff --check`
+- Result: PASS; no test failures and `git diff --check` clean.
+- Remote acceptance remains pending because this workspace has no provisioned
+  disposable remote; no Playwright remote result is claimed.

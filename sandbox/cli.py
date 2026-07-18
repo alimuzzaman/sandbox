@@ -300,6 +300,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     e2.add_argument("--strict-provision", dest="strict_provision", action="store_true",
         help="abort the whole run if any worker's instance fails to boot "
              "(default: continue with the healthy workers)")
+    e2_target = e2.add_mutually_exclusive_group()
+    e2_target.add_argument("--local", action="store_true", help="run the E2E coordinator locally")
+    e2_target.add_argument("--remote", help="run the detached E2E coordinator on a named remote")
+    e2.add_argument("--workspace", default=None, help="reusable remote workspace label")
     e2.add_argument("--timeout", type=int, default=900,
         help="per-worker playwright timeout in seconds (default: 900)")
     e2.add_argument("--json", action="store_true",

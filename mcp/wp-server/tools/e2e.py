@@ -9,7 +9,8 @@ from app import SANDBOX_ROOT, _require_project_capability, _safe_json, mcp
 def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
            grep: str | None = None, keep_on_fail: bool = False,
            strict_provision: bool = False, timeout: int = 900,
-           async_: bool = False) -> dict:
+           async_: bool = False, local: bool = False,
+           remote: str | None = None, workspace: str | None = None) -> dict:
     """Run Playwright e2e tests with N workers, EACH AGAINST ITS OWN FRESH
     WordPress instance (multi-instance-per-root) — instead of N workers
     sharing one site's state. See docs/ci-e2e-runner-spec.md §2.
@@ -40,9 +41,17 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
     capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
     if capability_error:
         return capability_error
+    if timeout <= 0:
+        return {"ok": False, "code": "invalid_timeout", "error": "timeout must be positive"}
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "e2e", "--project-dir", project_dir,
            "--workers", str(workers), "--json"]
+    if local:
+        cmd.append("--local")
+    elif remote:
+        cmd += ["--remote", remote]
+    if workspace:
+        cmd += ["--workspace", workspace]
     if concurrency:
         cmd += ["--concurrency", str(concurrency)]
     if grep:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import hashlib
 import os
 import shlex
 import subprocess
@@ -160,6 +161,49 @@ def cmd_e2e(cfg, args) -> None:
         die(f"no playwright config found under {root} (checked root, tests/, "
             f"test/, e2e/, tests/e2e/) — pass --playwright-config, or e2e "
             f"requires an existing Playwright setup in the project.")
+
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.application.target_service import TargetResolutionError
+    from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+    try:
+        target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+            project_dir=root, local=bool(getattr(args, "local", False)),
+            remote=getattr(args, "remote", None), workspace=getattr(args, "workspace", None),
+            required_capability="job.exec" if getattr(args, "remote", None) else None,
+        ))
+    except TargetResolutionError as exc:
+        die(f"{exc.code}: {exc}")
+    if target.kind == "remote":
+        timeout = int(getattr(args, "timeout", None) or 900)
+        if timeout <= 0:
+            die("E2E timeout must be a positive finite number of seconds")
+        relative_config = os.path.relpath(config_path.resolve(), root_path.resolve())
+        command = ["sb", "e2e", "--local", "--project-dir", ".",
+                   "--workers", str(max(1, int(getattr(args, "workers", None) or 2))),
+                   "--timeout", str(timeout), "--json"]
+        if relative_config != ".": command += ["--playwright-config", relative_config]
+        if getattr(args, "concurrency", None): command += ["--concurrency", str(args.concurrency)]
+        if getattr(args, "grep", None): command += ["--grep", args.grep]
+        if getattr(args, "keep_on_fail", False): command.append("--keep-on-fail")
+        if getattr(args, "strict_provision", False): command.append("--strict-provision")
+        passthrough = [item for item in (getattr(args, "passthrough", None) or ()) if item != "--"]
+        if passthrough: command += ["--", *passthrough]
+        identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+        submission = JobSubmission(
+            "e2e", target.project_root, identity, "remote", target.workspace_label,
+            tuple(command), timeout, SourceIdentity("sha256:" + identity),
+            remote_name=target.remote_name, output_profile="smart", deadline_source="explicit",
+        )
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        try:
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+        except Exception as exc:
+            die(f"remote E2E acceptance failed: {exc}")
+        if getattr(args, "json", False): print(json.dumps(accepted, sort_keys=True))
+        else: print(accepted["job_id"])
+        return
 
     workers = max(1, int(getattr(args, "workers", None) or 2))
     write_wp_env_port = _detect_wp_env_port_convention(config_path)

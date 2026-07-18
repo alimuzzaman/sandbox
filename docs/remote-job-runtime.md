@@ -13,6 +13,7 @@ development, and isolated labels for matrix cells:
 
 ```sh
 ./sb exec --remote NAME --workspace node-unit --timeout 3600 --detach -- npm test
+./sb e2e --remote NAME --workspace e2e-dev --timeout 7200 --workers 4 --json
 ./sb job-status JOB --json
 ./sb job-output JOB --stream combined --cursor CURSOR --max-bytes 65536
 ./sb job-output JOB --stream stderr --tail-bytes 8192 --wait-seconds 2
@@ -22,6 +23,10 @@ development, and isolated labels for matrix cells:
 `smart`, `errors`, `sampled`, `quiet`, and declarative custom profiles affect
 presentation only; complete output remains retained until cleanup/retention
 policy removes it.
+
+Remote E2E uses the same detached outer job and then runs the co-located E2E
+coordinator, which gives its Playwright workers their existing isolated runtime
+instances. Use `--local` only when deliberately keeping the coordinator local.
 
 ## Health and recovery
 

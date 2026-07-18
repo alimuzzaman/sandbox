@@ -10,6 +10,17 @@ from sandbox.jobs.storage import JobStorage
 
 
 class CancellationTests(unittest.TestCase):
+    def test_cancel_acceptance_before_supervisor_launch_releases_the_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None)
+            row, _ = repo.accept(JobSubmission("test", temp, "p", "local", "cancel", ("echo", "ok"), 30,
+                SourceIdentity("s")))
+            result = service.cancel(row["job_id"], force=True)
+            self.assertEqual(result["lifecycle"], "cancelled")
+            self.assertEqual(result["termination_reason"], "cancelled_before_process_start")
+            repo.close()
+
     def test_verified_cancel_transitions_to_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "registry.sqlite")

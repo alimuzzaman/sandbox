@@ -8,6 +8,7 @@
 - **Skills / workflows → CLI-first.** Use `./sb skill show <name>` and `./sb guide`; `load_workflow` / `load_skill` are MCP alternatives.
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
 - **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
+- **Long-running development/tests →** use durable jobs with finite `--timeout`. When configured, remote is the recommended default; use `--local` deliberately. Do not stream child stdio over SSH/MCP—use `job-status` and bounded `job-output` reads after detached submission.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
 - **"Add" / "build" / "implement" →** follow the relevant local skill; use MCP workflow loading only when that integration is active.

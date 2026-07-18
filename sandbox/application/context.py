@@ -206,7 +206,22 @@ def durable_job_dependencies():
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
     target = TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote)
-    workspace = WorkspaceService(target, storage)
+    def remote_workspace_control(resolved_target, action):
+        import json
+        import shlex
+        from sandbox.core import _remote
+        remote = _remote.get_remote(resolved_target.remote_name)
+        deployed = _remote.deploy_exact_working_tree(remote, resolved_target.project_root)
+        command = shlex.join(["sb", "workspace", action, "--local", "--project-dir",
+                              deployed["target_path"], "--workspace", resolved_target.workspace_label, "--json"])
+        result = _remote.ssh_run(remote, command, timeout=60)
+        payload = next((json.loads(line) for line in reversed((result.stdout or "").splitlines())
+                        if line.startswith("{")), None)
+        if result.returncode != 0 or not payload:
+            raise RuntimeError("remote workspace control failed")
+        return {**payload, "source": deployed}
+
+    workspace = WorkspaceService(target, storage, remote_workspace_control)
     job = JobService(repository, storage, components, scheduler=JobScheduler(repository))
     return {
         "job_service": job,

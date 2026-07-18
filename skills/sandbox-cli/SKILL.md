@@ -5,6 +5,26 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+## Durable remote-first jobs
+
+When a project configures `runtime.default: "remote"`, use the configured
+provisioned remote by default. Pass `--local` only when deliberately running on
+the workstation. Every long-running command needs a finite `--timeout`; use
+`--detach` to return a durable job ID and inspect it later rather than keeping
+an SSH or MCP stdio stream open.
+
+```sh
+sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+sb job-status <job-id> --json
+sb job-output <job-id> --follow
+sb workspace create --remote scaleway-sandbox --workspace node-unit
+```
+
+Remote job submission deploys the exact local working tree first, including
+uncommitted and untracked changes. Named workspaces are reusable; matrix cells
+must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
+server for live remote job status/output operations.
+
 Use this skill when MCP is unavailable, unnecessary, or would load tools for a
 different runtime. The `sb` CLI is the primary operational interface; MCP is an
 optional adapter for MCP-capable clients.

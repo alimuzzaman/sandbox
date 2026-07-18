@@ -23,6 +23,14 @@ class WorkspaceService:
 
     target_service: Any
     storage: Any | None = None
+    remote_control: Any | None = None
+
+    def _remote(self, target, action: str) -> dict | None:
+        if target.kind != "remote":
+            return None
+        if self.remote_control is None:
+            raise RuntimeError("remote workspace control is unavailable")
+        return self.remote_control(target, action)
 
     def _root(self, target) -> Path:
         if self.storage is None:
@@ -34,6 +42,8 @@ class WorkspaceService:
 
     def create(self, request):
         target = self.target_service.resolve(request)
+        remote = self._remote(target, "create")
+        if remote is not None: return remote
         path = self._root(target) / target.workspace_label
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         metadata = {"label": target.workspace_label, "target": target.kind,
@@ -44,6 +54,8 @@ class WorkspaceService:
 
     def list(self, request):
         target = self.target_service.resolve(request)
+        remote = self._remote(target, "list")
+        if remote is not None: return remote
         root = self._root(target)
         items = []
         for path in sorted(root.iterdir()):
@@ -54,12 +66,17 @@ class WorkspaceService:
 
     def status(self, request):
         target = self.target_service.resolve(request)
+        remote = self._remote(target, "status")
+        if remote is not None: return remote
         path = self._root(target) / target.workspace_label / "workspace.json"
         if not path.exists():
             return {"ok": False, "code": "workspace_not_found", "label": target.workspace_label}
         return {"ok": True, **json.loads(path.read_text())}
 
     def reset(self, request):
+        target = self.target_service.resolve(request)
+        remote = self._remote(target, "reset")
+        if remote is not None: return remote
         result = self.status(request)
         if not result.get("ok"):
             return result
@@ -71,6 +88,9 @@ class WorkspaceService:
         return {**result, "reset": True}
 
     def destroy(self, request):
+        target = self.target_service.resolve(request)
+        remote = self._remote(target, "destroy")
+        if remote is not None: return remote
         result = self.status(request)
         if not result.get("ok"):
             return result

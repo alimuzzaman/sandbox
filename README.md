@@ -272,6 +272,22 @@ screenshot, DOM, and console errors without you switching tabs.
 
 ## CLI-first operation (MCP optional)
 
+### Durable remote-first jobs
+
+When `sandbox.config.json` configures a provisioned `runtime.default: "remote"`,
+Sandbox recommends remote execution. Local execution remains available only by
+an explicit `--local` override. Remote job submission deploys the exact working
+tree first, including uncommitted and untracked files; the remote supervisor
+persists process output and callers resume it by cursor rather than streaming
+child pipes over SSH.
+
+```sh
+./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+./sb job-status <job-id> --json
+./sb job-output <job-id> --follow
+./sb workspace create --local --workspace node-unit
+```
+
 Use the same runtime operations without an MCP client:
 
 ```bash

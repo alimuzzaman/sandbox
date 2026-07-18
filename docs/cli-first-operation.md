@@ -3,6 +3,31 @@
 Sandbox can be used entirely through `sb`; an MCP server is optional client
 integration, not a requirement for local development or remote deployment.
 
+## Durable remote-first execution
+
+Projects can opt into a configured remote default:
+
+```json
+{"runtime":{"default":"remote","remote":"scaleway-sandbox","workspace":"default"}}
+```
+
+Use `--local` as an explicit override. Remote execution deploys the exact local
+working tree before acceptance, then the remote supervisor drains process pipes
+to durable local files. CLI/MCP callers read bounded retained output by cursor;
+they do not hold test pipes open across SSH.
+
+```sh
+./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+./sb job-status <job-id> --json
+./sb job-output <job-id> --follow
+./sb workspace create --local --workspace node-unit
+```
+
+Use a named persistent workspace for development. Use deterministic isolated
+labels for parallel matrix cells, retain failures for diagnosis, and reset or
+destroy workspaces explicitly. For live remote operations, prefer the
+co-located remote MCP server and its durable job status/output tools.
+
 Start in any configured project with:
 
 ```bash

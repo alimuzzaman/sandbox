@@ -240,3 +240,35 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Result: PASS; no test failures and `git diff --check` clean.
 - Remote acceptance remains pending because this workspace has no provisioned
   disposable remote; no Playwright remote result is claimed.
+
+## Live remote Compose-instance execution acceptance
+
+- Date: 2026-07-18
+- Environment: disposable Node 20 Compose project with project runtime defaulting
+  to the provisioned `scaleway-sandbox` remote and persistent workspace label
+  `node-instance-acceptance`.
+- Controller correction: remote generic execution now submits one durable
+  host-side supervisor solely for deadline/output/status ownership. Its retained
+  command first invokes `sb ensure --local` in the deployed workspace and then
+  invokes the private direct in-instance execution path. This prevents a
+  remote-first project configuration from recursively submitting a remote job and
+  prevents the explicit test argv from running on the VPS host.
+- Command: `sb exec --workspace node-instance-acceptance --timeout 180 --detach
+  -- node -e '<container assertion; print node-container-pass>'`.
+- Result: accepted job `ec418476a51bea22a15111507102b18b` reached `succeeded` with
+  exit code 0. The exact deployed source identity was
+  `sha256:e37370e1a259a618da0726d2f2c49264ad9db212e3710f72057baef9386521da`
+  at commit `7d2d9f5243d333bf1622bab7467f7226b273a172`.
+- Retained output: the controller recorded the Compose instance as `ready`, then
+  recorded `node-container-pass`. The explicit argv asserted `/.dockerenv` before
+  printing, proving execution occurred inside the remote Compose container rather
+  than in the VPS host environment. Output indexes were complete and the terminal
+  result retained a combined-output integrity hash.
+- Lifecycle observation: a prior controller attempt held the same persistent
+  workspace; the replacement job was safely queued with
+  `workspace_or_capacity_busy`, then started and completed after explicit
+  cancellation of that stale disposable job. This is recorded as scheduler/lease
+  behavior, not as a concurrent-execution success claim.
+- Supersedes the earlier “no provisioned disposable remote” limitation only for
+  this Node Compose acceptance. WordPress/E2E, matrix, CI, artifact, cleanup, and
+  authenticated remote-MCP acceptance remain open tasks.

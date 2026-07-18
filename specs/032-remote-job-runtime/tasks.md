@@ -428,7 +428,7 @@ feature requirements rather than treated as documentation-only follow-up.
 
 ## Phase 10: Live Remote Runtime Convergence
 
-- [ ] T150 [US1] Prove generic remote `sb exec` first ensures the isolated deployed Compose instance and then executes the explicit argv in its declared service—not on the VPS host—using a disposable Node Compose project; retain the job ID, source identity, output, and terminal result per FR-005 through FR-008 and US1/AC1 (partial)
+- [X] T150 [US1] Prove generic remote `sb exec` first ensures the isolated deployed Compose instance and then executes the explicit argv in its declared service—not on the VPS host—using a disposable Node Compose project; retain the job ID, source identity, output, and terminal result per FR-005 through FR-008 and US1/AC1
 - [ ] T151 [US1/US5] Add CLI and MCP contract coverage proving every remote job-control operation uses the staged remote `sb` path, including metrics/artifacts/cancel/retry and MCP `run_tests`/`instance_exec`, per FR-038 through FR-041 (partial)
 - [ ] T152 [US2/US5] Diagnose and repair the owned remote MCP service authentication probe on every provisioned remote; prove authenticated MCP job status/output calls without exposing credentials per FR-015, FR-038, and FR-041 (partial)
 - [ ] T153 [US3] Run disposable remote WordPress integration/E2E and reusable-workspace reset/destroy acceptance with separate runtime state and retained failure output per FR-023 through FR-030 and SC-004 through SC-008 (missing)

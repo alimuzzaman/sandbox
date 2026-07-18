@@ -234,7 +234,8 @@ def durable_job_dependencies():
         payload = next((json.loads(line) for line in reversed((result.stdout or "").splitlines())
                         if line.startswith("{")), None)
         if result.returncode != 0 or not payload:
-            raise RuntimeError("remote workspace control failed")
+            detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:500]
+            raise RuntimeError(f"remote workspace control failed{': ' + detail if detail else ''}")
         return {**payload, "source": deployed}
 
     scheduler = JobScheduler(repository)

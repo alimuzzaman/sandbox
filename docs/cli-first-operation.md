@@ -23,6 +23,7 @@ they do not hold test pipes open across SSH.
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
+./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
 ```
 
 Use a named persistent workspace for development. Use deterministic isolated
@@ -36,6 +37,12 @@ long-poll. It never keeps the test process's stdout/stderr pipes open over SSH
 or MCP. MCP `run_tests(..., remote=..., workspace=..., timeout_seconds=...)`
 uses the same detached runtime and returns a job ID; use `job_status` and
 `job_output` to observe it.
+
+`ci run --remote` applies the same durable model to compatible Linux workflows:
+preflight first, deploy once, then submit an aggregate parent and isolated child
+job for every selected workflow matrix cell. The parent status includes child
+counts while each child retains its own output, deadline, workspace, result, and
+artifact declarations. Use `--local` to force the local `act` path.
 
 Start in any configured project with:
 

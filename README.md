@@ -292,7 +292,16 @@ verbosity; the complete sealed log remains available for later retrieval.
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
+./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
 ```
+
+Remote CI is a durable parent/child submission. Sandbox preflights the workflow
+and blocks named incompatibilities until explicitly accepted, deploys the exact
+working tree once, then creates one isolated retained-log child per selected job
+and matrix cell. Inspect `parent_job_id` and each child with `job-status` and
+`job-output`; the submitting SSH/MCP connection never owns the workflow pipes.
+The co-located `act` adapter runs on the remote host, which must advertise
+`job.exec` and have any workflow-specific credentials configured there.
 
 Use the same runtime operations without an MCP client:
 

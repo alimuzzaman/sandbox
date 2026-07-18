@@ -345,12 +345,16 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="same as `ci plan` even when action=run — parse + classify only")
     ci_p.add_argument("--timeout", type=int, default=900,
         help="per-step timeout in seconds (default: 900)")
+    ci_p.add_argument("--output-profile", default="smart",
+        help="durable retained-output presentation profile for remote jobs")
     ci_p.add_argument("--json", action="store_true",
         help="print the plan/result as JSON (for the MCP server)")
     ci_p.add_argument("--async", dest="run_async", action="store_true",
         help="(action=run only) run detached; prints {job_id} immediately — "
         "poll with `./sb async-job <job_id>`")
-    ci_p.add_argument("--remote", default=None, help="provisioned remote for durable CI control")
+    ci_target = ci_p.add_mutually_exclusive_group()
+    ci_target.add_argument("--local", action="store_true", help="force local act execution")
+    ci_target.add_argument("--remote", default=None, help="provisioned remote for durable CI control")
     ci_p.add_argument("--workspace", default="ci", help="named reusable CI workspace")
     ci_p.add_argument("--accept-difference", dest="accepted_differences", action="append", default=None,
         help="named act compatibility difference accepted for this preflight (repeatable)")
@@ -514,6 +518,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     en.add_argument("--create", action="store_true",
         help="deliberately mint a new instance for --label if one doesn't "
              "exist yet (guards against typo-spawning an extra stack)")
+    ensure_target = en.add_mutually_exclusive_group()
+    ensure_target.add_argument("--local", action="store_true", help="force local execution")
+    ensure_target.add_argument("--remote", help="ensure on a provisioned remote")
+    en.add_argument("--workspace", dest="workspace", help="remote reusable workspace label")
 
     ini = sub.add_parser("init",
         help="Make a plugin dir a sandbox project (config + instance + test harness)")
@@ -729,6 +737,8 @@ Per-project (each plugin carries its own sandbox.config.json):
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
+    if args.cmd in {"status", "logs"} and getattr(args, "project_dir", None):
+        PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
     # Instance-scoped commands operate on ONE instance and require resolution.
     # Everything else is registry-wide/global (instances, dashboard, web, setup,
     # global, uninstall, domains, …) or takes its own name/project arg, so an

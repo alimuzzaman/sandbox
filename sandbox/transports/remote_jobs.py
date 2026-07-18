@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import shlex
 from typing import Any, Callable
 
@@ -58,14 +59,31 @@ class RemoteJobTransport:
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("remote is not provisioned")
         deployed = self.deploy(remote, first.project_root)
-        return [self._submit_deployed(remote, deployed, item) for item in submissions]
+        plan = [{"kind": item.kind, "workspace": item.workspace_label, "argv": list(item.argv),
+                 "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
+                 "output_profile": item.output_profile, "deadline_source": item.deadline_source,
+                 "request_id": item.request_id, "cleanup_policy": item.cleanup_policy,
+                 "artifact_paths": list(item.artifact_paths),
+                 "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
+                            "dirty_digest": deployed.get("dirty_digest")}} for item in submissions]
+        encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
+        args = ["sb", "job-matrix", "--local", "--project-dir", deployed["target_path"],
+                "--timeout", str(max(item.deadline_seconds for item in submissions)),
+                "--output-profile", first.output_profile, "--spec-json", encoded, "--json"]
+        result = self.ssh_run(remote, shlex.join(args), timeout=30)
+        payload = _last_json(getattr(result, "stdout", ""))
+        if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
+            raise RemoteJobTransportError("remote matrix acceptance failed")
+        return {**payload, "source": {"identity": deployed["identity"], "commit": deployed["commit"],
+                 "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
+                "workspace_path": deployed["target_path"]}
 
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         args = ["sb", "job-start", "--local", "--project-dir", deployed["target_path"],
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
-                "--output-profile", submission.output_profile]
+                "--output-profile", submission.output_profile, "--source-identity", deployed["identity"]]
         if submission.request_id:
             args += ["--request-id", submission.request_id]
         args += ["--json", "--", *submission.argv]

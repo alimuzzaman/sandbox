@@ -58,3 +58,27 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - `0f8b231` adds explicit isolated matrix submission. Live local smoke submitted `matrix-a` and `matrix-b`; both completed successfully with distinct supervisor/child PIDs, retained output, and metric records.
 - `db0148d` seals stdout, stderr, and combined indexes on terminal finalization and records a terminal combined-output integrity hash.
 - Validation: focused job, workspace, CI, architecture, CLI composition, MCP composition, MCP schema, and server transport suites passed. A full local discovery run advanced through the CLI boundary but the existing `instances` test blocked on a live Docker Compose `ps` operation for a pre-existing instance; it was terminated without changing runtime state.
+
+## Remote parent/matrix and remote-first lifecycle increment
+
+- Date: 2026-07-18
+- Implementation: durable matrix submission now creates an aggregate parent row,
+  links every isolated child, reconciles aggregate lifecycle/counts, supports parent
+  cancellation, and uses one exact-tree deployment for remote batches. Remote CI
+  expands selected workflow matrix cells into explicit child argv, gates known
+  incompatibilities through preflight, retains artifact declarations, and returns a
+  `parent_job_id` for control-plane observation. MCP exposes `job_matrix` and the
+  remote-aware CI target/workspace/deadline controls.
+- Scheduler evidence: lease renewal and expiry reconciliation are transactional;
+  workspace protection distinguishes local and remote namespaces while retaining
+  serial exclusive behavior.
+- Command: `.cli-venv/bin/python -m unittest tests.test_runtime_config tests.test_target_resolution tests.test_job_models tests.test_job_matrix tests.test_remote_ci_jobs tests.test_remote_job_transport tests.test_job_scheduler tests.test_workspace_runtime tests.test_mcp_composition tests.test_architecture_boundaries -v`
+- Result: PASS, 50 tests.
+- Command: `.cli-venv/bin/python -m unittest tests.test_command_composition tests.test_cli tests.test_ci tests.test_runtime_test_modes tests.test_mcp -v`
+- Result: not completed: the existing CLI resolution test entered a live Docker
+  Compose `ps` check for a pre-existing instance and was terminated; this is the
+  same environment-bound gate recorded above, not a reported feature assertion.
+- Remote acceptance: not run; no provisioned disposable remote is available in
+  this workspace. The mocked transport tests verify deploy-before-acceptance,
+  one-deploy matrix submission, encoded child plans, bounded output controls, and
+  remote preflight blocking without remote side effects.

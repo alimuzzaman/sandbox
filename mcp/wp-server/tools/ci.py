@@ -40,8 +40,12 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
           label_prefix: str | None = None,
           concurrency: int | None = None, allow_deploy: bool = False,
           keep_on_fail: bool = False, strict_provision: bool = False,
-          timeout: int = 900, async_: bool = False) -> dict:
-    """Execute a GitHub Actions workflow's job(s) locally via `act`
+          timeout: int = 900, async_: bool = False, local: bool = False,
+          remote: str | None = None, workspace: str = "ci",
+          accepted_differences: list[str] | None = None,
+          output_profile: str = "smart") -> dict:
+    """Execute a GitHub Actions workflow locally via `act` or durably on a
+    provisioned remote using isolated retained-log child jobs.
     (full GitHub-Actions-equivalent fidelity: matrix, if:, needs, services:,
     composite/reusable actions) — one matrix cell per concurrent ephemeral
     sandbox instance (capped). See docs/ci-e2e-runner-spec.md §3.
@@ -90,6 +94,12 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
         return capability_error
     sb = SANDBOX_ROOT / "sb"
     cmd = [str(sb), "ci", "run", workflow, "--project-dir", project_dir, "--json"]
+    if local:
+        cmd.append("--local")
+    elif remote:
+        cmd += ["--remote", remote]
+    if workspace:
+        cmd += ["--workspace", workspace]
     for j in (jobs or []):
         cmd += ["--job", j]
     for k, v in (matrix_filter or {}).items():
@@ -108,6 +118,10 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
         cmd.append("--strict-provision")
     if timeout:
         cmd += ["--timeout", str(timeout)]
+    if output_profile:
+        cmd += ["--output-profile", output_profile]
+    for difference in (accepted_differences or []):
+        cmd += ["--accept-difference", difference]
     if async_:
         cmd.append("--async")
         try:

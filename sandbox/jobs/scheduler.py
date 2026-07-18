@@ -63,6 +63,44 @@ class JobScheduler:
     def release(self, job_id: str) -> None:
         self.repository.release_leases(job_id)
 
+    def renew(self, job_id: str, *, deadline_seconds: int) -> bool:
+        """Extend an owned workspace/capacity lease while its job is observed."""
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        expiry = (now + timedelta(seconds=max(60, int(deadline_seconds)))).isoformat()
+        with self.repository.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT lease_id FROM workspace_leases WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                "UPDATE workspace_leases SET expires_at=?, heartbeat_at=? WHERE job_id=?",
+                (expiry, timestamp, job_id),
+            )
+            connection.execute(
+                "UPDATE host_capacity_leases SET heartbeat_at=? WHERE job_id=?",
+                (timestamp, job_id),
+            )
+        return True
+
+    def reconcile_stale(self, *, now: datetime | None = None) -> list[str]:
+        """Release expired leases and terminal-job leases atomically."""
+        now = now or datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        with self.repository.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                "SELECT l.job_id FROM workspace_leases l LEFT JOIN jobs j ON j.job_id=l.job_id "
+                "WHERE l.expires_at<=? OR j.job_id IS NULL OR j.lifecycle IN "
+                "('succeeded','failed','timed_out','cancelled','interrupted')",
+                (timestamp,),
+            ).fetchall()
+            ids = [row[0] for row in rows]
+            for job_id in ids:
+                connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
+                connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+        return ids
+
     def active(self, *, namespace: str | None = None) -> list[dict]:
         query = "SELECT * FROM workspace_leases"
         args = ()

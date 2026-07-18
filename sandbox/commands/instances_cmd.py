@@ -75,6 +75,15 @@ def cmd_ensure(cfg, args) -> None:
     """`./sb ensure [--project-dir DIR]` — boot the instance for a project
     directory (create-if-missing) and print its URL. The MCP server's
     ensure_instance tool wraps this; also usable by hand."""
+    if not getattr(args, "local", False):
+        from sandbox.commands.lifecycle import _remote_lifecycle
+        remote_result = _remote_lifecycle(cfg, args, "ensure")
+        if remote_result is not None and getattr(args, "json", False):
+            print(json.dumps(remote_result, sort_keys=True))
+        elif remote_result is not None:
+            print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
+        if remote_result is not None:
+            return
     sc = _core()
     pd = getattr(args, "project_dir", None) or os.getcwd()
     label = getattr(args, "label", None)

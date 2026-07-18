@@ -20,3 +20,18 @@ class JobServiceTests(unittest.TestCase):
             self.assertFalse(first["idempotent_replay"]); self.assertTrue(second["idempotent_replay"])
             self.assertTrue(launched[0].exists())
             repository.close()
+
+    def test_reconcile_marks_lost_supervisor_interrupted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                  launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.transition(row["job_id"], "running")
+            repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=99999999,
+                supervisor_start_identity="start", supervisor_nonce_hash="nonce")
+            result = service.reconcile_startup()
+            self.assertEqual(result["interrupted"], [row["job_id"]])
+            self.assertEqual(repository.get(row["job_id"])["lifecycle"], "interrupted")
+            repository.close()

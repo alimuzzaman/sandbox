@@ -238,7 +238,8 @@ needing time to propagate to OTHER containers after a fresh boot. A throwaway-co
        [--job ID ...] [--matrix-filter k=v ...] [--if-event NAME] \
        [--label-prefix P] [--concurrency N] \
        [--allow-deploy] [--list-secrets] [--keep-on-fail] [--strict-provision] \
-       [--async] [--dry-run] [--json]
+       [--local | --remote NAME] [--workspace LABEL] [--timeout N] \
+       [--accept-difference ID ...] [--async] [--dry-run] [--json]
 ./sb async-job <job_id> [--follow] [--kill] [--offset N] [--json]
 ```
 
@@ -247,8 +248,12 @@ dict all handled) — no trigger simulation, just "does this workflow mention th
 all." A non-matching event returns `{"ok": true, "skipped": true, "reason": "..."}` and
 runs nothing (not an error — matches how a real trigger mismatch behaves on GitHub).
 
-`--async`: same detached-job model as `./sb e2e --async` (§4.3) — returns `{"job_id":...}`
-immediately.
+`--async`: same detached-job model as `./sb e2e --async` (§4.3) for local runs.
+Remote runs are already accepted durably and return a `parent_job_id` immediately;
+each selected job/matrix cell is a child with its own retained output and deadline.
+The exact local working tree is deployed once before remote acceptance. Remote
+workflow processes are never attached to the submitting SSH/MCP stdio stream;
+poll `job-status` and read retained pages with `job-output` instead.
 
 MCP tools:
 ```python
@@ -257,7 +262,10 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
            matrix_filter: dict | None = None, if_event: str | None = None,
            label_prefix: str | None = None, concurrency: int | None = None,
            allow_deploy: bool = False, keep_on_fail: bool = False,
-           strict_provision: bool = False, timeout: int = 900) -> dict
+           strict_provision: bool = False, timeout: int = 900,
+           local: bool = False, remote: str | None = None,
+           workspace: str = "ci",
+           accepted_differences: list[str] | None = None) -> dict
 ```
 (Blocking; async MCP wrapping not yet exposed for `ci_run` either — see §7.)
 

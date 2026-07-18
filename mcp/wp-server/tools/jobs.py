@@ -24,7 +24,7 @@ def register(server, dependencies: ToolDependencies) -> None:
     _job_service = dependencies.require("job_service")
     _target_service = dependencies.require("target_service")
     _workspace_service = dependencies.require("workspace_service")
-    for tool in (job_start, job_status, job_list, job_output, job_follow, job_metrics, job_cancel,
+    for tool in (job_start, job_matrix, job_status, job_list, job_output, job_follow, job_metrics, job_reconcile, job_cancel,
                  job_artifacts, job_artifact_get, job_retry, job_cleanup,
                  workspace_create, workspace_list, workspace_status, workspace_reset, workspace_destroy):
         server.tool()(tool)
@@ -59,6 +59,32 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
         return _job_service.submit(submission)
     except Exception as exc:
         return {"ok": False, "code": "supervisor_launch_failed", "error": str(exc)}
+
+
+def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
+               local: bool = False, remote: str | None = None,
+               timeout_seconds: int = 900, output_profile: str = "smart") -> dict:
+    """Submit one explicit command per isolated workspace under an aggregate job."""
+    if not workspaces or not command:
+        return {"ok": False, "code": "invalid_matrix", "error": "command and workspaces are required"}
+    if len(set(workspaces)) != len(workspaces):
+        return {"ok": False, "code": "invalid_matrix", "error": "workspace labels must be unique"}
+    try:
+        target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
+            workspace=workspaces[0], required_capability="job.exec" if remote else None))
+        identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+        submissions = [JobSubmission("test", target.project_root, identity, target.kind, workspace,
+            tuple(command), timeout_seconds, SourceIdentity("sha256:" + identity),
+            remote_name=target.remote_name, workspace_mode="isolated", output_profile=output_profile)
+            for workspace in workspaces]
+        if target.kind == "remote":
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit_many(submissions)
+        return _job_service.submit_matrix(submissions)
+    except Exception as exc:
+        return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"), "error": str(exc)}
 
 
 def job_status(job_id: str) -> dict:
@@ -99,6 +125,14 @@ def job_metrics(job_id: str, *, limit: int = 500) -> dict:
         return _job_service.read_metrics(job_id, limit=limit)
     except Exception as exc:
         return {"ok": False, "code": "job_not_found", "error": str(exc)}
+
+
+def job_reconcile(*, limit: int = 200) -> dict:
+    """Reconcile active jobs after a supervisor or host interruption."""
+    try:
+        return _job_service.reconcile_startup(limit=limit)
+    except Exception as exc:
+        return {"ok": False, "code": "reconciliation_failed", "error": str(exc)}
 
 
 def job_cancel(job_id: str, *, force: bool = False) -> dict:

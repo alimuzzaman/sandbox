@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import time
 from pathlib import Path
@@ -44,6 +45,7 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--profile", default="exec")
     parser.add_argument("--output-profile", default="smart")
     parser.add_argument("--request-id")
+    parser.add_argument("--source-identity")
     parser.add_argument("--wait", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("command", nargs="...", help="argv after --")
@@ -88,16 +90,22 @@ def configure_metrics_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_reconcile_parser(parser) -> None:
+    parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--json", action="store_true")
+
+
 def configure_matrix_parser(parser) -> None:
     parser.description = "Fan out one explicit argv into isolated durable workspace jobs."
     parser.add_argument("--project-dir", default=".")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
-    parser.add_argument("--workspace", action="append", required=True,
+    parser.add_argument("--workspace", action="append",
                         help="isolated workspace label; repeat for each matrix cell")
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--output-profile", default="smart")
+    parser.add_argument("--spec-json", help="internal encoded matrix child submission plan")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("command", nargs="...")
 
@@ -117,10 +125,11 @@ def cmd_job_start(_cfg, args) -> None:
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
     timeout, profile = _profile_timeout(target, args.profile, args.timeout)
+    source = SourceIdentity(args.source_identity) if args.source_identity else _source_identity(target.project_root)
     submission = JobSubmission(
         kind="exec", project_root=target.project_root, project_identity=hashlib.sha256(target.project_root.encode()).hexdigest(),
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
-        argv=tuple(command), deadline_seconds=timeout, source=_source_identity(target.project_root),
+        argv=tuple(command), deadline_seconds=timeout, source=source,
         request_id=args.request_id, execution_profile=profile, output_profile=args.output_profile,
         deadline_source="explicit" if args.timeout else f"profile:{profile}",
     )
@@ -233,10 +242,19 @@ def cmd_job_metrics(_cfg, args) -> None:
             print(json.dumps(item, sort_keys=True))
 
 
+def cmd_job_reconcile(_cfg, args) -> None:
+    result = durable_job_dependencies()["job_service"].reconcile_startup(limit=args.limit)
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"interrupted={len(result['interrupted'])} released={len(result['released_leases'])}")
+
+
 def cmd_job_matrix(_cfg, args) -> None:
     command = list(args.command or ())
     if command[:1] == ["--"]: command = command[1:]
-    if not command: _die("usage: ./sb job-matrix --workspace LABEL [--workspace LABEL] -- <argv...>")
+    if not args.spec_json and (not args.workspace or not command):
+        _die("usage: ./sb job-matrix --workspace LABEL [--workspace LABEL] -- <argv...>")
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(args.project_dir, local=args.local,
@@ -244,17 +262,45 @@ def cmd_job_matrix(_cfg, args) -> None:
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
     source = _source_identity(target.project_root)
-    submissions = [JobSubmission("test", target.project_root, hashlib.sha256(target.project_root.encode()).hexdigest(),
-        target.kind, workspace, tuple(command), args.timeout, source, remote_name=target.remote_name,
-        workspace_mode="isolated", output_profile=args.output_profile, deadline_source="explicit")
-        for workspace in args.workspace]
+    project_identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    if args.spec_json:
+        try:
+            decoded = base64.b64decode(args.spec_json.encode(), validate=True).decode()
+            specs = json.loads(decoded)
+            if not isinstance(specs, list) or not specs:
+                raise ValueError("matrix plan must be a non-empty list")
+        except Exception as exc:
+            _die(f"invalid matrix submission plan: {exc}")
+        submissions = []
+        for item in specs:
+            if not isinstance(item, dict):
+                _die("invalid matrix submission plan entry")
+            try:
+                submissions.append(JobSubmission(
+                    kind=item.get("kind", "test"), project_root=target.project_root,
+                    project_identity=project_identity, target_kind=target.kind,
+                    remote_name=target.remote_name, workspace_label=item["workspace"],
+                    argv=tuple(item["argv"]), deadline_seconds=item.get("timeout", args.timeout),
+                    source=SourceIdentity(**item.get("source", {"identity": source.identity})),
+                    workspace_mode=item.get("workspace_mode", "isolated"),
+                    output_profile=item.get("output_profile", args.output_profile),
+                    deadline_source=item.get("deadline_source", "explicit"),
+                    request_id=item.get("request_id"), cleanup_policy=item.get("cleanup_policy", "retain"),
+                    artifact_paths=tuple(item.get("artifact_paths", ())),
+                ))
+            except (KeyError, TypeError, ValueError) as exc:
+                _die(f"invalid matrix submission plan entry: {exc}")
+    else:
+        submissions = [JobSubmission("test", target.project_root, project_identity,
+            target.kind, workspace, tuple(command), args.timeout, source, remote_name=target.remote_name,
+            workspace_mode="isolated", output_profile=args.output_profile, deadline_source="explicit")
+            for workspace in args.workspace]
     if target.kind == "remote":
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote)
-        result = {"ok": True, "kind": "matrix", "children": transport.submit_many(submissions),
-                  "summary": {"submitted": len(submissions)}}
+        result = transport.submit_many(submissions)
     else:
         result = dependencies["job_service"].submit_matrix(submissions)
     if args.json: print(json.dumps(result, sort_keys=True))
@@ -269,5 +315,6 @@ register_specs((
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
+    CommandSpec("job-reconcile", cmd_job_reconcile, configure=configure_reconcile_parser, owner=__name__, scope="global"),
     CommandSpec("job-matrix", cmd_job_matrix, configure=configure_matrix_parser, owner=__name__, scope="global"),
 ))

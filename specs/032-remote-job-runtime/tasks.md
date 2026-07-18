@@ -170,7 +170,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 
 ### Tests for User Story 3
 
-- [ ] T075 [P] [US3] Add atomic exclusive/shared/lifecycle/host-capacity lease and stale-lease reconciliation tests in `tests/test_job_scheduler.py` for FR-025 through FR-028
+- [X] T075 [P] [US3] Add atomic exclusive/shared/lifecycle/host-capacity lease and stale-lease reconciliation tests in `tests/test_job_scheduler.py` for FR-025 through FR-028
 - [ ] T076 [P] [US3] Add deterministic concurrent-safe <=21-character matrix label tests across projects, parents, retries, and canonical matrix values in `tests/test_workspace_labels.py`
 - [ ] T077 [P] [US3] Add persistent create/list/status/reset/destroy, busy mutation, retained failure, idempotent create, and local/remote namespace tests in `tests/test_workspace_runtime.py` for FR-023/FR-024/FR-026
 - [ ] T078 [P] [US3] Add same-instance serial, explicit shared-safe, immediate-busy suggestion, and process-isolation tests in `tests/test_workspace_concurrency.py` for FR-025/FR-026 and SC-006
@@ -179,7 +179,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 
 ### Implementation for User Story 3
 
-- [ ] T081 [US3] Implement transactional workspace/host capacity leases, queue state, renewal, release, and immediate-busy suggestions in `sandbox/jobs/scheduler.py`
+- [X] T081 [US3] Implement transactional workspace/host capacity leases, queue state, renewal, release, stale reconciliation, and immediate-busy suggestions in `sandbox/jobs/scheduler.py`
 - [X] T082 [US3] Implement deterministic safe isolated label generation and target namespace separation in `sandbox/jobs/scheduler.py`
 - [ ] T083 [US3] Implement parent coordinators, declared step dependencies, per-child deadlines/results, matrix capacity, fail-fast/continue, retry relationships, and aggregate status in `sandbox/jobs/scheduler.py`
 - [X] T084 [US3] Implement persistent workspace create/list/status and exclusive reset/destroy orchestration in `sandbox/application/workspace_service.py`
@@ -187,7 +187,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 - [ ] T086 [US3] Enforce deploy/ensure/reset/destroy lifecycle leases and execution leases before side effects in `sandbox/application/job_service.py` and `sandbox/application/workspace_service.py`
 - [X] T087 [US3] Add `sb workspace create|list|status|reset|destroy` feature-owned command group in `sandbox/commands/workspaces.py` and register it in `sandbox/commands/manifest.py`
 - [ ] T088 [US3] Add `sb test matrix` and declared multi-step plan submission/status rendering in `sandbox/commands/runtime.py` and `sandbox/commands/jobs_runtime.py`
-- [ ] T089 [US3] Add MCP workspace lifecycle and parent/matrix job inputs/results in `mcp/wp-server/tools/jobs.py`
+- [X] T089 [US3] Add MCP workspace lifecycle and parent/matrix job inputs/results in `mcp/wp-server/tools/jobs.py`
 - [ ] T090 [US3] Adapt WordPress unit/integration tests and E2E shards to leaf/parent jobs with per-workspace isolation in `sandbox/commands/debug.py`, `sandbox/commands/e2e.py`, and `mcp/wp-server/tools/e2e.py`
 - [ ] T091 [US3] Run the US3 tests plus existing fanout/E2E/WordPress suites with `.cli-venv/bin/python -m unittest tests.test_job_scheduler tests.test_workspace_labels tests.test_workspace_runtime tests.test_workspace_concurrency tests.test_job_matrix tests.test_workspace_contracts tests.test_fanout tests.test_e2e tests.test_runtime_test_modes -v`
 - [ ] T092 [US3] Run live same-instance serialization, reusable rerun, two isolated simultaneous instances, failed retention, reset, and destroy checks through `./sb` and append evidence to `specs/032-remote-job-runtime/implementation-evidence.md`
@@ -225,8 +225,8 @@ accepted.
 - [X] T101 [US4] Implement strict preflight result assembly, named acceptance validation, engine/version observation, and no-side-effect guarantee in `sandbox/ci/workflow.py`
 - [X] T102 [US4] Implement safe-mode step/action classification and a fail-closed neutralized workflow plan in `sandbox/ci/workflow.py`
 - [ ] T103 [US4] Adapt existing `act` execution to remote parent/child/matrix jobs with Sandbox outer deadlines, logs, artifacts, retries, and cleanup in `sandbox/commands/ci.py`
-- [ ] T104 [US4] Preserve existing CI parser/result compatibility and add `ci preflight` plus remote target/output/deadline/difference options in `sandbox/commands/ci.py`
-- [ ] T105 [US4] Add MCP CI preflight/start/status integration over durable jobs in `mcp/wp-server/tools/ci.py` and register dependencies in `mcp/wp-server/tools/manifest.py`
+- [X] T104 [US4] Preserve existing CI parser/result compatibility and add `ci preflight` plus remote target/output/deadline/difference options in `sandbox/commands/ci.py`
+- [X] T105 [US4] Add MCP CI preflight/start/status integration over durable jobs in `mcp/wp-server/tools/ci.py` and register dependencies in `mcp/wp-server/tools/manifest.py`
 - [ ] T106 [US4] Run CI compatibility, workflow, safe-mode, remote-job, contract, and existing CI suites with `.cli-venv/bin/python -m unittest tests.test_ci_compatibility tests.test_ci_workflow tests.test_ci_safe_mode tests.test_remote_ci_jobs tests.test_ci_contracts tests.test_ci -v`
 - [ ] T107 [US4] Run disposable remote acceptance for a compatible Linux workflow with dependencies/matrix/artifacts and an incompatible workflow blocked before side effects, recording evidence in `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T108 [US4] Commit and push the passing strict remote-CI increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
@@ -254,7 +254,7 @@ and both results identify target resolution.
 
 ### Implementation for User Story 5
 
-- [ ] T113 [US5] Apply the shared target resolver to `ensure`, `status`, `logs`, `exec`, and `test` command paths with mutually exclusive `--local|--remote` and workspace options in `sandbox/commands/lifecycle.py`, `sandbox/commands/runtime.py`, and `sandbox/cli.py`
+- [X] T113 [US5] Apply the shared target resolver to `ensure`, `status`, `logs`, `exec`, and `test` command paths with mutually exclusive `--local|--remote` and workspace options in `sandbox/commands/lifecycle.py`, `sandbox/commands/runtime.py`, and `sandbox/cli.py`
 - [ ] T114 [US5] Ensure all CLI human/JSON outputs report target/workspace/deadline source and actionable unknown-target guidance in `sandbox/commands/runtime.py`, `sandbox/commands/jobs_runtime.py`, and `sandbox/commands/lifecycle.py`
 - [ ] T115 [US5] Apply shared target/deadline/output inputs and result translation across MCP runtime/test/job/workspace tools in `mcp/wp-server/tools/runtime.py`, `mcp/wp-server/tools/debug.py`, `mcp/wp-server/tools/jobs.py`, and `mcp/wp-server/tools/instances.py`
 - [ ] T116 [US5] Update CLI-first command catalog and generated guidance to recommend configured remote execution and explicit local override in `sandbox/commands/runtime.py`
@@ -280,10 +280,10 @@ security, and release-regression evidence across all stories.
 - [ ] T125 Adapt Hermes job observation through an explicit service adapter in `sandbox/hermes/jobs.py` and `sandbox/commands/hermes.py` without adding compatibility-facade consumers
 - [X] T126 [P] Update user-facing remote-first overview, examples, output recovery, and CI scope in `README.md`
 - [X] T127 [P] Update CLI operation procedures and target/workspace/job command tables in `docs/cli-first-operation.md`
-- [ ] T128 [P] Update project runtime schema, profiles, test plans, output policies, and examples in `docs/sandbox-config-reference.md`
+- [X] T128 [P] Update project runtime schema, profiles, test plans, output policies, and examples in `docs/sandbox-config-reference.md`
 - [ ] T129 [P] Update remote hosting/deployment guidance to distinguish source deploy, remote development jobs, remote MCP, and production hosting in `docs/remote-hosting.md` and `docs/remote-hosting-implementation.md`
-- [ ] T130 [P] Update E2E/CI behavior, compatibility gate, matrices, artifacts, deadlines, and safe mode in `docs/ci-e2e-runner-spec.md`
-- [ ] T131 [P] Add a durable job runtime operations/troubleshooting guide with storage pressure, unreachable host, stalled health, cancellation, reconciliation, retention, and recovery in `docs/remote-job-runtime.md`
+- [X] T130 [P] Update E2E/CI behavior, compatibility gate, matrices, artifacts, deadlines, and safe mode in `docs/ci-e2e-runner-spec.md`
+- [X] T131 [P] Add a durable job runtime operations/troubleshooting guide with storage pressure, unreachable host, stalled health, cancellation, reconciliation, retention, and recovery in `docs/remote-job-runtime.md`
 - [ ] T132 Add acceptance fixtures for Node unit, PHP unit, WordPress integration, disconnect/resume, simultaneous labels, workspace reuse/failure/reset/destroy, matrix, artifact, timeout, and output retrieval in `tests/acceptance/test_remote_job_runtime.py`
 - [ ] T133 Add acceptance fixtures for remote compatible/incompatible CI and safe-mode behavior in `tests/acceptance/test_remote_ci.py`
 - [ ] T134 Run the complete pure test suite with `.cli-venv/bin/python -m unittest discover -s tests -v` and record totals/failures in `specs/032-remote-job-runtime/implementation-evidence.md`
@@ -410,3 +410,18 @@ Integration owner: T078/T080 + T085-T093 concurrency and interfaces
   output in `implementation-evidence.md`.
 - Every runtime mutation uses `./sb`; raw Docker/SSH is limited to owned transport
   implementation tests and never substitutes for the product's live verification.
+
+## Phase 9: Convergence
+
+The following gaps remain after the first implementation pass and are traced to the
+feature requirements rather than treated as documentation-only follow-up.
+
+- [ ] T141 [US3/US4] Implement dependency-aware parent coordination with declared `needs`/step edges, bounded capacity dispatch, fail-fast/continue policy, per-child queue reasons, retry relationships, and aggregate terminal outcomes for local and remote matrices per FR-027-FR-030 and US4/AC1 (partial)
+- [ ] T142 [US3] Give each remote workspace an isolated deployed source/runtime path, serialize reset/destroy/redeploy against active leases, and prove reusable reruns do not share mutable files or databases per FR-023-FR-028 and US3/AC4 (partial)
+- [ ] T143 [US4] Complete remote CI artifact transfer, safe-mode semantic-difference persistence, child retry/cleanup policy, and parent result retrieval through CLI and MCP per FR-031-FR-037 and US4/AC3-US4/AC5 (partial)
+- [ ] T144 [US2/Phase 8] Add startup reconciliation and a durable supervisor/host-restart recovery command that classifies orphaned, unreachable, process-missing, and interrupted jobs without false success per FR-015-FR-022 (partial)
+- [ ] T145 [Phase 8] Implement terminal-job/log/metric/artifact retention policy enforcement, storage-pressure handling, and explicit cleanup reporting per FR-014 and FR-032 (missing)
+- [ ] T146 [Phase 8] Add durable adapters and parity tests for legacy async-job and Hermes job status/output/cancel behavior without changing their scheduling semantics per FR-040 (missing)
+- [ ] T147 [US3/US4/Phase 8] Add remote E2E/WordPress test-mode submission, reusable workspace failure retention/reset/destroy coverage, disconnect/resume fixtures, and artifact/output acceptance fixtures per SC-001-SC-008 (partial)
+- [ ] T148 [US4/Phase 8] Run and record disposable remote Node, PHP, WordPress, matrix, artifact, CI-compatible, CI-blocked, timeout, and cleanup acceptance with exact remote/job/source identities per SC-009 and SC-010 (missing)
+- [ ] T149 [Phase 8] Complete the full pure/compatibility/architecture/MCP/local CLI regression suite and resolve environment-bound test gates or record reproducible skips before release per FR-040 and SC-010 (partial)

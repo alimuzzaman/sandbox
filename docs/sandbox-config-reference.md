@@ -572,6 +572,12 @@ an SSH/MCP child-process pipe. Persistent named workspaces are for development;
 use isolated deterministic labels for parallel matrix cells, and reset/destroy
 them explicitly when no active lease remains.
 
+Remote CI uses the selected runtime remote when `ci run` omits `--local`. Its
+outer deadline belongs to Sandbox, while the remote co-located `act` invocation
+executes one workflow cell per durable child. A blocked preflight is a no-side-
+effect result; pass each exact compatibility ID with `--accept-difference` only
+when the semantic divergence is intentional and reviewable.
+
 ## Hermes remote defaults
 
 `sb hermes` stores no provider credentials in project configuration. It uses an

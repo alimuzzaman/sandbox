@@ -303,6 +303,15 @@ class JobRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def children(self, parent_job_id: str) -> list[dict[str, Any]]:
+        """Return one parent's children in stable acceptance order."""
+        parent_job_id = validate_job_id(parent_job_id)
+        rows = self.connection.execute(
+            "SELECT * FROM jobs WHERE parent_job_id=? ORDER BY accepted_at ASC, job_id ASC",
+            (parent_job_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def transition(self, job_id: str, target: Lifecycle | str, **fields: Any) -> dict[str, Any]:
         target = Lifecycle(target)
         allowed_fields = {"exit_code", "termination_reason", "output_completeness",

@@ -38,13 +38,16 @@ class RemoteJobTransportTests(unittest.TestCase):
         calls = []
         transport = RemoteJobTransport(
             deploy=lambda remote, root: calls.append(("deploy", root)) or {"target_path": "/srv/p", "commit": "abc", "dirty": False, "dirty_digest": "", "identity": "sha256:id"},
-            ssh_run=lambda remote, command, timeout: calls.append(("ssh", command)) or SimpleNamespace(returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            ssh_run=lambda remote, command, timeout: calls.append(("ssh", command)) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"kind":"matrix","parent_job_id":"parent","children":[{"job_id":"a"},{"job_id":"b"}]}\n'),
             remote_lookup=lambda name: {"provisioned": True},
         )
         source = SourceIdentity("ignored")
         children = [JobSubmission("test", "/p", "p", "remote", label, ("npm", "test"), 60, source,
             remote_name="r", workspace_mode="isolated") for label in ("a", "b")]
-        self.assertEqual(len(transport.submit_many(children)), 2)
+        result = transport.submit_many(children)
+        self.assertEqual(result["parent_job_id"], "parent")
+        self.assertEqual(len(result["children"]), 2)
         self.assertEqual([item[0] for item in calls].count("deploy"), 1)
         calls.clear()
         transport.read_output("r", "abc", stream="stderr", cursor="cursor", tail_bytes=10,

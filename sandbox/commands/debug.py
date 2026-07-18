@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -155,6 +156,56 @@ def cmd_test(cfg, args) -> None:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:
         die(str(e))
+    # Remote is the project-level default when configured. Submit the explicit
+    # test command to the durable remote runtime before touching local instance
+    # state; the remote command uses --local to prevent recursive remote
+    # resolution on the deployed checkout.
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.application.target_service import TargetResolutionError
+    from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+    try:
+        selected_target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+            project_dir=pd, local=bool(getattr(args, "local", False)),
+            remote=getattr(args, "remote", None), workspace=(
+                (getattr(args, "workspace", None) or [None])[0]
+                if getattr(args, "mode", None) == "matrix" else None),
+            required_capability="job.exec",
+        ))
+    except TargetResolutionError as exc:
+        die(f"{exc.code}: {exc}")
+    if selected_target.kind == "remote":
+        try:
+            mode = resolve_test_mode(
+                selected_target.project_root,
+                configured=pconf.get("tests", {}).get("suite", "auto"),
+                explicit=getattr(args, "mode", None),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            die(str(exc))
+        if getattr(args, "provision_only", False):
+            die("--provision-only is only available for local integration harness setup")
+        extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
+        command = ["sb", "test", mode, "--local", "--project-dir", "."]
+        if extra:
+            command += ["--", *extra]
+        timeout = int(getattr(args, "timeout", 900) or 900)
+        submission = JobSubmission(
+            "test", selected_target.project_root,
+            hashlib.sha256(selected_target.project_root.encode()).hexdigest(), "remote",
+            selected_target.workspace_label, tuple(command), timeout,
+            SourceIdentity("sha256:" + hashlib.sha256(selected_target.project_root.encode()).hexdigest()),
+            remote_name=selected_target.remote_name, output_profile=getattr(args, "output_profile", "smart"),
+            deadline_source="explicit" if getattr(args, "timeout", None) else "profile:test",
+        )
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+            ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit(submission)
+        if getattr(args, "json", False):
+            print(json.dumps(accepted, sort_keys=True))
+        else:
+            print(accepted["job_id"])
+        return
     entry = sc.registry_get(pconf["root"], label=label)
     if not entry:
         if label is None and len(sc.registry_list_for_root(pconf["root"])) > 1:

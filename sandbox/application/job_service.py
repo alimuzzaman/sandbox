@@ -11,14 +11,16 @@ import hashlib
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from sandbox.jobs.models import JobSubmission, OutputQuery
+from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity
 from sandbox.jobs.output import JobOutputStore
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
-from sandbox.jobs.process import ProcessIdentity, signal_owned_process_group
+from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
+                                  signal_owned_process_group, verify_process_identity)
 from sandbox.jobs.scheduler import WorkspaceBusy
 
 
@@ -91,6 +93,8 @@ class JobService:
 
     def get(self, job_id: str, *, reconcile: bool = True):
         snapshot = self.repository.snapshot(job_id)
+        if snapshot["kind"] in {"matrix", "ci", "plan"}:
+            return self._get_parent(snapshot)
         if snapshot["lifecycle"] == Lifecycle.QUEUED.value and self.scheduler is not None:
             try:
                 self.scheduler.acquire(snapshot, parallel_safe=snapshot["workspace_mode"] == "isolated")
@@ -99,6 +103,8 @@ class JobService:
             except WorkspaceBusy:
                 pass
         if reconcile:
+            if self.scheduler is not None and snapshot["lifecycle"] in {"accepted", "queued", "running", "cancelling"}:
+                self.scheduler.renew(job_id, deadline_seconds=snapshot["deadline_seconds"])
             health, evidence = classify(snapshot)
             if snapshot["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
                 self.repository.set_health(job_id, health, evidence)
@@ -109,9 +115,92 @@ class JobService:
             self.scheduler.release(job_id)
         return snapshot
 
+    def _get_parent(self, snapshot: dict) -> dict:
+        """Reconcile an aggregate without launching a fake parent process."""
+        children = [self.get(child["job_id"]) for child in self.repository.children(snapshot["job_id"])]
+        terminal = {item.value for item in (
+            Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+            Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+        )}
+        states = [child["lifecycle"] for child in children]
+        if not states:
+            lifecycle = snapshot["lifecycle"]
+        elif all(state in terminal for state in states):
+            if any(state == Lifecycle.FAILED.value for state in states):
+                lifecycle = Lifecycle.FAILED.value
+            elif any(state == Lifecycle.TIMED_OUT.value for state in states):
+                lifecycle = Lifecycle.TIMED_OUT.value
+            elif any(state == Lifecycle.CANCELLED.value for state in states):
+                lifecycle = Lifecycle.CANCELLED.value
+            elif any(state == Lifecycle.INTERRUPTED.value for state in states):
+                lifecycle = Lifecycle.INTERRUPTED.value
+            else:
+                lifecycle = Lifecycle.SUCCEEDED.value
+        elif any(state in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value} for state in states):
+            lifecycle = Lifecycle.RUNNING.value
+        else:
+            lifecycle = Lifecycle.QUEUED.value
+        current = snapshot["lifecycle"]
+        if lifecycle != current:
+            try:
+                snapshot = self.repository.transition(snapshot["job_id"], lifecycle,
+                    result_json=__import__("json").dumps(self._aggregate_result(children), sort_keys=True))
+            except ValueError:
+                # A child can finish between the read and transition. The next
+                # status request will reconcile from the authoritative children.
+                snapshot = self.repository.snapshot(snapshot["job_id"])
+        result = self._aggregate_result(children)
+        return {**snapshot, "children": children, "aggregate": result,
+                "health": "terminal" if lifecycle in terminal else ("active" if lifecycle == "running" else "quiet")}
+
+    @staticmethod
+    def _aggregate_result(children: list[dict]) -> dict:
+        counts: dict[str, int] = {}
+        for child in children:
+            state = child["lifecycle"]
+            counts[state] = counts.get(state, 0) + 1
+        return {"children": len(children), "counts": counts,
+                "passed": counts.get(Lifecycle.SUCCEEDED.value, 0),
+                "failed": sum(counts.get(state, 0) for state in (
+                    Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
+                    Lifecycle.CANCELLED.value, Lifecycle.INTERRUPTED.value,
+                ))}
+
     def list(self, query=None):
         query = dict(query or {})
         return self.repository.list(**query)
+
+    def reconcile_startup(self, *, limit: int = 200) -> dict:
+        """Reconcile active jobs whose recorded supervisor identity is gone."""
+        interrupted = []
+        for row in self.repository.list(limit=limit):
+            if row["lifecycle"] not in {Lifecycle.RUNNING.value, Lifecycle.CANCELLING.value}:
+                continue
+            process = self.repository.snapshot(row["job_id"]).get("process") or {}
+            supervisor_pid = process.get("supervisor_pid")
+            if not supervisor_pid or not process.get("supervisor_start_identity"):
+                continue
+            observed = capture_process_identity(int(supervisor_pid))
+            if observed is not None:
+                observed = ProcessIdentity(observed.host_boot_id, observed.pid,
+                    observed.start_identity, process["supervisor_nonce_hash"], observed.process_group_id)
+            expected = ProcessIdentity(process["host_boot_id"], int(supervisor_pid),
+                process["supervisor_start_identity"], process["supervisor_nonce_hash"])
+            if verify_process_identity(expected, observed):
+                continue
+            try:
+                self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,
+                    termination_reason="supervisor_lost", output_completeness="partial",
+                    result_json=__import__("json").dumps({
+                        "reconciled": True, "evidence": "recorded supervisor identity no longer matches"
+                    }, sort_keys=True))
+                if self.scheduler is not None:
+                    self.scheduler.release(row["job_id"])
+                interrupted.append(row["job_id"])
+            except ValueError:
+                pass
+        stale = self.scheduler.reconcile_stale() if self.scheduler is not None else []
+        return {"ok": True, "interrupted": interrupted, "released_leases": stale}
 
     def read_output(self, job_id: str, query: OutputQuery | None = None):
         query = query or OutputQuery()
@@ -119,10 +208,23 @@ class JobService:
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)
+        if snapshot["kind"] in {"matrix", "ci", "plan"}:
+            children = self.repository.children(job_id)
+            cancelled = []
+            for child in children:
+                if child["lifecycle"] not in {item.value for item in (
+                    Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                    Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
+                )}:
+                    cancelled.append(self.cancel(child["job_id"], force=force))
+            return self._get_parent(self.repository.snapshot(job_id)) | {"cancelled_children": cancelled}
         if snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             raise RuntimeError("already_terminal")
         process = snapshot.get("process") or {}
         if not process.get("child_pid") or not process.get("child_pgid"):
+            if snapshot["lifecycle"] in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
+                return self.repository.transition(job_id, Lifecycle.CANCELLED,
+                    termination_reason="cancelled_before_process_start")
             raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
@@ -186,10 +288,26 @@ class JobService:
     def submit_matrix(self, submissions: list[JobSubmission]) -> dict:
         if not submissions:
             raise ValueError("matrix requires at least one child submission")
+        first = submissions[0]
+        if any(item.target_kind != first.target_kind or item.remote_name != first.remote_name or
+               item.project_root != first.project_root for item in submissions):
+            raise ValueError("matrix children must share one target and project")
+        parent = JobSubmission(
+            kind="matrix", project_root=first.project_root,
+            project_identity=first.project_identity, target_kind=first.target_kind,
+            remote_name=first.remote_name, workspace_label="matrix-parent",
+            argv=("sandbox-matrix-parent",), deadline_seconds=max(item.deadline_seconds for item in submissions),
+            source=first.source, workspace_mode="persistent", output_profile=first.output_profile,
+            execution_profile=first.execution_profile, deadline_source=first.deadline_source,
+        )
+        parent_row, replay = self.repository.accept(parent)
+        if replay:
+            return self._get_parent(parent_row)
+        self.storage.job_dir(parent_row["job_id"], create=True)
         accepted = []
         for submission in submissions:
             if submission.workspace_mode != "isolated":
                 raise ValueError("matrix children require isolated workspaces")
-            accepted.append(self.submit(submission))
-        return {"ok": True, "kind": "matrix", "children": accepted,
-                "summary": {"submitted": len(accepted)}}
+            accepted.append(self.submit(replace(submission, parent_job_id=parent_row["job_id"])))
+        return {"ok": True, "kind": "matrix", "parent_job_id": parent_row["job_id"],
+                "children": accepted, "summary": {"submitted": len(accepted)}}

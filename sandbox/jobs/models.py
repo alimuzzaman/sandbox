@@ -75,7 +75,7 @@ TERMINAL_LIFECYCLES = frozenset({
 _TRANSITIONS = {
     Lifecycle.ACCEPTED: frozenset({Lifecycle.QUEUED, Lifecycle.RUNNING,
                                    Lifecycle.FAILED, Lifecycle.INTERRUPTED}),
-    Lifecycle.QUEUED: frozenset({Lifecycle.RUNNING, Lifecycle.CANCELLING,
+    Lifecycle.QUEUED: frozenset({Lifecycle.RUNNING, Lifecycle.SUCCEEDED, Lifecycle.CANCELLING,
                                  Lifecycle.CANCELLED, Lifecycle.TIMED_OUT,
                                  Lifecycle.FAILED, Lifecycle.INTERRUPTED}),
     Lifecycle.RUNNING: frozenset({Lifecycle.CANCELLING, Lifecycle.SUCCEEDED,

@@ -130,6 +130,14 @@ def cmd_down(cfg, args) -> None:
     compose("down", instance=args.resolved_instance)
 
 def cmd_status(cfg, args) -> None:
+    remote_result = _remote_lifecycle(cfg, args, "status")
+    if remote_result is not None:
+        if getattr(args, "json", False):
+            print(json.dumps(remote_result, sort_keys=True))
+        else:
+            print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
+                  f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
+        return
     inst = args.resolved_instance
     owner = _core().registry_find_instance(inst)
     if owner and owner.get("kind") == "compose":
@@ -174,6 +182,11 @@ def cmd_status(cfg, args) -> None:
         _ensure_bridge_server()
 
 def cmd_logs(cfg, args) -> None:
+    remote_result = _remote_lifecycle(cfg, args, "logs")
+    if remote_result is not None:
+        if remote_result.get("output"):
+            print(remote_result["output"], end="")
+        return
     owner = _core().registry_find_instance(args.resolved_instance)
     if owner and owner.get("kind") == "compose":
         result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "logs", label=owner.get("label", "default")))
@@ -185,6 +198,47 @@ def cmd_logs(cfg, args) -> None:
         die("no containers on a herd instance — tail the WP debug log instead: "
             f"tail -f runtime/wp-{args.resolved_instance}/wp-content/debug.log")
     compose("logs", "-f", "wp", "db", instance=args.resolved_instance)
+
+
+def _remote_lifecycle(cfg, args, action: str) -> dict | None:
+    """Run instance lifecycle operations against a selected provisioned remote."""
+    remote_name = getattr(args, "remote", None)
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.application.target_service import TargetResolutionError
+    from sandbox.jobs.models import TargetRequest
+    from sandbox.core import _remote
+    project_dir = getattr(args, "project_dir", None) or os.getcwd()
+    workspace = getattr(args, "workspace", None) or getattr(args, "label", None)
+    try:
+        target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+            project_dir=project_dir, local=bool(getattr(args, "local", False)), remote=remote_name,
+            workspace=workspace, required_capability="job.exec"))
+    except TargetResolutionError as exc:
+        die(f"{exc.code}: {exc}")
+    if target.kind != "remote":
+        return None
+    remote = target.remote or _remote.get_remote(target.remote_name)
+    if action == "ensure":
+        deployed = _remote.deploy_exact_working_tree(remote, target.project_root)
+        target_path = deployed["target_path"]
+    else:
+        deployed = None
+        target_path = _remote.deploy_target_path(remote, target.project_root)
+    sb = _remote.remote_sb_path(remote)
+    command = [sb, action, "--local", "--project-dir", target_path, "--label", target.workspace_label]
+    if action == "ensure":
+        command.append("--create")
+    if action == "status":
+        command.append("--json")
+    result = _remote.ssh_run(remote, __import__("shlex").join(command), timeout=900 if action == "ensure" else 25)
+    if result.returncode != 0:
+        die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
+    payload = _remote._last_json(result.stdout or "") if action != "logs" else None
+    if action == "logs":
+        return {"ok": True, "action": action, "output": result.stdout or "",
+                "target": {"remote": target.remote_name, "workspace": target.workspace_label}}
+    return {**(payload or {"ok": True}), "target": {"remote": target.remote_name,
+            "workspace": target.workspace_label}, "source": deployed}
 
 def cmd_shell(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.exec")
@@ -743,8 +797,15 @@ def configure_parser(sub) -> None:
     """
     sub.add_parser("up", help="Boot the docker stack")
     sub.add_parser("down", help="Stop the stack")
-    sub.add_parser("status", help="Show container + project status")
-    sub.add_parser("logs", help="Tail WP + DB logs")
+    status = sub.add_parser("status", help="Show container + project status")
+    logs = sub.add_parser("logs", help="Tail WP + DB logs")
+    for parser in (status, logs):
+        parser.add_argument("--project-dir", default=None)
+        target = parser.add_mutually_exclusive_group()
+        target.add_argument("--local", action="store_true")
+        target.add_argument("--remote")
+        parser.add_argument("--workspace")
+        parser.add_argument("--json", action="store_true")
     sub.add_parser("shell", help="Bash into the WP container")
     sub.add_parser("install", help="Install WP + create admin user")
     sub.add_parser("doctor", help="Audit the stack and report problems")

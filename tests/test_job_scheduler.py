@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -35,4 +36,19 @@ class JobSchedulerTests(unittest.TestCase):
             scheduler.release(first["job_id"])
             service.get(second["job_id"])
             self.assertEqual(len(launched), 2)
+            repo.close()
+
+    def test_renewal_and_stale_reconciliation_release_only_expired_leases(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            scheduler = JobScheduler(repo, max_parallel=2)
+            first = repo.accept(JobSubmission("test", "/p", "p", "local", "one", ("echo", "x"), 60, SourceIdentity("s")))[0]
+            second = repo.accept(JobSubmission("test", "/p", "p", "local", "two", ("echo", "x"), 60, SourceIdentity("s")))[0]
+            scheduler.acquire(first); scheduler.acquire(second)
+            self.assertTrue(scheduler.renew(first["job_id"], deadline_seconds=300))
+            future = datetime.now(timezone.utc) + timedelta(seconds=120)
+            removed = scheduler.reconcile_stale(now=future)
+            self.assertIn(second["job_id"], removed)
+            self.assertNotIn(first["job_id"], removed)
+            self.assertEqual(len(scheduler.active()), 1)
             repo.close()

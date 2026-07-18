@@ -19,4 +19,13 @@ class MatrixTests(unittest.TestCase):
             result = service.submit_matrix(children)
             self.assertEqual(result["summary"]["submitted"], 2)
             self.assertEqual({item["workspace"] for item in result["children"]}, {"cell-a", "cell-b"})
+            self.assertTrue(result["parent_job_id"])
+            parent = service.get(result["parent_job_id"])
+            self.assertEqual(parent["aggregate"]["children"], 2)
+            for child in result["children"]:
+                repo.transition(child["job_id"], "running")
+                repo.transition(child["job_id"], "succeeded", exit_code=0)
+            parent = service.get(result["parent_job_id"])
+            self.assertEqual(parent["lifecycle"], "succeeded")
+            self.assertEqual(parent["aggregate"]["passed"], 2)
             repo.close()

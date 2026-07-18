@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import hashlib
 import itertools
 import json
 import os
@@ -493,6 +494,95 @@ def _event_matches(on_trigger, event: str) -> bool:
     return False
 
 
+def _remote_ci_artifacts(job: dict) -> list[str]:
+    """Extract only literal, project-relative upload paths for outer retention."""
+    paths = []
+    for step in job.get("steps") or []:
+        if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
+            continue
+        value = (step.get("with") or {}).get("path")
+        if isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts:
+            paths.append(value)
+    return sorted(set(paths))
+
+
+def _remote_ci_submissions(target, root: str, wf_path: Path, plan: dict, args) -> list:
+    """Build one durable explicit command per selected workflow matrix cell.
+
+    The deployed remote invokes its existing local ``act`` adapter inside each
+    child supervisor. The outer job runtime owns the deadline, retained logs,
+    process identity, workspace label, and artifact boundary; no workflow
+    process pipes are attached to the submitting SSH/MCP connection.
+    """
+    from sandbox.jobs.models import JobSubmission, SourceIdentity
+    timeout = int(getattr(args, "timeout", 900) or 900)
+    label_prefix = getattr(args, "label_prefix", None) or "ci"
+    run_id = _secretsmod.token_hex(4)
+    relative_workflow = os.path.relpath(wf_path.resolve(), Path(root).resolve())
+    if relative_workflow.startswith(".."):
+        die("remote CI workflow must be inside --project-dir")
+    matrix_filter = getattr(args, "matrix_filter", None) or {}
+    selected = getattr(args, "jobs", None)
+    workflow_data = _load_workflow(wf_path)
+    submissions = []
+    for job in plan["jobs"]:
+        if selected and job["id"] not in selected:
+            continue
+        matching = [item["matrix"] for item in job["cells"] if not matrix_filter or
+                    all(str(item["matrix"].get(k)) == v for k, v in matrix_filter.items())]
+        for cell in matching:
+            label = _cell_label(label_prefix, run_id, job["id"], cell)
+            command = ["sb", "ci", "run", relative_workflow, "--project-dir", ".",
+                       "--job", job["id"], "--label-prefix", label[:8],
+                       "--timeout", str(timeout), "--json", "--local"]
+            if getattr(args, "allow_deploy", False):
+                command.append("--allow-deploy")
+            if getattr(args, "keep_on_fail", False):
+                command.append("--keep-on-fail")
+            if getattr(args, "strict_provision", False):
+                command.append("--strict-provision")
+            for key, value in sorted(cell.items()):
+                command += ["--matrix-filter", f"{key}={value}"]
+            for difference in getattr(args, "accepted_differences", None) or ():
+                command += ["--accept-difference", difference]
+            job_source = SourceIdentity("workflow:" + hashlib.sha256(
+                f"{relative_workflow}|{job['id']}|{sorted(cell.items())}".encode()).hexdigest())
+            submissions.append(JobSubmission(
+                kind="ci", project_root=root,
+                project_identity=hashlib.sha256(Path(root).resolve().as_posix().encode()).hexdigest(),
+                target_kind="remote", remote_name=target.remote_name,
+                workspace_label=label, workspace_mode="isolated", argv=tuple(command),
+                deadline_seconds=timeout, source=job_source, output_profile=getattr(args, "output_profile", "smart"),
+                deadline_source="explicit", artifact_paths=tuple(_remote_ci_artifacts(
+                    workflow_data.get("jobs", {}).get(job["id"], {}))),
+            ))
+    if not submissions:
+        die("no matrix cells matched --matrix-filter")
+    return submissions
+
+
+def _run_remote_ci(target, root: str, wf_path: Path, plan: dict, args, *, as_json: bool) -> None:
+    from sandbox.core import _remote
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    submissions = _remote_ci_submissions(target, root, wf_path, plan, args)
+    result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote).submit_many(submissions)
+    report = {"ok": True, "kind": "ci", "workflow": str(wf_path),
+              "target": {"kind": target.kind, "remote": target.remote_name,
+                         "workspace": target.workspace_label},
+              "parent_job_id": result.get("parent_job_id"),
+              "children": result.get("children", []),
+              "summary": result.get("summary", {"submitted": len(submissions)}),
+              "source": result.get("source"),
+              "observation": "use job-status/job-output with parent_job_id; child logs remain retained remotely"}
+    if as_json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print(f"remote CI accepted: {report['parent_job_id']}")
+        for child in report["children"]:
+            print(f"  {child['job_id']} {child.get('workspace', '')}")
+
+
 def cmd_ci(cfg, args) -> None:
     """`./sb ci plan <workflow.yml>` / `./sb ci run <workflow.yml> --project-dir DIR
     [--job ID ...] [--matrix-filter k=v ...] [--if-event NAME] [--label-prefix P]
@@ -567,10 +657,6 @@ def cmd_ci(cfg, args) -> None:
             info(msg)
         return
 
-    if not _act_binary():
-        die("`act` not found — the CI executor requires it "
-            "(brew install act; https://github.com/nektos/act).")
-
     # action == "run"
     pd = getattr(args, "project_dir", None) or os.getcwd()
     try:
@@ -578,6 +664,41 @@ def cmd_ci(cfg, args) -> None:
     except sc.ConfigError as e:
         die(str(e))
     root = pconf["root"]
+
+    # Resolve the target before checking for a local act binary. A configured
+    # remote is the recommended execution path and needs only the co-located
+    # remote runtime; local act remains available through --local.
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.application.target_service import TargetResolutionError
+    from sandbox.jobs.models import TargetRequest
+    try:
+        target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+            project_dir=root, local=bool(getattr(args, "local", False)),
+            remote=getattr(args, "remote", None), workspace=getattr(args, "workspace", None),
+            required_capability="job.exec" if not getattr(args, "local", False) else None,
+        ))
+    except TargetResolutionError as exc:
+        die(f"{exc.code}: {exc}")
+    if target.kind == "remote":
+        from sandbox.ci.workflow import WorkflowError, preflight
+        try:
+            gate = preflight(root, wf_path, selected_jobs=getattr(args, "jobs", None),
+                             accepted_differences=getattr(args, "accepted_differences", None),
+                             safe_mode=not getattr(args, "allow_deploy", False))
+        except WorkflowError as exc:
+            die(str(exc))
+        if not gate["ok"]:
+            if getattr(args, "json", False):
+                print(json.dumps({"ok": False, "code": "ci_preflight_blocked", "preflight": gate}, sort_keys=True))
+            else:
+                die("remote CI preflight blocked execution; use --accept-difference for each named difference")
+            return
+        _run_remote_ci(target, root, wf_path, plan, args, as_json=as_json)
+        return
+
+    if not _act_binary():
+        die("`act` not found — the CI executor requires it "
+            "(brew install act; https://github.com/nektos/act).")
 
     if getattr(args, "run_async", False):
         # Detached run (sandbox/core/_asyncjobs.py) — a ci run mints multiple

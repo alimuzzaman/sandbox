@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.xc1.app/schemas/runtime-job-config-v1.json",
+  "title": "Sandbox remote job runtime configuration",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["local", "remote"]},
+        "remote": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"},
+        "workspace": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+        "executionProfile": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+        "outputProfile": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+        "maxParallel": {"type": "integer", "minimum": 1, "maximum": 64},
+        "retentionDays": {"type": "integer", "minimum": 1, "maximum": 365},
+        "executionProfiles": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/executionProfile"}
+        },
+        "outputProfiles": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/outputProfile"}
+        },
+        "testPlans": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/testPlan"}
+        },
+        "workspaces": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/workspace"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"default": {"const": "remote"}}, "required": ["default"]},
+          "then": {"required": ["remote"]}
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "executionProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeoutSeconds"],
+      "properties": {
+        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+        "stallSeconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+        "cancelGraceSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
+        "cancelOnStall": {"type": "boolean", "default": false},
+        "cleanup": {"enum": ["retain", "always", "on-success", "ephemeral"]}
+      }
+    },
+    "outputProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["full", "smart", "errors", "sampled", "quiet"]},
+        "everyLines": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "everyEvents": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "everySeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "include": {"type": "array", "maxItems": 50, "items": {"type": "string", "maxLength": 256}},
+        "exclude": {"type": "array", "maxItems": 50, "items": {"type": "string", "maxLength": 256}},
+        "before": {"type": "integer", "minimum": 0, "maximum": 100},
+        "after": {"type": "integer", "minimum": 0, "maximum": 100},
+        "deduplicate": {"type": "boolean"},
+        "timestamps": {"type": "boolean"},
+        "streamPrefixes": {"type": "boolean"},
+        "heartbeatSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "maxBytes": {"type": "integer", "minimum": 1, "maximum": 10485760},
+        "maxEvents": {"type": "integer", "minimum": 1, "maximum": 100000}
+      }
+    },
+    "testPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["steps"],
+      "properties": {
+        "executionProfile": {"type": "string"},
+        "outputProfile": {"type": "string"},
+        "maxParallel": {"type": "integer", "minimum": 1, "maximum": 64},
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "argv"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"},
+              "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "needs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+              "parallelSafe": {"type": "boolean"},
+              "workspace": {"type": "string"},
+              "artifacts": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "persistent": {"type": "boolean", "default": true},
+        "allowParallelSafe": {"type": "boolean", "default": false},
+        "executionProfile": {"type": "string"},
+        "outputProfile": {"type": "string"}
+      }
+    }
+  }
+}
+

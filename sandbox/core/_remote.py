@@ -100,6 +100,27 @@ def get_remote(name: str) -> dict | None:
     return _remote_block().get(name)
 
 
+def deploy_exact_working_tree(remote: dict, project_root: str | Path) -> dict:
+    """Deploy committed, modified, and untracked project state once.
+
+    This is the reusable deploy primitive for remote jobs.  It intentionally
+    returns identity metadata rather than a mutable instance record, allowing a
+    job to prove which exact working tree it was accepted against.
+    """
+    root = Path(project_root).resolve()
+    target = ensure_deploy_repo(remote, root)
+    branch = current_branch(root)
+    pushed_sha = push_commits(remote, root, target, branch)
+    reset_target_to(remote, target, pushed_sha)
+    diff_text, untracked = capture_uncommitted(root)
+    applied = apply_uncommitted(remote, target, root, diff_text, untracked)
+    dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
+    identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
+    return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
+            "dirty_digest": dirty, "identity": f"sha256:{identity}",
+            "uncommitted_files_applied": applied}
+
+
 def put_remote(name: str, **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's

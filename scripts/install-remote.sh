@@ -86,6 +86,18 @@ PY
 fi
 ok "python3 + venv present"
 
+# --- explicit job toolchains ------------------------------------------------
+# Durable generic jobs execute the caller's explicit argv on the remote host.
+# Keep the baseline useful for Node/npm and PHP unit commands without
+# discovering or running project scripts implicitly.
+log "installing Node/npm and PHP CLI test toolchains"
+if command -v apt-get >/dev/null 2>&1 && \
+   { ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v php >/dev/null 2>&1; }; then
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y nodejs npm php-cli
+fi
+ok "Node/npm and PHP CLI toolchains present"
+
 # --- sandbox runtime -----------------------------------------------------
 SANDBOX_HOME="${SANDBOX_HOME:-$HOME/sandbox}"
 mkdir -p "$SANDBOX_HOME"

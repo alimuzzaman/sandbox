@@ -272,3 +272,21 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Supersedes the earlier “no provisioned disposable remote” limitation only for
   this Node Compose acceptance. WordPress/E2E, matrix, CI, artifact, cleanup, and
   authenticated remote-MCP acceptance remain open tasks.
+
+## Staged remote CLI contract convergence
+
+- Implementation: every `RemoteJobTransport` control operation now constructs its
+  command through the injected staged remote `sb` path. Generic MCP
+  `instance_exec` submits `runtime-exec`, which uses the same co-located
+  in-instance controller as CLI `sb exec`; generic `job_start` remains a separate
+  host-job primitive by design. WordPress MCP `run_tests` now uses a named
+  transport factory with the same staged-path injection.
+- Command: `.cli-venv/bin/python -m unittest -v tests.test_mcp_composition
+  tests.test_remote_job_transport tests.test_mcp`.
+- Result: PASS, 26 tests. Coverage asserts the staged path for remote
+  cancel/metrics/artifacts/artifact-get/retry/cleanup, MCP job tools, generic MCP
+  `instance_exec`, and the WordPress remote-test transport factory.
+- Command: `mcp/wp-server/.venv/bin/python -m unittest -v
+  tests.test_server_transport`.
+- Result: PASS, 5 tests. The WordPress transport-factory assertion runs in the
+  MCP virtual environment, which owns its optional `httpx` dependency.

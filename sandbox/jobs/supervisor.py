@@ -78,7 +78,11 @@ def run_descriptor(path: str | Path) -> int:
         return_code = command.wait()
         output.finish("stdout"); output.finish("stderr")
         integrity = output.complete()
-        if descriptor.get("artifact_paths"):
+        # Artifacts describe successful job output. Do not let a missing
+        # artifact mask the child command's actual failure (for example a
+        # remote CI host missing its execution engine); retained stderr and
+        # the child exit status remain the authoritative diagnosis.
+        if return_code == 0 and descriptor.get("artifact_paths"):
             collect_artifacts(storage, repository, job_id, project_root=descriptor["cwd"],
                               declared_paths=tuple(descriptor["artifact_paths"]))
         if timed_out:

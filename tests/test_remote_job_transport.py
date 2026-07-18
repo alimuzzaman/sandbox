@@ -108,9 +108,9 @@ class RemoteJobTransportTests(unittest.TestCase):
             remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
         )
         transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace",
-            ("sb", "test", "integration", "--local", "--project-dir", "."), 60,
+            ("sb", "test", "--local", "--project-dir", ".", "integration"), 60,
             SourceIdentity("ignored"), remote_name="r"))
-        self.assertIn("-- /srv/sandbox/sb-src/sb test integration --local --project-dir .", calls[-1])
+        self.assertIn("-- /srv/sandbox/sb-src/sb test --local --project-dir . integration", calls[-1])
 
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(

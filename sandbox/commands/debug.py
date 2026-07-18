@@ -186,7 +186,11 @@ def cmd_test(cfg, args) -> None:
         if getattr(args, "provision_only", False):
             die("--provision-only is only available for local integration harness setup")
         extra = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
-        command = ["sb", "test", mode, "--local", "--project-dir", "."]
+        # ``test`` preserves everything after its positional mode as
+        # phpunit passthrough.  Keep target-selection options before the mode
+        # so the nested invocation cannot accidentally resolve the deployed
+        # project's remote-first default again.
+        command = ["sb", "test", "--local", "--project-dir", ".", mode]
         if extra:
             command += ["--", *extra]
         timeout = int(getattr(args, "timeout", 900) or 900)

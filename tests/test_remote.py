@@ -796,6 +796,9 @@ class TestStartRemoteMcpServer(unittest.TestCase):
         self.assertIn("kill \"$legacy_pid\"", command)
         self.assertNotIn("pathlib.Path('/proc')", command)
         self.assertIn("SANDBOX_REMOTE_MCP_TOKEN=\"$sandbox_remote_mcp_token\"", command)
+        self.assertIn("./sb mcp-install", command)
+        self.assertLess(command.index("./sb mcp-install"), command.index("kill \"$legacy_pid\""))
+        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 300)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_migration_refuses_to_replace_an_unproven_existing_unit(self, mock_ssh_run):

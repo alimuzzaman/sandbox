@@ -301,6 +301,10 @@ exact process's PID, working directory, bind, and port before handing it off. If
 new unit cannot start, its prior files are restored and only that proven legacy process
 is restarted. No generic process search or termination is used.
 
+Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
+environments before stopping a proven legacy process, so a runtime refresh cannot leave
+the replacement service without its interpreter dependencies.
+
 ## 9. Known limitation / next step
 
 **Live-verified against a fresh Ubuntu 24.04 VPS.** A real run against

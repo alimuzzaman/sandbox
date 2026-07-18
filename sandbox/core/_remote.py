@@ -1049,6 +1049,7 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
         "status": "planned", "requires_confirm": True,
         "service": record,
         "steps": [
+            "prepare the staged Sandbox CLI and MCP virtual environments",
             "write owner-only remote credential file", "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
@@ -1099,6 +1100,12 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         f"grep -Fq {shlex.quote('--bind ' + bind + ' --port ' + str(port))} \"$unit_path\" && "
         "grep -Fqx 'WorkingDirectory=%h/sandbox/sb-src' \"$unit_path\" || exit 43; fi; "
     )
+    runtime_preflight = (
+        "runtime=$HOME/sandbox/sb-src; test -x \"$runtime/sb\"; "
+        "if test ! -x \"$runtime/.cli-venv/bin/python\"; then python3 -m venv \"$runtime/.cli-venv\"; "
+        "\"$runtime/.cli-venv/bin/python\" -m pip install --quiet --disable-pip-version-check pyyaml; fi; "
+        "( cd \"$runtime\" && ./sb mcp-install >/dev/null ); "
+    )
     command = (
         "set -eu; umask 077; mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
         f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
@@ -1107,6 +1114,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "had_unit=0; had_env=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
         "if test -f \"$env_path\"; then cp \"$env_path\" \"$backup/env\"; had_env=1; fi; "
         + legacy_preflight +
+        runtime_preflight +
         "rollback() { if test \"$had_unit\" = 1; then cp \"$backup/unit\" \"$unit_path\"; else rm -f \"$unit_path\"; fi; "
         "if test \"$had_env\" = 1; then cp \"$backup/env\" \"$env_path\"; else rm -f \"$env_path\"; fi; "
         "systemctl --user daemon-reload || true; }; "
@@ -1123,7 +1131,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
         "rollback; if test -n \"$legacy_pid\"; then " + legacy_restart + "; fi; exit 1; fi; rm -rf \"$backup\""
     )
     try:
-        res = ssh_run(remote, command, timeout=60, input_data=token + "\n")
+        res = ssh_run(remote, command, timeout=300, input_data=token + "\n")
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("timed out installing the remote MCP service") from exc
     if res.returncode != 0:

@@ -2033,6 +2033,22 @@ def _bootstrap_lenzora_speckit(entry: dict, paths: dict, desired: dict) -> None:
     _checked(entry, command, timeout=60, what="Lenzora Spec-Kit bootstrap failed")
 
 
+def _cron_inventory_digest(jobs: list[dict]) -> str:
+    """Compare sanitized scheduler snapshots without retaining prompt content."""
+    normalized = sorted((dict(job) for job in jobs), key=lambda job: str(job.get("id") or ""))
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _restore_cron_inventory(entry: dict, backup: str) -> bool:
+    """Restore the protected inventory file without creating or triggering jobs."""
+    command = (
+        "set -eu; test -f " + backup + "; "
+        "cp " + backup + " $HOME/.hermes/cron/jobs.json; "
+        "chmod 600 $HOME/.hermes/cron/jobs.json"
+    )
+    return _ssh(entry, command, timeout=30).returncode == 0
+
+
 def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool = False) -> dict:
     """Preview or apply the committed cron catalog as one controlled replacement."""
     entry = _require_remote(remote_name)
@@ -2040,7 +2056,8 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
     try:
         catalog = load_catalog()
         desired = [render_entry(item, paths) for item in catalog["jobs"] if item.enabled]
-        plan = reconciliation_plan(catalog, _cron_snapshot(entry)["jobs"], force_replace=force_replace, paths=paths)
+        prior_jobs = _cron_snapshot(entry)["jobs"]
+        plan = reconciliation_plan(catalog, prior_jobs, force_replace=force_replace, paths=paths)
     except (ValueError, KeyError, OSError) as exc:
         raise HermesError(str(exc), "invalid_cron_catalog") from exc
     plan["requires_confirm"] = bool(plan["changes"] and not plan["blocked_by"])
@@ -2060,8 +2077,10 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = f"$HOME/.hermes/cron/backups/jobs-{stamp}.json"
+    backup_meta = f"$HOME/.hermes/cron/backups/jobs-{stamp}.metadata.json"
     _checked(entry, "mkdir -p $HOME/.hermes/cron/backups; chmod 700 $HOME/.hermes/cron/backups; "
-             f"if test -f $HOME/.hermes/cron/jobs.json; then cp $HOME/.hermes/cron/jobs.json {backup}; chmod 600 {backup}; fi",
+             f"if test -f $HOME/.hermes/cron/jobs.json; then cp $HOME/.hermes/cron/jobs.json {backup}; chmod 600 {backup}; fi; "
+             f"printf '%s\\n' {shlex.quote(json.dumps({'catalog_fingerprint': plan['catalog_fingerprint'], 'prior_inventory_digest': _cron_inventory_digest(prior_jobs)}, sort_keys=True))} > {backup_meta}; chmod 600 {backup_meta}",
              what="Hermes cron inventory backup failed")
     removed: list[str] = []
     created: list[dict[str, str]] = []
@@ -2088,20 +2107,38 @@ def cron_reconcile(remote_name: str, confirm: bool = False, force_replace: bool 
             created.append({"id": job_id, "name": item["name"]})
     except HermesError as exc:
         partial = {**plan, "removed_ids": removed, "created": created,
-                   "recovery": "rerun confirmed reconciliation; protected pre-change jobs.json was retained"}
-        partial["prepared_workdirs"] = prepared_workdirs
-        return result(False, "cron_reconcile", remote_name, status="partial", data=partial, error=exc)
+                   "prepared_workdirs": prepared_workdirs, "backup": {"inventory": backup, "metadata": backup_meta}}
+        if not removed:
+            return result(False, "cron_reconcile", remote_name, status="failed", data=partial, error=exc)
+        restored = _restore_cron_inventory(entry, backup)
+        restored_jobs = _cron_snapshot(entry)["jobs"] if restored else []
+        verified = restored and _cron_inventory_digest(restored_jobs) == _cron_inventory_digest(prior_jobs)
+        if verified:
+            return result(False, "cron_reconcile", remote_name, status="rolled_back",
+                          data={**partial, "rollback": {"attempted": True, "verified": True}}, error=exc)
+        return result(False, "cron_reconcile", remote_name, status="rollback_failed",
+                      data={**partial, "rollback": {"attempted": True, "verified": False}},
+                      error=HermesError("cron reconciliation failed and prior inventory could not be verified", "cron_rollback_failed", True))
 
     final = reconciliation_plan(catalog, _cron_snapshot(entry)["jobs"], force_replace=False, paths=paths)
     if final["changes"]:
-        return result(False, "cron_reconcile", remote_name, status="partial",
+        failed = HermesError("created cron inventory did not match the catalog", "cron_verify_failed")
+        restored = _restore_cron_inventory(entry, backup)
+        restored_jobs = _cron_snapshot(entry)["jobs"] if restored else []
+        verified = restored and _cron_inventory_digest(restored_jobs) == _cron_inventory_digest(prior_jobs)
+        status = "rolled_back" if verified else "rollback_failed"
+        error = failed if verified else HermesError(
+            "created cron inventory did not match the catalog and rollback could not be verified",
+            "cron_rollback_failed", True)
+        return result(False, "cron_reconcile", remote_name, status=status,
                       data={**final, "removed_ids": removed, "created": created,
                             "prepared_workdirs": prepared_workdirs,
-                            "recovery": "inspect cron health and rerun reconciliation"},
-                      error=HermesError("created cron inventory did not match the catalog", "cron_verify_failed"))
+                            "backup": {"inventory": backup, "metadata": backup_meta},
+                            "rollback": {"attempted": True, "verified": verified}}, error=error)
     return result(True, "cron_reconcile", remote_name, status="converged",
                   data={**final, "removed_ids": removed, "created": created,
-                        "prepared_workdirs": prepared_workdirs})
+                        "prepared_workdirs": prepared_workdirs,
+                        "backup": {"inventory": backup, "metadata": backup_meta}})
 
 
 def _set_cron_route(entry: dict, job_id: str, profile: str) -> dict:
@@ -2318,7 +2355,12 @@ def cron_verify(remote_name: str, job_id: str, timeout: int, confirm: bool) -> d
         "name": after.get("name"), "transitioned": transitioned,
         "prior_run_at": before.get("last_run_at"), "observed_run_at": after.get("last_run_at"),
         "upstream_status": after.get("last_status"), **derived,
-        "evidence": evidence, "elapsed_seconds": round(time.time() - started, 2),
+        "trigger": {"accepted": res.returncode == 0},
+        "transition": {"observed": transitioned},
+        "provider": {"failure": bool(evidence.get("failure")), "reason": evidence.get("reason") or ""},
+        "terminal_result": {"marker": derived.get("terminal_result"),
+                            "classification": derived.get("terminal_classification")},
+        "elapsed_seconds": round(time.time() - started, 2),
     }
     error = None if ok else HermesError(
         "verified cron execution failed: " + (evidence.get("reason") or "no successful terminal transition"),
@@ -2601,23 +2643,33 @@ def health(remote_name: str) -> dict:
         "if command -v systemctl >/dev/null 2>&1; then systemctl --user is-active hermes-gateway-sandbox.service 2>/dev/null || true; "
         "else echo unavailable; fi; "
         "if command -v loginctl >/dev/null 2>&1; then loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
+        "else echo unavailable; fi; "
+        "if command -v systemctl >/dev/null 2>&1; then systemctl --user is-enabled hermes-gateway-sandbox.service 2>/dev/null || true; "
         "else echo unavailable; fi")
+    def scheduler_snapshot() -> dict:
+        try:
+            return {"available": True, "jobs": _cron_snapshot(entry)["jobs"], "reason": ""}
+        except (HermesError, OSError, ValueError) as exc:
+            return {"available": False, "jobs": [], "reason": _redact(str(exc), entry)[:240]}
+
     with ThreadPoolExecutor(max_workers=6) as pool:
         diagnostic_future = pool.submit(doctor, remote_name)
         state_future = pool.submit(_remote_state_read, entry, paths)
         service_future = pool.submit(_ssh, entry, service_command, 30)
         gateway_future = pool.submit(_gateway_ownership, entry)
-        cron_future = pool.submit(_cron_snapshot, entry)
+        cron_future = pool.submit(scheduler_snapshot)
         worktree_future = pool.submit(_worktree_snapshot, entry, paths)
         diagnostic = diagnostic_future.result()
         state = state_future.result()
         service = service_future.result()
         gateway = gateway_future.result()
-        observed = cron_future.result()["jobs"]
+        scheduler = cron_future.result()
+        observed = scheduler["jobs"]
         worktrees = worktree_future.result()
     lines = (service.stdout or "").splitlines()
     gateway_state = lines[0].strip() if lines else "unknown"
     linger = lines[1].strip().lower() if len(lines) > 1 else "unknown"
+    gateway_enabled = lines[2].strip().lower() if len(lines) > 2 else "unknown"
     sessions = state["sessions"].values()
     diagnostic_error = diagnostic["error"]
     cron_health = []
@@ -2630,12 +2682,74 @@ def health(remote_name: str) -> dict:
             "evidence_reason": evidence_reason,
         })
     catalog = load_catalog()
-    cron_plan = reconciliation_plan(catalog, observed, paths=paths)
+    cron_plan = (reconciliation_plan(catalog, observed, paths=paths)
+                 if scheduler["available"] else {"changes": False, "catalog_fingerprint": catalog_fingerprint(catalog)})
+    components = {}
     degraded_reasons = []
-    if not diagnostic["ok"]: degraded_reasons.append("prerequisites")
-    if not gateway["healthy"]: degraded_reasons.append("gateway_ownership")
-    if any(item["effective_status"] in {"failed", "invalid"} for item in cron_health): degraded_reasons.append("cron_failure")
-    if cron_plan["changes"]: degraded_reasons.append("cron_drift")
+    service_record = entry.get("mcp_service") if isinstance(entry, dict) else None
+    if isinstance(service_record, dict):
+        try:
+            remote_service = remote.remote_mcp_service_status(entry)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            remote_service = {"installed": False, "enabled": False, "active": False, "linger": False,
+                              "ownership": "unknown", "error": _redact(str(exc), entry)[:240]}
+        service_reasons = []
+        if not remote_service["installed"]:
+            service_reasons.append("remote_mcp_not_installed")
+        elif not remote_service["enabled"]:
+            service_reasons.append("remote_mcp_not_enabled")
+        if not remote_service["active"]:
+            service_reasons.append("remote_mcp_inactive")
+        if not remote_service["linger"]:
+            service_reasons.append("user_linger_disabled")
+        if remote_service["ownership"] == "unknown":
+            service_reasons.append("remote_mcp_unknown")
+        elif remote_service["ownership"] != "proven":
+            service_reasons.append("remote_service_ownership_unknown")
+        components["remote_mcp"] = {"status": "healthy" if not service_reasons else "degraded",
+                                    "reasons": service_reasons, "evidence": remote_service}
+        degraded_reasons.extend(service_reasons)
+    else:
+        components["remote_mcp"] = {"status": "not_applicable", "reasons": [], "evidence": {}}
+    gateway_reasons = []
+    if not diagnostic["ok"]:
+        gateway_reasons.append("prerequisites")
+    if not gateway["healthy"]:
+        gateway_reasons.append("gateway_ownership")
+    if gateway_state != "active":
+        gateway_reasons.append("gateway_inactive")
+    if linger != "yes":
+        gateway_reasons.append("user_linger_disabled")
+    if gateway_enabled != "enabled":
+        gateway_reasons.append("gateway_not_enabled")
+    components["gateway"] = {"status": "healthy" if not gateway_reasons else "degraded",
+                             "reasons": gateway_reasons,
+                             "evidence": {**gateway, "state": gateway_state, "linger": linger,
+                                          "enabled": gateway_enabled}}
+    degraded_reasons.extend(gateway_reasons)
+    scheduler_reasons = []
+    if not scheduler["available"]:
+        scheduler_reasons.append("scheduler_unavailable")
+    components["scheduler"] = {"status": "healthy" if not scheduler_reasons else "degraded",
+                               "reasons": scheduler_reasons, "evidence": {"available": scheduler["available"],
+                                                                              "reason": scheduler["reason"]}}
+    degraded_reasons.extend(scheduler_reasons)
+    cron_reasons = []
+    if any(item["effective_status"] in {"failed", "invalid"} for item in cron_health):
+        cron_reasons.append("cron_failure")
+    if any(item.get("result_protocol_error") for item in cron_health):
+        cron_reasons.append("cron_result_protocol_error")
+    if cron_plan["changes"]:
+        cron_reasons.append("cron_drift")
+    components["cron"] = {"status": "healthy" if not cron_reasons else "degraded",
+                           "reasons": cron_reasons,
+                           "evidence": {"catalog_fingerprint": cron_plan["catalog_fingerprint"]}}
+    degraded_reasons.extend(cron_reasons)
+    if any(session.get("state") == "stale" for session in sessions):
+        degraded_reasons.append("stale_session")
+    if any(bool(item.get("dirty")) for item in worktrees):
+        degraded_reasons.append("dirty_managed_worktree")
+    degraded_reasons = list(dict.fromkeys(degraded_reasons))
     healthy = not degraded_reasons
     error = None if healthy else HermesError(
         "Hermes health is degraded: " + ", ".join(degraded_reasons), "hermes_health_degraded", True)
@@ -2643,12 +2757,14 @@ def health(remote_name: str) -> dict:
         healthy, "health", remote_name, status="healthy" if healthy else "degraded",
         data={
             "checks": diagnostic["data"]["checks"],
-            "gateway": {**gateway, "state": gateway_state, "linger": linger},
+            "gateway": {**gateway, "state": gateway_state, "linger": linger, "enabled": gateway_enabled},
+            "components": components,
             "cron": {"jobs": cron_health, "drift": cron_plan["changes"],
                      "catalog_fingerprint": cron_plan["catalog_fingerprint"]},
             "worktrees": {"count": len(worktrees),
                           "dirty_count": sum(bool(item.get("dirty")) for item in worktrees)},
             "degraded_reasons": degraded_reasons,
+            "reasons": degraded_reasons,
             "sessions": {
                 "running": sum(session.get("state") == "running" for session in sessions),
                 "stale": sum(session.get("state") == "stale" for session in sessions),

@@ -29,8 +29,56 @@ def cmd_remote(cfg, args) -> None:
         "down": _cmd_down,
         "remove": _cmd_remove,
         "set-origin": _cmd_set_origin,
+        "service": _cmd_service,
     }
     dispatch[action](args, as_json)
+
+
+def _cmd_service(args, as_json: bool) -> None:
+    """`sb remote service <status|migrate|stop> <name>` service contract."""
+    operation = getattr(args, "name", None)
+    name = getattr(args, "ssh_url", None)
+    if operation not in {"status", "migrate", "stop"} or not name:
+        die("usage: ./sb remote service <status|migrate|stop> <name> [--plan|--confirm]")
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        if operation == "status":
+            payload = {"ok": True, "name": name, "status": "observed",
+                       "data": sr.remote_mcp_service_status(entry), "error": None}
+        elif operation == "migrate":
+            transport = entry.get("control_transport") or "https"
+            bind = (entry.get("tailscale_host") if transport == "tailscale" else "127.0.0.1")
+            if not isinstance(bind, str) or not bind:
+                raise ValueError("remote service bind is unavailable; provision its control transport first")
+            token = entry.get("bearer_token")
+            if not isinstance(token, str) or not token:
+                raise ValueError("remote service token is unavailable; provision the remote first")
+            plan = sr.migrate_remote_mcp_service(
+                entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
+                entry.get("control_url"), confirm=bool(getattr(args, "confirm", False)),
+            )
+            if getattr(args, "confirm", False):
+                sr.put_remote(name, mcp_service=plan["service"])
+            payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}
+        else:
+            if not getattr(args, "confirm", False):
+                payload = {"ok": True, "name": name, "status": "planned",
+                           "data": {"requires_confirm": True, "action": "stop"}, "error": None}
+            else:
+                sr.stop_remote_mcp_server(entry)
+                payload = {"ok": True, "name": name, "status": "stopped", "data": {}, "error": None}
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        code = "remote_service_ownership_unknown" if str(exc) == "remote_service_ownership_unknown" else "remote_service_failed"
+        payload = {"ok": False, "name": name, "status": "degraded", "data": {},
+                   "error": {"code": code, "message": sr.redact_ssh_connection(str(exc), entry)}}
+    if as_json:
+        print(json.dumps(payload))
+    elif payload["ok"]:
+        print(f"remote service {name}: {payload['status']}")
+    else:
+        die(f"{payload['error']['code']}: {payload['error']['message']}")
 
 
 def _require_name(args) -> str:
@@ -252,7 +300,8 @@ def _cmd_provision(args, as_json: bool) -> None:
             sr.start_remote_mcp_server(entry, bind, port, token)
             sr.put_remote(name, control_transport="tailscale",
                           control_url=control_url, tailscale_host=tailscale_ip,
-                          mcp_port=port, bearer_token=token, provisioned=True)
+                          mcp_port=port, bearer_token=token, provisioned=True,
+                          mcp_service=sr.remote_mcp_service_record(bind, port))
         else:
             control_url = f"https://{public_host}"
             sr.configure_https_proxy(entry, public_host, port)
@@ -260,30 +309,26 @@ def _cmd_provision(args, as_json: bool) -> None:
                                        public_url=control_url)
             sr.put_remote(name, control_transport="https",
                           control_host=public_host, control_url=control_url,
-                          mcp_port=port, bearer_token=token, provisioned=True)
+                          mcp_port=port, bearer_token=token, provisioned=True,
+                          mcp_service=sr.remote_mcp_service_record("127.0.0.1", port, control_url))
             tailscale_ip = None
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         die(f"could not start the remote MCP server on '{name}': "
             f"{sr.redact_ssh_connection(str(e), entry)}")
         return
-    # The token is shown here ONCE, at mint time only -- same pattern as an
-    # AWS access key or GitHub PAT. It's never echoed again after this: not
-    # by `remote list`, not by any other command that reads the stored
-    # entry back (real bug caught by /speckit-analyze -- this success
-    # message used to claim "bearer token minted above" while never actually
-    # printing it, leaving no way to complete the second-MCP-server setup).
+    # The credential remains in the owner-only local secret store and is sent
+    # to the remote only on stdin while its service credential file is created.
+    # Do not return or print it: JSON output, terminals, and shell history are
+    # all inappropriate credential transports.
     result = {"ok": True, "name": name, "provisioned": True,
              "control_transport": control_transport, "control_url": control_url,
-             "tailscale_host": tailscale_ip, "mcp_port": port,
-             "bearer_token": token, "error": None}
+             "tailscale_host": tailscale_ip, "mcp_port": port, "error": None}
     if as_json:
         print(json.dumps(result))
     else:
         ok(f"'{name}' provisioned and its MCP server is reachable at {control_url}")
-        print(f"  bearer token (shown once, save it now): {token}")
-        print(f"  register it in Claude Code as a second MCP server "
-              f"(transport: http, url: {control_url}) "
-              f"— see docs/remote-hosting.md")
+        print("  credential retained in the owner-only Sandbox secret store; "
+              "see docs/remote-hosting.md for client configuration")
 
 
 def _cmd_up(args, as_json: bool) -> None:
@@ -301,11 +346,20 @@ def _cmd_up(args, as_json: bool) -> None:
     if not token:
         die(f"remote '{name}' is missing recorded connection details — "
             f"re-run `./sb remote provision {name}`")
+    if not getattr(args, "confirm", False):
+        result = {"ok": True, "name": name, "status": "planned",
+                  "data": {"requires_confirm": True, "action": "start"}, "error": None}
+        if as_json:
+            print(json.dumps(result))
+        else:
+            print(f"'{name}' MCP service start is planned; re-run with --confirm")
+        return
     try:
         if control_transport == "tailscale":
             tailscale_ip = entry.get("tailscale_host") or sr.resolve_tailscale_ip(entry)
             control_url = control_url or f"http://{tailscale_ip}:{port}"
             sr.start_remote_mcp_server(entry, tailscale_ip, port, token)
+            sr.put_remote(name, mcp_service=sr.remote_mcp_service_record(tailscale_ip, int(port)))
         else:
             public_host = entry.get("control_host")
             if not public_host:
@@ -315,6 +369,7 @@ def _cmd_up(args, as_json: bool) -> None:
             sr.configure_https_proxy(entry, public_host, port)
             sr.start_remote_mcp_server(entry, "127.0.0.1", port, token,
                                        public_url=control_url)
+            sr.put_remote(name, mcp_service=sr.remote_mcp_service_record("127.0.0.1", int(port), control_url))
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:
         die(f"could not start '{name}''s MCP server: "
             f"{sr.redact_ssh_connection(str(e), entry)}")
@@ -332,6 +387,14 @@ def _cmd_down(args, as_json: bool) -> None:
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
+    if not getattr(args, "confirm", False):
+        result = {"ok": True, "name": name, "status": "planned",
+                  "data": {"requires_confirm": True, "action": "stop"}, "error": None}
+        if as_json:
+            print(json.dumps(result))
+        else:
+            print(f"'{name}' MCP service stop is planned; re-run with --confirm")
+        return
     try:
         sr.stop_remote_mcp_server(entry)
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:

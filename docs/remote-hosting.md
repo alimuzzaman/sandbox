@@ -74,16 +74,12 @@ the host is unavailable. Long-lived MCP HTTP access uses the remote server's
 HTTPS/Tailscale transport rather than an SSH tunnel; a tunnel would add
 forwarding lifecycle without reducing ordinary command-shell latency.
 
-Register the second MCP server in Claude Code:
-
-```bash
-claude mcp add --scope user --transport http sandbox-myvps \
-  https://sandbox-control.example.com/mcp \
-  --header "Authorization: Bearer <token-printed-above>"
-```
-
-(Exact `claude mcp add` flags may vary by Claude Code version — check `claude mcp add
---help`.) Your local `sandbox` MCP server registration is completely untouched.
+Register the second MCP server through your client’s supported secret mechanism. The
+remote bearer credential is never printed, returned in JSON, embedded in a command,
+or copied into a service definition. It stays in Sandbox's owner-only local secret
+store and is transferred to the remote only on standard input while the remote service
+credential file is created. Your local `sandbox` MCP server registration is completely
+untouched.
 
 ## 4. Deploying code
 
@@ -261,8 +257,13 @@ has passed; it is intentionally an explicit command, not a background reaper.
   overkill for a single pre-shared secret between one client and one server).
 - SSH connection strings are stored in `sandbox.local.yml`'s `remotes:` block — gitignored
   and `chmod 0600`. They are write-only: `remote add` accepts one, but CLI and MCP output
-  never reveal it. The bearer token is also stored there and is shown once at provision
-  time; neither value is returned by later commands.
+  never reveal it. The bearer token is also stored there; it is never shown, returned,
+  stored in service metadata, or passed on an argument list.
+- Remote streamable-HTTP is owned by `sandbox-mcp-remote.service`, a systemd user
+  service with an owner-only environment file. It is restartable and reboot-recoverable
+  only when user lingering is enabled. Sandbox refuses wildcard/public listener binds.
+- A remote stop controls only the proven Sandbox service unit. Sandbox never scans or
+  terminates generic streamable-HTTP processes by their command-line flags.
 
 ## 8. CLI + MCP surface
 
@@ -275,7 +276,11 @@ reference. Summary:
 | `./sb remote list` | Show configured remotes + reachability + provisioned status |
 | `./sb remote provision <name> --control-host <host>` | Fully automated install + start the remote MCP server over public HTTPS |
 | `./sb remote provision <name> --control tailscale` | Same, but use Tailscale instead of public HTTPS |
-| `./sb remote up` / `down <name>` | Start/stop the remote MCP server process |
+| `./sb remote service status <name> --json` | Read-only owned-service, listener, and recovery evidence |
+| `./sb remote service migrate <name> --plan --json` | Read-only systemd service migration plan |
+| `./sb remote service migrate <name> --confirm --json` | Install the protected owned service after explicit confirmation |
+| `./sb remote service stop <name> --confirm --json` | Stop only the selected proven service unit |
+| `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
 | `./sb deploy --remote <name> --ensure --expose [--domain <host>]` | One-shot deploy, boot/refresh the remote WP instance, activate the plugin, and expose a public HTTPS URL |
@@ -291,7 +296,7 @@ plus `url` when exposure succeeds.
 `alim@212.47.72.49` installed Docker CE + compose, Caddy, the staged sandbox runtime, the
 MCP venv, and the Playwright/Chromium tools venv. The remote now reports provisioned at
 `https://sandbox-control.asb.bd`; Caddy owns public `80/443` by hostname, while the MCP
-process itself binds only to `127.0.0.1:9174`. Bearer-auth probing reaches the app (auth
+service itself binds only to `127.0.0.1:9174`. Bearer-auth probing reaches the app (auth
 failures return `401`; the verified token now reaches MCP-level responses instead).
 The HTTPS endpoint was then registered at its `/mcp` streamable-HTTP route and
 successfully ran `fs_read`, `visit`, `wp_cli`, and `run_tests` against the VPS-side

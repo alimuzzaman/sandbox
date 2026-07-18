@@ -36,6 +36,8 @@ import secrets
 import shlex
 import posixpath
 import json
+import hashlib
+import ipaddress
 import re
 import subprocess
 from pathlib import Path
@@ -839,6 +841,176 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
 
 DEFAULT_MCP_PORT = 9174
 _MCP_PIDFILE = "/tmp/sandbox-mcp-remote.pid"
+REMOTE_MCP_SERVICE = "sandbox-mcp-remote.service"
+_REMOTE_MCP_ENV = "$HOME/.sandbox/mcp-remote.env"
+_REMOTE_MCP_UNIT_ENV = "%h/.sandbox/mcp-remote.env"
+
+
+def _remote_mcp_bind_allowed(bind: str) -> bool:
+    """Return whether ``bind`` is private enough for remote MCP.
+
+    HTTPS mode is loopback-only. Tailscale mode may use an address in the
+    shared CGNAT range. Refusing every other literal address makes the public
+    exposure invariant enforceable before any remote command is built.
+    """
+    try:
+        address = ipaddress.ip_address(bind)
+    except ValueError:
+        return False
+    return address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")
+
+
+def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> str:
+    value = "|".join((REMOTE_MCP_SERVICE, bind, str(int(port)), public_url or ""))
+    return hashlib.sha256(value.encode()).hexdigest()[:24]
+
+
+def remote_mcp_service_record(bind: str, port: int, public_url: str | None = None) -> dict:
+    if not _remote_mcp_bind_allowed(bind):
+        raise ValueError("remote MCP bind must be loopback or a Tailscale address")
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("remote MCP port must be between 1 and 65535")
+    return {
+        "service_name": REMOTE_MCP_SERVICE,
+        "bind": bind,
+        "port": port,
+        "ownership_marker": _remote_mcp_marker(bind, port, public_url),
+    }
+
+
+def _validate_remote_mcp_public_url(public_url: str | None) -> str | None:
+    if public_url is None:
+        return None
+    if not isinstance(public_url, str) or any(char in public_url for char in "\r\n\0"):
+        raise ValueError("remote MCP public URL is invalid")
+    parsed = urlsplit(public_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("remote MCP public URL must be an HTTP(S) origin without credentials")
+    return public_url
+
+
+def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) -> str:
+    """Render a non-secret systemd user unit for the remote MCP service."""
+    public_url = _validate_remote_mcp_public_url(public_url)
+    record = remote_mcp_service_record(bind, port, public_url)
+    public_arg = f" --public-url {shlex.quote(public_url)}" if public_url else ""
+    return "\n".join((
+        "[Unit]",
+        "Description=Sandbox remote MCP control plane",
+        "After=network-online.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"EnvironmentFile={_REMOTE_MCP_UNIT_ENV}",
+        f"Environment=SANDBOX_REMOTE_MCP_MARKER={record['ownership_marker']}",
+        "WorkingDirectory=%h/sandbox/sb-src",
+        "ExecStart=%h/sandbox/sb-src/sb mcp --transport streamable-http "
+        f"--bind {shlex.quote(bind)} --port {port}{public_arg}",
+        "Restart=on-failure",
+        "RestartSec=5",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ))
+
+
+def remote_mcp_service_status(remote: dict) -> dict:
+    """Read only the selected Sandbox unit state; never inspect generic argv."""
+    record = dict(remote.get("mcp_service") or {})
+    expected = record.get("service_name") == REMOTE_MCP_SERVICE
+    marker = record.get("ownership_marker") if isinstance(record.get("ownership_marker"), str) else ""
+    marker_probe = (
+        f"if test -f $HOME/.config/systemd/user/{REMOTE_MCP_SERVICE} && "
+        f"grep -Fqx {shlex.quote('Environment=SANDBOX_REMOTE_MCP_MARKER=' + marker)} "
+        f"$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; then echo marker=1; else echo marker=0; fi; "
+        if marker else "echo marker=0; "
+    )
+    command = (
+        "if ! command -v systemctl >/dev/null 2>&1; then echo unavailable; exit 0; fi; "
+        f"printf 'enabled='; systemctl --user is-enabled {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
+        f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
+        f"printf 'pid='; systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true; "
+        "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
+        + marker_probe
+    )
+    res = ssh_run(remote, command, timeout=20)
+    values: dict[str, str] = {}
+    for line in (res.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in {"enabled", "active", "pid", "linger", "marker"}:
+            values[key] = value.strip().lower()
+    installed = values.get("enabled") not in {"", "not-found", "unknown"}
+    active = values.get("active") == "active"
+    enabled = values.get("enabled") == "enabled"
+    linger = values.get("linger") == "yes"
+    ownership = "proven" if expected and installed and values.get("marker") == "1" else "missing" if not installed else "ambiguous"
+    return {
+        "installed": installed, "enabled": enabled, "active": active,
+        "linger": linger, "ownership": ownership,
+        "service_name": REMOTE_MCP_SERVICE if expected else None,
+        "pid_present": values.get("pid", "0") not in {"", "0"},
+        "bind": record.get("bind"), "port": record.get("port"),
+    }
+
+
+def remote_mcp_service_plan(remote: dict, bind: str, port: int,
+                            public_url: str | None = None) -> dict:
+    """Build a no-write migration plan with no secret-bearing fields."""
+    public_url = _validate_remote_mcp_public_url(public_url)
+    record = remote_mcp_service_record(bind, port, public_url)
+    return {
+        "status": "planned", "requires_confirm": True,
+        "service": record,
+        "steps": [
+            "write owner-only remote credential file", "install Sandbox-owned user unit",
+            "reload user manager and enable linger", "enable and verify selected unit",
+        ],
+        "legacy_pidfile_detected": False,
+    }
+
+
+def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
+                               public_url: str | None = None, *, confirm: bool = False) -> dict:
+    """Install the scoped remote service only after explicit confirmation.
+
+    The token is passed through SSH stdin, never embedded in the unit or command.
+    """
+    plan = remote_mcp_service_plan(remote, bind, port, public_url)
+    if not confirm:
+        return plan
+    if not isinstance(token, str) or not token:
+        raise ValueError("remote MCP token is required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+        raise ValueError("remote MCP token has unsafe characters")
+    unit = render_remote_mcp_unit(bind, port, public_url)
+    command = (
+        "set -eu; umask 077; mkdir -p $HOME/.sandbox $HOME/.config/systemd/user; chmod 700 $HOME/.sandbox; "
+        f"unit_path=$HOME/.config/systemd/user/{REMOTE_MCP_SERVICE}; env_path={_REMOTE_MCP_ENV}; "
+        "backup=$HOME/.sandbox/mcp-remote-backup-$$; mkdir -p \"$backup\"; "
+        "had_unit=0; had_env=0; if test -f \"$unit_path\"; then cp \"$unit_path\" \"$backup/unit\"; had_unit=1; fi; "
+        "if test -f \"$env_path\"; then cp \"$env_path\" \"$backup/env\"; had_env=1; fi; "
+        "rollback() { if test \"$had_unit\" = 1; then cp \"$backup/unit\" \"$unit_path\"; else rm -f \"$unit_path\"; fi; "
+        "if test \"$had_env\" = 1; then cp \"$backup/env\" \"$env_path\"; else rm -f \"$env_path\"; fi; "
+        "systemctl --user daemon-reload || true; }; "
+        "unit_tmp=$(mktemp \"$unit_path.XXXXXX\"); cat > \"$unit_tmp\" <<'UNIT'\n"
+        + unit + "UNIT\n"
+        "chmod 600 \"$unit_tmp\"; mv \"$unit_tmp\" \"$unit_path\"; "
+        "IFS= read -r sandbox_remote_mcp_token; "
+        "env_tmp=$(mktemp \"$env_path.XXXXXX\"); "
+        "printf '%s\\n' \"SANDBOX_REMOTE_MCP_TOKEN=$sandbox_remote_mcp_token\" > \"$env_tmp\"; "
+        "chmod 600 \"$env_tmp\"; mv \"$env_tmp\" \"$env_path\"; "
+        "if ! systemctl --user daemon-reload || ! loginctl enable-linger \"$USER\" || "
+        f"! systemctl --user enable --now {REMOTE_MCP_SERVICE} || ! systemctl --user is-active --quiet {REMOTE_MCP_SERVICE}; then "
+        "rollback; exit 1; fi; rm -rf \"$backup\""
+    )
+    try:
+        res = ssh_run(remote, command, timeout=60, input_data=token + "\n")
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("timed out installing the remote MCP service") from exc
+    if res.returncode != 0:
+        raise RuntimeError("could not install the remote MCP service")
+    return {**plan, "status": "applied", "service": remote_mcp_service_record(bind, port, public_url)}
 
 
 def resolve_tailscale_ip(remote: dict) -> str:
@@ -871,66 +1043,18 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
 
 def start_remote_mcp_server(remote: dict, bind: str, port: int, token: str,
                             public_url: str | None = None) -> None:
-    """Start `sb mcp --transport streamable-http ...` on the VPS as a
-    detached background process, recording its PID in a pidfile so
-    stop_remote_mcp_server / a later start can find and manage it. Safe to
-    call when already running -- stops any prior instance first (idempotent,
-    matches spec FR-005's expectation applied to the server process too)."""
-    stop_remote_mcp_server(remote)
-    public_arg = f" --public-url {shlex.quote(public_url)}" if public_url else ""
-    mcp_cmd = (
-        f"./sb mcp --transport streamable-http --bind {shlex.quote(bind)} "
-        f"--port {int(port)} --token {shlex.quote(token)}{public_arg}"
-    )
-    child_cmd = (
-        f"echo $$ > {_MCP_PIDFILE}; "
-        f"exec {mcp_cmd} </dev/null > /tmp/sandbox-mcp-remote.log 2>&1"
-    )
-    cmd = (
-        "sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}; "
-        "mkdir -p \"$sandbox_home/sb-src\"; "
-        f"cd \"$sandbox_home/sb-src\" && setsid -f sh -c {shlex.quote(child_cmd)}"
-    )
-    try:
-        res = ssh_run(remote, cmd, timeout=30)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("timed out starting the remote MCP server")
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"could not start the remote MCP server: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
-        )
+    """Compatibility wrapper for the confirmed, systemd-owned service path."""
+    migrate_remote_mcp_service(remote, bind, port, token, public_url, confirm=True)
 
 
 def stop_remote_mcp_server(remote: dict) -> None:
-    """Stop the remote MCP server process if a pidfile from a prior start
-    exists and that PID is still alive. A no-op (not an error) if nothing is
-    running -- matches spec's `remote down` Edge Cases expectation that
-    stopping never affects WordPress instances, only this control-plane
-    process."""
-    cmd = (
-        f"if [ -f {_MCP_PIDFILE} ]; then "
-        f"kill \"$(cat {_MCP_PIDFILE})\" 2>/dev/null || true; "
-        f"rm -f {_MCP_PIDFILE}; fi; "
-        "python3 - <<'PY'\n"
-        "import os, pathlib, signal\n"
-        "me = os.getpid()\n"
-        "for path in pathlib.Path('/proc').glob('[0-9]*/cmdline'):\n"
-        "    try:\n"
-        "        pid = int(path.parent.name)\n"
-        "        parts = path.read_bytes().split(b'\\0')\n"
-        "    except Exception:\n"
-        "        continue\n"
-        "    if pid == me:\n"
-        "        continue\n"
-        "    if b'--transport' in parts and b'streamable-http' in parts and b'--token' in parts:\n"
-        "        try:\n"
-        "            os.kill(pid, signal.SIGTERM)\n"
-        "        except ProcessLookupError:\n"
-        "            pass\n"
-        "PY"
-    )
-    ssh_run(remote, cmd, timeout=15)
+    """Stop only the Sandbox-owned unit; legacy PID data is detection-only."""
+    status = remote_mcp_service_status(remote)
+    if status["ownership"] != "proven":
+        raise RuntimeError("remote_service_ownership_unknown")
+    res = ssh_run(remote, f"systemctl --user stop {REMOTE_MCP_SERVICE}", timeout=20)
+    if res.returncode != 0:
+        raise RuntimeError("could not stop the selected remote MCP service")
 
 
 def reject_herd_projects(pconf: dict) -> None:

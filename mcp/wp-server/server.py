@@ -103,7 +103,13 @@ def _parse_transport_args(argv):
     p.add_argument("--token", default=None)
     p.add_argument("--public-url", default=None)
     ns, _ = p.parse_known_args(argv)
-    return vars(ns)
+    values = vars(ns)
+    environment_token = os.environ.get("SANDBOX_REMOTE_MCP_TOKEN")
+    if environment_token:
+        if values["token"] and values["token"] != environment_token:
+            raise SystemExit("remote MCP token sources disagree")
+        values["token"] = environment_token
+    return values
 
 
 def _run_streamable_http(bind: str, port: int, token: str,

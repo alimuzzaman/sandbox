@@ -54,6 +54,31 @@ class TestParseTransportArgs(unittest.TestCase):
         self.assertEqual(opts["port"], 9174)
         self.assertEqual(opts["token"], "sekrit")
 
+    def test_remote_service_uses_environment_token_without_argv(self):
+        old = os.environ.get("SANDBOX_REMOTE_MCP_TOKEN")
+        os.environ["SANDBOX_REMOTE_MCP_TOKEN"] = "environment-secret"
+        try:
+            opts = server._parse_transport_args(
+                ["--transport", "streamable-http", "--bind", "127.0.0.1", "--port", "9174"])
+        finally:
+            if old is None:
+                os.environ.pop("SANDBOX_REMOTE_MCP_TOKEN", None)
+            else:
+                os.environ["SANDBOX_REMOTE_MCP_TOKEN"] = old
+        self.assertEqual(opts["token"], "environment-secret")
+
+    def test_mismatched_token_sources_are_rejected(self):
+        old = os.environ.get("SANDBOX_REMOTE_MCP_TOKEN")
+        os.environ["SANDBOX_REMOTE_MCP_TOKEN"] = "environment-secret"
+        try:
+            with self.assertRaises(SystemExit):
+                server._parse_transport_args(["--token", "argv-secret"])
+        finally:
+            if old is None:
+                os.environ.pop("SANDBOX_REMOTE_MCP_TOKEN", None)
+            else:
+                os.environ["SANDBOX_REMOTE_MCP_TOKEN"] = old
+
 
 class TestStreamableHttpSafetyGates(unittest.TestCase):
     def test_refuses_0_0_0_0_bind(self):

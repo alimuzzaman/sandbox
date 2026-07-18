@@ -358,7 +358,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "up/down: start/stop the remote MCP server; remove: forget a remote "
@@ -376,6 +376,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p.add_argument("--ipv6", default=None, help="public IPv6 address for hosted DNS records")
     remote_p.add_argument("--yes", action="store_true",
         help="accept the default HTTPS control-plane choice without prompting")
+    remote_p.add_argument("--plan", action="store_true",
+        help="for `remote service migrate`: show the no-write service migration plan")
+    remote_p.add_argument("--confirm", action="store_true",
+        help="allow a protected remote service lifecycle mutation")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

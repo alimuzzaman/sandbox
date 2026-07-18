@@ -114,6 +114,22 @@ _ERROR_RE = re.compile(
     r"(?i)(?:http\s*400|unsupported model|not supported|provider error|client error|"
     r"authentication failed|rate.?limit|quota exceeded|request failed|provider_bad_request|unsupported_model)"
 )
+_TERMINAL_RESULT_RE = re.compile(
+    r"(?m)(?:^|:\s*)(COMPLETED_SPEC_TASK|COMPLETED_TODO_TASK|NO_BACKLOG_WORK|REVIEW_REQUIRED)\b"
+)
+
+
+def classify_terminal_result(value: str, *, provider_failure: bool = False) -> dict[str, Any]:
+    """Classify documented final output without allowing it to mask a provider error."""
+    match = _TERMINAL_RESULT_RE.search(str(value or "")[:8000])
+    marker = match.group(1) if match else None
+    if provider_failure:
+        classification = "provider_failure"
+    elif marker:
+        classification = "successful_terminal"
+    else:
+        classification = "none"
+    return {"terminal_result": marker, "terminal_classification": classification}
 
 
 def catalog_path() -> Path:
@@ -225,9 +241,14 @@ def effective_job_status(job: dict[str, Any], evidence: str = "") -> dict[str, A
     error = str(job.get("last_error") or "")
     combined = "\n".join((error, evidence))[:8000]
     evidence_failure = bool(_ERROR_RE.search(combined))
+    terminal = classify_terminal_result(combined, provider_failure=evidence_failure)
     if route_reason:
         status = "invalid"
-    elif evidence_failure or last in {"error", "failed", "failure"}:
+    elif evidence_failure:
+        status = "failed"
+    elif terminal["terminal_classification"] == "successful_terminal":
+        status = "ok"
+    elif last in {"error", "failed", "failure"}:
         status = "failed"
     elif str(job.get("state") or "").lower() in {"running", "claimed"}:
         status = "running"
@@ -242,6 +263,8 @@ def effective_job_status(job: dict[str, Any], evidence: str = "") -> dict[str, A
         "false_success": evidence_failure and last in {"ok", "success", "completed"},
         "route_valid": route_reason is None,
         "reason": route_reason or ("bounded request evidence records a provider/client failure" if evidence_failure else ""),
+        **terminal,
+        "result_protocol_error": bool(terminal["terminal_result"] and last in {"error", "failed", "failure"}),
     }
 
 

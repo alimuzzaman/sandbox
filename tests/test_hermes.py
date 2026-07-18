@@ -342,6 +342,21 @@ class TestValidation(unittest.TestCase):
         self.assertTrue(status["false_success"])
         self.assertEqual(classify_job({"no_agent": True, "script": "watch.py"}), "script")
 
+    def test_documented_terminal_marker_overrides_only_wrapper_error(self):
+        status = effective_job_status({
+            "last_status": "error", "last_run_at": "now",
+            "last_error": "RuntimeError: COMPLETED_SPEC_TASK",
+        })
+        self.assertEqual(status["effective_status"], "ok")
+        self.assertEqual(status["terminal_result"], "COMPLETED_SPEC_TASK")
+        self.assertTrue(status["result_protocol_error"])
+        provider = effective_job_status({
+            "last_status": "error", "last_run_at": "now",
+            "last_error": "RuntimeError: COMPLETED_SPEC_TASK\nHTTP 429 quota exceeded",
+        })
+        self.assertEqual(provider["effective_status"], "failed")
+        self.assertEqual(provider["terminal_classification"], "provider_failure")
+
     def test_reconciliation_is_exact_and_idempotent(self):
         paths = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
                  "worktrees": "/home/u/sandbox/runtime/hermes-worktrees"}
@@ -625,6 +640,28 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertEqual(ssh.call_count, 1)
         self.assertEqual(create.call_count, 1)
         install_scripts.assert_called_once()
+
+    @patch("sandbox.core._hermes._create_catalog_job", side_effect=hermes.HermesError("create failed", "cron_create_failed"))
+    @patch("sandbox.core._hermes._install_cron_scripts")
+    @patch("sandbox.core._hermes._prepare_catalog_workdir", return_value=None)
+    @patch("sandbox.core._hermes._checked", return_value=_completed())
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={
+        "repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
+        "worktrees": "/home/u/sandbox/runtime/hermes-worktrees", "launcher": "$HOME/.local/bin/hermes",
+    })
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    def test_reconcile_restores_prior_inventory_after_post_removal_failure(
+            self, snapshot, require_remote, paths, ssh, checked, prepare, install_scripts, create):
+        initial = _exact_catalog_snapshot(paths.return_value)
+        del next(job for job in initial["jobs"] if not job["no_agent"])["prompt_sha256"]
+        snapshot.side_effect = [initial, initial]
+        out = hermes.cron_reconcile("test", confirm=True, force_replace=True)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "rolled_back")
+        self.assertTrue(out["data"]["rollback"]["verified"])
+        self.assertEqual(ssh.call_count, 2)  # controlled removal, then inventory restore
 
     @patch("sandbox.core._hermes._checked")
     @patch("sandbox.core._hermes._require_remote", return_value={})
@@ -2416,16 +2453,17 @@ class TestRemoteCommands(unittest.TestCase):
              patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
              patch.object(hermes, "_remote_state_read", return_value=state), \
              patch.object(hermes, "_reconcile_sessions", return_value=(state, [])), \
-             patch.object(hermes, "_ssh", return_value=_completed(stdout="active\nyes\n")), \
+             patch.object(hermes, "_ssh", return_value=_completed(stdout="active\nyes\nenabled\n")), \
              patch.object(hermes, "_gateway_ownership", return_value={"healthy": True, "conflict": False}), \
              patch.object(hermes, "_cron_snapshot", return_value={"jobs": []}), \
              patch.object(hermes, "_worktree_snapshot", return_value=[]), \
              patch.object(hermes, "reconciliation_plan", return_value={"changes": False, "catalog_fingerprint": "a" * 64}):
             out = hermes.health("test")
-        self.assertTrue(out["ok"])
+        self.assertFalse(out["ok"])
         self.assertEqual(out["data"]["gateway"]["state"], "active")
         self.assertEqual(out["data"]["gateway"]["linger"], "yes")
         self.assertEqual(out["data"]["sessions"]["stale"], 1)
+        self.assertIn("stale_session", out["data"]["reasons"])
 
     def test_health_observes_state_without_reconciliation_or_persistence(self):
         before = {
@@ -2453,6 +2491,22 @@ class TestRemoteCommands(unittest.TestCase):
         write_state.assert_not_called()
         self.assertEqual(before["last_boot_id"], "11111111-1111-1111-1111-111111111111")
         self.assertEqual(out["data"]["v2_gate"]["status"], "pending")
+
+    def test_health_degrades_when_scheduler_probe_is_unavailable(self):
+        state = {"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {}}
+        diagnostic = {"ok": True, "data": {"checks": {}}, "error": None}
+        with patch.object(hermes, "doctor", return_value=diagnostic), \
+             patch.object(hermes, "_require_remote", return_value=self.entry), \
+             patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
+             patch.object(hermes, "_remote_state_read", return_value=state), \
+             patch.object(hermes, "_ssh", return_value=_completed(stdout="active\nyes\nenabled\n")), \
+             patch.object(hermes, "_gateway_ownership", return_value={"healthy": True, "conflict": False}), \
+             patch.object(hermes, "_cron_snapshot", side_effect=hermes.HermesError("scheduler unavailable", "remote_command_failed")), \
+             patch.object(hermes, "_worktree_snapshot", return_value=[]):
+            out = hermes.health("test")
+        self.assertFalse(out["ok"])
+        self.assertIn("scheduler_unavailable", out["data"]["reasons"])
+        self.assertFalse(out["data"]["components"]["scheduler"]["evidence"]["available"])
 
     @patch("sandbox.core._hermes.subprocess.run")
     @patch("sandbox.core._hermes.remote.ssh_run")

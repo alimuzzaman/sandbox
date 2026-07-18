@@ -693,12 +693,8 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 1)
 
 
-class TestCmdRemoteProvisionSurfacesTheToken(unittest.TestCase):
-    # Real bug caught by /speckit-analyze: cmd_remote_provision's own
-    # success message claimed "bearer token minted above" while never
-    # actually printing it anywhere -- there was no way to complete the
-    # second-MCP-server registration described in docs/remote-hosting.md.
-    def test_provision_result_includes_the_minted_token(self):
+class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
+    def test_provision_result_omits_the_minted_token(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
@@ -713,8 +709,8 @@ class TestCmdRemoteProvisionSurfacesTheToken(unittest.TestCase):
                     remote_cmd._cmd_provision(args, as_json=True)
                 printed = mock_print.call_args[0][0]
                 result = json.loads(printed)
-                self.assertTrue(result["bearer_token"])
-                self.assertEqual(len(result["bearer_token"]), 64)  # secrets.token_hex(32)
+                self.assertNotIn("bearer_token", result)
+                self.assertNotIn("token", json.dumps(result).lower())
                 self.assertEqual(result["control_transport"], "https")
                 self.assertEqual(result["control_url"], "https://sandbox.example.com")
 
@@ -754,35 +750,37 @@ class TestStartRemoteMcpServer(unittest.TestCase):
     def test_start_remote_mcp_server_defaults_sandbox_home(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         entry = {"ssh": "ubuntu@1.2.3.4"}
-        sr.start_remote_mcp_server(entry, "100.64.1.2", 9174, "token123")
+        token = "a" * 64
+        sr.start_remote_mcp_server(entry, "100.64.1.2", 9174, token)
         cmd = mock_ssh_run.call_args[0][1]
-        self.assertIn("sandbox_home=${SANDBOX_HOME:-$HOME/sandbox}", cmd)
-        self.assertIn("mkdir -p \"$sandbox_home/sb-src\"", cmd)
-        self.assertIn("cd \"$sandbox_home/sb-src\"", cmd)
+        self.assertIn("sandbox-mcp-remote.service", cmd)
+        self.assertIn("EnvironmentFile=%h/.sandbox/mcp-remote.env", cmd)
+        self.assertIn("SANDBOX_REMOTE_MCP_TOKEN", cmd)
+        self.assertIn("rollback()", cmd)
+        self.assertIn("mcp-remote-backup", cmd)
+        self.assertNotIn(token, cmd)
+        self.assertEqual(mock_ssh_run.call_args.kwargs["input_data"], token + "\n")
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_passes_public_url(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(returncode=0)
         entry = {"ssh": "ubuntu@1.2.3.4"}
         sr.start_remote_mcp_server(
-            entry, "127.0.0.1", 9174, "token123",
+            entry, "127.0.0.1", 9174, "b" * 64,
             public_url="https://sandbox.example.com",
         )
         cmd = mock_ssh_run.call_args[0][1]
         self.assertIn("--bind 127.0.0.1", cmd)
         self.assertIn("--public-url https://sandbox.example.com", cmd)
-        self.assertIn("</dev/null", cmd)
+        self.assertIn("Restart=on-failure", cmd)
 
     @patch("sandbox.core._remote.ssh_run")
     def test_start_remote_mcp_server_timeout_is_redacted(self, mock_ssh_run):
-        mock_ssh_run.side_effect = [
-            _completed(returncode=0),
-            subprocess.TimeoutExpired(cmd="ssh", timeout=30),
-        ]
+        mock_ssh_run.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=30)
         with self.assertRaisesRegex(RuntimeError, "timed out"):
             sr.start_remote_mcp_server(
                 {"ssh": "ubuntu@1.2.3.4"}, "127.0.0.1", 9174,
-                "secret-token", public_url="https://sandbox.example.com",
+                "s" * 64, public_url="https://sandbox.example.com",
             )
 
 
@@ -887,14 +885,53 @@ class TestRemotePreviewInstances(unittest.TestCase):
 
 class TestStopRemoteMcpServer(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
-    def test_stop_kills_pidfile_and_stale_streamable_http_processes(self, mock_ssh_run):
-        mock_ssh_run.return_value = _completed(returncode=0)
-        sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
-        cmd = mock_ssh_run.call_args[0][1]
-        self.assertIn("/tmp/sandbox-mcp-remote.pid", cmd)
-        self.assertIn("/proc", cmd)
-        self.assertIn("streamable-http", cmd)
-        self.assertIn("--token", cmd)
+    def test_stop_targets_only_the_proven_service_unit(self, mock_ssh_run):
+        mock_ssh_run.side_effect = [
+            _completed(stdout="enabled=enabled\nactive=active\npid=123\nlinger=yes\nmarker=1\n"),
+            _completed(returncode=0),
+        ]
+        remote = {"ssh": "ubuntu@1.2.3.4", "mcp_service": sr.remote_mcp_service_record("127.0.0.1", 9174)}
+        sr.stop_remote_mcp_server(remote)
+        cmd = mock_ssh_run.call_args_list[1].args[1]
+        self.assertEqual(cmd, "systemctl --user stop sandbox-mcp-remote.service")
+        self.assertNotIn("/proc", cmd)
+        self.assertNotIn("--token", cmd)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_stop_refuses_unproven_ownership(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout="enabled=not-found\nactive=inactive\npid=0\nlinger=no\n")
+        with self.assertRaisesRegex(RuntimeError, "ownership_unknown"):
+            sr.stop_remote_mcp_server({"ssh": "ubuntu@1.2.3.4"})
+        self.assertEqual(mock_ssh_run.call_count, 1)
+
+
+class TestRemoteServiceCommand(unittest.TestCase):
+    def test_service_migration_plan_never_opens_ssh(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
+                              control_transport="https", control_url="https://sandbox.example.test",
+                              mcp_port=9174, bearer_token="a" * 64)
+                args = MagicMock()
+                args.name = "migrate"
+                args.ssh_url = "myvps"
+                args.confirm = False
+                with patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
+                    remote_cmd._cmd_service(args, as_json=True)
+                ssh_run.assert_not_called()
+                payload = json.loads(printed.call_args.args[0])
+                self.assertEqual(payload["status"], "planned")
+                self.assertNotIn("a" * 64, json.dumps(payload))
+
+    def test_down_without_confirmation_is_plan_only(self):
+        args = MagicMock()
+        args.name = "myvps"
+        args.confirm = False
+        with patch.object(sr, "get_remote", return_value={"ssh": "ubuntu@1.2.3.4"}), \
+             patch.object(sr, "stop_remote_mcp_server") as stop, patch("builtins.print") as printed:
+            remote_cmd._cmd_down(args, as_json=True)
+        stop.assert_not_called()
+        self.assertEqual(json.loads(printed.call_args.args[0])["status"], "planned")
 
 
 class TestDeployRequiresProvisionedRemote(unittest.TestCase):

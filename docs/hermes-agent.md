@@ -256,11 +256,23 @@ Git worktree if it is absent; scheduled edits never target the primary checkout.
 fast-forward merge, and for the `sandbox` repo atomically refreshes `sb-src`
 from the committed Git tree while preserving its managed virtual environments.
 
-`hermes health` aggregates gateway ownership, catalog drift, model routing,
-bounded correlated request dumps, and dirty worktrees. A provider rejection wins
-over an upstream `last_status=ok` marker and is reported as `false_success`.
-`cron verify` likewise waits for a changed terminal run marker and rejects a
-nominal success when correlated request evidence records an error.
+`hermes health` aggregates remote-MCP recovery, gateway ownership and enablement,
+user linger, scheduler availability, catalog drift, model routing, bounded correlated
+request dumps, stale sessions, and dirty worktrees. Each condition has a distinct
+machine-readable reason code; unknown recovery/scheduler evidence is degraded rather
+than treated as healthy. A provider rejection wins over an upstream `last_status=ok`
+marker and is reported as `false_success`. A documented terminal marker such as
+`COMPLETED_SPEC_TASK` is classified separately as a scheduler result-protocol issue,
+not as failed work, unless provider/client evidence is present.
+`cron verify` waits for a changed terminal run marker and returns separate trigger,
+transition, provider, and terminal-result evidence without returning a prompt or full
+saved output.
+
+`hermes cron reconcile --force-replace --json` remains a read-only plan. Confirmed
+replacement preflights managed worktrees, creates an owner-only prior-inventory backup,
+requires exact postcondition convergence, and restores/verifies the previous inventory
+after a post-removal failure. Its result is explicitly `converged`, `rolled_back`, or
+`rollback_failed`; it never triggers a cron job as part of reconciliation.
 `cron output` reads only the latest saved Markdown artifact for a validated job
 ID, returns only its response/error outcome (never the stored prompt), bounds
 the response, and withholds secret-like content. `worktree inspect`

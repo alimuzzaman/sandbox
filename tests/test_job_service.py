@@ -36,6 +36,19 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(repository.get(row["job_id"])["lifecycle"], "interrupted")
             repository.close()
 
+    def test_reconcile_marks_running_job_without_supervisor_identity_interrupted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                  launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.transition(row["job_id"], "running")
+            result = service.reconcile_startup()
+            self.assertEqual(result["interrupted"], [row["job_id"]])
+            self.assertEqual(repository.get(row["job_id"])["termination_reason"], "missing_supervisor_identity")
+            repository.close()
+
     def test_retention_sweep_removes_terminal_outputs_and_marks_cleanup(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")
@@ -53,4 +66,22 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(len(result["cleaned"]), 1)
             self.assertEqual(repository.get(row["job_id"])["cleanup_state"], "completed")
             self.assertFalse((job_dir / "output").exists())
+            repository.close()
+
+    def test_storage_pressure_retention_reclaims_oldest_terminal_job(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.transition(row["job_id"], "running")
+            repository.transition(row["job_id"], "succeeded", exit_code=0)
+            job_dir = storage.job_dir(row["job_id"], create=True)
+            (job_dir / "output").mkdir()
+            (job_dir / "output" / "data").write_text("retained")
+            storage.is_under_pressure = lambda: True
+            result = service.retention_sweep(retention_days=7, storage_pressure=True)
+            self.assertTrue(result["storage_pressure"])
+            self.assertEqual(len(result["cleaned"]), 1)
             repository.close()

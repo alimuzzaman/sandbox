@@ -243,6 +243,17 @@ class JobService:
             process = self.repository.snapshot(row["job_id"]).get("process") or {}
             supervisor_pid = process.get("supervisor_pid")
             if not supervisor_pid or not process.get("supervisor_start_identity"):
+                try:
+                    self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,
+                        termination_reason="missing_supervisor_identity", output_completeness="unknown",
+                        result_json=__import__("json").dumps({
+                            "reconciled": True, "evidence": "active job has no durable supervisor identity"
+                        }, sort_keys=True))
+                    if self.scheduler is not None:
+                        self.scheduler.release(row["job_id"])
+                    interrupted.append(row["job_id"])
+                except ValueError:
+                    pass
                 continue
             observed = capture_process_identity(int(supervisor_pid))
             if observed is not None:
@@ -355,12 +366,18 @@ class JobService:
         self.repository.set_cleanup_state(job_id, "completed")
         return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": "completed"}
 
-    def retention_sweep(self, *, retention_days: int = 7, limit: int = 200) -> dict:
+    def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,
+                        storage_pressure: bool = False) -> dict:
         if isinstance(retention_days, bool) or not isinstance(retention_days, int) or retention_days < 0:
             raise ValueError("retention_days must be a non-negative whole number")
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         cleaned = []
-        for row in self.repository.list(limit=limit):
+        rows = self.repository.list(limit=limit)
+        if storage_pressure and not self.storage.is_under_pressure():
+            storage_pressure = False
+        if storage_pressure:
+            rows.sort(key=lambda item: item.get("finished_at") or item.get("accepted_at") or "")
+        for row in rows:
             if row["lifecycle"] not in {item.value for item in (
                 Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
                 Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
@@ -370,9 +387,12 @@ class JobService:
                 finished = datetime.fromisoformat(row["finished_at"].replace("Z", "+00:00"))
             except ValueError:
                 continue
-            if finished <= cutoff and row.get("cleanup_state") != "completed":
+            if (storage_pressure or finished <= cutoff) and row.get("cleanup_state") != "completed":
                 cleaned.append(self.cleanup(row["job_id"]))
-        return {"ok": True, "retention_days": retention_days, "cleaned": cleaned}
+            if storage_pressure and not self.storage.is_under_pressure():
+                break
+        return {"ok": True, "retention_days": retention_days,
+                "storage_pressure": storage_pressure, "cleaned": cleaned}
 
     def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
         if not submissions:

@@ -83,6 +83,22 @@ def configure_cancel_parser(parser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
+def configure_retry_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("--request-id")
+    parser.add_argument("--remote")
+    parser.add_argument("--json", action="store_true")
+
+
+def configure_cleanup_parser(parser) -> None:
+    parser.add_argument("job_id")
+    parser.add_argument("--logs", action="store_true")
+    parser.add_argument("--artifacts", action="store_true")
+    parser.add_argument("--metrics", action="store_true")
+    parser.add_argument("--remote")
+    parser.add_argument("--json", action="store_true")
+
+
 def configure_metrics_parser(parser) -> None:
     parser.add_argument("job_id")
     parser.add_argument("--limit", type=int, default=500)
@@ -114,6 +130,8 @@ def configure_reconcile_parser(parser) -> None:
 def configure_retention_parser(parser) -> None:
     parser.add_argument("--retention-days", type=int, default=7)
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--storage-pressure", action="store_true",
+                        help="reclaim oldest terminal data only when below the disk reserve")
     parser.add_argument("--json", action="store_true")
 
 
@@ -249,6 +267,31 @@ def cmd_job_cancel(_cfg, args) -> None:
     print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cancelling")
 
 
+def cmd_job_retry(_cfg, args) -> None:
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).retry(args.remote, args.job_id, request_id=args.request_id)
+    else:
+        result = durable_job_dependencies()["job_service"].retry(args.job_id, request_id=args.request_id)
+    print(json.dumps(result, sort_keys=True) if args.json else result["job_id"])
+
+
+def cmd_job_cleanup(_cfg, args) -> None:
+    selected = args.logs or args.artifacts or args.metrics
+    options = {"logs": args.logs or not selected, "artifacts": args.artifacts or not selected,
+               "metrics": args.metrics or not selected}
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote).cleanup(args.remote, args.job_id, **options)
+    else:
+        result = durable_job_dependencies()["job_service"].cleanup(args.job_id, **options)
+    print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} cleanup={result['cleanup_state']}")
+
+
 def cmd_job_metrics(_cfg, args) -> None:
     if args.remote:
         from sandbox.core import _remote
@@ -308,7 +351,8 @@ def cmd_job_reconcile(_cfg, args) -> None:
 
 def cmd_job_retention(_cfg, args) -> None:
     result = durable_job_dependencies()["job_service"].retention_sweep(
-        retention_days=args.retention_days, limit=args.limit)
+        retention_days=args.retention_days, limit=args.limit,
+        storage_pressure=args.storage_pressure)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
@@ -398,6 +442,8 @@ register_specs((
     CommandSpec("job-output", cmd_job_output, configure=configure_output_parser, owner=__name__, scope="global"),
     CommandSpec("job-list", cmd_job_list, configure=configure_list_parser, owner=__name__, scope="global"),
     CommandSpec("job-cancel", cmd_job_cancel, configure=configure_cancel_parser, owner=__name__, scope="global"),
+    CommandSpec("job-retry", cmd_job_retry, configure=configure_retry_parser, owner=__name__, scope="global"),
+    CommandSpec("job-cleanup", cmd_job_cleanup, configure=configure_cleanup_parser, owner=__name__, scope="global"),
     CommandSpec("job-metrics", cmd_job_metrics, configure=configure_metrics_parser, owner=__name__, scope="global"),
     CommandSpec("job-artifacts", cmd_job_artifacts, configure=configure_artifacts_parser, owner=__name__, scope="global"),
     CommandSpec("job-artifact-get", cmd_job_artifact_get, configure=configure_artifact_get_parser, owner=__name__, scope="global"),

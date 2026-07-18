@@ -10,6 +10,7 @@ from pathlib import Path
 
 MAX_ARTIFACTS = 50
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 
 
 class ArtifactError(RuntimeError):
@@ -22,13 +23,25 @@ def collect(storage, repository, job_id: str, *, project_root: str | Path,
     destination = storage.job_dir(job_id) / "artifacts"
     destination.mkdir(mode=0o700, exist_ok=True)
     results = []
+    total_size = 0
     for index, declared in enumerate(declared_paths):
         if index >= MAX_ARTIFACTS: raise ArtifactError("artifact count limit exceeded")
-        source = (root / declared).resolve()
-        if root not in source.parents or not source.is_file() or source.is_symlink():
+        candidate = root / declared
+        current = root
+        ancestor_symlink = False
+        for part in Path(declared).parts[:-1]:
+            current = current / part
+            ancestor_symlink = ancestor_symlink or current.is_symlink()
+        if candidate.is_symlink() or ancestor_symlink:
+            raise ArtifactError(f"artifact symlink is not allowed: {declared}")
+        source = candidate.resolve()
+        if root not in source.parents or not source.is_file():
             raise ArtifactError(f"artifact is outside project or not a regular file: {declared}")
         size = source.stat().st_size
         if size > MAX_ARTIFACT_BYTES: raise ArtifactError(f"artifact exceeds size limit: {declared}")
+        total_size += size
+        if total_size > MAX_ARTIFACT_TOTAL_BYTES:
+            raise ArtifactError("artifact total size limit exceeded")
         artifact_id = hashlib.sha256(f"{job_id}:{declared}".encode()).hexdigest()[:24]
         stored = destination / artifact_id
         shutil.copyfile(source, stored)

@@ -38,6 +38,9 @@ class JobStorage:
         if free - max(0, incoming_bytes) < self.free_disk_reserve:
             raise StoragePressureError("job storage free-disk reserve would be crossed")
 
+    def is_under_pressure(self) -> bool:
+        return shutil.disk_usage(self.root).free < self.free_disk_reserve
+
     @staticmethod
     def safe_relative(value: str | Path) -> Path:
         path = Path(value)

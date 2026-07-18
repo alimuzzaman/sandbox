@@ -52,6 +52,14 @@ destroy are explicit and refuse active workspace leases.
 For scheduled/maintenance cleanup, apply the configured age explicitly with
 `./sb job-retention --retention-days 7 --json`; it removes terminal output,
 metrics, and artifacts and records `cleanup_state` in the registry.
+If the host is below its configured free-disk reserve, use
+`./sb job-retention --storage-pressure --json`; only the oldest terminal jobs
+are reclaimed until pressure clears. Active jobs and retained failed workspaces
+remain protected. Output writes fail explicitly as `storage_pressure` if the
+reserve is crossed, never as a false successful test.
+Artifact collection rejects symlinks, non-regular objects, path escapes, and
+per-job count/size limits. Retrieve artifacts by immutable ID with
+`./sb job-artifacts JOB --json` and `./sb job-artifact-get JOB ARTIFACT --output-file PATH`.
 Never delete a workspace or job directory by hand: the registry and lease store
 must remain authoritative.
 

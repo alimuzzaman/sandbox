@@ -19,3 +19,14 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(items[0]["display_name"], "result.txt")
             with self.assertRaises(ArtifactError): collect(storage, repo, job["job_id"], project_root=root, declared_paths=("../escape",))
             repo.close()
+
+    def test_symlink_artifact_is_rejected_even_when_target_stays_under_project(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "real.txt").write_text("result")
+            (root / "link.txt").symlink_to(root / "real.txt")
+            repo = JobRepository(root / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission("test", str(root), "p", "local", "w", ("echo", "x"), 60, SourceIdentity("s")))
+            storage = JobStorage(root, free_disk_reserve=0); storage.job_dir(job["job_id"], create=True)
+            with self.assertRaisesRegex(ArtifactError, "symlink"):
+                collect(storage, repo, job["job_id"], project_root=root, declared_paths=("link.txt",))
+            repo.close()

@@ -147,7 +147,12 @@ class RemoteJobTransport:
         return payload
 
     def status(self, remote_name: str, job_id: str) -> dict:
-        return self.control(remote_name, ["job-status", job_id])
+        try:
+            return self.control(remote_name, ["job-status", job_id])
+        except RemoteJobTransportError as exc:
+            return {"ok": False, "job_id": job_id, "lifecycle": "unknown",
+                    "health": "unreachable", "target": {"kind": "remote", "remote": remote_name},
+                    "error": str(exc)}
 
     def list(self, remote_name: str, *, limit: int = 50) -> dict:
         return self.control(remote_name, ["job-list", "--limit", str(limit)])
@@ -167,3 +172,15 @@ class RemoteJobTransport:
                      offset: int = 0, max_bytes: int = 1_048_576) -> dict:
         return self.control(remote_name, ["job-artifact-get", job_id, artifact_id,
                                           "--offset", str(offset), "--max-bytes", str(max_bytes)])
+
+    def retry(self, remote_name: str, job_id: str, *, request_id: str | None = None) -> dict:
+        args = ["job-retry", job_id]
+        if request_id: args += ["--request-id", request_id]
+        return self.control(remote_name, args)
+
+    def cleanup(self, remote_name: str, job_id: str, *, logs: bool = True,
+                artifacts: bool = True, metrics: bool = True) -> dict:
+        args = ["job-cleanup", job_id]
+        for flag, enabled in (("--logs", logs), ("--artifacts", artifacts), ("--metrics", metrics)):
+            if enabled: args.append(flag)
+        return self.control(remote_name, args)

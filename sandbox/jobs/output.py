@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import OutputProfile, OutputQuery, validate_job_id
+from .storage import StoragePressureError
 
 
 class OutputError(RuntimeError):
@@ -159,6 +160,10 @@ class JobOutputStore:
         path = self._path(stream)
         offset = path.stat().st_size if path.exists() else 0
         try:
+            try:
+                self.storage.require_capacity(len(content) + 512)
+            except StoragePressureError as exc:
+                raise OutputError("durable output storage pressure") from exc
             with path.open("ab", buffering=0) as handle:
                 os.chmod(path, 0o600)
                 handle.write(content)

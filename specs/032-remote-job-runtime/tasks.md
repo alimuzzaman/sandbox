@@ -142,13 +142,13 @@ health, evidence, metrics, artifacts, and final results.
 
 - [ ] T063 [P] [US2] Implement host/process resource metric sampling and movement evidence in `sandbox/jobs/metrics.py`
 - [X] T064 [P] [US2] Implement evidence-based lifecycle-independent health classification and threshold reporting in `sandbox/jobs/health.py`
-- [ ] T065 [P] [US2] Implement constrained artifact planning, collection, hashing, indexing, expiry, and bounded retrieval in `sandbox/jobs/artifacts.py`
+- [X] T065 [P] [US2] Implement constrained artifact planning, collection, hashing, indexing, expiry, and bounded retrieval in `sandbox/jobs/artifacts.py`
 - [ ] T066 [US2] Record heartbeats/metrics/progress and apply warn-only or opt-in cancel-on-stall policy in `sandbox/jobs/supervisor.py`
 - [X] T067 [US2] Implement verified graceful/force/parent cancellation and retry use cases in `sandbox/application/job_service.py`
 - [ ] T068 [US2] Implement on-read and maintenance reconciliation for boot change, PID reuse, supervisor loss, child loss, and incomplete finalization in `sandbox/jobs/retention.py` and `sandbox/application/job_service.py`
-- [ ] T069 [US2] Implement terminal-job/log/metric/artifact retention planning and scoped cleanup with active-job protection in `sandbox/jobs/retention.py`
-- [ ] T070 [US2] Add CLI metrics/artifact-get/cancel/retry/cleanup commands and full health rendering in `sandbox/commands/jobs_runtime.py`
-- [ ] T071 [US2] Add MCP `job_metrics`, `job_artifacts`, `job_artifact_get`, `job_cancel`, `job_retry`, and `job_cleanup` tools in `mcp/wp-server/tools/jobs.py`
+- [X] T069 [US2] Implement terminal-job/log/metric/artifact retention planning and scoped cleanup with active-job protection in `sandbox/application/job_service.py` and `sandbox/jobs/storage.py`
+- [X] T070 [US2] Add CLI metrics/artifact-get/cancel/retry/cleanup commands and bounded health rendering in `sandbox/commands/jobs_runtime.py`
+- [X] T071 [US2] Add MCP `job_metrics`, `job_artifacts`, `job_artifact_get`, `job_cancel`, `job_retry`, and `job_cleanup` tools in `mcp/wp-server/tools/jobs.py`
 - [ ] T072 [US2] Run the US2 tests and failure-path stress fixture with `.cli-venv/bin/python -m unittest tests.test_job_health tests.test_job_metrics tests.test_job_cancellation tests.test_job_reconciliation tests.test_job_artifacts tests.test_job_observation_contracts -v`
 - [ ] T073 [US2] Run active/quiet/stalled/timed-out local jobs through `./sb`, verify status latency and evidence, and append job IDs/results to `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T074 [US2] Commit and push the passing observation, health, cancellation, artifact, retry, and retention increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
@@ -420,7 +420,7 @@ feature requirements rather than treated as documentation-only follow-up.
 - [ ] T142 [US3] Give each remote workspace an isolated deployed source/runtime path, serialize reset/destroy/redeploy against active leases, and prove reusable reruns do not share mutable files or databases per FR-023-FR-028 and US3/AC4 (partial)
 - [ ] T143 [US4] Complete remote CI artifact transfer, safe-mode semantic-difference persistence, child retry/cleanup policy, and parent result retrieval through CLI and MCP per FR-031-FR-037 and US4/AC3-US4/AC5 (partial)
 - [ ] T144 [US2/Phase 8] Add startup reconciliation and a durable supervisor/host-restart recovery command that classifies orphaned, unreachable, process-missing, and interrupted jobs without false success per FR-015-FR-022 (partial)
-- [ ] T145 [Phase 8] Implement terminal-job/log/metric/artifact retention policy enforcement, storage-pressure handling, and explicit cleanup reporting per FR-014 and FR-032 (missing)
+- [X] T145 [Phase 8] Implement terminal-job/log/metric/artifact retention policy enforcement, storage-pressure handling, and explicit cleanup reporting per FR-014 and FR-032
 - [ ] T146 [Phase 8] Add durable adapters and parity tests for legacy async-job and Hermes job status/output/cancel behavior without changing their scheduling semantics per FR-040 (missing)
 - [ ] T147 [US3/US4/Phase 8] Add remote E2E/WordPress test-mode submission, reusable workspace failure retention/reset/destroy coverage, disconnect/resume fixtures, and artifact/output acceptance fixtures per SC-001-SC-008 (partial)
 - [ ] T148 [US4/Phase 8] Run and record disposable remote Node, PHP, WordPress, matrix, artifact, CI-compatible, CI-blocked, timeout, and cleanup acceptance with exact remote/job/source identities per SC-009 and SC-010 (missing)

@@ -121,3 +121,16 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Result: PASS, 38 tests; `git diff --check` PASS.
 - Remote acceptance remains pending because no disposable provisioned remote is
   available in this workspace; transport tests remain the evidence boundary.
+
+## Recovery, artifacts, and storage-pressure increment
+
+- Implementation: missing or mismatched supervisor identities are reconciled as
+  `interrupted`; remote status normalizes control-plane loss to `health: unreachable`
+  without inventing a terminal result. Output writes check the configured disk
+  reserve and record `storage_pressure` rather than reporting a false success.
+- Implementation: artifact collection rejects symlink paths and non-regular objects,
+  enforces per-file, total-size, and count bounds, and supports remote bounded list/get
+  through the CLI control plane. Retention can reclaim oldest terminal job data when
+  explicitly invoked with `--storage-pressure`; active jobs remain protected.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_service tests.test_remote_job_transport tests.test_job_output tests.test_job_artifacts tests.test_command_composition tests.test_architecture_boundaries -v`
+- Result: PASS, 29 tests; `git diff --check` PASS.

@@ -3,12 +3,28 @@ import unittest
 from pathlib import Path
 
 from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity
-from sandbox.jobs.output import JobOutputStore
+from sandbox.jobs.output import JobOutputStore, OutputError
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
 
 
+class _PressureStorage(JobStorage):
+    def require_capacity(self, incoming_bytes):
+        from sandbox.jobs.storage import StoragePressureError
+        raise StoragePressureError("reserve")
+
+
 class JobOutputTests(unittest.TestCase):
+    def test_storage_pressure_is_explicit_before_any_output_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            row, _ = repo.accept(JobSubmission("test", temp, "p", "local", "w", ("echo",), 60, SourceIdentity("s")))
+            JobStorage(temp, free_disk_reserve=0).job_dir(row["job_id"], create=True)
+            storage = _PressureStorage(temp, free_disk_reserve=0)
+            output = JobOutputStore(storage, repo, row["job_id"])
+            with self.assertRaisesRegex(OutputError, "pressure"):
+                output.append("stdout", b"must-not-write")
+            repo.close()
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.repository = JobRepository(Path(self.temp.name) / "jobs.sqlite")

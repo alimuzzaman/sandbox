@@ -34,6 +34,17 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertTrue(all("--json" in command for command, _ in commands))
         self.assertIn("job-cancel abc --force", commands[2][0])
 
+    def test_status_reports_unreachable_without_inventing_terminal_success(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        result = transport.status("r", "a" * 32)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["health"], "unreachable")
+        self.assertEqual(result["lifecycle"], "unknown")
+
     def test_output_controls_and_matrix_deploy_once(self):
         calls = []
         transport = RemoteJobTransport(

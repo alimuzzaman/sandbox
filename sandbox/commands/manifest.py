@@ -62,6 +62,7 @@ LEGACY_BRIDGE_COMMANDS = {
     "test": "debug", "selftest": "debug",
     "abilities": "abilities", "job": "jobs", "jobs": "jobs", "async-job": "jobs",
     "job-start": "jobs_runtime", "job-status": "jobs_runtime", "job-output": "jobs_runtime", "job-list": "jobs_runtime", "job-cancel": "jobs_runtime",
+    "workspace": "workspaces",
     "skill": "skill", "mcp": "integ", "claude": "integ", "mcp-install": "integ",
     "exec": "runtime", "guide": "runtime",
     "dashboard": "ui_dash", "ui": "ui_dash", "web": "ui_dash", "cache": "cache",

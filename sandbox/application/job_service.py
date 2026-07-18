@@ -39,17 +39,22 @@ class JobService:
     storage: Any
     components: Any
     launcher: Any = None
+    scheduler: Any = None
 
     def submit(self, submission: JobSubmission):
         row, replay = self.repository.accept(submission)
         if replay:
             return self._accepted(row, replay=True)
         try:
+            if self.scheduler is not None:
+                self.scheduler.acquire(row, parallel_safe=submission.workspace_mode == "isolated")
             self.storage.job_dir(row["job_id"], create=True)
             descriptor = self._descriptor(row)
             descriptor_path = self.storage.write_json_atomic(row["job_id"], "descriptor.json", descriptor)
             self._launch(descriptor_path)
         except BaseException as exc:
+            if self.scheduler is not None:
+                self.scheduler.release(row["job_id"])
             self.repository.transition(row["job_id"], "failed", termination_reason="supervisor_launch_failed")
             raise RuntimeError("supervisor_launch_failed") from exc
         return self._accepted(row, replay=False)
@@ -87,6 +92,8 @@ class JobService:
                 snapshot = self.repository.snapshot(job_id)
             snapshot["health"] = health.value
             snapshot["health_evidence"] = evidence
+        if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+            self.scheduler.release(job_id)
         return snapshot
 
     def list(self, query=None):

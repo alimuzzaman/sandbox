@@ -193,6 +193,7 @@ def durable_job_dependencies():
     from sandbox.jobs.process import capture_process_identity
     from sandbox.jobs.registry import JobRepository
     from sandbox.jobs.storage import JobStorage
+    from sandbox.jobs.scheduler import JobScheduler
 
     repository = JobRepository(RUNTIME_DIR / "jobs" / "registry.sqlite3")
     storage = JobStorage(RUNTIME_DIR)
@@ -205,8 +206,8 @@ def durable_job_dependencies():
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
     target = TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote)
-    workspace = WorkspaceService(target)
-    job = JobService(repository, storage, components)
+    workspace = WorkspaceService(target, storage)
+    job = JobService(repository, storage, components, scheduler=JobScheduler(repository))
     return {
         "job_service": job,
         "target_service": target,

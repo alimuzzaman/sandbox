@@ -335,11 +335,6 @@ class TestValidation(unittest.TestCase):
         self.assertIn('root / "cron_scripts" / script', script)
         self.assertNotIn("todo_md_monitor.py", script)
 
-    def test_remote_install_provisions_explicit_job_test_toolchains(self):
-        script = (ROOT / "scripts/install-remote.sh").read_text()
-        self.assertIn("Node/npm and PHP CLI test toolchains", script)
-        self.assertIn("nodejs npm php-cli", script)
-
     def test_cron_status_prefers_provider_failure_over_false_green(self):
         job = {"last_status": "ok", "last_run_at": "now", "model_snapshot": "gpt-5.6-luna"}
         status = effective_job_status(job, "provider_bad_request")

@@ -79,7 +79,7 @@ def cmd_exec(cfg, args) -> None:
             die(f"{exc.code}: {exc}")
         timeout = args.timeout or 900
         source = SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest())
-        submission = JobSubmission("exec", target.project_root,
+        submission = JobSubmission("runtime-exec" if target.kind == "remote" else "exec", target.project_root,
             hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind,
             target.workspace_label, tuple(command), timeout, source,
             remote_name=target.remote_name, output_profile=args.output_profile,

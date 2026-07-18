@@ -115,7 +115,21 @@ class RemoteJobTransport:
                 "--output-profile", submission.output_profile, "--source-identity", deployed["identity"]]
         if submission.request_id:
             args += ["--request-id", submission.request_id]
-        args += ["--json", "--", *submission.argv]
+        argv = list(submission.argv)
+        if submission.kind == "runtime-exec":
+            # Generic Compose commands belong in the selected remote project
+            # instance, not in the VPS host environment.  The outer durable
+            # job owns all output and deadline handling while this controller
+            # ensures the deployed instance and performs the explicit argv
+            # execution in its declared public service.
+            sb = self.remote_sb_path(remote)
+            controller = " && ".join((
+                f"cd {shlex.quote(workspace_path)}",
+                shlex.join([sb, "ensure", "--json"]),
+                shlex.join([sb, "exec", "--", *argv]),
+            ))
+            argv = ["sh", "-lc", controller]
+        args += ["--json", "--", *argv]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):

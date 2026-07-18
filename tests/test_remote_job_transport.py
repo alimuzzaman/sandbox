@@ -62,6 +62,22 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("project-workspace-", commands[0])
         self.assertNotIn("project.workspace-", commands[0])
 
+    def test_remote_runtime_exec_ensures_and_executes_in_the_deployed_instance(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
+                                         "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda remote, command, timeout: calls.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        transport.submit(JobSubmission("runtime-exec", "/p", "p", "remote", "workspace", ("npm", "test"), 60,
+            SourceIdentity("ignored"), remote_name="r"))
+        controller = calls[-1]
+        self.assertIn("/srv/sandbox/sb-src/sb ensure --json", controller)
+        self.assertIn("/srv/sandbox/sb-src/sb exec -- npm test", controller)
+
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},

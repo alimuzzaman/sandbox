@@ -215,8 +215,8 @@ def durable_job_dependencies():
         workspace_path = _remote.prepare_remote_workspace(
             remote, resolved_target.project_root, resolved_target.workspace_label,
             deployed_path=deployed["target_path"])
+        sb = _remote.remote_sb_path(remote)
         if action in {"reset", "destroy"}:
-            sb = _remote.remote_sb_path(remote)
             busy_command = shlex.join([
                 sb, "job-list", "--local", "--project-dir", workspace_path,
                 "--workspace", resolved_target.workspace_label, "--active-only", "--json",

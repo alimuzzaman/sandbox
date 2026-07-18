@@ -312,3 +312,33 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   `ec418476a51bea22a15111507102b18b`; status reported `succeeded` and retained
   output contained `node-container-pass`. The verification printed only boolean
   outcomes and did not expose credentials or full headers.
+
+## T153: live remote WordPress integration and workspace lifecycle
+
+- Fixture: the disposable external repository
+  `/Users/alim/wp-remote-integration-proof-20260719`, committed at
+  `32220075df2358190a8b1162ce5297b97e29c87c`. It uses the provisioned
+  `scaleway-sandbox` remote and workspace `wp-integration-acceptance`.
+- Retained failure evidence: job `fa601738658a06181051eb64cffc6347` failed
+  before test execution because `sb` was not on the remote PATH. It is retained
+  as transport-failure evidence only; no PHPUnit output is claimed for it.
+- Command: `sb test --workspace wp-integration-acceptance --timeout 1200
+  integration --json`, then bounded `job-output` and `job-status` reads.
+- Result: job `1b069dd785a6f9c04f144b1aef4ffe4e` reached `succeeded` with exit
+  code `0`, complete stdout/stderr/combined retained indexes, and combined-output
+  integrity SHA-256 `82b7bd8a701575a60f6ca53428a6dcf2258c99871b27fb7a5421cd47e81cbf56`.
+  Its controller ensured the isolated remote WordPress instance before invoking
+  the integration suite; retained output records the integration install and
+  test run. The accepted source identity references the committed fixture above.
+- Lifecycle commands, run from the fixture directory: `workspace create`,
+  `workspace status`, `workspace reset`, and `workspace destroy`, each with
+  `--remote scaleway-sandbox --workspace wp-integration-acceptance --json`.
+  All returned `ok: true`; reset returned `reset: true` and destroy returned
+  `destroyed: true`. The remote workspace registry path was separate from the
+  local workstation state.
+- Follow-up implementation evidence: nested remote test commands now use the
+  staged CLI path, put options before the positional test mode, ensure the
+  co-located instance, and consume trailing `--json` instead of forwarding it
+  to PHPUnit. Remote workspace lifecycle uses the same slug-safe hyphenated
+  path as durable job submissions and does not recreate a workspace during
+  status/reset/destroy.

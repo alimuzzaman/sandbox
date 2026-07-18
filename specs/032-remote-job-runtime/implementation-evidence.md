@@ -134,3 +134,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   explicitly invoked with `--storage-pressure`; active jobs remain protected.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_service tests.test_remote_job_transport tests.test_job_output tests.test_job_artifacts tests.test_command_composition tests.test_architecture_boundaries -v`
 - Result: PASS, 29 tests; `git diff --check` PASS.
+
+## Remote MCP observation compatibility increment
+
+- Implementation: durable job MCP tools now accept optional `remote` routing for
+  status/list/output/follow/metrics/reconcile/retention/cancel/artifacts/retry and
+  cleanup. Existing required parameters and result keys remain unchanged. WordPress
+  `run_tests` accepts an explicit local override, named remote/workspace, finite
+  timeout, output profile, and uses the configured project remote when available;
+  the existing local PHPUnit response shape is preserved.
+- Command: `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`
+- Result: PASS, 5 tests; `.cli-venv/bin/python -m unittest tests.test_mcp tests.test_architecture_boundaries -v` PASS, 12 tests.

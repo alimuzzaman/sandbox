@@ -19,6 +19,13 @@ _target_service = None
 _workspace_service = None
 
 
+def _remote_transport():
+    from sandbox.core import _remote
+    from sandbox.transports.remote_jobs import RemoteJobTransport
+    return RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+        ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote)
+
+
 def register(server, dependencies: ToolDependencies) -> None:
     global _job_service, _target_service, _workspace_service
     _job_service = dependencies.require("job_service")
@@ -87,82 +94,103 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
         return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"), "error": str(exc)}
 
 
-def job_status(job_id: str) -> dict:
+def job_status(job_id: str, *, remote: str | None = None) -> dict:
     """Return durable lifecycle, process, and retained-output metadata for a job."""
     try:
-        return {"ok": True, **_job_service.get(job_id)}
+        result = _remote_transport().status(remote, job_id) if remote else _job_service.get(job_id)
+        return result if remote and result.get("ok") is False else {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "code": "job_not_found", "error": str(exc)}
 
 
-def job_list(limit: int = 50) -> dict:
+def job_list(limit: int = 50, *, remote: str | None = None) -> dict:
     """List durable jobs newest first with a bounded result page."""
     try:
-        return {"ok": True, "jobs": _job_service.list({"limit": limit})}
+        result = _remote_transport().list(remote, limit=limit) if remote else {"jobs": _job_service.list({"limit": limit})}
+        return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "code": "invalid_query", "error": str(exc)}
 
 
 def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = None,
                tail_bytes: int | None = None, max_bytes: int = 65536,
-               encoding: str = "utf8", wait_seconds: int = 0) -> dict:
+               encoding: str = "utf8", wait_seconds: int = 0,
+               remote: str | None = None) -> dict:
     """Read a bounded retained output page. Returned cursors are exclusive."""
     try:
+        if remote:
+            return _remote_transport().read_output(remote, job_id, stream=stream, cursor=cursor,
+                tail_bytes=tail_bytes, max_bytes=max_bytes, wait_seconds=wait_seconds)
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
             tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
     except Exception as exc:
         return {"ok": False, "code": "invalid_output_query", "error": str(exc)}
 
 
-def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536) -> dict:
+def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536,
+               remote: str | None = None) -> dict:
     """Return one bounded long-poll output page; callers repeat with its cursor."""
-    return job_output(job_id, cursor=cursor, max_bytes=max_bytes, wait_seconds=1)
+    return job_output(job_id, cursor=cursor, max_bytes=max_bytes, wait_seconds=1, remote=remote)
 
 
-def job_metrics(job_id: str, *, limit: int = 500) -> dict:
+def job_metrics(job_id: str, *, limit: int = 500, remote: str | None = None) -> dict:
     """Read bounded persisted CPU/RSS/I/O evidence for a durable job."""
     try:
-        return _job_service.read_metrics(job_id, limit=limit)
+        return _remote_transport().metrics(remote, job_id, limit=limit) if remote else _job_service.read_metrics(job_id, limit=limit)
     except Exception as exc:
         return {"ok": False, "code": "job_not_found", "error": str(exc)}
 
 
-def job_reconcile(*, limit: int = 200) -> dict:
+def job_reconcile(*, limit: int = 200, remote: str | None = None) -> dict:
     """Reconcile active jobs after a supervisor or host interruption."""
     try:
+        if remote:
+            return _remote_transport().control(remote, ["job-reconcile", "--limit", str(limit)])
         return _job_service.reconcile_startup(limit=limit)
     except Exception as exc:
         return {"ok": False, "code": "reconciliation_failed", "error": str(exc)}
 
 
-def job_retention(*, retention_days: int = 7, limit: int = 200) -> dict:
+def job_retention(*, retention_days: int = 7, limit: int = 200,
+                  storage_pressure: bool = False, remote: str | None = None) -> dict:
     """Apply terminal log/metric/artifact retention to old jobs."""
     try:
-        return _job_service.retention_sweep(retention_days=retention_days, limit=limit)
+        if remote:
+            args = ["job-retention", "--retention-days", str(retention_days), "--limit", str(limit)]
+            if storage_pressure: args.append("--storage-pressure")
+            return _remote_transport().control(remote, args)
+        return _job_service.retention_sweep(retention_days=retention_days, limit=limit,
+                                            storage_pressure=storage_pressure)
     except Exception as exc:
         return {"ok": False, "code": "retention_failed", "error": str(exc)}
 
 
-def job_cancel(job_id: str, *, force: bool = False) -> dict:
+def job_cancel(job_id: str, *, force: bool = False, remote: str | None = None) -> dict:
     """Cancel only a verified owned job process group."""
     try:
-        return {"ok": True, **_job_service.cancel(job_id, force=force)}
+        result = _remote_transport().cancel(remote, job_id, force=force) if remote else _job_service.cancel(job_id, force=force)
+        return result if remote and result.get("ok") is False else {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "code": str(exc), "error": str(exc)}
 
 
-def job_artifacts(job_id: str) -> dict:
+def job_artifacts(job_id: str, *, remote: str | None = None) -> dict:
     """List metadata for retained, project-contained job artifacts."""
     try:
+        if remote:
+            return _remote_transport().artifacts(remote, job_id)
         return {"ok": True, "artifacts": _job_service.list_artifacts(job_id)}
     except Exception as exc:
         return {"ok": False, "code": "job_not_found", "error": str(exc)}
 
 
 def job_artifact_get(job_id: str, artifact_id: str, *, offset: int = 0,
-                     max_bytes: int = 1_048_576) -> dict:
+                     max_bytes: int = 1_048_576, remote: str | None = None) -> dict:
     """Return one bounded base64 artifact chunk by immutable artifact ID."""
     try:
+        if remote:
+            return _remote_transport().artifact_get(remote, job_id, artifact_id,
+                offset=offset, max_bytes=max_bytes)
         data = _job_service.get_artifact(job_id, artifact_id, offset=offset, max_bytes=max_bytes)
         return {"ok": True, "job_id": job_id, "artifact_id": artifact_id,
                 "offset": offset, "data": base64.b64encode(data).decode(), "bytes_read": len(data),
@@ -171,10 +199,10 @@ def job_artifact_get(job_id: str, artifact_id: str, *, offset: int = 0,
         return {"ok": False, "code": "artifact_not_found", "error": str(exc)}
 
 
-def job_retry(job_id: str, *, request_id: str | None = None) -> dict:
+def job_retry(job_id: str, *, request_id: str | None = None, remote: str | None = None) -> dict:
     """Create a linked retry attempt without mutating the prior terminal job."""
     try:
-        return _job_service.retry(job_id, request_id=request_id)
+        return _remote_transport().retry(remote, job_id, request_id=request_id) if remote else _job_service.retry(job_id, request_id=request_id)
     except Exception as exc:
         return {"ok": False, "code": str(exc), "error": str(exc)}
 
@@ -225,9 +253,10 @@ def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | No
 
 
 def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True,
-                metrics: bool = True) -> dict:
+                metrics: bool = True, remote: str | None = None) -> dict:
     """Explicitly remove retained logs/artifacts for a terminal job only."""
     try:
-        return _job_service.cleanup(job_id, logs=logs, artifacts=artifacts, metrics=metrics)
+        return _remote_transport().cleanup(remote, job_id, logs=logs, artifacts=artifacts, metrics=metrics) \
+            if remote else _job_service.cleanup(job_id, logs=logs, artifacts=artifacts, metrics=metrics)
     except Exception as exc:
         return {"ok": False, "code": str(exc), "error": str(exc)}

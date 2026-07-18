@@ -102,6 +102,7 @@ def wp_rest(method: str, path: str, body: dict | None = None,
 @mcp.tool()
 def run_tests(project_dir: str, phpunit_args: str = "",
              label: str | None = None, mode: str | None = None,
+             local: bool = False,
              remote: str | None = None, workspace: str | None = None,
              timeout_seconds: int = 900, output_profile: str = "smart") -> dict:
     """Run the plugin's PHPUnit tests in unit or integration mode.
@@ -128,7 +129,20 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         return {"ok": False, "passed": False, "summary": None,
                 "output": "", "mode": None,
                 "error": "test mode must be auto, unit, or integration"}
-    if remote:
+    selected_remote = remote
+    if not local and selected_remote is None and workspace is None:
+        # A configured project-level remote is the default; an unconfigured or
+        # non-Sandbox project keeps the historical local PHPUnit path.
+        try:
+            from sandbox.application.context import durable_job_dependencies
+            from sandbox.jobs.models import TargetRequest
+            auto_target = durable_job_dependencies()["target_service"].resolve(
+                TargetRequest(project_dir=project_dir, required_capability="job.exec"))
+            if auto_target.kind == "remote":
+                selected_remote, workspace = auto_target.remote_name, auto_target.workspace_label
+        except Exception:
+            pass
+    if not local and (selected_remote or workspace is not None):
         # Keep remote tests inside the shared detached runtime. The command
         # executes from the deployed project root, so `.` names the exact tree
         # sent by the deploy layer rather than the caller's local filesystem.
@@ -140,8 +154,10 @@ def run_tests(project_dir: str, phpunit_args: str = "",
         try:
             dependencies = durable_job_dependencies()
             target = dependencies["target_service"].resolve(TargetRequest(
-                project_dir=project_dir, remote=remote, workspace=workspace,
+                project_dir=project_dir, remote=selected_remote, workspace=workspace,
                 required_capability="job.exec"))
+            if target.kind != "remote":
+                raise ValueError("remote test target did not resolve to a remote")
             command = ["sb", "test", mode or "auto", "--local", "--project-dir", "."]
             if phpunit_args.strip():
                 command += ["--", *shlex.split(phpunit_args)]

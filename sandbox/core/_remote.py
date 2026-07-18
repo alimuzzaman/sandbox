@@ -984,19 +984,25 @@ def remote_mcp_service_status(remote: dict) -> dict:
         f"{shlex.quote(bind)} {port} {_REMOTE_MCP_ENV}; else echo auth=unknown; fi; "
         if bind and port else "echo auth=unknown; "
     )
+    legacy_probe = (
+        f"if test -r {_MCP_PIDFILE}; then legacy_pid=$(cat {_MCP_PIDFILE} 2>/dev/null || true); "
+        "case \"$legacy_pid\" in ''|*[!0-9]*) echo legacy_pidfile=invalid;; "
+        "*) if kill -0 \"$legacy_pid\" 2>/dev/null; then echo legacy_pidfile=present; else echo legacy_pidfile=stale; fi;; esac; "
+        "else echo legacy_pidfile=absent; fi"
+    )
     command = (
         "if ! command -v systemctl >/dev/null 2>&1; then echo unavailable; exit 0; fi; "
         f"printf 'enabled='; systemctl --user is-enabled {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"printf 'active='; systemctl --user is-active {REMOTE_MCP_SERVICE} 2>/dev/null || true; "
         f"printf 'pid='; systemctl --user show {REMOTE_MCP_SERVICE} -p MainPID --value 2>/dev/null || true; "
         "printf 'linger='; loginctl show-user \"$USER\" -p Linger --value 2>/dev/null || true; "
-        + marker_probe + listener_probe + auth_probe
+        + marker_probe + listener_probe + auth_probe + legacy_probe
     )
     res = ssh_run(remote, command, timeout=20)
     values: dict[str, str] = {}
     for line in (res.stdout or "").splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "listener", "auth"}:
+        if separator and key in {"enabled", "active", "pid", "linger", "ownership", "listener", "auth", "legacy_pidfile"}:
             values[key] = value.strip().lower()
     installed = values.get("enabled") not in {"", "not-found", "unknown"}
     active = values.get("active") == "active"
@@ -1012,12 +1018,13 @@ def remote_mcp_service_status(remote: dict) -> dict:
         "authenticated": values.get("auth") == "ok",
         "listener_state": values.get("listener", "unknown"),
         "auth_state": values.get("auth", "unknown"),
+        "legacy_pidfile": values.get("legacy_pidfile", "unknown"),
         "bind": record.get("bind"), "port": record.get("port"),
     }
 
 
 def remote_mcp_service_plan(remote: dict, bind: str, port: int,
-                            public_url: str | None = None) -> dict:
+                            public_url: str | None = None, *, observed: dict | None = None) -> dict:
     """Build a no-write migration plan with no secret-bearing fields."""
     public_url = _validate_remote_mcp_public_url(public_url)
     record = remote_mcp_service_record(bind, port, public_url)
@@ -1028,7 +1035,7 @@ def remote_mcp_service_plan(remote: dict, bind: str, port: int,
             "write owner-only remote credential file", "install Sandbox-owned user unit",
             "reload user manager and enable linger", "enable and verify selected unit",
         ],
-        "legacy_pidfile_detected": False,
+        "legacy_pidfile_detected": bool((observed or {}).get("legacy_pidfile") == "present"),
     }
 
 

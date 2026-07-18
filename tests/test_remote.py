@@ -909,12 +909,13 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
-            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\n")
+            stdout="enabled=enabled\nactive=active\npid=7\nlinger=yes\nownership=proven\nlistener=expected\nauth=ok\nlegacy_pidfile=present\n")
         record = sr.remote_mcp_service_record("127.0.0.1", 9174, "https://sandbox.example.test")
         status = sr.remote_mcp_service_status({"ssh": "ubuntu@1.2.3.4", "mcp_service": record})
         self.assertEqual(status["ownership"], "proven")
         self.assertTrue(status["listener_expected"])
         self.assertTrue(status["authenticated"])
+        self.assertEqual(status["legacy_pidfile"], "present")
         command = mock_ssh_run.call_args.args[1]
         self.assertIn("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", command)
         self.assertIn("ss -H -ltn", command)
@@ -944,7 +945,7 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
 
 
 class TestRemoteServiceCommand(unittest.TestCase):
-    def test_service_migration_plan_never_opens_ssh(self):
+    def test_service_migration_plan_records_read_only_legacy_evidence(self):
         with tempfile.TemporaryDirectory() as d:
             with _patched_config_local(Path(d) / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True,
@@ -954,11 +955,13 @@ class TestRemoteServiceCommand(unittest.TestCase):
                 args.name = "migrate"
                 args.ssh_url = "myvps"
                 args.confirm = False
-                with patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
+                with patch.object(sr, "remote_mcp_service_status", return_value={"legacy_pidfile": "present"}) as status, \
+                     patch.object(sr, "ssh_run") as ssh_run, patch("builtins.print") as printed:
                     remote_cmd._cmd_service(args, as_json=True)
                 ssh_run.assert_not_called()
                 payload = json.loads(printed.call_args.args[0])
                 self.assertEqual(payload["status"], "planned")
+                self.assertTrue(payload["data"]["legacy_pidfile_detected"])
                 self.assertNotIn("a" * 64, json.dumps(payload))
 
     def test_down_without_confirmation_is_plan_only(self):

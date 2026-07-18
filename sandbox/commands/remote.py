@@ -55,10 +55,13 @@ def _cmd_service(args, as_json: bool) -> None:
             token = entry.get("bearer_token")
             if not isinstance(token, str) or not token:
                 raise ValueError("remote service token is unavailable; provision the remote first")
+            observed = sr.remote_mcp_service_status(entry)
             plan = sr.migrate_remote_mcp_service(
                 entry, bind, int(entry.get("mcp_port") or sr.DEFAULT_MCP_PORT), token,
                 entry.get("control_url"), confirm=bool(getattr(args, "confirm", False)),
             )
+            plan["observed"] = observed
+            plan["legacy_pidfile_detected"] = observed.get("legacy_pidfile") == "present"
             if getattr(args, "confirm", False):
                 sr.put_remote(name, mcp_service=plan["service"])
             payload = {"ok": True, "name": name, "status": plan["status"], "data": plan, "error": None}

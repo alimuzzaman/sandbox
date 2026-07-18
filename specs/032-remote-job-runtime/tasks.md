@@ -42,30 +42,30 @@ CI stories.
 
 ### Foundational tests
 
-- [ ] T009 [P] Add exhaustive enum, ID, argv, deadline, profile, relationship, and transition tests in `tests/test_job_models.py` covering FR-002, FR-004, FR-006, FR-007, FR-015, FR-016, FR-020, FR-029, and 16-hex compatibility
-- [ ] T010 [P] Add repository migration, atomic acceptance/idempotency, transition, concurrency, foreign-key, and recovery tests in `tests/test_job_registry.py` covering FR-006, FR-007, FR-009, FR-014, FR-022, and FR-032
-- [ ] T011 [P] Add project runtime schema and precedence tests in `tests/test_runtime_config.py` covering defaults, custom execution/output profiles, invalid/unbounded values, multiple workspaces, and FR-001 through FR-004
-- [ ] T012 [P] Add local/configured/remote target precedence, namespace separation, capability-first failure, invalid remote, and label tests in `tests/test_target_resolution.py` covering FR-001 and FR-023
-- [ ] T013 [P] Add process identity tests in `tests/test_job_process_identity.py` for boot changes, PID reuse, PGID ownership, missing `/proc`, and FR-021/FR-022
-- [ ] T014 [P] Add source/deadline/output/workspace/artifact serialization redaction tests in `tests/test_job_contracts.py` for every value object in `specs/032-remote-job-runtime/contracts/job-service.md`
+- [X] T009 [P] Add exhaustive enum, ID, argv, deadline, profile, relationship, and transition tests in `tests/test_job_models.py` covering FR-002, FR-004, FR-006, FR-007, FR-015, FR-016, FR-020, FR-029, and 16-hex compatibility
+- [X] T010 [P] Add repository migration, atomic acceptance/idempotency, transition, concurrency, foreign-key, and recovery tests in `tests/test_job_registry.py` covering FR-006, FR-007, FR-009, FR-014, FR-022, and FR-032
+- [X] T011 [P] Add project runtime schema and precedence tests in `tests/test_runtime_config.py` covering defaults, custom execution/output profiles, invalid/unbounded values, multiple workspaces, and FR-001 through FR-004
+- [X] T012 [P] Add local/configured/remote target precedence, namespace separation, capability-first failure, invalid remote, and label tests in `tests/test_target_resolution.py` covering FR-001 and FR-023
+- [X] T013 [P] Add process identity tests in `tests/test_job_process_identity.py` for boot changes, PID reuse, PGID ownership, missing `/proc`, and FR-021/FR-022
+- [X] T014 [P] Add source/deadline/output/workspace/artifact serialization redaction tests in `tests/test_job_contracts.py` for every value object in `specs/032-remote-job-runtime/contracts/job-service.md`
 
 ### Foundational implementation
 
-- [ ] T015 Implement immutable job, target, execution-policy, source, process, output, metrics, artifact, lease, and result value objects in `sandbox/jobs/models.py`
-- [ ] T016 Implement lifecycle transition validation, terminal invariants, ID generation/legacy validation, canonical submission digests, and finite deadline resolution in `sandbox/jobs/models.py`
-- [ ] T017 Implement the versioned SQLite schema, WAL/full-durability setup, migrations, transactions, and repository errors in `sandbox/jobs/registry.py`
-- [ ] T018 Implement atomic submit/idempotency, job relationship, lifecycle, heartbeat, process identity, output index, event, metric index, artifact index, and compatibility-difference repository methods in `sandbox/jobs/registry.py`
-- [ ] T019 [P] Implement common runtime configuration normalization and built-in/default profile definitions in `sandbox/config/runtime.py` matching `specs/032-remote-job-runtime/contracts/config.schema.json`
-- [ ] T020 Register common runtime configuration providers explicitly and compose them after kind-specific descriptors in `sandbox/config/manifest.py` and `sandbox/config/facade.py`
-- [ ] T021 Preserve WordPress and Compose descriptor compatibility while exposing normalized runtime policy in `sandbox/config/wordpress.py` and `sandbox/config/compose.py`
-- [ ] T022 Implement pure target/workspace/deadline/output precedence and validation in `sandbox/application/target_service.py`
-- [ ] T023 [P] Implement portable boot/process start identity collection and verified process-group ownership in `sandbox/jobs/process.py`
-- [ ] T024 [P] Implement owner-only job-directory creation, atomic JSON mirrors, safe relative paths, disk reserve checks, and fsync helpers in `sandbox/jobs/storage.py`
-- [ ] T025 Define local job transport protocols and service result translation in `sandbox/transports/jobs.py`
-- [ ] T026 Register repository, storage, process identity, clock, and profile providers in `sandbox/jobs/manifest.py` without importing compatibility facades
-- [ ] T027 Compose shared job dependencies at CLI and MCP composition roots in `sandbox/application/context.py` and `mcp/wp-server/tools/manifest.py`
-- [ ] T028 Run all foundational tests and the existing config/runtime/architecture suites with `.cli-venv/bin/python -m unittest tests.test_job_models tests.test_job_registry tests.test_runtime_config tests.test_target_resolution tests.test_job_process_identity tests.test_job_contracts tests.test_config_descriptors tests.test_project_config tests.test_runtime_contracts tests.test_runtime_adapters tests.test_architecture_boundaries -v`
-- [ ] T029 Inspect the SQLite schema and atomic idempotency behavior through the public repository test fixture and append evidence to `specs/032-remote-job-runtime/implementation-evidence.md`
+- [X] T015 Implement immutable job, target, execution-policy, source, process, output, metrics, artifact, lease, and result value objects in `sandbox/jobs/models.py`
+- [X] T016 Implement lifecycle transition validation, terminal invariants, ID generation/legacy validation, canonical submission digests, and finite deadline resolution in `sandbox/jobs/models.py`
+- [X] T017 Implement the versioned SQLite schema, WAL/full-durability setup, migrations, transactions, and repository errors in `sandbox/jobs/registry.py`
+- [X] T018 Implement atomic submit/idempotency, job relationship, lifecycle, heartbeat, process identity, output index, event, metric index, artifact index, and compatibility-difference repository methods in `sandbox/jobs/registry.py`
+- [X] T019 [P] Implement common runtime configuration normalization and built-in/default profile definitions in `sandbox/config/runtime.py` matching `specs/032-remote-job-runtime/contracts/config.schema.json`
+- [X] T020 Register common runtime configuration providers explicitly and compose them after kind-specific descriptors in `sandbox/config/manifest.py` and `sandbox/config/facade.py`
+- [X] T021 Preserve WordPress and Compose descriptor compatibility while exposing normalized runtime policy in `sandbox/config/wordpress.py` and `sandbox/config/compose.py`
+- [X] T022 Implement pure target/workspace/deadline/output precedence and validation in `sandbox/application/target_service.py`
+- [X] T023 [P] Implement portable boot/process start identity collection and verified process-group ownership in `sandbox/jobs/process.py`
+- [X] T024 [P] Implement owner-only job-directory creation, atomic JSON mirrors, safe relative paths, disk reserve checks, and fsync helpers in `sandbox/jobs/storage.py`
+- [X] T025 Define local job transport protocols and service result translation in `sandbox/transports/jobs.py`
+- [X] T026 Register repository, storage, process identity, clock, and profile providers in `sandbox/jobs/manifest.py` without importing compatibility facades
+- [X] T027 Compose shared job dependencies at CLI and MCP composition roots in `sandbox/application/context.py` and `mcp/wp-server/tools/manifest.py`
+- [X] T028 Run all foundational tests and the existing config/runtime/architecture suites with `.cli-venv/bin/python -m unittest tests.test_job_models tests.test_job_registry tests.test_runtime_config tests.test_target_resolution tests.test_job_process_identity tests.test_job_contracts tests.test_config_descriptors tests.test_project_config tests.test_runtime_contracts tests.test_runtime_adapters tests.test_architecture_boundaries -v`
+- [X] T029 Inspect the SQLite schema and atomic idempotency behavior through the public repository test fixture and append evidence to `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T030 Commit and push the passing foundational increment with `sandbox/jobs/`, config manifest/runtime policy, shared application composition, and its tests
 
 **Checkpoint**: Durable contracts, target resolution, profiles, process identity, and

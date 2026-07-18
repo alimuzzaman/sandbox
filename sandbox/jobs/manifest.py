@@ -42,3 +42,21 @@ class JobComponentRegistry:
 
     def specs(self) -> tuple[JobComponentSpec, ...]:
         return tuple(sorted(self._items.values(), key=lambda item: (item.order, item.component_id)))
+
+
+def builtin_job_component_registry(*, repository: Any, storage: Any,
+                                   process_identity: Any, clock: Any,
+                                   profiles: Any) -> JobComponentRegistry:
+    """Register the built-in mechanisms without constructing them implicitly."""
+    registry = JobComponentRegistry()
+    for order, (component_id, component, owner) in enumerate((
+        ("repository", repository, "sandbox.jobs.registry"),
+        ("storage", storage, "sandbox.jobs.storage"),
+        ("process_identity", process_identity, "sandbox.jobs.process"),
+        ("clock", clock, "sandbox.application.context"),
+        ("profiles", profiles, "sandbox.config.runtime"),
+    ), start=10):
+        if component is None:
+            raise ValueError(f"job component {component_id!r} is required")
+        registry.register(component_id, component, owner=owner, order=order)
+    return registry

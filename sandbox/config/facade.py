@@ -7,6 +7,7 @@ from .descriptors import discover_project_kind
 from .compose import ComposeSchemaProvider
 from .registry import SchemaRegistry
 from .wordpress import WordPressSchemaProvider
+from .manifest import apply_common_config
 
 
 def resolve_project_config(
@@ -35,4 +36,4 @@ def resolve_project_config(
     if not isinstance(result, dict):
         raise TypeError(f"schema {kind!r} returned {type(result).__name__}, expected dict")
     result.setdefault("kind", kind)
-    return result
+    return apply_common_config(result)

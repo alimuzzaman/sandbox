@@ -24,6 +24,11 @@ def _runtime_service():
     return runtime_service(load_config())
 
 
+def _durable_job_dependencies():
+    from sandbox.application.context import durable_job_dependencies
+    return durable_job_dependencies()
+
+
 def _last_json(stdout: str) -> dict | None:
     for line in reversed((stdout or "").splitlines()):
         try:
@@ -74,6 +79,8 @@ _selected_groups = (
 )
 if _scoped_groups is not None:
     _selected_groups = _scoped_groups
+_job_dependencies = _durable_job_dependencies() \
+    if _selected_groups is None or "jobs" in _selected_groups else {}
 built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "app": mcp,
     "sandbox_root": SANDBOX_ROOT,
@@ -86,6 +93,7 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "site_url": _site_url,
     "runtime_service": _runtime_service,
     "hermes_service": _HermesCommandAdapter(),
+    **_job_dependencies,
 }))
 
 

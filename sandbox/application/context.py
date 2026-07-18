@@ -176,3 +176,39 @@ def preflight_instance_capability(cfg, instance: str, capability: str):
 def preflight_project_capability(cfg, project_root: str, capability: str, *, label: str = "default"):
     """Validate a project-scoped operation before any remote or local mutation."""
     return runtime_service(cfg).check(project_root, capability, label=label)
+
+
+def durable_job_dependencies():
+    """Compose host-local durable-job services for CLI and MCP adapters."""
+    import time
+    import sandbox_core as sc
+
+    from sandbox.application.job_service import JobService
+    from sandbox.application.target_service import TargetService
+    from sandbox.application.workspace_service import WorkspaceService
+    from sandbox.config.runtime import BUILTIN_EXECUTION_PROFILES, BUILTIN_OUTPUT_PROFILES
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.core._remote import get_remote
+    from sandbox.jobs.manifest import builtin_job_component_registry
+    from sandbox.jobs.process import capture_process_identity
+    from sandbox.jobs.registry import JobRepository
+    from sandbox.jobs.storage import JobStorage
+
+    repository = JobRepository(RUNTIME_DIR / "jobs" / "registry.sqlite3")
+    storage = JobStorage(RUNTIME_DIR)
+    profiles = {
+        "execution": BUILTIN_EXECUTION_PROFILES,
+        "output": BUILTIN_OUTPUT_PROFILES,
+    }
+    components = builtin_job_component_registry(
+        repository=repository, storage=storage,
+        process_identity=capture_process_identity, clock=time, profiles=profiles,
+    )
+    target = TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote)
+    workspace = WorkspaceService(target)
+    job = JobService(repository, storage, components)
+    return {
+        "job_service": job,
+        "target_service": target,
+        "workspace_service": workspace,
+    }

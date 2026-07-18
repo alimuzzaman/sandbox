@@ -32,6 +32,7 @@ class ComposeSchemaProvider:
             if override is not None:
                 override_doc = _load_mapping(override)
                 document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
+                document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
@@ -61,4 +62,5 @@ class ComposeSchemaProvider:
                 "internal_port": port, "health_path": health_path,
                 "http_port": http_port,
                 "display_name": root.name, "label": label or "default",
+                "runtime": document.get("runtime"),
                 "root": str(root), "source": config_path.name}

@@ -91,7 +91,7 @@ def cmd_job_start(_cfg, args) -> None:
     try:
         target = dependencies["target_service"].resolve(TargetRequest(
             project_dir=args.project_dir, local=args.local, remote=args.remote,
-            workspace=args.workspace, required_capability="compose.remote-deploy" if args.remote else None,
+            workspace=args.workspace, required_capability="job.exec" if args.remote else None,
         ))
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")

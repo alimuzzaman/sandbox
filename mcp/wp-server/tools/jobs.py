@@ -41,7 +41,7 @@ def job_start(command: list[str], project_dir: str, *, local: bool = False,
         return {"ok": False, "code": "invalid_argv", "error": "command must be a non-empty argv list"}
     try:
         target = _target_service.resolve(TargetRequest(project_dir=project_dir, local=local, remote=remote,
-            workspace=workspace, required_capability="compose.remote-deploy" if remote else None))
+            workspace=workspace, required_capability="job.exec" if remote else None))
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "invalid_target"), "error": str(exc)}
     try:

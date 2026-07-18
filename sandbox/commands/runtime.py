@@ -73,7 +73,7 @@ def cmd_exec(cfg, args) -> None:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
                 project_dir=str(Path.cwd()), local=args.local, remote=args.remote,
                 workspace=args.workspace,
-                required_capability="compose.remote-deploy" if args.remote else None,
+                required_capability="job.exec" if args.remote else None,
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")

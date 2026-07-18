@@ -318,6 +318,7 @@ def _cmd_provision(args, as_json: bool) -> None:
             sr.put_remote(name, control_transport="tailscale",
                           control_url=control_url, tailscale_host=tailscale_ip,
                           mcp_port=port, bearer_token=token, provisioned=True,
+                          capabilities=["job.exec"],
                           mcp_service=sr.remote_mcp_service_record(bind, port))
         else:
             control_url = f"https://{public_host}"
@@ -327,6 +328,7 @@ def _cmd_provision(args, as_json: bool) -> None:
             sr.put_remote(name, control_transport="https",
                           control_host=public_host, control_url=control_url,
                           mcp_port=port, bearer_token=token, provisioned=True,
+                          capabilities=["job.exec"],
                           mcp_service=sr.remote_mcp_service_record("127.0.0.1", port, control_url))
             tailscale_ip = None
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as e:

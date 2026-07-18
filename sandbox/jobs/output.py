@@ -200,6 +200,15 @@ class JobOutputStore:
     def read(self, query: OutputQuery) -> dict[str, Any]:
         stream = query.stream
         events = self._events()
+        initial_count = len(events)
+        if query.wait_seconds and query.cursor:
+            deadline = time.monotonic() + query.wait_seconds
+            while time.monotonic() < deadline:
+                time.sleep(min(.1, deadline - time.monotonic()))
+                candidate = self._events()
+                if len(candidate) > initial_count:
+                    events = candidate
+                    break
         if stream != "combined":
             events = [event for event in events if event.stream == stream]
         if query.cursor:
@@ -213,9 +222,7 @@ class JobOutputStore:
                     break
                 selected.append(event); consumed += event.size
             events = list(reversed(selected))
-        if query.lines is not None:
-            # Lines are selected after materialization so mixed stream order remains correct.
-            events = events[-max(0, query.lines):]
+        line_filter = query.lines
         selected, chunks, total = [], [], 0
         for event in events:
             raw = self._read_event(event, stream)
@@ -231,6 +238,8 @@ class JobOutputStore:
             if len(selected) >= query.max_events or total >= query.max_bytes:
                 break
         data = b"".join(chunks)
+        if line_filter is not None and query.encoding == "utf8":
+            data = b"".join(data.splitlines(keepends=True)[-line_filter:])
         if query.encoding == "base64":
             rendered = base64.b64encode(data).decode()
         else:

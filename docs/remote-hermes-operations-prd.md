@@ -300,6 +300,19 @@ This phase is intentionally separate and requires an explicit operator change wi
    run one bounded, explicitly approved cron verification.
 6. Review worktree/session cleanup separately; never fold it into scheduler migration.
 
+#### Partial live evidence — 2026-07-18
+
+With explicit authorization, `scaleway-sandbox` was updated from its legacy
+PID-file-managed MCP process to `sandbox-mcp-remote.service`. Read-only follow-up
+verified the selected service is installed, enabled, active, owned by the expected
+unit/cgroup, protected by user linger, bound only to `127.0.0.1:9174`, and accepts an
+authenticated `/mcp` probe. No bearer credential, connection target, or process
+arguments are recorded here.
+
+Not performed: a scoped-stop/unrelated-process test, reboot recovery test, cron
+reconciliation or verification, gateway changes, session/worktree cleanup, and any
+change to `hermes-acceptance`. Those remain separately approval-gated.
+
 ## 8. Validation and acceptance matrix
 
 | Scenario | Required result |

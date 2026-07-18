@@ -121,9 +121,14 @@ class JobService:
             self.launcher(descriptor_path)
             return
         _DETACHED_SUPERVISORS[:] = [process for process in _DETACHED_SUPERVISORS if process.poll() is None]
+        # The CLI can be invoked through an absolute path over SSH, where the
+        # caller's cwd is not the staged Sandbox checkout.  The detached child
+        # must start in the package root for ``-m sandbox.jobs.supervisor`` to
+        # resolve reliably after the parent exits.
+        package_root = Path(__file__).resolve().parents[2]
         _DETACHED_SUPERVISORS.append(subprocess.Popen([sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True, close_fds=True))
+            cwd=package_root, start_new_session=True, close_fds=True))
 
     @staticmethod
     def _accepted(row: dict, *, replay: bool) -> dict:

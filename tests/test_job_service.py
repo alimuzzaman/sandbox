@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -9,6 +10,15 @@ from sandbox.jobs.storage import JobStorage
 
 
 class JobServiceTests(unittest.TestCase):
+    def test_default_launcher_uses_package_root_when_cli_was_called_by_absolute_path(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.application.job_service.subprocess.Popen", return_value=MagicMock(poll=lambda: None)) as launch:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None)
+            service._launch(Path(temp) / "descriptor.json")
+            self.assertEqual(Path(launch.call_args.kwargs["cwd"]).name, "sandbox")
+            repository.close()
+
     def test_acceptance_precedes_launcher_and_idempotency_replays(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

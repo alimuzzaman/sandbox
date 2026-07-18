@@ -97,6 +97,21 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("/srv/sandbox/sb-src/sb ensure --local --json", controller)
         self.assertIn("/srv/sandbox/sb-src/sb exec --in-instance -- npm test", controller)
 
+    def test_remote_nested_cli_uses_the_staged_path(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda remote, root: {"target_path": "/srv/project", "commit": "abc", "dirty": False,
+                                         "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda remote, command, timeout: calls.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"job_id":"abc"}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        transport.submit(JobSubmission("test", "/p", "p", "remote", "workspace",
+            ("sb", "test", "integration", "--local", "--project-dir", "."), 60,
+            SourceIdentity("ignored"), remote_name="r"))
+        self.assertIn("-- /srv/sandbox/sb-src/sb test integration --local --project-dir .", calls[-1])
+
     def test_status_reports_unreachable_without_inventing_terminal_success(self):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},

@@ -134,6 +134,12 @@ class RemoteJobTransport:
                 shlex.join([sb, "exec", "--in-instance", "--", *argv]),
             ))
             argv = ["sh", "-lc", controller]
+        elif argv[:1] == ["sb"]:
+            # Test, E2E, and compatibility coordinators deliberately invoke
+            # the co-located CLI with an explicit local target.  The staged
+            # runtime is not assumed to be on the VPS PATH, so preserve that
+            # policy here just as the generic instance controller does.
+            argv[0] = self.remote_sb_path(remote)
         args += ["--json", "--", *argv]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))

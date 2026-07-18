@@ -309,12 +309,13 @@ class JobService:
                 cleaned.append(self.cleanup(row["job_id"]))
         return {"ok": True, "retention_days": retention_days, "cleaned": cleaned}
 
-    def submit_matrix(self, submissions: list[JobSubmission]) -> dict:
+    def submit_matrix(self, submissions: list[JobSubmission], *, allow_project_variants: bool = False) -> dict:
         if not submissions:
             raise ValueError("matrix requires at least one child submission")
         first = submissions[0]
         if any(item.target_kind != first.target_kind or item.remote_name != first.remote_name or
-               item.project_root != first.project_root for item in submissions):
+               (not allow_project_variants and item.project_root != first.project_root)
+               for item in submissions):
             raise ValueError("matrix children must share one target and project")
         parent = JobSubmission(
             kind="matrix", project_root=first.project_root,

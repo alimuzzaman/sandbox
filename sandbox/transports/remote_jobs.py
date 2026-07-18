@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
 import shlex
 from typing import Any, Callable
 
@@ -40,7 +41,7 @@ class RemoteJobTransport:
         deployed = self.deploy(remote, submission.project_root)
         return self._submit_deployed(remote, deployed, submission)
 
-    def submit_many(self, submissions: list) -> list[dict]:
+    def submit_many(self, submissions: list) -> dict:
         """Accept matrix children after one exact-tree deployment.
 
         A matrix is a control-plane fan-out, not a reason to rsync the same
@@ -59,13 +60,17 @@ class RemoteJobTransport:
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("remote is not provisioned")
         deployed = self.deploy(remote, first.project_root)
-        plan = [{"kind": item.kind, "workspace": item.workspace_label, "argv": list(item.argv),
+        plan = []
+        for item in submissions:
+            workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label)
+            plan.append({"kind": item.kind, "workspace": item.workspace_label, "project_dir": workspace_path,
+                 "argv": list(item.argv),
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
                  "output_profile": item.output_profile, "deadline_source": item.deadline_source,
                  "request_id": item.request_id, "cleanup_policy": item.cleanup_policy,
                  "artifact_paths": list(item.artifact_paths),
                  "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
-                            "dirty_digest": deployed.get("dirty_digest")}} for item in submissions]
+                            "dirty_digest": deployed.get("dirty_digest")}})
         encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
         args = ["sb", "job-matrix", "--local", "--project-dir", deployed["target_path"],
                 "--timeout", str(max(item.deadline_seconds for item in submissions)),
@@ -77,6 +82,17 @@ class RemoteJobTransport:
         return {**payload, "source": {"identity": deployed["identity"], "commit": deployed["commit"],
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
                 "workspace_path": deployed["target_path"]}
+
+    def _prepare_workspace(self, remote: dict, source_path: str, label: str) -> str:
+        suffix = hashlib.sha256(label.encode()).hexdigest()[:14]
+        workspace_path = f"{source_path}.workspace-{suffix}"
+        command = shlex.join(["rm", "-rf", workspace_path]) + " && " + shlex.join(
+            ["mkdir", "-p", workspace_path]) + " && " + shlex.join(
+            ["cp", "-a", f"{source_path}/.", workspace_path])
+        result = self.ssh_run(remote, command, timeout=120)
+        if getattr(result, "returncode", 1) != 0:
+            raise RemoteJobTransportError("remote workspace preparation failed")
+        return workspace_path
 
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain

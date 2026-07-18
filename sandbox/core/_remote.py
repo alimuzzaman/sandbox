@@ -476,6 +476,29 @@ def deploy_target_path(remote: dict, project_root) -> str:
     return f"{home}/deploy-src/{slug}"
 
 
+def remote_workspace_path(remote: dict, project_root, workspace_label: str) -> str:
+    """Derive a deterministic remote copy path for one workspace label."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", workspace_label or ""):
+        raise ValueError("invalid remote workspace label")
+    suffix = hashlib.sha256(workspace_label.encode()).hexdigest()[:14]
+    return f"{deploy_target_path(remote, project_root)}.workspace-{suffix}"
+
+
+def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
+                             *, deployed_path: str | None = None) -> str:
+    """Copy one deployed exact tree into a deterministic isolated workspace."""
+    source = deployed_path or deploy_target_path(remote, project_root)
+    target = remote_workspace_path(remote, project_root, workspace_label)
+    command = (
+        f"rm -rf {shlex.quote(target)} && mkdir -p {shlex.quote(target)} && "
+        f"cp -a {shlex.quote(source.rstrip('/') + '/.')} {shlex.quote(target)}"
+    )
+    result = ssh_run(remote, command, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError("could not prepare remote workspace")
+    return target
+
+
 def remote_sb_path(remote: dict) -> str:
     """Path to the staged sandbox runtime's `sb` on the VPS."""
     return f"{resolve_sandbox_home(remote)}/sb-src/sb"

@@ -49,6 +49,10 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertEqual(result["parent_job_id"], "parent")
         self.assertEqual(len(result["children"]), 2)
         self.assertEqual([item[0] for item in calls].count("deploy"), 1)
+        workspace_commands = [item[1] for item in calls if item[0] == "ssh" and "workspace-" in item[1]]
+        self.assertEqual(len(workspace_commands), 2)
+        self.assertNotEqual(workspace_commands[0].split("workspace-")[1].split()[0],
+                            workspace_commands[1].split("workspace-")[1].split()[0])
         calls.clear()
         transport.read_output("r", "abc", stream="stderr", cursor="cursor", tail_bytes=10,
                               max_bytes=12, wait_seconds=2)

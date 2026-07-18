@@ -291,9 +291,14 @@ def cmd_job_matrix(_cfg, args) -> None:
             if not isinstance(item, dict):
                 _die("invalid matrix submission plan entry")
             try:
+                project_root = target.project_root
+                if item.get("project_dir"):
+                    project_root = str(Path(item["project_dir"]).expanduser().resolve())
+                    if Path(target.project_root) not in Path(project_root).parents:
+                        raise ValueError("matrix project directory must remain under the deployed project")
                 submissions.append(JobSubmission(
-                    kind=item.get("kind", "test"), project_root=target.project_root,
-                    project_identity=project_identity, target_kind=target.kind,
+                    kind=item.get("kind", "test"), project_root=project_root,
+                    project_identity=hashlib.sha256(project_root.encode()).hexdigest(), target_kind=target.kind,
                     remote_name=target.remote_name, workspace_label=item["workspace"],
                     argv=tuple(item["argv"]), deadline_seconds=item.get("timeout", args.timeout),
                     source=SourceIdentity(**item.get("source", {"identity": source.identity})),
@@ -317,7 +322,8 @@ def cmd_job_matrix(_cfg, args) -> None:
             remote_lookup=_remote.get_remote)
         result = transport.submit_many(submissions)
     else:
-        result = dependencies["job_service"].submit_matrix(submissions)
+        result = dependencies["job_service"].submit_matrix(
+            submissions, allow_project_variants=bool(args.spec_json))
     if args.json: print(json.dumps(result, sort_keys=True))
     else:
         for child in result["children"]: print(child["job_id"])

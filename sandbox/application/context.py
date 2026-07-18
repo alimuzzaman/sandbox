@@ -212,8 +212,11 @@ def durable_job_dependencies():
         from sandbox.core import _remote
         remote = _remote.get_remote(resolved_target.remote_name)
         deployed = _remote.deploy_exact_working_tree(remote, resolved_target.project_root)
+        workspace_path = _remote.prepare_remote_workspace(
+            remote, resolved_target.project_root, resolved_target.workspace_label,
+            deployed_path=deployed["target_path"])
         command = shlex.join(["sb", "workspace", action, "--local", "--project-dir",
-                              deployed["target_path"], "--workspace", resolved_target.workspace_label, "--json"])
+                              workspace_path, "--workspace", resolved_target.workspace_label, "--json"])
         result = _remote.ssh_run(remote, command, timeout=60)
         payload = next((json.loads(line) for line in reversed((result.stdout or "").splitlines())
                         if line.startswith("{")), None)

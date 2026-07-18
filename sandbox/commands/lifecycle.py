@@ -220,10 +220,13 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     remote = target.remote or _remote.get_remote(target.remote_name)
     if action == "ensure":
         deployed = _remote.deploy_exact_working_tree(remote, target.project_root)
-        target_path = deployed["target_path"]
+        target_path = _remote.prepare_remote_workspace(
+            remote, target.project_root, target.workspace_label,
+            deployed_path=deployed["target_path"])
     else:
         deployed = None
-        target_path = _remote.deploy_target_path(remote, target.project_root)
+        target_path = _remote.remote_workspace_path(
+            remote, target.project_root, target.workspace_label)
     sb = _remote.remote_sb_path(remote)
     command = [sb, action, "--local", "--project-dir", target_path, "--label", target.workspace_label]
     if action == "ensure":

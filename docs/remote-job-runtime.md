@@ -58,8 +58,9 @@ must remain authoritative.
 ## Remote CI
 
 `ci run --remote NAME` preflights the workflow, deploys the exact working tree
-once, and returns a durable parent ID with isolated child jobs for selected
-matrix cells. Inspect the parent for aggregate counts and each child for output,
+once, creates deterministic per-label workspace copies from that deployed tree,
+and returns a durable parent ID with isolated child jobs for selected matrix
+cells. Inspect the parent for aggregate counts and each child for output,
 deadline, artifacts, and cleanup. Known compatibility differences must be
 accepted by exact ID; safe mode blocks deployment/release/publish side effects by
 default. Use `--local` when deliberately choosing the local `act` path.

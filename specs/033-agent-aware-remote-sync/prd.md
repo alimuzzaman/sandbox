@@ -1,6 +1,14 @@
-# Agent-aware incremental sync for remote `dev/tmp` instances
+# Product Requirements Draft: Agent-aware incremental sync for remote `dev/tmp` instances
 
-**Planned file:** `specs/033-agent-aware-remote-sync/plan.md`
+**Status**: Discovery
+
+**Created**: 2026-07-18
+
+**Last Refined**: 2026-07-19
+
+**Artifact Owner**: `speckit-refine`
+
+**Next Stage**: `speckit-specify`
 
 ## Summary
 
@@ -157,4 +165,14 @@ Status must report:
 - A successful commit triggers synchronization but does not block or fail the commit if remote sync is unavailable.
 - The maximum sync debounce is ten seconds.
 - Live sync is opt-in; current deploy and remote-job contracts remain compatible.
-- The implementation will first be stored as this single plan file. A formal `spec.md`, tasks, contracts, and quickstart may be generated later.
+- This PRD remains the single pre-spec artifact. A formal `spec.md`, plan, tasks, contracts, and quickstart may be generated later by their owning Spec Kit phases.
+
+## Readiness for Specification
+
+- [ ] Normalize this initial technical draft into the PRD template's problem, user, goal, non-goal, and scenario sections.
+- [ ] Confirm consequential product choices and record remaining open questions.
+- [ ] Separate product outcomes from implementation proposals.
+- [ ] Validate measurable acceptance outcomes without implementation details.
+- [x] Keep downstream specification, planning, task, and implementation artifacts out of this PRD.
+
+**Readiness**: `NOT READY`

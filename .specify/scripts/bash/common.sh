@@ -191,6 +191,7 @@ get_feature_paths() {
     printf 'REPO_ROOT=%q\n' "$repo_root"
     printf 'CURRENT_BRANCH=%q\n' "$current_branch"
     printf 'FEATURE_DIR=%q\n' "$feature_dir"
+    printf 'FEATURE_PRD=%q\n' "$feature_dir/prd.md"
     printf 'FEATURE_SPEC=%q\n' "$feature_dir/spec.md"
     printf 'IMPL_PLAN=%q\n' "$feature_dir/plan.md"
     printf 'TASKS=%q\n' "$feature_dir/tasks.md"

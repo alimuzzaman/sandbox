@@ -19,6 +19,20 @@ $ARGUMENTS
 
 You **MUST** consider the user input before proceeding (if not empty).
 
+## PRD handoff
+
+Before the normal specification flow, check the active feature directory from
+`SPECIFY_FEATURE_DIRECTORY` or `.specify/feature.json` for `prd.md`.
+
+- If `prd.md` exists and its readiness marker is not `READY FOR SPECKIT`, stop and
+  direct the user back to `speckit-refine`.
+- If `prd.md` is ready, treat its complete contents as the authoritative feature
+  description. Reuse that numbered feature directory and create only `spec.md` plus
+  the specification quality checklist owned by this skill.
+- Never modify, rename, or delete `prd.md`.
+- An explicit natural-language description remains supported when no active PRD
+  exists. Empty arguments are valid only for a ready active PRD.
+
 ## Pre-Execution Checks
 
 **Check for extension hooks (before specification)**:
@@ -83,8 +97,9 @@ Given that feature description, do this:
    Specs live under the default `specs/` directory unless the user explicitly provides `SPECIFY_FEATURE_DIRECTORY`.
 
    **Resolution order for `SPECIFY_FEATURE_DIRECTORY`**:
-   1. If the user explicitly provided `SPECIFY_FEATURE_DIRECTORY` (e.g., via environment variable, argument, or configuration), use it as-is
-   2. Otherwise, auto-generate it under `specs/`:
+   1. If PRD handoff mode is active, reuse the PRD's existing feature directory
+   2. If the user explicitly provided `SPECIFY_FEATURE_DIRECTORY` (e.g., via environment variable, argument, or configuration), use it as-is
+   3. Otherwise, auto-generate it under `specs/`:
       - Check `.specify/init-options.json` for `feature_numbering` (preferred) or `branch_numbering` (deprecated, migration only — will be removed in a future release)
       - If `"timestamp"`: prefix is `YYYYMMDD-HHMMSS` (current timestamp)
       - If `"sequential"` or absent: prefix is `NNN` (next available 3-digit number after scanning existing directories in `specs/`)
@@ -110,14 +125,15 @@ Given that feature description, do this:
    - You must only create one feature per `/speckit-specify` invocation
    - The spec directory name and the git branch name are independent — they may be the same but that is the user's choice
    - The spec directory and file are always created by this command, never by the hook
+   - In PRD handoff mode, create `spec.md` in the existing PRD directory and leave `prd.md` unchanged
 
 4. Load the resolved active `spec-template` file to understand required sections.
 
 5. **IF EXISTS**: Load `.specify/memory/constitution.md` for project principles and governance constraints.
 
 6. Follow this execution flow:
-    1. Parse user description from arguments
-       If empty: ERROR "No feature description provided"
+    1. Parse the feature description from a ready active PRD when present; otherwise use arguments
+       If both are absent: ERROR "No feature description or ready active PRD provided"
     2. Extract key concepts from description
        Identify: actors, actions, data, constraints
     3. For unclear aspects:

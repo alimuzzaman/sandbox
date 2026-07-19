@@ -92,18 +92,20 @@ if $PATHS_ONLY; then
                 --arg repo_root "$REPO_ROOT" \
                 --arg branch "$CURRENT_BRANCH" \
                 --arg feature_dir "$FEATURE_DIR" \
+                --arg feature_prd "$FEATURE_PRD" \
                 --arg feature_spec "$FEATURE_SPEC" \
                 --arg impl_plan "$IMPL_PLAN" \
                 --arg tasks "$TASKS" \
-                '{REPO_ROOT:$repo_root,BRANCH:$branch,FEATURE_DIR:$feature_dir,FEATURE_SPEC:$feature_spec,IMPL_PLAN:$impl_plan,TASKS:$tasks}'
+                '{REPO_ROOT:$repo_root,BRANCH:$branch,FEATURE_DIR:$feature_dir,FEATURE_PRD:$feature_prd,FEATURE_SPEC:$feature_spec,IMPL_PLAN:$impl_plan,TASKS:$tasks}'
         else
-            printf '{"REPO_ROOT":"%s","BRANCH":"%s","FEATURE_DIR":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
-                "$(json_escape "$REPO_ROOT")" "$(json_escape "$CURRENT_BRANCH")" "$(json_escape "$FEATURE_DIR")" "$(json_escape "$FEATURE_SPEC")" "$(json_escape "$IMPL_PLAN")" "$(json_escape "$TASKS")"
+            printf '{"REPO_ROOT":"%s","BRANCH":"%s","FEATURE_DIR":"%s","FEATURE_PRD":"%s","FEATURE_SPEC":"%s","IMPL_PLAN":"%s","TASKS":"%s"}\n' \
+                "$(json_escape "$REPO_ROOT")" "$(json_escape "$CURRENT_BRANCH")" "$(json_escape "$FEATURE_DIR")" "$(json_escape "$FEATURE_PRD")" "$(json_escape "$FEATURE_SPEC")" "$(json_escape "$IMPL_PLAN")" "$(json_escape "$TASKS")"
         fi
     else
         echo "REPO_ROOT: $REPO_ROOT"
         echo "BRANCH: $CURRENT_BRANCH"
         echo "FEATURE_DIR: $FEATURE_DIR"
+        echo "FEATURE_PRD: $FEATURE_PRD"
         echo "FEATURE_SPEC: $FEATURE_SPEC"
         echo "IMPL_PLAN: $IMPL_PLAN"
         echo "TASKS: $TASKS"

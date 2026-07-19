@@ -5,6 +5,7 @@ set -e
 JSON_MODE=false
 DRY_RUN=false
 ALLOW_EXISTING=false
+PRD_MODE=false
 SHORT_NAME=""
 BRANCH_NUMBER=""
 USE_TIMESTAMP=false
@@ -21,6 +22,9 @@ while [ $i -le $# ]; do
             ;;
         --allow-existing-branch)
             ALLOW_EXISTING=true
+            ;;
+        --prd)
+            PRD_MODE=true
             ;;
         --short-name)
             if [ $((i + 1)) -gt $# ]; then
@@ -53,12 +57,13 @@ while [ $i -le $# ]; do
             USE_TIMESTAMP=true
             ;;
         --help|-h)
-            echo "Usage: $0 [--json] [--dry-run] [--allow-existing-branch] [--short-name <name>] [--number N] [--timestamp] <feature_description>"
+            echo "Usage: $0 [--json] [--dry-run] [--allow-existing-branch] [--prd] [--short-name <name>] [--number N] [--timestamp] <feature_description>"
             echo ""
             echo "Options:"
             echo "  --json              Output in JSON format"
             echo "  --dry-run           Compute feature name and paths without creating directories or files"
             echo "  --allow-existing-branch  Reuse an existing feature directory if it already exists"
+            echo "  --prd               Create prd.md from prd-template instead of spec.md"
             echo "  --short-name <name> Provide a custom short name (2-4 words) for the feature"
             echo "  --number N          Specify branch number manually (overrides auto-detection)"
             echo "  --timestamp         Use timestamp prefix (YYYYMMDD-HHMMSS) instead of sequential numbering"
@@ -79,7 +84,7 @@ done
 
 FEATURE_DESCRIPTION="${ARGS[*]}"
 if [ -z "$FEATURE_DESCRIPTION" ]; then
-    echo "Usage: $0 [--json] [--dry-run] [--allow-existing-branch] [--short-name <name>] [--number N] [--timestamp] <feature_description>" >&2
+    echo "Usage: $0 [--json] [--dry-run] [--allow-existing-branch] [--prd] [--short-name <name>] [--number N] [--timestamp] <feature_description>" >&2
     exit 1
 fi
 
@@ -234,7 +239,13 @@ if [ ${#BRANCH_NAME} -gt $MAX_BRANCH_LENGTH ]; then
 fi
 
 FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
-SPEC_FILE="$FEATURE_DIR/spec.md"
+if [ "$PRD_MODE" = true ]; then
+    ARTIFACT_FILE="$FEATURE_DIR/prd.md"
+    TEMPLATE_NAME="prd-template"
+else
+    ARTIFACT_FILE="$FEATURE_DIR/spec.md"
+    TEMPLATE_NAME="spec-template"
+fi
 
 if [ "$DRY_RUN" != true ]; then
     if [ -d "$FEATURE_DIR" ] && [ "$ALLOW_EXISTING" != true ]; then
@@ -248,13 +259,13 @@ if [ "$DRY_RUN" != true ]; then
 
     mkdir -p "$FEATURE_DIR"
 
-    if [ ! -f "$SPEC_FILE" ]; then
-        TEMPLATE=$(resolve_template "spec-template" "$REPO_ROOT") || true
+    if [ ! -f "$ARTIFACT_FILE" ]; then
+        TEMPLATE=$(resolve_template "$TEMPLATE_NAME" "$REPO_ROOT") || true
         if [ -n "$TEMPLATE" ] && [ -f "$TEMPLATE" ]; then
-            cp "$TEMPLATE" "$SPEC_FILE"
+            cp "$TEMPLATE" "$ARTIFACT_FILE"
         else
-            echo "Warning: Spec template not found; created empty spec file" >&2
-            touch "$SPEC_FILE"
+            echo "Warning: $TEMPLATE_NAME not found; created empty artifact" >&2
+            touch "$ARTIFACT_FILE"
         fi
     fi
 
@@ -271,26 +282,40 @@ if $JSON_MODE; then
         if [ "$DRY_RUN" = true ]; then
             jq -cn \
                 --arg branch_name "$BRANCH_NAME" \
-                --arg spec_file "$SPEC_FILE" \
+                --arg artifact_file "$ARTIFACT_FILE" \
                 --arg feature_num "$FEATURE_NUM" \
-                '{BRANCH_NAME:$branch_name,SPEC_FILE:$spec_file,FEATURE_NUM:$feature_num,DRY_RUN:true}'
+                --argjson prd_mode "$PRD_MODE" \
+                '{BRANCH_NAME:$branch_name,ARTIFACT_FILE:$artifact_file,FEATURE_NUM:$feature_num,PRD_MODE:$prd_mode,DRY_RUN:true} + (if $prd_mode then {PRD_FILE:$artifact_file} else {SPEC_FILE:$artifact_file} end)'
         else
             jq -cn \
                 --arg branch_name "$BRANCH_NAME" \
-                --arg spec_file "$SPEC_FILE" \
+                --arg artifact_file "$ARTIFACT_FILE" \
                 --arg feature_num "$FEATURE_NUM" \
-                '{BRANCH_NAME:$branch_name,SPEC_FILE:$spec_file,FEATURE_NUM:$feature_num}'
+                --argjson prd_mode "$PRD_MODE" \
+                '{BRANCH_NAME:$branch_name,ARTIFACT_FILE:$artifact_file,FEATURE_NUM:$feature_num,PRD_MODE:$prd_mode} + (if $prd_mode then {PRD_FILE:$artifact_file} else {SPEC_FILE:$artifact_file} end)'
         fi
     else
         if [ "$DRY_RUN" = true ]; then
-            printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s","DRY_RUN":true}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$SPEC_FILE")" "$(json_escape "$FEATURE_NUM")"
+            if [ "$PRD_MODE" = true ]; then
+                printf '{"BRANCH_NAME":"%s","ARTIFACT_FILE":"%s","PRD_FILE":"%s","FEATURE_NUM":"%s","PRD_MODE":true,"DRY_RUN":true}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$FEATURE_NUM")"
+            else
+                printf '{"BRANCH_NAME":"%s","ARTIFACT_FILE":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s","PRD_MODE":false,"DRY_RUN":true}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$FEATURE_NUM")"
+            fi
         else
-            printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s"}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$SPEC_FILE")" "$(json_escape "$FEATURE_NUM")"
+            if [ "$PRD_MODE" = true ]; then
+                printf '{"BRANCH_NAME":"%s","ARTIFACT_FILE":"%s","PRD_FILE":"%s","FEATURE_NUM":"%s","PRD_MODE":true}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$FEATURE_NUM")"
+            else
+                printf '{"BRANCH_NAME":"%s","ARTIFACT_FILE":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s","PRD_MODE":false}\n' "$(json_escape "$BRANCH_NAME")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$ARTIFACT_FILE")" "$(json_escape "$FEATURE_NUM")"
+            fi
         fi
     fi
 else
     echo "BRANCH_NAME: $BRANCH_NAME"
-    echo "SPEC_FILE: $SPEC_FILE"
+    if [ "$PRD_MODE" = true ]; then
+        echo "PRD_FILE: $ARTIFACT_FILE"
+    else
+        echo "SPEC_FILE: $ARTIFACT_FILE"
+    fi
     echo "FEATURE_NUM: $FEATURE_NUM"
     if [ "$DRY_RUN" != true ]; then
         printf '# To persist in your shell: export SPECIFY_FEATURE=%q\n' "$BRANCH_NAME"

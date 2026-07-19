@@ -515,6 +515,7 @@ class TestSchedulerReliability(unittest.TestCase):
         command = checked.call_args.args[1]
         self.assertIn("runtime=/home/u/sandbox/sb-src", command)
         self.assertIn('"$runtime/skills/$skill/SKILL.md"', command)
+        self.assertIn("speckit-refine", command)
         self.assertIn('"$runtime/.specify/templates"', command)
         self.assertIn("rev-parse --git-path info/exclude", command)
         self.assertIn("/.agents/", command)

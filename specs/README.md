@@ -1,8 +1,9 @@
 # Sandbox specs index
 
-Spec-driven work for the Sandbox tooling. Each numbered directory is a feature
-spec (spec-kit shape: `spec.md` + `plan.md`, sometimes `research.md` /
-`data-model.md` / `tasks.md`).
+Spec-driven work for the Sandbox tooling. Material or ambiguous features may begin
+with the first-class pre-spec artifact `prd.md`, owned by `speckit-refine`. Formal
+Spec Kit progression is `prd.md` → `spec.md` → `plan.md` → `tasks.md`; later stages
+may also add `research.md`, `data-model.md`, contracts, and quickstarts.
 
 | # | Feature | Status | Origin |
 |---|---------|--------|--------|
@@ -13,6 +14,7 @@ spec (spec-kit shape: `spec.md` + `plan.md`, sometimes `research.md` /
 | 006 | In-product skill authoring (auto-matched playbooks) | Draft | Novamira parity #4 |
 | 007 | Headless debugging tools: Query Monitor + dump/dd + Xdebug | Draft | Debugging ask |
 | 008 | DB-only snapshots & reset-to-fresh-install (extends 002) | Draft | Snapshot/reset ask |
+| 033 | Agent-aware incremental remote sync | PRD | Remote development ask |
 
 ## Background: the Novamira comparison (2026-06-22)
 

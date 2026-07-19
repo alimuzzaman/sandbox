@@ -256,6 +256,12 @@ verified by an `sb` CLI/MCP call; non-negotiables — auth, sanitize-in/escape-o
 prefixing — enforced per Edit). Final `STATUS: SHIPPED` block pairs every
 success criterion with live evidence + rollout notes.
 
+For material or ambiguous work, Spec Kit can begin one stage earlier:
+`speckit-refine` creates and repeatedly tightens a single `prd.md`, using bounded
+low-cost model review when available. It cannot create specifications, plans,
+tasks, or code. A PRD marked `READY FOR SPECKIT` is then consumed in place by
+`speckit-specify`, preserving the numbered feature directory.
+
 **Verify a UI flow.** `visit` opens a real admin or frontend URL and returns a
 screenshot, DOM, and console errors without you switching tabs.
 

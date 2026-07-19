@@ -71,7 +71,7 @@ _MANAGED_CATALOG_WORKTREES = {
     "lenzora-todo-task": ("lenzora", "hermes/lenzora-todo-task"),
 }
 _LENZORA_SPECKIT_SKILLS = (
-    "speckit-specify", "speckit-clarify", "speckit-plan", "speckit-tasks", "speckit-analyze",
+    "speckit-refine", "speckit-specify", "speckit-clarify", "speckit-plan", "speckit-tasks", "speckit-analyze",
     "speckit-implement",
 )
 DASHBOARD_UNIT = "hermes-dashboard-sandbox.service"

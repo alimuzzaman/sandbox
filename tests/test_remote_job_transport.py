@@ -110,6 +110,8 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("docker run --rm --user 0:0", prepare)
         self.assertIn("/srv/project-workspace-", prepare)
         self.assertIn("find /workspace -mindepth 1 -maxdepth 1", prepare)
+        self.assertIn("find /srv/project-workspace-", prepare)
+        self.assertNotIn("rm -rf /srv/project-workspace-", prepare)
 
     def test_remote_runtime_exec_ensures_and_executes_in_the_deployed_instance(self):
         calls = []

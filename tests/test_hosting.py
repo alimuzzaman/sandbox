@@ -1,11 +1,13 @@
 """Offline coverage for managed Compose hosting and Cloudflare intent."""
 import json
 import hashlib
+import io
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -237,6 +239,24 @@ class TestHostingManifest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "remote rejected"):
             hosting.apply_with_rollback(apply, lambda: events.append("rollback"))
         self.assertEqual(events, ["apply", "rollback"])
+
+    @patch("sandbox.commands.hosting.time.sleep")
+    @patch("sandbox.commands.hosting.urllib.request.build_opener")
+    def test_edge_verification_accepts_basic_auth_challenge_for_served_route(self, build_opener, _sleep):
+        response = urllib.error.HTTPError(
+            "https://example.test/", 401, "Unauthorized", {}, io.BytesIO(),
+        )
+        build_opener.return_value.open.side_effect = response
+
+        try:
+            hosting_cmd._verify_edge(
+                [{"hostname": "example.test", "mode": "serve"}],
+                basic_auth_enabled=True,
+            )
+        finally:
+            response.close()
+
+        self.assertEqual(build_opener.return_value.open.call_count, 1)
 
 
 class _Response:

@@ -331,7 +331,7 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
         raise RuntimeError(f"remote healthcheck returned {code}, expected {minimum}-{maximum}")
 
 
-def _verify_edge(routes: list[dict]) -> None:
+def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
 
@@ -360,7 +360,8 @@ def _verify_edge(routes: list[dict]) -> None:
                         last_error = None
                         break
             except urllib.error.HTTPError as exc:
-                if 300 <= exc.code < 400:
+                if (300 <= exc.code < 400
+                        or (basic_auth_enabled and route.get("mode") == "serve" and exc.code == 401)):
                     last_error = None
                     break
                 last_error = exc
@@ -441,7 +442,7 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             previous = next((record for record in all_records if record.get("type") == kind), None)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=True)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
-        _verify_edge(validated["routes"])
+        _verify_edge(validated["routes"], basic_auth_enabled=bool(validated.get("basic_auth")))
         state["hosts"][key] = {"loopback_port": runtime["loopback_port"], "compose_project": runtime["compose_project"],
                                "certificate": certificate, "records": changes, "commit": sha,
                                "caddy_name": caddy_name}

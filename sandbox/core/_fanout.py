@@ -55,17 +55,21 @@ def run_across_instances(cfg: dict, root: str, specs: list[dict], worker_fn,
                          *, concurrency: int | None = None,
                          keep_on_fail: bool = False,
                          strict_provision: bool = False,
-                         on_progress=None) -> dict:
+                         on_progress=None,
+                         provision_instance=None,
+                         teardown_instance=None) -> dict:
     """Boot one labelled instance per entry in `specs` (concurrently, capped),
     run `worker_fn(instance_entry, spec)` against each, collect results, and
     tear down every ephemeral instance afterward — UNLESS `keep_on_fail` is
     set and that particular unit failed, in which case its stack is left
     running for inspection (`wp_cli`/`visit` with that `label`).
 
-    specs: `[{"label": str, "php": str | None, "wp": str | None}, ...]`. Each
-    label is minted via `ensure_instance(cfg, root, label=label, create=True)`
-    — callers own the label-prefix convention (`e2e-w*`, `ci-<runid>-*`); this
-    helper does not invent one.
+    By default each label is minted via the legacy WordPress
+    `ensure_instance(cfg, root, label=label, create=True)` path. Callers for a
+    different runtime provide `provision_instance(spec) -> entry` and, when
+    needed, `teardown_instance(entry)`. This keeps the concurrency, lifecycle,
+    and failure policy shared without silently provisioning WordPress for a
+    generic Compose project.
 
     worker_fn(entry, spec) -> dict: MUST return a dict with at least a
     `status` key (`"passed"`/`"failed"`/`"skipped"`/`"noop"`/anything else is
@@ -106,10 +110,13 @@ def run_across_instances(cfg: dict, root: str, specs: list[dict], worker_fn,
             # carry a `config_label` — a run-independent key for an optional
             # sandbox.config.<config_label>.json layer, distinct from the
             # (possibly randomized, per-run) instance `label` itself.
-            entry = ensure_instance(cfg, root, label=label, create=True,
-                                    php_version=spec.get("php"),
-                                    wp_version=spec.get("wp"),
-                                    config_label=spec.get("config_label"))
+            if provision_instance is None:
+                entry = ensure_instance(cfg, root, label=label, create=True,
+                                        php_version=spec.get("php"),
+                                        wp_version=spec.get("wp"),
+                                        config_label=spec.get("config_label"))
+            else:
+                entry = provision_instance(spec)
             unit["provision"] = entry
         except Exception as e:
             unit["status"] = "provision_failed"
@@ -133,9 +140,20 @@ def run_across_instances(cfg: dict, root: str, specs: list[dict], worker_fn,
             # Delete by the instance's real NAME (unique, docker-compose-project-
             # bearing) — not by `label`, which is only unique within this root
             # and isn't what `./sb instance delete` operates on.
-            inst_name = (unit.get("provision") or {}).get("instance")
-            if inst_name and not (keep_on_fail and failed):
-                _teardown_instance(inst_name)
+            entry = unit.get("provision") or {}
+            if entry and not (keep_on_fail and failed):
+                try:
+                    if teardown_instance is not None:
+                        teardown_instance(entry)
+                    else:
+                        inst_name = entry.get("instance")
+                        if inst_name:
+                            _teardown_instance(inst_name)
+                except Exception:
+                    # Like the legacy teardown path, cleanup must never mask
+                    # the completed CI result. The retained durable job output
+                    # is the evidence source for a failed cleanup.
+                    pass
         return unit
 
     with ThreadPoolExecutor(max_workers=max(1, cap)) as ex:

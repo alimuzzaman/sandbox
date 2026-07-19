@@ -462,7 +462,9 @@ def _run_cell_with_act(entry: dict, spec: dict, root: Path,
     than keep patching a mechanism with no evidence it ever helped."""
     cell = spec["cell"]
     job_id = spec["job_id"]
-    port = entry.get("wordpress_port")
+    # WordPress compatibility records use ``wordpress_port``; generic Compose
+    # records expose the same host-reachable service as ``http_port``.
+    port = entry.get("wordpress_port") or entry.get("http_port")
     # The instance's secured https://<name>.tst URL is a HOST-side proxy/DNS
     # convenience — it does not resolve inside an arbitrary container. This
     # WAS the actual bug behind the one observed HTTP 000 failure (mistaken,
@@ -879,13 +881,35 @@ def cmd_ci(cfg, args) -> None:
             ok(f"  [{label}] {event.get('status')}")
 
     try:
+        provision_instance = None
+        teardown_instance = None
+        if pconf.get("kind") == "compose":
+            from sandbox.application.runtime_service import OperationError, OperationRequest
+            from sandbox.application.context import runtime_service
+
+            service = runtime_service(cfg)
+
+            def provision_instance(spec):
+                result = service.invoke(OperationRequest(
+                    root, "ensure", label=spec["label"], arguments={"create": True}))
+                if isinstance(result, OperationError):
+                    raise RuntimeError(result.message)
+                return dict(result.data)
+
+            def teardown_instance(entry):
+                result = service.invoke(OperationRequest(
+                    root, "destroy", label=entry.get("label", "default")))
+                if isinstance(result, OperationError):
+                    raise RuntimeError(result.message)
+
         result = run_across_instances(
             cfg, root, specs,
             worker_fn=lambda entry, spec: _run_cell_with_act(
                 entry, spec, Path(root), patched_path, secrets_path,
                 allow_deploy, timeout),
             concurrency=concurrency, keep_on_fail=keep_on_fail,
-            strict_provision=strict_provision, on_progress=_progress)
+            strict_provision=strict_provision, on_progress=_progress,
+            provision_instance=provision_instance, teardown_instance=teardown_instance)
     finally:
         _cleanup_ci_temp_files(patched_path, secrets_path)
 

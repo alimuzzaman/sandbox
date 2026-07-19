@@ -131,6 +131,27 @@ class TestRunAcrossInstances(unittest.TestCase):
         # The healthy unit still ran and reported ok.
         self.assertEqual(by_label["e2e-w0"]["result"]["status"], "passed")
 
+    def test_custom_runtime_provisioner_and_teardown_are_used(self):
+        provisioned, torn_down = [], []
+
+        def provision(spec):
+            provisioned.append(spec["label"])
+            return {"instance": f"compose-{spec['label']}", "label": spec["label"],
+                    "kind": "compose", "http_port": 8173}
+
+        def teardown(entry):
+            torn_down.append(entry["instance"])
+
+        result = core.run_across_instances({}, "/tmp/proj", [{"label": "ci-compose"}],
+                                           worker_fn=lambda entry, spec: {"status": "passed"},
+                                           concurrency=1, provision_instance=provision,
+                                           teardown_instance=teardown)
+        self.assertTrue(result["ok"])
+        self.assertEqual(provisioned, ["ci-compose"])
+        self.assertEqual(torn_down, ["compose-ci-compose"])
+        self.assertEqual(self.provisioned, [])
+        self.assertEqual(self.teardown_calls, [])
+
     def test_strict_provision_reraises(self):
         def flaky_ensure(cfg, root, label="default", create=False,
                          php_version=None, wp_version=None, config_label=None):

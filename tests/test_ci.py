@@ -249,6 +249,21 @@ class TestActInvocation(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertIn("--bind", run.call_args.args[0])
 
+    @patch("sandbox.commands.ci._core")
+    @patch("sandbox.commands.ci.subprocess.run")
+    @patch("sandbox.commands.ci._act_binary", return_value="act")
+    def test_compose_http_port_is_available_to_act(self, _act, run, core):
+        core.return_value.project_lock.return_value = nullcontext()
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with __import__("tempfile").TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = ci._run_cell_with_act(
+                {"http_port": 8173, "instance": "ci-compose"},
+                {"cell": {}, "job_id": "build"}, root, root / "workflow.yml",
+                root / "secrets.env", False, 30)
+        self.assertEqual(result["status"], "passed")
+        self.assertIn("WP_BASE_URL=http://host.docker.internal:8173", run.call_args.args[0])
+
 class TestRuntimeSecrets(unittest.TestCase):
     def test_skipped_deploy_secrets_do_not_block_safe_run(self):
         jobs = [{"steps": [

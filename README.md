@@ -306,6 +306,12 @@ remote provisioner installs `act`; GitHub's `actions/upload-artifact` is
 converted to Sandbox's retained job-artifact collection because a self-hosted
 `act` runner has no GitHub Actions runtime token.
 
+Generic Compose instances have enforced default limits of 2 CPUs, 4 GiB RAM,
+and 512 PIDs. The remote durable scheduler admits at most two jobs and checks
+free memory/disk before starting another. If SSH is unavailable, retrieve the
+authenticated, log-free HTTPS host snapshot with
+`./sb remote service diagnostics <remote> --json`.
+
 Use the same runtime operations without an MCP client:
 
 ```bash

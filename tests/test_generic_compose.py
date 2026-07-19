@@ -110,6 +110,19 @@ class TestGenericComposeAdapter(unittest.TestCase):
                     "argv": ["pnpm", "test:fast"], "timeout": 0,
                 }))
 
+    def test_overlay_enforces_instance_resource_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, _ = self.make_adapter(root)
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+            overlay = next(Path(part) for call, _, _ in process.calls for part in call
+                           if part.endswith("sandbox.override.yaml"))
+            content = overlay.read_text()
+            self.assertIn('cpus: "2"', content)
+            self.assertIn('mem_limit: "4096m"', content)
+            self.assertIn("pids_limit: 512", content)
+
     def test_descriptor_validation_rejects_command_ambiguous_fields(self):
         invalid = (
             {"service": "web\nbad"},

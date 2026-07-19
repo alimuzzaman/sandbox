@@ -7,6 +7,7 @@ from .descriptors import _load_mapping
 
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_DEFAULT_RESOURCES = {"cpus": 2.0, "memoryMB": 4096, "pids": 512}
 
 
 def _valid_port(value: object) -> bool:
@@ -57,6 +58,20 @@ class ComposeSchemaProvider:
         http_port = compose.get("http_port")
         if http_port is not None and not _valid_port(http_port):
             raise ValueError("compose http_port must be a valid port")
+        resources = compose.get("resources", {})
+        if resources is None:
+            resources = {}
+        if not isinstance(resources, dict) or set(resources) - set(_DEFAULT_RESOURCES):
+            raise ValueError("compose resources must contain only cpus, memoryMB, and pids")
+        cpus = resources.get("cpus", _DEFAULT_RESOURCES["cpus"])
+        memory_mb = resources.get("memoryMB", _DEFAULT_RESOURCES["memoryMB"])
+        pids = resources.get("pids", _DEFAULT_RESOURCES["pids"])
+        if (isinstance(cpus, bool) or not isinstance(cpus, (int, float)) or not 0.25 <= cpus <= 64):
+            raise ValueError("compose resources.cpus must be between 0.25 and 64")
+        if (isinstance(memory_mb, bool) or not isinstance(memory_mb, int) or not 128 <= memory_mb <= 262144):
+            raise ValueError("compose resources.memoryMB must be between 128 and 262144")
+        if (isinstance(pids, bool) or not isinstance(pids, int) or not 32 <= pids <= 65536):
+            raise ValueError("compose resources.pids must be between 32 and 65536")
         tests = document.get("tests", {})
         if not isinstance(tests, dict):
             raise ValueError("compose tests must be an object")
@@ -75,6 +90,7 @@ class ComposeSchemaProvider:
                 "compose_file": str(path), "service": service,
                 "internal_port": port, "health_path": health_path,
                 "http_port": http_port,
+                "resources": {"cpus": float(cpus), "memoryMB": memory_mb, "pids": pids},
                 "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",
                 "runtime": document.get("runtime"),

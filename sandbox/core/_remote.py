@@ -38,6 +38,8 @@ import posixpath
 import json
 import hashlib
 import ipaddress
+import urllib.error
+import urllib.request
 import re
 import subprocess
 from pathlib import Path
@@ -1010,6 +1012,33 @@ def render_remote_mcp_unit(bind: str, port: int, public_url: str | None = None) 
         "WantedBy=default.target",
         "",
     ))
+
+
+def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
+    """Read authenticated, non-secret host evidence over the HTTPS control plane.
+
+    This deliberately avoids SSH and does not expose job output, command lines,
+    paths, credentials, or process identifiers. It is the fallback diagnosis
+    path when a VPS accepts TCP but its SSH daemon is overloaded or unavailable.
+    """
+    base = remote.get("control_url")
+    token = remote.get("bearer_token")
+    if not isinstance(base, str) or not base.startswith("https://"):
+        raise RuntimeError("remote diagnostics require an HTTPS control URL")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("remote diagnostics require a provisioned bearer token")
+    url = base.rstrip("/") + "/diagnostics"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"remote diagnostics returned HTTP {response.status}")
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError("remote diagnostics returned an invalid payload")
+    return payload
 
 
 def remote_mcp_service_status(remote: dict) -> dict:

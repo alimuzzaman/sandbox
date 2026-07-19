@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import secrets
+import shutil
 from datetime import datetime, timedelta, timezone
 
 
@@ -25,9 +27,30 @@ def matrix_workspace_label(*, project_identity: str, parent_job_id: str,
 
 
 class JobScheduler:
-    def __init__(self, repository, *, max_parallel: int = 4) -> None:
+    def __init__(self, repository, *, max_parallel: int = 2,
+                 min_free_memory_mb: int = 512, min_free_disk_mb: int = 2048) -> None:
         self.repository = repository
         self.max_parallel = max_parallel
+        self.min_free_memory_mb = min_free_memory_mb
+        self.min_free_disk_mb = min_free_disk_mb
+
+    def _resource_floor_available(self) -> bool:
+        """Conservative host admission check; Docker gets stricter instance limits."""
+        try:
+            disk_mb = shutil.disk_usage(self.repository.path.parent).free // (1024 * 1024)
+            if disk_mb < self.min_free_disk_mb:
+                return False
+        except OSError:
+            return False
+        try:
+            available = next((line for line in open("/proc/meminfo") if line.startswith("MemAvailable:")), None)
+            if available is not None and int(available.split()[1]) // 1024 < self.min_free_memory_mb:
+                return False
+        except (OSError, ValueError):
+            # Non-Linux hosts do not expose MemAvailable; disk and the slot
+            # limit remain active there.
+            pass
+        return True
 
     @staticmethod
     def namespace(row: dict) -> str:
@@ -39,6 +62,8 @@ class JobScheduler:
         now = datetime.now(timezone.utc)
         expiry = (now + timedelta(seconds=max(60, int(row["deadline_seconds"])))).isoformat()
         with self.repository.transaction(immediate=True) as connection:
+            if not self._resource_floor_available():
+                raise WorkspaceBusy("host resource floor is not available")
             active = connection.execute(
                 "SELECT l.* FROM workspace_leases l JOIN jobs j ON j.job_id=l.job_id "
                 "WHERE l.target_namespace=? AND l.project_identity=? AND l.workspace_label=? "

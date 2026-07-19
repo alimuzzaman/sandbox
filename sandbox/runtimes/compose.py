@@ -97,11 +97,15 @@ class ComposeAdapter:
     def _overlay(self, descriptor: dict[str, Any], runtime_id: str, http_port: int) -> Path:
         path = self._artifact_dir(runtime_id) / "sandbox.override.yaml"
         service = descriptor["service"]
+        resources = descriptor.get("resources") or {"cpus": 2.0, "memoryMB": 4096, "pids": 512}
         path.write_text(
             "services:\n"
             f"  {service}:\n"
             "    ports:\n"
             f"      - \"127.0.0.1:{http_port}:{int(descriptor['internal_port'])}\"\n"
+            f"    cpus: \"{float(resources['cpus']):g}\"\n"
+            f"    mem_limit: \"{int(resources['memoryMB'])}m\"\n"
+            f"    pids_limit: {int(resources['pids'])}\n"
         )
         return path
 

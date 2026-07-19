@@ -35,11 +35,11 @@ def cmd_remote(cfg, args) -> None:
 
 
 def _cmd_service(args, as_json: bool) -> None:
-    """`sb remote service <status|migrate|stop> <name>` service contract."""
+    """`sb remote service <status|diagnostics|migrate|stop> <name>` service contract."""
     operation = getattr(args, "name", None)
     name = getattr(args, "ssh_url", None)
-    if operation not in {"status", "migrate", "stop"} or not name:
-        die("usage: ./sb remote service <status|migrate|stop> <name> [--plan|--confirm]")
+    if operation not in {"status", "diagnostics", "migrate", "stop"} or not name:
+        die("usage: ./sb remote service <status|diagnostics|migrate|stop> <name> [--plan|--confirm]")
     entry = sr.get_remote(name)
     if not entry:
         die(f"no remote named '{name}'")
@@ -48,6 +48,9 @@ def _cmd_service(args, as_json: bool) -> None:
         if operation == "status":
             payload = {"ok": True, "name": name, "status": "observed",
                        "data": sr.remote_mcp_service_status(entry), "error": None}
+        elif operation == "diagnostics":
+            payload = {"ok": True, "name": name, "status": "observed",
+                       "data": sr.remote_diagnostics(entry), "error": None}
         elif operation == "migrate":
             transport = entry.get("control_transport") or "https"
             bind = (entry.get("tailscale_host") if transport == "tailscale" else "127.0.0.1")

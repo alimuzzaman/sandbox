@@ -31,6 +31,16 @@ labels for parallel matrix cells, retain failures for diagnosis, and reset or
 destroy workspaces explicitly. For live remote operations, prefer the
 co-located remote MCP server and its durable job status/output tools.
 
+Generic Compose instances are resource-bounded by default (2 CPUs, 4 GiB RAM,
+and 512 PIDs); override those values only through `compose.resources` in the
+project descriptor. The remote scheduler admits at most two jobs and refuses
+new work below its free-memory/disk floors. When SSH is unavailable but the
+HTTPS control plane responds, use the authenticated, log-free host snapshot:
+
+```sh
+./sb remote service diagnostics scaleway-sandbox --json
+```
+
 Output observation is control-plane only: `job-output` reads durable files in
 bounded cursor pages, including a selected stream, a tail, or a bounded
 long-poll. It never keeps the test process's stdout/stderr pipes open over SSH

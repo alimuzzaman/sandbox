@@ -312,6 +312,27 @@ class TestSshRun(unittest.TestCase):
         self.assertIn("[redacted SSH target]", error)
 
 
+class TestRemoteDiagnostics(unittest.TestCase):
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_diagnostics_use_authenticated_https_without_ssh(self, urlopen):
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"ok":true,"memory_available_mb":1024}'
+        urlopen.return_value.__enter__.return_value = response
+        result = sr.remote_diagnostics({
+            "control_url": "https://control.example.test", "bearer_token": "secret-token",
+        })
+        self.assertEqual(result["memory_available_mb"], 1024)
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, "https://control.example.test/diagnostics")
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-token")
+
+    def test_diagnostics_require_https_control_and_token(self):
+        with self.assertRaisesRegex(RuntimeError, "HTTPS"):
+            sr.remote_diagnostics({"control_url": "http://control.example.test", "bearer_token": "x"})
+        with self.assertRaisesRegex(RuntimeError, "bearer token"):
+            sr.remote_diagnostics({"control_url": "https://control.example.test"})
+
+
 class TestCheckReachable(unittest.TestCase):
     @patch("subprocess.run")
     def test_true_on_zero_exit(self, mock_run):

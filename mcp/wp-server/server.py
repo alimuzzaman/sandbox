@@ -3,6 +3,8 @@ import json
 import os
 import shlex
 import subprocess
+import shutil
+import sqlite3
 from pathlib import Path
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -154,7 +156,46 @@ def _run_streamable_http(bind: str, port: int, token: str,
 
     import uvicorn
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import PlainTextResponse
+    from starlette.responses import JSONResponse, PlainTextResponse
+    from starlette.routing import Route
+
+    def diagnostic_snapshot() -> dict:
+        """Safe host evidence for control-plane outages; never returns secrets or logs."""
+        home = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox"))
+        memory_mb = None
+        try:
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    memory_mb = int(line.split()[1]) // 1024
+                    break
+        except (OSError, ValueError, IndexError):
+            pass
+        jobs = {"active": None, "queued": None}
+        try:
+            connection = sqlite3.connect(home / "runtime" / "jobs" / "registry.sqlite3")
+            try:
+                rows = connection.execute(
+                    "SELECT lifecycle, COUNT(*) FROM jobs GROUP BY lifecycle"
+                ).fetchall()
+            finally:
+                connection.close()
+            counts = dict(rows)
+            jobs = {"active": sum(int(counts.get(state, 0)) for state in ("accepted", "queued", "running", "cancelling")),
+                    "queued": int(counts.get("queued", 0))}
+        except (OSError, sqlite3.Error):
+            pass
+        return {
+            "ok": True,
+            "service": "sandbox-remote-mcp",
+            "runtime_revision": os.environ.get("SANDBOX_REMOTE_MCP_RUNTIME_REVISION", "unknown"),
+            "load_1m": round(os.getloadavg()[0], 2) if hasattr(os, "getloadavg") else None,
+            "memory_available_mb": memory_mb,
+            "disk_free_mb": shutil.disk_usage(home).free // (1024 * 1024),
+            "jobs": jobs,
+        }
+
+    async def diagnostics(_request):
+        return JSONResponse(diagnostic_snapshot())
 
     class _BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -179,6 +220,7 @@ def _run_streamable_http(bind: str, port: int, token: str,
             )
 
     app = mcp.streamable_http_app()
+    app.routes.append(Route("/diagnostics", diagnostics, methods=["GET"]))
     app.add_middleware(_BearerAuthMiddleware)
     uvicorn.run(app, host=bind, port=port)
 

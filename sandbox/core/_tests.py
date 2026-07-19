@@ -94,10 +94,19 @@ def detect_test_mode(project_root: str | Path) -> str:
 
 def resolve_test_mode(project_root: str | Path, *, configured: str = "auto",
                       explicit: str | None = None) -> str:
-    """Resolve explicit > configured > conservative auto mode."""
+    """Resolve explicit > configured > conservative auto mode.
+
+    "auto" is a DETECT SENTINEL, never a runnable mode — detect_test_mode() only
+    ever returns "unit" or "integration". Returning "auto" verbatim (which an
+    explicit `sb test auto` used to do) leaks it downstream to cmd_test, which
+    provisions the polyfills/suite harness only for "integration" but routes
+    every non-"unit" mode into _run_tests() — producing `KeyError: 'polyfills'`.
+    So an explicit "auto" must resolve through detection exactly like a
+    configured one.
+    """
     configured = normalize_test_mode(configured, allow_none=False)
     explicit = normalize_test_mode(explicit)
-    if explicit is not None:
+    if explicit is not None and explicit != "auto":
         return explicit
     return configured if configured != "auto" else detect_test_mode(project_root)
 

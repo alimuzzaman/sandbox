@@ -296,7 +296,11 @@ def cmd_test(cfg, args) -> None:
         die("--provision-only is only valid for integration test mode")
 
     print(f"  mode:       {mode}")
-    if mode == "integration":
+    # Any mode other than "unit" routes into _run_tests(), which requires the
+    # provisioned suite + polyfills. Keyed off "not unit" rather than
+    # "== integration" so a new mode can never reach _run_tests() with an
+    # unprovisioned tools dict (that mismatch was the KeyError: 'polyfills').
+    if mode != "unit":
         info("Provisioning test harness (cached)…")
         h = _provision_test_harness(inst, pconf)
         suite, tools, config = h["suite"], h["tools"], h["config"]

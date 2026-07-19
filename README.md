@@ -265,6 +265,17 @@ preserving the numbered feature directory. The normal clarify, plan, tasks, and
 analyze stages remain required before implementation; implementation prefers Terra
 High, or Sol Medium for architecture-sensitive or cross-cutting work.
 
+The resulting handoff is deliberately phase-specific: Terra Medium drafts product
+intent, Sol High validates and strengthens the ready PRD, Sol Medium creates the
+formal specification, and Terra High implements the approved task plan. A named
+model preference is a task-launch default, not an implicit root-model switch; a
+fallback must be disclosed and cannot be represented as a completed Sol validation.
+
+```text
+speckit-refine → Sol High validation → speckit-specify → speckit-clarify
+→ speckit-plan → speckit-tasks → speckit-analyze → speckit-implement
+```
+
 **Verify a UI flow.** `visit` opens a real admin or frontend URL and returns a
 screenshot, DOM, and console errors without you switching tabs.
 

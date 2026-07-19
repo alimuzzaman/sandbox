@@ -67,6 +67,11 @@ class SpeckitRefineArtifactTests(unittest.TestCase):
         self.assertLess(refine, review)
         self.assertLess(review, specify)
         self.assertIn("command: speckit.refine", workflow)
+        self.assertIn("Sol High validation", workflow)
+        self.assertIn("command: speckit.clarify", workflow)
+        self.assertIn("command: speckit.analyze", workflow)
+        self.assertLess(workflow.index("  - id: clarify"), workflow.index("  - id: plan"))
+        self.assertLess(workflow.index("  - id: analyze"), workflow.index("  - id: implement"))
         self.assertIn('args: ""', workflow)
 
     def test_existing_remote_sync_draft_uses_prd_filename(self):

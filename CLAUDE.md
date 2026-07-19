@@ -30,7 +30,7 @@
 
 **Docs with code.** Code change + matching `README.md` / `CLAUDE.md` / `SKILL.md` / `WORKFLOW.md` land together. Non-obvious runtime findings → `memory/plugin-behavior/`.
 
-**Specs via spec-kit.** For material or ambiguous features, use `speckit-refine` → `speckit-specify` → `speckit-clarify` → `speckit-plan` → `speckit-tasks`. `speckit-refine` owns only `prd.md`; never hand-author `specs/<n>/spec.md`.
+**Specs via spec-kit.** For material or ambiguous features, use `speckit-refine` → independent Sol High PRD review → `speckit-specify` → `speckit-clarify` → `speckit-plan` → `speckit-tasks` → `speckit-analyze` → `speckit-implement`. Prefer Terra Medium for PRD drafting, Sol Medium for specification, Terra High for implementation, and Sol Medium for judgment-heavy implementation. `speckit-refine` owns only `prd.md`; never hand-author `specs/<n>/spec.md`.
 
 **Module boundaries.** New config schemas, runtime adapters, CLI commands, and MCP
 groups register through explicit manifests/contracts. Do not add consumers of

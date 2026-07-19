@@ -110,6 +110,21 @@ class TestGenericComposeAdapter(unittest.TestCase):
                     "argv": ["pnpm", "test:fast"], "timeout": 0,
                 }))
 
+    def test_exec_failure_keeps_bounded_compose_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, _ = self.make_adapter(root)
+
+            def fail(argv, *, cwd=None, env=None, timeout=None):
+                if "config" in argv:
+                    return ProcessResult(tuple(argv), 0, "web\n", "")
+                return ProcessResult(tuple(argv), 1, "container is not running\n", "exec rejected\n")
+
+            process.run = fail
+            with self.assertRaisesRegex(RuntimeError, "(?s)exec rejected.*container is not running"):
+                adapter.invoke(OperationRequest(str(root), "exec", arguments={"argv": ["pnpm", "test:fast"]}))
+
     def test_overlay_enforces_instance_resource_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

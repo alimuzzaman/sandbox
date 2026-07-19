@@ -178,7 +178,12 @@ class ComposeAdapter:
             timeout=self._operation_timeout(request) if op == "exec" else self.timeout,
         )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr or f"Compose {op} failed")
+            # Docker Compose occasionally writes useful execution diagnostics to
+            # stdout (not stderr). Preserve a bounded combined tail so a
+            # durable remote receipt can distinguish a stopped container from
+            # a missing executable without attaching child stdio over SSH.
+            detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part.strip())[-4096:]
+            raise RuntimeError(detail or f"Compose {op} failed")
         data = dict(record or {}, instance=runtime_id, root=descriptor["root"], label=request.label, kind="compose", adapter=self.adapter_id, service=service, http_port=http_port, url=f"http://127.0.0.1:{http_port}", status="stopped" if op in {"stop", "destroy"} else "ready", output=result.stdout[-10000:])
         if op == "destroy":
             self.registry.registry_remove(descriptor["root"], label=request.label)

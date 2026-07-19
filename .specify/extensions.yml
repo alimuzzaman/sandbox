@@ -1,5 +1,6 @@
 installed:
 - agent-context
+- prd
 settings:
   auto_execute_hooks: true
 hooks:
@@ -20,4 +21,13 @@ hooks:
     priority: 10
     prompt: Execute speckit.agent-context.update?
     description: Refresh agent context after planning
+    condition: null
+  before_specify:
+  - extension: prd
+    command: speckit.prd.validate
+    enabled: true
+    optional: false
+    priority: 5
+    prompt: Execute speckit.prd.validate?
+    description: Validate the active PRD and reuse its feature directory when present
     condition: null

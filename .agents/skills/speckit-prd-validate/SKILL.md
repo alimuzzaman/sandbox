@@ -1,0 +1,1 @@
+../../../.specify/extensions/prd/.specify-dev/agent-commands/zed/speckit-prd-validate/SKILL.md

@@ -14,6 +14,33 @@
       },
       "registered_skills": [],
       "installed_at": "2026-06-21T12:13:05.990784+00:00"
+    },
+    "prd": {
+      "version": "0.1.0",
+      "source": "local",
+      "manifest_hash": "sha256:7086ec8aca2fe1537bc1dbc108cd2f0829225b9e1ff4255ecdd9960106418d8a",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "agy": [
+          "speckit.prd.refine",
+          "speckit.prd.validate"
+        ],
+        "claude": [
+          "speckit.prd.refine",
+          "speckit.prd.validate"
+        ],
+        "codex": [
+          "speckit.prd.refine",
+          "speckit.prd.validate"
+        ],
+        "zed": [
+          "speckit.prd.refine",
+          "speckit.prd.validate"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-07-19T11:02:06.739907+00:00"
     }
   }
 }

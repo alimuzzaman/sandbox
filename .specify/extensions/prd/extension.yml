@@ -1,0 +1,39 @@
+schema_version: "1.0"
+
+extension:
+  id: prd
+  name: "Reviewed PRD Workflow"
+  version: "0.1.0"
+  description: "Create a Terra-refined PRD and require an independent Sol High validation before specification."
+  category: process
+  effect: read-write
+  author: "Md. Alimuzzaman Alim"
+  repository: "https://github.com/alimuzzaman/spec-kit"
+  license: MIT
+
+requires:
+  speckit_version: ">=0.11.3,<1.0.0"
+  commands:
+    - speckit.specify
+
+provides:
+  commands:
+    - name: speckit.prd.refine
+      file: commands/speckit.prd.refine.md
+      description: "Create or refine a product requirements draft and validate it for specification"
+    - name: speckit.prd.validate
+      file: commands/speckit.prd.validate.md
+      description: "Guard specification handoff until the active PRD has passed Sol High validation"
+
+hooks:
+  before_specify:
+    command: speckit.prd.validate
+    priority: 5
+    optional: false
+    description: "Validate the active PRD and reuse its feature directory when present"
+
+tags:
+  - product
+  - discovery
+  - requirements
+  - workflow

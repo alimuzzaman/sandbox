@@ -22,6 +22,9 @@ class SpeckitRefineArtifactTests(unittest.TestCase):
         self.assertIn("## Non-Goals", template)
         self.assertIn("## Open Questions", template)
         self.assertIn("## Readiness for Specification", template)
+        self.assertIn("**Drafting Model**: `gpt-5.6-terra` Medium", template)
+        self.assertIn("**Final Validation**: `PENDING`", template)
+        self.assertIn("Sol High validation verdict is `PASS`", template)
         self.assertIn("**Readiness**: `NOT READY`", template)
         self.assertNotIn("### Functional Requirements", template)
 
@@ -29,7 +32,10 @@ class SpeckitRefineArtifactTests(unittest.TestCase):
         canonical = (ROOT / "skills/speckit-refine/SKILL.md").read_text()
         mirrored = (ROOT / ".agents/skills/speckit-refine/SKILL.md").read_text()
         self.assertEqual(canonical, mirrored)
-        self.assertIn("gpt-5.6-luna", canonical)
+        self.assertIn("`gpt-5.6-terra` at Medium effort", canonical)
+        self.assertIn("`gpt-5.6-sol` at High effort", canonical)
+        self.assertIn("## Final Sol validation", canonical)
+        self.assertNotIn("gpt-5.6-luna", canonical)
         self.assertIn("Run at most five passes", canonical)
         self.assertIn("MUST NOT create or modify", canonical)
         for artifact in ("`spec.md`", "`plan.md`", "`tasks.md`"):
@@ -44,6 +50,14 @@ class SpeckitRefineArtifactTests(unittest.TestCase):
         self.assertIn("READY FOR SPECKIT", canonical)
         self.assertIn("Never modify, rename, or delete `prd.md`", canonical)
         self.assertIn("reuse the PRD's existing feature directory", canonical)
+        self.assertIn("`gpt-5.6-sol` at Medium effort", canonical)
+
+    def test_implementation_model_routing_is_mirrored(self):
+        canonical = (ROOT / "skills/speckit-implement/SKILL.md").read_text()
+        mirrored = (ROOT / ".agents/skills/speckit-implement/SKILL.md").read_text()
+        for content in (canonical, mirrored):
+            self.assertIn("`gpt-5.6-terra` at High effort", content)
+            self.assertIn("`gpt-5.6-sol` at Medium", content)
 
     def test_workflow_places_refinement_before_specification(self):
         workflow = (ROOT / ".specify/workflows/speckit/workflow.yml").read_text()

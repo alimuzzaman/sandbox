@@ -1,6 +1,6 @@
 ---
 name: speckit-refine
-description: Create or refine a pre-spec PRD through bounded low-cost model passes without performing specification, planning, task, or implementation work.
+description: Create or refine a pre-spec PRD with Terra Medium, then require an independent Sol High readiness review before specification.
 argument-hint: Describe the product idea or provide an existing PRD path
 compatibility: Requires spec-kit project structure with .specify/ directory
 metadata:
@@ -72,12 +72,23 @@ Before asking a question, exhaust discoverable repository facts. Ask only about
 choices that materially affect product scope, user outcomes, policy, acceptance,
 or compatibility.
 
-## Bounded Luna refinement loop
+## Model routing
 
-When the runtime exposes `gpt-5.6-luna` as a worker override, use one Luna worker
-at a time for read-only refinement passes. Luna may critique and propose edits but
-must not write files or make final decisions. If that override is unavailable,
-continue with the active model and state the fallback; never claim Luna ran.
+The preferred root configuration for drafting and interactive refinement is
+`gpt-5.6-terra` at Medium effort. This skill cannot switch the active root model.
+If the active configuration differs, continue unless the user made the preference
+a strict gate, and report the configuration that actually ran.
+
+After the PRD first passes every normal readiness item, require one independent
+review by `gpt-5.6-sol` at High effort. Use a read-only Sol worker when that exact
+override is exposed. Otherwise report that the required Sol validation did not
+occur and leave the PRD `NOT READY`; never claim a fallback was Sol High.
+
+The Sol reviewer may find issues and propose concrete PRD edits, but it must not
+write files, make final product decisions, or create downstream artifacts. The root
+reviews and applies supported improvements to the same `prd.md`.
+
+## Bounded Terra refinement loop
 
 Run at most five passes, stopping earlier when two consecutive passes find no new
 material issue:
@@ -88,25 +99,45 @@ material issue:
 4. Consequential decisions, assumptions, and unresolved questions.
 5. Measurable acceptance outcomes and readiness.
 
-For each pass:
+For each Terra pass:
 
-1. Give the worker the current PRD, relevant evidence, the pass objective, and the
+1. Review the current PRD against relevant evidence, the pass objective, and the
    artifact boundary.
-2. Require a compact result containing findings, proposed PRD changes, questions,
-   and confidence. Reject implementation plans and downstream artifacts.
-3. Root-review every finding against repository evidence and prior user decisions.
+2. Produce compact findings, proposed PRD changes, questions, and confidence.
+   Reject implementation plans and downstream artifacts.
+3. Check every finding against repository evidence and prior user decisions.
 4. Ask the user only the smallest set of material unresolved questions. Do not
    silently choose consequential behavior.
 5. Apply accepted decisions and evidence to `prd.md`; remove contradictions and
    obsolete alternatives rather than appending duplicate prose.
 6. Re-run the artifact-boundary and readiness checks before the next pass.
 
+## Final Sol validation
+
+Once the Terra-refined PRD first passes the normal readiness checklist:
+
+1. Give one Sol High reviewer the complete PRD, relevant repository evidence,
+   confirmed user decisions, and the artifact boundary.
+2. Require a compact result covering omissions, contradictions, ambiguous or
+   unconfirmed decisions, missing negative scenarios, weak acceptance outcomes,
+   invalid assumptions, and implementation leakage. Require proposed edits and a
+   `PASS` or `REOPEN` verdict.
+3. Root-review every finding. Apply evidence-backed, non-consequential improvements
+   directly to `prd.md`, replacing obsolete wording rather than appending a review
+   transcript.
+4. If a finding requires a consequential product choice, set readiness to
+   `NOT READY`, ask the user for that decision, update the PRD, re-run the necessary
+   Terra readiness checks, and perform a new single final Sol High review.
+5. Record only the drafting configuration, validation configuration, validation
+   date, and verdict in PRD metadata. Do not store chain-of-thought, worker output,
+   or transient critique notes.
+
 ## Readiness gate
 
 Set `**Readiness**: READY FOR SPECKIT` only when all template readiness items pass,
 all consequential decisions are confirmed or explicitly accepted as assumptions,
-and no blocking open question remains. Otherwise retain `NOT READY` and list the
-smallest remaining decisions.
+no blocking open question remains, and the latest Sol High validation verdict is
+`PASS`. Otherwise retain `NOT READY` and list the smallest remaining decisions.
 
 Readiness means the PRD is suitable input to `speckit-specify`. It does not mean a
 formal specification, implementation plan, or task list exists.
@@ -117,7 +148,8 @@ Before reporting completion:
 
 1. Verify the only feature artifact changed by this skill is `prd.md` and the only
    permitted metadata change is `.specify/feature.json`.
-2. Report the PRD path, number of completed refinement passes, readiness state,
-   unresolved decisions, and whether Luna was actually used.
+2. Report the PRD path, number of completed Terra refinement passes, readiness
+   state, unresolved decisions, drafting configuration, and whether Sol High
+   validation actually ran and passed.
 3. When ready, recommend `speckit-specify` as the next explicit action. Do not invoke
    it automatically.

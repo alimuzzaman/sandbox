@@ -1,0 +1,1 @@
+../../../.specify/extensions/prd/.specify-dev/agent-commands/claude/speckit-prd-refine/SKILL.md

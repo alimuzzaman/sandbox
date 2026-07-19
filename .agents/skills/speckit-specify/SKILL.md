@@ -10,6 +10,11 @@ user-invocable: true
 disable-model-invocation: false
 ---
 
+## Preferred model
+
+Run this specification phase with `gpt-5.6-sol` at Medium effort when available.
+This skill cannot switch the active root model; report the actual configuration or
+fallback and never imply that the preferred configuration ran when it did not.
 
 ## User Input
 
@@ -183,9 +188,10 @@ Given that feature description, do this:
       - [ ] Success criteria are measurable
       - [ ] Success criteria are technology-agnostic (no implementation details)
       - [ ] All acceptance scenarios are defined
+      - [ ] Primary, negative, and boundary scenarios are covered
       - [ ] Edge cases are identified
       - [ ] Scope is clearly bounded
-      - [ ] Dependencies and assumptions identified
+      - [ ] Dependencies, compatibility constraints, and assumptions identified
       
       ## Feature Readiness
       

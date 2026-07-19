@@ -257,10 +257,13 @@ prefixing — enforced per Edit). Final `STATUS: SHIPPED` block pairs every
 success criterion with live evidence + rollout notes.
 
 For material or ambiguous work, Spec Kit can begin one stage earlier:
-`speckit-refine` creates and repeatedly tightens a single `prd.md`, using bounded
-low-cost model review when available. It cannot create specifications, plans,
-tasks, or code. A PRD marked `READY FOR SPECKIT` is then consumed in place by
-`speckit-specify`, preserving the numbered feature directory.
+`speckit-refine` creates and repeatedly tightens a single `prd.md`, preferring
+Terra Medium for drafting and requiring an independent Sol High validation before
+readiness. It cannot create specifications, plans, tasks, or code. A validated PRD
+marked `READY FOR SPECKIT` is consumed in place by Sol Medium `speckit-specify`,
+preserving the numbered feature directory. The normal clarify, plan, tasks, and
+analyze stages remain required before implementation; implementation prefers Terra
+High, or Sol Medium for architecture-sensitive or cross-cutting work.
 
 **Verify a UI flow.** `visit` opens a real admin or frontend URL and returns a
 screenshot, DOM, and console errors without you switching tabs.

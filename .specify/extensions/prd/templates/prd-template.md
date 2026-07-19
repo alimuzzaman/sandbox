@@ -14,9 +14,9 @@
 
 **Validated On**: [DATE or N/A]
 
-**Artifact Owner**: `speckit-refine`
+**Artifact Owner**: `speckit.prd.refine`
 
-**Next Stage**: `speckit-specify`
+**Next Stage**: `speckit.specify`
 
 > This document captures product intent before formal specification. It must
 > not contain implementation plans, task breakdowns, contracts, or source-code

@@ -131,7 +131,11 @@ class RemoteJobTransport:
         )
         result = self.ssh_run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
-            raise RemoteJobTransportError("remote workspace preparation failed")
+            detail = "\n".join(part.strip() for part in (
+                getattr(result, "stderr", ""), getattr(result, "stdout", ""),
+            ) if part.strip())[-4096:]
+            raise RemoteJobTransportError(
+                "remote workspace preparation failed" + (f": {detail}" if detail else ""))
         return workspace_path
 
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:

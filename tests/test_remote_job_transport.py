@@ -113,6 +113,16 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("find /srv/project-workspace-", prepare)
         self.assertNotIn("rm -rf /srv/project-workspace-", prepare)
 
+    def test_workspace_prepare_retains_bounded_remote_error_detail(self):
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=1, stdout="copy failed\n", stderr="permission denied\n"),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        with self.assertRaisesRegex(Exception, "(?s)permission denied.*copy failed"):
+            transport._prepare_workspace({}, "/srv/project", "workspace")
+
     def test_remote_runtime_exec_ensures_and_executes_in_the_deployed_instance(self):
         calls = []
         transport = RemoteJobTransport(

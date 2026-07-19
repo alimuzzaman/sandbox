@@ -128,6 +128,8 @@ def configure_artifact_get_parser(parser) -> None:
 
 def configure_reconcile_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--remote",
+                        help="reconcile durable jobs on a provisioned remote controller")
     parser.add_argument("--json", action="store_true")
 
 
@@ -360,7 +362,17 @@ def cmd_job_artifact_get(_cfg, args) -> None:
 
 
 def cmd_job_reconcile(_cfg, args) -> None:
-    result = durable_job_dependencies()["job_service"].reconcile_startup(limit=args.limit)
+    if args.remote:
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(
+            deploy=_remote.deploy_exact_working_tree,
+            ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote,
+            remote_sb_path=_remote.remote_sb_path,
+        ).control(args.remote, ["job-reconcile", "--limit", str(args.limit)])
+    else:
+        result = durable_job_dependencies()["job_service"].reconcile_startup(limit=args.limit)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

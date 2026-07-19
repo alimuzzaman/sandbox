@@ -49,6 +49,19 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport.list("r")
         self.assertTrue(commands[0].startswith("/srv/sandbox/sb-src/sb job-list"))
 
+    def test_reconcile_uses_bounded_remote_control(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append((command, timeout)) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"interrupted":[]}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        result = transport.control("r", ["job-reconcile", "--limit", "200"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(commands, [("/srv/sandbox/sb-src/sb job-reconcile --limit 200 --json", 25)])
+
     def test_all_remote_control_operations_use_the_staged_cli_path(self):
         commands = []
         transport = RemoteJobTransport(

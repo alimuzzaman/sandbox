@@ -58,8 +58,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                     {
                         "instance": "fixture",
                         "url": "https://fixture.tst",
-                        "login_url": "https://fixture.tst/?sandbox_autologin=sensitive",
-                        "autologin_token": "sensitive",
+                        "login_url": "https://fixture.tst/?sandbox_autologin=login-token",
+                        "autologin_token": "raw-token",
                     },
                 )
 
@@ -67,11 +67,12 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                                      create=False, json=True)
         output = io.StringIO()
         with mock.patch.object(commands, "wordpress_runtime_service",
-                               return_value=SuccessfulService()), \
+                              return_value=SuccessfulService()), \
                 contextlib.redirect_stdout(output):
             commands.cmd_ensure({}, args)
-        self.assertNotIn("sensitive", output.getvalue())
-        self.assertNotIn("login_url", output.getvalue())
+        self.assertNotIn("raw-token", output.getvalue())
+        self.assertNotIn("autologin_token", output.getvalue())
+        self.assertIn("login_url", output.getvalue())
         self.assertIn("https://fixture.tst", output.getvalue())
 
 if __name__ == "__main__":

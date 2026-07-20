@@ -104,7 +104,6 @@ def cmd_ensure(cfg, args) -> None:
         # Compact single line as the LAST stdout line so the MCP server can
         # parse it past any boot/progress output above.
         public_entry = dict(entry)
-        public_entry.pop("login_url", None)
         public_entry.pop("autologin_token", None)
         print(json.dumps(public_entry))
     else:

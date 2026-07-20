@@ -791,11 +791,19 @@ def cmd_open(cfg, args) -> None:
         run([opener, url], check=False)
         return
     inst_cfg = resolve_instances(cfg)[args.resolved_instance]
-    port = inst_cfg["wordpress_port"]
     mailpit = inst_cfg["mailpit_port"]
+
+    base_url = site_url(inst_cfg)
+    if owner:
+        admin_url = owner.get("login_url") or owner.get("admin_url") or f"{base_url}/wp-admin/"
+        site_url_val = owner.get("url") or base_url
+    else:
+        admin_url = f"{base_url}/wp-admin/"
+        site_url_val = base_url
+
     targets = {
-        "admin": f"http://localhost:{port}/wp-admin",
-        "site": f"http://localhost:{port}",
+        "admin": admin_url,
+        "site": site_url_val,
         "mail": f"http://localhost:{mailpit}",
     }
     url = targets.get(args.what or "admin")

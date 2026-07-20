@@ -278,9 +278,18 @@ def cmd_install(cfg, args) -> None:
     #    available before deciding whether the bundled core can be reused.
     wp_v = inst_cfg.get("wp_version")
     if wp_v:
-        info(f"downloading WordPress {wp_v}…")
-        wpcli(["core", "download", "--force", f"--version={wp_v}"],
-              instance=inst, check=False)
+        # Already on the pinned version? Skip the download — re-fetching on every
+        # start is a pointless round-trip to WordPress.org that hard-errors
+        # ("Failed to get url ... cURL error 28") whenever the network is down,
+        # even though the requested core is sitting on disk.
+        cur = wpcli(["core", "version"], instance=inst, check=False, capture=True)
+        have = (cur.stdout or "").strip() if cur.returncode == 0 else ""
+        if have == str(wp_v):
+            info(f"WordPress {wp_v} already present — skipping download.")
+        else:
+            info(f"downloading WordPress {wp_v}…")
+            wpcli(["core", "download", "--force", f"--version={wp_v}"],
+                  instance=inst, check=False)
     else:
         latest = None
         update = wpcli(

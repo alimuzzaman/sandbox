@@ -906,8 +906,15 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             if e.get("active"):
                 activate.append(slug)
         elif kind == "zip":
-            (zip_install_active if e.get("active") else zip_install_inactive).append(
-                src["value"])
+            if (pdir / slug).exists():
+                # Already present (prior provision / bundled). Reinstalling only
+                # emits "Destination folder already exists" + "Error: No plugins
+                # installed." noise — skip it, same as org and theme entries.
+                if e.get("active"):
+                    activate.append(slug)
+            else:
+                (zip_install_active if e.get("active")
+                 else zip_install_inactive).append(src["value"])
         else:  # org
             if (pdir / slug).exists():
                 if e.get("active"):

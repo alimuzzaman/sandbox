@@ -169,7 +169,8 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 16. `bridge_token`, `app_password`, `autologin_token` carried over by `_build_instance_block` — don't drop them.
 17. WP Abilities: categories register on `wp_abilities_api_categories_init` (before `wp_abilities_api_init`).
 18. wp-cli via `docker compose exec` on web; falls back to `compose run --rm wpcli` when web is down.
-19. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
+19. Proxy mounts the DIRECTORY (`runtime/proxy:/etc/caddy:ro`), never the Caddyfile itself — a file bind mount pins an inode and `regen_caddyfile()` replaces the file, so the container loses `/etc/caddy/Caddyfile` and every `caddy reload` fails. `sb doctor` asserts config domain == Caddyfile route == readable-in-container.
+20. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

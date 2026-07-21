@@ -225,12 +225,88 @@ def _proxy_container_running() -> bool:
 def _sandbox_proxy_active(domain: str) -> bool:
     """True when the proxy is running AND has a route for this domain — i.e.
     https://<domain> actually serves. Used by site_url()."""
-    if not domain or not PROXY_CADDYFILE.exists():
-        return False
-    txt = PROXY_CADDYFILE.read_text()
-    if f"http://{domain} {{" not in txt and f"\n{domain} {{" not in txt:
+    if not _caddyfile_has_route(domain):
         return False
     return _proxy_container_running()
+
+
+def _caddyfile_has_route(domain: str, text: str | None = None) -> bool:
+    """True if the Caddyfile carries a site block for <domain> (http or https)."""
+    if not domain:
+        return False
+    if text is None:
+        if not PROXY_CADDYFILE.exists():
+            return False
+        text = PROXY_CADDYFILE.read_text()
+    return f"http://{domain} {{" in text or f"\n{domain} {{" in text
+
+
+def _caddyfile_readable_in_container() -> bool | None:
+    """True/False if the running proxy can read /etc/caddy/Caddyfile; None when
+    the container isn't running (nothing to assert).
+
+    This is the check that would have caught the dangling file bind mount: the
+    host file existed and had every route, but inside the container the path was
+    gone, so every `caddy reload` failed and new domains silently fell back to
+    localhost."""
+    if not _proxy_container_running():
+        return None
+    res = subprocess.run(
+        ["docker", "exec", PROXY_PROJECT, "test", "-r", "/etc/caddy/Caddyfile"],
+        capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def proxy_health_checks(cfg: dict) -> list[dict]:
+    """Doctor checks for domain/proxy drift. Asserts the three views agree:
+    domain present in config == route present in the host Caddyfile ==
+    Caddyfile readable inside the proxy container. They drifted apart silently
+    once (file bind mount pinned to a replaced inode); assert them explicitly."""
+    checks: list[dict] = []
+    in_sync = total = 0
+    running = _proxy_container_running()
+    text = PROXY_CADDYFILE.read_text() if PROXY_CADDYFILE.exists() else ""
+    readable = _caddyfile_readable_in_container()
+    if running:
+        checks.append({
+            "label": "proxy Caddyfile readable inside the container",
+            "ok": bool(readable),
+            "hint": ("the bind mount is stale — `./sb domains setup` now "
+                     "force-recreates the proxy to repair it"),
+        })
+    for name, ic in resolve_instances(cfg).items():
+        if ic.get("server") == "herd":
+            continue
+        dom = ic.get("domain")
+        has_route = _caddyfile_has_route(dom, text) if dom else False
+        if dom and not dom.endswith(f".{_tld(ic)}"):
+            continue  # not a proxy-managed domain (legacy Valet etc.)
+        if dom:
+            in_sync += 1 if has_route else 0
+            total += 1
+            if not has_route:
+                checks.append({
+                    "label": f"{name}: domain {dom} configured but no route in the "
+                             f"Caddyfile",
+                    "ok": False,
+                    "hint": "./sb domains setup   (regenerates + reloads the routes)",
+                })
+        elif ic.get("tld") and _caddyfile_has_route(f"{name}.{_tld(ic)}", text):
+            # Half-rolled-back state: the route survived but the domain didn't.
+            checks.append({
+                "label": f"{name}: orphaned route {name}.{_tld(ic)} with no domain "
+                         f"in config",
+                "ok": False,
+                "hint": "./sb domains setup   (reassigns the domain and reloads)",
+            })
+    if total:
+        # One aggregate line for the healthy majority; drift is listed above.
+        checks.append({
+            "label": f"instance domains routed ({in_sync}/{total})",
+            "ok": in_sync == total,
+            "hint": "./sb domains setup   (regenerates + reloads the routes)",
+        })
+    return checks
 
 
 def _cert_paths(domain: str) -> tuple[Path, Path]:
@@ -319,7 +395,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - {PROXY_CADDYFILE}:/etc/caddy/Caddyfile:ro
+      # Mount the DIRECTORY, not the Caddyfile itself. A file bind mount pins
+      # the host inode; regen_caddyfile() replaces the file atomically (new
+      # inode), which leaves the container's mount dangling — /etc/caddy/Caddyfile
+      # disappears inside the container and every `caddy reload` fails until the
+      # container is recreated. A directory mount resolves the name on each open,
+      # so it survives file replacement.
+      - {PROXY_DIR}:/etc/caddy:ro
       - {PROXY_CERTS_DIR}:/certs:ro
       - proxy_data:/data
       - proxy_config:/config
@@ -465,19 +547,44 @@ def _certs_changed_since_proxy_start() -> bool:
     return False
 
 
-def reload_proxy() -> bool:
-    """Apply the current proxy config. Always rewrite the compose from the
-    template; if it changed (e.g. ports) recreate the container. Otherwise
-    hot-reload Caddy with the regenerated Caddyfile — UNLESS a cert was re-minted
-    since the proxy started, in which case restart the container so Caddy re-reads
-    the changed cert files (a plain `caddy reload` won't). Then self-heal DNS
-    (clear stale *.tst cache) so a new/changed domain resolves immediately — no
-    manual flush. Non-interactive, never hangs. Returns success of the proxy step."""
+def _proxy_compose_up(force_recreate: bool = False):
+    """`docker compose up -d` the proxy project. Returns the CompletedProcess."""
+    cmd = ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
+           "--project-directory", str(ROOT), "up", "-d"]
+    if force_recreate:
+        cmd.append("--force-recreate")
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _run_detail(res) -> str:
+    """Shortest useful diagnostic from a CompletedProcess."""
+    txt = ((res.stderr or "") + "\n" + (res.stdout or "")).strip()
+    return " ".join(txt.split())[:300]
+
+
+def proxy_apply() -> tuple[bool, str]:
+    """Apply the current proxy config; returns (ok, detail) where detail is the
+    underlying stderr/stdout when it failed (empty on success).
+
+    Always rewrite the compose from the template; if it changed (e.g. ports, or
+    the Caddyfile mount shape) recreate the container. Otherwise hot-reload Caddy
+    with the regenerated Caddyfile — UNLESS a cert was re-minted since the proxy
+    started, in which case restart the container so Caddy re-reads the changed
+    cert files (a plain `caddy reload` won't).
+
+    Self-heal: if the hot reload fails while the container IS running, the mount
+    or the running config is stale (the historical case: a file bind mount of the
+    Caddyfile dangling after regen replaced the inode). Recreate the container
+    once before reporting failure, rather than leaving the whole domain step dead.
+
+    Then self-heal DNS (clear stale *.tst cache) so a new/changed domain resolves
+    immediately — no manual flush. Non-interactive, never hangs."""
     desired = render_proxy_compose()
     changed = (not PROXY_COMPOSE.exists()) or PROXY_COMPOSE.read_text() != desired
     if changed:
         PROXY_COMPOSE.write_text(desired)
-    if _proxy_container_running() and not changed:
+    hot = _proxy_container_running() and not changed
+    if hot:
         if _certs_changed_since_proxy_start():
             # Certs re-minted at an unchanged path (e.g. an instance recreate):
             # `caddy reload` keeps the stale cert and TLS resets — restart so the
@@ -494,12 +601,22 @@ def reload_proxy() -> bool:
     else:
         # First boot, or the compose changed (ports/image) → (re)create so the
         # new spec takes effect; `up -d` recreates only what differs.
-        res = subprocess.run(
-            ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
-             "--project-directory", str(ROOT), "up", "-d"],
-            capture_output=True, text=True)
+        res = _proxy_compose_up()
+    if res.returncode != 0 and hot:
+        reload_detail = _run_detail(res)
+        res = _proxy_compose_up(force_recreate=True)
+        if res.returncode != 0:
+            _dns_flush()
+            return False, (f"caddy reload failed ({reload_detail}); "
+                           f"recreate also failed: {_run_detail(res)}")
     _dns_flush()
-    return res.returncode == 0
+    return (res.returncode == 0, "" if res.returncode == 0 else _run_detail(res))
+
+
+def reload_proxy() -> bool:
+    """proxy_apply() reduced to a bool — kept for callers that only branch on
+    success. Prefer proxy_apply() when the failure reason should be surfaced."""
+    return proxy_apply()[0]
 
 
 def site_url(inst_cfg: dict) -> str:
@@ -660,8 +777,16 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
     _install_alias_launchd()
     PROXY_COMPOSE.write_text(render_proxy_compose())
     regen_caddyfile(cfg)
-    if not reload_proxy():
-        info("proxy container did not start (is Docker running?).")
+    up, detail = proxy_apply()
+    if not up:
+        if _proxy_container_running():
+            # The container IS up — this is a config apply failure, not Docker
+            # being down. Say so, and show what Caddy actually reported.
+            info(f"proxy is running but the config reload failed: "
+                 f"{detail or 'no output'}")
+        else:
+            info(f"proxy container did not start (is Docker running?)"
+                 f"{': ' + detail if detail else '.'}")
         return False, cfg
     return True, cfg
 
@@ -769,9 +894,19 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     up, cfg = _ensure_url_proxy(cfg, quiet=True, tld=tld)
     if not up:
         # Roll the domain back so the instance installs cleanly at localhost.
+        # Pop BOTH keys written at step 1 — a half rollback (domain gone, tld
+        # kept) leaves a block that looks configured, while _build_instance_block
+        # only re-adopts a domain that is still present, so no later `sb ensure`
+        # ever repairs it.
         local = _local_yaml()
-        local.get("instances", {}).get(name, {}).pop("domain", None)
+        blk = local.get("instances", {}).get(name, {})
+        blk.pop("domain", None)
+        blk.pop("tld", None)
         _write_local_yaml(local)
+        # Drop the now-orphaned route: _ensure_url_proxy regenerated the Caddyfile
+        # WITH this domain before failing, so leaving it there means the file
+        # claims a route the config no longer has.
+        regen_caddyfile(load_config())
         return False
     # 3. Mint the trusted cert + wire the route so https://<name>.<tld> serves.
     #    Subdomain multisite needs a wildcard SAN so every sub-site host is
@@ -811,6 +946,15 @@ def _assign_domains_to_all(cfg: dict, tld=None):
         _write_local_yaml(local)
         ok(f"assigned domains: {', '.join(changed)}")
     cfg = load_config()
+    if changed:
+        # Wire the new routes BEFORE deciding each site's URL below: site_url()
+        # only returns http(s)://<domain> when the proxy already serves a route
+        # for it, so without this the freshly-assigned instances would resolve to
+        # http://localhost:<port>, that would match their current siteurl, and
+        # the loop would skip them — leaving WP pinned to localhost even though
+        # the domain is now configured and routed.
+        regen_caddyfile(cfg)
+        reload_proxy()
 
     # Point each running instance's WP siteurl/home at its clean URL. Uses
     # site_url() so it's http://<name>.tst by default, or https when secured.

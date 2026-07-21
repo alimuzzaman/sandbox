@@ -611,6 +611,14 @@ def cmd_doctor(cfg, args) -> None:
     check(f"focused plugin: {focus or '—'}", True,
           hint="(optional — set with ./sb focus <slug>)")
 
+    print("\nDomains / proxy:")
+    from sandbox.core._domains import proxy_health_checks
+    proxy_checks = proxy_health_checks(cfg)
+    if not proxy_checks:
+        info("  (no proxy-managed domains)")
+    for pc in proxy_checks:
+        check(pc["label"], pc["ok"], hint=pc["hint"])
+
     from sandbox.core._remote import list_remotes, remote_doctor_checks
     remotes = list_remotes()
     print("\nRemote targets:")

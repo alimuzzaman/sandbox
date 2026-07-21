@@ -12,6 +12,7 @@ live instance (doctor/wp/bridge over HTTP) is exercised separately.
 import os
 import sys
 import shutil
+import subprocess
 import tempfile
 import unittest
 import json
@@ -237,6 +238,116 @@ class TestCaddyBlocks(unittest.TestCase):
             rendered = caddyfile.read_text()
         self.assertIn("http://generic-app.tst {", rendered)
         self.assertIn("reverse_proxy host.docker.internal:49152", rendered)
+
+
+class TestProxyMountAndReload(unittest.TestCase):
+    """The Caddyfile must stay visible to the container across regeneration."""
+
+    def test_compose_mounts_the_proxy_directory_not_the_file(self):
+        rendered = core.render_proxy_compose()
+        self.assertIn(f"{domains_core.PROXY_DIR}:/etc/caddy:ro", rendered)
+        self.assertNotIn(f"{domains_core.PROXY_CADDYFILE}:/etc/caddy/Caddyfile",
+                         rendered)
+
+    def _apply_with(self, runner, compose_text):
+        with tempfile.TemporaryDirectory() as td:
+            compose = Path(td) / "proxy.yml"
+            compose.write_text(compose_text)
+            with mock.patch.object(domains_core, "PROXY_COMPOSE", compose), \
+                 mock.patch.object(domains_core, "render_proxy_compose",
+                                   return_value=compose_text), \
+                 mock.patch.object(domains_core, "_proxy_container_running",
+                                   return_value=True), \
+                 mock.patch.object(domains_core, "_certs_changed_since_proxy_start",
+                                   return_value=False), \
+                 mock.patch.object(domains_core, "_dns_flush"), \
+                 mock.patch.object(domains_core.subprocess, "run", runner):
+                return domains_core.proxy_apply()
+
+    def test_failed_hot_reload_falls_back_to_force_recreate(self):
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append(cmd)
+            failed = cmd[:2] == ["docker", "exec"]
+            return subprocess.CompletedProcess(
+                cmd, 1 if failed else 0,
+                stdout="", stderr="no such file or directory" if failed else "")
+
+        ok_, detail = self._apply_with(runner, "compose: unchanged\n")
+        self.assertTrue(ok_)
+        self.assertEqual(detail, "")
+        self.assertEqual(calls[0][:2], ["docker", "exec"])
+        self.assertIn("--force-recreate", calls[1])
+
+    def test_reload_and_recreate_failure_reports_both(self):
+        def runner(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, stdout="",
+                                               stderr="boom")
+
+        ok_, detail = self._apply_with(runner, "compose: unchanged\n")
+        self.assertFalse(ok_)
+        self.assertIn("caddy reload failed", detail)
+        self.assertIn("recreate also failed", detail)
+
+
+class TestProxyHealthChecks(unittest.TestCase):
+    def _checks(self, cfg, caddyfile_text, readable=True, running=True):
+        with tempfile.TemporaryDirectory() as td:
+            caddyfile = Path(td) / "Caddyfile"
+            caddyfile.write_text(caddyfile_text)
+            with mock.patch.object(domains_core, "PROXY_CADDYFILE", caddyfile), \
+                 mock.patch.object(domains_core, "_proxy_container_running",
+                                   return_value=running), \
+                 mock.patch.object(domains_core, "_caddyfile_readable_in_container",
+                                   return_value=readable), \
+                 mock.patch.object(domains_core, "resolve_instances",
+                                   return_value=cfg):
+                return domains_core.proxy_health_checks({})
+
+    def test_missing_route_for_configured_domain_fails(self):
+        checks = self._checks({"a": {"domain": "a.tst", "tld": "tst"}}, "")
+        labels = {c["label"]: c["ok"] for c in checks}
+        self.assertFalse(labels["a: domain a.tst configured but no route in the "
+                                "Caddyfile"])
+        self.assertFalse(labels["instance domains routed (0/1)"])
+
+    def test_orphaned_route_without_domain_fails(self):
+        checks = self._checks({"a": {"tld": "tst"}}, "http://a.tst {\n}\n")
+        self.assertTrue(any("orphaned route" in c["label"] and not c["ok"]
+                            for c in checks))
+
+    def test_unreadable_caddyfile_in_container_fails(self):
+        checks = self._checks({}, "", readable=False)
+        self.assertFalse(checks[0]["ok"])
+        self.assertIn("readable inside the container", checks[0]["label"])
+
+    def test_all_in_sync_passes(self):
+        checks = self._checks({"a": {"domain": "a.tst", "tld": "tst"}},
+                              "http://a.tst {\n}\n")
+        self.assertTrue(all(c["ok"] for c in checks))
+
+
+class TestSecureAtCreateRollback(unittest.TestCase):
+    def test_rollback_pops_domain_and_tld(self):
+        local = {"instances": {"a": {"domain": "a.tst", "tld": "tst"}}}
+        written = {}
+
+        with mock.patch.object(domains_core, "resolve_instances",
+                               return_value={"a": {"tld": "tst"}}), \
+             mock.patch.object(domains_core.shutil, "which", return_value="/x/mkcert"), \
+             mock.patch.object(domains_core, "_ca_trusted_macos", return_value=True), \
+             mock.patch.object(domains_core, "_local_yaml", side_effect=lambda: local), \
+             mock.patch.object(domains_core, "_write_local_yaml",
+                               side_effect=lambda d: written.update(d)), \
+             mock.patch.object(domains_core, "load_config", return_value={}), \
+             mock.patch.object(domains_core, "_ensure_url_proxy",
+                               return_value=(False, {})), \
+             mock.patch.object(domains_core, "regen_caddyfile") as regen:
+            self.assertFalse(domains_core._secure_at_create({}, "a"))
+
+        self.assertEqual(written["instances"]["a"], {})
+        regen.assert_called_once()
 
 
 class TestDomainValidation(unittest.TestCase):

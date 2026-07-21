@@ -10,6 +10,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - `./sb smoke` — self-test subcommand: boots a fresh instance, verifies WP + REST, tears down.
 - `./sb doctor` now audits credential state (FluentBoards reachability, GitHub org set, `.env.local` permissions).
+- `./sb doctor` now audits domain/proxy drift: Caddyfile readable inside the proxy container, and configured domain == Caddyfile route for every instance.
+
+### Fixed
+- Proxy compose mounts `runtime/proxy` as a directory instead of bind-mounting the
+  Caddyfile as a file. The file mount pinned an inode; `regen_caddyfile()` replaces
+  the file, so the running container lost `/etc/caddy/Caddyfile` and every
+  `caddy reload` failed — `domains setup` reported "proxy container did not start"
+  while the container was up, and new instances silently fell back to
+  `http://localhost:<port>`.
+- `proxy_apply()` self-heals: a failed hot reload now force-recreates the proxy once
+  before reporting failure, and surfaces the real stderr instead of guessing at Docker.
+- Secure-at-create rollback pops `tld` alongside `domain` and drops the orphaned
+  Caddy route, so a failed proxy step no longer leaves an unrepairable half-state.
+- `domains setup` wires new routes before deciding each site's URL, so freshly
+  assigned domains reach WP's `siteurl`/`home` instead of staying on localhost.
 
 ---
 

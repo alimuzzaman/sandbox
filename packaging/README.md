@@ -6,7 +6,7 @@ fits. All need **Python 3** and **Docker** at runtime.
 | Channel | Entry | Best for |
 |---|---|---|
 | curl installer | `scripts/web-install.sh` → `install.sh` | quickest one-liner |
-| npm | `@templately/sandbox` (`package.json` + `bin/sandbox.js`) | Node devs / CI |
+| npm | `@alimuzzaman/sandbox` (`package.json` + `bin/sandbox.js`) | Node devs / CI |
 | Homebrew | `packaging/homebrew/sandbox.rb` | macOS / Linuxbrew |
 
 The `sandbox` command is the canonical name; `sb` is kept as an alias (the
@@ -24,7 +24,7 @@ the `.venv`s) can never leak even though `.npmignore` does not prune inside
 
 ```bash
 npm pack                                   # build the tarball
-npm install -g ./wpdeveloper-sandbox-*.tgz # or: npm i -g @templately/sandbox
+npm install -g ./wpdeveloper-sandbox-*.tgz # or: npm i -g @alimuzzaman/sandbox
 sandbox --help
 ```
 
@@ -34,14 +34,14 @@ and `sandbox init --help` run from any directory.
 ## Homebrew
 
 `packaging/homebrew/sandbox.rb` belongs in a tap repo
-(`templately/homebrew-sandbox` as `Formula/sandbox.rb`). It depends on
+(`alimuzzaman/homebrew-sandbox` as `Formula/sandbox.rb`). It depends on
 `python@3.12` and wraps `sb` with that python on PATH. `--HEAD` installs from
 git directly; a tagged release needs `url`/`sha256` pointed at the uploaded
 `sandbox-<ver>.tar.gz` (the sha is `shasum -a 256 dist/sandbox-<ver>.tar.gz`,
 filled in by the release flow — see `scripts/make-release.sh`).
 
 ```bash
-brew install --HEAD templately/sandbox/sandbox   # from git
+brew install --HEAD alimuzzaman/sandbox/sandbox   # from git
 # or, after a release is published + the formula sha is filled:
-brew tap templately/sandbox && brew install sandbox
+brew tap alimuzzaman/sandbox && brew install sandbox
 ```

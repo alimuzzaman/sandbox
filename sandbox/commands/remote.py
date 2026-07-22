@@ -189,7 +189,7 @@ def _cmd_remove(args, as_json: bool) -> None:
 def _upload_runtime_source(ssh_target: str) -> None:
     """Stage this checkout onto the VPS so provisioning never depends on
     GitHub reachability or repo visibility. Fresh VPS validation caught that
-    cloning templately/sandbox anonymously can fail for private/internal repos."""
+    cloning alimuzzaman/sandbox anonymously can fail for private/internal repos."""
     excludes = [
         ".git",
         ".cli-venv",

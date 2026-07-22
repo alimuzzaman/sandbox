@@ -1,5 +1,5 @@
 {
-  "name": "@templately/sandbox",
+  "name": "@alimuzzaman/sandbox",
   "version": "0.1.0",
   "description": "MCP-first, per-project WordPress dev/test stack — cd into a plugin, boot an instance, and run its phpunit tests with zero composer pollution.",
   "keywords": [
@@ -14,7 +14,7 @@
   ],
   "homepage": "https://sandbox.xc1.app/",
   "bugs": {
-    "url": "https://github.com/templately/sandbox/issues"
+    "url": "https://github.com/alimuzzaman/sandbox/issues"
   },
   "license": "GPL-2.0-or-later",
   "bin": {

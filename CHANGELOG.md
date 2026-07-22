@@ -54,7 +54,7 @@ a live stack, isolated test DB, and a single registered MCP server.
 - **Version knobs** — `phpVersion`/`wpVersion` in config resolve to
   server-aware image tags (apache, nginx-fpm, lsphp). WP CLI image
   follows the PHP pin.
-- **npm / Homebrew distribution** — `@templately/sandbox` package +
+- **npm / Homebrew distribution** — `@alimuzzaman/sandbox` package +
   `bin/sandbox.js` shim + `packaging/homebrew/sandbox.rb` formula.
 - **`docs/sandbox-config-reference.md`** — full schema reference.
 - **Web dashboard** (`./sb web`) — instance list, focus/server/start/

@@ -35,7 +35,7 @@ phpunit tests** — no central catalog, nothing to pre-register.
 ## Get started
 
 > **Note:** This is a major rewrite to the per-project model hosted at
-> [`templately/sandbox`](https://github.com/templately/sandbox). Install:
+> [`alimuzzaman/sandbox`](https://github.com/alimuzzaman/sandbox). Install:
 
 **Prerequisites:** A running Docker-compatible engine (Docker Desktop or
 OrbStack on macOS) · Python 3.9+ · Claude Code (or any MCP client). On a fresh
@@ -62,7 +62,7 @@ instead, where it behaves exactly like the Ubuntu path above.
 **Clone and set up:**
 
 ```bash
-git clone -b main https://github.com/templately/sandbox.git
+git clone -b main https://github.com/alimuzzaman/sandbox.git
 cd sandbox
 ./sb global           # puts `sb` on your PATH (do this first)
 ./sb setup            # prepares the CLI and local runtime
@@ -494,7 +494,7 @@ sandbox/
 ├── sandbox.yml             # machine/global defaults
 ├── sandbox.local.yml       # per-machine overrides (gitignored)
 ├── bin/sandbox.js          # npm entry shim (execs the bundled sb)
-├── package.json            # npm package (@templately/sandbox)
+├── package.json            # npm package (@alimuzzaman/sandbox)
 ├── packaging/              # Homebrew formula + packaging notes
 ├── docker-compose.yml      # managed by the CLI
 ├── runtime/

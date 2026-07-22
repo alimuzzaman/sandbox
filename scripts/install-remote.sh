@@ -118,7 +118,7 @@ if [[ -x "$SANDBOX_HOME/sb-src/sb" ]]; then
     ok "sandbox runtime already present at $SANDBOX_HOME/sb-src"
 elif [[ ! -d "$SANDBOX_HOME/sb-src/.git" ]]; then
     log "cloning the sandbox runtime into $SANDBOX_HOME/sb-src"
-    git clone --depth 1 https://github.com/templately/sandbox.git "$SANDBOX_HOME/sb-src"
+    git clone --depth 1 https://github.com/alimuzzaman/sandbox.git "$SANDBOX_HOME/sb-src"
 else
     ok "sandbox runtime already present at $SANDBOX_HOME/sb-src"
 fi

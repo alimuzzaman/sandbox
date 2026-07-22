@@ -1,10 +1,7 @@
 # Homebrew formula for the Sandbox CLI.
 #
-# Ship this from a tap repo (e.g. alimuzzaman/homebrew-sandbox as Formula/sandbox.rb):
-#     brew tap alimuzzaman/sandbox
-#     brew install sandbox
-# Or install bleeding-edge straight from git:
-#     brew install --HEAD alimuzzaman/sandbox/sandbox
+# This formula is maintained in the Sandbox repository. From a local checkout:
+#     brew install --HEAD ./packaging/homebrew/sandbox.rb
 #
 # Release flow: scripts/make-release.sh builds dist/sandbox-<ver>.tar.gz; upload it
 # to the BASE_URL (sandbox.xc1.app), then set `url`/`sha256` below to that exact

@@ -33,15 +33,12 @@ and `sandbox init --help` run from any directory.
 
 ## Homebrew
 
-`packaging/homebrew/sandbox.rb` belongs in a tap repo
-(`alimuzzaman/homebrew-sandbox` as `Formula/sandbox.rb`). It depends on
-`python@3.12` and wraps `sb` with that python on PATH. `--HEAD` installs from
-git directly; a tagged release needs `url`/`sha256` pointed at the uploaded
-`sandbox-<ver>.tar.gz` (the sha is `shasum -a 256 dist/sandbox-<ver>.tar.gz`,
-filled in by the release flow — see `scripts/make-release.sh`).
+`packaging/homebrew/sandbox.rb` is maintained in this repository. It depends
+on `python@3.12` and wraps `sb` with that python on PATH. A tagged release
+needs `url`/`sha256` pointed at the uploaded `sandbox-<ver>.tar.gz` (the sha is
+`shasum -a 256 dist/sandbox-<ver>.tar.gz`, filled in by the release flow — see
+`scripts/make-release.sh`).
 
 ```bash
-brew install --HEAD alimuzzaman/sandbox/sandbox   # from git
-# or, after a release is published + the formula sha is filled:
-brew tap alimuzzaman/sandbox && brew install sandbox
+brew install --HEAD ./packaging/homebrew/sandbox.rb
 ```

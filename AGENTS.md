@@ -17,7 +17,7 @@
 
 ## Non-negotiable rules
 
-**Git & shipping.** After required checks pass, agents must `git commit` and `git push` the relevant completed work to the active branch automatically, including `main`. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+**Git & shipping — hard branch rule.** `main` is read-only: agents must never switch to it for work, commit on it, push to it, or merge into it. Do all work on `latest` or a feature branch. Feature branches may be merged only into `latest`; never create, prepare, or merge a PR targeting `main`. After required checks pass, agents must `git commit` and `git push` the relevant completed work to the active non-`main` branch automatically. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 

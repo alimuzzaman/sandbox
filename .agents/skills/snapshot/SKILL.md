@@ -1,3 +1,8 @@
+---
+name: snapshot
+description: Capture, restore, and reset local Sandbox WordPress state safely using named snapshots and the install baseline.
+---
+
 # Snapshots
 
 Save and restore DB + uploads state. The unlock for fast bug repro, QA

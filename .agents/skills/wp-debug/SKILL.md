@@ -1,3 +1,8 @@
+---
+name: wp-debug
+description: Diagnose WordPress and plugin runtime errors with Sandbox logs, Query Monitor, WP-CLI, and Xdebug.
+---
+
 # WP Debugging
 
 Tools and patterns for diagnosing WordPress / plugin errors in the sandbox.

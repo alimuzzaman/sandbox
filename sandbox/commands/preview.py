@@ -145,6 +145,8 @@ def cmd_preview(cfg, args) -> None:
         die("remote has no origin IPv4; run `./sb remote set-origin`")
     record = None
     instance = None
+    target = None
+    label = None
     domain = None
     zone = None
     route_configured = False
@@ -177,6 +179,7 @@ def cmd_preview(cfg, args) -> None:
         route_configured = True
         url = f"https://{domain}"
         remote.set_remote_instance_url(entry, target, url)
+        login_url = remote.rewrite_instance_url(instance.get("login_url"), url) if instance.get("login_url") else ""
     except (RuntimeError, ValueError, cloudflare.CloudflareError, KeyError) as exc:
         # Best-effort rollback is deliberately restricted to resources whose
         # generated identifiers are known, never broad DNS or Caddy cleanup.
@@ -195,10 +198,16 @@ def cmd_preview(cfg, args) -> None:
                 remote.delete_remote_instance(entry, instance["instance"])
             except (RuntimeError, KeyError):
                 pass
+        elif target and label:
+            try:
+                remote.delete_remote_instance_for_label(entry, target, label)
+            except (RuntimeError, ValueError):
+                pass
         die(str(exc))
     expiry = datetime.now(timezone.utc) + timedelta(hours=args.ttl_hours)
     row = {"id": preview_id, "remote": args.remote, "project_root": str(root),
            "instance": instance["instance"], "domain": domain, "url": url,
+           "login_url": login_url,
            "zone_id": zone["id"], "dns_record_id": record["id"],
            "expires_at": expiry.isoformat()}
     state["previews"][preview_id] = row

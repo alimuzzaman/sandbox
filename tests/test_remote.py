@@ -238,18 +238,13 @@ class TestSshRun(unittest.TestCase):
                             mock_run.assert_called_once()
 
     @patch("subprocess.run")
-    def test_ssh_retries_directly_after_a_multiplex_timeout(self, mock_run):
-        mock_run.side_effect = [
-            subprocess.TimeoutExpired(cmd="ssh", timeout=10),
-            _completed(returncode=0, stdout="recovered"),
-        ]
+    def test_ssh_timeout_is_not_replayed(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=10)
         with tempfile.TemporaryDirectory() as runtime:
             with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
-                result = sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
-        self.assertEqual(result.stdout, "recovered")
-        self.assertEqual(mock_run.call_count, 2)
-        self.assertIn("ControlMaster=auto", mock_run.call_args_list[0][0][0])
-        self.assertNotIn("ControlMaster=auto", mock_run.call_args_list[1][0][0])
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    sr.ssh_run({"ssh": "ubuntu@1.2.3.4"}, "true", timeout=10)
+        mock_run.assert_called_once()
 
     @patch("subprocess.run")
     def test_scp_uses_control_options_with_custom_port(self, mock_run):
@@ -988,7 +983,36 @@ class TestRemotePreviewInstances(unittest.TestCase):
         mock_ssh_run.return_value = _completed(stdout='{"instance":"preview-a","wordpress_port":8123}\n')
         result = sr.ensure_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a")
         self.assertEqual(result["instance"], "preview-a")
-        self.assertIn("--label preview-a --create", mock_ssh_run.call_args[0][1])
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("--label preview-a --create", command)
+        self.assertIn("timeout --signal=TERM --kill-after=30s 300s", command)
+        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_ensure_remote_instance_reports_timeout_once(self, mock_ssh_run):
+        mock_ssh_run.side_effect = [
+            _completed(stdout="/home/ubuntu/sandbox/sb\n"),
+            _completed(returncode=124),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "timed out after 300s"):
+            sr.ensure_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a")
+        self.assertEqual(mock_ssh_run.call_count, 2)
+
+    @patch("sandbox.core._remote.delete_remote_instance")
+    @patch("sandbox.core._remote.remote_sb_path", return_value="/srv/sandbox/sb")
+    @patch("sandbox.core._remote.ssh_run")
+    def test_partial_preview_cleanup_resolves_the_instance_by_label(self, ssh_run, _sb_path, delete):
+        ssh_run.return_value = _completed(stdout=json.dumps({"ok": True, "instances": [
+            {"name": "preview-a", "label": "preview-a"},
+        ]}) + "\n")
+
+        removed = sr.delete_remote_instance_for_label(
+            {"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a"
+        )
+
+        self.assertTrue(removed)
+        self.assertIn("instances --project-dir /srv/project --json", ssh_run.call_args.args[1])
+        delete.assert_called_once_with({"ssh": "ubuntu@1.2.3.4"}, "preview-a")
 
     @patch("sandbox.core._remote.ssh_run")
     def test_delete_remote_instance_is_scoped_to_name(self, mock_ssh_run):

@@ -327,6 +327,35 @@ class TestCloudflareClient(unittest.TestCase):
 
 
 class TestRemotePreviewIdentity(unittest.TestCase):
+    def test_preview_rolls_back_a_partial_instance_when_ensure_fails(self):
+        args = types.SimpleNamespace(
+            action="create", json=True, confirm=True, ttl_hours=24,
+            remote="preview", project_dir="/tmp/project", name=None,
+            base_domain="sandbox.asb.bd",
+        )
+        config_core = MagicMock()
+        config_core.load_project_config.return_value = {"root": "/tmp/project", "slug": "demo"}
+        entry = {"provisioned": True, "origin_ipv4": "203.0.113.10"}
+
+        with patch.object(preview, "_load_state", return_value={"version": 1, "previews": {}}), \
+             patch.object(preview.core, "_core", return_value=config_core), \
+             patch.object(preview.remote, "get_remote", return_value=entry), \
+             patch.object(preview, "preflight_project_capability", return_value=None), \
+             patch.object(preview.remote, "current_branch", return_value="latest"), \
+             patch.object(preview, "preview_identity", return_value=("preview-id", "preview-label")), \
+             patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
+             patch.object(preview.remote, "push_commits", return_value="abc123"), \
+             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(preview.remote, "apply_uncommitted"), \
+             patch.object(preview.remote, "ensure_remote_instance", side_effect=RuntimeError("bootstrap failed")), \
+             patch.object(preview.remote, "delete_remote_instance_for_label") as cleanup, \
+             patch.object(preview, "die", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                preview.cmd_preview(None, args)
+
+        cleanup.assert_called_once_with(entry, "/srv/demo", "preview-label")
+
     def test_preview_create_loads_project_config_from_core_facade(self):
         args = types.SimpleNamespace(
             action="create", json=True, confirm=True, ttl_hours=24,
@@ -339,7 +368,11 @@ class TestRemotePreviewIdentity(unittest.TestCase):
         client.zone.return_value = {"id": "zone-1"}
         client.records.return_value = []
         client.upsert_address.return_value = {"id": "record-1"}
-        instance = {"instance": "preview-demo", "wordpress_port": 8188}
+        instance = {
+            "instance": "preview-demo",
+            "wordpress_port": 8188,
+            "login_url": "http://127.0.0.1:8188/wp-login.php?sandbox_autologin=token",
+        }
         state = {"version": 1, "previews": {}}
 
         with patch.object(preview, "_load_state", return_value=state), \
@@ -359,9 +392,15 @@ class TestRemotePreviewIdentity(unittest.TestCase):
              patch.object(preview.remote, "activate_remote_plugin"), \
              patch.object(preview.remote, "configure_instance_https_route"), \
              patch.object(preview.remote, "set_remote_instance_url"), \
+             patch.object(preview.remote, "rewrite_instance_url", return_value="https://preview.example.test/wp-login.php?sandbox_autologin=token"), \
              patch.object(preview.cloudflare, "Client", return_value=client), \
-             patch("builtins.print"):
+             patch("builtins.print") as printed:
             preview.cmd_preview(None, args)
+        response = json.loads(printed.call_args.args[0])
+        self.assertEqual(
+            response["preview"]["login_url"],
+            "https://preview.example.test/wp-login.php?sandbox_autologin=token",
+        )
 
         config_core.load_project_config.assert_called_once_with("/tmp/project")
 

@@ -637,7 +637,6 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             _provision_herd(name, pconf)
         else:
             cmd_up(cfg, ns)
-            _wait_http(ports["wordpress_port"])
             # Secure-at-create: when the clean-URL proxy is already set up, give
             # the instance its https://<name>.<tld> BEFORE install so WP never
             # stores an http localhost URL (whose port leaks into redirects).
@@ -646,6 +645,11 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                 secured = True
                 cfg = load_config()
         cmd_install(cfg, ns)
+        # A version-pinned bootstrap may need to repair an empty or partial
+        # document root before WordPress can answer HTTP. Probe only after core
+        # installation, otherwise the first ensure fails before repair starts.
+        if server != "herd":
+            _wait_http(ports["wordpress_port"])
         if secured:
             _auto_heal_wp_url(name)
         # Multisite goes live only when the web tier reboots WITH the MULTISITE

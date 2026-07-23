@@ -75,6 +75,7 @@ def cmd_up(cfg: dict, args) -> None:
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
     if wp_dir(inst).exists():
+        _prepare_mu_plugin_directory(inst)
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
@@ -113,6 +114,25 @@ def cmd_up(cfg: dict, args) -> None:
             _ensure_bridge_server()
     ok(f"WordPress: {site_url(inst_cfg)}")
     ok(f"Mailpit:   http://localhost:{inst_cfg['mailpit_port']}")
+
+
+def _prepare_mu_plugin_directory(instance: str) -> None:
+    """Make the shared mu-plugin directory writable by host and container tools.
+
+    Docker can create a fresh bind-mounted document root as ``www-data``. The
+    Sandbox controller writes generated mu-plugins from the host, so grant the
+    narrowly scoped directory shared write access before those writes rather
+    than depending on image-entrypoint timing or host/container UID parity.
+    """
+    if _is_herd_instance(instance):
+        return
+    compose(
+        "exec", "-T", "wp", "sh", "-c",
+        "mkdir -p /var/www/html/wp-content/mu-plugins && "
+        "chown -R www-data:www-data /var/www/html/wp-content/mu-plugins && "
+        "chmod -R a+rwX /var/www/html/wp-content/mu-plugins",
+        instance=instance, check=True,
+    )
 
 def cmd_down(cfg, args) -> None:
     owner = _core().registry_find_instance(args.resolved_instance)
@@ -258,6 +278,25 @@ def cmd_shell(cfg, args) -> None:
             f"at runtime/wp-{args.resolved_instance}/")
     compose("exec", "wp", "bash", instance=args.resolved_instance)
 
+
+def _download_wordpress_core(instance: str, args: list[str]) -> None:
+    """Install core as the same unprivileged user used by the web tier.
+
+    The official image can seed a bind-mounted document root as the host user.
+    Reconcile that ownership before forcing a versioned core download; otherwise
+    tar emits one permission error per core file and a remote bootstrap can
+    appear to hang while its output pipe fills.
+    """
+    if not _is_herd_instance(instance):
+        compose(
+            "exec", "-T", "wp", "chown", "-R", "www-data:www-data",
+            "/var/www/html", instance=instance, check=True,
+        )
+    # `wp core download` operates on archive files and does not bootstrap the
+    # currently mounted WordPress tree, which may be incomplete on first boot.
+    wpcli(args, instance=instance, check=True)
+
+
 def cmd_install(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.cli")
     if error is not None:
@@ -274,52 +313,18 @@ def cmd_install(cfg, args) -> None:
     #    errors from non-existent patch-level image tags (e.g. 6.9.4-php8.1).
     #  - When a wp_version is pinned, always force-download it so the container
     #    runs the exact requested version, not whatever ships in the base image.
-    #  - Without a pin, ask WordPress.org whether a newer stable release is
-    #    available before deciding whether the bundled core can be reused.
+    #  - A fresh bind mount can contain a partial image-seeded core. Download
+    #    before invoking any command that bootstraps WordPress, rather than
+    #    probing that partial tree with `core version` or `check-update`.
     wp_v = inst_cfg.get("wp_version")
     if wp_v:
-        # Already on the pinned version? Skip the download — re-fetching on every
-        # start is a pointless round-trip to WordPress.org that hard-errors
-        # ("Failed to get url ... cURL error 28") whenever the network is down,
-        # even though the requested core is sitting on disk.
-        cur = wpcli(["core", "version"], instance=inst, check=False, capture=True)
-        have = (cur.stdout or "").strip() if cur.returncode == 0 else ""
-        if have == str(wp_v):
-            info(f"WordPress {wp_v} already present — skipping download.")
-        else:
-            info(f"downloading WordPress {wp_v}…")
-            wpcli(["core", "download", "--force", f"--version={wp_v}"],
-                  instance=inst, check=False)
-    else:
-        latest = None
-        update = wpcli(
-            ["core", "check-update", "--format=json"],
-            instance=inst,
-            check=False,
-            capture=True,
+        info(f"downloading WordPress {wp_v}…")
+        _download_wordpress_core(
+            inst, ["core", "download", "--force", f"--version={wp_v}"]
         )
-        if update.returncode == 0 and update.stdout:
-            try:
-                offers = json.loads(update.stdout)
-            except (TypeError, ValueError):
-                offers = []
-            if isinstance(offers, list) and offers:
-                candidate = offers[0].get("version")
-                if isinstance(candidate, str) and candidate:
-                    latest = candidate
-
-        if latest:
-            info(f"WordPress.org reports WordPress {latest}; downloading it…")
-            wpcli(
-                ["core", "download", "--force", f"--version={latest}"],
-                instance=inst,
-                check=False,
-            )
-        else:
-            ver = wpcli(["core", "version"], instance=inst, check=False, capture=True)
-            if ver.returncode != 0:
-                info("downloading WordPress core (latest)…")
-                wpcli(["core", "download", "--force"], instance=inst, check=False)
+    else:
+        info("downloading WordPress core (latest)…")
+        _download_wordpress_core(inst, ["core", "download", "--force"])
     chk = wpcli(["config", "path"], instance=inst, check=False, capture=True)
     if chk.returncode != 0:
         info("generating wp-config.php…")
@@ -354,6 +359,11 @@ def cmd_install(cfg, args) -> None:
         "--skip-email",
     ], instance=inst)
     wpcli(["rewrite", "structure", "/%postname%/"], instance=inst)
+
+    # Core download repairs the document root as www-data, which also resets
+    # the bind-mounted mu-plugin directory. Reapply its narrowly scoped shared
+    # write mode before generating the autologin, snapshot, and mail plugins.
+    _prepare_mu_plugin_directory(inst)
 
     # The OpenLiteSpeed image's vhost template does `autoLoadHtaccess`, but
     # WordPress only writes a physical .htaccess under Apache — under OLS it

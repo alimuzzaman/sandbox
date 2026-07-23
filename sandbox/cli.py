@@ -224,6 +224,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     isc.add_argument("--project-dir", dest="project_dir", default=None,
         help="filter to one project root's instance(s) — useful once a root "
              "owns more than one labelled instance")
+    isc.add_argument("--json", action="store_true", help="print the instance inventory as JSON")
 
     sub.add_parser("dashboard",
         help="Interactive TUI to view + manage all instances")

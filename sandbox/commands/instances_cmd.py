@@ -362,6 +362,9 @@ def cmd_instances(cfg, args) -> None:
             die(f"invalid --project-dir {project_dir!r}: {e}")
         owned = {e["instance"] for e in sc.registry_list_for_root(root)}
         rows = [r for r in rows if r["name"] in owned]
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, "instances": rows}))
+        return
     print()
     print(f"  {'STATUS':<10} {'NAME':<10} {'LABEL':<10} {'URL':<26} {'SERVER':<10} "
           f"{'MCP SERVER':<18} {'PROJECT':<12} FOCUS")

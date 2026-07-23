@@ -322,23 +322,13 @@ def ssh_process(remote_or_target, command: str, *, input_data=None,
         multiplex = False
     args = ssh_command_args(remote_or_target, command, multiplex=multiplex)
     is_text = input_data is None or isinstance(input_data, str)
-    try:
-        return subprocess.run(
-            args, input=input_data, capture_output=True, text=is_text,
-            timeout=timeout, check=False,
-        )
-    except subprocess.TimeoutExpired:
-        if not multiplex:
-            raise
-        # A stale ControlMaster can accept the first connection but wedge a
-        # later channel. Retry this bounded command directly once; callers
-        # retain their existing timeout/error behavior if the VPS is truly
-        # unreachable.
-        direct_args = ssh_command_args(remote_or_target, command, multiplex=False)
-        return subprocess.run(
-            direct_args, input=input_data, capture_output=True, text=is_text,
-            timeout=timeout, check=False,
-        )
+    # A timeout is ambiguous: the remote command may still be running after the
+    # local SSH client is terminated. Never replay it automatically, because a
+    # second launch can race a stateful operation such as `sb ensure`.
+    return subprocess.run(
+        args, input=input_data, capture_output=True, text=is_text,
+        timeout=timeout, check=False,
+    )
 
 
 def scp_run(remote: dict, local_path: str, remote_path: str,
@@ -561,15 +551,42 @@ def _last_json(stdout: str) -> dict | None:
     return None
 
 
+REMOTE_ENSURE_TIMEOUT_SECONDS = 300
+REMOTE_ENSURE_KILL_GRACE_SECONDS = 30
+REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS = (
+    REMOTE_ENSURE_TIMEOUT_SECONDS + REMOTE_ENSURE_KILL_GRACE_SECONDS + 15
+)
+
+
 def ensure_remote_instance(remote: dict, target_path: str, label: str | None = None) -> dict:
     """Run remote `sb ensure` for the deployed project and parse its JSON
     result. This is the missing second half after code deploy: it creates or
     refreshes the WordPress instance on the VPS itself."""
     sb = remote_sb_path(remote)
     label_arg = f" --label {shlex.quote(label)} --create" if label else ""
-    cmd = f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)}{label_arg} --json"
-    res = ssh_run(remote, cmd, timeout=900)
+    ensure = (
+        f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)}"
+        f"{label_arg} --json"
+    )
+    # Bound the command on the VPS, not just the local SSH client. `exec`
+    # keeps the timeout supervisor in the session's foreground process group;
+    # it terminates the child after the grace period even when a client drops.
+    cmd = (
+        "exec timeout --signal=TERM "
+        f"--kill-after={REMOTE_ENSURE_KILL_GRACE_SECONDS}s "
+        f"{REMOTE_ENSURE_TIMEOUT_SECONDS}s {ensure}"
+    )
+    try:
+        res = ssh_run(remote, cmd, timeout=REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"remote instance ensure timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        ) from exc
     data = _last_json(res.stdout or "")
+    if res.returncode == 124:
+        raise RuntimeError(
+            f"remote instance ensure timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        )
     if res.returncode != 0 or not data:
         raise RuntimeError(
             f"could not ensure remote instance: "
@@ -714,6 +731,40 @@ def delete_remote_instance(remote: dict, instance_name: str) -> None:
             f"could not delete remote Sandbox instance: "
             f"{(res.stderr or res.stdout or '').strip()[:1000]}"
         )
+
+
+def delete_remote_instance_for_label(remote: dict, target_path: str, label: str) -> bool:
+    """Delete the remote instance currently registered for one project label.
+
+    A failed `ensure` may create its registry entry before it can return the
+    instance record to the caller. Resolve the name through the CLI's JSON
+    inventory so preview rollback still removes that partial stack.
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or ""):
+        raise ValueError("invalid remote Sandbox instance label")
+    sb = remote_sb_path(remote)
+    command = (
+        f"{shlex.quote(sb)} instances --project-dir {shlex.quote(target_path)} --json"
+    )
+    res = ssh_run(remote, command, timeout=30)
+    data = _last_json(res.stdout or "")
+    if res.returncode != 0 or not isinstance(data, dict):
+        raise RuntimeError(
+            "could not list remote instances for preview rollback: "
+            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+        )
+    rows = data.get("instances")
+    if not isinstance(rows, list):
+        raise RuntimeError("remote instance inventory returned no instances list")
+    instance = next(
+        (row.get("name") for row in rows
+         if isinstance(row, dict) and row.get("label") == label),
+        None,
+    )
+    if not instance:
+        return False
+    delete_remote_instance(remote, str(instance))
+    return True
 
 
 def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:

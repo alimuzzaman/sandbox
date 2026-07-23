@@ -6,10 +6,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -326,6 +327,44 @@ class TestCloudflareClient(unittest.TestCase):
 
 
 class TestRemotePreviewIdentity(unittest.TestCase):
+    def test_preview_create_loads_project_config_from_core_facade(self):
+        args = types.SimpleNamespace(
+            action="create", json=True, confirm=True, ttl_hours=24,
+            remote="preview", project_dir="/tmp/project", name=None,
+            base_domain="sandbox.asb.bd",
+        )
+        config_core = MagicMock()
+        config_core.load_project_config.return_value = {"root": "/tmp/project", "slug": "demo"}
+        client = MagicMock()
+        client.zone.return_value = {"id": "zone-1"}
+        client.records.return_value = []
+        client.upsert_address.return_value = {"id": "record-1"}
+        instance = {"instance": "preview-demo", "wordpress_port": 8188}
+        state = {"version": 1, "previews": {}}
+
+        with patch.object(preview, "_load_state", return_value=state), \
+             patch.object(preview, "_save_state"), \
+             patch.object(preview.core, "_core", return_value=config_core), \
+             patch.object(preview.remote, "get_remote", return_value={
+                 "provisioned": True, "origin_ipv4": "203.0.113.10",
+             }), \
+             patch.object(preview, "preflight_project_capability", return_value=None), \
+             patch.object(preview.remote, "current_branch", return_value="latest"), \
+             patch.object(preview.remote, "ensure_deploy_repo", return_value="/srv/demo"), \
+             patch.object(preview.remote, "push_commits", return_value="abc123"), \
+             patch.object(preview.remote, "reset_target_to"), \
+             patch.object(preview.remote, "capture_uncommitted", return_value=("", [])), \
+             patch.object(preview.remote, "apply_uncommitted"), \
+             patch.object(preview.remote, "ensure_remote_instance", return_value=instance), \
+             patch.object(preview.remote, "activate_remote_plugin"), \
+             patch.object(preview.remote, "configure_instance_https_route"), \
+             patch.object(preview.remote, "set_remote_instance_url"), \
+             patch.object(preview.cloudflare, "Client", return_value=client), \
+             patch("builtins.print"):
+            preview.cmd_preview(None, args)
+
+        config_core.load_project_config.assert_called_once_with("/tmp/project")
+
     def test_preview_identity_is_stable_and_namespaced(self):
         first = preview.preview_identity("/tmp/example", "fix/login", "login")
         second = preview.preview_identity("/tmp/example", "fix/login", "login")

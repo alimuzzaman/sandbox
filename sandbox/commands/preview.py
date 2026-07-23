@@ -149,7 +149,7 @@ def cmd_preview(cfg, args) -> None:
     zone = None
     route_configured = False
     try:
-        project = core.load_project_config(args.project_dir or os.getcwd())
+        project = core._core().load_project_config(args.project_dir or os.getcwd())
         root = Path(project["root"])
         capability_error = preflight_project_capability(
             cfg, str(root), "wordpress.remote-preview"

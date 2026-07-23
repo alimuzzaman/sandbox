@@ -114,6 +114,7 @@ One durable accepted execution or aggregate parent.
 | `cleanup_state` | TEXT | cleanup enum |
 | `integrity_sha256` | TEXT nullable | terminal canonical result/log index identity |
 | `result_json` | TEXT nullable | bounded structured result, compatibility keys included |
+| `submission_json` | TEXT nullable | additive bounded canonical policy/reference snapshot for lossless retry; null on legacy rows; no environment values or arbitrary JSON |
 
 Indexes: `(project_identity, accepted_at)`, `(workspace_label, lifecycle)`,
 `(parent_job_id, attempt)`, `(lifecycle, priority, accepted_at)`, and unique
@@ -201,6 +202,7 @@ Expired leases are reclaimed only after process-identity reconciliation.
 | `last_segment_bytes` | INTEGER | append offset |
 | `complete` | INTEGER | terminal index closed |
 | `sha256` | TEXT nullable | terminal stream identity |
+| `available` | INTEGER | false after explicit cleanup removes retained bytes |
 | `updated_at` | TEXT | UTC RFC3339 |
 
 The payload itself lives in `stdout/00000000.log`, `stderr/00000000.log`, etc. Combined
@@ -232,8 +234,9 @@ Primary key `(job_id, sequence)`.
 | `first_at` / `last_at` | TEXT | retained time range |
 | `sha256` | TEXT nullable | terminal identity |
 | `complete` | INTEGER | collection finalized |
+| `available` | INTEGER | false after explicit cleanup removes retained samples |
 
-Samples live in `metrics.ndjson` and may include process CPU time, RSS, process count,
+Samples live in `metrics.jsonl` and may include process CPU time, RSS, process count,
 I/O counters where available, process state, load, free disk, and supervisor heartbeat.
 Unsupported fields are null with a capability list; they are never fabricated.
 
@@ -255,9 +258,10 @@ Unsupported fields are null with a capability list; they are never fabricated.
 | `status` | TEXT | available/rejected/expired/retrieval_failed |
 | `reason` | TEXT nullable | safe rejection/failure code |
 
-Collection resolves paths without following unsafe symlinks, requires containment in
-the deployed project/workspace, rejects devices/sockets/FIFOs, and applies file/count/
-total-size limits before copying.
+Collection resolves literal paths without following unsafe symlinks, requires containment
+in the deployed project/workspace, rejects devices/sockets/FIFOs, and applies file/count/
+total-size limits before copying. Literal directories become deterministic bounded tar
+archives with sorted entries and normalized metadata.
 
 ### `compatibility_differences`
 
@@ -286,7 +290,7 @@ $SANDBOX_HOME/runtime/jobs/<job-id>/
 │   └── 00000001.log[.gz]
 ├── stderr/
 │   └── 00000000.log[.gz]
-├── metrics.ndjson
+├── metrics.jsonl
 ├── result.json               # canonical terminal result mirror
 ├── artifacts/
 │   ├── manifest.json

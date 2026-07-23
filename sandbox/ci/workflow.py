@@ -50,12 +50,28 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
     selected = selected_jobs or list(jobs)
     unknown = [name for name in selected if name not in jobs]
     if unknown: raise WorkflowError(f"unknown workflow jobs: {', '.join(unknown)}")
-    differences = detect(workflow)
+    active_jobs = list(dict.fromkeys(selected))
+    active_job_set = set(active_jobs)
+    pending = list(selected)
+    while pending:
+        job_id = pending.pop()
+        needs = jobs[job_id].get("needs", [])
+        needs = needs if isinstance(needs, list) else [needs]
+        for dependency in needs:
+            if dependency not in jobs:
+                raise WorkflowError(f"job {job_id!r} needs unknown job {dependency!r}")
+            if dependency not in active_job_set:
+                active_job_set.add(dependency)
+                active_jobs.append(dependency)
+                pending.append(dependency)
+
+    differences = [item for item in detect(workflow) if not item["location"].startswith("jobs.") or
+                   any(item["location"].startswith(f"jobs.{job_id}.") for job_id in active_job_set)]
     accepted = set(accepted_differences or ())
     for item in differences: item["accepted"] = item["id"] in accepted
     blocking = [item["id"] for item in differences if item["severity"] == "block" and not item["accepted"]]
     safe_actions = []
-    for job_id in selected:
+    for job_id in active_jobs:
         for index, step in enumerate(jobs[job_id].get("steps") or []):
             text = str(step.get("uses") or step.get("run") or "").lower()
             if any(word in text for word in ("deploy", "release", "publish", "git push", "svn commit")):
@@ -73,5 +89,5 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
             "runner": {"platform": "linux", "accepted": True},
             "graph": {"jobs": list(jobs), "selected_jobs": selected,
                       "dependencies": {name: jobs[name].get("needs", []) if isinstance(jobs[name].get("needs", []), list) else [jobs[name].get("needs")] for name in selected},
-                      "matrix_cells": sum(len(matrix_cells(jobs[name])) for name in selected)},
+                      "matrix_cells": sum(len(matrix_cells(jobs[name])) for name in active_jobs)},
             "differences": differences, "safe_mode_actions": safe_actions, "blocking": sorted(set(blocking))}

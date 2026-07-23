@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
-CATALOG_VERSION = "1"
+CATALOG_VERSION = "2"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,15 @@ CATALOG = {
     "act.environment-ignored": Difference("act.environment-ignored", "block", "deployment environments and environment secrets are ignored"),
     "act.docker-context-unsupported": Difference("act.docker-context-unsupported", "block", "Docker context execution is unsupported"),
     "act.non-linux-runner": Difference("act.non-linux-runner", "block", "only Linux runners are supported"),
+    "sandbox.artifact-pattern-unsupported": Difference(
+        "sandbox.artifact-pattern-unsupported", "block",
+        "upload-artifact paths must be literal project-relative paths; globs and expressions are unsupported"),
+    "sandbox.artifact-missing-semantics": Difference(
+        "sandbox.artifact-missing-semantics", "block",
+        "upload-artifact must declare if-no-files-found: error for Sandbox collection parity"),
+    "sandbox.artifact-options-unsupported": Difference(
+        "sandbox.artifact-options-unsupported", "block",
+        "upload-artifact options beyond name, path, and if-no-files-found are unsupported"),
 }
 
 
@@ -51,4 +61,27 @@ def detect(workflow: dict[str, Any]) -> list[dict[str, str]]:
         if job.get("continue-on-error") is not None: add("act.continue-on-error-ignored", f"{prefix}.continue-on-error")
         if job.get("environment") is not None: add("act.environment-ignored", f"{prefix}.environment")
         if job.get("container") or job.get("defaults", {}).get("run", {}).get("working-directory", "").startswith("docker:"): add("act.docker-context-unsupported", f"{prefix}.container")
+        for index, step in enumerate(job.get("steps") or []):
+            uses = step.get("uses")
+            if not isinstance(uses, str) or uses.split("@", 1)[0].lower() != "actions/upload-artifact":
+                continue
+            location = f"{prefix}.steps[{index}].with"
+            options = step.get("with") or {}
+            if not isinstance(options, dict):
+                add("sandbox.artifact-options-unsupported", location)
+                add("sandbox.artifact-pattern-unsupported", f"{location}.path")
+                add("sandbox.artifact-missing-semantics", f"{location}.if-no-files-found")
+                continue
+            path_value = options.get("path")
+            literals = ([value.strip() for value in path_value.splitlines() if value.strip()]
+                        if isinstance(path_value, str) else [])
+            if (not literals or any(
+                    "${{" in value or any(char in value for char in "*?[]") or
+                    Path(value).is_absolute() or ".." in Path(value).parts
+                    for value in literals)):
+                add("sandbox.artifact-pattern-unsupported", f"{location}.path")
+            if options.get("if-no-files-found") != "error":
+                add("sandbox.artifact-missing-semantics", f"{location}.if-no-files-found")
+            if set(options) - {"name", "path", "if-no-files-found"}:
+                add("sandbox.artifact-options-unsupported", location)
     return differences

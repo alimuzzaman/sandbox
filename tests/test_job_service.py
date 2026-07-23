@@ -94,6 +94,61 @@ class JobServiceTests(unittest.TestCase):
             self.assertFalse((job_dir / "output").exists())
             repository.close()
 
+    def test_cleanup_marks_retained_metadata_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.upsert_output_stream(row["job_id"], "stdout", bytes_stored=3,
+                events_stored=1, next_sequence=1, complete=True)
+            repository.upsert_metrics_index(row["job_id"], samples=1, complete=True)
+            repository.add_artifact(row["job_id"], artifact_id="report", display_name="report.txt",
+                stored_relative_path="artifacts/report", size_bytes=3, sha256="0" * 64)
+            repository.transition(row["job_id"], "running")
+            repository.transition(row["job_id"], "succeeded", exit_code=0)
+            job_dir = storage.job_dir(row["job_id"], create=True)
+            for name in ("output", "artifacts", "metrics"):
+                (job_dir / name).mkdir()
+                (job_dir / name / "data").write_text("retained")
+            service.cleanup(row["job_id"])
+            snapshot = repository.snapshot(row["job_id"])
+            self.assertFalse(snapshot["output"][0]["available"])
+            self.assertFalse(snapshot["metrics"]["available"])
+            self.assertEqual(snapshot["artifacts"][0]["status"], "expired")
+            self.assertEqual(snapshot["artifacts"][0]["reason"], "cleanup_removed")
+            repository.close()
+
+    def test_scoped_cleanup_remains_retained_until_retention_removes_remaining_resources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            service = JobService(repository, storage, None, launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source")))
+            repository.upsert_output_stream(row["job_id"], "stdout", bytes_stored=3,
+                events_stored=1, next_sequence=1, complete=True)
+            repository.upsert_metrics_index(row["job_id"], samples=1, complete=True)
+            repository.add_artifact(row["job_id"], artifact_id="report", display_name="report.txt",
+                stored_relative_path="artifacts/report", size_bytes=3, sha256="0" * 64)
+            repository.transition(row["job_id"], "running")
+            repository.transition(row["job_id"], "succeeded", exit_code=0)
+            job_dir = storage.job_dir(row["job_id"], create=True)
+            (job_dir / "output").mkdir(); (job_dir / "output" / "data").write_text("log")
+            (job_dir / "artifacts").mkdir(); (job_dir / "artifacts" / "report").write_text("art")
+            (job_dir / "metrics.jsonl").write_text('{"timestamp":1}\n')
+            first = service.cleanup(row["job_id"], logs=True, artifacts=False, metrics=False)
+            self.assertEqual(first["cleanup_state"], "retained")
+            self.assertTrue((job_dir / "artifacts").exists())
+            self.assertTrue((job_dir / "metrics.jsonl").exists())
+            retained = service.retention_sweep(retention_days=0)
+            self.assertEqual(len(retained["cleaned"]), 1)
+            self.assertEqual(repository.get(row["job_id"])["cleanup_state"], "completed")
+            self.assertFalse((job_dir / "artifacts").exists())
+            self.assertFalse((job_dir / "metrics.jsonl").exists())
+            repository.close()
+
     def test_storage_pressure_retention_reclaims_oldest_terminal_job(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

@@ -70,13 +70,18 @@ Returns a bounded metrics page and health evidence.
 
 ### `job_artifacts` / `job_artifact_get`
 
-Lists metadata or returns a bounded base64 chunk. Artifact downloads larger than the
-MCP limit require repeated offset calls or CLI retrieval.
+Lists metadata or returns exactly one bounded base64 chunk with declared size, SHA-256,
+next offset, and `has_more`. Invalid negative/boolean offsets or page sizes outside
+1..1 MiB return `invalid_artifact_query` before any transport read. Artifact downloads larger than the MCP limit require repeated
+offset calls or CLI retrieval; MCP never loops through an unbounded artifact in one tool
+response.
 
 ### `job_cancel`, `job_retry`, `job_cleanup`
 
 Explicit mutation tools. Force cancellation and workspace cleanup require explicit
-boolean confirmation/reason fields.
+boolean confirmation/reason fields. `job_retry` rejects aggregate parents with
+`aggregate_retry_unsupported`; retrying a terminal child retains its parent but appears in
+parent `retry_attempts`, not frozen original `children` membership.
 
 ### `workspace_create/list/status/reset/destroy`
 
@@ -110,6 +115,12 @@ use `job_status`. When waited, existing success/failure semantics remain.
 
 Add the same optional target/workspace/deadline/output inputs and return job identity
 alongside existing runtime result keys. Explicit argv remains required.
+
+### `ci_run`
+
+The adapter accepts both preserved local reports containing `cells` and durable remote
+reports containing `parent_job_id` plus `children`, including detached remote acceptance.
+Callers inspect remote parent/child results through ordinary job tools.
 
 ### Existing async tools
 

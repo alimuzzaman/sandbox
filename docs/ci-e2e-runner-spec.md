@@ -134,7 +134,7 @@ own code still touches (for planning/mapping/safety) is:
 | `jobs.<id>.strategy.matrix` | Our code | Expanded to cells → one sandbox instance each (§3.5) |
 | `jobs.<id>.if:`, `needs:`, `services:`, composite/reusable actions | **`act`**, for real | Not hand-implemented; verify per-workflow if in doubt |
 | Most `uses:` actions (checkout, setup-*, cache, third-party) | **`act`**, for real | Full fidelity — this is the whole point of adopting it |
-| `actions/upload-artifact` | Sandbox job runtime | Replaced with a local marker; `act --bind` keeps declared output in the isolated workspace and the durable supervisor retains it as a Sandbox job artifact because self-hosted `act` has no GitHub runtime token |
+| `actions/upload-artifact` | Sandbox job runtime | Preflight requires literal project-relative paths plus `if-no-files-found: error`; globs, expressions, and unsupported options block with named differences. Accepted steps become a local marker; `act --bind` keeps output in the isolated workspace and the durable supervisor retains files directly and directories as deterministic bounded tar archives because self-hosted `act` has no GitHub runtime token |
 | Deploy/publish-class `uses:` or `run:` | Our safety deny-list | Neutralized BEFORE act sees them, unless `--allow-deploy` (§3.6) |
 | `${{ secrets.* }}` | Resolved from `sandbox.local.yml` `ci_secrets:` / `$SANDBOX_CI_SECRET_*`, fed to act via `--secret-file` | Never GitHub's; unresolved → fail loud before anything runs |
 
@@ -268,7 +268,10 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
            workspace: str = "ci",
            accepted_differences: list[str] | None = None) -> dict
 ```
-(Blocking; async MCP wrapping not yet exposed for `ci_run` either — see §7.)
+Local MCP responses preserve `cells`; remote durable responses expose
+`parent_job_id` plus `children` (including detached acceptance) and are inspected through
+job status/output/artifact tools. MCP artifact retrieval remains one bounded page; CLI
+`--output-file` performs verified multi-page transfer.
 
 ### 3.8 Live verification log (what was actually proven, not just designed)
 

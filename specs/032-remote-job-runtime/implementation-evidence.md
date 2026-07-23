@@ -381,6 +381,57 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   replaced with durable Sandbox collection using a bound workspace; and a CI
   leaf is not misclassified as a matrix parent during dependency reconciliation.
 
+## T143 Phase 1: local implementation proof (task remains open)
+
+- Local-only proof date: 2026-07-22. No remote runtime, remote cleanup, deployment,
+  account mutation, or destructive operation was run for this increment.
+- Focused independent-review regression suite passed 53 tests, covering aggregate retry
+  rejection, frozen membership/retry attempts, cleanup-after-terminal behavior, metrics
+  cleanup, strict artifact bounds/races, snapshot replay/argv, artifact preflight, and MCP
+  CI response docs:
+  `.cli-venv/bin/python -m unittest tests.test_job_retry tests.test_job_matrix
+  tests.test_job_metrics tests.test_job_artifacts tests.test_job_cli
+  tests.test_job_registry tests.test_ci_workflow tests.test_remote_ci_jobs -v`.
+- Compatibility suite passed 168 tests, including job models/contracts, remote transport
+  plan compatibility, CI catalog/workflow behavior, public MCP schema/tool count, command
+  composition, and architecture boundaries:
+  `.cli-venv/bin/python -m unittest tests.test_job_models tests.test_job_contracts
+  tests.test_job_registry tests.test_job_service tests.test_job_retry
+  tests.test_job_matrix tests.test_job_metrics tests.test_job_artifacts
+  tests.test_job_cli tests.test_remote_job_transport tests.test_remote_ci_jobs
+  tests.test_ci_compatibility tests.test_ci_workflow tests.test_ci tests.test_mcp
+  tests.test_mcp_composition tests.test_command_composition
+  tests.test_architecture_boundaries -v`.
+- Live local `./sb` smoke submitted one durable CI parent/child with a 2,500,000-byte
+  file artifact and one directory artifact. Child and retry both reached `succeeded`;
+  parent returned normalized `result.conclusion=succeeded` and one additive retry
+  attempt. `job-artifact-get --max-bytes 524288 --output-file` reconstructed the file
+  across bounded pages and `cmp` matched the source. Artifact kinds were `file` and
+  `archive`; cleanup completed and both retained artifact rows changed to `expired`.
+  Probe artifacts and scratch files were then removed through `./sb job-cleanup` and
+  the gitignored `tmp/` directory.
+- This entry records local implementation proof only. T143 remains unchecked pending any
+  separately required disposable remote acceptance; `tasks.md` was not changed.
+
+## T143 Phase 2: remote acceptance gate (not satisfied)
+
+- A 2026-07-23 safe-mode preflight against the reachable, authenticated
+  `scaleway-sandbox` service accepted a two-cell build plus dependent verify workflow,
+  its literal file/directory artifact declarations, and the recorded
+  `safe-mode:verify:1` neutralization. The disposable submission itself was accepted
+  as a three-child durable parent and its retained, bounded stderr was retrieved through
+  the remote CLI.
+- This is not feature acceptance: the fixture was placed under gitignored `tmp/`, so it
+  was intentionally absent from the staged remote working tree and both build children
+  failed with `workflow file not found`; the dependent child was then cancelled by the
+  existing fail-fast policy. All four disposable retained job records were explicitly
+  cleaned up through `./sb job-cleanup --remote ... --logs --artifacts --metrics`.
+- The remote invocation used the installed `/home/alim/sandbox/sb-src/sb`, whose parent
+  result still has the pre-T143 aggregate shape. The current uncommitted T143 runtime is
+  therefore not installed on that host. A successful disposable remote acceptance remains
+  blocked until an authorized remote runtime update makes the tested revision available;
+  no remote deployment or service update was performed here.
+
 ## T155: completion reconciliation and final regression
 
 - Reconciliation date: 2026-07-19. T153 and T154 are checked only because their

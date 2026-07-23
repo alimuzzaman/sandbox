@@ -1,0 +1,37 @@
+# Version control and editor state
+.git/
+.gitignore
+.claude/
+.vscode/
+.idea/
+.DS_Store
+
+# Dependencies and virtual environments
+node_modules/
+**/node_modules/
+.cli-venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+vendor/
+
+# Runtime, secrets, and local state
+runtime/
+tmp/
+.env
+.env.*
+*.local.yml
+sandbox.local.yml
+.mcp.json
+
+# Build and test output
+dist/
+build/
+coverage/
+*.log
+*.log.*
+
+# Docker metadata
+Dockerfile*
+.dockerignore

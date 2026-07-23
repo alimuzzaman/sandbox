@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity
 from sandbox.jobs.output import JobOutputStore, OutputError
 from sandbox.jobs.registry import JobRepository
@@ -46,6 +47,19 @@ class JobOutputTests(unittest.TestCase):
         self.assertNotIn("secret-value", page["data"])
         self.assertIn("[REDACTED]", page["data"])
         self.assertEqual([event["stream"] for event in page["events"]], ["stdout", "stderr", "stdout"])
+
+    def test_service_read_after_cleanup_fails_without_recreating_output_directory(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        output.append("stdout", b"retained\n"); output.finish("stdout")
+        self.repository.transition(self.job["job_id"], "running")
+        self.repository.transition(self.job["job_id"], "succeeded", exit_code=0)
+        service = JobService(self.repository, self.storage, None, launcher=lambda _: None)
+        directory = self.storage.job_dir(self.job["job_id"]) / "output"
+        service.cleanup(self.job["job_id"], logs=True, artifacts=False, metrics=False)
+        self.assertFalse(directory.exists())
+        with self.assertRaisesRegex(RuntimeError, "output_unavailable"):
+            service.read_output(self.job["job_id"], OutputQuery())
+        self.assertFalse(directory.exists())
 
     def test_cursor_does_not_repeat_event_and_invalid_utf8_is_safe(self):
         output = JobOutputStore(self.storage, self.repository, self.job["job_id"])

@@ -13,7 +13,11 @@ from typing import Any, Iterator
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+MAX_SUBMISSION_SNAPSHOT_BYTES = 65_536
+MAX_SUBMISSION_ITEMS = 256
+MAX_SUBMISSION_TEXT = 4_096
+MAX_DIFFERENCE_DETAIL = 2_048
 _INITIALIZATION_LOCK = threading.Lock()
 
 
@@ -31,6 +35,96 @@ class JobNotFound(JobRepositoryError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bounded_text(value: object, label: str, *, maximum: int = MAX_SUBMISSION_TEXT,
+                  allow_none: bool = False) -> str | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or len(value.encode("utf-8")) > maximum or any(
+            ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{label} is invalid or exceeds the durable snapshot limit")
+    return value
+
+
+def _bounded_strings(values: object, label: str, *, maximum: int = MAX_SUBMISSION_ITEMS) -> list[str]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)) or len(values) > maximum:
+        raise ValueError(f"{label} exceeds the durable snapshot limit")
+    return [_bounded_text(value, label) for value in values]
+
+
+def _bounded_argv(values: object) -> list[str]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)) or len(values) > MAX_SUBMISSION_ITEMS:
+        raise ValueError("command arguments exceed the durable snapshot limit")
+    result = []
+    for value in values:
+        if (not isinstance(value, str) or not value or "\x00" in value or
+                len(value.encode("utf-8")) > MAX_SUBMISSION_SNAPSHOT_BYTES):
+            raise ValueError("command argument is invalid or exceeds the durable snapshot limit")
+        result.append(value)
+    return result
+
+
+def _safe_difference(item: object) -> dict[str, Any]:
+    if not isinstance(item, dict) or not item.get("id"):
+        raise ValueError("compatibility difference is invalid")
+    return {
+        "id": _bounded_text(item["id"], "compatibility difference id", maximum=128),
+        "workflow": _bounded_text(item.get("workflow", ""), "compatibility workflow", maximum=1_024),
+        "location": _bounded_text(item.get("location", ""), "compatibility location", maximum=1_024),
+        "severity": _bounded_text(item.get("severity", "notice"), "compatibility severity", maximum=64),
+        "accepted": bool(item.get("accepted")),
+        "detail": _bounded_text(item.get("detail", item.get("message", "")),
+                                "compatibility detail", maximum=MAX_DIFFERENCE_DETAIL),
+        "catalog_version": _bounded_text(item.get("catalog_version", "unknown"),
+                                         "compatibility catalog version", maximum=128),
+    }
+
+
+def _canonical_submission_snapshot(submission: JobSubmission) -> str:
+    raw = submission.as_dict()
+    differences = raw.get("compatibility_differences", ())
+    if len(differences) > MAX_SUBMISSION_ITEMS:
+        raise ValueError("compatibility differences exceed the durable snapshot limit")
+    source = raw["source"]
+    snapshot = {
+        "version": 1,
+        "kind": _bounded_text(raw["kind"], "job kind", maximum=64),
+        "project_root": _bounded_text(raw["project_root"], "project root"),
+        "project_identity": _bounded_text(raw["project_identity"], "project identity"),
+        "target_kind": raw["target_kind"],
+        "remote_name": _bounded_text(raw.get("remote_name"), "remote name", maximum=64, allow_none=True),
+        "workspace_label": _bounded_text(raw["workspace_label"], "workspace label", maximum=64),
+        "workspace_mode": raw["workspace_mode"],
+        "argv": _bounded_argv(raw["argv"]),
+        "cwd_relative": _bounded_text(raw["cwd_relative"], "working directory"),
+        "execution_profile": _bounded_text(raw["execution_profile"], "execution profile", maximum=64),
+        "output_profile": _bounded_text(raw["output_profile"], "output profile", maximum=64),
+        "deadline_seconds": int(raw["deadline_seconds"]),
+        "deadline_source": _bounded_text(raw["deadline_source"], "deadline source", maximum=128),
+        "stall_seconds": int(raw["stall_seconds"]),
+        "cancel_on_stall": bool(raw["cancel_on_stall"]),
+        "cleanup_policy": raw["cleanup_policy"],
+        "request_id": _bounded_text(raw.get("request_id"), "request id", maximum=64, allow_none=True),
+        "parent_job_id": raw.get("parent_job_id"),
+        "retry_of_job_id": raw.get("retry_of_job_id"),
+        "attempt": int(raw["attempt"]),
+        # Environment values never enter this snapshot; only validated key names do.
+        "environment_keys": _bounded_strings(raw.get("environment_keys", ()), "environment key"),
+        "artifact_paths": _bounded_strings(raw.get("artifact_paths", ()), "artifact path"),
+        "depends_on": _bounded_strings(raw.get("depends_on", ()), "job dependency"),
+        "failure_policy": raw["failure_policy"],
+        "compatibility_differences": [_safe_difference(item) for item in differences],
+        "source": {
+            "identity": _bounded_text(source["identity"], "source identity"),
+            "commit": _bounded_text(source.get("commit"), "source commit", allow_none=True),
+            "dirty_digest": _bounded_text(source.get("dirty_digest"), "source dirty digest", allow_none=True),
+        },
+    }
+    payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > MAX_SUBMISSION_SNAPSHOT_BYTES:
+        raise ValueError("canonical submission snapshot exceeds 65536 bytes")
+    return payload
 
 
 class JobRepository:
@@ -117,7 +211,8 @@ class JobRepository:
             output_completeness TEXT NOT NULL DEFAULT 'active',
             cleanup_state TEXT NOT NULL DEFAULT 'not_requested',
             integrity_sha256 TEXT,
-            result_json TEXT
+            result_json TEXT,
+            submission_json TEXT
         );
         CREATE UNIQUE INDEX IF NOT EXISTS jobs_request_identity
             ON jobs(target_kind, IFNULL(remote_name, ''), project_identity, request_id)
@@ -177,6 +272,7 @@ class JobRepository:
             last_segment_bytes INTEGER NOT NULL DEFAULT 0,
             complete INTEGER NOT NULL DEFAULT 0,
             sha256 TEXT,
+            available INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL,
             PRIMARY KEY(job_id, stream)
         );
@@ -194,7 +290,8 @@ class JobRepository:
             first_at TEXT,
             last_at TEXT,
             sha256 TEXT,
-            complete INTEGER NOT NULL DEFAULT 0
+            complete INTEGER NOT NULL DEFAULT 0,
+            available INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS artifacts (
             artifact_id TEXT PRIMARY KEY,
@@ -225,16 +322,27 @@ class JobRepository:
         """
         with self._lock:
             self.connection.executescript(schema)
-            columns = {row[1] for row in self.connection.execute("PRAGMA table_info(jobs)")}
+        # Additive upgrades and version publication share one full-durability
+        # transaction. A crash cannot advertise the new version before every
+        # required column exists; old rows remain nullable/backward readable.
+        with self.transaction(immediate=True) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
             for name, declaration in (
                 ("depends_on_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("failure_policy", "TEXT NOT NULL DEFAULT 'fail-fast'"),
                 ("queue_reason", "TEXT"),
                 ("queue_position", "INTEGER"),
+                ("submission_json", "TEXT"),
             ):
                 if name not in columns:
-                    self.connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
-            self.connection.execute(
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            output_columns = {row[1] for row in connection.execute("PRAGMA table_info(output_streams)")}
+            if "available" not in output_columns:
+                connection.execute("ALTER TABLE output_streams ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+            metric_columns = {row[1] for row in connection.execute("PRAGMA table_info(metrics_index)")}
+            if "available" not in metric_columns:
+                connection.execute("ALTER TABLE metrics_index ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+            connection.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
@@ -265,6 +373,7 @@ class JobRepository:
                     if existing["request_digest"] != digest:
                         raise RequestIdConflict("request id was already used for a different submission")
                     return dict(existing), True
+            submission_json = _canonical_submission_snapshot(submission)
             job_id = new_job_id()
             values = (
                 job_id, submission.request_id, digest, submission.parent_job_id, None,
@@ -279,7 +388,7 @@ class JobRepository:
                 submission.deadline_seconds, submission.deadline_source,
                 submission.stall_seconds, int(submission.cancel_on_stall),
                 submission.cleanup_policy, submission.source.identity, submission.source.commit,
-                submission.source.dirty_digest, now, now,
+                submission.source.dirty_digest, now, now, submission_json,
             )
             connection.execute(
                 """INSERT INTO jobs(
@@ -290,8 +399,8 @@ class JobRepository:
                     command_json, cwd_relative, environment_keys_json,
                     execution_profile, output_profile, deadline_seconds, deadline_source,
                     stall_seconds, cancel_on_stall, cleanup_policy, source_identity,
-                    source_commit, source_dirty_digest, accepted_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    source_commit, source_dirty_digest, accepted_at, updated_at, submission_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
             root = submission.parent_job_id or job_id
@@ -304,6 +413,17 @@ class JobRepository:
         if row is None:
             raise JobNotFound(f"job {job_id!r} was not found")
         return dict(row)
+
+    def submission_snapshot(self, job_id: str) -> dict[str, Any] | None:
+        """Return bounded canonical input, or None for legacy/corrupt rows."""
+        payload = self.get(job_id).get("submission_json")
+        if not isinstance(payload, str) or not payload or len(payload.encode("utf-8")) > MAX_SUBMISSION_SNAPSHOT_BYTES:
+            return None
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) and value.get("version") == 1 else None
 
     def list(self, *, limit: int = 50, project_identity: str | None = None,
              workspace_label: str | None = None) -> list[dict[str, Any]]:
@@ -465,13 +585,13 @@ class JobRepository:
     def record_compatibility_differences(self, job_id: str, differences: list[dict] | tuple[dict, ...]) -> None:
         """Persist bounded CI semantic differences alongside the durable child."""
         rows = []
+        if len(differences) > MAX_SUBMISSION_ITEMS:
+            raise ValueError("compatibility differences exceed the durable snapshot limit")
         for item in differences:
-            if not isinstance(item, dict) or not item.get("id"):
-                raise ValueError("compatibility difference is invalid")
-            rows.append((validate_job_id(job_id), str(item["id"]), str(item.get("workflow", "")),
-                         str(item.get("location", "")), str(item.get("severity", "notice")),
-                         int(bool(item.get("accepted"))), str(item.get("detail", "")),
-                         str(item.get("catalog_version", "unknown"))))
+            safe = _safe_difference(item)
+            rows.append((validate_job_id(job_id), safe["id"], safe["workflow"],
+                         safe["location"], safe["severity"], int(safe["accepted"]),
+                         safe["detail"], safe["catalog_version"]))
         with self.transaction(immediate=True) as connection:
             connection.executemany(
                 """INSERT OR REPLACE INTO compatibility_differences(
@@ -491,9 +611,13 @@ class JobRepository:
         output = [dict(row) for row in self.connection.execute(
             "SELECT * FROM output_streams WHERE job_id=? ORDER BY stream", (job_id,)
         ).fetchall()]
+        for stream in output:
+            stream["available"] = bool(stream.get("available", 1))
         metrics = self._row(self.connection.execute(
             "SELECT * FROM metrics_index WHERE job_id=?", (job_id,)
         ).fetchone())
+        if metrics:
+            metrics["available"] = bool(metrics.get("available", 1))
         artifacts = [dict(row) for row in self.connection.execute(
             "SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)
         ).fetchall()]
@@ -503,12 +627,27 @@ class JobRepository:
         ).fetchall()]
         return {**job, "process": process, "heartbeat": heartbeat,
                 "output": output, "metrics": metrics, "artifacts": artifacts,
-                "compatibility_differences": differences}
+                "compatibility_differences": differences,
+                "submission": self.submission_snapshot(job_id)}
 
     def release_leases(self, job_id: str) -> None:
         with self.transaction(immediate=True) as connection:
             connection.execute("DELETE FROM workspace_leases WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM host_capacity_leases WHERE job_id=?", (job_id,))
+
+    def mark_retained_metadata_unavailable(self, job_id: str, *, logs: bool = False,
+                                           artifacts: bool = False,
+                                           metrics: bool = False) -> None:
+        job_id = validate_job_id(job_id)
+        with self.transaction(immediate=True) as connection:
+            if logs:
+                connection.execute("UPDATE output_streams SET available=0, updated_at=? WHERE job_id=?",
+                                   (_now(), job_id))
+            if artifacts:
+                connection.execute("UPDATE artifacts SET status='expired', reason='cleanup_removed' "
+                                   "WHERE job_id=? AND status='available'", (job_id,))
+            if metrics:
+                connection.execute("UPDATE metrics_index SET available=0 WHERE job_id=?", (job_id,))
 
     def set_cleanup_state(self, job_id: str, state: str) -> None:
         if not isinstance(state, str) or not state or any(ord(char) < 32 for char in state):

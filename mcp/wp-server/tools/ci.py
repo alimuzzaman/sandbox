@@ -71,10 +71,10 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     allow_deploy: actually attempt deploy-class steps (see SAFETY above).
     keep_on_fail: preserve a failed cell's instance for inspection.
     strict_provision: abort the whole run if any cell's instance fails to boot.
-    async_: run detached and return {ok, job_id} immediately instead of
-      blocking — poll with async_job_status(job_id), cancel with
-      async_job_kill(job_id). Use for long matrix runs so the conversation
-      isn't blocked; the job survives even if this MCP call itself times out.
+    async_: run detached. Local compatibility runs return {ok, job_id}; durable
+      remote runs return {ok, parent_job_id, children}. Inspect remote parents
+      and children with job_status/job_output/job_artifacts. The job survives
+      even if this MCP call itself times out.
 
     Each matrix cell's instance is provisioned with that cell's requested
     PHP/WP version when the workflow specifies one (matrix key or a
@@ -85,9 +85,11 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     site; workflows that don't reference it (classic self-contained
     phpunit-with-services: CI) simply ignore it.
 
-    Returns {ok, workflow, run_id, jobs, cells:[{label, matrix, status,
+    Returns local {ok, workflow, run_id, jobs, cells:[{label, matrix, status,
     exit_code, url, warning, output, error}], neutralized:[...],
-    summary:{cells, passed, failed}} — or {ok, job_id} when async_=true.
+    summary:{cells, passed, failed}}; local async returns {ok, job_id}. Durable
+    remote execution returns {ok, parent_job_id, children, summary} whether
+    detached or accepted through the bounded blocking adapter.
     """
     capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
     if capability_error:
@@ -131,7 +133,9 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
             return {"ok": False, "error": "ci_run --async launch timed out after 60s"}
         lines = (res.stdout or "").strip().splitlines()
         launched = _safe_json(lines[-1]) if lines else None
-        if isinstance(launched, dict) and "job_id" in launched:
+        if isinstance(launched, dict) and (
+                "job_id" in launched or
+                ("parent_job_id" in launched and "children" in launched)):
             return launched
         return {"ok": False, "code": res.returncode,
                 "error": (res.stderr or res.stdout or "async launch failed").strip()[:2000]}
@@ -144,7 +148,9 @@ def ci_run(project_dir: str, workflow: str, jobs: list[str] | None = None,
     report = _safe_json(lines[-1]) if lines else None
     if isinstance(report, dict) and report.get("skipped"):
         return report  # --if-event didn't match; nothing ran, not an error.
-    if isinstance(report, dict) and "cells" in report:
+    if isinstance(report, dict) and (
+            "cells" in report or
+            ("parent_job_id" in report and "children" in report)):
         return report
     return {"ok": False, "code": res.returncode,
             "error": (res.stderr or res.stdout or "ci run failed").strip()[:2000]}

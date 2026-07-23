@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import base64
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 
 from sandbox.application.context import durable_job_dependencies
 from sandbox.application.target_service import TargetResolutionError
-from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
 from sandbox.registry import CommandSpec, register_specs
 
 
@@ -23,6 +25,57 @@ def _source_identity(root: str) -> SourceIdentity:
     # Local execution still has an identity. Remote submission replaces this with
     # the deploy identity returned by the deployment transport before acceptance.
     return SourceIdentity("sha256:" + hashlib.sha256(str(Path(root)).encode()).hexdigest())
+
+
+def _download_artifact_file(destination: str | Path, metadata: dict, fetch) -> dict:
+    """Download every bounded page, then atomically publish verified bytes."""
+    if metadata.get("status", "available") != "available":
+        raise RuntimeError("artifact metadata is unavailable")
+    expected_size = metadata.get("size_bytes")
+    expected_sha = metadata.get("sha256")
+    if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+        raise RuntimeError("artifact size metadata is invalid")
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+        raise RuntimeError("artifact sha256 metadata is invalid")
+    target = Path(destination).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    digest = hashlib.sha256()
+    offset = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while offset < expected_size:
+                page = fetch(offset)
+                if not isinstance(page, dict) or not page.get("ok", False):
+                    raise RuntimeError("artifact chunk retrieval failed")
+                if page.get("offset") != offset or page.get("encoding", "base64") != "base64":
+                    raise RuntimeError("artifact chunk offset or encoding mismatch")
+                try:
+                    chunk = base64.b64decode(page.get("data", ""), validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise RuntimeError("artifact chunk base64 is invalid") from exc
+                if page.get("bytes_read") != len(chunk):
+                    raise RuntimeError("artifact chunk size mismatch")
+                if not chunk:
+                    raise RuntimeError("artifact download ended before declared size")
+                if offset + len(chunk) > expected_size:
+                    raise RuntimeError("artifact download exceeds declared size")
+                handle.write(chunk)
+                digest.update(chunk)
+                offset += len(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if offset != expected_size:
+            raise RuntimeError("artifact size validation failed")
+        actual_sha = digest.hexdigest()
+        if actual_sha != expected_sha:
+            raise RuntimeError("artifact sha256 validation failed")
+        os.replace(temporary, target)
+        return {"ok": True, "artifact_id": metadata.get("artifact_id"),
+                "output_file": str(target), "size_bytes": offset, "sha256": actual_sha}
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _profile_timeout(target, name: str, explicit: int | None) -> tuple[int, str]:
@@ -208,7 +261,8 @@ def cmd_job_status(_cfg, args) -> None:
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
     else:
         result = durable_job_dependencies()["job_service"].get(args.job_id)
-    print(json.dumps(result, sort_keys=True) if args.json else f"{result['job_id']} {result['lifecycle']} ({result['health']})")
+    print(json.dumps({"ok": True, **result}, sort_keys=True) if args.json
+          else f"{result['job_id']} {result['lifecycle']} ({result['health']})")
 
 
 def cmd_job_output(_cfg, args) -> None:
@@ -232,10 +286,16 @@ def cmd_job_output(_cfg, args) -> None:
     service = durable_job_dependencies()["job_service"]
     cursor = args.cursor
     while True:
-        result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
-            tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
-            wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
-            encoding=args.encoding))
+        try:
+            result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
+                tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
+                wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
+                encoding=args.encoding))
+        except RuntimeError as exc:
+            if args.json:
+                print(json.dumps({"ok": False, "code": str(exc), "error": str(exc)}, sort_keys=True))
+                return
+            _die(str(exc))
         if args.json:
             print(json.dumps(result, sort_keys=True))
         elif result["data"]:
@@ -341,21 +401,48 @@ def cmd_job_artifacts(_cfg, args) -> None:
 
 
 def cmd_job_artifact_get(_cfg, args) -> None:
+    query = ArtifactQuery(artifact_id=args.artifact_id, offset=args.offset,
+                          max_bytes=args.max_bytes, encoding="base64")
+    transport = None
+    service = None
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
-        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).artifact_get(args.remote, args.job_id, args.artifact_id,
-                offset=args.offset, max_bytes=args.max_bytes)
+        transport = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path)
+        artifacts = transport.artifacts(args.remote, args.job_id).get("artifacts", ())
     else:
-        data = durable_job_dependencies()["job_service"].get_artifact(args.job_id, args.artifact_id,
-            offset=args.offset, max_bytes=args.max_bytes)
-        result = {"ok": True, "job_id": args.job_id, "artifact_id": args.artifact_id,
-                  "offset": args.offset, "data": base64.b64encode(data).decode(),
-                  "bytes_read": len(data), "encoding": "base64"}
+        service = durable_job_dependencies()["job_service"]
+        artifacts = service.list_artifacts(args.job_id)
+    metadata = next((item for item in artifacts if item.get("artifact_id") == args.artifact_id), None)
+    if metadata is None:
+        raise RuntimeError("artifact_not_found")
+
+    def fetch(offset: int) -> dict:
+        if transport is not None:
+            return transport.artifact_get(args.remote, args.job_id, args.artifact_id,
+                                          offset=offset, max_bytes=args.max_bytes)
+        data = service.get_artifact(args.job_id, args.artifact_id,
+                                    offset=offset, max_bytes=args.max_bytes)
+        return {"ok": True, "job_id": args.job_id, "artifact_id": args.artifact_id,
+                "offset": offset, "data": base64.b64encode(data).decode(),
+                "bytes_read": len(data), "encoding": "base64",
+                "size_bytes": metadata["size_bytes"], "sha256": metadata["sha256"],
+                "next_offset": offset + len(data),
+                "has_more": offset + len(data) < metadata["size_bytes"]}
+
     if args.output_file:
-        Path(args.output_file).expanduser().resolve().write_bytes(base64.b64decode(result["data"]))
-    elif args.json:
+        if args.offset:
+            raise RuntimeError("--offset cannot be combined with --output-file")
+        _download_artifact_file(args.output_file, metadata, fetch)
+        return
+    result = fetch(args.offset)
+    result.setdefault("size_bytes", metadata["size_bytes"])
+    result.setdefault("sha256", metadata["sha256"])
+    result.setdefault("status", metadata.get("status", "available"))
+    result.setdefault("next_offset", args.offset + result.get("bytes_read", 0))
+    result.setdefault("has_more", result["next_offset"] < metadata["size_bytes"])
+    if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
         print(f"{result['artifact_id']} {result['bytes_read']} bytes")
@@ -438,8 +525,13 @@ def cmd_job_matrix(_cfg, args) -> None:
                     argv=tuple(item["argv"]), deadline_seconds=item.get("timeout", args.timeout),
                     source=SourceIdentity(**item.get("source", {"identity": source.identity})),
                     workspace_mode=item.get("workspace_mode", "isolated"),
+                    cwd_relative=item.get("cwd_relative", "."),
+                    execution_profile=item.get("execution_profile", "exec"),
                     output_profile=item.get("output_profile", args.output_profile),
                     deadline_source=item.get("deadline_source", "explicit"),
+                    stall_seconds=item.get("stall_seconds", 300),
+                    cancel_on_stall=bool(item.get("cancel_on_stall", False)),
+                    environment_keys=tuple(item.get("environment_keys", ())),
                     request_id=item.get("request_id"), cleanup_policy=item.get("cleanup_policy", "retain"),
                     depends_on=tuple(item.get("depends_on", ())),
                     failure_policy=item.get("failure_policy", "fail-fast"),

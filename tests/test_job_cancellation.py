@@ -21,6 +21,17 @@ class CancellationTests(unittest.TestCase):
             self.assertEqual(result["termination_reason"], "cancelled_before_process_start")
             repo.close()
 
+    def test_ci_leaf_without_children_cancels_as_leaf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None)
+            row, _ = repo.accept(JobSubmission("ci", temp, "p", "local", "ci-cell",
+                ("echo", "ok"), 30, SourceIdentity("s"), workspace_mode="isolated"))
+            result = service.cancel(row["job_id"])
+            self.assertEqual(result["lifecycle"], "cancelled")
+            self.assertEqual(result["termination_reason"], "cancelled_before_process_start")
+            repo.close()
+
     def test_verified_cancel_transitions_to_cancelled(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "registry.sqlite")

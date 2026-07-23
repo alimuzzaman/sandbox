@@ -33,7 +33,7 @@ workflow step, deploy source, create a workspace, fetch secrets, or mutate a rem
   "ok": false,
   "compatible": false,
   "engine": {"name": "act", "version": "observed-version"},
-  "catalog_version": "1",
+  "catalog_version": "2",
   "runner": {"platform": "linux", "accepted": true},
   "graph": {
     "jobs": ["build", "test"],
@@ -103,14 +103,22 @@ to run development CI does not authorize deployment or release behavior.
 - Timeout: Sandbox outer deadlines are authoritative even where `act` ignores
   `timeout-minutes`.
 - Retry: creates new attempts and preserves prior cells/results.
-- Artifacts: workflow artifact requests are mapped to Sandbox constrained artifacts.
+- Artifacts: workflow artifact requests are mapped to Sandbox constrained artifacts only
+  for literal project-relative paths. Preflight blocks globs/expressions, unsupported
+  upload options, and missing-file semantics other than explicit `if-no-files-found: error`
+  using named compatibility differences before execution.
 
 ## Final result
 
-The parent result includes engine/version, workflow/source identity, selected graph,
-accepted differences, safe-mode skips, each child/cell outcome, output completeness,
-artifact identities, cleanup status, and aggregate conclusion. Aggregate success
-requires all required children to pass plus complete Sandbox finalization.
+The terminal parent persists a normalized result while preserving compatibility keys
+`aggregate`, `children`, and `result_json`. It includes engine/version where available,
+workflow/source identity, selected graph, accepted differences, safe-mode skips, each
+original child/cell references and outcomes, output completeness, artifact/difference
+counts, cleanup policy/state, and aggregate conclusion within a 256 KiB persisted cap. Full
+current child detail remains in `children`; retries retain the actual CI parent but appear
+separately in `retry_attempts`. Aggregate-parent retry is explicitly unsupported, and prior
+terminal membership/results remain immutable. Aggregate
+success requires all required children to pass plus complete Sandbox finalization.
 
 An `act` zero exit is insufficient when output storage failed, a required artifact was
 unsafe/missing, the deadline elapsed, cancellation was incomplete, or cleanup policy

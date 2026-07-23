@@ -535,6 +535,12 @@ def _event_matches(on_trigger, event: str) -> bool:
     return False
 
 
+def _artifact_blocking_differences(gate: dict) -> list[str]:
+    return sorted({item["id"] for item in gate.get("differences", ())
+                   if item.get("id", "").startswith("sandbox.artifact-") and
+                   item.get("severity") == "block" and not item.get("accepted")})
+
+
 def _remote_ci_artifacts(job: dict) -> list[str]:
     """Extract only literal, project-relative upload paths for outer retention."""
     paths = []
@@ -542,8 +548,11 @@ def _remote_ci_artifacts(job: dict) -> list[str]:
         if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
             continue
         value = (step.get("with") or {}).get("path")
-        if isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts:
-            paths.append(value)
+        if isinstance(value, str):
+            for literal in value.splitlines():
+                literal = literal.strip()
+                if literal and not Path(literal).is_absolute() and ".." not in Path(literal).parts:
+                    paths.append(literal)
     return sorted(set(paths))
 
 
@@ -752,20 +761,32 @@ def cmd_ci(cfg, args) -> None:
         ))
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
+    from sandbox.ci.workflow import WorkflowError, preflight
+    try:
+        gate = preflight(root, wf_path, selected_jobs=getattr(args, "jobs", None),
+                         accepted_differences=getattr(args, "accepted_differences", None),
+                         safe_mode=not getattr(args, "allow_deploy", False))
+    except WorkflowError as exc:
+        die(str(exc))
     if target.kind == "remote":
-        from sandbox.ci.workflow import WorkflowError, preflight
-        try:
-            gate = preflight(root, wf_path, selected_jobs=getattr(args, "jobs", None),
-                             accepted_differences=getattr(args, "accepted_differences", None),
-                             safe_mode=not getattr(args, "allow_deploy", False))
-        except WorkflowError as exc:
-            die(str(exc))
-        if not gate["ok"]:
-            if getattr(args, "json", False):
-                print(json.dumps({"ok": False, "code": "ci_preflight_blocked", "preflight": gate}, sort_keys=True))
-            else:
+        blocking = gate["blocking"]
+    else:
+        # Preserve local act compatibility policy while preventing Sandbox's
+        # upload-artifact replacement from silently changing path/options/missing
+        # semantics. These named differences must be accepted before neutralization.
+        blocking = _artifact_blocking_differences(gate)
+    if blocking:
+        blocked_gate = {**gate, "ok": False, "compatible": False, "blocking": blocking}
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "code": "ci_preflight_blocked",
+                              "preflight": blocked_gate}, sort_keys=True))
+        else:
+            if target.kind == "remote":
                 die("remote CI preflight blocked execution; use --accept-difference for each named difference")
-            return
+            die("CI artifact preflight blocked execution; use literal paths, "
+                "if-no-files-found: error, or accept each named difference")
+        return
+    if target.kind == "remote":
         _run_remote_ci(target, root, wf_path, plan, args, as_json=as_json)
         return
 

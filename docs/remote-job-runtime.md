@@ -50,8 +50,15 @@ active jobs with a matching supervisor are left untouched.
 
 `job-cancel` sends a verified graceful signal first; `--force` uses the verified
 owned process group. `job-retry` creates a linked attempt and does not mutate the
-original result. Failed reusable workspaces are retained by default. Reset and
-destroy are explicit and refuse active workspace leases.
+original result. Retry reads a bounded canonical submission snapshot, preserving
+artifact declarations, compatibility/dependency/failure policy, cleanup policy,
+environment key names, source/workspace/deadline/output settings, and parent context.
+Legacy rows fall back only to safely persisted fields. Standalone retries remain
+parentless; CI children retain their actual parent and appear under parent
+`retry_attempts`, outside frozen original aggregate membership. Aggregate-parent retry
+fails `aggregate_retry_unsupported` until scoped graph retry exists. Failed reusable
+workspaces are retained by default. Reset and destroy are explicit and refuse active
+workspace leases.
 
 `job-cleanup` is terminal-only and reports which logs/artifacts were removed.
 For scheduled/maintenance cleanup, apply the configured age explicitly with
@@ -62,11 +69,18 @@ If the host is below its configured free-disk reserve, use
 are reclaimed until pressure clears. Active jobs and retained failed workspaces
 remain protected. Output writes fail explicitly as `storage_pressure` if the
 reserve is crossed, never as a false successful test.
-Artifact collection rejects symlinks, non-regular objects, path escapes, and
-per-job count/size limits. Retrieve artifacts by immutable ID with
+Artifact collection rejects symlinks, devices, sockets, FIFOs, path escapes, and
+per-job count/size limits. Files that grow, shrink, change identity, or cross a live byte
+limit during collection fail rather than producing a misleading hash. Literal directories
+become sorted deterministic tar archives with normalized metadata. Retrieve artifacts by immutable ID with
 `./sb job-artifacts JOB --json` and `./sb job-artifact-get JOB ARTIFACT --output-file PATH`.
-Never delete a workspace or job directory by hand: the registry and lease store
-must remain authoritative.
+CLI file retrieval downloads every bounded chunk to a same-directory temporary file,
+validates total size and SHA-256, then atomically publishes it; MCP returns one bounded
+chunk with next-offset metadata. Offset must be non-negative and page size 1..1 MiB.
+Cleanup removes the authoritative `metrics.jsonl`, retains audit rows, marks removed output
+and metrics unavailable, and marks artifacts expired; post-cleanup metric reads fail
+`metrics_unavailable`. Never delete a workspace or job directory by
+hand: the registry and lease store must remain authoritative.
 
 ## Remote CI
 
@@ -76,5 +90,12 @@ and returns a durable parent ID with isolated child jobs for selected matrix
 cells. Inspect the parent for aggregate counts and each child for output,
 deadline, artifacts, and cleanup. Known compatibility differences must be
 accepted by exact ID; safe mode neutralizes deployment/release/publish side effects
-by default and records each semantic difference in the child result. Use `--local`
-when deliberately choosing the local `act` path.
+by default and records each semantic difference in the child result. Upload-artifact
+preflight requires literal relative paths and `if-no-files-found: error`; patterns,
+expressions, and unsupported options block before execution. Terminal parent
+status persists a normalized result capped at 256 KiB containing aggregate counts and
+bounded original-child references. Full current artifact/difference/output/cleanup detail
+remains in frozen `children`; retries are separate in `retry_attempts`. Existing
+`aggregate`, `children`, and `result_json` keys remain. MCP `ci_run` accepts both local `cells`
+reports and remote durable `parent_job_id`/`children` reports. Use `--local` when
+deliberately choosing the local `act` path.

@@ -313,6 +313,8 @@ verbosity; the complete sealed log remains available for later retrieval.
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
+./sb job-artifact-get <child-job-id> <artifact-id> --remote scaleway-sandbox \
+  --output-file tmp/report.tar
 ```
 
 Remote CI is a durable parent/child submission. Sandbox preflights the workflow
@@ -324,7 +326,18 @@ The co-located `act` adapter runs on the remote host, which must advertise
 `job.exec` and have any workflow-specific credentials configured there. The
 remote provisioner installs `act`; GitHub's `actions/upload-artifact` is
 converted to Sandbox's retained job-artifact collection because a self-hosted
-`act` runner has no GitHub Actions runtime token.
+`act` runner has no GitHub Actions runtime token. Remote CI preflight accepts only literal
+project-relative upload paths with `if-no-files-found: error`; globs, expressions, and
+unsupported upload options produce named blocking differences before execution. Literal artifact directories are
+stored as deterministic bounded tar archives. CLI `--output-file` retrieval reads
+all bounded pages into a temporary file, validates declared size and SHA-256, then
+atomically publishes it; MCP artifact reads remain one bounded page per call.
+Parent status preserves `aggregate`, frozen original `children`, and `result_json` while
+adding a normalized terminal `result` capped at 256 KiB. Persisted child references carry
+outcome, output completeness, artifact/difference counts, and cleanup state; full current
+detail remains in `children`, and linked retries appear separately in `retry_attempts`.
+Aggregate-parent retry returns `aggregate_retry_unsupported`; child retry reuses the
+durable bounded submission snapshot without mutating prior terminal attempts.
 
 Generic Compose instances have enforced default limits of 2 CPUs, 4 GiB RAM,
 and 512 PIDs. The remote durable scheduler admits at most two jobs and checks

@@ -11,7 +11,7 @@ import base64
 from pathlib import Path
 
 from dependencies import ToolDependencies
-from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
 
 
 _job_service = None
@@ -144,8 +144,10 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
                 encoding=encoding)
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
             tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
-    except Exception as exc:
+    except ValueError as exc:
         return {"ok": False, "code": "invalid_output_query", "error": str(exc)}
+    except RuntimeError as exc:
+        return {"ok": False, "code": str(exc), "error": str(exc)}
 
 
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536,
@@ -158,8 +160,8 @@ def job_metrics(job_id: str, *, limit: int = 500, remote: str | None = None) -> 
     """Read bounded persisted CPU/RSS/I/O evidence for a durable job."""
     try:
         return _remote_transport().metrics(remote, job_id, limit=limit) if remote else _job_service.read_metrics(job_id, limit=limit)
-    except Exception as exc:
-        return {"ok": False, "code": "job_not_found", "error": str(exc)}
+    except RuntimeError as exc:
+        return {"ok": False, "code": str(exc), "error": str(exc)}
 
 
 def job_reconcile(*, limit: int = 200, remote: str | None = None) -> dict:
@@ -209,13 +211,26 @@ def job_artifact_get(job_id: str, artifact_id: str, *, offset: int = 0,
                      max_bytes: int = 1_048_576, remote: str | None = None) -> dict:
     """Return one bounded base64 artifact chunk by immutable artifact ID."""
     try:
+        query = ArtifactQuery(artifact_id=artifact_id, offset=offset,
+                              max_bytes=max_bytes, encoding="base64")
+    except ValueError as exc:
+        return {"ok": False, "code": "invalid_artifact_query", "error": str(exc)}
+    try:
         if remote:
             return _remote_transport().artifact_get(remote, job_id, artifact_id,
-                offset=offset, max_bytes=max_bytes)
-        data = _job_service.get_artifact(job_id, artifact_id, offset=offset, max_bytes=max_bytes)
+                offset=query.offset, max_bytes=query.max_bytes)
+        metadata = next((item for item in _job_service.list_artifacts(job_id)
+                         if item.get("artifact_id") == artifact_id), None)
+        if metadata is None:
+            raise RuntimeError("artifact_not_found")
+        data = _job_service.get_artifact(job_id, artifact_id,
+                                         offset=query.offset, max_bytes=query.max_bytes)
+        next_offset = query.offset + len(data)
         return {"ok": True, "job_id": job_id, "artifact_id": artifact_id,
-                "offset": offset, "data": base64.b64encode(data).decode(), "bytes_read": len(data),
-                "encoding": "base64"}
+                "offset": query.offset, "data": base64.b64encode(data).decode(), "bytes_read": len(data),
+                "encoding": "base64", "size_bytes": metadata["size_bytes"],
+                "sha256": metadata["sha256"], "status": metadata.get("status", "available"),
+                "next_offset": next_offset, "has_more": next_offset < metadata["size_bytes"]}
     except Exception as exc:
         return {"ok": False, "code": "artifact_not_found", "error": str(exc)}
 

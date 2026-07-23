@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from sandbox.jobs.models import JobSubmission, OutputQuery, SourceIdentity
+from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity
 from sandbox.jobs.output import JobOutputStore
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
@@ -26,6 +27,7 @@ from sandbox.jobs.scheduler import WorkspaceBusy
 
 
 _DETACHED_SUPERVISORS: list[subprocess.Popen] = []
+MAX_AGGREGATE_RESULT_BYTES = 262_144
 
 
 class JobServiceProtocol(Protocol):
@@ -143,13 +145,17 @@ class JobService:
             result["termination_reason"] = row.get("termination_reason")
         return result
 
+    def _is_aggregate(self, snapshot: dict) -> bool:
+        return snapshot.get("kind") in {"matrix", "plan"} or bool(
+            self.repository.children(snapshot["job_id"]))
+
     def get(self, job_id: str, *, reconcile: bool = True):
         snapshot = self.repository.snapshot(job_id)
         # A CI matrix's children are themselves kind="ci".  Treat only an
         # actual aggregate (or a dedicated matrix/plan record) as a parent;
         # otherwise a dependency-ready CI child would never reach its
         # scheduler/launcher during status reconciliation.
-        if snapshot["kind"] in {"matrix", "plan"} or self.repository.children(job_id):
+        if self._is_aggregate(snapshot):
             return self._get_parent(snapshot)
         if snapshot["lifecycle"] == Lifecycle.QUEUED.value:
             dependency_state, dependency_reason = self._dependency_state(snapshot)
@@ -181,8 +187,12 @@ class JobService:
         return snapshot
 
     def _get_parent(self, snapshot: dict) -> dict:
-        """Reconcile an aggregate without launching a fake parent process."""
-        children = [self.get(child["job_id"]) for child in self.repository.children(snapshot["job_id"])]
+        """Reconcile original aggregate members; expose retries separately."""
+        members = self.repository.children(snapshot["job_id"])
+        original_rows = [child for child in members if not child.get("retry_of_job_id")]
+        retry_rows = [child for child in members if child.get("retry_of_job_id")]
+        children = [self.get(child["job_id"]) for child in original_rows]
+        retry_attempts = [self.get(child["job_id"]) for child in retry_rows]
         if snapshot.get("failure_policy", "fail-fast") == "fail-fast" and any(
                 child["lifecycle"] in {Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
                                         Lifecycle.INTERRUPTED.value} for child in children):
@@ -193,7 +203,7 @@ class JobService:
                         self.cancel(child["job_id"])
                     except RuntimeError:
                         pass
-            children = [self.repository.snapshot(child["job_id"]) for child in self.repository.children(snapshot["job_id"])]
+            children = [self.repository.snapshot(child["job_id"]) for child in original_rows]
         terminal = {item.value for item in (
             Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
             Lifecycle.CANCELLED, Lifecycle.INTERRUPTED,
@@ -217,17 +227,38 @@ class JobService:
         else:
             lifecycle = Lifecycle.QUEUED.value
         current = snapshot["lifecycle"]
-        if lifecycle != current:
+        normalized = self._normalized_aggregate_result(children, lifecycle)
+        if current not in terminal and lifecycle != current:
             try:
-                snapshot = self.repository.transition(snapshot["job_id"], lifecycle,
-                    result_json=__import__("json").dumps(self._aggregate_result(children), sort_keys=True))
+                # A newly accepted parent can observe already-terminal children
+                # on its first read. Preserve lifecycle validation by publishing
+                # the intermediate queued state before its terminal result.
+                if current == Lifecycle.ACCEPTED.value and lifecycle in terminal:
+                    snapshot = self.repository.transition(snapshot["job_id"], Lifecycle.QUEUED)
+                fields = {"result_json": json.dumps(normalized, sort_keys=True)} if lifecycle in terminal else {}
+                snapshot = self.repository.transition(snapshot["job_id"], lifecycle, **fields)
             except ValueError:
                 # A child can finish between the read and transition. The next
                 # status request will reconcile from the authoritative children.
                 snapshot = self.repository.snapshot(snapshot["job_id"])
-        result = self._aggregate_result(children)
-        return {**snapshot, "children": children, "aggregate": result,
-                "health": "terminal" if lifecycle in terminal else ("active" if lifecycle == "running" else "quiet")}
+        persisted = self._decode_result(snapshot.get("result_json"))
+        result = persisted if snapshot["lifecycle"] in terminal and persisted is not None else normalized
+        aggregate = self._aggregate_result(children)
+        effective_lifecycle = snapshot["lifecycle"]
+        return {**snapshot, "children": children, "retry_attempts": retry_attempts,
+                "aggregate": aggregate, "result": result,
+                "health": "terminal" if effective_lifecycle in terminal else (
+                    "active" if effective_lifecycle == "running" else "quiet")}
+
+    @staticmethod
+    def _decode_result(value: object) -> dict | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            result = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return result if isinstance(result, dict) else None
 
     @staticmethod
     def _aggregate_result(children: list[dict]) -> dict:
@@ -241,6 +272,106 @@ class JobService:
                     Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
                     Lifecycle.CANCELLED.value, Lifecycle.INTERRUPTED.value,
                 ))}
+
+    @classmethod
+    def _normalized_aggregate_result(cls, children: list[dict], conclusion: str) -> dict:
+        """Build bounded terminal summary; detailed children stay outside result_json."""
+        summary = cls._aggregate_result(children)
+        terminal = {
+            Lifecycle.SUCCEEDED.value, Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
+            Lifecycle.CANCELLED.value, Lifecycle.INTERRUPTED.value,
+        }
+        references = []
+        for child in children:
+            reference = {
+                "job_id": child["job_id"],
+                "retry_of_job_id": child.get("retry_of_job_id"),
+                "attempt": child.get("attempt"),
+                "kind": child.get("kind"),
+                "workspace": child.get("workspace_label"),
+                "lifecycle": child.get("lifecycle"),
+                "exit_code": child.get("exit_code"),
+                "termination_reason": child.get("termination_reason"),
+                "output_completeness": child.get("output_completeness"),
+                "artifact_count": len(child.get("artifacts", ())),
+                "compatibility_difference_count": len(child.get("compatibility_differences", ())),
+                "cleanup": {"policy": child.get("cleanup_policy"), "state": child.get("cleanup_state")},
+            }
+            references.append(reference)
+        base = {**summary, "kind": "aggregate", "conclusion": conclusion,
+                "complete": all(item.get("lifecycle") in terminal for item in children)}
+        if any(item.get("kind") == "ci" for item in children):
+            base["context"] = cls._ci_result_context(children)
+
+        def candidate(count: int) -> dict:
+            return {**base, "child_outcomes": references[:count],
+                    "child_outcomes_truncated": count < len(references),
+                    "child_outcomes_returned": count}
+
+        low, high = 0, len(references)
+        while low < high:
+            middle = (low + high + 1) // 2
+            encoded = json.dumps(candidate(middle), sort_keys=True).encode()
+            if len(encoded) <= MAX_AGGREGATE_RESULT_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        result = candidate(low)
+        if len(json.dumps(result, sort_keys=True).encode()) > MAX_AGGREGATE_RESULT_BYTES:
+            raise RuntimeError("aggregate_result_limit_exceeded")
+        return result
+
+    @staticmethod
+    def _ci_result_context(children: list[dict]) -> dict:
+        """Keep the CI execution facts needed to interpret a retained parent result.
+
+        This is deliberately a small, immutable summary rather than a duplicate of
+        each child snapshot.  The child records remain available through normal job
+        status calls, while the terminal parent result survives later cleanup.
+        """
+        ci_children = [item for item in children if item.get("kind") == "ci"]
+        first = ci_children[0] if ci_children else {}
+        source = {"identity": first.get("source_identity")}
+        if first.get("source_commit") is not None:
+            source["commit"] = first["source_commit"]
+        if first.get("source_dirty_digest") is not None:
+            source["dirty_digest"] = first["source_dirty_digest"]
+
+        workflows: list[str] = []
+        accepted: list[str] = []
+        safe_mode_skips: list[str] = []
+        graph_children = []
+        for child in ci_children:
+            try:
+                argv = json.loads(child.get("command_json") or "[]")
+            except (TypeError, ValueError):
+                argv = []
+            for value in argv:
+                if (isinstance(value, str) and ".github/workflows/" in value and
+                        value.endswith((".yml", ".yaml")) and value not in workflows):
+                    workflows.append(value)
+            for difference in child.get("compatibility_differences", ()):
+                identifier = difference.get("difference_id") or difference.get("id")
+                if not identifier or not difference.get("accepted"):
+                    continue
+                if identifier not in accepted:
+                    accepted.append(identifier)
+                if identifier.startswith("safe-mode:") and identifier not in safe_mode_skips:
+                    safe_mode_skips.append(identifier)
+            if len(graph_children) < 512:
+                graph_children.append({"job_id": child["job_id"],
+                                       "workspace": child.get("workspace_label")})
+
+        # These caps leave room for the separately bounded child-outcome list.
+        return {
+            "engine": {"name": "act", "version": "unobserved"},
+            "workflows": workflows[:128],
+            "source": source,
+            "graph": {"children": graph_children,
+                      "children_truncated": len(ci_children) > len(graph_children)},
+            "accepted_differences": accepted[:512],
+            "safe_mode_skips": safe_mode_skips[:512],
+        }
 
     def list(self, query=None):
         query = dict(query or {})
@@ -357,38 +488,87 @@ class JobService:
 
     def read_metrics(self, job_id: str, *, limit: int = 500):
         from sandbox.jobs.metrics import read
+        metrics = self.repository.snapshot(job_id).get("metrics")
+        if metrics is not None and not metrics.get("available", True):
+            raise RuntimeError("metrics_unavailable")
         return {"ok": True, "job_id": job_id, "samples": read(self.storage, job_id, limit=limit)}
 
     def get_artifact(self, job_id: str, artifact_id: str, *, offset: int = 0, max_bytes: int = 1_048_576) -> bytes:
-        import base64
+        query = ArtifactQuery(artifact_id=artifact_id, offset=offset, max_bytes=max_bytes, encoding="bytes")
         for artifact in self.list_artifacts(job_id):
             if artifact["artifact_id"] == artifact_id:
+                if artifact.get("status", "available") != "available":
+                    raise RuntimeError("artifact_unavailable")
                 path = self.storage.job_dir(job_id) / artifact["stored_relative_path"]
                 with path.open("rb") as handle:
-                    handle.seek(offset)
-                    return handle.read(max_bytes)
+                    handle.seek(query.offset)
+                    return handle.read(query.max_bytes)
         raise RuntimeError("artifact_not_found")
 
     def retry(self, job_id: str, *, request_id: str | None = None):
-        import json
-        from sandbox.jobs.models import SourceIdentity
         previous = self.repository.get(job_id)
-        if previous["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
+        if previous["kind"] in {"matrix", "plan"} or self.repository.children(job_id):
+            raise RuntimeError("aggregate_retry_unsupported")
+        if previous["lifecycle"] not in {item.value for item in (
+                Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT,
+                Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             raise RuntimeError("job_not_terminal")
-        return self.submit(JobSubmission(
-            kind=previous["kind"], project_root=previous["project_root"], project_identity=previous["project_identity"],
-            target_kind=previous["target_kind"], remote_name=previous["remote_name"], workspace_label=previous["workspace_label"],
-            workspace_mode=previous["workspace_mode"], argv=tuple(json.loads(previous["command_json"])),
-            deadline_seconds=previous["deadline_seconds"], source=SourceIdentity(previous["source_identity"], previous["source_commit"], previous["source_dirty_digest"]),
-            request_id=request_id, retry_of_job_id=job_id, parent_job_id=previous["root_job_id"],
-            attempt=int(previous["attempt"]) + 1, cwd_relative=previous["cwd_relative"],
-            execution_profile=previous["execution_profile"], output_profile=previous["output_profile"],
-            deadline_source=previous["deadline_source"], stall_seconds=previous["stall_seconds"],
-            cancel_on_stall=bool(previous["cancel_on_stall"]), cleanup_policy=previous["cleanup_policy"],
-            environment_keys=tuple(json.loads(previous["environment_keys_json"])),
-            depends_on=tuple(json.loads(previous.get("depends_on_json") or "[]")),
-            failure_policy=previous.get("failure_policy", "fail-fast"),
-        ))
+        canonical = self.repository.submission_snapshot(job_id)
+        if canonical is not None:
+            source = canonical["source"]
+            submission = JobSubmission(
+                kind=canonical["kind"], project_root=canonical["project_root"],
+                project_identity=canonical["project_identity"], target_kind=canonical["target_kind"],
+                remote_name=canonical.get("remote_name"), workspace_label=canonical["workspace_label"],
+                workspace_mode=canonical["workspace_mode"], argv=tuple(canonical["argv"]),
+                deadline_seconds=canonical["deadline_seconds"],
+                source=SourceIdentity(source["identity"], source.get("commit"), source.get("dirty_digest")),
+                request_id=request_id, retry_of_job_id=job_id,
+                # Standalone jobs remain standalone. CI/matrix children retain
+                # their actual parent, never a guessed root/self relationship.
+                parent_job_id=previous.get("parent_job_id"),
+                attempt=int(previous["attempt"]) + 1, cwd_relative=canonical["cwd_relative"],
+                execution_profile=canonical["execution_profile"], output_profile=canonical["output_profile"],
+                deadline_source=canonical["deadline_source"], stall_seconds=canonical["stall_seconds"],
+                cancel_on_stall=bool(canonical["cancel_on_stall"]),
+                cleanup_policy=canonical["cleanup_policy"],
+                environment_keys=tuple(canonical.get("environment_keys", ())),
+                artifact_paths=tuple(canonical.get("artifact_paths", ())),
+                depends_on=tuple(canonical.get("depends_on", ())),
+                failure_policy=canonical.get("failure_policy", "fail-fast"),
+                compatibility_differences=tuple(canonical.get("compatibility_differences", ())),
+            )
+        else:
+            # Safe legacy fallback for rows accepted before schema v3. Only
+            # fields historically persisted in bounded columns/tables can be
+            # reconstructed; absent artifact declarations are not invented.
+            snapshot = self.repository.snapshot(job_id)
+            differences = tuple({
+                "id": item["difference_id"], "workflow": item.get("workflow_path", ""),
+                "location": item.get("location", ""), "severity": item.get("severity", "notice"),
+                "accepted": bool(item.get("accepted")), "detail": item.get("detail", ""),
+                "catalog_version": item.get("catalog_version", "unknown"),
+            } for item in snapshot.get("compatibility_differences", ()))
+            submission = JobSubmission(
+                kind=previous["kind"], project_root=previous["project_root"],
+                project_identity=previous["project_identity"], target_kind=previous["target_kind"],
+                remote_name=previous["remote_name"], workspace_label=previous["workspace_label"],
+                workspace_mode=previous["workspace_mode"], argv=tuple(json.loads(previous["command_json"])),
+                deadline_seconds=previous["deadline_seconds"],
+                source=SourceIdentity(previous["source_identity"], previous["source_commit"],
+                                      previous["source_dirty_digest"]),
+                request_id=request_id, retry_of_job_id=job_id,
+                parent_job_id=previous.get("parent_job_id"), attempt=int(previous["attempt"]) + 1,
+                cwd_relative=previous["cwd_relative"], execution_profile=previous["execution_profile"],
+                output_profile=previous["output_profile"], deadline_source=previous["deadline_source"],
+                stall_seconds=previous["stall_seconds"], cancel_on_stall=bool(previous["cancel_on_stall"]),
+                cleanup_policy=previous["cleanup_policy"],
+                environment_keys=tuple(json.loads(previous["environment_keys_json"])),
+                depends_on=tuple(json.loads(previous.get("depends_on_json") or "[]")),
+                failure_policy=previous.get("failure_policy", "fail-fast"),
+                compatibility_differences=differences,
+            )
+        return self.submit(submission)
 
     def cleanup(self, job_id: str, *, logs: bool = True, artifacts: bool = True,
                 metrics: bool = True) -> dict:
@@ -405,10 +585,23 @@ class JobService:
             artifact_dir = directory / "artifacts"
             if artifact_dir.exists(): shutil.rmtree(artifact_dir); removed.append("artifacts")
         if metrics:
+            metric_file = directory / "metrics.jsonl"
             metric_dir = directory / "metrics"
-            if metric_dir.exists(): shutil.rmtree(metric_dir); removed.append("metrics")
-        self.repository.set_cleanup_state(job_id, "completed")
-        return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": "completed"}
+            metric_removed = False
+            if metric_file.exists():
+                metric_file.unlink()
+                metric_removed = True
+            if metric_dir.exists():
+                shutil.rmtree(metric_dir)
+                metric_removed = True
+            if metric_removed:
+                removed.append("metrics")
+        self.repository.mark_retained_metadata_unavailable(
+            job_id, logs=logs, artifacts=artifacts, metrics=metrics)
+        remaining = any((directory / name).exists() for name in ("output", "artifacts", "metrics", "metrics.jsonl"))
+        cleanup_state = "retained" if remaining else "completed"
+        self.repository.set_cleanup_state(job_id, cleanup_state)
+        return {"ok": True, "job_id": job_id, "removed": removed, "cleanup_state": cleanup_state}
 
     def retention_sweep(self, *, retention_days: int = 7, limit: int = 200,
                         storage_pressure: bool = False) -> dict:

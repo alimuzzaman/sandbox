@@ -185,16 +185,35 @@ metrics are null. Health evidence identifies which samples contributed to classi
 
 Creates a new job/attempt linked through `retry_of_job_id`. It revalidates target,
 source, deadline, workspace, and capability. It never mutates the prior terminal job.
-For CI parents, caller may retry failed children or the complete graph.
+Every newly accepted job stores a bounded canonical submission snapshot containing policy
+and reference data only: artifact declarations, compatibility differences, dependency and
+failure policy, cleanup policy, environment key names, source/workspace/deadline/output
+settings, and parent context. Secret environment values and arbitrary/unbounded JSON are
+excluded. Argv retains valid tabs/newlines and rejects only empty/NUL-bearing arguments
+plus total snapshot bounds. Exact scoped request replay is resolved by stored digest before
+new snapshot validation, preserving pre-migration replay compatibility. Retry uses this
+snapshot; rows accepted before the additive migration use only safe fields available in
+legacy columns/tables. A standalone retry keeps
+`parent_job_id:null`; a CI child retry keeps its actual parent. Aggregate-parent retry
+fails with stable `aggregate_retry_unsupported` until scoped complete-graph retry exists.
+Retries linked to a terminal parent appear under additive `retry_attempts`; frozen original
+`children` membership and terminal aggregate result do not change.
 
 ## Artifacts
 
 - `list_artifacts(job_id) -> ArtifactPage`
 - `get_artifact(job_id, artifact_id, offset=0, max_bytes=1MiB, encoding=base64) -> ArtifactChunk`
 
-Artifact retrieval is bounded. CLI may provide an explicit local destination and stream
-chunks through the transport; MCP returns bounded chunks/metadata. Paths are never
-accepted as retrieval identities after collection—only artifact IDs.
+Artifact retrieval is bounded: offset must be a non-negative non-boolean integer and page
+size must be 1..1 MiB. Literal directory declarations are retained as byte-deterministic
+bounded tar archives; collection rejects any symlink, device, socket, FIFO, path escape,
+entry-count overflow, byte-limit overflow, or file growth/shrink/change during collection.
+Both file and directory collection account verified live bytes. CLI may provide an
+explicit local destination and streams every bounded chunk to a same-directory temporary
+file, validates declared total size and SHA-256, then atomically publishes the file. A
+failed transfer leaves no partial destination. MCP returns one bounded chunk plus
+size/hash/next-offset metadata per call. Paths are never accepted as retrieval identities
+after collection—only artifact IDs.
 
 ## Maintenance
 
@@ -204,5 +223,16 @@ accepted as retrieval identities after collection—only artifact IDs.
 - `cleanup(job_id, artifacts?, logs?, workspace?)` applies only explicit scoped policy.
 
 Maintenance returns structured planned/applied/skipped/failed counts and never treats a
-partially failed cleanup as success.
+partially failed cleanup as success. Cleanup keeps bounded index rows for audit but marks
+removed output/metrics unavailable and retained artifact rows `expired` with a stable
+cleanup reason. Metrics cleanup removes the authoritative `metrics.jsonl`; service reads
+fail `metrics_unavailable` after cleanup rather than returning an empty successful page.
+
+Aggregate-parent status preserves existing `aggregate`, original `children`, and raw
+`result_json` keys and adds normalized `result` plus separate `retry_attempts`. On terminal
+transition, `result_json` is capped at 256 KiB and persists aggregate counts/conclusion plus
+bounded child references with output completeness, artifact/difference counts, and cleanup
+policy/state. `child_outcomes_truncated` signals omitted references. Full current artifact,
+difference, output, and cleanup detail remains inspectable through `children`; terminal rows
+and aggregate membership remain immutable.
 

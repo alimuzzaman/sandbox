@@ -68,9 +68,14 @@ sb job retry JOB_ID [--remote NAME] [--request-id ID] [--workspace-policy reuse|
 sb job cleanup JOB_ID [--remote NAME] [--logs] [--artifacts] [--workspace] --yes
 ```
 
-`status`, `output`, `metrics`, and artifact list are observational. `cancel`, retry,
-cleanup, reset, and destroy are explicit mutations. Full output is obtained through
-`job output --output full`; quiet execution never removes retained output.
+`status`, `output`, `metrics`, and artifact list are observational. Successful
+`job status --json` always includes `ok:true`; human status rendering is unchanged.
+`cancel`, retry, cleanup, reset, and destroy are explicit mutations. Full output is
+obtained through `job output --output full`; quiet execution never removes retained
+output. Artifact offset must be non-negative and each requested page must be 1..1 MiB;
+invalid bounds fail before local or remote reads. `job artifact get --output-file`
+downloads all bounded chunks to a temporary file and publishes only after total-size and
+SHA-256 validation.
 
 Human follow rendering writes stdout events to local stdout and stderr events to local
 stderr when `--stream` is not combined. JSON/NDJSON mode emits structured events only.

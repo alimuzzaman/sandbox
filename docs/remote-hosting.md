@@ -167,9 +167,11 @@ primary hostname, aliases, redirects, and the required Cloudflare policy.
 ```
 
 `validate` is offline. `plan` is read-only and lists only the declared hostnames;
-it never prunes unrelated DNS records. `apply` is confirmation-gated: it transfers the
-approved checkout, runs Compose/init health checks, validates Caddy, and then updates
-only declared DNS records. Configure Cloudflare with `./sb connect cloudflare`, which
+it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandbox
+checks the local Git branch and clean-tree policy declared for the target environment.
+`apply` is confirmation-gated: it then transfers the approved checkout, runs
+Compose/init health checks, validates Caddy, and updates only declared DNS records.
+Configure Cloudflare with `./sb connect cloudflare`, which
 stores the token in `~/.zshrc.secrets` (owner-only and outside Git), and record the VPS
 public address with `./sb remote set-origin myvps --ipv4 <address>`.
 

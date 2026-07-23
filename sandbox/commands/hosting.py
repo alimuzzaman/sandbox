@@ -372,8 +372,32 @@ def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> Non
             raise RuntimeError(f"edge verification failed for {route['hostname']}: {last_error}")
 
 
+def _validate_apply_source(validated: dict) -> str:
+    """Reject an ineligible deployment entirely on the local machine."""
+    branch = remote.current_branch(validated["project_root"])
+    policy = validated["deploy"]
+    if branch not in policy["allowed_branches"] and "*" not in policy["allowed_branches"]:
+        allowed = ", ".join(policy["allowed_branches"])
+        raise hosting.HostingError(
+            f"branch '{branch}' is not allowed for {validated['environment']} "
+            f"(allowed: {allowed})"
+        )
+    if policy["require_clean"]:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=validated["project_root"],
+            capture_output=True, text=True, check=False,
+        )
+        if status.returncode != 0:
+            raise RuntimeError("could not inspect the deployment working tree")
+        if status.stdout.strip():
+            raise hosting.HostingError(
+                f"{validated['environment']} requires a clean working tree"
+            )
+    return branch
+
+
 def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
-                state: dict, allow_zone_ssl_change: bool) -> None:
+                state: dict, allow_zone_ssl_change: bool, branch: str) -> None:
     secret_values, missing = _secret_status(validated)
     if missing:
         raise hosting.HostingError("missing hosting secrets: " + ", ".join(missing))
@@ -381,7 +405,6 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     client = cloudflare.Client()
     home = remote.resolve_sandbox_home(entry)
     target = _ensure_host_source(entry, home, validated["project"])
-    branch = remote.current_branch(validated["project_root"])
     sha = remote.push_commits(entry, validated["project_root"], target, branch)
     remote.reset_target_to(entry, target, sha)
     diff, untracked = remote.capture_uncommitted(validated["project_root"])
@@ -464,6 +487,14 @@ def cmd_host(cfg, args) -> None:
         return
     if not args.remote:
         die("--remote is required for host plan, apply, and login-url")
+    branch = None
+    if args.action == "apply":
+        if not args.confirm:
+            die("host apply is protected; review `./sb host plan` then pass --confirm")
+        try:
+            branch = _validate_apply_source(validated)
+        except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            die(str(exc))
     entry = remote.get_remote(args.remote)
     if not entry:
         die(f"no remote named '{args.remote}'")
@@ -494,21 +525,10 @@ def cmd_host(cfg, args) -> None:
     if args.action == "plan":
         _emit({"ok": True, **plan}, args.json)
         return
-    if not args.confirm:
-        die("host apply is protected; review `./sb host plan` then pass --confirm")
     if not entry.get("provisioned"):
         die(f"remote '{args.remote}' is not provisioned")
     if not entry.get("origin_ipv4"):
         die(f"remote '{args.remote}' has no public origin address; run `./sb remote set-origin`")
-    branch = remote.current_branch(validated["project_root"])
-    policy = validated["deploy"]
-    if branch not in policy["allowed_branches"] and "*" not in policy["allowed_branches"]:
-        die(f"branch '{branch}' is not allowed for {validated['environment']}")
-    if policy["require_clean"]:
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=validated["project_root"],
-                                capture_output=True, text=True, check=False)
-        if status.stdout.strip():
-            die(f"{validated['environment']} requires a clean working tree")
     ssl = plan["cloudflare"].get("ssl") if isinstance(plan.get("cloudflare"), dict) else None
     if ssl and not getattr(args, "allow_zone_ssl_change", False):
         non_strict = [zone for zone, mode in ssl.items() if mode != "strict"]
@@ -516,7 +536,7 @@ def cmd_host(cfg, args) -> None:
             die("these zones require --allow-zone-ssl-change: " + ", ".join(non_strict))
     try:
         _apply_host(validated, entry, args.remote, plan["runtime"], state,
-                    bool(getattr(args, "allow_zone_ssl_change", False)))
+                    bool(getattr(args, "allow_zone_ssl_change", False)), branch)
     except (hosting.HostingError, cloudflare.CloudflareError, RuntimeError,
             subprocess.SubprocessError, OSError) as exc:
         die(str(exc))

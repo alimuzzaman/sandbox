@@ -241,6 +241,32 @@ class TestHostingManifest(unittest.TestCase):
             hosting.apply_with_rollback(apply, lambda: events.append("rollback"))
         self.assertEqual(events, ["apply", "rollback"])
 
+    def test_apply_rejects_disallowed_branch_before_reading_remote_state(self):
+        args = types.SimpleNamespace(
+            action="apply", project_dir=None, environment=None,
+            remote="not-configured", confirm=True, json=True,
+            allow_zone_ssl_change=False,
+        )
+        validated = {
+            "project_root": "/tmp/example-site",
+            "project": "example-site",
+            "environment": "production",
+            "deploy": {"allowed_branches": ["main"], "require_clean": True},
+        }
+        clean = subprocess.CompletedProcess(
+            ["git", "status", "--porcelain"], 0, stdout="", stderr=""
+        )
+
+        with patch.object(hosting_cmd.hosting, "validate_manifest", return_value=validated), \
+             patch.object(hosting_cmd.remote, "current_branch", return_value="dev"), \
+             patch.object(hosting_cmd.remote, "get_remote") as get_remote, \
+             patch.object(hosting_cmd.subprocess, "run", return_value=clean), \
+             patch.object(hosting_cmd, "die", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                hosting_cmd.cmd_host(None, args)
+
+        get_remote.assert_not_called()
+
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.urllib.request.build_opener")
     def test_edge_verification_accepts_basic_auth_challenge_for_served_route(self, build_opener, _sleep):

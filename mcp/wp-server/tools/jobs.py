@@ -331,14 +331,20 @@ def workspace_status(project_dir: str, *, local: bool = False, remote: str | Non
 
 
 def workspace_reset(project_dir: str, *, local: bool = False, remote: str | None = None,
-                    workspace: str | None = None) -> dict:
+                    workspace: str | None = None, confirm: bool = False) -> dict:
     """Reset a non-busy workspace; active durable job leases are protected."""
+    if confirm is not True:
+        return {"ok": False, "code": "confirmation_required",
+                "error": "workspace reset requires confirm=true"}
     return _workspace("reset", project_dir, local=local, remote=remote, workspace=workspace)
 
 
 def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | None = None,
-                      workspace: str | None = None) -> dict:
+                      workspace: str | None = None, confirm: bool = False) -> dict:
     """Explicitly remove a non-busy named workspace from its selected namespace."""
+    if confirm is not True:
+        return {"ok": False, "code": "confirmation_required",
+                "error": "workspace destroy requires confirm=true"}
     return _workspace("destroy", project_dir, local=local, remote=remote, workspace=workspace)
 
 

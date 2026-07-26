@@ -16,10 +16,15 @@ def configure_parser(parser) -> None:
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
     parser.add_argument("--workspace", default="default")
+    parser.add_argument("--confirm", action="store_true",
+                        help="required before reset or destroy changes a workspace")
     parser.add_argument("--json", action="store_true")
 
 
 def cmd_workspace(_cfg, args) -> None:
+    if args.action in {"reset", "destroy"} and not args.confirm:
+        from sandbox.core import die
+        die(f"workspace {args.action} requires --confirm")
     service = durable_job_dependencies()["workspace_service"]
     request = TargetRequest(args.project_dir, local=args.local, remote=args.remote, workspace=args.workspace)
     try:

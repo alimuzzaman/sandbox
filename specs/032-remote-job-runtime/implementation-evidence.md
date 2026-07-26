@@ -745,3 +745,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   dispatching after release.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_artifacts
   tests.test_job_matrix tests.test_job_scheduler -v`. Result: PASS, 21 tests.
+
+## Workspace confirmation-contract increment
+
+- Date: 2026-07-26. Workspace reset and destroy now require an explicit CLI
+  `--confirm` or MCP `confirm=true` before invoking lifecycle controls. The
+  contract suite covers local lifecycle request forwarding, confirmation
+  rejection, confirmed mutation dispatch, and isolated matrix submission.
+- Command: `.cli-venv/bin/python -m unittest tests.test_workspace_contracts
+  tests.test_workspace_runtime tests.test_job_matrix -v`. Result: PASS, 17 tests.

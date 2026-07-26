@@ -763,3 +763,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   passes; the disposable WordPress acceptance remains deliberately gated.
 - Command: `.cli-venv/bin/python -m unittest discover -s tests -v`.
   Result: PASS (one gated WordPress acceptance skip).
+
+## Explicit retained-data cleanup increment
+
+- Date: 2026-07-26. CLI `job-cleanup` now requires `--yes` (with `--confirm`
+  accepted as an alias), MCP requires `confirm=true`, and remote cleanup
+  control transmits the confirmation flag. Observation contracts cover status,
+  metrics, artifact paging, cancellation, retry, and confirmed cleanup.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_observation_contracts
+  tests.test_job_mcp tests.test_remote_job_transport -v`. Result: PASS,
+  16 tests.

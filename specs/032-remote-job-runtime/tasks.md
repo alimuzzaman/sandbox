@@ -136,7 +136,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
 - [X] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
 - [X] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
-- [ ] T062 [P] [US2] Add CLI/MCP status, metrics, artifact, cancel, retry, and cleanup contract tests in `tests/test_job_observation_contracts.py` for FR-038/FR-039
+- [X] T062 [P] [US2] Add CLI/MCP status, metrics, artifact, cancel, retry, and cleanup contract tests in `tests/test_job_observation_contracts.py` for FR-038/FR-039
 
 ### Implementation for User Story 2
 

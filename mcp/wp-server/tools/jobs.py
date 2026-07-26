@@ -349,8 +349,11 @@ def workspace_destroy(project_dir: str, *, local: bool = False, remote: str | No
 
 
 def job_cleanup(job_id: str, *, logs: bool = True, artifacts: bool = True,
-                metrics: bool = True, remote: str | None = None) -> dict:
+                metrics: bool = True, remote: str | None = None, confirm: bool = False) -> dict:
     """Explicitly remove retained logs/artifacts for a terminal job only."""
+    if confirm is not True:
+        return {"ok": False, "code": "confirmation_required",
+                "error": "job cleanup requires confirm=true"}
     try:
         return _remote_transport().cleanup(remote, job_id, logs=logs, artifacts=artifacts, metrics=metrics) \
             if remote else _job_service.cleanup(job_id, logs=logs, artifacts=artifacts, metrics=metrics)

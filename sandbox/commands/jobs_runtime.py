@@ -157,6 +157,8 @@ def configure_cleanup_parser(parser) -> None:
     parser.add_argument("--logs", action="store_true")
     parser.add_argument("--artifacts", action="store_true")
     parser.add_argument("--metrics", action="store_true")
+    parser.add_argument("--confirm", "--yes", dest="confirm", action="store_true",
+                        help="required before retained job data is removed")
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -382,6 +384,8 @@ def cmd_job_retry(_cfg, args) -> None:
 
 
 def cmd_job_cleanup(_cfg, args) -> None:
+    if not args.confirm:
+        _die("job cleanup requires --yes")
     selected = args.logs or args.artifacts or args.metrics
     options = {"logs": args.logs or not selected, "artifacts": args.artifacts or not selected,
                "metrics": args.metrics or not selected}

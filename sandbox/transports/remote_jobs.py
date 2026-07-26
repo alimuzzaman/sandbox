@@ -285,7 +285,7 @@ class RemoteJobTransport:
 
     def cleanup(self, remote_name: str, job_id: str, *, logs: bool = True,
                 artifacts: bool = True, metrics: bool = True) -> dict:
-        args = ["job-cleanup", job_id]
+        args = ["job-cleanup", job_id, "--yes"]
         for flag, enabled in (("--logs", logs), ("--artifacts", artifacts), ("--metrics", metrics)):
             if enabled: args.append(flag)
         return self.control(remote_name, args)

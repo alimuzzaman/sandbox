@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from sandbox.jobs.models import JobSubmission, SourceIdentity
-from sandbox.transports.remote_jobs import RemoteJobTransport
+from sandbox.transports.remote_jobs import RemoteJobTransport, RemoteJobTransportError
 
 
 class RemoteJobTransportTests(unittest.TestCase):
@@ -207,3 +207,30 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("--tail-bytes 10", command)
         self.assertIn("--wait-seconds 2", command)
         self.assertIn("--encoding base64", command)
+
+    def test_matrix_rejection_reports_structured_remote_reason(self):
+        transport = RemoteJobTransport(
+            deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,
+                                           "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=2, stdout='{"ok":false,"error":{"message":"matrix plan rejected"}}\n'),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        source = SourceIdentity("ignored")
+        child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
+                              remote_name="r", workspace_mode="isolated")
+        with self.assertRaisesRegex(RemoteJobTransportError, "matrix plan rejected"):
+            transport.submit_many([child])
+
+    def test_matrix_rejection_reports_bounded_stderr_when_json_is_absent(self):
+        transport = RemoteJobTransport(
+            deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,
+                                           "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="matrix parser failed"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        source = SourceIdentity("ignored")
+        child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
+                              remote_name="r", workspace_mode="isolated")
+        with self.assertRaisesRegex(RemoteJobTransportError, "matrix parser failed"):
+            transport.submit_many([child])

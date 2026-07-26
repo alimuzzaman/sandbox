@@ -511,6 +511,11 @@ def cmd_job_matrix(_cfg, args) -> None:
     if command[:1] == ["--"]: command = command[1:]
     if not args.spec_json and (not args.workspace or not command):
         _die("usage: ./sb job-matrix --workspace LABEL [--workspace LABEL] -- <argv...>")
+    # The remote transport uses deterministic sibling workspaces of the exact
+    # deployment path. The resolved config root can differ (for example when
+    # a copied checkout retains a Git worktree pointer), so retain the
+    # explicitly declared deployment boundary for validating those children.
+    declared_project_root = Path(args.project_dir).expanduser().resolve()
     dependencies = durable_job_dependencies()
     try:
         target = dependencies["target_service"].resolve(TargetRequest(args.project_dir, local=args.local,
@@ -536,7 +541,7 @@ def cmd_job_matrix(_cfg, args) -> None:
                 project_root = target.project_root
                 if item.get("project_dir"):
                     project_root = str(Path(item["project_dir"]).expanduser().resolve())
-                    deployed_root = Path(target.project_root).resolve()
+                    deployed_root = declared_project_root
                     candidate_root = Path(project_root)
                     # Remote matrix workspaces are deterministic sibling
                     # copies (`<deploy>-workspace-<hash>`), not descendants:

@@ -106,7 +106,18 @@ class RemoteJobTransport:
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
-            raise RemoteJobTransportError("remote matrix acceptance failed")
+            detail = ""
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict) and isinstance(error.get("message"), str):
+                    detail = error["message"][:512]
+            if not detail:
+                stderr = getattr(result, "stderr", "")
+                if isinstance(stderr, str) and stderr.strip():
+                    detail = stderr.strip()[-512:]
+                else:
+                    detail = f"remote exit code {getattr(result, 'returncode', 1)}"
+            raise RemoteJobTransportError(f"remote matrix acceptance failed: {detail}")
         return {**payload, "target": {"kind": "remote", "remote": first.remote_name,
                                         "workspace": first.workspace_label},
                 "source": {"identity": deployed["identity"], "commit": deployed["commit"],

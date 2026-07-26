@@ -109,6 +109,30 @@ class RemoteCIJobTests(unittest.TestCase):
         self.assertEqual(captured[0].stall_seconds, 300)
         self.assertEqual(captured[0].environment_keys, ())
 
+    def test_encoded_matrix_allows_sibling_of_declared_deployment_root(self):
+        plan = [{
+            "kind": "test", "workspace": "cell", "argv": ["echo", "ok"],
+            "project_dir": "/tmp/deployed-workspace-cell", "timeout": 60,
+            "source": {"identity": "source"},
+        }]
+        encoded = base64.b64encode(json.dumps(plan).encode()).decode()
+        captured = []
+        service = SimpleNamespace(submit_matrix=lambda submissions, **_kwargs: captured.extend(submissions) or {
+            "ok": True, "parent_job_id": "p" * 32, "children": []})
+        # Project discovery can canonicalize a copied checkout to a different
+        # root. The explicitly supplied deployment root remains the boundary
+        # for deterministic sibling workspaces.
+        target = ResolvedTarget("/tmp/canonical-root", "local", None, "default", "local:p", {})
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target),
+                        "job_service": service}
+        args = SimpleNamespace(spec_json=encoded, command=[], workspace=None, project_dir="/tmp/deployed",
+                               local=True, remote=None, timeout=60, output_profile="smart", json=True)
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value=dependencies), \
+                redirect_stdout(StringIO()):
+            cmd_job_matrix(None, args)
+        self.assertEqual(captured[0].project_root,
+                         str(Path("/tmp/deployed-workspace-cell").resolve()))
+
     def test_remote_matrix_plan_carries_dependencies_and_accepted_differences(self):
         calls = []
         transport = RemoteJobTransport(

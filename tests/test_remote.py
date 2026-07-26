@@ -965,6 +965,23 @@ class TestConfigureHttpsProxy(unittest.TestCase):
             "/etc/caddy/conf.d/sandbox-instance-default-demo.sandbox.asb.bd.caddy",
             cmd,
         )
+        self.assertIn("/etc/caddy/conf.d/sandbox-host-*.caddy", cmd)
+        self.assertIn("use sb host apply instead", cmd)
+        self.assertLess(
+            cmd.index("sandbox-host-*.caddy"),
+            cmd.index("sandbox-instance-default-demo.sandbox.asb.bd.caddy"),
+        )
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_instance_route_reports_permanent_host_ownership(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            returncode=65,
+            stderr="hostname is managed by permanent Sandbox hosting; use sb host apply instead",
+        )
+        with self.assertRaisesRegex(RuntimeError, "managed by permanent Sandbox hosting"):
+            sr.configure_instance_https_route(
+                {"ssh": "ubuntu@1.2.3.4"}, "lenzora.dev", 8188
+            )
 
     @patch("sandbox.core._remote.ssh_run")
     def test_removes_only_the_named_instance_route(self, mock_ssh_run):

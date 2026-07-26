@@ -663,16 +663,34 @@ def _validate_hostname(hostname: str, what: str) -> str:
     return hostname
 
 
-def _caddy_proxy_command(hostname: str, port: int, conf_prefix: str) -> str:
+def _caddy_proxy_command(
+    hostname: str,
+    port: int,
+    conf_prefix: str,
+    *,
+    reject_managed_host: bool = False,
+) -> str:
     site_q = shlex.quote(
         f"{hostname} {{\n"
         f"    reverse_proxy 127.0.0.1:{int(port)}\n"
         f"}}\n"
     )
     file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")
+    managed_host_guard = ""
+    if reject_managed_host:
+        hostname_pattern = shlex.quote(
+            rf"^[[:space:]]*{re.escape(hostname)}[[:space:]]*\{{"
+        )
+        managed_host_guard = (
+            f"if $SUDO grep -l -E {hostname_pattern} "
+            "/etc/caddy/conf.d/sandbox-host-*.caddy >/dev/null 2>&1; then "
+            "echo 'hostname is managed by permanent Sandbox hosting; "
+            "use sb host apply instead' >&2; exit 65; fi; "
+        )
     return (
         "set -e; "
         "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"{managed_host_guard}"
         "if ! command -v caddy >/dev/null 2>&1; then "
         "$SUDO apt-get update -qq && $SUDO apt-get install -y caddy; "
         "fi; "
@@ -693,9 +711,14 @@ def _caddy_proxy_command(hostname: str, port: int, conf_prefix: str) -> str:
 
 
 def configure_instance_https_route(remote: dict, domain: str, port: int) -> None:
-    """Route a public instance hostname through Caddy to the remote WP port."""
+    """Route a preview hostname through Caddy unless permanent hosting owns it."""
     domain = _validate_hostname(domain, "remote instance domain")
-    cmd = _caddy_proxy_command(domain, port, "sandbox-instance")
+    cmd = _caddy_proxy_command(
+        domain,
+        port,
+        "sandbox-instance",
+        reject_managed_host=True,
+    )
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:
         raise RuntimeError(

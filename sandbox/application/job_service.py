@@ -28,7 +28,6 @@ from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
 from sandbox.jobs.scheduler import WorkspaceBusy
 
 
-_DETACHED_SUPERVISORS: list[subprocess.Popen] = []
 MAX_AGGREGATE_RESULT_BYTES = 262_144
 
 
@@ -117,6 +116,7 @@ class JobService:
                 "runtime_dir": str(self.storage.root.parent), "argv": __import__("json").loads(row["command_json"]),
                 "cwd": str(Path(row["project_root"]) / row["cwd_relative"]),
                 "deadline_seconds": row["deadline_seconds"], "cancel_grace_seconds": 20,
+                "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
                 "artifact_paths": list(submission.artifact_paths)}
 
@@ -124,15 +124,19 @@ class JobService:
         if self.launcher:
             self.launcher(descriptor_path)
             return
-        _DETACHED_SUPERVISORS[:] = [process for process in _DETACHED_SUPERVISORS if process.poll() is None]
         # The CLI can be invoked through an absolute path over SSH, where the
         # caller's cwd is not the staged Sandbox checkout.  The detached child
         # must start in the package root for ``-m sandbox.jobs.supervisor`` to
         # resolve reliably after the parent exits.
         package_root = Path(__file__).resolve().parents[2]
-        _DETACHED_SUPERVISORS.append(subprocess.Popen([sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
+        process = subprocess.Popen([sys.executable, "-m", "sandbox.jobs.supervisor", str(descriptor_path)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            cwd=package_root, start_new_session=True, close_fds=True))
+            cwd=package_root, start_new_session=True, close_fds=True)
+        # This is intentionally a fire-and-forget control-plane process: its
+        # durable descriptor and registry own lifecycle after acceptance. Avoid
+        # retaining a parent Popen handle whose destructor would falsely warn
+        # when the caller exits before the detached supervisor finishes.
+        process._child_created = False  # type: ignore[attr-defined]
 
     @staticmethod
     def _accepted(row: dict, *, replay: bool) -> dict:

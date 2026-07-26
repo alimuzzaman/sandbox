@@ -143,7 +143,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T063 [P] [US2] Implement host/process resource metric sampling and movement evidence in `sandbox/jobs/metrics.py`
 - [X] T064 [P] [US2] Implement evidence-based lifecycle-independent health classification and threshold reporting in `sandbox/jobs/health.py`
 - [X] T065 [P] [US2] Implement constrained artifact planning, collection, hashing, indexing, expiry, and bounded retrieval in `sandbox/jobs/artifacts.py`
-- [ ] T066 [US2] Record heartbeats/metrics/progress and apply warn-only or opt-in cancel-on-stall policy in `sandbox/jobs/supervisor.py`
+- [X] T066 [US2] Record heartbeats/metrics/progress and apply warn-only or opt-in cancel-on-stall policy in `sandbox/jobs/supervisor.py`
 - [X] T067 [US2] Implement verified graceful/force/parent cancellation and retry use cases in `sandbox/application/job_service.py`
 - [ ] T068 [US2] Implement on-read and maintenance reconciliation for boot change, PID reuse, supervisor loss, child loss, and incomplete finalization in `sandbox/jobs/retention.py` and `sandbox/application/job_service.py`
 - [X] T069 [US2] Implement terminal-job/log/metric/artifact retention planning and scoped cleanup with active-job protection in `sandbox/application/job_service.py` and `sandbox/jobs/storage.py`

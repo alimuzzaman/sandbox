@@ -63,12 +63,40 @@ def run_descriptor(path: str | Path) -> int:
         deadline = time.monotonic() + int(descriptor["deadline_seconds"])
         next_metric = time.monotonic()
         timed_out = False
+        stall_cancelled = False
+        last_metric_digest = None
+        last_progress_monotonic = time.monotonic()
+        last_progress_at = _iso()
         while selector.get_map():
             if time.monotonic() >= next_metric and command.poll() is None:
                 metric = append_metric(storage, repository, job_id, sample_metric(command.pid))
-                repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={"process_alive": True},
-                    last_metric_at=_iso(), metric_digest=str(metric.get("cpu_seconds")))
+                movement_digest = metric.get("movement_digest")
+                metric_movement = movement_digest is not None and movement_digest != last_metric_digest
+                if metric_movement:
+                    last_progress_monotonic = time.monotonic()
+                    last_progress_at = _iso()
+                last_metric_digest = movement_digest
+                repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
+                    "process_alive": True, "metric_movement": metric_movement,
+                }, last_metric_at=_iso(), last_progress_at=last_progress_at,
+                    metric_digest=str(movement_digest or ""))
                 next_metric = time.monotonic() + 1
+            stall_seconds = int(descriptor.get("stall_seconds", 300))
+            stalled = command.poll() is None and time.monotonic() - last_progress_monotonic >= stall_seconds
+            if stalled:
+                repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
+                    "process_alive": True, "stalled": True,
+                    "cancel_on_stall": bool(descriptor.get("cancel_on_stall", False)),
+                }, last_progress_at=last_progress_at)
+            if stalled and not stall_cancelled and descriptor.get("cancel_on_stall", False):
+                stall_cancelled = True
+                repository.transition(job_id, Lifecycle.CANCELLING)
+                _signal_group(command.pid, 15)
+                grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
+                while command.poll() is None and time.monotonic() < grace_end:
+                    time.sleep(0.05)
+                if command.poll() is None:
+                    _signal_group(command.pid, 9)
             if time.monotonic() >= deadline and command.poll() is None:
                 timed_out = True
                 _signal_group(command.pid, 15)
@@ -81,7 +109,11 @@ def run_descriptor(path: str | Path) -> int:
                 chunk = os.read(key.fileobj.fileno(), 65536)
                 if chunk:
                     output.append(key.data, chunk)
-                    repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={"process_alive": True}, last_output_at=_iso())
+                    last_progress_monotonic = time.monotonic()
+                    last_progress_at = _iso()
+                    repository.put_heartbeat(job_id, supervisor_at=_iso(), health_evidence={
+                        "process_alive": True, "progress": True,
+                    }, last_output_at=_iso(), last_activity_at=_iso(), last_progress_at=last_progress_at)
                 else:
                     selector.unregister(key.fileobj)
         return_code = command.wait()
@@ -98,6 +130,10 @@ def run_descriptor(path: str | Path) -> int:
             repository.transition(job_id, Lifecycle.TIMED_OUT, exit_code=return_code,
                 termination_reason="deadline_exceeded", output_completeness="complete", integrity_sha256=integrity)
             return 124
+        if stall_cancelled:
+            repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
+                termination_reason="cancelled_on_stall", output_completeness="complete", integrity_sha256=integrity)
+            return 130
         if repository.get(job_id)["lifecycle"] == Lifecycle.CANCELLING.value:
             repository.transition(job_id, Lifecycle.CANCELLED, exit_code=return_code,
                 termination_reason="cancelled_by_request", output_completeness="complete", integrity_sha256=integrity)

@@ -520,7 +520,7 @@ class JobRepository:
             f"""INSERT INTO heartbeats(job_id, supervisor_at, {', '.join(names)}, health_evidence_json)
                 VALUES({', '.join('?' for _ in range(9))})
                 ON CONFLICT(job_id) DO UPDATE SET supervisor_at=excluded.supervisor_at,
-                {', '.join(f'{name}=excluded.{name}' for name in names)},
+                {', '.join(f'{name}=COALESCE(excluded.{name}, heartbeats.{name})' for name in names)},
                 health_evidence_json=excluded.health_evidence_json""",
             (job_id, supervisor_at, *values, json.dumps(health_evidence, sort_keys=True)),
         )

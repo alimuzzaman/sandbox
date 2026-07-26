@@ -43,3 +43,19 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(all(item["complete"] for item in state["output"]))
             self.assertEqual(service.read_output(submitted["job_id"])["data"], "startdone")
             repository.close()
+
+    def test_opt_in_stall_cancellation_records_a_distinct_reason(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), components=None)
+            submitted = service.submit(JobSubmission("test", temp, "p", "local", "stalled",
+                ("/bin/sh", "-c", "sleep 10"), 20, SourceIdentity("source"),
+                stall_seconds=1, cancel_on_stall=True))
+            for _ in range(100):
+                state = service.get(submitted["job_id"])
+                if state["lifecycle"] in {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}:
+                    break
+                time.sleep(.05)
+            self.assertEqual(state["lifecycle"], "cancelled", state)
+            self.assertEqual(state["termination_reason"], "cancelled_on_stall")
+            repository.close()

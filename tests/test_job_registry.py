@@ -55,6 +55,17 @@ class JobRegistryTests(unittest.TestCase):
         reopened = self.repository()
         self.assertEqual(reopened.get(first["job_id"])["lifecycle"], "accepted")
 
+    def test_heartbeat_updates_preserve_prior_observation_timestamps(self):
+        repo = self.repository()
+        row, _ = repo.accept(submission())
+        repo.put_heartbeat(row["job_id"], supervisor_at="2026-01-01T00:00:00Z",
+                           last_output_at="2026-01-01T00:00:00Z", health_evidence={"output": True})
+        repo.put_heartbeat(row["job_id"], supervisor_at="2026-01-01T00:00:01Z",
+                           last_metric_at="2026-01-01T00:00:01Z", health_evidence={"metric": True})
+        heartbeat = repo.snapshot(row["job_id"])["heartbeat"]
+        self.assertEqual(heartbeat["last_output_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(heartbeat["last_metric_at"], "2026-01-01T00:00:01Z")
+
     def test_canonical_submission_snapshot_round_trips_retry_policy_without_values(self):
         from sandbox.jobs.models import JobSubmission, SourceIdentity
 

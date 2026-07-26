@@ -671,3 +671,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_output
   tests.test_job_output_cursor tests.test_job_supervisor tests.test_job_service
   -v`. Result: PASS, 22 tests.
+
+## Supervisor progress and stall-policy increment
+
+- Date: 2026-07-26. The supervisor now carries declared stall policy into its
+  descriptor, records metric movement and retained-output progress in durable
+  heartbeats, preserves prior heartbeat observations across updates, and marks
+  a sustained stall as warn-only evidence by default. Jobs with
+  `cancel_on_stall=true` transition through verified process-group cancellation
+  to `cancelled_on_stall`; ordinary deadline behavior remains distinct.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_registry
+  tests.test_job_supervisor tests.test_job_service tests.test_job_health
+  tests.test_job_cancellation -v`. Result: PASS, 35 tests.

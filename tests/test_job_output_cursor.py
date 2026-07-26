@@ -50,3 +50,26 @@ class OutputCursorModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "since"):
                 OutputQuery(since="")
             repo.close()
+
+    def test_one_hundred_cursor_resumes_never_repeat_a_retained_event(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "w", ("echo", "x"), 60, SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            storage.job_dir(job["job_id"], create=True)
+            output = JobOutputStore(storage, repo, job["job_id"])
+            for number in range(100):
+                output.append("stdout", f"{number}\n".encode())
+
+            cursor = None
+            sequences = []
+            for _ in range(100):
+                page = output.read(OutputQuery(cursor=cursor, max_events=1) if cursor else
+                                   OutputQuery(max_events=1))
+                sequences.extend(event["sequence"] for event in page["events"])
+                cursor = page["cursor"]
+
+            self.assertEqual(sequences, list(range(100)))
+            self.assertEqual(len(sequences), len(set(sequences)))
+            repo.close()

@@ -61,7 +61,9 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
         submission = JobSubmission(kind, target.project_root,
             hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind, target.workspace_label,
             tuple(command), timeout_seconds, SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
-            remote_name=target.remote_name, request_id=request_id, output_profile=output_profile)
+            remote_name=target.remote_name, request_id=request_id, output_profile=output_profile,
+            output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
+                                       .get(output_profile)))
         if target.kind == "remote":
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport

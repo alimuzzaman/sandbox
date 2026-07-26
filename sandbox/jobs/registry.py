@@ -100,6 +100,7 @@ def _canonical_submission_snapshot(submission: JobSubmission) -> str:
         "cwd_relative": _bounded_text(raw["cwd_relative"], "working directory"),
         "execution_profile": _bounded_text(raw["execution_profile"], "execution profile", maximum=64),
         "output_profile": _bounded_text(raw["output_profile"], "output profile", maximum=64),
+        "output_profile_definition": raw.get("output_profile_definition", {}),
         "deadline_seconds": int(raw["deadline_seconds"]),
         "deadline_source": _bounded_text(raw["deadline_source"], "deadline source", maximum=128),
         "stall_seconds": int(raw["stall_seconds"]),

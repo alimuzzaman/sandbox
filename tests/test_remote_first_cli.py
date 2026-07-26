@@ -22,9 +22,12 @@ class RemoteFirstCliTests(unittest.TestCase):
 
     def test_configured_remote_uses_durable_transport_without_explicit_flag(self):
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
-                                 workspace_label="default")
+                                 workspace_label="default", runtime_policy={
+                                     "outputProfiles": {"agent": {"mode": "errors"}},
+                                 })
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
-        remote_transport = SimpleNamespace(submit=lambda submission: {
+        submissions = []
+        remote_transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {
             "job_id": "a" * 32, "target": submission.target_kind,
             "remote": submission.remote_name,
         })
@@ -36,8 +39,9 @@ class RemoteFirstCliTests(unittest.TestCase):
              patch("sandbox.core._remote.get_remote"), \
              patch("sandbox.core._remote.remote_sb_path"), \
              patch("sys.stdout", output):
-            cmd_exec(None, self._args())
+            cmd_exec(None, self._args(output_profile="agent"))
         self.assertEqual(json.loads(output.getvalue())["remote"], "vps")
+        self.assertEqual(submissions[0].output_profile_definition, {"mode": "errors"})
 
     def test_explicit_local_does_not_resolve_the_configured_remote(self):
         accepted = {"job_id": "b" * 32}

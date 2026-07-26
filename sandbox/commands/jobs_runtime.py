@@ -235,6 +235,8 @@ def cmd_job_start(_cfg, args) -> None:
         target_kind=target.kind, remote_name=target.remote_name, workspace_label=target.workspace_label,
         argv=tuple(command), deadline_seconds=timeout, source=source,
         request_id=args.request_id, execution_profile=profile, output_profile=args.output_profile,
+        output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
+                                   .get(args.output_profile)),
         deadline_source="explicit" if args.timeout else f"profile:{profile}",
     )
     if target.kind == "remote":

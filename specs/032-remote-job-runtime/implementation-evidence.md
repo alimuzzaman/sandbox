@@ -649,3 +649,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_service
   tests.test_job_cli tests.test_remote_job_transport tests.test_remote_first_cli
   tests.test_remote_first_mcp -v`. Result: PASS, 35 tests.
+
+## Durable named output-profile increment
+
+- Date: 2026-07-26. A selected custom output-profile definition is now copied
+  from resolved project runtime policy into the bounded job submission snapshot.
+  Later reads and retries resolve that exact declarative definition, rather
+  than relying on mutable current configuration. The snapshot rejects unknown
+  profile keys through the same validated output-profile model.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
+  tests.test_job_output tests.test_job_retry tests.test_job_models
+  tests.test_runtime_config -v`. Result: PASS, 23 tests.

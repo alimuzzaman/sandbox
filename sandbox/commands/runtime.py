@@ -114,6 +114,8 @@ def cmd_exec(cfg, args) -> None:
             hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind,
             target.workspace_label, tuple(command), timeout, source,
             remote_name=target.remote_name, output_profile=args.output_profile,
+            output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
+                                       .get(args.output_profile)),
             deadline_source="explicit" if args.timeout else "profile:exec")
         if target.kind == "remote":
             from sandbox.core import _remote

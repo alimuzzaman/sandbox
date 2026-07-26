@@ -72,5 +72,5 @@ class TargetService:
             workspace_label=workspace, namespace=namespace,
             sources={"target": source,
                      "workspace": "explicit" if request.workspace else "project"},
-            remote=remote,
+            remote=remote, runtime_policy=runtime,
         )

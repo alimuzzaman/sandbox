@@ -200,6 +200,28 @@ class OutputProfile:
         _positive_seconds(self.max_events, "output profile event budget", maximum=100_000)
 
 
+def output_profile_from_definition(name: str, definition: Mapping[str, Any] | None = None) -> OutputProfile:
+    """Build a validated profile from the persisted config-schema spelling."""
+    definition = definition or {}
+    if not isinstance(definition, Mapping):
+        raise ValueError("output profile definition is invalid")
+    aliases = {
+        "everyLines": "every_lines", "everyEvents": "every_events",
+        "everySeconds": "every_seconds", "streamPrefixes": "stream_prefixes",
+        "heartbeatSeconds": "heartbeat_seconds", "maxBytes": "max_bytes",
+        "maxEvents": "max_events",
+    }
+    allowed = {"mode", "everyLines", "everyEvents", "everySeconds", "include", "exclude",
+               "before", "after", "deduplicate", "timestamps", "streamPrefixes",
+               "heartbeatSeconds", "maxBytes", "maxEvents"}
+    unknown = set(definition) - allowed
+    if unknown:
+        raise ValueError("output profile definition has unknown keys")
+    kwargs = {aliases.get(key, key): tuple(value) if key in {"include", "exclude"}
+              and isinstance(value, (list, tuple)) else value for key, value in definition.items()}
+    return OutputProfile(name, **kwargs)
+
+
 @dataclass(frozen=True)
 class SourceIdentity:
     identity: str
@@ -243,6 +265,7 @@ class ResolvedTarget:
     namespace: str
     sources: Mapping[str, str]
     remote: Mapping[str, Any] | None = None
+    runtime_policy: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _safe_text(self.project_root, "project root")
@@ -329,6 +352,7 @@ class JobSubmission:
     cwd_relative: str = "."
     execution_profile: str = "exec"
     output_profile: str = "smart"
+    output_profile_definition: Mapping[str, Any] | None = None
     deadline_source: str = "explicit"
     stall_seconds: int = 300
     cancel_on_stall: bool = False
@@ -367,6 +391,9 @@ class JobSubmission:
             raise ValueError("job working directory must stay within the project")
         _safe_name(self.execution_profile, "execution profile")
         _safe_name(self.output_profile, "output profile")
+        if self.output_profile_definition is not None:
+            output_profile_from_definition(self.output_profile, self.output_profile_definition)
+            object.__setattr__(self, "output_profile_definition", dict(self.output_profile_definition))
         _positive_seconds(self.stall_seconds, "stall timeout")
         if not isinstance(self.cancel_on_stall, bool):
             raise ValueError("cancel_on_stall must be boolean")
@@ -405,6 +432,7 @@ class JobSubmission:
             "cwd_relative": self.cwd_relative,
             "execution_profile": self.execution_profile,
             "output_profile": self.output_profile,
+            "output_profile_definition": dict(self.output_profile_definition or {}),
             "deadline_seconds": self.deadline_seconds,
             "deadline_source": self.deadline_source,
             "stall_seconds": self.stall_seconds,

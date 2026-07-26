@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputProfile, OutputQuery, SourceIdentity
+from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputProfile, OutputQuery, SourceIdentity,
+                                 output_profile_from_definition)
 from sandbox.jobs.output import JobOutputStore, present_output
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
@@ -478,9 +479,9 @@ class JobService:
         if any(not stream.get("available", True) for stream in snapshot.get("output", ())):
             raise RuntimeError("output_unavailable")
         page = JobOutputStore(self.storage, self.repository, job_id).read(query)
-        return present_output(page, self._output_profile(query.profile))
+        return present_output(page, self._output_profile(snapshot, query.profile))
 
-    def _output_profile(self, name: str) -> OutputProfile:
+    def _output_profile(self, snapshot: dict, name: str) -> OutputProfile:
         """Resolve a declarative presentation profile from the job composition."""
         from sandbox.config.runtime import BUILTIN_OUTPUT_PROFILES
 
@@ -490,18 +491,15 @@ class JobService:
             configured = getattr(spec, "component", {}).get("output", {}) if spec is not None else {}
             if isinstance(configured, dict):
                 definitions.update(configured)
+        canonical = self.repository.submission_snapshot(snapshot["job_id"])
+        if canonical and name == canonical.get("output_profile"):
+            definition = canonical.get("output_profile_definition")
+            if definition:
+                return output_profile_from_definition(name, definition)
         definition = definitions.get(name)
         if not isinstance(definition, dict):
             raise RuntimeError("unknown_output_profile")
-        aliases = {
-            "everyLines": "every_lines", "everyEvents": "every_events",
-            "everySeconds": "every_seconds", "streamPrefixes": "stream_prefixes",
-            "heartbeatSeconds": "heartbeat_seconds", "maxBytes": "max_bytes",
-            "maxEvents": "max_events",
-        }
-        kwargs = {aliases.get(key, key): tuple(value) if key in {"include", "exclude"}
-                  and isinstance(value, list) else value for key, value in definition.items()}
-        return OutputProfile(name, **kwargs)
+        return output_profile_from_definition(name, definition)
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)
@@ -582,6 +580,7 @@ class JobService:
                 parent_job_id=previous.get("parent_job_id"),
                 attempt=int(previous["attempt"]) + 1, cwd_relative=canonical["cwd_relative"],
                 execution_profile=canonical["execution_profile"], output_profile=canonical["output_profile"],
+                output_profile_definition=canonical.get("output_profile_definition"),
                 deadline_source=canonical["deadline_source"], stall_seconds=canonical["stall_seconds"],
                 cancel_on_stall=bool(canonical["cancel_on_stall"]),
                 cleanup_policy=canonical["cleanup_policy"],

@@ -79,3 +79,18 @@ class JobOutputTests(unittest.TestCase):
         self.assertEqual(presented["data"], "two\nthree\nerror four\nfive\nsix\nseven\neight\nnine\n")
         self.assertIn("ten\n", full["data"])
         self.assertNotIn("ten\n", presented["data"])
+
+    def test_service_uses_the_custom_profile_definition_retained_with_submission(self):
+        custom, _ = self.repository.accept(JobSubmission(
+            "test", "/project", "project", "local", "custom", ("echo", "x"), 60,
+            SourceIdentity("source"), output_profile="agent-errors",
+            output_profile_definition={"mode": "errors"},
+        ))
+        self.storage.job_dir(custom["job_id"], create=True)
+        output = JobOutputStore(self.storage, self.repository, custom["job_id"])
+        output.append("stdout", b"one\nerror two\nthree\n"); output.finish("stdout")
+        service = JobService(self.repository, self.storage, None, launcher=lambda _: None)
+        page = service.read_output(custom["job_id"], OutputQuery(profile="agent-errors"))
+        self.assertEqual(page["data"], "error two\n")
+        self.assertEqual(self.repository.submission_snapshot(custom["job_id"])["output_profile_definition"],
+                         {"mode": "errors"})

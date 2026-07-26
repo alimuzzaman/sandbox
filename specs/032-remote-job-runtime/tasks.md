@@ -145,7 +145,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T065 [P] [US2] Implement constrained artifact planning, collection, hashing, indexing, expiry, and bounded retrieval in `sandbox/jobs/artifacts.py`
 - [X] T066 [US2] Record heartbeats/metrics/progress and apply warn-only or opt-in cancel-on-stall policy in `sandbox/jobs/supervisor.py`
 - [X] T067 [US2] Implement verified graceful/force/parent cancellation and retry use cases in `sandbox/application/job_service.py`
-- [ ] T068 [US2] Implement on-read and maintenance reconciliation for boot change, PID reuse, supervisor loss, child loss, and incomplete finalization in `sandbox/jobs/retention.py` and `sandbox/application/job_service.py`
+- [X] T068 [US2] Implement on-read and maintenance reconciliation for boot change, PID reuse, supervisor loss, child loss, and incomplete finalization in `sandbox/jobs/retention.py` and `sandbox/application/job_service.py`
 - [X] T069 [US2] Implement terminal-job/log/metric/artifact retention planning and scoped cleanup with active-job protection in `sandbox/application/job_service.py` and `sandbox/jobs/storage.py`
 - [X] T070 [US2] Add CLI metrics/artifact-get/cancel/retry/cleanup commands and bounded health rendering in `sandbox/commands/jobs_runtime.py`
 - [X] T071 [US2] Add MCP `job_metrics`, `job_artifacts`, `job_artifact_get`, `job_cancel`, `job_retry`, and `job_cleanup` tools in `mcp/wp-server/tools/jobs.py`

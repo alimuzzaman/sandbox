@@ -918,3 +918,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_job_transport
   tests.test_remote_first_cli tests.test_remote_first_mcp -v`. Result: PASS,
   22 tests.
+
+## US2 reconciliation verification increment
+
+- Date: 2026-07-26. The durable service owns both status-read reconciliation
+  and bounded maintenance reconciliation. It interrupts boot-changed, PID
+  reused, supervisor-lost, child-lost, stale-heartbeat, and incomplete active
+  jobs without inventing success, retaining best available output and
+  releasing leases only after a truthful terminal classification.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_reconciliation
+  tests.test_job_service tests.test_job_health -v`. Result: PASS, 19 tests.

@@ -16,6 +16,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(preflight(root, "ci.yml", accepted_differences=["act.job-timeout-ignored"])["ok"])
             with self.assertRaises(WorkflowError): preflight(root, "../outside.yml")
 
+    def test_malformed_yaml_and_unknown_dependency_fail_before_a_run_is_planned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            malformed = root / "malformed.yml"
+            malformed.write_text("jobs: [\n")
+            with self.assertRaises(WorkflowError):
+                preflight(root, malformed.name)
+            unknown_need = root / "unknown-need.yml"
+            unknown_need.write_text(
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n    needs: missing\n    steps: []\n")
+            with self.assertRaisesRegex(WorkflowError, "needs unknown job"):
+                preflight(root, unknown_need.name)
+
     def test_upload_artifact_glob_and_expression_paths_block_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -549,3 +549,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   stores the launch-established PID as its new-session process-group ID and tolerates
   an exit race while signaling a deadline. Targeted supervisor and acceptance fixtures
   pass after that correction.
+
+## Output selector contract increment
+
+- Date: 2026-07-26. Wired retained-output `offset`, `tail-bytes`, `lines`, and
+  RFC 3339/Unix-seconds `since` selection through the local store, CLI parser,
+  MCP job tool, and remote control transport. Selectors are mutually exclusive
+  and validate their bounds before reads. Combined-stream byte offsets now apply
+  across the rendered retained event sequence.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output_cursor
+  tests.test_remote_job_transport tests.test_remote_first_mcp tests.test_job_cli -v`.
+  Result: PASS, 26 tests.

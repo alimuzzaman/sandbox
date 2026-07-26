@@ -33,3 +33,20 @@ class OutputCursorModelTests(unittest.TestCase):
             thread.join()
             self.assertEqual(waited["data"], "four\n")
             repo.close()
+
+    def test_offset_tail_since_and_base64_select_retained_events(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission("test", "/p", "p", "local", "w", ("echo", "x"), 60, SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0); storage.job_dir(job["job_id"], create=True)
+            output = JobOutputStore(storage, repo, job["job_id"])
+            output.append("stdout", b"first\n", timestamp=10.0)
+            output.append("stdout", b"second\n", timestamp=20.0)
+            self.assertEqual(output.read(OutputQuery(offset=2))["data"], "rst\nsecond\n")
+            self.assertEqual(output.read(OutputQuery(tail_bytes=7))["data"], "second\n")
+            self.assertEqual(output.read(OutputQuery(since="1970-01-01T00:00:15Z"))["data"], "second\n")
+            encoded = output.read(OutputQuery(since="15", encoding="base64"))
+            self.assertEqual(encoded["data"], "c2Vjb25kCg==")
+            with self.assertRaisesRegex(ValueError, "since"):
+                OutputQuery(since="")
+            repo.close()

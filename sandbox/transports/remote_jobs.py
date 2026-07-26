@@ -196,7 +196,9 @@ class RemoteJobTransport:
                 "workspace_path": workspace_path}
 
     def read_output(self, remote_name: str, job_id: str, *, stream: str = "combined",
-                    cursor: str | None = None, tail_bytes: int | None = None,
+                    cursor: str | None = None, offset: int | None = None,
+                    tail_bytes: int | None = None, lines: int | None = None,
+                    since: str | None = None,
                     max_bytes: int = 65536, wait_seconds: int = 0,
                     encoding: str = "utf8") -> dict:
         remote = self.remote_lookup(remote_name)
@@ -206,8 +208,14 @@ class RemoteJobTransport:
                 "--max-bytes", str(max_bytes), "--encoding", encoding, "--json"]
         if cursor:
             args += ["--cursor", cursor]
+        if offset is not None:
+            args += ["--offset", str(offset)]
         if tail_bytes is not None:
             args += ["--tail-bytes", str(tail_bytes)]
+        if lines is not None:
+            args += ["--lines", str(lines)]
+        if since is not None:
+            args += ["--since", since]
         # The remote job-output command performs the bounded wait against its
         # retained output. SSH carries only the resulting page, never child IO.
         if wait_seconds:

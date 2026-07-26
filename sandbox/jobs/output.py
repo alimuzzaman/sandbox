@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -57,6 +58,20 @@ def _parse_cursor(value: str, job_id: str, stream: str) -> int:
         return sequence
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise OutputCursorError("output cursor is invalid for this job and stream") from exc
+
+
+def _parse_since(value: str) -> float:
+    """Accept an RFC 3339 timestamp or a finite Unix-seconds value."""
+    try:
+        timestamp = float(value)
+    except ValueError:
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+        except ValueError as exc:
+            raise OutputError("output since value is invalid") from exc
+    if timestamp != timestamp or timestamp in {float("inf"), float("-inf")}:
+        raise OutputError("output since value is invalid")
+    return timestamp
 
 
 class StreamingRedactor:
@@ -226,6 +241,9 @@ class JobOutputStore:
         if query.cursor:
             start_sequence = _parse_cursor(query.cursor, self.job_id, stream)
             events = [event for event in events if event.sequence >= start_sequence]
+        if query.since is not None:
+            threshold = _parse_since(query.since)
+            events = [event for event in events if event.timestamp >= threshold]
         if query.tail_bytes is not None:
             consumed = 0
             selected = []
@@ -235,11 +253,16 @@ class JobOutputStore:
                 selected.append(event); consumed += event.size
             events = list(reversed(selected))
         line_filter = query.lines
+        remaining_offset = query.offset or 0
         selected, chunks, total = [], [], 0
         for event in events:
             raw = self._read_event(event, stream)
-            if query.offset is not None:
-                raw = raw[max(0, query.offset - event.offset):] if event.stream == stream else raw
+            if remaining_offset:
+                if len(raw) <= remaining_offset:
+                    remaining_offset -= len(raw)
+                    continue
+                raw = raw[remaining_offset:]
+                remaining_offset = 0
             if not raw:
                 continue
             if total + len(raw) > query.max_bytes:

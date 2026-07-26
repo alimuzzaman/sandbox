@@ -19,7 +19,9 @@ development, and isolated labels for matrix cells:
 ./sb job-output JOB --stream stderr --tail-bytes 8192 --wait-seconds 2
 ```
 
-`job-output --follow` is a client polling loop over retained files. `full`,
+`job-output` accepts exactly one retained-output position selector: an opaque
+cursor, a byte offset across the rendered stream, a trailing byte count, a line
+count, or an RFC 3339/Unix-seconds `since` timestamp. `job-output --follow` is a client polling loop over retained files. `full`,
 `smart`, `errors`, `sampled`, `quiet`, and declarative custom profiles affect
 presentation only; complete output remains retained until cleanup/retention
 policy removes it.

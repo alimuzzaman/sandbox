@@ -60,8 +60,9 @@ class RemoteFirstMcpTests(unittest.TestCase):
         self.assertTrue(module.job_output("b" * 32, remote="vps", cursor="opaque", max_bytes=4096)["ok"])
         self.assertEqual(calls, [
             ("status", "vps", "b" * 32),
-            ("output", "vps", "b" * 32, {"stream": "combined", "cursor": "opaque", "tail_bytes": None,
-                                       "max_bytes": 4096, "wait_seconds": 0, "encoding": "utf8"}),
+            ("output", "vps", "b" * 32, {"stream": "combined", "cursor": "opaque", "offset": None,
+                                       "tail_bytes": None, "lines": None, "since": None, "max_bytes": 4096,
+                                       "wait_seconds": 0, "encoding": "utf8"}),
         ])
 
 

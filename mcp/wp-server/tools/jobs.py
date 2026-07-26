@@ -133,17 +133,20 @@ def job_list(limit: int = 50, *, remote: str | None = None) -> dict:
 
 
 def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = None,
-               tail_bytes: int | None = None, max_bytes: int = 65536,
+               offset: int | None = None, tail_bytes: int | None = None,
+               lines: int | None = None, since: str | None = None, max_bytes: int = 65536,
                encoding: str = "utf8", wait_seconds: int = 0,
                remote: str | None = None) -> dict:
     """Read a bounded retained output page. Returned cursors are exclusive."""
     try:
         if remote:
             return _remote_transport().read_output(remote, job_id, stream=stream, cursor=cursor,
-                tail_bytes=tail_bytes, max_bytes=max_bytes, wait_seconds=wait_seconds,
+                offset=offset, tail_bytes=tail_bytes, lines=lines, since=since,
+                max_bytes=max_bytes, wait_seconds=wait_seconds,
                 encoding=encoding)
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
-            tail_bytes=tail_bytes, max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
+            offset=offset, tail_bytes=tail_bytes, lines=lines, since=since,
+            max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
     except ValueError as exc:
         return {"ok": False, "code": "invalid_output_query", "error": str(exc)}
     except RuntimeError as exc:

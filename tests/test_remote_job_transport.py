@@ -187,7 +187,7 @@ class RemoteJobTransportTests(unittest.TestCase):
                             workspace_commands[1].split("workspace-")[1].split()[0])
         calls.clear()
         transport.read_output("r", "abc", stream="stderr", cursor="cursor", tail_bytes=10,
-                              max_bytes=12, wait_seconds=2, encoding="base64")
+                              offset=None, lines=None, since=None, max_bytes=12, wait_seconds=2, encoding="base64")
         command = calls[-1][1]
         self.assertIn("--stream stderr", command)
         self.assertIn("--tail-bytes 10", command)

@@ -278,6 +278,19 @@ class OutputQuery:
         positions = [self.cursor, self.offset, self.tail_bytes, self.lines, self.since]
         if sum(value is not None for value in positions) > 1:
             raise ValueError("output query accepts only one position selector")
+        for value, label, allow_zero in (
+            (self.offset, "output offset", True),
+            (self.tail_bytes, "output tail bytes", False),
+            (self.lines, "output lines", False),
+        ):
+            if value is None:
+                continue
+            if (isinstance(value, bool) or not isinstance(value, int) or
+                    value < 0 or (not allow_zero and value == 0)):
+                raise ValueError(f"{label} is invalid")
+        if self.since is not None:
+            if not isinstance(self.since, str) or not self.since.strip():
+                raise ValueError("output since value is invalid")
 
 
 @dataclass(frozen=True)

@@ -113,8 +113,12 @@ def configure_status_parser(parser) -> None:
 def configure_output_parser(parser) -> None:
     parser.add_argument("job_id")
     parser.add_argument("--stream", choices=("combined", "stdout", "stderr"), default="combined")
-    parser.add_argument("--cursor")
-    parser.add_argument("--tail-bytes", type=int)
+    position = parser.add_mutually_exclusive_group()
+    position.add_argument("--cursor")
+    position.add_argument("--offset", type=int)
+    position.add_argument("--tail-bytes", type=int)
+    position.add_argument("--lines", type=int)
+    position.add_argument("--since", help="RFC 3339 timestamp or Unix seconds")
     parser.add_argument("--max-bytes", type=int, default=65536)
     parser.add_argument("--encoding", choices=("utf8", "base64"), default="utf8")
     parser.add_argument("--follow", action="store_true")
@@ -274,7 +278,9 @@ def cmd_job_output(_cfg, args) -> None:
         cursor = args.cursor
         while True:
             result = transport.read_output(args.remote, args.job_id, stream=args.stream, cursor=cursor,
-                tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
+                offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
+                lines=getattr(args, "lines", None), since=getattr(args, "since", None),
+                max_bytes=args.max_bytes,
                 wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
                 encoding=args.encoding)
             if args.json: print(json.dumps(result, sort_keys=True))
@@ -288,7 +294,9 @@ def cmd_job_output(_cfg, args) -> None:
     while True:
         try:
             result = service.read_output(args.job_id, OutputQuery(stream=args.stream, cursor=cursor,
-                tail_bytes=args.tail_bytes, max_bytes=args.max_bytes,
+                offset=getattr(args, "offset", None), tail_bytes=args.tail_bytes,
+                lines=getattr(args, "lines", None), since=getattr(args, "since", None),
+                max_bytes=args.max_bytes,
                 wait_seconds=max(args.wait_seconds, 1) if args.follow else args.wait_seconds,
                 encoding=args.encoding))
         except RuntimeError as exc:

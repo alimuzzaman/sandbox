@@ -56,12 +56,28 @@ def detect(workflow: dict[str, Any]) -> list[dict[str, str]]:
         runner_values = runner if isinstance(runner, list) else [runner]
         if any(value and "ubuntu" not in str(value).lower() and "linux" not in str(value).lower() for value in runner_values): add("act.non-linux-runner", f"{prefix}.runs-on")
         if job.get("concurrency") is not None: add("act.concurrency-ignored", f"{prefix}.concurrency")
-        if job.get("permissions") is not None: add("act.job-permissions-ignored", f"{prefix}.permissions")
+        permissions = job.get("permissions")
+        if permissions is not None:
+            add("act.job-permissions-ignored", f"{prefix}.permissions")
+            if isinstance(permissions, dict) and permissions.get("id-token") == "write":
+                add("act.oidc-unavailable", f"{prefix}.permissions.id-token")
         if job.get("timeout-minutes") is not None: add("act.job-timeout-ignored", f"{prefix}.timeout-minutes")
         if job.get("continue-on-error") is not None: add("act.continue-on-error-ignored", f"{prefix}.continue-on-error")
         if job.get("environment") is not None: add("act.environment-ignored", f"{prefix}.environment")
         if job.get("container") or job.get("defaults", {}).get("run", {}).get("working-directory", "").startswith("docker:"): add("act.docker-context-unsupported", f"{prefix}.container")
         for index, step in enumerate(job.get("steps") or []):
+            step_location = f"{prefix}.steps[{index}]"
+            step_text = str(step)
+            run = step.get("run") if isinstance(step, dict) else None
+            if isinstance(run, str) and "GITHUB_STEP_SUMMARY" in run:
+                add("act.step-summary-discarded", f"{step_location}.run")
+            if isinstance(run, str) and ("::add-matcher" in run or "::remove-matcher" in run or
+                                         "::error" in run or "::warning" in run):
+                add("act.problem-matchers-ignored", f"{step_location}.run")
+            if "github." in step_text:
+                add("act.github-context-incomplete", step_location)
+            if "cancelled()" in step_text:
+                add("act.cancellation-incomplete", step_location)
             uses = step.get("uses")
             if not isinstance(uses, str) or uses.split("@", 1)[0].lower() != "actions/upload-artifact":
                 continue

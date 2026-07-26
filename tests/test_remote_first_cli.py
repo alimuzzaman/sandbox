@@ -59,6 +59,21 @@ class RemoteFirstCliTests(unittest.TestCase):
             cmd_exec(None, self._args(local=True, detach=True))
         self.assertEqual(json.loads(output.getvalue()), accepted)
 
+    def test_detached_human_output_includes_target_workspace_and_deadline_source(self):
+        accepted = {"job_id": "c" * 32, "target": {"kind": "local", "remote": None},
+                    "workspace": "unit", "deadline": {"seconds": 120, "source": "explicit"}}
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="unit", runtime_policy={})
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target),
+                        "job_service": SimpleNamespace(submit=lambda _submission: accepted)}
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sys.stdout", output):
+            cmd_exec(None, self._args(local=True, workspace="unit", timeout=120,
+                                      detach=True, json=False))
+        self.assertEqual(output.getvalue().strip(),
+                         f"{'c' * 32} target=local workspace=unit deadline=120s source=explicit")
+
 
 if __name__ == "__main__":
     unittest.main()

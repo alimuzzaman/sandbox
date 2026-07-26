@@ -823,3 +823,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_ci_compatibility
   tests.test_ci_workflow tests.test_remote_ci_jobs tests.test_ci -v`.
   Result: PASS, 66 tests.
+
+## Detached exec context increment
+
+- Date: 2026-07-26. Human-mode detached `sb exec` responses now identify the
+  resolved target, workspace, effective deadline, and deadline source instead
+  of returning an opaque job ID alone. JSON remains the unchanged accepted-job
+  envelope.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
+  tests.test_job_cli -v`. Result: PASS, 11 tests.

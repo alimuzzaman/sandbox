@@ -127,7 +127,16 @@ def cmd_exec(cfg, args) -> None:
             service = durable_job_dependencies()["job_service"]
             accepted = service.submit(submission)
         if args.detach or target.kind == "remote":
-            print(json.dumps(accepted) if args.json else accepted["job_id"])
+            if args.json:
+                print(json.dumps(accepted))
+            else:
+                target_info = accepted.get("target", {})
+                target_name = target_info.get("remote") or target_info.get("kind") or target.remote_name or target.kind
+                deadline = accepted.get("deadline", {})
+                print(f"{accepted['job_id']} target={target_name} "
+                      f"workspace={accepted.get('workspace', target.workspace_label)} "
+                      f"deadline={deadline.get('seconds', timeout)}s "
+                      f"source={deadline.get('source', submission.deadline_source)}")
             return
         service = durable_job_dependencies()["job_service"]
         while True:

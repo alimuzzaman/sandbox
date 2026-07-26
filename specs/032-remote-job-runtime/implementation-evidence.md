@@ -475,3 +475,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Live local check: `./sb async-job 3546174b1b12505da3d41f27bd6b49c6 --json`
   returned the retained `spec-audit-live-ok` output and terminal exit code `0`
   through the legacy-compatible response shape.
+
+## T129: remote workflow boundary documentation
+
+- Date: 2026-07-26. Added the missing
+  `docs/remote-hosting-implementation.md` and linked it from
+  `docs/remote-hosting.md`. Both documents now distinguish the one-way source
+  deploy, durable remote development jobs, co-located remote MCP control plane,
+  and separately confirmation-gated production hosting workflow.
+- Verification: `git diff --check` passed, and a targeted content check found
+  each of the four workflow headings and their boundary statements in the new
+  implementation guide.

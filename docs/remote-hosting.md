@@ -13,6 +13,23 @@ decisions this feature encodes).
 **Not this**: a continuous file-sync daemon, an on-demand-power-managed VPS, or a
 multi-tenant/shared-VPS story. See §5 for what's explicitly out of scope.
 
+## Choose the remote workflow
+
+Sandbox has four related remote capabilities with deliberately different purposes.
+They may use the same VPS, but one is not an implicit substitute for another.
+
+| Need | Use | What it does | Boundary |
+|---|---|---|---|
+| Put the current checkout on a VPS for an instance or preview | `./sb deploy --remote NAME` | Makes a one-way snapshot of the local source tree; `--ensure --expose` can boot and expose that sandbox instance. | It is not continuous sync or a production promotion. |
+| Run a test, E2E run, matrix, or compatible CI remotely | `./sb test` / `exec` / `ci run --remote NAME` | Deploys the selected source revision to a named development workspace, then returns a durable job ID. | It is development execution, not a public-hosting command. |
+| Inspect or control those remote jobs from an agent | The co-located `sandbox-NAME` MCP server | Reads durable job status/output and calls the same VPS-side operations without keeping SSH pipes open. | It is a control plane, not a source-sync or deployment mechanism. |
+| Operate a declared public service | `./sb host plan` then `./sb host apply --confirm` | Applies a checked hosting manifest, health checks, Caddy/DNS policy, and declared secrets for an environment. | It is separately confirmation-gated and never inferred from a development deploy or job. |
+
+For command examples and operational boundaries, see
+[`docs/remote-hosting-implementation.md`](remote-hosting-implementation.md). Durable
+job recovery and retention are documented separately in
+[`docs/remote-job-runtime.md`](remote-job-runtime.md).
+
 ## 2. The model in one sentence
 
 **Co-location, not remote-control.** The MCP server, `sb`, `$SANDBOX_HOME`, Docker, and

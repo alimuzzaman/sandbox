@@ -281,7 +281,7 @@ security, and release-regression evidence across all stories.
 - [X] T126 [P] Update user-facing remote-first overview, examples, output recovery, and CI scope in `README.md`
 - [X] T127 [P] Update CLI operation procedures and target/workspace/job command tables in `docs/cli-first-operation.md`
 - [X] T128 [P] Update project runtime schema, profiles, test plans, output policies, and examples in `docs/sandbox-config-reference.md`
-- [ ] T129 [P] Update remote hosting/deployment guidance to distinguish source deploy, remote development jobs, remote MCP, and production hosting in `docs/remote-hosting.md` and `docs/remote-hosting-implementation.md`
+- [X] T129 [P] Update remote hosting/deployment guidance to distinguish source deploy, remote development jobs, remote MCP, and production hosting in `docs/remote-hosting.md` and `docs/remote-hosting-implementation.md`
 - [X] T130 [P] Update E2E/CI behavior, compatibility gate, matrices, artifacts, deadlines, and safe mode in `docs/ci-e2e-runner-spec.md`
 - [X] T131 [P] Add a durable job runtime operations/troubleshooting guide with storage pressure, unreachable host, stalled health, cancellation, reconciliation, retention, and recovery in `docs/remote-job-runtime.md`
 - [ ] T132 Add acceptance fixtures for Node unit, PHP unit, WordPress integration, disconnect/resume, simultaneous labels, workspace reuse/failure/reset/destroy, matrix, artifact, timeout, and output retrieval in `tests/acceptance/test_remote_job_runtime.py`

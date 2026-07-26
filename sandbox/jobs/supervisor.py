@@ -28,8 +28,13 @@ def run_descriptor(path: str | Path) -> int:
     storage = JobStorage(descriptor["runtime_dir"], free_disk_reserve=descriptor.get("free_disk_reserve", 0))
     try:
         current = repository.get(job_id)
-        if current["lifecycle"] == Lifecycle.ACCEPTED.value:
-            repository.transition(job_id, Lifecycle.QUEUED)
+        if current["lifecycle"] in {
+                Lifecycle.SUCCEEDED.value, Lifecycle.FAILED.value, Lifecycle.TIMED_OUT.value,
+                Lifecycle.CANCELLED.value, Lifecycle.INTERRUPTED.value,
+        }:
+            return 0
+        if current["lifecycle"] not in {Lifecycle.ACCEPTED.value, Lifecycle.QUEUED.value}:
+            raise RuntimeError(f"supervisor cannot start a {current['lifecycle']} job")
         identity = capture_process_identity(os.getpid())
         if identity is None:
             raise RuntimeError("could not capture supervisor process identity")

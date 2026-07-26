@@ -21,7 +21,7 @@ class SupervisorTests(unittest.TestCase):
                 if state["lifecycle"] in {"succeeded", "failed", "timed_out"}:
                     break
                 time.sleep(.05)
-            self.assertEqual(state["lifecycle"], "succeeded")
+            self.assertEqual(state["lifecycle"], "succeeded", state)
             self.assertEqual(state["output_completeness"], "complete")
             self.assertIsNotNone(state["integrity_sha256"])
             self.assertTrue(all(item["complete"] for item in state["output"]))

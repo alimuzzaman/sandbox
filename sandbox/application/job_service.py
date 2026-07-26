@@ -454,11 +454,14 @@ class JobService:
 
     def read_output(self, job_id: str, query: OutputQuery | None = None):
         query = query or OutputQuery()
+        snapshot = self.repository.snapshot(job_id)
+        if any(not stream.get("available", True) for stream in snapshot.get("output", ())):
+            raise RuntimeError("output_unavailable")
         return JobOutputStore(self.storage, self.repository, job_id).read(query)
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)
-        if snapshot["kind"] in {"matrix", "ci", "plan"}:
+        if self._is_aggregate(snapshot):
             children = self.repository.children(job_id)
             cancelled = []
             for child in children:

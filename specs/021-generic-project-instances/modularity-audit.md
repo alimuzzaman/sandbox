@@ -127,6 +127,11 @@ Every registered command appears once below. “Candidate” means the concept c
 
 ## Modularity acceptance checks
 
+- Current automated inventory (2026-07-26): 84 CLI commands, 50 decorated MCP
+  tools, 20 wildcard imports, and 75 `kind`-referencing conditional expressions.
+  The conditional count is a broad static regression proxy (it includes job and CI
+  discriminators as well as runtime selection), so it is updated alongside each
+  intentional feature addition rather than treated as a runtime-adapter-only limit.
 - New `sandbox/runtimes/` files use no wildcard imports.
 - Runtime-kind branching is confined to descriptor normalization and adapter selection; a repository search verifies exceptions.
 - New CLI parsers are registered from their feature module, not appended directly to `sandbox/cli.py`.

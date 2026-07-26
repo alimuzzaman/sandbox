@@ -691,3 +691,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   `supervisor_launch_failed`, never a misleading running or successful state.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_service
   tests.test_job_supervisor tests.test_job_models -v`. Result: PASS, 20 tests.
+
+## Supervisor deadline and descendant verification increment
+
+- Date: 2026-07-26. Added detached-supervisor coverage for non-zero child exit
+  propagation and a finite deadline that terminates a background descendant in
+  the owned process group before recording `timed_out` / `deadline_exceeded`.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor
+  tests.test_job_cancellation tests.test_job_output -v`. Result: PASS, 18 tests.

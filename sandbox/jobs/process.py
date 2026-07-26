@@ -79,7 +79,8 @@ def verify_process_identity(expected: ProcessIdentity,
                 and expected.nonce_hash == observed.nonce_hash)
 
 
-def signal_owned_process_group(expected: ProcessIdentity, signal_number: int) -> bool:
+def verify_owned_process_identity(expected: ProcessIdentity) -> bool:
+    """Confirm that a durable child identity still owns its recorded process group."""
     if expected.process_group_id is None or expected.process_group_id <= 0:
         return False
     observed = capture_process_identity(
@@ -92,7 +93,11 @@ def signal_owned_process_group(expected: ProcessIdentity, signal_number: int) ->
             observed.host_boot_id, observed.pid, observed.start_identity,
             expected.nonce_hash, observed.process_group_id,
         )
-    if not verify_process_identity(expected, observed):
+    return verify_process_identity(expected, observed)
+
+
+def signal_owned_process_group(expected: ProcessIdentity, signal_number: int) -> bool:
+    if not verify_owned_process_identity(expected):
         return False
     os.killpg(expected.process_group_id, signal_number)
     return True

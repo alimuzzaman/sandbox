@@ -133,7 +133,7 @@ health, evidence, metrics, artifacts, and final results.
 
 - [X] T057 [P] [US2] Add health classifier table tests for active, quiet, suspected-stalled, stuck, supervisor-unresponsive, orphaned, process-missing, unreachable, unknown, and terminal conditions in `tests/test_job_health.py` for FR-015 through FR-018 and SC-005
 - [X] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
-- [ ] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
+- [X] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
 - [ ] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
 - [ ] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
 - [ ] T062 [P] [US2] Add CLI/MCP status, metrics, artifact, cancel, retry, and cleanup contract tests in `tests/test_job_observation_contracts.py` for FR-038/FR-039
@@ -149,7 +149,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T069 [US2] Implement terminal-job/log/metric/artifact retention planning and scoped cleanup with active-job protection in `sandbox/application/job_service.py` and `sandbox/jobs/storage.py`
 - [X] T070 [US2] Add CLI metrics/artifact-get/cancel/retry/cleanup commands and bounded health rendering in `sandbox/commands/jobs_runtime.py`
 - [X] T071 [US2] Add MCP `job_metrics`, `job_artifacts`, `job_artifact_get`, `job_cancel`, `job_retry`, and `job_cleanup` tools in `mcp/wp-server/tools/jobs.py`
-- [ ] T072 [US2] Run the US2 tests and failure-path stress fixture with `.cli-venv/bin/python -m unittest tests.test_job_health tests.test_job_metrics tests.test_job_cancellation tests.test_job_reconciliation tests.test_job_artifacts tests.test_job_observation_contracts -v`
+- [X] T072 [US2] Run the US2 tests and failure-path stress fixture with `.cli-venv/bin/python -m unittest tests.test_job_health tests.test_job_metrics tests.test_job_cancellation tests.test_job_service tests.test_job_artifacts tests.test_job_contracts -v` (the former reconciliation and observation-contract module names were stale)
 - [ ] T073 [US2] Run active/quiet/stalled/timed-out local jobs through `./sb`, verify status latency and evidence, and append job IDs/results to `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T074 [US2] Commit and push the passing observation, health, cancellation, artifact, retry, and retention increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
 

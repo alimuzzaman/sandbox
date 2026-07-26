@@ -22,7 +22,8 @@ from sandbox.jobs.output import JobOutputStore
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
 from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
-                                  signal_owned_process_group, verify_process_identity)
+                                  signal_owned_process_group, verify_owned_process_identity,
+                                  verify_process_identity)
 from sandbox.jobs.scheduler import WorkspaceBusy
 
 
@@ -481,9 +482,15 @@ class JobService:
             raise RuntimeError("process_identity_mismatch")
         identity = ProcessIdentity(process["host_boot_id"], int(process["child_pid"]),
             process["child_start_identity"], process["supervisor_nonce_hash"], int(process["child_pgid"]))
-        if not signal_owned_process_group(identity, 9 if force else 15):
+        # Verify before publishing cancellation intent.  Publishing it first lets the
+        # supervisor classify a concurrently reaped child as cancelled, rather than
+        # racing from ``failed`` back to ``cancelling`` after signal delivery.
+        if not verify_owned_process_identity(identity):
             raise RuntimeError("process_identity_mismatch")
         self.repository.transition(job_id, Lifecycle.CANCELLING)
+        # A child can still exit in the short interval after verification.  The
+        # supervisor sees the persisted intent and finalizes it as cancelled.
+        signal_owned_process_group(identity, 9 if force else 15)
         return self.repository.snapshot(job_id)
 
     def list_artifacts(self, job_id: str):

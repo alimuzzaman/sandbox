@@ -576,3 +576,20 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   data is unavailable, and persist a stable movement digest.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_metrics -v`.
   Result: PASS, 4 tests.
+
+## Cancellation race and US2 verification increment
+
+- Date: 2026-07-26. Added coverage for graceful and force cancellation,
+  identity mismatch rejection before signaling, process-group descendant cleanup,
+  and parent-to-child matrix cancellation. A broader US2 run exposed a real
+  ordering race where a signaled child could finalize as failed before the
+  cancellation intent was persisted. Cancellation now verifies the owned
+  identity first, persists `cancelling`, and then signals, so the supervisor
+  classifies a concurrently reaped child as cancelled.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_health
+  tests.test_job_metrics tests.test_job_cancellation tests.test_job_service
+  tests.test_job_artifacts tests.test_job_contracts -v`. Result: PASS, 36 tests.
+- The task's prior `tests.test_job_reconciliation` and
+  `tests.test_job_observation_contracts` module names no longer existed; their
+  maintained coverage resides in `tests.test_job_service` and
+  `tests.test_job_contracts`, respectively.

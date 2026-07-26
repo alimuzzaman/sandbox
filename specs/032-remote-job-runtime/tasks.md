@@ -171,7 +171,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 ### Tests for User Story 3
 
 - [X] T075 [P] [US3] Add atomic exclusive/shared/lifecycle/host-capacity lease and stale-lease reconciliation tests in `tests/test_job_scheduler.py` for FR-025 through FR-028
-- [ ] T076 [P] [US3] Add deterministic concurrent-safe <=21-character matrix label tests across projects, parents, retries, and canonical matrix values in `tests/test_workspace_labels.py`
+- [X] T076 [P] [US3] Add deterministic concurrent-safe <=21-character matrix label tests across projects, parents, retries, and canonical matrix values in `tests/test_workspace_labels.py`
 - [ ] T077 [P] [US3] Add persistent create/list/status/reset/destroy, busy mutation, retained failure, idempotent create, and local/remote namespace tests in `tests/test_workspace_runtime.py` for FR-023/FR-024/FR-026
 - [ ] T078 [P] [US3] Add same-instance serial, explicit shared-safe, immediate-busy suggestion, and process-isolation tests in `tests/test_workspace_concurrency.py` for FR-025/FR-026 and SC-006
 - [ ] T079 [P] [US3] Add parent/child dependency, multi-command, fail-fast/continue, capacity queue, cell isolation, retry, and cleanup aggregation tests in `tests/test_job_matrix.py` for FR-027 through FR-030

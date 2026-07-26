@@ -708,3 +708,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   becomes an explicit interruption; reconciliation never invents success.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_reconciliation
   tests.test_job_service tests.test_job_health -v`. Result: PASS, 19 tests.
+
+## Matrix workspace-label verification increment
+
+- Date: 2026-07-26. Added concurrent label coverage across canonical cell maps,
+  projects, parent IDs, and retry attempts. Labels remain deterministic,
+  collision-free for the exercised matrix, and bounded to 21 characters.
+- Command: `.cli-venv/bin/python -m unittest tests.test_workspace_labels
+  tests.test_job_scheduler tests.test_job_matrix -v`. Result: PASS, 13 tests.

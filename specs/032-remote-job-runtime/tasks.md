@@ -186,7 +186,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 - [ ] T085 [US3] Adapt existing local and remote ensure/reset/destroy mechanisms behind workspace service contracts in `sandbox/transports/jobs.py`, `sandbox/transports/remote_jobs.py`, and `sandbox/core/_remote.py`
 - [ ] T086 [US3] Enforce deploy/ensure/reset/destroy lifecycle leases and execution leases before side effects in `sandbox/application/job_service.py` and `sandbox/application/workspace_service.py`
 - [X] T087 [US3] Add `sb workspace create|list|status|reset|destroy` feature-owned command group in `sandbox/commands/workspaces.py` and register it in `sandbox/commands/manifest.py`
-- [ ] T088 [US3] Add `sb test matrix` and declared multi-step plan submission/status rendering in `sandbox/commands/runtime.py` and `sandbox/commands/jobs_runtime.py`
+- [X] T088 [US3] Add `sb test matrix` and declared multi-step plan submission/status rendering in `sandbox/commands/runtime.py` and `sandbox/commands/jobs_runtime.py`
 - [X] T089 [US3] Add MCP workspace lifecycle and parent/matrix job inputs/results in `mcp/wp-server/tools/jobs.py`
 - [ ] T090 [US3] Adapt WordPress unit/integration tests and E2E shards to leaf/parent jobs with per-workspace isolation in `sandbox/commands/debug.py`, `sandbox/commands/e2e.py`, and `mcp/wp-server/tools/e2e.py`
 - [X] T091 [US3] Run the US3 tests plus existing fanout/E2E/WordPress suites with `.cli-venv/bin/python -m unittest tests.test_job_scheduler tests.test_workspace_labels tests.test_workspace_runtime tests.test_workspace_concurrency tests.test_job_matrix tests.test_workspace_contracts tests.test_fanout tests.test_e2e tests.test_runtime_test_modes -v`

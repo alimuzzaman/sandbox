@@ -108,10 +108,34 @@ def _validate_plans(value: object) -> dict:
     result = {}
     for name, plan in value.items():
         _name(name, "test plan name")
-        if not isinstance(plan, Mapping) or not isinstance(plan.get("steps"), list) or not plan["steps"]:
+        if (not isinstance(plan, Mapping) or set(plan) - {"executionProfile", "outputProfile", "maxParallel", "steps"}
+                or not isinstance(plan.get("steps"), list) or not plan["steps"]):
             raise ValueError(f"test plan {name!r} requires non-empty steps")
+        if "executionProfile" in plan:
+            _name(plan["executionProfile"], "test plan execution profile")
+        if "outputProfile" in plan:
+            _name(plan["outputProfile"], "test plan output profile")
+        if "maxParallel" in plan:
+            _whole(plan["maxParallel"], "test plan maxParallel", 1, 64)
+        step_ids = set()
         for step in plan["steps"]:
-            if not isinstance(step, Mapping) or "id" not in step or "argv" not in step:
+            if (not isinstance(step, Mapping) or set(step) - {"id", "argv", "needs", "parallelSafe", "workspace", "artifacts"}
+                    or not isinstance(step.get("id"), str) or not isinstance(step.get("argv"), list)
+                    or not step["argv"]):
+                raise ValueError(f"test plan {name!r} has an invalid step")
+            _name(step["id"], "test plan step id")
+            if step["id"] in step_ids or any(not isinstance(item, str) or not item for item in step["argv"]):
+                raise ValueError(f"test plan {name!r} has an invalid step")
+            step_ids.add(step["id"])
+            if "needs" in step and (not isinstance(step["needs"], list)
+                                    or any(not isinstance(item, str) for item in step["needs"])):
+                raise ValueError(f"test plan {name!r} has an invalid step")
+            if "parallelSafe" in step and not isinstance(step["parallelSafe"], bool):
+                raise ValueError(f"test plan {name!r} has an invalid step")
+            if "workspace" in step:
+                _name(step["workspace"], "test plan workspace")
+            if "artifacts" in step and (not isinstance(step["artifacts"], list)
+                                        or any(not isinstance(item, str) or not item for item in step["artifacts"])):
                 raise ValueError(f"test plan {name!r} has an invalid step")
         result[name] = copy.deepcopy(dict(plan))
     return result
@@ -166,12 +190,18 @@ def normalize_runtime_policy(value: object = None) -> dict:
     output_name = _name(value.get("outputProfile", "smart"), "output profile")
     if execution_name not in executions or output_name not in outputs:
         raise ValueError("runtime selected profile is not defined")
+    plans = _validate_plans(value.get("testPlans"))
+    for name, plan in plans.items():
+        if plan.get("executionProfile", execution_name) not in executions:
+            raise ValueError(f"test plan {name!r} references an unknown execution profile")
+        if plan.get("outputProfile", output_name) not in outputs:
+            raise ValueError(f"test plan {name!r} references an unknown output profile")
     return {
         "default": default, "remote": remote, "workspace": workspace,
         "executionProfile": execution_name, "outputProfile": output_name,
         "maxParallel": _whole(value.get("maxParallel", 4), "maxParallel", 1, 64),
         "retentionDays": _whole(value.get("retentionDays", 7), "retentionDays", 1, 365),
         "executionProfiles": executions, "outputProfiles": outputs,
-        "testPlans": _validate_plans(value.get("testPlans")),
+        "testPlans": plans,
         "workspaces": _validate_workspaces(value.get("workspaces")),
     }

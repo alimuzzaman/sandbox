@@ -312,6 +312,7 @@ verbosity; the complete sealed log remains available for later retrieval.
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
+./sb test matrix --remote scaleway-sandbox --plan verify --timeout 1800 --json
 ./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
 ./sb job-artifact-get <child-job-id> <artifact-id> --remote scaleway-sandbox \
   --output-file tmp/report.tar

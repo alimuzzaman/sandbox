@@ -30,6 +30,20 @@ Remote E2E uses the same detached outer job and then runs the co-located E2E
 coordinator, which gives its Playwright workers their existing isolated runtime
 instances. Use `--local` only when deliberately keeping the coordinator local.
 
+## Declared test plans
+
+Projects may declare `runtime.testPlans` with explicit argv, stable step IDs,
+dependencies, optional artifact paths, and `parallelSafe` steps. Submit one as
+a durable parent with independently inspectable isolated children:
+
+```sh
+./sb test matrix --remote NAME --plan verify --timeout 1800 --json
+```
+
+Steps serialize unless `parallelSafe: true`; declared `needs` and `maxParallel`
+become durable child dependencies. Sandbox never discovers package scripts or
+test commands automatically.
+
 ## Health and recovery
 
 Status separates lifecycle from health. A quiet process is not failed; suspected

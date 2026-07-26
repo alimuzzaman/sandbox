@@ -496,6 +496,92 @@ def cmd_job_reconcile(_cfg, args) -> None:
         print(f"interrupted={len(result['interrupted'])} released={len(result['released_leases'])}")
 
 
+def cmd_declared_test_plan(_cfg, args) -> None:
+    """Submit one configured multi-step test plan as durable matrix children."""
+    dependencies = durable_job_dependencies()
+    try:
+        target = dependencies["target_service"].resolve(TargetRequest(
+            args.project_dir, local=args.local, remote=args.remote,
+            required_capability="job.exec" if not args.local else None))
+    except TargetResolutionError as exc:
+        _die(f"{exc.code}: {exc}")
+    runtime = getattr(target, "runtime_policy", {}) or {}
+    plans = runtime.get("testPlans", {})
+    plan = plans.get(args.plan)
+    if not isinstance(plan, dict):
+        _die(f"unknown declared test plan {args.plan!r}")
+    profiles = runtime.get("executionProfiles", {})
+    profile_name = plan.get("executionProfile", runtime.get("executionProfile", "exec"))
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        _die(f"declared test plan {args.plan!r} references unknown execution profile {profile_name!r}")
+    output_profile = getattr(args, "output_profile", None) or plan.get(
+        "outputProfile", runtime.get("outputProfile", "smart"))
+    if output_profile not in runtime.get("outputProfiles", {}):
+        _die(f"declared test plan {args.plan!r} references unknown output profile {output_profile!r}")
+    timeout = getattr(args, "timeout", None) or profile["timeoutSeconds"]
+    deadline_source = "explicit" if getattr(args, "timeout", None) else f"plan:{args.plan}"
+    raw_steps = plan.get("steps", [])
+    if not isinstance(raw_steps, list) or not raw_steps:
+        _die(f"declared test plan {args.plan!r} has no steps")
+    labels = {}
+    for step in raw_steps:
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            _die(f"declared test plan {args.plan!r} has an invalid step")
+        label = step.get("workspace") or f"{args.plan}-{step['id']}"
+        if not isinstance(label, str) or len(label) > 64 or not label:
+            _die(f"declared test plan {args.plan!r} has an invalid workspace label")
+        if step["id"] in labels or label in labels.values():
+            _die(f"declared test plan {args.plan!r} has duplicate step/workspace labels")
+        labels[step["id"]] = label
+    max_parallel = plan.get("maxParallel", runtime.get("maxParallel", 1))
+    if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or not 1 <= max_parallel <= 64:
+        _die(f"declared test plan {args.plan!r} has an invalid maxParallel")
+    source = _source_identity(target.project_root)
+    project_identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    submissions = []
+    for index, step in enumerate(raw_steps):
+        argv = step.get("argv")
+        if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv):
+            _die(f"declared test plan {args.plan!r} step {step['id']!r} has an invalid argv")
+        needs = step.get("needs", [])
+        if not isinstance(needs, list) or any(not isinstance(item, str) or item not in labels for item in needs):
+            _die(f"declared test plan {args.plan!r} step {step['id']!r} has an unknown dependency")
+        dependencies_by_label = [labels[item] for item in needs]
+        # Steps run independently only when configuration opts in. Otherwise
+        # preserve declared order as an explicit durable edge.
+        if not step.get("parallelSafe", False) and index:
+            dependencies_by_label.append(labels[raw_steps[index - 1]["id"]])
+        # A plan-level cap adds stable backwards-only edges, allowing the
+        # scheduler to enforce the cap without an unbounded local coordinator.
+        if index >= max_parallel:
+            dependencies_by_label.append(labels[raw_steps[index - max_parallel]["id"]])
+        artifacts = step.get("artifacts", [])
+        if not isinstance(artifacts, list) or any(not isinstance(item, str) or not item for item in artifacts):
+            _die(f"declared test plan {args.plan!r} step {step['id']!r} has invalid artifacts")
+        submissions.append(JobSubmission(
+            "test", target.project_root, project_identity, target.kind, labels[step["id"]], tuple(argv), timeout,
+            source, remote_name=target.remote_name, workspace_mode="isolated",
+            output_profile=output_profile, execution_profile=profile_name,
+            deadline_source=deadline_source, depends_on=tuple(dict.fromkeys(dependencies_by_label)),
+            artifact_paths=tuple(artifacts),
+        ))
+    if target.kind == "remote":
+        from sandbox.core import _remote
+        from sandbox.transports.remote_jobs import RemoteJobTransport
+        result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+    else:
+        result = dependencies["job_service"].submit_matrix(submissions)
+    result = {**result, "plan": args.plan,
+              "target": {"kind": target.kind, "remote": target.remote_name},
+              "deadline": {"seconds": timeout, "source": deadline_source}}
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(result.get("parent_job_id", ""))
+
+
 def cmd_job_retention(_cfg, args) -> None:
     result = durable_job_dependencies()["job_service"].retention_sweep(
         retention_days=args.retention_days, limit=args.limit,

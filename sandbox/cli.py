@@ -277,8 +277,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     test_target.add_argument("--remote", help="run a durable remote matrix")
     ts.add_argument("--workspace", action="append", default=None,
         help="isolated matrix workspace label (repeatable; mode=matrix)")
-    ts.add_argument("--timeout", type=int, default=900, help="durable matrix job deadline")
-    ts.add_argument("--output-profile", default="smart", help="durable matrix output profile")
+    ts.add_argument("--timeout", type=int, default=None,
+        help="durable matrix/declared-plan deadline (overrides the plan profile)")
+    ts.add_argument("--output-profile", default=None,
+        help="durable matrix/declared-plan output profile (overrides the plan profile)")
     ts.add_argument("--json", action="store_true",
         help="print the durable remote submission result as JSON")
     ts.add_argument("passthrough", nargs=argparse.REMAINDER,

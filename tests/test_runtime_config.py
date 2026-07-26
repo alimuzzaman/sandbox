@@ -43,6 +43,25 @@ class RuntimeConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_runtime_policy(value)
 
+    def test_declared_test_plans_are_validated_against_explicit_profiles(self):
+        from sandbox.config.runtime import normalize_runtime_policy
+
+        runtime = normalize_runtime_policy({
+            "executionProfiles": {"verify": {"timeoutSeconds": 90}},
+            "testPlans": {"checks": {
+                "executionProfile": "verify", "maxParallel": 2,
+                "steps": [{"id": "lint", "argv": ["npm", "run", "lint"], "parallelSafe": True}],
+            }},
+        })
+        self.assertEqual(runtime["testPlans"]["checks"]["executionProfile"], "verify")
+        for invalid in (
+            {"testPlans": {"bad": {"steps": [{"id": "bad id", "argv": ["echo"]}]}}},
+            {"testPlans": {"bad": {"executionProfile": "missing",
+                                       "steps": [{"id": "ok", "argv": ["echo"]}]}}},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                normalize_runtime_policy(invalid)
+
     def test_wordpress_and_compose_facades_expose_common_runtime_policy(self):
         from sandbox.config.facade import resolve_project_config
 

@@ -123,12 +123,13 @@ def cmd_introspect(cfg, args) -> None:
 def cmd_test(cfg, args) -> None:
     """Run a project's resolved unit or integration PHPUnit environment."""
     if getattr(args, "mode", None) == "matrix":
-        from sandbox.commands.jobs_runtime import cmd_job_matrix
+        from sandbox.commands.jobs_runtime import cmd_declared_test_plan, cmd_job_matrix
         remainder = list(getattr(args, "passthrough", ()) or ())
         local = bool(getattr(args, "local", False)); remote = getattr(args, "remote", None)
         workspaces = list(getattr(args, "workspace", None) or [])
-        timeout = getattr(args, "timeout", 900); output_profile = getattr(args, "output_profile", "smart")
+        timeout = getattr(args, "timeout", None); output_profile = getattr(args, "output_profile", None)
         as_json = bool(getattr(args, "json", False))
+        plan_name = None
         # ``argparse.REMAINDER`` intentionally preserves all tokens after the
         # positional mode. Parse the durable matrix subset here so the natural
         # `sb test matrix --workspace cell -- <argv>` spelling remains valid.
@@ -139,14 +140,24 @@ def cmd_test(cfg, args) -> None:
             if token == "--local": local = True; continue
             if token == "--remote" and remainder: remote = remainder.pop(0); continue
             if token == "--workspace" and remainder: workspaces.append(remainder.pop(0)); continue
+            if token == "--plan" and remainder: plan_name = remainder.pop(0); continue
             if token == "--timeout" and remainder: timeout = int(remainder.pop(0)); continue
             if token == "--output-profile" and remainder: output_profile = remainder.pop(0); continue
             if token == "--json": as_json = True; continue
             command.append(token)
+        if plan_name:
+            if command:
+                die("declared test plans do not accept an explicit command")
+            cmd_declared_test_plan(cfg, _types.SimpleNamespace(
+                plan=plan_name, project_dir=getattr(args, "project_dir", None) or os.getcwd(),
+                local=local, remote=remote, timeout=timeout,
+                output_profile=output_profile, json=as_json,
+            ))
+            return
         cmd_job_matrix(cfg, _types.SimpleNamespace(
             command=command, project_dir=getattr(args, "project_dir", None) or os.getcwd(),
-            local=local, remote=remote, workspace=workspaces, timeout=timeout,
-            output_profile=output_profile, json=as_json,
+            local=local, remote=remote, workspace=workspaces, timeout=timeout or 900,
+            output_profile=output_profile or "smart", json=as_json,
             spec_json=None,
         ))
         return
@@ -201,7 +212,7 @@ def cmd_test(cfg, args) -> None:
                 hashlib.sha256(target.project_root.encode()).hexdigest(), "remote", target.workspace_label,
                 tuple(argv), int(getattr(args, "timeout", 900) or 900),
                 SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
-                remote_name=target.remote_name, output_profile=getattr(args, "output_profile", "smart"),
+                remote_name=target.remote_name, output_profile=getattr(args, "output_profile", None) or "smart",
                 deadline_source="explicit")
             from sandbox.core import _remote
             from sandbox.transports.remote_jobs import RemoteJobTransport
@@ -261,7 +272,7 @@ def cmd_test(cfg, args) -> None:
             hashlib.sha256(selected_target.project_root.encode()).hexdigest(), "remote",
             selected_target.workspace_label, tuple(command), timeout,
             SourceIdentity("sha256:" + hashlib.sha256(selected_target.project_root.encode()).hexdigest()),
-            remote_name=selected_target.remote_name, output_profile=getattr(args, "output_profile", "smart"),
+            remote_name=selected_target.remote_name, output_profile=getattr(args, "output_profile", None) or "smart",
             deadline_source="explicit" if getattr(args, "timeout", None) else "profile:test",
         )
         from sandbox.core import _remote

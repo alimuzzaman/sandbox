@@ -940,3 +940,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_job_matrix tests.test_workspace_runtime
   tests.test_workspace_concurrency tests.test_workspace_contracts -v`.
   Result: PASS, 24 tests.
+
+## Declared multi-step test-plan increment
+
+- Date: 2026-07-26. `sb test matrix --plan PLAN_NAME` now resolves a project
+  `runtime.testPlans` declaration into an aggregate durable parent and isolated
+  child jobs. Step IDs, argv, needs, workspace labels, artifacts, profiles,
+  and plan-level concurrency are validated; only `parallelSafe` steps may run
+  independently, while declared dependencies and the bounded plan cap become
+  durable child edges. Explicit CLI timeout/output values override the plan;
+  otherwise its named profiles apply. No package-script discovery is added.
+- Command: `.cli-venv/bin/python -m unittest tests.test_declared_test_plans
+  tests.test_runtime_config tests.test_job_cli tests.test_runtime_test_modes
+  tests.test_job_matrix tests.test_remote_job_transport
+  tests.test_remote_first_cli -v`. Result: PASS, 56 tests.

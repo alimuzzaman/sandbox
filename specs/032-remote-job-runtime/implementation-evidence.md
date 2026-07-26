@@ -812,3 +812,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_workspace_concurrency tests.test_job_matrix
   tests.test_workspace_contracts tests.test_fanout tests.test_e2e
   tests.test_runtime_test_modes -v`. Result: PASS, 49 tests.
+
+## US4 local CI regression checkpoint
+
+- Date: 2026-07-26. The maintained CI compatibility, workflow/safe-mode,
+  remote parent-child/matrix/MCP contract, and core `act` behavior suites pass
+  together. The originally listed `test_ci_safe_mode` and `test_ci_contracts`
+  module names are obsolete; their coverage lives in the workflow and remote
+  CI suites.
+- Command: `.cli-venv/bin/python -m unittest tests.test_ci_compatibility
+  tests.test_ci_workflow tests.test_remote_ci_jobs tests.test_ci -v`.
+  Result: PASS, 66 tests.

@@ -928,3 +928,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   releasing leases only after a truthful terminal classification.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_reconciliation
   tests.test_job_service tests.test_job_health -v`. Result: PASS, 19 tests.
+
+## US3 matrix coordinator verification increment
+
+- Date: 2026-07-26. The durable scheduler/service matrix path has direct
+  proof for parent/child lifecycle aggregation, declared dependency edges,
+  isolated capacity queueing, fail-fast and continue semantics, retry
+  relationships, immutable terminal aggregate results, and local/remote
+  workspace lifecycle contract forwarding.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_scheduler
+  tests.test_job_matrix tests.test_workspace_runtime
+  tests.test_workspace_concurrency tests.test_workspace_contracts -v`.
+  Result: PASS, 24 tests.

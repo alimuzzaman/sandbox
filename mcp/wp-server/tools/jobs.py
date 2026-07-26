@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
+import time
 from pathlib import Path
 
 from dependencies import ToolDependencies
@@ -154,9 +155,56 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
 
 
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536,
-               remote: str | None = None) -> dict:
-    """Return one bounded long-poll output page; callers repeat with its cursor."""
-    return job_output(job_id, cursor=cursor, max_bytes=max_bytes, wait_seconds=1, remote=remote)
+               max_updates: int = 1, max_duration_seconds: int = 2,
+               progress_token: str | None = None, remote: str | None = None) -> dict:
+    """Return a bounded set of retained-output updates for one MCP request.
+
+    ``progress_token`` is deliberately request-scoped.  It produces compact,
+    monotonic observation summaries in the response without adding a second
+    durable state channel or implying anything about the child process's
+    completion percentage.
+    """
+    if (isinstance(max_updates, bool) or not isinstance(max_updates, int)
+            or not 1 <= max_updates <= 20):
+        return {"ok": False, "code": "invalid_follow_query",
+                "error": "max_updates must be between 1 and 20"}
+    if (isinstance(max_duration_seconds, bool) or not isinstance(max_duration_seconds, int)
+            or not 1 <= max_duration_seconds <= 20):
+        return {"ok": False, "code": "invalid_follow_query",
+                "error": "max_duration_seconds must be between 1 and 20"}
+    if progress_token is not None and (not isinstance(progress_token, str) or not progress_token):
+        return {"ok": False, "code": "invalid_follow_query", "error": "progress_token is invalid"}
+
+    deadline = time.monotonic() + max_duration_seconds
+    current_cursor = cursor
+    updates, progress = [], []
+    next_poll_at = time.monotonic()
+    for index in range(max_updates):
+        pause = next_poll_at - time.monotonic()
+        if pause > 0:
+            if time.monotonic() + pause >= deadline:
+                break
+            time.sleep(pause)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Each retained-output wait is bounded and notifications are no more
+        # frequent than once every two seconds for the active MCP request.
+        page = job_output(job_id, cursor=current_cursor, max_bytes=max_bytes,
+                          wait_seconds=min(2, max(1, int(remaining))), remote=remote)
+        if not page.get("ok", False):
+            return page
+        updates.append(page)
+        current_cursor = page.get("cursor", current_cursor)
+        next_poll_at = time.monotonic() + 2
+        if progress_token is not None:
+            progress.append({"token": progress_token, "current": index + 1,
+                             "total": max_updates, "events_observed": page.get("events_read", 0)})
+        if not page.get("has_more", False):
+            break
+    return {"ok": True, "job_id": job_id, "updates": updates,
+            "cursor": current_cursor, "bounded": True,
+            **({"progress": progress} if progress_token is not None else {})}
 
 
 def job_metrics(job_id: str, *, limit: int = 500, remote: str | None = None) -> dict:

@@ -593,3 +593,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   `tests.test_job_observation_contracts` module names no longer existed; their
   maintained coverage resides in `tests.test_job_service` and
   `tests.test_job_contracts`, respectively.
+
+## MCP bounded progress increment
+
+- Date: 2026-07-26. `job_follow` now accepts a capped observation window and
+  an optional client progress token. It returns request-scoped monotonic
+  summaries, waits at least two seconds before a subsequent poll, and does not
+  persist notification state or imply child-process completion progress.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_mcp
+  tests.test_mcp_composition tests.test_remote_first_mcp -v`. Result: PASS,
+  20 tests.

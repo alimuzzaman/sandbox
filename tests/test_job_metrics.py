@@ -1,7 +1,9 @@
 import os
+from types import SimpleNamespace
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.application.job_service import JobService
 from sandbox.jobs.metrics import append, read, sample
@@ -11,6 +13,26 @@ from sandbox.jobs.storage import JobStorage
 
 
 class MetricsTests(unittest.TestCase):
+    def test_proc_and_portable_fallback_metrics_expose_movement_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "42").mkdir()
+            (root / "42" / "stat").write_text("42 (worker) S " + "0 " * 11 + "10 20 0\n")
+            (root / "42" / "status").write_text("VmRSS:\t12 kB\n")
+            (root / "42" / "io").write_text("read_bytes: 5\nwrite_bytes: 7\n")
+            value = sample(42, proc_root=root, disk_path=root)
+            self.assertEqual(value["rss_bytes"], 12 * 1024)
+            self.assertEqual((value["io_read_bytes"], value["io_write_bytes"]), (5, 7))
+            self.assertIn("proc_stat", value["capabilities"])
+            self.assertIn("disk_free", value["capabilities"])
+            self.assertEqual(len(value["movement_digest"]), 64)
+
+    def test_portable_ps_fallback_keeps_sampling_best_effort(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.jobs.metrics.subprocess.run", return_value=SimpleNamespace(
+                    returncode=0, stdout="9 S\n")):
+            value = sample(42, proc_root=Path(temp), disk_path=temp)
+        self.assertEqual((value["rss_bytes"], value["state"]), (9 * 1024, "S"))
+        self.assertIn("portable_ps", value["capabilities"])
     def test_metrics_are_best_effort_and_durably_indexed(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = JobRepository(Path(temp) / "jobs.sqlite")

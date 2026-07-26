@@ -5,17 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
 
-def sample(pid: int) -> dict:
+def sample(pid: int, *, proc_root: Path = Path("/proc"), disk_path: str | Path = ".") -> dict:
     result = {"timestamp": time.time(), "pid": pid, "cpu_seconds": None,
               "rss_bytes": None, "io_read_bytes": None, "io_write_bytes": None,
-              "state": None, "capabilities": []}
-    stat = Path("/proc") / str(pid) / "stat"
-    status = Path("/proc") / str(pid) / "status"
-    io = Path("/proc") / str(pid) / "io"
+              "state": None, "process_count": None, "disk_free_bytes": None,
+              "movement_digest": None, "capabilities": []}
+    stat = proc_root / str(pid) / "stat"
+    status = proc_root / str(pid) / "status"
+    io = proc_root / str(pid) / "io"
     try:
         values = stat.read_text().split()
         ticks = os.sysconf("SC_CLK_TCK")
@@ -39,6 +42,29 @@ def sample(pid: int) -> dict:
         result["capabilities"].append("proc_io")
     except (OSError, ValueError):
         pass
+    if result["rss_bytes"] is None or result["state"] is None:
+        try:
+            ps = subprocess.run(["ps", "-o", "rss=,state=", "-p", str(pid)], text=True,
+                                capture_output=True, timeout=2, check=False)
+            fields = ps.stdout.split()
+            if ps.returncode == 0 and len(fields) >= 2:
+                result["rss_bytes"] = int(fields[0]) * 1024
+                result["state"] = fields[1]
+                result["capabilities"].append("portable_ps")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    try:
+        result["process_count"] = len([entry for entry in proc_root.iterdir() if entry.name.isdigit()])
+        result["capabilities"].append("process_count")
+    except OSError:
+        pass
+    try:
+        result["disk_free_bytes"] = shutil.disk_usage(disk_path).free
+        result["capabilities"].append("disk_free")
+    except OSError:
+        pass
+    movement = {key: result[key] for key in ("cpu_seconds", "rss_bytes", "io_read_bytes", "io_write_bytes", "state")}
+    result["movement_digest"] = hashlib.sha256(json.dumps(movement, sort_keys=True).encode()).hexdigest()
     return result
 
 

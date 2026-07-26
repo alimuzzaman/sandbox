@@ -132,7 +132,7 @@ health, evidence, metrics, artifacts, and final results.
 ### Tests for User Story 2
 
 - [X] T057 [P] [US2] Add health classifier table tests for active, quiet, suspected-stalled, stuck, supervisor-unresponsive, orphaned, process-missing, unreachable, unknown, and terminal conditions in `tests/test_job_health.py` for FR-015 through FR-018 and SC-005
-- [ ] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
+- [X] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
 - [ ] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
 - [ ] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
 - [ ] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
@@ -140,7 +140,7 @@ health, evidence, metrics, artifacts, and final results.
 
 ### Implementation for User Story 2
 
-- [ ] T063 [P] [US2] Implement host/process resource metric sampling and movement evidence in `sandbox/jobs/metrics.py`
+- [X] T063 [P] [US2] Implement host/process resource metric sampling and movement evidence in `sandbox/jobs/metrics.py`
 - [X] T064 [P] [US2] Implement evidence-based lifecycle-independent health classification and threshold reporting in `sandbox/jobs/health.py`
 - [X] T065 [P] [US2] Implement constrained artifact planning, collection, hashing, indexing, expiry, and bounded retrieval in `sandbox/jobs/artifacts.py`
 - [ ] T066 [US2] Record heartbeats/metrics/progress and apply warn-only or opt-in cancel-on-stall policy in `sandbox/jobs/supervisor.py`

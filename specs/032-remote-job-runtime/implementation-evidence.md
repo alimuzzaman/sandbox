@@ -568,3 +568,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   orphaned, process-missing, unreachable, unknown, and terminal.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_health -v`.
   Result: PASS, 4 tests.
+
+## Portable metric sampling increment
+
+- Date: 2026-07-26. Metrics now collect best-effort `/proc` CPU/RSS/I/O/state,
+  process-count and disk-free evidence, use a bounded `ps` fallback when `/proc`
+  data is unavailable, and persist a stable movement digest.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_metrics -v`.
+  Result: PASS, 4 tests.

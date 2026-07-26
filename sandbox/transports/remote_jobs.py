@@ -193,6 +193,8 @@ class RemoteJobTransport:
                                         "workspace": submission.workspace_label},
                 "source": {"identity": deployed["identity"], "commit": deployed["commit"],
                  "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
+                "deadline": payload.get("deadline", {"seconds": submission.deadline_seconds,
+                                                       "source": submission.deadline_source}),
                 "workspace_path": workspace_path}
 
     def read_output(self, remote_name: str, job_id: str, *, stream: str = "combined",

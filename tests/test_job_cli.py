@@ -41,8 +41,10 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["submitted"], 2)
         self.assertEqual({child["workspace"] for child in payload["children"]}, {"cli-cell-a", "cli-cell-b"})
 
-    def test_successful_json_status_adds_ok_without_changing_human_rendering(self):
-        state = {"job_id": "a" * 32, "lifecycle": "succeeded", "health": "terminal"}
+    def test_successful_status_reports_json_and_human_target_deadline_context(self):
+        state = {"job_id": "a" * 32, "lifecycle": "succeeded", "health": "terminal",
+                 "target_kind": "local", "workspace_label": "unit",
+                 "deadline_seconds": 60, "deadline_source": "explicit"}
         with patch("sandbox.commands.jobs_runtime.durable_job_dependencies",
                    return_value={"job_service": SimpleNamespace(get=lambda _job_id: dict(state))}):
             output = StringIO()
@@ -52,7 +54,9 @@ class JobCliTests(unittest.TestCase):
             output = StringIO()
             with redirect_stdout(output):
                 cmd_job_status(None, SimpleNamespace(remote=None, job_id=state["job_id"], json=False))
-            self.assertEqual(output.getvalue().strip(), f"{state['job_id']} succeeded (terminal)")
+            self.assertEqual(output.getvalue().strip(),
+                             f"{state['job_id']} succeeded (terminal) target=local workspace=unit "
+                             "deadline=60s source=explicit")
 
     def test_cli_artifact_get_rejects_invalid_bounds_before_transport(self):
         from sandbox.commands.jobs_runtime import cmd_job_artifact_get

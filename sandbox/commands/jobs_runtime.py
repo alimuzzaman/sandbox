@@ -255,7 +255,11 @@ def cmd_job_start(_cfg, args) -> None:
     if args.json:
         print(json.dumps(accepted, sort_keys=True))
     else:
-        print(accepted["job_id"])
+        target_info = accepted.get("target", {})
+        target_name = target_info.get("remote") or target_info.get("kind", target.kind)
+        deadline = accepted.get("deadline", {})
+        print(f"{accepted['job_id']} target={target_name} workspace={accepted.get('workspace', target.workspace_label)} "
+              f"deadline={deadline.get('seconds', timeout)}s source={deadline.get('source', submission.deadline_source)}")
 
 
 def cmd_job_status(_cfg, args) -> None:
@@ -266,8 +270,16 @@ def cmd_job_status(_cfg, args) -> None:
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
     else:
         result = durable_job_dependencies()["job_service"].get(args.job_id)
-    print(json.dumps({"ok": True, **result}, sort_keys=True) if args.json
-          else f"{result['job_id']} {result['lifecycle']} ({result['health']})")
+    if args.json:
+        print(json.dumps({"ok": True, **result}, sort_keys=True))
+        return
+    target_info = result.get("target") or {"kind": result.get("target_kind"), "remote": result.get("remote_name")}
+    target_name = target_info.get("remote") or target_info.get("kind", "unknown")
+    workspace = result.get("workspace") or result.get("workspace_label", "unknown")
+    deadline = result.get("deadline") or {"seconds": result.get("deadline_seconds"),
+                                            "source": result.get("deadline_source")}
+    print(f"{result['job_id']} {result['lifecycle']} ({result['health']}) target={target_name} "
+          f"workspace={workspace} deadline={deadline.get('seconds')}s source={deadline.get('source')}")
 
 
 def cmd_job_output(_cfg, args) -> None:

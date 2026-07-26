@@ -639,3 +639,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_service
   tests.test_job_health tests.test_job_cancellation tests.test_job_process_identity
   -v`. Result: PASS, 23 tests.
+
+## Job target/deadline presentation increment
+
+- Date: 2026-07-26. Durable job acceptance now returns a structured deadline
+  `{seconds, source}` alongside target/workspace metadata. Human `job-start`
+  and `job-status` output show resolved target, workspace, deadline, and its
+  source; JSON preserves those fields for callers.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_service
+  tests.test_job_cli tests.test_remote_job_transport tests.test_remote_first_cli
+  tests.test_remote_first_mcp -v`. Result: PASS, 35 tests.

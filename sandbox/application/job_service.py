@@ -138,6 +138,7 @@ class JobService:
         result = {"ok": True, "job_id": row["job_id"], "status": "accepted", "kind": row["kind"],
                 "target": {"kind": row["target_kind"], "remote": row["remote_name"]},
                 "workspace": row["workspace_label"], "output_profile": row["output_profile"],
+                "deadline": {"seconds": row["deadline_seconds"], "source": row["deadline_source"]},
                 "idempotent_replay": replay}
         if row.get("lifecycle") == Lifecycle.QUEUED.value:
             result["queue"] = {"reason": row.get("queue_reason") or "queued"}

@@ -30,6 +30,7 @@ class JobServiceTests(unittest.TestCase):
             first = service.submit(submission); second = service.submit(submission)
             self.assertFalse(first["idempotent_replay"]); self.assertTrue(second["idempotent_replay"])
             self.assertTrue(launched[0].exists())
+            self.assertEqual(first["deadline"], {"seconds": 60, "source": "explicit"})
             repository.close()
 
     def test_reconcile_marks_lost_supervisor_interrupted(self):

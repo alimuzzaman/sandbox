@@ -456,7 +456,7 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   rerun/database proof (T142), CI/MCP parity beyond the CLI evidence (T143),
   host-restart reconciliation (T144), durable async/Hermes routing parity
   (T146), remote E2E and disconnect fixtures (T147), and the broader Node/PHP/
-  timeout/measurement/security/quickstart acceptance set (T148 and T136-T140).
+  timeout/security/quickstart acceptance set (T148 and T137-T140).
   These are recorded as remaining gates rather than silently checked.
 - Worktree integrity at reconciliation: `git diff --check` was clean; no files
   under `runtime/wp/` or `vendor/` were changed. The only untracked path is the

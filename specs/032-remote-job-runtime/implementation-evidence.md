@@ -507,3 +507,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
   tests.test_remote_first_mcp tests.test_remote_first_guidance
   tests.test_local_override_compatibility -v`. Result: PASS, 10 tests.
+
+## T055: local detached resume smoke
+
+- Date: 2026-07-26. Submitted the prescribed detached local `exec` smoke.
+  Job `330eb09401d43802a2d33fa5b14c12f3` accepted before completion, then
+  reached `lifecycle=succeeded`, `exit_code=0`, and `health=terminal`.
+- The resumed `job-output` read returned the complete retained output
+  `start\ndone\n`, two ordered stdout events, a cursor, and `has_more=false`.
+  Its submission records the explicit 60-second deadline and local target.

@@ -12,7 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sandbox.commands.jobs_runtime import _download_artifact_file, cmd_job_status
+from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_start,
+                                          cmd_job_status, configure_start_parser)
 
 
 ROOT = Path(__file__).parent.parent
@@ -30,6 +31,37 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_start_parser_and_detached_acceptance_preserve_explicit_argv_context(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args([
+            "--project-dir", "/project", "--local", "--workspace", "unit", "--timeout", "120",
+            "--output-profile", "full", "--request-id", "request-1", "--", "python", "-c", "print('ok')",
+        ])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="unit", runtime_policy={})
+        captured = []
+        accepted = {"ok": True, "job_id": "d" * 32, "target": {"kind": "local", "remote": None},
+                    "workspace": "unit", "deadline": {"seconds": 120, "source": "explicit"}}
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(submit=lambda submission: captured.append(submission) or accepted),
+            }), redirect_stdout(output):
+            cmd_job_start(None, args)
+        self.assertEqual(captured[0].argv, ("python", "-c", "print('ok')"))
+        self.assertEqual(captured[0].request_id, "request-1")
+        self.assertEqual(captured[0].output_profile, "full")
+        self.assertIn("target=local workspace=unit deadline=120s source=explicit", output.getvalue())
+
+    def test_start_rejects_missing_or_malformed_explicit_argv(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args(["--local"])
+        with patch("sandbox.commands.jobs_runtime._die", side_effect=RuntimeError("invalid usage")):
+            with self.assertRaisesRegex(RuntimeError, "invalid usage"):
+                cmd_job_start(None, args)
+
     def test_test_matrix_accepts_flags_after_mode_and_returns_isolated_children(self):
         result = subprocess.run([
             str(ROOT / "sb"), "test", "matrix", "--local", "--workspace", "cli-cell-a",

@@ -832,3 +832,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   envelope.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
   tests.test_job_cli -v`. Result: PASS, 11 tests.
+
+## Explicit job-start CLI contract increment
+
+- Date: 2026-07-26. Added direct CLI coverage for explicit argv parsing,
+  target/workspace/timeout/output-profile/request-ID propagation, durable
+  detached acceptance context, and missing-command rejection. Existing command
+  tests retain output paging, exit/error, and artifact download behavior.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_cli -v`.
+  Result: PASS, 10 tests.

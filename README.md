@@ -346,6 +346,11 @@ free memory/disk before starting another. If SSH is unavailable, retrieve the
 authenticated, log-free HTTPS host snapshot with
 `./sb remote service diagnostics <remote> --json`.
 
+Projects whose service startup bootstraps dependencies can declare a bounded
+`compose.startupTimeoutSeconds`; persistent workspaces can additionally opt
+into `compose.recreateOnEnsure` to rerun that bootstrap after each deployed
+source revision while retaining named volumes.
+
 Use the same runtime operations without an MCP client:
 
 ```bash

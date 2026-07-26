@@ -117,6 +117,12 @@ Pass an argv list to `sb exec`; do not rely on an implicit shell. If a shell is
 required, make the boundary explicit, for example `sb exec -- sh -lc 'npm
 test'`.
 
+If a Compose service must install dependencies or generate clients before its
+health endpoint is ready, declare a bounded `compose.startupTimeoutSeconds`.
+For persistent workspaces whose named dependency volume must be reconciled
+after every source deployment, also declare `compose.recreateOnEnsure: true`;
+Sandbox force-recreates the service but preserves declared volumes.
+
 ## WordPress projects
 
 ```bash

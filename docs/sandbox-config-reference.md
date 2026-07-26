@@ -28,7 +28,9 @@ Compose file and declares the public service and container port:
     "file": "docker-compose.yml",
     "service": "laravel.test",
     "internal_port": 80,
-    "health_path": "/"
+    "health_path": "/",
+    "startupTimeoutSeconds": 300,
+    "recreateOnEnsure": true
   }
 }
 ```
@@ -42,6 +44,13 @@ does not rewrite the project's Compose file, infer or execute package scripts,
 or remove project-owned volumes on destroy. WordPress-only tools (WP-CLI,
 database, Mailpit, WordPress filesystem, abilities, snapshots) fail before
 their side effects with a capability error.
+
+`startupTimeoutSeconds` is the bounded time Sandbox waits for the declared
+health endpoint after `ensure` (30–3600 seconds; default 120). Set
+`recreateOnEnsure` only when the service boot command must reconcile source- or
+lockfile-dependent state, such as dependencies in a named `node_modules`
+volume. It force-recreates the service container while preserving its declared
+volumes.
 
 Generic Compose projects can also use the normal registered-remote workflow.
 Their declaration must include the public service, internal port, and health path

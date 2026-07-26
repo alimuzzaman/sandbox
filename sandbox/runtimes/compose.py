@@ -76,7 +76,17 @@ class ComposeAdapter:
             raise ValueError("Compose health path is invalid")
         if "http_port" in descriptor and descriptor["http_port"] is not None and not _valid_port(descriptor["http_port"]):
             raise ValueError("Compose HTTP port is invalid")
-        return {**descriptor, "root": str(root), "compose_file": str(compose_file)}
+        startup_timeout = descriptor.get("startup_timeout_seconds", self.timeout)
+        if "startup_timeout_seconds" in descriptor and (
+                isinstance(startup_timeout, bool) or not isinstance(startup_timeout, (int, float))
+                or not math.isfinite(startup_timeout) or not 30 <= startup_timeout <= 3600):
+            raise ValueError("Compose startup timeout is invalid")
+        recreate_on_ensure = descriptor.get("recreate_on_ensure", False)
+        if not isinstance(recreate_on_ensure, bool):
+            raise ValueError("Compose recreate-on-ensure setting is invalid")
+        return {**descriptor, "root": str(root), "compose_file": str(compose_file),
+                "startup_timeout_seconds": float(startup_timeout),
+                "recreate_on_ensure": recreate_on_ensure}
 
     def _record(self, request: OperationRequest, **fields: Any) -> dict[str, Any] | None:
         return self.registry.registry_get(request.project_root, label=request.label)
@@ -145,11 +155,14 @@ class ComposeAdapter:
             config = self.dependencies.process.run(["docker", "compose", *project_args, "config", "--services"], cwd=descriptor["root"], timeout=30)
             if config.returncode != 0 or service not in config.stdout.split():
                 raise ValueError(f"declared Compose service {service!r} was not found")
-            started = self.dependencies.process.run(["docker", "compose", *project_args, "up", "-d", service], cwd=descriptor["root"], timeout=self.timeout)
+            up = ["docker", "compose", *project_args, "up", "-d"]
+            if descriptor["recreate_on_ensure"]:
+                up.append("--force-recreate")
+            started = self.dependencies.process.run([*up, service], cwd=descriptor["root"], timeout=self.timeout)
             if started.returncode != 0:
                 raise RuntimeError(started.stderr or "Compose failed to start")
             url = f"http://127.0.0.1:{http_port}"
-            deadline = time.monotonic() + self.timeout
+            deadline = time.monotonic() + descriptor["startup_timeout_seconds"]
             while time.monotonic() < deadline:
                 if self.dependencies.http.probe(url + descriptor["health_path"], timeout=2):
                     data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": url, "health_path": descriptor["health_path"], "framework": descriptor.get("framework"), "status": "ready"}

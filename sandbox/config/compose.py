@@ -58,6 +58,13 @@ class ComposeSchemaProvider:
         http_port = compose.get("http_port")
         if http_port is not None and not _valid_port(http_port):
             raise ValueError("compose http_port must be a valid port")
+        startup_timeout = compose.get("startupTimeoutSeconds", 120)
+        if (isinstance(startup_timeout, bool) or not isinstance(startup_timeout, int)
+                or not 30 <= startup_timeout <= 3600):
+            raise ValueError("compose startupTimeoutSeconds must be between 30 and 3600")
+        recreate_on_ensure = compose.get("recreateOnEnsure", False)
+        if not isinstance(recreate_on_ensure, bool):
+            raise ValueError("compose recreateOnEnsure must be a boolean")
         resources = compose.get("resources", {})
         if resources is None:
             resources = {}
@@ -90,6 +97,8 @@ class ComposeSchemaProvider:
                 "compose_file": str(path), "service": service,
                 "internal_port": port, "health_path": health_path,
                 "http_port": http_port,
+                "startup_timeout_seconds": startup_timeout,
+                "recreate_on_ensure": recreate_on_ensure,
                 "resources": {"cpus": float(cpus), "memoryMB": memory_mb, "pids": pids},
                 "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",

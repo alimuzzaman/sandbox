@@ -138,6 +138,16 @@ class TestGenericComposeAdapter(unittest.TestCase):
             self.assertIn('mem_limit: "4096m"', content)
             self.assertIn("pids_limit: 512", content)
 
+    def test_ensure_can_recreate_a_dependency_bootstrapping_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, _, registry = self.make_adapter(root)
+            registry.descriptor.update({"startup_timeout_seconds": 300, "recreate_on_ensure": True})
+            adapter.invoke(OperationRequest(str(root), "ensure"))
+            up_call = next(call for call, _, _ in process.calls if "up" in call)
+            self.assertIn("--force-recreate", up_call)
+
     def test_descriptor_validation_rejects_command_ambiguous_fields(self):
         invalid = (
             {"service": "web\nbad"},

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.commands.runtime import cmd_exec
+from sandbox.runtimes.base import OperationResult
 
 
 class RemoteFirstCliTests(unittest.TestCase):
@@ -78,6 +79,32 @@ class RemoteFirstCliTests(unittest.TestCase):
         self.assertEqual(requests[0].remote, "named-vps")
         self.assertEqual(requests[0].workspace, "qa")
         self.assertEqual(requests[0].required_capability, "job.exec")
+
+    def test_in_instance_exec_bypasses_the_local_job_host_and_uses_compose_service(self):
+        requests, invocations = [], []
+        target = SimpleNamespace(kind="local", project_root="/remote/project", remote_name=None,
+                                 workspace_label="qa", runtime_policy={})
+        dependencies = {"target_service": SimpleNamespace(
+            resolve=lambda request: requests.append(request) or target)}
+        registry = SimpleNamespace(registry_find_instance=lambda _instance: {
+            "root": "/remote/project", "label": "qa",
+        })
+        runtime = SimpleNamespace(invoke=lambda request: invocations.append(request) or OperationResult(
+            True, "exec", "/remote/project", "compose", {"output": "v22.18.0\n"}))
+        output = StringIO()
+        with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+             patch("sandbox.commands.runtime.preflight_instance_capability", return_value=None), \
+             patch("sandbox.commands.runtime._core", return_value=registry), \
+             patch("sandbox.commands.runtime.runtime_service", return_value=runtime), \
+             patch("sys.stdout", output):
+            cmd_exec(None, self._args(local=True, workspace="qa", timeout=120,
+                                      in_instance=True))
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(requests[0].local)
+        self.assertEqual(invocations[0].project_root, "/remote/project")
+        self.assertEqual(invocations[0].operation, "exec")
+        self.assertEqual(invocations[0].arguments, {"argv": ["npm", "test"], "timeout": 120})
+        self.assertEqual(json.loads(output.getvalue())["output"], "v22.18.0\n")
 
     def test_exec_help_exposes_target_and_finite_deadline_controls(self):
         result = subprocess.run([str(__import__("pathlib").Path(__file__).parent.parent / "sb"),

@@ -95,7 +95,12 @@ def cmd_exec(cfg, args) -> None:
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
 
-    if args.local or args.remote or args.detach or (target is not None and target.kind == "remote"):
+    # The remote transport's in-instance controller has already selected its
+    # VPS and ensured the project Compose service. It must invoke that service
+    # directly; submitting another local durable job would execute the argv on
+    # the VPS host instead of in the declared container image.
+    if not args.in_instance and (args.local or args.remote or args.detach or
+                                 (target is not None and target.kind == "remote")):
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest

@@ -20,6 +20,8 @@ Once a remote job is running on its selected VPS, Sandbox invokes its nested
 project commands with `--local`. In that context, `--local` means the selected
 VPS's co-located runtime, not the developer workstation; it prevents a
 remote-first project policy from recursively submitting another remote job.
+The internal `--in-instance` mode then runs the explicit command directly in
+the declared Compose service, preserving the project's pinned container image.
 
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test

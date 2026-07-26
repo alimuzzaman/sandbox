@@ -52,7 +52,9 @@ Remote job output is intentionally retained and polled through the control
 plane; do not keep child stdout or stderr streams open over SSH. In a nested
 remote controller, `--local` means the selected VPS's co-located runtime, not
 the developer workstation, and prevents a remote-first project from
-recursively selecting its named remote again.
+recursively selecting its named remote again. The controller's internal
+`--in-instance` execution then runs directly in the declared Compose service,
+so the project's pinned container image remains authoritative.
 
 ## Remote CI workflows
 

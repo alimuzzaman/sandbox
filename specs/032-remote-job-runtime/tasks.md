@@ -247,7 +247,7 @@ and both results identify target resolution.
 
 ### Tests for User Story 5
 
-- [ ] T109 [P] [US5] Add end-to-end CLI precedence and help-text tests for configured remote, explicit named remote, explicit local, no configured remote, unknown remote/workspace, and profile deadline reminders in `tests/test_remote_first_cli.py` for FR-001 through FR-004 and FR-041
+- [X] T109 [P] [US5] Add end-to-end CLI precedence and help-text tests for configured remote, explicit named remote, explicit local, no configured remote, unknown remote/workspace, and profile deadline reminders in `tests/test_remote_first_cli.py` for FR-001 through FR-004 and FR-041
 - [X] T110 [P] [US5] Add MCP instruction/catalog and shared target-input parity tests in `tests/test_remote_first_mcp.py` for FR-038/FR-039/FR-041
 - [X] T111 [P] [US5] Add CLI guide and skill content assertions for remote recommendation, deploy-first, deadlines, reusable workspaces, matrix isolation, and remote MCP preference in `tests/test_remote_first_guidance.py` for FR-041
 - [X] T112 [P] [US5] Add existing local CLI/MCP/runtime compatibility assertions with remote config enabled in `tests/test_local_override_compatibility.py` for FR-040 and SC-010

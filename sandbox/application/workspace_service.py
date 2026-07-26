@@ -55,12 +55,17 @@ class WorkspaceService:
         remote = self._remote(target, "create")
         if remote is not None: return remote
         path = self._root(target) / target.workspace_label
+        metadata_path = path / "workspace.json"
+        existed = metadata_path.exists()
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         metadata = {"label": target.workspace_label, "target": target.kind,
                     "remote": target.remote_name, "namespace": target.namespace,
                     "mode": "persistent", "path": str(path)}
-        (path / "workspace.json").write_text(json.dumps(metadata, sort_keys=True) + "\n")
-        return {"ok": True, "created": True, **metadata}
+        if not existed:
+            metadata_path.write_text(json.dumps(metadata, sort_keys=True) + "\n")
+        else:
+            metadata = json.loads(metadata_path.read_text())
+        return {"ok": True, "created": not existed, **metadata}
 
     def list(self, request):
         target = self.target_service.resolve(request)

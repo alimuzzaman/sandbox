@@ -716,3 +716,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   collision-free for the exercised matrix, and bounded to 21 characters.
 - Command: `.cli-venv/bin/python -m unittest tests.test_workspace_labels
   tests.test_job_scheduler tests.test_job_matrix -v`. Result: PASS, 13 tests.
+
+## Persistent workspace lifecycle increment
+
+- Date: 2026-07-26. Local workspace creation now truthfully reports idempotent
+  reuse. Tests cover create/list/status/reset/destroy, active lease rejection,
+  failure retention until explicit lifecycle action, and remote namespace action
+  delegation through the workspace control boundary.
+- Command: `.cli-venv/bin/python -m unittest tests.test_workspace_runtime
+  tests.test_job_scheduler tests.test_workspace_labels -v`. Result: PASS,
+  9 tests.

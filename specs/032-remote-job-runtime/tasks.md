@@ -172,7 +172,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 
 - [X] T075 [P] [US3] Add atomic exclusive/shared/lifecycle/host-capacity lease and stale-lease reconciliation tests in `tests/test_job_scheduler.py` for FR-025 through FR-028
 - [X] T076 [P] [US3] Add deterministic concurrent-safe <=21-character matrix label tests across projects, parents, retries, and canonical matrix values in `tests/test_workspace_labels.py`
-- [ ] T077 [P] [US3] Add persistent create/list/status/reset/destroy, busy mutation, retained failure, idempotent create, and local/remote namespace tests in `tests/test_workspace_runtime.py` for FR-023/FR-024/FR-026
+- [X] T077 [P] [US3] Add persistent create/list/status/reset/destroy, busy mutation, retained failure, idempotent create, and local/remote namespace tests in `tests/test_workspace_runtime.py` for FR-023/FR-024/FR-026
 - [ ] T078 [P] [US3] Add same-instance serial, explicit shared-safe, immediate-busy suggestion, and process-isolation tests in `tests/test_workspace_concurrency.py` for FR-025/FR-026 and SC-006
 - [ ] T079 [P] [US3] Add parent/child dependency, multi-command, fail-fast/continue, capacity queue, cell isolation, retry, and cleanup aggregation tests in `tests/test_job_matrix.py` for FR-027 through FR-030
 - [ ] T080 [P] [US3] Add workspace CLI/MCP lifecycle and matrix contract tests in `tests/test_workspace_contracts.py` for FR-038

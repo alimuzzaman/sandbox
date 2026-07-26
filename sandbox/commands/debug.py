@@ -22,6 +22,24 @@ from sandbox.registry import register
 
 
 
+def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
+                                    workspaces: list[str], timeout: int,
+                                    output_profile: str) -> list:
+    """Turn selected WordPress test workspaces into isolated remote leaves."""
+    from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+    identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    command = ["sb", "test", "--local", "--project-dir", ".", mode]
+    if extra:
+        command += ["--", *extra]
+    return [JobSubmission(
+        "test", target.project_root, identity, "remote", workspace, tuple(command), timeout,
+        SourceIdentity("sha256:" + identity), remote_name=target.remote_name,
+        workspace_mode="isolated", output_profile=output_profile,
+        deadline_source="explicit" if timeout else "profile:test",
+    ) for workspace in workspaces]
+
+
 def cmd_xdebug(cfg, args) -> None:
     """Toggle Xdebug by writing a drop-in PHP ini into the WP container.
 
@@ -237,11 +255,12 @@ def cmd_test(cfg, args) -> None:
     from sandbox.application.context import durable_job_dependencies
     from sandbox.application.target_service import TargetResolutionError
     from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+    requested_workspaces = list(getattr(args, "workspace", None) or [])
     try:
         selected_target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=pd, local=bool(getattr(args, "local", False)),
             remote=getattr(args, "remote", None), workspace=(
-                (getattr(args, "workspace", None) or [None])[0]
+                requested_workspaces[0]
                 if getattr(args, "mode", None) == "matrix" else None),
             required_capability="job.exec",
         ))
@@ -267,12 +286,26 @@ def cmd_test(cfg, args) -> None:
         if extra:
             command += ["--", *extra]
         timeout = int(getattr(args, "timeout", 900) or 900)
+        output_profile = getattr(args, "output_profile", None) or "smart"
+        if len(requested_workspaces) > 1:
+            submissions = _remote_test_matrix_submissions(
+                selected_target, mode, extra, requested_workspaces, timeout, output_profile)
+            from sandbox.core import _remote
+            from sandbox.transports.remote_jobs import RemoteJobTransport
+            accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
+                ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
+                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
+            if cli_json:
+                print(json.dumps(accepted, sort_keys=True))
+            else:
+                print(accepted["parent_job_id"])
+            return
         submission = JobSubmission(
             "test", selected_target.project_root,
             hashlib.sha256(selected_target.project_root.encode()).hexdigest(), "remote",
             selected_target.workspace_label, tuple(command), timeout,
             SourceIdentity("sha256:" + hashlib.sha256(selected_target.project_root.encode()).hexdigest()),
-            remote_name=selected_target.remote_name, output_profile=getattr(args, "output_profile", None) or "smart",
+            remote_name=selected_target.remote_name, output_profile=output_profile,
             deadline_source="explicit" if getattr(args, "timeout", None) else "profile:test",
         )
         from sandbox.core import _remote

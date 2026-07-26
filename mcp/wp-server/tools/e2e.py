@@ -36,7 +36,10 @@ def run_e2e(project_dir: str, workers: int = 2, concurrency: int | None = None,
       async_job_kill(job_id).
 
     Returns {ok, workers, concurrency, passed, failed, by_worker:[{label, url,
-    status, error?, exit_code?}]} — or {ok, job_id} when async_=true.
+    status, error?, exit_code?}]} locally. A remote run returns a durable
+    matrix parent plus independently observable, isolated worker leaf jobs.
+    `async_` returns {ok, job_id} for a local coordinator; remote execution is
+    already detached through its matrix parent.
     """
     capability_error = _require_project_capability(project_dir, None, "wordpress.cli")
     if capability_error:

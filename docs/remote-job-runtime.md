@@ -26,9 +26,14 @@ count, or an RFC 3339/Unix-seconds `since` timestamp. `job-output --follow` is a
 presentation only; complete output remains retained until cleanup/retention
 policy removes it.
 
-Remote E2E uses the same detached outer job and then runs the co-located E2E
-coordinator, which gives its Playwright workers their existing isolated runtime
-instances. Use `--local` only when deliberately keeping the coordinator local.
+Remote E2E submits a durable matrix parent with one isolated workspace leaf per
+Playwright shard. Each leaf runs exactly one `--shard=i/N` coordinator, so its
+status, output, retry, and failure retention remain independently observable.
+Use `--local` only when deliberately keeping the coordinator local.
+
+Likewise, a remote WordPress unit or integration run with two or more repeated
+`--workspace` labels becomes one durable matrix parent with an isolated test
+leaf for each named workspace.
 
 ## Declared test plans
 

@@ -4,6 +4,7 @@ import hashlib
 import os
 import shlex
 import subprocess
+import uuid
 from pathlib import Path
 
 
@@ -122,6 +123,64 @@ def _run_shard(entry: dict, spec: dict, root: Path, config_path: Path | None,
     }
 
 
+def _shard_specs(workers: int, shard_index: int | None = None,
+                 shard_total: int | None = None) -> list[dict]:
+    """Return the Playwright shards this coordinator owns.
+
+    A normal invocation owns every shard. Remote durable matrix leaves invoke
+    this coordinator with exactly one shard so the controller, rather than an
+    opaque nested process, owns each worker's lifecycle and output.
+    """
+    workers = max(1, int(workers))
+    if shard_index is None and shard_total is None:
+        return [{"label": f"{_E2E_LABEL_PREFIX}{i}", "index": i, "total": workers}
+                for i in range(workers)]
+    if shard_index is None or shard_total is None:
+        raise ValueError("--shard-index and --shard-total must be supplied together")
+    if shard_total <= 0 or shard_index < 0 or shard_index >= shard_total:
+        raise ValueError("E2E shard index must be within the positive shard total")
+    return [{"label": f"{_E2E_LABEL_PREFIX}{shard_index}",
+             "index": shard_index, "total": shard_total}]
+
+
+def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
+                              workers: int, timeout: int, args) -> list:
+    """Build one isolated durable job per requested Playwright shard."""
+    from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+    relative_config = os.path.relpath(config_path.resolve(), root_path.resolve())
+    identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    # These labels become remote workspace paths. A unique run key prevents
+    # concurrent E2E submissions from sharing a staged checkout.
+    run_key = uuid.uuid4().hex[:10]
+    namespace_key = hashlib.sha256(str(target.workspace_label).encode()).hexdigest()[:4]
+    submissions = []
+    for shard in _shard_specs(workers):
+        command = ["sb", "e2e", "--local", "--project-dir", ".", "--workers", "1",
+                   "--shard-index", str(shard["index"]), "--shard-total", str(shard["total"]),
+                   "--timeout", str(timeout), "--json"]
+        if relative_config != ".":
+            command += ["--playwright-config", relative_config]
+        if getattr(args, "concurrency", None):
+            command += ["--concurrency", str(args.concurrency)]
+        if getattr(args, "grep", None):
+            command += ["--grep", args.grep]
+        if getattr(args, "keep_on_fail", False):
+            command.append("--keep-on-fail")
+        if getattr(args, "strict_provision", False):
+            command.append("--strict-provision")
+        passthrough = [item for item in (getattr(args, "passthrough", None) or ()) if item != "--"]
+        if passthrough:
+            command += ["--", *passthrough]
+        submissions.append(JobSubmission(
+            "e2e", target.project_root, identity, "remote",
+            f"e2e-{namespace_key}-{run_key}-w{shard['index']}", tuple(command), timeout,
+            SourceIdentity("sha256:" + identity), remote_name=target.remote_name,
+            workspace_mode="isolated", output_profile="smart", deadline_source="explicit",
+        ))
+    return submissions
+
+
 def cmd_e2e(cfg, args) -> None:
     """`./sb e2e --project-dir DIR [--workers N] [--concurrency N] [--grep P]
     [--playwright-config PATH] [--keep-on-fail] [--strict-provision] [--json]
@@ -177,33 +236,22 @@ def cmd_e2e(cfg, args) -> None:
         timeout = int(getattr(args, "timeout", None) or 900)
         if timeout <= 0:
             die("E2E timeout must be a positive finite number of seconds")
-        relative_config = os.path.relpath(config_path.resolve(), root_path.resolve())
-        command = ["sb", "e2e", "--local", "--project-dir", ".",
-                   "--workers", str(max(1, int(getattr(args, "workers", None) or 2))),
-                   "--timeout", str(timeout), "--json"]
-        if relative_config != ".": command += ["--playwright-config", relative_config]
-        if getattr(args, "concurrency", None): command += ["--concurrency", str(args.concurrency)]
-        if getattr(args, "grep", None): command += ["--grep", args.grep]
-        if getattr(args, "keep_on_fail", False): command.append("--keep-on-fail")
-        if getattr(args, "strict_provision", False): command.append("--strict-provision")
-        passthrough = [item for item in (getattr(args, "passthrough", None) or ()) if item != "--"]
-        if passthrough: command += ["--", *passthrough]
-        identity = hashlib.sha256(target.project_root.encode()).hexdigest()
-        submission = JobSubmission(
-            "e2e", target.project_root, identity, "remote", target.workspace_label,
-            tuple(command), timeout, SourceIdentity("sha256:" + identity),
-            remote_name=target.remote_name, output_profile="smart", deadline_source="explicit",
+        workers = max(1, int(getattr(args, "workers", None) or 2))
+        submissions = _remote_shard_submissions(
+            target=target, config_path=config_path, root_path=root_path,
+            workers=workers, timeout=timeout, args=args,
         )
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         try:
             accepted = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree,
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
-                remote_sb_path=_remote.remote_sb_path).submit(submission)
+                remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
         except Exception as exc:
             die(f"remote E2E acceptance failed: {exc}")
+        accepted["workers"] = workers
         if getattr(args, "json", False): print(json.dumps(accepted, sort_keys=True))
-        else: print(accepted["job_id"])
+        else: print(accepted["parent_job_id"])
         return
 
     workers = max(1, int(getattr(args, "workers", None) or 2))
@@ -253,8 +301,12 @@ def cmd_e2e(cfg, args) -> None:
     extra_args = [a for a in (getattr(args, "passthrough", None) or []) if a != "--"]
     timeout = int(getattr(args, "timeout", 900) or 900)
 
-    specs = [{"label": f"{_E2E_LABEL_PREFIX}{i}", "index": i, "total": workers}
-             for i in range(workers)]
+    try:
+        specs = _shard_specs(workers, getattr(args, "shard_index", None),
+                             getattr(args, "shard_total", None))
+    except ValueError as exc:
+        die(str(exc))
+    workers = len(specs)
 
     if not as_json:
         info(f"e2e: {workers} worker(s), concurrency cap "

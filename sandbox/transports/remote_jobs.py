@@ -216,8 +216,14 @@ class RemoteJobTransport:
         if not isinstance(remote, dict):
             raise RemoteJobTransportError("unknown remote")
         args = ["job-output", job_id, "--stream", stream,
-                "--max-bytes", str(max_bytes), "--encoding", encoding,
-                "--profile", profile, "--json"]
+                "--max-bytes", str(max_bytes), "--encoding", encoding]
+        # The default full page is understood by controllers that predate
+        # declarative presentation profiles. Omit it for reconnectability
+        # across an independently provisioned controller; named profiles are
+        # still explicit and require a current controller.
+        if profile != "full":
+            args += ["--profile", profile]
+        args.append("--json")
         if cursor:
             args += ["--cursor", cursor]
         if offset is not None:

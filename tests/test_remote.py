@@ -984,6 +984,7 @@ class TestRemotePreviewInstances(unittest.TestCase):
         result = sr.ensure_remote_instance({"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a")
         self.assertEqual(result["instance"], "preview-a")
         command = mock_ssh_run.call_args.args[1]
+        self.assertIn("ensure --local --project-dir /srv/project", command)
         self.assertIn("--label preview-a --create", command)
         self.assertIn("timeout --signal=TERM --kill-after=30s 300s", command)
         self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)

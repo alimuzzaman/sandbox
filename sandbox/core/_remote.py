@@ -564,8 +564,11 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
     refreshes the WordPress instance on the VPS itself."""
     sb = remote_sb_path(remote)
     label_arg = f" --label {shlex.quote(label)} --create" if label else ""
+    # This command already runs on the selected VPS.  A remote-first project
+    # config must not make this nested ensure resolve its named remote again:
+    # the VPS owns only its co-located runtime registry.
     ensure = (
-        f"{shlex.quote(sb)} ensure --project-dir {shlex.quote(target_path)}"
+        f"{shlex.quote(sb)} ensure --local --project-dir {shlex.quote(target_path)}"
         f"{label_arg} --json"
     )
     # Bound the command on the VPS, not just the local SSH client. `exec`

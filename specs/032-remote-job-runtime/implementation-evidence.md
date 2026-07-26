@@ -603,3 +603,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_mcp
   tests.test_mcp_composition tests.test_remote_first_mcp -v`. Result: PASS,
   20 tests.
+
+## US1 regression gate
+
+- Date: 2026-07-26. The complete retained-output, supervisor, service,
+  remote transport, CLI, MCP, and compatibility gate passed after replacing
+  the stale missing `tests.test_job_mcp` reference with its maintained suite.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output
+  tests.test_output_profiles tests.test_job_output_cursor tests.test_job_supervisor
+  tests.test_job_service tests.test_remote_job_transport tests.test_job_cli
+  tests.test_job_mcp tests.test_asyncjobs tests.test_runtime_transport
+  tests.test_mcp_composition -v`. Result: PASS, 67 tests.

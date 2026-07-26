@@ -95,6 +95,8 @@ def configure_start_parser(parser) -> None:
     target.add_argument("--remote")
     parser.add_argument("--workspace")
     parser.add_argument("--timeout", type=int)
+    parser.add_argument("--stall-seconds", type=int, default=300)
+    parser.add_argument("--cancel-on-stall", action="store_true")
     parser.add_argument("--profile", default="exec")
     parser.add_argument("--output-profile", default="smart")
     parser.add_argument("--request-id")
@@ -240,6 +242,7 @@ def cmd_job_start(_cfg, args) -> None:
         output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})
                                    .get(args.output_profile)),
         deadline_source="explicit" if args.timeout else f"profile:{profile}",
+        stall_seconds=args.stall_seconds, cancel_on_stall=args.cancel_on_stall,
     )
     if target.kind == "remote":
         from sandbox.core import _remote

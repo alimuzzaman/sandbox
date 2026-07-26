@@ -841,3 +841,16 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests retain output paging, exit/error, and artifact download behavior.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_cli -v`.
   Result: PASS, 10 tests.
+
+## Local live observation acceptance
+
+- Date: 2026-07-26. Through `./sb job-start --local`, active retained output
+  job `03b586a6c082ab2992f3f9524f14d61f` completed with two retained events and
+  complete integrity. Quiet stalled job `3228b7bf13638917c9f4fe9e9de9a086`
+  recorded metric/heartbeat stall evidence and ended `cancelled_on_stall`.
+  Deadline job `73e0593d558cab48b71890807d05679a` ended
+  `timed_out/deadline_exceeded`. All status requests returned immediately with
+  persisted health, heartbeat, metrics, and terminal evidence.
+- CLI addition: `job-start` now exposes `--stall-seconds` and
+  `--cancel-on-stall`, matching the durable submission policy already enforced
+  by the supervisor.

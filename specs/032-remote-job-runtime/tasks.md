@@ -150,7 +150,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T070 [US2] Add CLI metrics/artifact-get/cancel/retry/cleanup commands and bounded health rendering in `sandbox/commands/jobs_runtime.py`
 - [X] T071 [US2] Add MCP `job_metrics`, `job_artifacts`, `job_artifact_get`, `job_cancel`, `job_retry`, and `job_cleanup` tools in `mcp/wp-server/tools/jobs.py`
 - [X] T072 [US2] Run the US2 tests and failure-path stress fixture with `.cli-venv/bin/python -m unittest tests.test_job_health tests.test_job_metrics tests.test_job_cancellation tests.test_job_service tests.test_job_artifacts tests.test_job_contracts -v` (the former reconciliation and observation-contract module names were stale)
-- [ ] T073 [US2] Run active/quiet/stalled/timed-out local jobs through `./sb`, verify status latency and evidence, and append job IDs/results to `specs/032-remote-job-runtime/implementation-evidence.md`
+- [X] T073 [US2] Run active/quiet/stalled/timed-out local jobs through `./sb`, verify status latency and evidence, and append job IDs/results to `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T074 [US2] Commit and push the passing observation, health, cancellation, artifact, retry, and retention increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
 
 **Checkpoint**: US2 independently distinguishes lifecycle from evidence-based health and

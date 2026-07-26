@@ -525,3 +525,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - The review records one constrained internal Docker workspace-recovery fallback;
   it is not exposed as a raw Docker CLI/MCP interface, but its live remote boundary
   still needs the disposable acceptance required by T137/T138.
+
+## Acceptance fixture increment
+
+- Date: 2026-07-26. Added environment-gated acceptance fixtures for durable local
+  Node/PHP execution, WordPress integration setup, disconnect/resume, matrix labels,
+  workspace lifecycle, artifact retrieval, deadline handling, and compatible/
+  incompatible/safe-mode CI preflight. These fixtures are not substituted for a
+  credentialed VPS run.

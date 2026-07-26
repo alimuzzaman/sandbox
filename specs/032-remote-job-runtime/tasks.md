@@ -284,8 +284,8 @@ security, and release-regression evidence across all stories.
 - [X] T129 [P] Update remote hosting/deployment guidance to distinguish source deploy, remote development jobs, remote MCP, and production hosting in `docs/remote-hosting.md` and `docs/remote-hosting-implementation.md`
 - [X] T130 [P] Update E2E/CI behavior, compatibility gate, matrices, artifacts, deadlines, and safe mode in `docs/ci-e2e-runner-spec.md`
 - [X] T131 [P] Add a durable job runtime operations/troubleshooting guide with storage pressure, unreachable host, stalled health, cancellation, reconciliation, retention, and recovery in `docs/remote-job-runtime.md`
-- [ ] T132 Add acceptance fixtures for Node unit, PHP unit, WordPress integration, disconnect/resume, simultaneous labels, workspace reuse/failure/reset/destroy, matrix, artifact, timeout, and output retrieval in `tests/acceptance/test_remote_job_runtime.py`
-- [ ] T133 Add acceptance fixtures for remote compatible/incompatible CI and safe-mode behavior in `tests/acceptance/test_remote_ci.py`
+- [X] T132 Add acceptance fixtures for Node unit, PHP unit, WordPress integration, disconnect/resume, simultaneous labels, workspace reuse/failure/reset/destroy, matrix, artifact, timeout, and output retrieval in `tests/acceptance/test_remote_job_runtime.py`
+- [X] T133 Add acceptance fixtures for remote compatible/incompatible CI and safe-mode behavior in `tests/acceptance/test_remote_ci.py`
 - [X] T134 Run the complete pure test suite with `.cli-venv/bin/python -m unittest discover -s tests -v` and record totals/failures in `specs/032-remote-job-runtime/implementation-evidence.md`
 - [X] T135 Run existing local CLI, MCP, WordPress, generic Compose, async-job, E2E, CI, remote-hosting, architecture, and release-boundary suites named in `specs/032-remote-job-runtime/implementation-evidence.md`
 - [ ] T136 Run 100 controlled detach/disconnect/reconnect cases and cursor duplicate checks, status latency checks, health-classification fixtures, deadline/cancel cases, and output/artifact retrieval measurements against SC-001 through SC-008 and record measurements in `specs/032-remote-job-runtime/implementation-evidence.md`

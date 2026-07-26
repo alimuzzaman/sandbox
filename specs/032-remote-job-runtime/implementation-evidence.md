@@ -516,3 +516,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - The resumed `job-output` read returned the complete retained output
   `start\ndone\n`, two ordered stdout events, a cursor, and `has_more=false`.
   Its submission records the explicit 60-second deadline and local target.
+
+## Security review (local/static scope)
+
+- Date: 2026-07-26. Added `security-review.md` covering redaction, bounded
+  output/artifact retrieval, artifact containment, process identity, disk reserve,
+  and remote control construction. The reviewed suite passed 34 tests.
+- The review records one constrained internal Docker workspace-recovery fallback;
+  it is not exposed as a raw Docker CLI/MCP interface, but its live remote boundary
+  still needs the disposable acceptance required by T137/T138.

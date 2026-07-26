@@ -754,3 +754,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   rejection, confirmed mutation dispatch, and isolated matrix submission.
 - Command: `.cli-venv/bin/python -m unittest tests.test_workspace_contracts
   tests.test_workspace_runtime tests.test_job_matrix -v`. Result: PASS, 17 tests.
+
+## Local durable-runtime acceptance repair
+
+- Date: 2026-07-26. Corrected the reusable-workspace acceptance assertion to
+  reflect the documented idempotent create contract: the first create reports
+  `created: true`; the replay reports `created: false`. The full local suite
+  passes; the disposable WordPress acceptance remains deliberately gated.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`.
+  Result: PASS (one gated WordPress acceptance skip).

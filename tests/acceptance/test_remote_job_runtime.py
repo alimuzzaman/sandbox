@@ -84,7 +84,7 @@ class DurableRuntimeAcceptanceFixtures(unittest.TestCase):
         workspaces = WorkspaceService(_LocalTarget(), JobStorage(root, free_disk_reserve=0))
         request = TargetRequest(root, local=True, workspace="reuse")
         self.assertTrue(workspaces.create(request)["created"])
-        self.assertTrue(workspaces.create(request)["created"])
+        self.assertFalse(workspaces.create(request)["created"])
         self.assertTrue(workspaces.reset(request)["reset"])
         self.assertTrue(workspaces.destroy(request)["destroyed"])
 

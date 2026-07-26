@@ -699,3 +699,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   the owned process group before recording `timed_out` / `deadline_exceeded`.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor
   tests.test_job_cancellation tests.test_job_output -v`. Result: PASS, 18 tests.
+
+## Reconciliation evidence matrix increment
+
+- Date: 2026-07-26. Added the dedicated reconciliation suite for host-boot
+  mismatch, stale heartbeat, missing child finalization evidence, on-read
+  orphaned identity, and terminal-row preservation. Each unsafe active state
+  becomes an explicit interruption; reconciliation never invents success.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_reconciliation
+  tests.test_job_service tests.test_job_health -v`. Result: PASS, 19 tests.

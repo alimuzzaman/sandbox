@@ -134,7 +134,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T057 [P] [US2] Add health classifier table tests for active, quiet, suspected-stalled, stuck, supervisor-unresponsive, orphaned, process-missing, unreachable, unknown, and terminal conditions in `tests/test_job_health.py` for FR-015 through FR-018 and SC-005
 - [X] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
 - [X] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
-- [ ] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
+- [X] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
 - [ ] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
 - [ ] T062 [P] [US2] Add CLI/MCP status, metrics, artifact, cancel, retry, and cleanup contract tests in `tests/test_job_observation_contracts.py` for FR-038/FR-039
 

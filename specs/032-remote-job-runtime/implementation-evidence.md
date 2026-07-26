@@ -280,6 +280,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Live remote CI acceptance remains pending on the provisioned VPS controller's
   current `job-matrix` protocol compatibility and explicit control-host choice.
 
+## Legacy async and Hermes compatibility verification
+
+- Date: 2026-07-26
+- Command: `.cli-venv/bin/python -m unittest tests.test_asyncjob_compatibility tests.test_hermes_job_compatibility tests.test_asyncjobs tests.test_hermes_jobs -v`
+- Result: PASS, 18 tests in 1.268 seconds.
+- Evidence: legacy 16-hex async identifiers retain their status/output/cancel
+  contract; durable 32-hex identifiers are translated to that same read shape.
+  The injected Hermes durable backend preserves terminal lifecycle, retained
+  output, cancellation, cleanup, and idempotent run behavior without direct
+  registry or legacy-control-plane consumers.
+
 ## Live remote Compose-instance execution acceptance
 
 - Date: 2026-07-18

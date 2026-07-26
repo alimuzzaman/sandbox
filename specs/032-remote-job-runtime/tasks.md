@@ -276,8 +276,8 @@ security, and release-regression evidence across all stories.
 
 - [X] T122 [P] Add legacy async-job ID/status/output/kill parity tests and 16/32-hex routing tests in `tests/test_asyncjob_compatibility.py` for FR-040
 - [X] T123 [P] Add Hermes job-view adapter parity tests without changing Hermes scheduling semantics in `tests/test_hermes_job_compatibility.py` for FR-040
-- [ ] T124 Adapt `sandbox/core/_asyncjobs.py` and `sandbox/commands/jobs.py` behind the durable job service while preserving existing result keys and rollback path
-- [ ] T125 Adapt Hermes job observation through an explicit service adapter in `sandbox/hermes/jobs.py` and `sandbox/commands/hermes.py` without adding compatibility-facade consumers
+- [X] T124 Adapt `sandbox/core/_asyncjobs.py` and `sandbox/commands/jobs.py` behind the durable job service while preserving existing result keys and rollback path
+- [X] T125 Adapt Hermes job observation through an explicit service adapter in `sandbox/hermes/jobs.py` and `sandbox/commands/hermes.py` without adding compatibility-facade consumers
 - [X] T126 [P] Update user-facing remote-first overview, examples, output recovery, and CI scope in `README.md`
 - [X] T127 [P] Update CLI operation procedures and target/workspace/job command tables in `docs/cli-first-operation.md`
 - [X] T128 [P] Update project runtime schema, profiles, test plans, output policies, and examples in `docs/sandbox-config-reference.md`

@@ -773,3 +773,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_observation_contracts
   tests.test_job_mcp tests.test_remote_job_transport -v`. Result: PASS,
   16 tests.
+
+## Retained-output integrity coverage increment
+
+- Date: 2026-07-26. Added direct retained-output proof for partial-line
+  redaction across chunks, invalid/control-byte-safe presentation, per-stream
+  completion, combined event ordering, segmentation, and the persisted
+  combined SHA-256 integrity value.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output
+  tests.test_job_output_cursor -v`. Result: PASS, 11 tests.

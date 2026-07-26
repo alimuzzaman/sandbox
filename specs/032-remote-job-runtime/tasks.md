@@ -85,7 +85,7 @@ complete retained stdout/stderr/combined output.
 
 ### Tests for User Story 1
 
-- [ ] T031 [P] [US1] Add streaming redaction, partial-line, invalid-UTF8, control-code, chunk-boundary secret, segmentation, combined-order, and integrity tests in `tests/test_job_output.py` for FR-009 through FR-014
+- [X] T031 [P] [US1] Add streaming redaction, partial-line, invalid-UTF8, control-code, chunk-boundary secret, segmentation, combined-order, and integrity tests in `tests/test_job_output.py` for FR-009 through FR-014
 - [X] T032 [P] [US1] Add full/smart/errors/sampled/quiet/custom profile tests including every-10/20-lines, time sampling, context, deduplication, heartbeat, and budgets in `tests/test_output_profiles.py` for FR-012/FR-013
 - [ ] T033 [P] [US1] Add opaque cursor, no-duplicate resume, stream/offset/tail/line/time reads, compression, base64, bounded long-poll, and expired-range tests in `tests/test_job_output_cursor.py` for FR-011 and SC-003
 - [ ] T034 [P] [US1] Add detached supervisor tests in `tests/test_job_supervisor.py` for descriptor detachment, local pipe drainage, caller exit, deadline, exit code, child descendants, output/storage failure, and FR-006/FR-008/FR-014/FR-020

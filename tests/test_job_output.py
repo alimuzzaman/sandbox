@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import hashlib
 from pathlib import Path
 
 from sandbox.application.job_service import JobService
@@ -47,6 +48,22 @@ class JobOutputTests(unittest.TestCase):
         self.assertNotIn("secret-value", page["data"])
         self.assertIn("[REDACTED]", page["data"])
         self.assertEqual([event["stream"] for event in page["events"]], ["stdout", "stderr", "stdout"])
+
+    def test_partial_lines_control_codes_and_integrity_are_retained_safely(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"], secrets=["token"])
+        output.append("stdout", b"partial tok")
+        output.append("stdout", b"en\x00\x1b[31m line\n")
+        output.append("stderr", b"warn\x07\n")
+        output.finish("stdout"); output.finish("stderr")
+        integrity = output.complete()
+        page = output.read(OutputQuery())
+        self.assertEqual(page["data"], "partial [REDACTED][31m line\nwarn\n")
+        self.assertEqual(integrity, hashlib.sha256(
+            (self.storage.job_dir(self.job["job_id"]) / "output" / "combined.jsonl").read_bytes()).hexdigest())
+        streams = {item["stream"]: item for item in self.repository.snapshot(self.job["job_id"])["output"]}
+        self.assertTrue(streams["stdout"]["complete"])
+        self.assertTrue(streams["stderr"]["complete"])
+        self.assertEqual(streams["combined"]["sha256"], integrity)
 
     def test_segmented_streams_preserve_logical_offsets_and_integrity(self):
         output = JobOutputStore(self.storage, self.repository, self.job["job_id"])

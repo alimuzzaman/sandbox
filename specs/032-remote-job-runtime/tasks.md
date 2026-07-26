@@ -188,10 +188,10 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 - [X] T087 [US3] Add `sb workspace create|list|status|reset|destroy` feature-owned command group in `sandbox/commands/workspaces.py` and register it in `sandbox/commands/manifest.py`
 - [X] T088 [US3] Add `sb test matrix` and declared multi-step plan submission/status rendering in `sandbox/commands/runtime.py` and `sandbox/commands/jobs_runtime.py`
 - [X] T089 [US3] Add MCP workspace lifecycle and parent/matrix job inputs/results in `mcp/wp-server/tools/jobs.py`
-- [ ] T090 [US3] Adapt WordPress unit/integration tests and E2E shards to leaf/parent jobs with per-workspace isolation in `sandbox/commands/debug.py`, `sandbox/commands/e2e.py`, and `mcp/wp-server/tools/e2e.py`
+- [X] T090 [US3] Adapt WordPress unit/integration tests and E2E shards to leaf/parent jobs with per-workspace isolation in `sandbox/commands/debug.py`, `sandbox/commands/e2e.py`, and `mcp/wp-server/tools/e2e.py`
 - [X] T091 [US3] Run the US3 tests plus existing fanout/E2E/WordPress suites with `.cli-venv/bin/python -m unittest tests.test_job_scheduler tests.test_workspace_labels tests.test_workspace_runtime tests.test_workspace_concurrency tests.test_job_matrix tests.test_workspace_contracts tests.test_fanout tests.test_e2e tests.test_runtime_test_modes -v`
 - [ ] T092 [US3] Run live same-instance serialization, reusable rerun, two isolated simultaneous instances, failed retention, reset, and destroy checks through `./sb` and append evidence to `specs/032-remote-job-runtime/implementation-evidence.md`
-- [ ] T093 [US3] Commit and push the passing workspace lease, lifecycle, matrix, WordPress, and E2E increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
+- [X] T093 [US3] Commit and push the passing workspace lease, lifecycle, matrix, WordPress, and E2E increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
 
 **Checkpoint**: Multiple tests in one instance are serialized by default; multiple tests
 across isolated instances run concurrently within host capacity and remain independently

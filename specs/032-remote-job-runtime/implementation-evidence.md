@@ -241,6 +241,24 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Remote acceptance remains pending because this workspace has no provisioned
   disposable remote; no Playwright remote result is claimed.
 
+## Remote WordPress and E2E leaf-matrix increment
+
+- Date: 2026-07-26
+- Implementation: remote E2E now submits a durable matrix parent with one
+  UUID-namespaced isolated workspace leaf per Playwright shard. Every leaf runs
+  precisely one co-located `--shard=i/N` coordinator, so the controller owns its
+  lifecycle, retained output, retry, and failure retention. A remote WordPress
+  unit/integration invocation with two or more `--workspace` values likewise
+  becomes an isolated durable test-leaf matrix. MCP `run_e2e` returns this remote
+  matrix shape unchanged.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_scheduler tests.test_workspace_labels tests.test_workspace_runtime tests.test_workspace_concurrency tests.test_job_matrix tests.test_workspace_contracts tests.test_fanout tests.test_e2e tests.test_runtime_test_modes -v`
+- Result: PASS, 53 tests in 0.292 seconds.
+- Commit/push: `def134d8c4199a320b4cc89ef5e7f255bd663a86`
+  (`feat(jobs): expose remote test shard matrices`) pushed to `origin/latest`.
+- Live remote matrix acceptance remains pending: the current VPS controller must
+  be provisioned with an explicit HTTPS control host (or explicitly authorized
+  Tailscale control path) before it can accept the current `job-matrix` protocol.
+
 ## Live remote Compose-instance execution acceptance
 
 - Date: 2026-07-18

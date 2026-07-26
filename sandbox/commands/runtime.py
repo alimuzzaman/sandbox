@@ -72,18 +72,35 @@ def cmd_exec(cfg, args) -> None:
     if any(not isinstance(item, str) or not item or "\x00" in item for item in command):
         die("exec requires a non-empty argv list without NUL bytes")
 
-    if args.local or args.remote or args.detach:
+    target = None
+    if not args.local and not args.remote:
+        # Resolve the configured target even when the caller did not spell out
+        # a durable-job flag.  A project that opts into a remote default must
+        # not silently fall back to direct local Compose execution.
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
-        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.jobs.models import TargetRequest
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
-                project_dir=str(Path.cwd()), local=args.local, remote=args.remote,
-                workspace=args.workspace,
-                required_capability="job.exec" if args.remote else None,
+                project_dir=str(Path.cwd()), workspace=args.workspace,
+                required_capability="job.exec",
             ))
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
+
+    if args.local or args.remote or args.detach or (target is not None and target.kind == "remote"):
+        from sandbox.application.context import durable_job_dependencies
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        if target is None:
+            try:
+                target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
+                    project_dir=str(Path.cwd()), local=args.local, remote=args.remote,
+                    workspace=args.workspace,
+                    required_capability="job.exec" if args.remote else None,
+                ))
+            except TargetResolutionError as exc:
+                die(f"{exc.code}: {exc}")
         timeout = args.timeout or 900
         source = SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest())
         submission = JobSubmission("runtime-exec" if target.kind == "remote" else "exec", target.project_root,

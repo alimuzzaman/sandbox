@@ -735,3 +735,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_workspace_concurrency
   tests.test_job_scheduler tests.test_workspace_runtime -v`. Result: PASS,
   10 tests.
+
+## Artifact expiry and matrix-policy coverage increment
+
+- Date: 2026-07-26. Added direct proof that a collected artifact remains
+  retrievable until scoped cleanup marks it expired, after which retrieval is
+  rejected. Expanded matrix coverage proves a failed prerequisite dispatches a
+  `continue` child and independent cells queue behind host capacity before
+  dispatching after release.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_artifacts
+  tests.test_job_matrix tests.test_job_scheduler -v`. Result: PASS, 21 tests.

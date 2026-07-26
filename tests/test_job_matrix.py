@@ -6,6 +6,7 @@ from pathlib import Path
 from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.registry import JobRepository
+from sandbox.jobs.scheduler import JobScheduler
 from sandbox.jobs.storage import JobStorage
 
 
@@ -189,4 +190,47 @@ class MatrixTests(unittest.TestCase):
             state = service.get(child["unit"]["job_id"])
             self.assertEqual(state["lifecycle"], "cancelled")
             self.assertEqual(state["termination_reason"], "dependency_failed")
+            repo.close()
+
+    def test_failed_dependency_dispatches_continue_policy_child(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            launched = []
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=launched.append)
+            source = SourceIdentity("s")
+            upstream = JobSubmission("test", temp, "p", "local", "build", ("echo", "build"), 60,
+                source, workspace_mode="isolated", failure_policy="continue")
+            downstream = JobSubmission("test", temp, "p", "local", "unit", ("echo", "unit"), 60,
+                source, workspace_mode="isolated", depends_on=("build",), failure_policy="continue")
+            result = service.submit_matrix([upstream, downstream])
+            child = {item["workspace"]: item for item in result["children"]}
+            repo.transition(child["build"]["job_id"], "queued")
+            repo.transition(child["build"]["job_id"], "running")
+            repo.transition(child["build"]["job_id"], "failed", exit_code=1)
+            state = service.get(child["unit"]["job_id"])
+            self.assertEqual(state["lifecycle"], "queued")
+            self.assertEqual(len(launched), 2)
+            repo.close()
+
+    def test_matrix_capacity_queues_independent_cell_until_slot_is_released(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            launched = []
+            scheduler = JobScheduler(repo, max_parallel=1, min_free_memory_mb=0, min_free_disk_mb=0)
+            service = JobService(repo, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=launched.append, scheduler=scheduler)
+            source = SourceIdentity("s")
+            result = service.submit_matrix([
+                JobSubmission("test", temp, "p", "local", "cell-a", ("echo", "a"), 60,
+                    source, workspace_mode="isolated"),
+                JobSubmission("test", temp, "p", "local", "cell-b", ("echo", "b"), 60,
+                    source, workspace_mode="isolated"),
+            ])
+            child = {item["workspace"]: item for item in result["children"]}
+            self.assertEqual(repo.get(child["cell-b"]["job_id"])["queue_reason"],
+                             "workspace_or_capacity_busy")
+            scheduler.release(child["cell-a"]["job_id"])
+            service.get(child["cell-b"]["job_id"])
+            self.assertEqual(len(launched), 2)
             repo.close()

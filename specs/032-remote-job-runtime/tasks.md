@@ -135,7 +135,7 @@ health, evidence, metrics, artifacts, and final results.
 - [X] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
 - [X] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
 - [X] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022
-- [ ] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
+- [X] T061 [P] [US2] Add artifact containment, symlink/device/FIFO escape, count/size, hash, retention, bounded retrieval, and partial failure tests in `tests/test_job_artifacts.py` for FR-031/FR-032
 - [ ] T062 [P] [US2] Add CLI/MCP status, metrics, artifact, cancel, retry, and cleanup contract tests in `tests/test_job_observation_contracts.py` for FR-038/FR-039
 
 ### Implementation for User Story 2
@@ -174,7 +174,7 @@ workspaces/instances; rerun, retain failure, reset, and destroy explicitly.
 - [X] T076 [P] [US3] Add deterministic concurrent-safe <=21-character matrix label tests across projects, parents, retries, and canonical matrix values in `tests/test_workspace_labels.py`
 - [X] T077 [P] [US3] Add persistent create/list/status/reset/destroy, busy mutation, retained failure, idempotent create, and local/remote namespace tests in `tests/test_workspace_runtime.py` for FR-023/FR-024/FR-026
 - [X] T078 [P] [US3] Add same-instance serial, explicit shared-safe, immediate-busy suggestion, and process-isolation tests in `tests/test_workspace_concurrency.py` for FR-025/FR-026 and SC-006
-- [ ] T079 [P] [US3] Add parent/child dependency, multi-command, fail-fast/continue, capacity queue, cell isolation, retry, and cleanup aggregation tests in `tests/test_job_matrix.py` for FR-027 through FR-030
+- [X] T079 [P] [US3] Add parent/child dependency, multi-command, fail-fast/continue, capacity queue, cell isolation, retry, and cleanup aggregation tests in `tests/test_job_matrix.py` for FR-027 through FR-030
 - [ ] T080 [P] [US3] Add workspace CLI/MCP lifecycle and matrix contract tests in `tests/test_workspace_contracts.py` for FR-038
 
 ### Implementation for User Story 3

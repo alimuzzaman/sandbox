@@ -106,6 +106,30 @@ class ArtifactTests(unittest.TestCase):
                                              offset=offset, max_bytes=maximum)
             repo.close()
 
+    def test_cleanup_expires_collected_artifact_and_prevents_later_retrieval(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            (project / "report.txt").write_text("retained result")
+            repo = JobRepository(root / "jobs.sqlite")
+            storage = JobStorage(root, free_disk_reserve=0)
+            service = JobService(repo, storage, None, launcher=lambda _: None)
+            job, _ = repo.accept(JobSubmission("test", str(project), "p", "local", "w",
+                ("echo", "x"), 60, SourceIdentity("s")))
+            storage.job_dir(job["job_id"], create=True)
+            artifact = collect(storage, repo, job["job_id"], project_root=project,
+                               declared_paths=("report.txt",))[0]
+            self.assertEqual(service.get_artifact(job["job_id"], artifact["artifact_id"]),
+                             b"retained result")
+            repo.transition(job["job_id"], "running")
+            repo.transition(job["job_id"], "succeeded", exit_code=0)
+            service.cleanup(job["job_id"], logs=False, artifacts=True, metrics=False)
+            self.assertEqual(repo.snapshot(job["job_id"])["artifacts"][0]["status"], "expired")
+            with self.assertRaisesRegex(RuntimeError, "artifact_unavailable"):
+                service.get_artifact(job["job_id"], artifact["artifact_id"])
+            repo.close()
+
     def test_exact_copy_detects_growth_and_shrink(self):
         with self.assertRaisesRegex(ArtifactError, "grew"):
             _copy_exact(io.BytesIO(b"abcd"), io.BytesIO(), 3)

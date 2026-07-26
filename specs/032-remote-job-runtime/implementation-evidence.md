@@ -259,6 +259,27 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   be provisioned with an explicit HTTPS control host (or explicitly authorized
   Tailscale control path) before it can accept the current `job-matrix` protocol.
 
+## Strict remote-CI safety increment
+
+- Date: 2026-07-26
+- Implementation: compatibility preflight now detects every documented `act`
+  divergence at its exact workflow location. Safe mode neutralizes known
+  deployment/release/publish actions, blocks unknown external mutation actions
+  before a remote submission, and records the distinction. Environment-backed
+  CI secrets require an explicit `ci_secret_allowlist`; configured `ci_secrets`
+  remains an explicit allowlist.
+- Command: `.cli-venv/bin/python -m unittest tests.test_ci_workflow tests.test_ci_compatibility tests.test_remote_ci_jobs tests.test_ci -v`
+- Result: PASS, 71 tests in 0.046 seconds.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v` and
+  `./sb selftest`.
+- Result: PASS. The disposable WordPress acceptance fixture remained skipped
+  because `SANDBOX_RUN_WP_ACCEPTANCE=1` and a disposable configured project
+  were not supplied.
+- Commit/push: `e56ce91` (`fix(ci): fail closed on unknown mutation secrets`)
+  pushed to `origin/latest`.
+- Live remote CI acceptance remains pending on the provisioned VPS controller's
+  current `job-matrix` protocol compatibility and explicit control-host choice.
+
 ## Live remote Compose-instance execution acceptance
 
 - Date: 2026-07-18

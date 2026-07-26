@@ -229,7 +229,7 @@ accepted.
 - [X] T105 [US4] Add MCP CI preflight/start/status integration over durable jobs in `mcp/wp-server/tools/ci.py` and register dependencies in `mcp/wp-server/tools/manifest.py`
 - [X] T106 [US4] Run CI compatibility, workflow, safe-mode, remote-job, contract, and existing CI suites with `.cli-venv/bin/python -m unittest tests.test_ci_compatibility tests.test_ci_workflow tests.test_remote_ci_jobs tests.test_ci -v` (safe-mode and CLI/MCP contract coverage are maintained in the workflow and remote-job suites)
 - [ ] T107 [US4] Run disposable remote acceptance for a compatible Linux workflow with dependencies/matrix/artifacts and an incompatible workflow blocked before side effects, recording evidence in `specs/032-remote-job-runtime/implementation-evidence.md`
-- [ ] T108 [US4] Commit and push the passing strict remote-CI increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
+- [X] T108 [US4] Commit and push the passing strict remote-CI increment and record its identity in `specs/032-remote-job-runtime/implementation-evidence.md`
 
 **Checkpoint**: US4 provides bounded remote CI rather than hosted-runner parity claims;
 all known semantic differences are visible and preflighted.

@@ -291,6 +291,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   output, cancellation, cleanup, and idempotent run behavior without direct
   registry or legacy-control-plane consumers.
 
+## Retained-output cursor verification
+
+- Date: 2026-07-26
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output_cursor -v`
+- Result: PASS. The suite verifies exclusive opaque cursors, stream/offset/tail/
+  line/time selectors, base64 rendering, bounded long-polling, and 100
+  consecutive reconnects without duplicate retained events.
+- Note: output compression is not a requirement of FR-011, SC-003, or the
+  published job-service/CLI/MCP contracts; the historical task wording is
+  broader than the approved specification.
+
 ## Live remote Compose-instance execution acceptance
 
 - Date: 2026-07-18

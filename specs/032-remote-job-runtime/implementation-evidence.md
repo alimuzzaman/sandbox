@@ -497,3 +497,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_guidance
   tests.test_remote_first_cli tests.test_cli tests.test_mcp_composition -v`.
   Result: PASS.
+
+## Remote-first CLI/MCP target parity
+
+- Date: 2026-07-26. Added dedicated coverage for configured remote target
+  selection in CLI and MCP job submission, bounded remote status/output input
+  forwarding, actionable unknown-target errors, and the explicit-local override
+  under a remote-first configuration.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
+  tests.test_remote_first_mcp tests.test_remote_first_guidance
+  tests.test_local_override_compatibility -v`. Result: PASS, 10 tests.

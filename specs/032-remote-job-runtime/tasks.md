@@ -248,9 +248,9 @@ and both results identify target resolution.
 ### Tests for User Story 5
 
 - [ ] T109 [P] [US5] Add end-to-end CLI precedence and help-text tests for configured remote, explicit named remote, explicit local, no configured remote, unknown remote/workspace, and profile deadline reminders in `tests/test_remote_first_cli.py` for FR-001 through FR-004 and FR-041
-- [ ] T110 [P] [US5] Add MCP instruction/catalog and shared target-input parity tests in `tests/test_remote_first_mcp.py` for FR-038/FR-039/FR-041
+- [X] T110 [P] [US5] Add MCP instruction/catalog and shared target-input parity tests in `tests/test_remote_first_mcp.py` for FR-038/FR-039/FR-041
 - [X] T111 [P] [US5] Add CLI guide and skill content assertions for remote recommendation, deploy-first, deadlines, reusable workspaces, matrix isolation, and remote MCP preference in `tests/test_remote_first_guidance.py` for FR-041
-- [ ] T112 [P] [US5] Add existing local CLI/MCP/runtime compatibility assertions with remote config enabled in `tests/test_local_override_compatibility.py` for FR-040 and SC-010
+- [X] T112 [P] [US5] Add existing local CLI/MCP/runtime compatibility assertions with remote config enabled in `tests/test_local_override_compatibility.py` for FR-040 and SC-010
 
 ### Implementation for User Story 5
 
@@ -261,7 +261,7 @@ and both results identify target resolution.
 - [X] T117 [US5] Update MCP server instructions to prefer co-located remote MCP and durable status/output reads in `mcp/wp-server/app.py` and `mcp/wp-server/tools/context.py`
 - [X] T118 [US5] Update the Sandbox CLI skill with remote-first development, deadlines, output modes, status inspection, workspace reuse/isolation, and cleanup guidance in `skills/sandbox-cli/SKILL.md`
 - [X] T119 [US5] Update repository agent reflexes and MCP catalog for remote-first job operation in `AGENTS.md` and `CLAUDE.md`
-- [ ] T120 [US5] Run remote-first CLI/MCP/guidance/local-override tests with `.cli-venv/bin/python -m unittest tests.test_remote_first_cli tests.test_remote_first_mcp tests.test_remote_first_guidance tests.test_local_override_compatibility -v`
+- [X] T120 [US5] Run remote-first CLI/MCP/guidance/local-override tests with `.cli-venv/bin/python -m unittest tests.test_remote_first_cli tests.test_remote_first_mcp tests.test_remote_first_guidance tests.test_local_override_compatibility -v`
 - [ ] T121 [US5] Run configured-remote and explicit-local live smoke tests through `./sb`, capture resolved targets/job results in `specs/032-remote-job-runtime/implementation-evidence.md`, and commit/push the passing remote-first interface increment
 
 **Checkpoint**: All five stories are functional. Configured remote is recommended and

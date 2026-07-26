@@ -881,3 +881,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   authorized Tailscale control plane), neither of which may be inferred.
   WordPress, artifact, CI-compatible/blocked, workspace cleanup, and full
   matrix acceptance therefore remain unrecorded.
+
+## MCP remote-job contract increment
+
+- Date: 2026-07-26. `tests/test_job_mcp.py` now directly covers the MCP
+  contracts for remote explicit-argv start/status/output, bounded retained
+  output selectors, remote `run_tests` acceptance with preserved
+  `{ok, passed, summary, output, mode}` keys, runtime-service `instance_exec`
+  submission, and bounded request-scoped follow progress. The WordPress tool
+  is loaded through a minimal isolated MCP fixture so this contract remains
+  runnable in the primary test environment without requiring the optional MCP
+  server virtual environment.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_mcp
+  tests.test_remote_first_mcp tests.test_mcp_composition -v`. Result: PASS,
+  23 tests.

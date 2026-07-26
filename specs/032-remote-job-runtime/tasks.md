@@ -214,7 +214,7 @@ accepted.
 
 - [X] T094 [P] [US4] Add versioned `act` compatibility catalog and exact workflow-location detector tests in `tests/test_ci_compatibility.py` for all entries in `specs/032-remote-job-runtime/contracts/remote-ci.md`
 - [X] T095 [P] [US4] Add workflow path, Linux runner, dependency graph, matrix, selection, expression-boundary, malformed YAML, and no-side-effect preflight tests in `tests/test_ci_workflow.py` for FR-033/FR-034/FR-037
-- [ ] T096 [P] [US4] Add safe-mode classification tests for deploy/release/publish/external mutation, credential allowlists, unknown mutation, and recorded semantic differences in `tests/test_ci_safe_mode.py` for FR-035/FR-036
+- [X] T096 [P] [US4] Add safe-mode classification tests for deploy/release/publish/external mutation, credential allowlists, unknown mutation, and recorded semantic differences in `tests/test_ci_workflow.py` for FR-035/FR-036
 - [ ] T097 [P] [US4] Add remote CI parent/child/cell, capacity, outer timeout, output, artifact, retry, cleanup, and aggregate-result tests in `tests/test_remote_ci_jobs.py` for FR-033 through FR-037 and SC-009
 - [ ] T098 [P] [US4] Add CI CLI/MCP preflight and run contract tests in `tests/test_ci_contracts.py`
 

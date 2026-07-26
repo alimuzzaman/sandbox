@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from sandbox.ci.workflow import WorkflowError, preflight
 from sandbox.commands.ci import _artifact_blocking_differences
+from sandbox.commands import ci
 
 
 class WorkflowTests(unittest.TestCase):
@@ -101,3 +103,27 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result["safe_mode_actions"][0]["action"], "neutralized")
             self.assertEqual(result["differences"][-1]["id"], "safe-mode:release:0")
             self.assertNotIn("safe-mode:release:0", result["blocking"])
+
+    def test_safe_mode_blocks_unknown_external_mutation_before_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); flow = root / "ci.yml"
+            flow.write_text(
+                "jobs:\n  mutate:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: example/external-mutator@v1\n")
+            result = preflight(root, flow.name, safe_mode=True)
+            self.assertFalse(result["ok"])
+            self.assertIn("safe-mode-unknown-mutation:mutate:0", result["blocking"])
+            self.assertEqual(result["safe_mode_actions"], [{
+                "id": "safe-mode-unknown-mutation:mutate:0",
+                "location": "jobs.mutate.steps[0]", "action": "blocked",
+            }])
+
+    def test_environment_ci_secret_requires_explicit_allowlist(self):
+        with patch.dict("os.environ", {"SANDBOX_CI_SECRET_TOKEN": "environment-value"}, clear=False):
+            self.assertIsNone(ci._resolve_secret("TOKEN", {"ci_secrets": {}}))
+            self.assertEqual(ci._resolve_secret("TOKEN", {
+                "ci_secrets": {}, "ci_secret_allowlist": ["TOKEN"],
+            }), "environment-value")
+        self.assertEqual(ci._resolve_secret("TOKEN", {
+            "ci_secrets": {"TOKEN": "configured-value"},
+        }), "configured-value")

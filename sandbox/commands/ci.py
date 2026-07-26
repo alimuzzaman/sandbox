@@ -238,6 +238,18 @@ def _plan_workflow(path: Path) -> dict:
 
 def _resolve_secret(name: str, local_cfg: dict) -> str | None:
     ci_secrets = (local_cfg.get("ci_secrets") or {})
+    # The mapping is an explicit allowlist by default. Environment-backed
+    # values require an equally explicit list, so a workflow cannot forward an
+    # arbitrary ambient SANDBOX_CI_SECRET_* value to a third-party action.
+    configured = local_cfg.get("ci_secret_allowlist")
+    if configured is None:
+        allowed = set(ci_secrets) if isinstance(ci_secrets, dict) else set()
+    elif isinstance(configured, list) and all(isinstance(item, str) for item in configured):
+        allowed = set(configured)
+    else:
+        return None
+    if name not in allowed:
+        return None
     if name in ci_secrets:
         return str(ci_secrets[name])
     env_key = f"SANDBOX_CI_SECRET_{name}"
@@ -676,8 +688,9 @@ def cmd_ci(cfg, args) -> None:
     safe, no execution. `run` actually executes: deploy/publish-shaped steps
     are neutralized into no-op stubs UNLESS --allow-deploy (act itself has no
     such gate — this module supplies it), and any `${{ secrets.* }}` the
-    workflow references must resolve from sandbox.local.yml's `ci_secrets:` (or
-    $SANDBOX_CI_SECRET_*) before anything runs, or the run aborts loud.
+    workflow references must be explicitly allowlisted in sandbox.local.yml's
+    `ci_secrets:` mapping (or `ci_secret_allowlist` for an environment-backed
+    `$SANDBOX_CI_SECRET_*`) before anything runs, or the run aborts loud.
     `--async` runs detached (sandbox/core/_asyncjobs.py) — poll with
     `./sb async-job <job_id>`.
     """
@@ -846,8 +859,8 @@ def cmd_ci(cfg, args) -> None:
         val = _resolve_secret(name, local_cfg)
         if val is None:
             die(f"secret '{name}' referenced by workflow '{wf_path.name}' is not "
-                f"defined in sandbox.local.yml ci_secrets (or "
-                f"$SANDBOX_CI_SECRET_{name}) — refusing to run with an "
+                f"explicitly allowlisted in sandbox.local.yml ci_secrets (or "
+                f"ci_secret_allowlist for $SANDBOX_CI_SECRET_{name}) — refusing to run with an "
                 f"empty value. Use `./sb ci run ... --list-secrets` to see "
                 f"what's needed.")
         resolved_secrets[name] = val

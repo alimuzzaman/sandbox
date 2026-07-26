@@ -35,6 +35,11 @@ Likewise, a remote WordPress unit or integration run with two or more repeated
 `--workspace` labels becomes one durable matrix parent with an isolated test
 leaf for each named workspace.
 
+Remote CI safe mode neutralizes known deployment/release/publish operations and
+blocks unknown external mutation actions before deployment. CI secrets must be
+explicitly named in `ci_secrets`; environment-backed `SANDBOX_CI_SECRET_*`
+values additionally require `ci_secret_allowlist`.
+
 ## Declared test plans
 
 Projects may declare `runtime.testPlans` with explicit argv, stable step IDs,

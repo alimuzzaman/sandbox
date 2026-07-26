@@ -8,6 +8,10 @@ from typing import Any
 from .compatibility import CATALOG_VERSION, detect
 
 
+_KNOWN_MUTATION_MARKERS = ("deploy", "release", "publish", "git push", "svn commit")
+_UNKNOWN_MUTATION_MARKERS = ("mutat", "webhook", "issue-comment", "pull-request-comment")
+
+
 class WorkflowError(ValueError):
     pass
 
@@ -74,8 +78,16 @@ def preflight(project_root: str | Path, workflow_path: str | Path, *, selected_j
     for job_id in active_jobs:
         for index, step in enumerate(jobs[job_id].get("steps") or []):
             text = str(step.get("uses") or step.get("run") or "").lower()
-            if any(word in text for word in ("deploy", "release", "publish", "git push", "svn commit")):
-                location = f"jobs.{job_id}.steps[{index}]"
+            location = f"jobs.{job_id}.steps[{index}]"
+            if any(word in text for word in _UNKNOWN_MUTATION_MARKERS):
+                difference_id = f"safe-mode-unknown-mutation:{job_id}:{index}"
+                safe_actions.append({"id": difference_id, "location": location, "action": "blocked"})
+                differences.append({"id": difference_id, "workflow": str(workflow_path),
+                    "location": location, "severity": "block", "accepted": False,
+                    "detail": "unknown external mutation is blocked before execution",
+                    "catalog_version": CATALOG_VERSION})
+                blocking.append(difference_id)
+            elif any(word in text for word in _KNOWN_MUTATION_MARKERS):
                 difference_id = f"safe-mode:{job_id}:{index}"
                 safe_actions.append({"id": difference_id, "location": location,
                                      "action": "neutralized" if safe_mode else "allowed"})

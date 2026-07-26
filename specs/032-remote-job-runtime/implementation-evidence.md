@@ -801,3 +801,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_job_transport
   tests.test_remote_first_cli tests.test_remote_first_mcp -v`. Result: PASS,
   18 tests.
+
+## US3 local orchestration regression checkpoint
+
+- Date: 2026-07-26. Scheduler leases, deterministic workspace labels,
+  idempotent lifecycle, shared/isolated concurrency, parent/child matrices,
+  fanout, E2E helpers, and runtime test-mode selection all pass together.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_scheduler
+  tests.test_workspace_labels tests.test_workspace_runtime
+  tests.test_workspace_concurrency tests.test_job_matrix
+  tests.test_workspace_contracts tests.test_fanout tests.test_e2e
+  tests.test_runtime_test_modes -v`. Result: PASS, 49 tests.

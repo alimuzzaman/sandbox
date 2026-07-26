@@ -854,3 +854,30 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - CLI addition: `job-start` now exposes `--stall-seconds` and
   `--cancel-on-stall`, matching the durable submission policy already enforced
   by the supervisor.
+
+## Remote VPS acceptance increment
+
+- Date: 2026-07-26. Authorized disposable acceptance ran through `./sb` on
+  provisioned `hermes-acceptance`. Node job
+  `e5a2147f5cd48f744da34dcc1b8bd6ea` completed with retained output
+  `remote-node-hermes-acceptance`; PHP job
+  `0d97e816a82b49b35184a36c3e2a18c0` completed with retained output
+  `remote-php-acceptance`. Both used exact staged sources and isolated remote
+  workspace copies. The PHP source identity was
+  `sha256:e7a87c97325355f04b75511474ca258a5d1494df544c51dda9503b6d1a688cc8`.
+- Deadline job `bff3fc85b9eb22dd992b3134bad5630e`, staged from commit
+  `8def7e3c3f78cedf99404d49eed6f61b5e2ada00` with source identity
+  `sha256:8544caa1680865cdae1cd43800e22894ece7fe03e58f828df9e1775c867d2cbe`,
+  was terminated as `timed_out` with `deadline_exceeded` after its explicit
+  one-second deadline. Its retained output is complete and empty.
+- Remote output initially exposed a backward-controller incompatibility when
+  the local transport passed the default `--profile full`; omitting the
+  default restores retained output reads while named profiles remain explicit.
+  The local transport regression suite passed after this repair.
+- Matrix acceptance currently remains gated by the older installed VPS
+  controller, which rejects the deterministic sibling deployment workspaces.
+  The project-side boundary repair is committed in `8def7e3`; controller
+  reconciliation now requires an explicit HTTPS `--control-host` (or an
+  authorized Tailscale control plane), neither of which may be inferred.
+  WordPress, artifact, CI-compatible/blocked, workspace cleanup, and full
+  matrix acceptance therefore remain unrecorded.

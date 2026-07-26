@@ -130,7 +130,9 @@ class OutputEvent:
 
 
 class JobOutputStore:
-    """Append-only byte files plus a combined order index for one job."""
+    """Append-only segmented byte streams plus a combined order index for one job."""
+
+    segment_bytes = 1_048_576
 
     def __init__(self, storage, repository, job_id: str, *, secrets: Iterable[bytes | str] = ()) -> None:
         self.storage = storage
@@ -140,10 +142,81 @@ class JobOutputStore:
         self.directory.mkdir(mode=0o700, exist_ok=True)
         self._redactors = {"stdout": StreamingRedactor(secrets), "stderr": StreamingRedactor(secrets)}
 
-    def _path(self, stream: str) -> Path:
+    def _legacy_path(self, stream: str) -> Path:
         if stream not in {"stdout", "stderr"}:
             raise OutputError("output stream is invalid")
         return self.directory / f"{stream}.bin"
+
+    def _segments_dir(self, stream: str) -> Path:
+        if stream not in {"stdout", "stderr"}:
+            raise OutputError("output stream is invalid")
+        return self.directory / stream
+
+    def _segment_paths(self, stream: str) -> list[Path]:
+        directory = self._segments_dir(stream)
+        if directory.exists():
+            return sorted(directory.glob("*.bin"))
+        legacy = self._legacy_path(stream)
+        return [legacy] if legacy.exists() else []
+
+    def _stream_size(self, stream: str) -> int:
+        return sum(path.stat().st_size for path in self._segment_paths(stream))
+
+    def _stream_digest(self, stream: str) -> str | None:
+        paths = self._segment_paths(stream)
+        if not paths:
+            return None
+        digest = hashlib.sha256()
+        for path in paths:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65_536), b""):
+                    digest.update(chunk)
+        return digest.hexdigest()
+
+    def _append_stream(self, stream: str, content: bytes) -> int:
+        """Append bytes to numbered segments and return the logical stream offset."""
+        offset = self._stream_size(stream)
+        legacy = self._legacy_path(stream)
+        # Old persisted jobs predate segmentation. Keep their one-file layout
+        # readable and appendable instead of relocating logs during a read/write.
+        if legacy.exists() and not self._segments_dir(stream).exists():
+            with legacy.open("ab", buffering=0) as handle:
+                os.chmod(legacy, 0o600); handle.write(content); os.fsync(handle.fileno())
+            return offset
+        directory = self._segments_dir(stream)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        remaining = memoryview(content)
+        paths = self._segment_paths(stream)
+        while remaining:
+            path = paths[-1] if paths else directory / "00000000.bin"
+            current = path.stat().st_size if path.exists() else 0
+            if current >= self.segment_bytes:
+                path = directory / f"{len(paths):08d}.bin"
+                current = 0
+            amount = min(len(remaining), self.segment_bytes - current)
+            with path.open("ab", buffering=0) as handle:
+                os.chmod(path, 0o600); handle.write(remaining[:amount]); os.fsync(handle.fileno())
+            if not paths or path != paths[-1]:
+                paths.append(path)
+            remaining = remaining[amount:]
+        return offset
+
+    def _read_stream(self, stream: str, offset: int, size: int) -> bytes:
+        remaining_offset, remaining_size, chunks = offset, size, []
+        for path in self._segment_paths(stream):
+            segment_size = path.stat().st_size
+            if remaining_offset >= segment_size:
+                remaining_offset -= segment_size
+                continue
+            with path.open("rb") as handle:
+                handle.seek(remaining_offset)
+                chunk = handle.read(remaining_size)
+            chunks.append(chunk)
+            remaining_size -= len(chunk)
+            if remaining_size <= 0:
+                break
+            remaining_offset = 0
+        return b"".join(chunks)
 
     @property
     def _events_path(self) -> Path:
@@ -172,17 +245,12 @@ class JobOutputStore:
     def _append_ready(self, stream: str, content: bytes, *, timestamp: float | None) -> OutputEvent | None:
         if not content:
             return None
-        path = self._path(stream)
-        offset = path.stat().st_size if path.exists() else 0
         try:
             try:
                 self.storage.require_capacity(len(content) + 512)
             except StoragePressureError as exc:
                 raise OutputError("durable output storage pressure") from exc
-            with path.open("ab", buffering=0) as handle:
-                os.chmod(path, 0o600)
-                handle.write(content)
-                os.fsync(handle.fileno())
+            offset = self._append_stream(stream, content)
             sequence = self._next_sequence()
             event = OutputEvent(sequence, stream, offset, len(content), timestamp or _utc())
             with self._events_path.open("ab", buffering=0) as handle:
@@ -217,12 +285,13 @@ class JobOutputStore:
             self.repository.upsert_output_stream(self.job_id, stream, bytes_stored=size,
                 events_stored=len(events), next_sequence=len(events), complete=complete, sha256=digest)
             return
-        path = self._path(stream)
-        size = path.stat().st_size if path.exists() else 0
+        paths = self._segment_paths(stream)
+        size = self._stream_size(stream)
         event_count = sum(1 for event in self._events() if event.stream == stream)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        digest = self._stream_digest(stream)
         self.repository.upsert_output_stream(self.job_id, stream, bytes_stored=size,
-            events_stored=event_count, next_sequence=event_count, complete=complete, sha256=digest)
+            events_stored=event_count, next_sequence=event_count, complete=complete, sha256=digest,
+            segments=len(paths), last_segment_bytes=paths[-1].stat().st_size if paths else 0)
 
     def read(self, query: OutputQuery) -> dict[str, Any]:
         stream = query.stream
@@ -288,10 +357,7 @@ class JobOutputStore:
                 "retained": {"first_sequence": 0, "next_sequence": len(self._events())}}
 
     def _read_event(self, event: OutputEvent, stream: str) -> bytes:
-        path = self._path(event.stream)
-        with path.open("rb") as handle:
-            handle.seek(event.offset)
-            return handle.read(event.size)
+        return self._read_stream(event.stream, event.offset, event.size)
 
 
 def present_output(page: dict[str, Any], profile: OutputProfile) -> dict[str, Any]:

@@ -660,3 +660,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_cli
   tests.test_job_output tests.test_job_retry tests.test_job_models
   tests.test_runtime_config -v`. Result: PASS, 23 tests.
+
+## Segmented retained-output increment
+
+- Date: 2026-07-26. New stdout/stderr retention uses fixed-size numbered,
+  owner-only segment files while preserving one logical byte offset stream and
+  the existing append-only combined event order. Old single-file streams remain
+  readable and appendable without migration. Stream indexes record segment
+  count, final-segment size, and a digest over the logical concatenated bytes.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_output
+  tests.test_job_output_cursor tests.test_job_supervisor tests.test_job_service
+  -v`. Result: PASS, 22 tests.

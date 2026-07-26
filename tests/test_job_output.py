@@ -48,6 +48,19 @@ class JobOutputTests(unittest.TestCase):
         self.assertIn("[REDACTED]", page["data"])
         self.assertEqual([event["stream"] for event in page["events"]], ["stdout", "stderr", "stdout"])
 
+    def test_segmented_streams_preserve_logical_offsets_and_integrity(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        output.segment_bytes = 4
+        output.append("stdout", b"abcdef")
+        output.append("stdout", b"ghij")
+        output.finish("stdout")
+        self.assertEqual(output.read(OutputQuery(stream="stdout"))["data"], "abcdefghij")
+        stream = self.repository.snapshot(self.job["job_id"])["output"]
+        stdout = next(item for item in stream if item["stream"] == "stdout")
+        self.assertEqual(stdout["segments"], 3)
+        self.assertEqual(stdout["last_segment_bytes"], 2)
+        self.assertIsNotNone(stdout["sha256"])
+
     def test_service_read_after_cleanup_fails_without_recreating_output_directory(self):
         output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
         output.append("stdout", b"retained\n"); output.finish("stdout")

@@ -628,3 +628,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_job_output tests.test_job_output_cursor tests.test_job_cli
   tests.test_job_mcp tests.test_remote_job_transport tests.test_remote_first_mcp
   tests.test_mcp_composition -v`. Result: PASS, 51 tests.
+
+## On-read reconciliation increment
+
+- Date: 2026-07-26. A status read now converts a running job with stale
+  supervisor heartbeat, orphaned identity, or missing child process into an
+  explicit `interrupted` outcome with retained-output completeness marked
+  partial. `cancelling` jobs remain under supervisor ownership so a concurrent
+  read cannot replace their verified cancellation outcome.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_service
+  tests.test_job_health tests.test_job_cancellation tests.test_job_process_identity
+  -v`. Result: PASS, 23 tests.

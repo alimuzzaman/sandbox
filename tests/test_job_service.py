@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -73,6 +74,21 @@ class JobServiceTests(unittest.TestCase):
             result = service.reconcile_startup()
             self.assertEqual(result["interrupted"], [row["job_id"]])
             self.assertEqual(repository.get(row["job_id"])["termination_reason"], "supervisor_lost")
+            repository.close()
+
+    def test_read_reconciliation_interrupts_stale_supervisor_heartbeat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=lambda _descriptor: None)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "default",
+                ("echo", "ok"), 60, SourceIdentity("source"), stall_seconds=1))
+            repository.transition(row["job_id"], "running")
+            old = (datetime.now(timezone.utc) - timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
+            repository.put_heartbeat(row["job_id"], supervisor_at=old, health_evidence={})
+            result = service.get(row["job_id"])
+            self.assertEqual(result["lifecycle"], "interrupted")
+            self.assertEqual(result["termination_reason"], "supervisor_heartbeat_stale")
             repository.close()
 
     def test_retention_sweep_removes_terminal_outputs_and_marks_cleanup(self):

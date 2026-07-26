@@ -68,7 +68,7 @@ class CancellationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "process_identity_mismatch"):
                 service.cancel(row["job_id"], force=True)
-            self.assertEqual(service.get(row["job_id"])["lifecycle"], "running")
+            self.assertEqual(repo.get(row["job_id"])["lifecycle"], "running")
             repo.close()
 
     def test_force_cancel_terminates_child_process_group_descendants(self):

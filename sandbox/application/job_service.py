@@ -180,6 +180,24 @@ class JobService:
             health, evidence = classify(snapshot)
             if snapshot["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
                 self.repository.set_health(job_id, health, evidence)
+                interruption_reasons = {
+                    "supervisor_unresponsive": "supervisor_heartbeat_stale",
+                    "orphaned": "orphaned_process_identity",
+                    "process_missing": "child_process_missing",
+                }
+                # A cancelling job has already recorded a verified owner intent.
+                # Its supervisor must retain control of the terminal outcome after
+                # the process group exits, rather than a concurrent status read
+                # relabeling it as an unrelated interruption.
+                reason = interruption_reasons.get(health.value) if snapshot["lifecycle"] == Lifecycle.RUNNING.value else None
+                if reason is not None:
+                    try:
+                        self.repository.transition(job_id, Lifecycle.INTERRUPTED,
+                            termination_reason=reason, output_completeness="partial",
+                            result_json=json.dumps({"reconciled": True,
+                                "evidence": evidence.get("reasons", [])}, sort_keys=True))
+                    except ValueError:
+                        pass
                 snapshot = self.repository.snapshot(job_id)
             snapshot["health"] = health.value
             snapshot["health_evidence"] = evidence

@@ -895,3 +895,15 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_mcp
   tests.test_remote_first_mcp tests.test_mcp_composition -v`. Result: PASS,
   23 tests.
+
+## US1 implementation-task verification increment
+
+- Date: 2026-07-26. Re-verified the previously unchecked detached supervisor,
+  durable service, and exact-source deployment implementation tasks. Source
+  inspection confirms process-group launch, selector-based pipe drainage,
+  heartbeat/finalization, idempotent request replay, retained-output reads, and
+  commit/dirty deployment identities. The focused supervisor/service/remote
+  transport/remote-first CLI suite passed.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor
+  tests.test_job_service tests.test_remote_job_transport
+  tests.test_remote_first_cli -v`. Result: PASS, 35 tests.

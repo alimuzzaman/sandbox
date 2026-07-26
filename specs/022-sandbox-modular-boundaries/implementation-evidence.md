@@ -1637,3 +1637,13 @@ passed 687 tests with one skip; `./sb selftest` passed; `git diff --check`
 passed. T086 and T099 remain open because authenticated browser/WebSocket
 reconnect evidence and a successful remote backup-create result were not
 obtained. No backup, restore, deletion, or schedule claim is made.
+
+## Current self-test replay — 2026-07-26
+
+`./sb selftest` completed successfully on the active `latest` worktree:
+1,125 tests passed with two deliberately gated skips. The run exercises the
+command/MCP manifest boundaries, recovery isolation, generic runtime routing,
+durable jobs, remote-control contracts, and the static modularity inventory.
+It does not replace the still-open live remote gateway/WebSocket, recovery
+creation, restore, or deletion scenarios; those remain explicitly external
+authorization/configuration gates.

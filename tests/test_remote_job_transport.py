@@ -151,7 +151,7 @@ class RemoteJobTransportTests(unittest.TestCase):
             SourceIdentity("ignored"), remote_name="r"))
         controller = calls[-1]
         self.assertIn("/srv/sandbox/sb-src/sb ensure --local --json", controller)
-        self.assertIn("/srv/sandbox/sb-src/sb exec --in-instance --timeout 60 -- npm test", controller)
+        self.assertIn("/srv/sandbox/sb-src/sb exec --local --in-instance --timeout 60 -- npm test", controller)
 
     def test_remote_nested_cli_uses_the_staged_path(self):
         calls = []

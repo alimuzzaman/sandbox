@@ -203,7 +203,10 @@ class RemoteJobTransport:
                 # recursively submit another remote job from inside the
                 # durable job supervisor.
                 shlex.join([sb, "ensure", "--local", "--json"]),
-                shlex.join([sb, "exec", "--in-instance", "--timeout",
+                # This controller already runs on the selected VPS. Explicitly
+                # select that host's local runtime so a remote-first project
+                # policy cannot recursively submit to the same named remote.
+                shlex.join([sb, "exec", "--local", "--in-instance", "--timeout",
                             str(submission.deadline_seconds), "--", *argv]),
             ))
             argv = ["sh", "-lc", controller]

@@ -16,6 +16,11 @@ working tree before acceptance, then the remote supervisor drains process pipes
 to durable local files. CLI/MCP callers read bounded retained output by cursor;
 they do not hold test pipes open across SSH.
 
+Once a remote job is running on its selected VPS, Sandbox invokes its nested
+project commands with `--local`. In that context, `--local` means the selected
+VPS's co-located runtime, not the developer workstation; it prevents a
+remote-first project policy from recursively submitting another remote job.
+
 ```sh
 ./sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
 ./sb job-status <job-id> --json

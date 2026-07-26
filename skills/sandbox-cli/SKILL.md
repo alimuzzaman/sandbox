@@ -34,6 +34,26 @@ streaming process pipes across SSH. The MCP workspace tools mirror `sb
 workspace create|list|status|reset|destroy`; remote `run_tests` returns a
 durable job ID for the same observation flow.
 
+### Detached job observation is required
+
+`--detach` confirms only that a durable job was accepted. It is not evidence
+that the command passed. A caller or runner that submits a detached remote job
+must retain its job ID, read status and bounded retained output until the job
+reaches a terminal lifecycle, then surface a non-success lifecycle and its
+relevant output to the user.
+
+```sh
+sb exec --remote scaleway-sandbox --workspace node-unit --timeout 3600 --detach -- npm test
+sb job-status <job-id> --remote scaleway-sandbox --json
+sb job-output <job-id> --remote scaleway-sandbox --stream stderr --tail-bytes 8192 --wait-seconds 20 --json
+```
+
+Remote job output is intentionally retained and polled through the control
+plane; do not keep child stdout or stderr streams open over SSH. In a nested
+remote controller, `--local` means the selected VPS's co-located runtime, not
+the developer workstation, and prevents a remote-first project from
+recursively selecting its named remote again.
+
 ## Remote CI workflows
 
 Preflight a GitHub Actions workflow before submission. A compatible workflow

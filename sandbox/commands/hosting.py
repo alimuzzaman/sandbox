@@ -322,13 +322,32 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
     port = runtime["loopback_port"]
     path = runtime["healthcheck"]["path"]
     minimum, maximum = min(runtime["healthcheck"]["statuses"]), max(runtime["healthcheck"]["statuses"])
-    output = _remote_checked(entry, f"curl -fsS --max-time 15 -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{port}{shlex.quote(path)}", timeout=30)
-    try:
-        code = int(output.strip())
-    except ValueError as exc:
-        raise RuntimeError("remote healthcheck returned a non-status response") from exc
-    if not minimum <= code <= maximum:
-        raise RuntimeError(f"remote healthcheck returned {code}, expected {minimum}-{maximum}")
+    command = (
+        "curl -fsS --max-time 15 -o /dev/null -w '%{http_code}' "
+        f"http://127.0.0.1:{port}{shlex.quote(path)}"
+    )
+    last_error = "no response"
+    # A recreated Compose service can reset its loopback connection between
+    # `up -d` returning and its healthcheck becoming green. Treat that short
+    # startup window as pending, not as a failed deployment.
+    for _ in range(30):
+        result = remote.ssh_run(entry, command, timeout=30)
+        output = (result.stdout or "").strip()
+        if result.returncode == 0:
+            try:
+                code = int(output)
+            except ValueError:
+                last_error = "remote healthcheck returned a non-status response"
+            else:
+                if minimum <= code <= maximum:
+                    return
+                last_error = f"remote healthcheck returned {code}, expected {minimum}-{maximum}"
+        else:
+            last_error = (result.stderr or output or "remote healthcheck command failed").strip()[:500]
+        time.sleep(2)
+    raise RuntimeError(
+        f"remote healthcheck did not return {minimum}-{maximum} within 60 seconds: {last_error}"
+    )
 
 
 def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> None:

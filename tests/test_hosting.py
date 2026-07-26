@@ -222,6 +222,23 @@ class TestHostingManifest(unittest.TestCase):
         run_index = next(i for i, command in enumerate(commands) if command.endswith("run --rm setup"))
         self.assertLess(build_index, run_index)
 
+    @patch("sandbox.commands.hosting.time.sleep")
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_health_retries_startup_connection_reset(self, ssh_run, _sleep):
+        ssh_run.side_effect = [
+            types.SimpleNamespace(returncode=56, stdout="", stderr="curl: (56) Recv failure: Connection reset by peer"),
+            types.SimpleNamespace(returncode=0, stdout="200", stderr=""),
+        ]
+        runtime = {
+            "loopback_port": 18001,
+            "healthcheck": {"path": "/api/health", "statuses": [200]},
+        }
+
+        hosting_cmd._verify_remote_health({}, runtime)
+
+        self.assertEqual(ssh_run.call_count, 2)
+        _sleep.assert_called_once_with(2)
+
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hosts.json"

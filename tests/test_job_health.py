@@ -1,10 +1,38 @@
 import unittest
+import os
 from datetime import datetime, timedelta, timezone
 
 from sandbox.jobs.health import classify
 
 
 class JobHealthTests(unittest.TestCase):
+    def test_classification_table_covers_each_public_non_terminal_state(self):
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(seconds=301)).isoformat()
+        quiet = (now - timedelta(seconds=31)).isoformat()
+        cases = {
+            "active": {"lifecycle": "running", "process": {"child_pid": os.getpid()},
+                       "heartbeat": {"last_output_at": now.isoformat()}},
+            "quiet": {"lifecycle": "running", "process": {"child_pid": os.getpid()},
+                      "heartbeat": {"last_output_at": quiet}},
+            "suspected_stalled": {"lifecycle": "running", "stall_seconds": 300,
+                                  "process": {}, "heartbeat": {"last_output_at": old}},
+            "stuck": {"lifecycle": "running", "stall_seconds": 300, "process": {},
+                      "heartbeat": {"last_output_at": (now - timedelta(seconds=601)).isoformat()}},
+            "supervisor_unresponsive": {"lifecycle": "running", "stall_seconds": 300, "process": {},
+                                         "heartbeat": {"supervisor_at": (now - timedelta(seconds=601)).isoformat()}},
+            "orphaned": {"lifecycle": "running", "process": {"orphaned": True}},
+            "process_missing": {"lifecycle": "running", "process": {"child_pid": 99999999}},
+            "unreachable": {"lifecycle": "running", "target_reachable": False},
+            "unknown": {"lifecycle": "running"},
+            "terminal": {"lifecycle": "succeeded"},
+        }
+        for expected, snapshot in cases.items():
+            with self.subTest(expected=expected):
+                health, evidence = classify(snapshot, now=now)
+                self.assertEqual(health.value, expected)
+                self.assertTrue(evidence["reasons"])
+
     def test_terminal_and_stalled_are_evidence_based(self):
         health, _ = classify({"lifecycle": "succeeded"})
         self.assertEqual(health.value, "terminal")

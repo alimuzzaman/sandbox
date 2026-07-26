@@ -560,3 +560,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_output_cursor
   tests.test_remote_job_transport tests.test_remote_first_mcp tests.test_job_cli -v`.
   Result: PASS, 26 tests.
+
+## Health classification table
+
+- Date: 2026-07-26. Added a single table-driven test for every public health
+  state: active, quiet, suspected-stalled, stuck, supervisor-unresponsive,
+  orphaned, process-missing, unreachable, unknown, and terminal.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_health -v`.
+  Result: PASS, 4 tests.

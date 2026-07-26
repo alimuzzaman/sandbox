@@ -131,7 +131,7 @@ health, evidence, metrics, artifacts, and final results.
 
 ### Tests for User Story 2
 
-- [ ] T057 [P] [US2] Add health classifier table tests for active, quiet, suspected-stalled, stuck, supervisor-unresponsive, orphaned, process-missing, unreachable, unknown, and terminal conditions in `tests/test_job_health.py` for FR-015 through FR-018 and SC-005
+- [X] T057 [P] [US2] Add health classifier table tests for active, quiet, suspected-stalled, stuck, supervisor-unresponsive, orphaned, process-missing, unreachable, unknown, and terminal conditions in `tests/test_job_health.py` for FR-015 through FR-018 and SC-005
 - [ ] T058 [P] [US2] Add Linux `/proc` and portable-fallback metric sampling tests for CPU, RSS, I/O, process count/state, disk, capability gaps, and movement digest in `tests/test_job_metrics.py`
 - [ ] T059 [P] [US2] Add graceful/force/parent cancellation tests with process identity mismatch and descendant cleanup in `tests/test_job_cancellation.py` for FR-019 through FR-021
 - [ ] T060 [P] [US2] Add host restart, stale heartbeat, missing final row, orphan, and best-evidence reconciliation tests in `tests/test_job_reconciliation.py` for FR-021/FR-022

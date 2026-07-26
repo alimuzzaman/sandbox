@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
@@ -10,6 +11,21 @@ from sandbox.jobs.storage import JobStorage
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_fast_child_does_not_depend_on_a_racy_getpgid_lookup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), components=None)
+            with patch("sandbox.jobs.supervisor.os.getpgid", side_effect=AssertionError("must not be called")):
+                submitted = service.submit(JobSubmission("test", temp, "p", "local", "fast",
+                    ("/bin/sh", "-c", "true"), 20, SourceIdentity("source")))
+                for _ in range(100):
+                    state = service.get(submitted["job_id"])
+                    if state["lifecycle"] in {"succeeded", "failed", "timed_out"}:
+                        break
+                    time.sleep(.05)
+            self.assertEqual(state["lifecycle"], "succeeded", state)
+            repository.close()
+
     def test_detached_process_drains_output_and_finishes(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

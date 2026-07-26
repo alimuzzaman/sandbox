@@ -533,3 +533,19 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   workspace lifecycle, artifact retrieval, deadline handling, and compatible/
   incompatible/safe-mode CI preflight. These fixtures are not substituted for a
   credentialed VPS run.
+
+## T136: controlled local durability measurement
+
+- Date: 2026-07-26. A temporary isolated runtime submitted 100 detached Python
+  jobs concurrently. All 100 reached `succeeded`; each output was read once and
+  resumed once by opaque cursor with zero duplicate event sequences. The largest
+  observed local `status` read was 0.127 ms.
+- The same run collected and bounded-read an 8-byte artifact, classified synthetic
+  terminal and unreachable snapshots as `terminal` and `unreachable`, respectively,
+  and observed a deadline case as `timed_out` plus a verified process-group cancellation
+  case as `cancelled`.
+- During the initial stress run, a fast-child race produced a false supervisor error:
+  the process could exit between identity capture and `os.getpgid`. The supervisor now
+  stores the launch-established PID as its new-session process-group ID and tolerates
+  an exit race while signaling a deadline. Targeted supervisor and acceptance fixtures
+  pass after that correction.

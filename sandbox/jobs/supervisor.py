@@ -49,10 +49,14 @@ def run_descriptor(path: str | Path) -> int:
         child = capture_process_identity(command.pid)
         if child is None:
             raise RuntimeError("could not capture child process identity")
+        # ``start_new_session=True`` makes the child its own process-group
+        # leader.  Reading its group with ``os.getpgid`` races a fast command
+        # that exits between identity capture and the lookup; its PID is the
+        # authoritative group ID established at launch.
         repository.put_process_identity(job_id, host_boot_id=identity.host_boot_id,
             supervisor_pid=identity.pid, supervisor_start_identity=identity.start_identity,
             supervisor_nonce_hash=descriptor["nonce_hash"], child_pid=command.pid,
-            child_pgid=os.getpgid(command.pid), child_start_identity=child.start_identity)
+            child_pgid=command.pid, child_start_identity=child.start_identity)
         selector = selectors.DefaultSelector()
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")
@@ -67,12 +71,12 @@ def run_descriptor(path: str | Path) -> int:
                 next_metric = time.monotonic() + 1
             if time.monotonic() >= deadline and command.poll() is None:
                 timed_out = True
-                os.killpg(os.getpgid(command.pid), 15)
+                _signal_group(command.pid, 15)
                 grace_end = time.monotonic() + int(descriptor.get("cancel_grace_seconds", 20))
                 while command.poll() is None and time.monotonic() < grace_end:
                     time.sleep(0.05)
                 if command.poll() is None:
-                    os.killpg(os.getpgid(command.pid), 9)
+                    _signal_group(command.pid, 9)
             for key, _ in selector.select(timeout=0.1):
                 chunk = os.read(key.fileobj.fileno(), 65536)
                 if chunk:
@@ -128,6 +132,16 @@ def run_descriptor(path: str | Path) -> int:
 def _iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _signal_group(process_group_id: int, signal_number: int) -> None:
+    """Signal the launch-owned group without converting an exit race to failure."""
+    try:
+        os.killpg(process_group_id, signal_number)
+    except ProcessLookupError:
+        # The deadline check and signal can race normal child completion. The
+        # subsequent ``wait`` observes the actual result and finalizes it.
+        pass
 
 
 def main(argv=None) -> int:

@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 import os
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,8 @@ from sandbox.application.job_service import JobService
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
+from sandbox.jobs.output import OutputError
+from sandbox.jobs.supervisor import run_descriptor
 
 
 class SupervisorTests(unittest.TestCase):
@@ -96,4 +99,28 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["lifecycle"], "failed", state)
             self.assertEqual(state["exit_code"], 7)
             self.assertEqual(state["termination_reason"], "exit_nonzero")
+            repository.close()
+
+    def test_output_storage_failure_is_a_durable_terminal_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            storage = JobStorage(temp, free_disk_reserve=0)
+            row, _ = repository.accept(JobSubmission("test", temp, "p", "local", "storage",
+                ("/bin/sh", "-c", "printf retained-output"), 20, SourceIdentity("source")))
+            job_dir = storage.job_dir(row["job_id"], create=True)
+            descriptor = {
+                "job_id": row["job_id"], "registry_path": str(repository.path),
+                "runtime_dir": str(storage.root.parent), "argv": ["/bin/sh", "-c", "printf retained-output"],
+                "cwd": temp, "deadline_seconds": 20, "cancel_grace_seconds": 1,
+                "nonce_hash": "0" * 64, "environment": None,
+            }
+            descriptor_path = job_dir / "descriptor.json"
+            descriptor_path.write_text(json.dumps(descriptor))
+            with patch("sandbox.jobs.supervisor.JobOutputStore.append",
+                       side_effect=OutputError("durable output storage failed")):
+                self.assertEqual(run_descriptor(descriptor_path), 1)
+            state = repository.snapshot(row["job_id"])
+            self.assertEqual(state["lifecycle"], "failed")
+            self.assertEqual(state["termination_reason"], "output_storage_failed")
+            self.assertEqual(state["output_completeness"], "write_failed")
             repository.close()

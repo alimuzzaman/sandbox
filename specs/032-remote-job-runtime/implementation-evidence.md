@@ -782,3 +782,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   combined SHA-256 integrity value.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_output
   tests.test_job_output_cursor -v`. Result: PASS, 11 tests.
+
+## Supervisor output-failure increment
+
+- Date: 2026-07-26. Added direct supervisor coverage for a durable output-store
+  write failure after child launch. The supervisor atomically records the
+  terminal `failed` lifecycle, `output_storage_failed` reason, and
+  `write_failed` completeness rather than reporting a child success.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor -v`.
+  Result: PASS, 6 tests.

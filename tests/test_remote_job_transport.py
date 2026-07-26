@@ -6,6 +6,19 @@ from sandbox.transports.remote_jobs import RemoteJobTransport
 
 
 class RemoteJobTransportTests(unittest.TestCase):
+    def test_missing_execution_capability_rejects_before_deployment(self):
+        calls = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_args: calls.append("deploy"),
+            ssh_run=lambda *_args, **_kwargs: calls.append("ssh"),
+            remote_lookup=lambda _name: {"provisioned": True, "capabilities": ["status"]},
+        )
+        submission = JobSubmission("test", "/p", "p", "remote", "w", ("npm", "test"), 60,
+            SourceIdentity("ignored"), remote_name="r")
+        with self.assertRaisesRegex(Exception, "does not support job.exec"):
+            transport.submit(submission)
+        self.assertEqual(calls, [])
+
     def test_deployment_precedes_bounded_json_acceptance(self):
         calls = []
         transport = RemoteJobTransport(
@@ -80,6 +93,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertEqual(len(commands), 6)
         self.assertTrue(all(command.startswith("/srv/sandbox/sb-src/sb job-")
                             for command in commands))
+        self.assertIn("job-retry abc --request-id retry --json", commands[4])
 
     def test_workspace_copy_path_is_slug_safe_for_remote_project_resolution(self):
         commands = []

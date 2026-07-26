@@ -791,3 +791,13 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   `write_failed` completeness rather than reporting a child success.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor -v`.
   Result: PASS, 6 tests.
+
+## Remote transport capability increment
+
+- Date: 2026-07-26. The direct remote job transport now rejects a provisioned
+  remote that explicitly lacks `job.exec` before deployment. Transport tests
+  also pin exact-tree deployment ordering, bounded JSON-only SSH control, and
+  retry request-ID forwarding.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_job_transport
+  tests.test_remote_first_cli tests.test_remote_first_mcp -v`. Result: PASS,
+  18 tests.

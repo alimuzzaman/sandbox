@@ -90,7 +90,7 @@ complete retained stdout/stderr/combined output.
 - [ ] T033 [P] [US1] Add opaque cursor, no-duplicate resume, stream/offset/tail/line/time reads, compression, base64, bounded long-poll, and expired-range tests in `tests/test_job_output_cursor.py` for FR-011 and SC-003
 - [X] T034 [P] [US1] Add detached supervisor tests in `tests/test_job_supervisor.py` for descriptor detachment, local pipe drainage, caller exit, deadline, exit code, child descendants, output/storage failure, and FR-006/FR-008/FR-014/FR-020
 - [X] T035 [P] [US1] Add service submission tests in `tests/test_job_service.py` proving durable acceptance precedes launch response and launch failure never reports running/success
-- [ ] T036 [P] [US1] Add mocked remote transport tests in `tests/test_remote_job_transport.py` proving capability validation and exact-tree deployment precede remote acceptance, retry reuses request ID, and SSH carries bounded JSON rather than child pipes for FR-005/FR-007/FR-008
+- [X] T036 [P] [US1] Add mocked remote transport tests in `tests/test_remote_job_transport.py` proving capability validation and exact-tree deployment precede remote acceptance, retry reuses request ID, and SSH carries bounded JSON rather than child pipes for FR-005/FR-007/FR-008
 - [ ] T037 [P] [US1] Add CLI contract tests in `tests/test_job_cli.py` for explicit argv, target/workspace/timeout/output options, detach/wait, stderr reminders, exit codes, and malformed commands
 - [ ] T038 [P] [US1] Add MCP contract tests in `tests/test_job_mcp.py` for remote-aware `run_tests`, `instance_exec`, job start/status/output, preserved result keys, bounded responses, and optional progress for FR-038/FR-039/FR-040
 

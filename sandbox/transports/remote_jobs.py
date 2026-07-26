@@ -40,12 +40,23 @@ class RemoteJobTransport:
     def _remote_command(self, remote: dict, argv: list[str]) -> str:
         return shlex.join([self.remote_sb_path(remote), *argv])
 
+    def _execution_remote(self, name: str) -> dict:
+        """Resolve a provisioned execution target before any deployment side effect."""
+        remote = self.remote_lookup(name)
+        if not isinstance(remote, dict) or not remote.get("provisioned"):
+            raise RemoteJobTransportError("remote is not provisioned")
+        # Older hand-written remote records may predate capability metadata;
+        # preserve that compatibility while refusing an explicitly constrained
+        # remote before staging source or starting a job.
+        capabilities = remote.get("capabilities")
+        if capabilities is not None and "job.exec" not in capabilities:
+            raise RemoteJobTransportError("remote does not support job.exec")
+        return remote
+
     def submit(self, submission) -> dict:
         if submission.target_kind != "remote" or not submission.remote_name:
             raise RemoteJobTransportError("remote transport requires a remote submission")
-        remote = self.remote_lookup(submission.remote_name)
-        if not isinstance(remote, dict) or not remote.get("provisioned"):
-            raise RemoteJobTransportError("remote is not provisioned")
+        remote = self._execution_remote(submission.remote_name)
         deployed = self.deploy(remote, submission.project_root)
         return self._submit_deployed(remote, deployed, submission)
 
@@ -64,9 +75,7 @@ class RemoteJobTransport:
                 any(item.target_kind != "remote" or item.remote_name != first.remote_name or
                     item.project_root != first.project_root for item in submissions)):
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
-        remote = self.remote_lookup(first.remote_name)
-        if not isinstance(remote, dict) or not remote.get("provisioned"):
-            raise RemoteJobTransportError("remote is not provisioned")
+        remote = self._execution_remote(first.remote_name)
         deployed = self.deploy(remote, first.project_root)
         plan = []
         for item in submissions:

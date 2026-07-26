@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import sys
 import unittest
+from argparse import ArgumentParser
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sandbox.commands.workspaces import cmd_workspace
+from sandbox.commands.workspaces import cmd_workspace, configure_parser
 
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
@@ -45,6 +46,12 @@ class WorkspaceContractTests(unittest.TestCase):
             ("status", "unit", None, True),
         ])
         self.assertEqual(output.getvalue().count('"ok": true'), 3)
+
+    def test_documented_confirmation_and_idempotent_create_aliases_parse(self):
+        parser = ArgumentParser()
+        configure_parser(parser)
+        self.assertTrue(parser.parse_args(["create", "--ensure"]).ensure)
+        self.assertTrue(parser.parse_args(["reset", "--yes"]).confirm)
 
     def test_cli_reset_and_destroy_require_explicit_confirmation(self):
         service = _WorkspaceService()

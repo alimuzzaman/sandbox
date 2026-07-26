@@ -16,8 +16,12 @@ def configure_parser(parser) -> None:
     target.add_argument("--local", action="store_true")
     target.add_argument("--remote")
     parser.add_argument("--workspace", default="default")
-    parser.add_argument("--confirm", action="store_true",
+    parser.add_argument("--confirm", "--yes", dest="confirm", action="store_true",
                         help="required before reset or destroy changes a workspace")
+    # Creation is already idempotent; keep the documented spelling as an
+    # explicit acknowledgement without creating a second behavior branch.
+    parser.add_argument("--ensure", action="store_true",
+                        help="accept idempotent workspace creation")
     parser.add_argument("--json", action="store_true")
 
 

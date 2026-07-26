@@ -234,3 +234,20 @@ class RemoteJobTransportTests(unittest.TestCase):
                               remote_name="r", workspace_mode="isolated")
         with self.assertRaisesRegex(RemoteJobTransportError, "matrix parser failed"):
             transport.submit_many([child])
+
+    def test_matrix_rejection_redacts_controller_credentials(self):
+        transport = RemoteJobTransport(
+            deploy=lambda _remote, _root: {"target_path": "/srv/p", "commit": "abc", "dirty": False,
+                                           "dirty_digest": "", "identity": "sha256:id"},
+            ssh_run=lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=2, stdout="", stderr="Bearer controller-token token=second-secret"),
+            remote_lookup=lambda _name: {"provisioned": True},
+        )
+        source = SourceIdentity("ignored")
+        child = JobSubmission("test", "/p", "p", "remote", "a", ("npm", "test"), 60, source,
+                              remote_name="r", workspace_mode="isolated")
+        with self.assertRaises(RemoteJobTransportError) as raised:
+            transport.submit_many([child])
+        self.assertIn("[REDACTED]", str(raised.exception))
+        self.assertNotIn("controller-token", str(raised.exception))
+        self.assertNotIn("second-secret", str(raised.exception))

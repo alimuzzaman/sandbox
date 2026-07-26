@@ -5,12 +5,28 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import re
 import shlex
 from typing import Any, Callable
 
 
 class RemoteJobTransportError(RuntimeError):
     pass
+
+
+_REMOTE_SECRET = re.compile(
+    r"(?i)\b(bearer|token|password|secret|api[_-]?key|authorization)\b(?:\s*[:=]\s*|\s+)[^\s]+"
+)
+_URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@")
+
+
+def _safe_remote_detail(value: object, *, limit: int = 512) -> str:
+    """Return bounded controller diagnostics without forwarding credentials."""
+    if not isinstance(value, str):
+        return ""
+    text = _URL_USERINFO.sub(r"\1[REDACTED]@", value.strip())
+    text = _REMOTE_SECRET.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+    return text[-limit:]
 
 
 def _last_json(text: str) -> dict | None:
@@ -110,11 +126,11 @@ class RemoteJobTransport:
             if isinstance(payload, dict):
                 error = payload.get("error")
                 if isinstance(error, dict) and isinstance(error.get("message"), str):
-                    detail = error["message"][:512]
+                    detail = _safe_remote_detail(error["message"])
             if not detail:
                 stderr = getattr(result, "stderr", "")
                 if isinstance(stderr, str) and stderr.strip():
-                    detail = stderr.strip()[-512:]
+                    detail = _safe_remote_detail(stderr)
                 else:
                     detail = f"remote exit code {getattr(result, 'returncode', 1)}"
             raise RemoteJobTransportError(f"remote matrix acceptance failed: {detail}")
@@ -156,7 +172,8 @@ class RemoteJobTransport:
         if getattr(result, "returncode", 1) != 0:
             detail = "\n".join(part.strip() for part in (
                 getattr(result, "stderr", ""), getattr(result, "stdout", ""),
-            ) if part.strip())[-4096:]
+            ) if part.strip())
+            detail = _safe_remote_detail(detail, limit=4096)
             raise RemoteJobTransportError(
                 "remote workspace preparation failed" + (f": {detail}" if detail else ""))
         return workspace_path

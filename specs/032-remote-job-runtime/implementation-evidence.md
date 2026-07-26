@@ -907,3 +907,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_supervisor
   tests.test_job_service tests.test_remote_job_transport
   tests.test_remote_first_cli -v`. Result: PASS, 35 tests.
+
+## Remote diagnostic redaction increment
+
+- Date: 2026-07-26. Remote matrix and workspace preparation errors now pass
+  through a bounded credential scrubber before reaching CLI/MCP callers.
+  Bearer tokens, token/password/secret/API-key/authorization values, and URL
+  userinfo are replaced with `[REDACTED]`; compact structured errors and
+  reconnectable retained-output pages remain available.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_job_transport
+  tests.test_remote_first_cli tests.test_remote_first_mcp -v`. Result: PASS,
+  22 tests.

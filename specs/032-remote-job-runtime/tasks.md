@@ -105,7 +105,7 @@ complete retained stdout/stderr/combined output.
 - [X] T045 [US1] Implement submit/get/list/read-output use cases and idempotent launch recovery in `sandbox/application/job_service.py`
 - [X] T046 [US1] Implement the host-local service transport and detached supervisor launcher with every standard descriptor disconnected in `sandbox/transports/jobs.py`
 - [X] T047 [US1] Extend exact-working-tree deployment to return commit/dirty-manifest/deploy identities and workspace target paths in `sandbox/commands/deploy.py` and `sandbox/core/_remote.py`
-- [ ] T048 [US1] Implement bounded remote `sb` JSON invocation, timeout/error redaction, and reconnectable job reads in `sandbox/transports/remote_jobs.py`
+- [X] T048 [US1] Implement bounded remote `sb` JSON invocation, timeout/error redaction, and reconnectable job reads in `sandbox/transports/remote_jobs.py`
 - [ ] T049 [US1] Add remote-aware explicit-argv `exec` and `test` submission/follow behavior in `sandbox/commands/runtime.py` while preserving local Compose execution
 - [X] T050 [US1] Add feature-owned job status/list/output/follow command parsers and renderers in `sandbox/commands/jobs_runtime.py` and register them in `sandbox/commands/manifest.py`
 - [X] T051 [US1] Add MCP `job_start`, `job_status`, `job_list`, `job_output`, and bounded `job_follow` tools in `mcp/wp-server/tools/jobs.py`

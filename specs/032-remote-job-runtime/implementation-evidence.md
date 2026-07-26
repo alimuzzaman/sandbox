@@ -726,3 +726,12 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_workspace_runtime
   tests.test_job_scheduler tests.test_workspace_labels -v`. Result: PASS,
   9 tests.
+
+## Workspace concurrency verification increment
+
+- Date: 2026-07-26. Added local lease coverage for serial shared-workspace
+  behavior, explicit shared-safe concurrency, immediate busy guidance, and
+  independent isolated-job storage paths.
+- Command: `.cli-venv/bin/python -m unittest tests.test_workspace_concurrency
+  tests.test_job_scheduler tests.test_workspace_runtime -v`. Result: PASS,
+  10 tests.

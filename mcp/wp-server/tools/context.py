@@ -99,7 +99,9 @@ def load_context() -> dict:
     decided you're engaged in WP work and need the full operating prompt
     beyond the 2KB instructions baseline. Also returns the list of
     available top-level sandbox skills so you know which load_skill()
-    calls are available.
+    calls are available. For configured remote development, the guide directs
+    callers to the co-located remote MCP server and durable status/output reads
+    rather than a long-lived child-process stream.
     """
     if not SANDBOX_CLAUDE_MD.exists():
         return {"ok": False, "error": f"missing {SANDBOX_CLAUDE_MD}"}

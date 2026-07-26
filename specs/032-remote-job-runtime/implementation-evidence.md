@@ -486,3 +486,14 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Verification: `git diff --check` passed, and a targeted content check found
   each of the four workflow headings and their boundary statements in the new
   implementation guide.
+
+## Remote-first guidance increment
+
+- Date: 2026-07-26. The generated CLI guide now explains configured-remote
+  execution, the deliberate `--local` override, workspace/deadline inputs, and
+  retained job recovery. MCP baseline and context guidance now direct live
+  remote work to the co-located MCP server with durable `job_status` and
+  `job_output` recovery.
+- Command: `.cli-venv/bin/python -m unittest tests.test_remote_first_guidance
+  tests.test_remote_first_cli tests.test_cli tests.test_mcp_composition -v`.
+  Result: PASS.

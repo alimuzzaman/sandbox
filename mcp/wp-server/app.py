@@ -354,6 +354,12 @@ SANDBOX_INSTRUCTIONS = """Sandbox runtime tools are available.
 
 Pass the target project root as `project_dir`. Call `ensure_instance(project_dir=...)` before instance-scoped tools; use `label` only for an additional instance. Use MCP for live runtime evidence and `./sb` for routine CLI work.
 
+For a project configured with a remote default, prefer the co-located remote MCP
+server for live work. Start long-running work as a durable job, retain its `job_id`,
+and recover with bounded `job_status` and `job_output` reads; an MCP disconnection
+must never be treated as a child-process failure. Use an explicit local target only
+when deliberately overriding the configured remote.
+
 Detailed operating rules are available on demand through `load_context`, `load_skill`, and `load_workflow`. Keep responses bounded and request detail only when needed.
 """
 

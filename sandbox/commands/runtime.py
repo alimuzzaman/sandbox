@@ -20,8 +20,12 @@ _GUIDES = {
         ("ensure", "./sb ensure", "Start or reconcile the local instance."),
         ("status", "./sb status", "Inspect the declared runtime."),
         ("logs", "./sb logs", "Read service logs."),
-        ("exec", "./sb exec -- <argv...>", "Run an argv list in the declared public service."),
-        ("test", "./sb test <declared-mode>", "Run a declared test command in the Compose service."),
+        ("exec", "./sb exec [--local] --workspace <name> --timeout <seconds> -- <argv...>",
+         "Run a durable job; a configured remote is the default and --local is explicit."),
+        ("test", "./sb test <declared-mode> [--local] --timeout <seconds>",
+         "Run the declared test command with a configured remote by default."),
+        ("jobs", "./sb job-status <job-id> && ./sb job-output <job-id>",
+         "Inspect durable retained output after a disconnected caller resumes."),
         ("deploy", "./sb deploy --remote <name> --ensure --expose", "Deploy to a provisioned remote."),
     ),
     "wordpress": (
@@ -29,7 +33,10 @@ _GUIDES = {
         ("ensure", "./sb ensure", "Start or reconcile the local instance."),
         ("status", "./sb status", "Inspect the declared runtime."),
         ("wp", "./sb wp -- <wp-cli args...>", "Run WP-CLI."),
-        ("test", "./sb test", "Run the configured test mode."),
+        ("test", "./sb test [--local] --timeout <seconds>",
+         "Run the configured test mode with a configured remote by default."),
+        ("jobs", "./sb job-status <job-id> && ./sb job-output <job-id>",
+         "Inspect durable retained output after a disconnected caller resumes."),
         ("deploy", "./sb deploy --remote <name> --ensure --expose", "Deploy to a provisioned remote."),
     ),
 }
@@ -207,7 +214,8 @@ def cmd_guide(_cfg, args) -> None:
     if root:
         print(f"  project: {root}")
     print("  skill:   ./sb skill show sandbox-cli")
-    print("  MCP is optional; start it only for MCP clients.")
+    print("  Configured remote execution is the default; use --local deliberately.")
+    print("  MCP is optional; for live remote jobs prefer the co-located remote MCP server.")
     for item in commands:
         print(f"  {item['command']:<58} {item['purpose']}")
 

@@ -33,6 +33,19 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(first["deadline"], {"seconds": 60, "source": "explicit"})
             repository.close()
 
+    def test_launch_failure_is_durably_failed_never_running_or_successful(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None,
+                                 launcher=lambda _descriptor: (_ for _ in ()).throw(OSError("launch failed")))
+            with self.assertRaisesRegex(RuntimeError, "supervisor_launch_failed"):
+                service.submit(JobSubmission("test", temp, "p", "local", "default",
+                    ("echo", "ok"), 60, SourceIdentity("source")))
+            row = repository.list(limit=1)[0]
+            self.assertEqual(row["lifecycle"], "failed")
+            self.assertEqual(row["termination_reason"], "supervisor_launch_failed")
+            repository.close()
+
     def test_reconcile_marks_lost_supervisor_interrupted(self):
         with tempfile.TemporaryDirectory() as temp:
             repository = JobRepository(Path(temp) / "registry.sqlite")

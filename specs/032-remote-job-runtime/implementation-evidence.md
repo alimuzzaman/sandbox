@@ -683,3 +683,11 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Command: `.cli-venv/bin/python -m unittest tests.test_job_registry
   tests.test_job_supervisor tests.test_job_service tests.test_job_health
   tests.test_job_cancellation -v`. Result: PASS, 35 tests.
+
+## Service acceptance failure-path increment
+
+- Date: 2026-07-26. Added coverage proving a request is durably accepted before
+  launch and that a launcher exception records `failed` with
+  `supervisor_launch_failed`, never a misleading running or successful state.
+- Command: `.cli-venv/bin/python -m unittest tests.test_job_service
+  tests.test_job_supervisor tests.test_job_models -v`. Result: PASS, 20 tests.

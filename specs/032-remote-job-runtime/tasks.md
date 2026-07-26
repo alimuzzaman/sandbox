@@ -274,8 +274,8 @@ selected predictably; local operation is preserved by explicit override.
 **Purpose**: Complete migration adapters, documentation, acceptance, performance,
 security, and release-regression evidence across all stories.
 
-- [ ] T122 [P] Add legacy async-job ID/status/output/kill parity tests and 16/32-hex routing tests in `tests/test_asyncjob_compatibility.py` for FR-040
-- [ ] T123 [P] Add Hermes job-view adapter parity tests without changing Hermes scheduling semantics in `tests/test_hermes_job_compatibility.py` for FR-040
+- [X] T122 [P] Add legacy async-job ID/status/output/kill parity tests and 16/32-hex routing tests in `tests/test_asyncjob_compatibility.py` for FR-040
+- [X] T123 [P] Add Hermes job-view adapter parity tests without changing Hermes scheduling semantics in `tests/test_hermes_job_compatibility.py` for FR-040
 - [ ] T124 Adapt `sandbox/core/_asyncjobs.py` and `sandbox/commands/jobs.py` behind the durable job service while preserving existing result keys and rollback path
 - [ ] T125 Adapt Hermes job observation through an explicit service adapter in `sandbox/hermes/jobs.py` and `sandbox/commands/hermes.py` without adding compatibility-facade consumers
 - [X] T126 [P] Update user-facing remote-first overview, examples, output recovery, and CI scope in `README.md`

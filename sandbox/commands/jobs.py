@@ -149,11 +149,28 @@ def cmd_async_job(cfg, args) -> None:
     _asyncjobs.py). NOT instance-scoped — e2e/ci jobs mint multiple instances
     themselves, so they don't fit commands/jobs.py's per-instance `job`/`jobs`
     (one wp-cli command in one container)."""
-    from sandbox.transports.jobs import LegacyAsyncJobAdapter
-    adapter = LegacyAsyncJobAdapter(valid_async_job_id, background_job_status, kill_background_job)
+    from sandbox.application.context import durable_job_dependencies
+    from sandbox.jobs.models import OutputQuery
+    from sandbox.transports.jobs import AsyncJobCompatibilityRouter, LegacyAsyncJobAdapter
+
+    durable = None
+
+    def durable_service():
+        nonlocal durable
+        if durable is None:
+            durable = durable_job_dependencies()["job_service"]
+        return durable
+
+    adapter = AsyncJobCompatibilityRouter(
+        LegacyAsyncJobAdapter(valid_async_job_id, background_job_status, kill_background_job),
+        durable_status=lambda job_id: durable_service().get(job_id),
+        durable_output=lambda job_id, *, offset, limit: durable_service().read_output(
+            job_id, OutputQuery(offset=offset, max_bytes=limit)),
+        durable_cancel=lambda job_id: durable_service().cancel(job_id),
+    )
     jid = args.job_id
     try:
-        adapter._check(jid)
+        adapter._kind(jid)
     except ValueError:
         die("invalid job id (expected 16 hex chars)")
     if getattr(args, "kill", False):

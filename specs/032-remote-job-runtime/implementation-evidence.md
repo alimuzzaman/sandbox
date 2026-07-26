@@ -461,3 +461,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - Worktree integrity at reconciliation: `git diff --check` was clean; no files
   under `runtime/wp/` or `vendor/` were changed. The only untracked path is the
   user-owned `specs/033-agent-aware-remote-sync/`, preserved without edits.
+
+## Legacy async and Hermes compatibility increment
+
+- Date: 2026-07-26. `AsyncJobCompatibilityRouter` preserves the historic
+  sixteen-hex async-job status/cancel envelope and maps thirty-two-hex durable
+  jobs to the same bounded `stdout`, `bytes_read`, and `truncated` fields.
+  Durable cancellation reports its real lifecycle rather than inventing a
+  terminal result.
+- Command: `.cli-venv/bin/python -m unittest tests.test_asyncjob_compatibility
+  tests.test_hermes_job_compatibility tests.test_asyncjobs tests.test_hermes_jobs -v`.
+  Result: PASS, 18 tests.
+- Live local check: `./sb async-job 3546174b1b12505da3d41f27bd6b49c6 --json`
+  returned the retained `spec-audit-live-ok` output and terminal exit code `0`
+  through the legacy-compatible response shape.

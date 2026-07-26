@@ -62,7 +62,7 @@ class RemoteFirstMcpTests(unittest.TestCase):
             ("status", "vps", "b" * 32),
             ("output", "vps", "b" * 32, {"stream": "combined", "cursor": "opaque", "offset": None,
                                        "tail_bytes": None, "lines": None, "since": None, "max_bytes": 4096,
-                                       "wait_seconds": 0, "encoding": "utf8"}),
+                                       "wait_seconds": 0, "encoding": "utf8", "profile": "full"}),
         ])
 
 

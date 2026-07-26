@@ -69,3 +69,13 @@ class JobOutputTests(unittest.TestCase):
         self.assertEqual(first["events_read"], 1)
         self.assertEqual(second["events_read"], 0)
         self.assertIn("�", first["data"])
+
+    def test_service_applies_builtin_profile_only_at_read_time(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"])
+        output.append("stdout", b"one\ntwo\nthree\nerror four\nfive\nsix\nseven\neight\nnine\nten\n"); output.finish("stdout")
+        service = JobService(self.repository, self.storage, None, launcher=lambda _: None)
+        presented = service.read_output(self.job["job_id"], OutputQuery(profile="errors"))
+        full = service.read_output(self.job["job_id"], OutputQuery(profile="full"))
+        self.assertEqual(presented["data"], "two\nthree\nerror four\nfive\nsix\nseven\neight\nnine\n")
+        self.assertIn("ten\n", full["data"])
+        self.assertNotIn("ten\n", presented["data"])

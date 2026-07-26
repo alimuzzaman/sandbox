@@ -136,7 +136,7 @@ def job_list(limit: int = 50, *, remote: str | None = None) -> dict:
 def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = None,
                offset: int | None = None, tail_bytes: int | None = None,
                lines: int | None = None, since: str | None = None, max_bytes: int = 65536,
-               encoding: str = "utf8", wait_seconds: int = 0,
+               encoding: str = "utf8", profile: str = "full", wait_seconds: int = 0,
                remote: str | None = None) -> dict:
     """Read a bounded retained output page. Returned cursors are exclusive."""
     try:
@@ -144,10 +144,10 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
             return _remote_transport().read_output(remote, job_id, stream=stream, cursor=cursor,
                 offset=offset, tail_bytes=tail_bytes, lines=lines, since=since,
                 max_bytes=max_bytes, wait_seconds=wait_seconds,
-                encoding=encoding)
+                encoding=encoding, profile=profile)
         return _job_service.read_output(job_id, OutputQuery(stream=stream, cursor=cursor,
             offset=offset, tail_bytes=tail_bytes, lines=lines, since=since,
-            max_bytes=max_bytes, encoding=encoding, wait_seconds=wait_seconds))
+            max_bytes=max_bytes, encoding=encoding, profile=profile, wait_seconds=wait_seconds))
     except ValueError as exc:
         return {"ok": False, "code": "invalid_output_query", "error": str(exc)}
     except RuntimeError as exc:
@@ -156,7 +156,8 @@ def job_output(job_id: str, *, stream: str = "combined", cursor: str | None = No
 
 def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536,
                max_updates: int = 1, max_duration_seconds: int = 2,
-               progress_token: str | None = None, remote: str | None = None) -> dict:
+               progress_token: str | None = None, profile: str = "smart",
+               remote: str | None = None) -> dict:
     """Return a bounded set of retained-output updates for one MCP request.
 
     ``progress_token`` is deliberately request-scoped.  It produces compact,
@@ -191,7 +192,7 @@ def job_follow(job_id: str, *, cursor: str | None = None, max_bytes: int = 65536
         # Each retained-output wait is bounded and notifications are no more
         # frequent than once every two seconds for the active MCP request.
         page = job_output(job_id, cursor=current_cursor, max_bytes=max_bytes,
-                          wait_seconds=min(2, max(1, int(remaining))), remote=remote)
+                          profile=profile, wait_seconds=min(2, max(1, int(remaining))), remote=remote)
         if not page.get("ok", False):
             return page
         updates.append(page)

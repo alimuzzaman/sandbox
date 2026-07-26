@@ -614,3 +614,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_job_service tests.test_remote_job_transport tests.test_job_cli
   tests.test_job_mcp tests.test_asyncjobs tests.test_runtime_transport
   tests.test_mcp_composition -v`. Result: PASS, 67 tests.
+
+## Declarative output profile increment
+
+- Date: 2026-07-26. Retained output reads now apply built-in or injected
+  declarative presentation profiles at read time; execution and stored bytes
+  remain unchanged. The policy supports full, smart, errors, sampled, quiet,
+  and named custom definitions with literal include/exclude matching, context,
+  line/event/time sampling, deduplication, timestamp/stream prefixes,
+  heartbeat metadata, and byte/event budgets. CLI and MCP reads forward the
+  requested profile to local and remote job services.
+- Command: `.cli-venv/bin/python -m unittest tests.test_output_profiles
+  tests.test_job_output tests.test_job_output_cursor tests.test_job_cli
+  tests.test_job_mcp tests.test_remote_job_transport tests.test_remote_first_mcp
+  tests.test_mcp_composition -v`. Result: PASS, 51 tests.

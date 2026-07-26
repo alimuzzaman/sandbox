@@ -200,12 +200,13 @@ class RemoteJobTransport:
                     tail_bytes: int | None = None, lines: int | None = None,
                     since: str | None = None,
                     max_bytes: int = 65536, wait_seconds: int = 0,
-                    encoding: str = "utf8") -> dict:
+                    encoding: str = "utf8", profile: str = "full") -> dict:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict):
             raise RemoteJobTransportError("unknown remote")
         args = ["job-output", job_id, "--stream", stream,
-                "--max-bytes", str(max_bytes), "--encoding", encoding, "--json"]
+                "--max-bytes", str(max_bytes), "--encoding", encoding,
+                "--profile", profile, "--json"]
         if cursor:
             args += ["--cursor", cursor]
         if offset is not None:

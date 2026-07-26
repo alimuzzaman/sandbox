@@ -17,8 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity
-from sandbox.jobs.output import JobOutputStore
+from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputProfile, OutputQuery, SourceIdentity
+from sandbox.jobs.output import JobOutputStore, present_output
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
 from sandbox.jobs.process import (ProcessIdentity, capture_process_identity,
@@ -458,7 +458,31 @@ class JobService:
         snapshot = self.repository.snapshot(job_id)
         if any(not stream.get("available", True) for stream in snapshot.get("output", ())):
             raise RuntimeError("output_unavailable")
-        return JobOutputStore(self.storage, self.repository, job_id).read(query)
+        page = JobOutputStore(self.storage, self.repository, job_id).read(query)
+        return present_output(page, self._output_profile(query.profile))
+
+    def _output_profile(self, name: str) -> OutputProfile:
+        """Resolve a declarative presentation profile from the job composition."""
+        from sandbox.config.runtime import BUILTIN_OUTPUT_PROFILES
+
+        definitions = dict(BUILTIN_OUTPUT_PROFILES)
+        if self.components is not None:
+            spec = self.components.get("profiles") if hasattr(self.components, "get") else None
+            configured = getattr(spec, "component", {}).get("output", {}) if spec is not None else {}
+            if isinstance(configured, dict):
+                definitions.update(configured)
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):
+            raise RuntimeError("unknown_output_profile")
+        aliases = {
+            "everyLines": "every_lines", "everyEvents": "every_events",
+            "everySeconds": "every_seconds", "streamPrefixes": "stream_prefixes",
+            "heartbeatSeconds": "heartbeat_seconds", "maxBytes": "max_bytes",
+            "maxEvents": "max_events",
+        }
+        kwargs = {aliases.get(key, key): tuple(value) if key in {"include", "exclude"}
+                  and isinstance(value, list) else value for key, value in definition.items()}
+        return OutputProfile(name, **kwargs)
 
     def cancel(self, job_id: str, *, force: bool = False):
         snapshot = self.repository.snapshot(job_id)

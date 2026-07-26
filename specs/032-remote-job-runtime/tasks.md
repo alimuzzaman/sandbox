@@ -86,7 +86,7 @@ complete retained stdout/stderr/combined output.
 ### Tests for User Story 1
 
 - [ ] T031 [P] [US1] Add streaming redaction, partial-line, invalid-UTF8, control-code, chunk-boundary secret, segmentation, combined-order, and integrity tests in `tests/test_job_output.py` for FR-009 through FR-014
-- [ ] T032 [P] [US1] Add full/smart/errors/sampled/quiet/custom profile tests including every-10/20-lines, time sampling, context, deduplication, heartbeat, and budgets in `tests/test_output_profiles.py` for FR-012/FR-013
+- [X] T032 [P] [US1] Add full/smart/errors/sampled/quiet/custom profile tests including every-10/20-lines, time sampling, context, deduplication, heartbeat, and budgets in `tests/test_output_profiles.py` for FR-012/FR-013
 - [ ] T033 [P] [US1] Add opaque cursor, no-duplicate resume, stream/offset/tail/line/time reads, compression, base64, bounded long-poll, and expired-range tests in `tests/test_job_output_cursor.py` for FR-011 and SC-003
 - [ ] T034 [P] [US1] Add detached supervisor tests in `tests/test_job_supervisor.py` for descriptor detachment, local pipe drainage, caller exit, deadline, exit code, child descendants, output/storage failure, and FR-006/FR-008/FR-014/FR-020
 - [ ] T035 [P] [US1] Add service submission tests in `tests/test_job_service.py` proving durable acceptance precedes launch response and launch failure never reports running/success
@@ -99,7 +99,7 @@ complete retained stdout/stderr/combined output.
 - [X] T039 [US1] Implement streaming secret redaction with cross-chunk overlap and explicit redaction failure in `sandbox/jobs/output.py`
 - [ ] T040 [US1] Implement separate segmented stdout/stderr byte stores and append-only combined event ordering in `sandbox/jobs/output.py`
 - [X] T041 [US1] Implement opaque cursor encoding/validation and bounded stream/offset/tail/line/time/base64 retrieval in `sandbox/jobs/output.py`
-- [ ] T042 [US1] Implement full/smart/errors/sampled/quiet and declarative named custom presentation policies in `sandbox/jobs/output.py`
+- [X] T042 [US1] Implement full/smart/errors/sampled/quiet and declarative named custom presentation policies in `sandbox/jobs/output.py`
 - [ ] T043 [US1] Implement the detached supervisor entrypoint, lease wait heartbeat, child session/process group launch, non-blocking local pipe drainage, and atomic finalization in `sandbox/jobs/supervisor.py`
 - [X] T044 [US1] Implement deadline enforcement, TERM/grace/KILL cleanup of owned descendants, output/storage failure promotion, and terminal integrity hashes in `sandbox/jobs/supervisor.py`
 - [ ] T045 [US1] Implement submit/get/list/read-output use cases and idempotent launch recovery in `sandbox/application/job_service.py`

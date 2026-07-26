@@ -298,20 +298,74 @@ def present_output(page: dict[str, Any], profile: OutputProfile) -> dict[str, An
     """Apply a display-only profile to a bounded retained-output page."""
     if profile.mode == "full" or page["encoding"] == "base64":
         return page
-    lines = page["data"].splitlines(keepends=True)
+    source_lines = page["data"].splitlines(keepends=True)
+    lines = source_lines
+    events = list(page.get("events") or ())
+    events_align_to_lines = bool(events) and len(events) == len(source_lines)
+    # Output profiles are deliberately declarative. Treat include/exclude values
+    # as case-insensitive literals rather than executable filters or unbounded
+    # regular expressions.
+    def matches(line: str, patterns: tuple[str, ...]) -> bool:
+        folded = line.casefold()
+        return any(pattern.casefold() in folded for pattern in patterns)
+
+    selected = list(range(len(lines)))
     if profile.mode == "quiet":
-        lines = []
-    elif profile.mode == "errors":
-        lines = [line for line in lines if re.search(r"error|fail|exception", line, re.I)]
-    elif profile.mode == "sampled" and profile.every_lines:
-        lines = [line for index, line in enumerate(lines, 1) if index % profile.every_lines == 0]
-    elif profile.mode == "smart":
+        selected = []
+    else:
+        include = profile.include
+        if profile.mode == "errors":
+            include = (*include, "error", "fail", "exception")
+        if include:
+            matching = {index for index, line in enumerate(lines) if matches(line, include)}
+            if profile.before or profile.after:
+                contextual = set()
+                for index in matching:
+                    contextual.update(range(max(0, index - profile.before),
+                                            min(len(lines), index + profile.after + 1)))
+                matching = contextual
+            selected = sorted(matching)
+        if profile.exclude:
+            selected = [index for index in selected if not matches(lines[index], profile.exclude)]
+        if profile.mode == "sampled":
+            if profile.every_lines:
+                selected = [index for index in selected if (index + 1) % profile.every_lines == 0]
+            if profile.every_events and events_align_to_lines:
+                selected = [index for index in selected if (index + 1) % profile.every_events == 0]
+            if profile.every_seconds and events_align_to_lines:
+                last_timestamp = None
+                sampled = []
+                for index in selected:
+                    timestamp = events[index].get("timestamp")
+                    if not isinstance(timestamp, (int, float)):
+                        continue
+                    if last_timestamp is None or timestamp - last_timestamp >= profile.every_seconds:
+                        sampled.append(index); last_timestamp = timestamp
+                selected = sampled
+    lines = [lines[index] for index in selected]
+    if profile.mode == "smart":
         seen: set[str] = set(); compact = []
         for line in lines:
             if not profile.deduplicate or line not in seen:
                 compact.append(line); seen.add(line)
         lines = compact
+    if profile.timestamps and events_align_to_lines:
+        lines = [f"[{events[index].get('timestamp')}] {line}"
+                 for index, line in zip(selected, lines)]
+    if profile.stream_prefixes and events_align_to_lines:
+        lines = [f"[{events[index].get('stream', 'combined')}] {line}"
+                 for index, line in zip(selected, lines)]
     result = dict(page)
-    result["data"] = "".join(lines)[:profile.max_bytes]
+    rendered = "".join(lines)
+    bounded = rendered.encode("utf-8")[:profile.max_bytes].decode("utf-8", errors="ignore")
+    result["data"] = bounded
+    if events_align_to_lines:
+        result["events"] = [events[index] for index in selected[:profile.max_events]]
+        result["events_read"] = len(result["events"])
     result["presentation"] = profile.mode
+    if profile.heartbeat_seconds:
+        result["presentation_heartbeat"] = {
+            "interval_seconds": profile.heartbeat_seconds,
+            "retained_events_observed": len(events),
+        }
     return result

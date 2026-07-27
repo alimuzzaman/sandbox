@@ -275,6 +275,24 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(ssh_run.call_count, 2)
         _sleep.assert_called_once_with(2)
 
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._remote_checked", return_value="web | ready\nworker | polling\n")
+    def test_reads_bounded_logs_for_all_declared_host_services(self, remote_checked, _resolve_home):
+        manifest = _manifest().replace(
+            "      service: web\n",
+            "      service: web\n      background_services: [worker]\n",
+        )
+        with self._write(manifest) as directory:
+            validated = hosting.validate_manifest(directory)
+
+        output = hosting_cmd._read_host_logs(validated, {}, lines=75)
+
+        self.assertEqual(output, "web | ready\nworker | polling\n")
+        command = remote_checked.call_args.args[1]
+        self.assertIn("docker compose", command)
+        self.assertIn("-p sandbox-host-example-site-production", command)
+        self.assertIn("logs --no-color --tail 75 web worker", command)
+
     def test_state_round_trip_is_atomic_and_owner_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hosts.json"

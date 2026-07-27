@@ -271,6 +271,30 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     _remote_checked(entry, f"{prefix} up -d {service_args}", timeout=300)
 
 
+def _read_host_logs(validated: dict, entry: dict, *, lines: int) -> str:
+    if not 1 <= lines <= 1000:
+        raise hosting.HostingError("--lines must be between 1 and 1000")
+    home = remote.resolve_sandbox_home(entry)
+    source_dir = f"{home}/deploy-src/hosts/{validated['project']}"
+    runtime_dir = f"{home}/runtime/hosts/{validated['project']}/{validated['environment']}"
+    prefix = _compose_prefix(
+        validated,
+        source_dir,
+        f"{runtime_dir}/compose.override.yml",
+        f"{runtime_dir}/environment.env",
+    )
+    services = [
+        validated["compose"]["service"],
+        *validated["compose"].get("background_services", []),
+    ]
+    service_args = " ".join(shlex.quote(service) for service in services)
+    return _remote_checked(
+        entry,
+        f"{prefix} logs --no-color --tail {lines} {service_args}",
+        timeout=60,
+    )
+
+
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,
                           state: dict, ttl_seconds: int | None) -> dict:
     config = validated.get("autologin")
@@ -522,6 +546,19 @@ def cmd_host(cfg, args) -> None:
     if not entry:
         die(f"no remote named '{args.remote}'")
     state = hosting.load_host_state()
+    if args.action == "logs":
+        if not entry.get("provisioned"):
+            die(f"remote '{args.remote}' is not provisioned")
+        try:
+            output = _read_host_logs(validated, entry, lines=args.lines)
+        except (hosting.HostingError, RuntimeError, subprocess.SubprocessError, OSError) as exc:
+            die(str(exc))
+        if args.json:
+            print(json.dumps({"ok": True, "project": validated["project"],
+                              "environment": validated["environment"], "output": output}))
+        else:
+            print(output, end="" if output.endswith("\n") or not output else "\n")
+        return
     if args.action == "login-url":
         if not args.confirm:
             die("host login-url is protected; pass --confirm to issue a one-time admin link")

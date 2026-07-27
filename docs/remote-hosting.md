@@ -181,6 +181,7 @@ primary hostname, aliases, redirects, and the required Cloudflare policy.
 ./sb host validate --project-dir /path/to/site
 ./sb host plan --project-dir /path/to/site --environment production --remote myvps
 ./sb host apply --project-dir /path/to/site --environment production --remote myvps --confirm
+./sb host logs --project-dir /path/to/site --environment production --remote myvps --lines 200
 ```
 
 `validate` is offline. `plan` is read-only and lists only the declared hostnames;
@@ -188,6 +189,8 @@ it never prunes unrelated DNS records. Before `apply` contacts the remote, Sandb
 checks the local Git branch and clean-tree policy declared for the target environment.
 `apply` is confirmation-gated: it then transfers the approved checkout, runs
 Compose/init health checks, validates Caddy, and updates only declared DNS records.
+`logs` reads a bounded snapshot from the hosted web service and declared background
+services; it does not hold an SSH stream open.
 Configure Cloudflare with `./sb connect cloudflare`, which
 stores the token in `~/.zshrc.secrets` (owner-only and outside Git), and record the VPS
 public address with `./sb remote set-origin myvps --ipv4 <address>`.

@@ -15,7 +15,7 @@
 and reports desired state; with a configured token it reports Cloudflare drift.
 
 Manifest fields: `compose.files`, `compose.service`, `compose.container_port`, optional
-`compose.init_services`, `healthcheck.path`, `deploy.allowed_branches`,
+`compose.init_services` and `compose.background_services`, `healthcheck.path`, `deploy.allowed_branches`,
 `deploy.require_clean`, `host.primary`, `host.aliases`, optional
 `basic_auth.username`, `basic_auth.password_secret`, and `cloudflare` policy.
 Optional `secrets.values`, `secrets.required`, and `secrets.generated` map container

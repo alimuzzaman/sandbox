@@ -253,18 +253,22 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     _write_remote_text(entry, override, runtime["compose_override"], "0600")
     _write_remote_text(entry, env_file, runtime["environment"], "0600")
     prefix = _compose_prefix(validated, source_dir, override, env_file)
-    service = shlex.quote(validated["compose"]["service"])
+    runtime_services = [
+        shlex.quote(validated["compose"]["service"]),
+        *(shlex.quote(service) for service in validated["compose"].get("background_services", [])),
+    ]
+    service_args = " ".join(runtime_services)
     # Replace the image's anonymous application volume on each deployment so
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
-    _remote_checked(entry, f"{prefix} up -d --build --force-recreate --renew-anon-volumes --remove-orphans {service}", timeout=900)
+    _remote_checked(entry, f"{prefix} up -d --build --force-recreate --renew-anon-volumes --remove-orphans {service_args}", timeout=900)
     for init_service in validated["compose"].get("init_services", []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
         # is never run from a previous deployment's image.
         _remote_checked(entry, f"{prefix} build {shlex.quote(init_service)}", timeout=900)
         _remote_checked(entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}", timeout=900)
-    _remote_checked(entry, f"{prefix} up -d {service}", timeout=300)
+    _remote_checked(entry, f"{prefix} up -d {service_args}", timeout=300)
 
 
 def _issue_host_autologin(validated: dict, entry: dict, remote_name: str,

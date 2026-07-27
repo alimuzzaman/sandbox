@@ -201,6 +201,27 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--remove-orphans", command)
         self.assertTrue(command.endswith("web"))
 
+    def test_compose_command_starts_declared_background_services(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      background_services: [worker, scheduler]"
+            ))
+            validated = hosting.validate_manifest(directory)
+        command = hosting.render_compose_command(
+            validated, "/srv/example", "/srv/example/.sandbox-hosting.yml"
+        )
+        self.assertTrue(command.endswith("web worker scheduler"))
+
+    def test_rejects_duplicate_background_service(self):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      background_services: [web]"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "must not be duplicated"):
+                hosting.validate_manifest(directory)
+
     @patch("sandbox.commands.hosting._write_remote_text")
     @patch("sandbox.commands.hosting._remote_checked")
     def test_init_service_is_built_before_its_one_shot_run(self, remote_checked, _write):
@@ -221,6 +242,21 @@ class TestHostingManifest(unittest.TestCase):
         build_index = next(i for i, command in enumerate(commands) if command.endswith("build setup"))
         run_index = next(i for i, command in enumerate(commands) if command.endswith("run --rm setup"))
         self.assertLess(build_index, run_index)
+
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_background_services_are_recreated_and_started_with_web(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      background_services: [worker]"
+            ))
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
+        self.assertTrue(commands[-1].endswith("up -d web worker"))
 
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.remote.ssh_run")

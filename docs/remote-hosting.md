@@ -174,7 +174,7 @@ ssh ubuntu@203.0.113.10 "cd \$SANDBOX_HOME/deploy-src/<project-slug> && ./sb ens
 ## Managed Compose hosts
 
 Any Docker Compose project can carry a project-local `sandbox.hosting.yml`. It describes
-a Compose web service, deployment policy,
+a Compose web service, optional long-lived worker services, deployment policy,
 primary hostname, aliases, redirects, and the required Cloudflare policy.
 
 ```bash
@@ -196,6 +196,10 @@ Permanent projects may declare public values plus required/generated secret mapp
 `sandbox.hosting.yml`. `./sb host secrets --project-dir /path --environment production`
 reports names only; `--generate` creates declared generated values and `--set KEY`
 stores a required value through a hidden prompt.
+
+Use `compose.background_services` for declared long-lived workers that must be built,
+recreated, and started with the web service. Keep one-shot migration/setup jobs in
+`compose.init_services`; each service name must be unique across the three fields.
 
 An environment may also protect its public origin with Basic Auth:
 

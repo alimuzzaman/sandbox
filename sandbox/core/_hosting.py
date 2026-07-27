@@ -176,8 +176,14 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     if not 1 <= compose["container_port"] <= 65535:
         raise HostingError("compose.container_port must be between 1 and 65535")
     init_services = compose.get("init_services", [])
-    if not isinstance(init_services, list) or not all(isinstance(s, str) and s for s in init_services):
+    if not isinstance(init_services, list) or not all(isinstance(s, str) and _SERVICE_RE.fullmatch(s) for s in init_services):
         raise HostingError("compose.init_services must be a list of service names")
+    background_services = compose.get("background_services", [])
+    if not isinstance(background_services, list) or not all(isinstance(s, str) and _SERVICE_RE.fullmatch(s) for s in background_services):
+        raise HostingError("compose.background_services must be a list of service names")
+    declared_services = [str(compose["service"]), *init_services, *background_services]
+    if len(declared_services) != len(set(declared_services)):
+        raise HostingError("compose service names must not be duplicated across service lists")
     healthcheck = env.get("healthcheck") or {}
     if not isinstance(healthcheck.get("path"), str) or not healthcheck["path"].startswith("/"):
         raise HostingError("healthcheck.path must start with /")
@@ -378,6 +384,7 @@ def render_compose_command(validated: dict, source_dir: str, override_path: str)
     files.extend(["-f", override_path, "up", "-d", "--remove-orphans"])
     files.extend(compose.get("init_services", []))
     files.append(compose["service"])
+    files.extend(compose.get("background_services", []))
     return " ".join(shlex.quote(part) for part in files)
 
 

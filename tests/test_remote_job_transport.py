@@ -127,6 +127,20 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertIn("find /srv/project-workspace-", prepare)
         self.assertNotIn("rm -rf /srv/project-workspace-", prepare)
 
+    def test_workspace_prepare_checks_for_root_owned_contents_after_unprivileged_cleanup(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout=""),
+            remote_lookup=lambda name: {"provisioned": True},
+        )
+        transport._prepare_workspace({}, "/srv/project", "workspace")
+        prepare = commands[0]
+        self.assertIn("-print -quit", prepare)
+        self.assertIn("if [ -n \"$(find /srv/project-workspace-", prepare)
+        self.assertIn("remote workspace cleanup left contents", prepare)
+
     def test_workspace_prepare_retains_bounded_remote_error_detail(self):
         transport = RemoteJobTransport(
             deploy=lambda *_: {},

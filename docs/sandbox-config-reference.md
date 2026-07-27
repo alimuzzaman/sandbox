@@ -50,7 +50,8 @@ health endpoint after `ensure` (30–3600 seconds; default 120). Set
 `recreateOnEnsure` only when the service boot command must reconcile source- or
 lockfile-dependent state, such as dependencies in a named `node_modules`
 volume. It force-recreates the service container while preserving its declared
-volumes.
+volumes. If the health deadline expires, the durable result includes a bounded
+tail of the declared service's Compose logs.
 
 Generic Compose projects can also use the normal registered-remote workflow.
 Their declaration must include the public service, internal port, and health path

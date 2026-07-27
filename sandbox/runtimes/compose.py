@@ -170,7 +170,13 @@ class ComposeAdapter:
                     self.registry.registry_put(descriptor["root"], **stored)
                     return OperationResult(True, op, descriptor["root"], "compose", data)
                 time.sleep(0.1)
-            raise RuntimeError("generic Compose service did not pass its health check")
+            logs = self.dependencies.process.run(
+                ["docker", "compose", *project_args, "logs", "--no-color", "--tail", "100", service],
+                cwd=descriptor["root"], timeout=30,
+            )
+            detail = "\n".join(part.strip() for part in (logs.stderr, logs.stdout) if part.strip())[-4096:]
+            message = "generic Compose service did not pass its health check"
+            raise RuntimeError(f"{message}:\n{detail}" if detail else message)
 
         if op == "status":
             result = self.dependencies.process.run(["docker", "compose", *project_args, "ps", "--format", "json"], cwd=descriptor["root"], timeout=30)

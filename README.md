@@ -350,6 +350,8 @@ Projects whose service startup bootstraps dependencies can declare a bounded
 `compose.startupTimeoutSeconds`; persistent workspaces can additionally opt
 into `compose.recreateOnEnsure` to rerun that bootstrap after each deployed
 source revision while retaining named volumes.
+If the health deadline expires, the durable result includes a bounded tail of
+the declared service's Compose logs for diagnosis.
 
 Use the same runtime operations without an MCP client:
 

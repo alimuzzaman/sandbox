@@ -148,6 +148,27 @@ class TestGenericComposeAdapter(unittest.TestCase):
             up_call = next(call for call, _, _ in process.calls if "up" in call)
             self.assertIn("--force-recreate", up_call)
 
+    def test_health_timeout_includes_bounded_service_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "compose.yaml").write_text("services: {web: {image: nginx}}\n")
+            adapter, process, http, _ = self.make_adapter(root)
+            adapter.timeout = 0.01
+            http.probe = lambda *_args, **_kwargs: False
+
+            def process_with_logs(argv, *, cwd=None, env=None, timeout=None):
+                process.calls.append((tuple(argv), cwd, timeout))
+                if "config" in argv:
+                    return ProcessResult(tuple(argv), 0, "web\n", "")
+                if "logs" in argv:
+                    return ProcessResult(tuple(argv), 0, "pnpm install failed\n", "")
+                return ProcessResult(tuple(argv), 0, "started\n", "")
+
+            process.run = process_with_logs
+            with self.assertRaisesRegex(RuntimeError, "(?s)health check.*pnpm install failed"):
+                adapter.invoke(OperationRequest(str(root), "ensure"))
+            self.assertTrue(any("logs" in call for call, _, _ in process.calls))
+
     def test_descriptor_validation_rejects_command_ambiguous_fields(self):
         invalid = (
             {"service": "web\nbad"},

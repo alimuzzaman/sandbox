@@ -122,6 +122,8 @@ health endpoint is ready, declare a bounded `compose.startupTimeoutSeconds`.
 For persistent workspaces whose named dependency volume must be reconciled
 after every source deployment, also declare `compose.recreateOnEnsure: true`;
 Sandbox force-recreates the service but preserves declared volumes.
+If that bounded readiness check expires, the durable job retains the declared
+service's recent Compose logs with the health-check error for diagnosis.
 
 ## WordPress projects
 

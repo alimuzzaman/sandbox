@@ -157,6 +157,10 @@ class RemoteJobTransport:
             "find", workspace_path, "-mindepth", "1", "-maxdepth", "1",
             "-exec", "rm", "-rf", "--", "{}", "+",
         ])
+        remaining_contents = shlex.join([
+            "find", workspace_path, "-mindepth", "1", "-maxdepth", "1",
+            "-print", "-quit",
+        ])
         root_clean = shlex.join([
             "docker", "run", "--rm", "--user", "0:0", "--volume",
             f"{workspace_path}:/workspace", "alpine:3.20", "sh", "-c",
@@ -164,7 +168,15 @@ class RemoteJobTransport:
         ])
         command = (
             shlex.join(["mkdir", "-p", workspace_path]) + " && "
-            f"if ! {clean_contents} 2>/dev/null; then {root_clean} && {clean_contents}; fi && "
+            # GNU find does not reliably propagate a failed -exec rm status.
+            # Check the directory after the unprivileged attempt, then use the
+            # scoped root cleaner only when root-owned bind-mount contents
+            # remain. A final emptiness check prevents cp -a merging stale
+            # dependency-store files into the refreshed source tree.
+            f"{clean_contents} 2>/dev/null || true; "
+            f"if [ -n \"$({remaining_contents})\" ]; then {root_clean}; fi && "
+            f"if [ -n \"$({remaining_contents})\" ]; then "
+            "echo 'remote workspace cleanup left contents' >&2; exit 1; fi && "
             + shlex.join(
             ["cp", "-a", f"{source_path}/.", workspace_path])
         )

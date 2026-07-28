@@ -68,13 +68,17 @@ class ResourceService:
             )
         return float(value)
 
-    def _scan(self, *, thorough: bool, budget_seconds: float, progress=None) -> StorageScan:
+    def _scan(
+        self, *, thorough: bool, budget_seconds: float, progress=None,
+        focus: str | None = None,
+    ) -> StorageScan:
         budget = self._budget(budget_seconds)
         started = self.clock().astimezone(timezone.utc)
         snapshot = self.adapter.observe(
             thorough=bool(thorough),
             budget_seconds=budget,
             progress=progress,
+            focus=focus,
         )
         target = self.adapter.target()
         if snapshot.target != target:
@@ -93,8 +97,13 @@ class ResourceService:
             item for item in snapshot.resources
             if item.size_state == "measured" and item.size_bytes is not None
         )
-        attributed = sum(item.size_bytes or 0 for item in measured)
+        explicitly_accounted = tuple(
+            item for item in measured if item.capacity_accounted
+        )
+        accounting_items = explicitly_accounted or measured
+        raw_attributed = sum(item.size_bytes or 0 for item in accounting_items)
         used = int((snapshot.capacity or {}).get("used_bytes") or 0)
+        attributed = min(raw_attributed, used)
         unknown = max(used - attributed, 0)
         reclaimable = sum(item.reclaimable_bytes for item in snapshot.resources)
         incomplete = any(
@@ -114,6 +123,13 @@ class ResourceService:
             ),
             reverse=True,
         ))
+        drift = snapshot.drift
+        if raw_attributed > used:
+            drift = {
+                **(drift or {}),
+                "capacity_accounting_overage_bytes": raw_attributed - used,
+                "reason": "filesystem_accounting_overlap_or_sparse_storage",
+            }
         return StorageScan(
             scan_id=secrets.token_hex(16),
             target=target,
@@ -129,7 +145,7 @@ class ResourceService:
             reclaimable_bytes=reclaimable,
             confidence=confidence,
             category_outcomes=snapshot.category_outcomes,
-            drift=snapshot.drift,
+            drift=drift,
         )
 
     def status(
@@ -141,6 +157,7 @@ class ResourceService:
                 thorough=thorough,
                 budget_seconds=budget_seconds,
                 progress=progress,
+                focus=None,
             )
             return result(
                 True, "status", status=scan.status, target=scan.target,
@@ -171,6 +188,7 @@ class ResourceService:
                 thorough=thorough,
                 budget_seconds=budget_seconds,
                 progress=progress,
+                focus=scope,
             )
             candidates = []
             exclusions = []
@@ -180,11 +198,13 @@ class ResourceService:
                     and item.classification == "disposable_cache"
                     and item.kind not in {"volume", "worktree"}
                     and item.size_state == "measured"
+                    and item.reclaimable_bytes > 0
                 ) or (
                     scope == "stale"
                     and item.classification == "stale_candidate"
                     and item.kind in {"volume", "worktree"}
                     and item.size_state == "measured"
+                    and item.reclaimable_bytes > 0
                 )
                 if eligible:
                     candidates.append(CleanupCandidate.from_observation(item))

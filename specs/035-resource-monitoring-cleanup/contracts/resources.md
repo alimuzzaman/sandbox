@@ -147,9 +147,13 @@ Every resource contains:
 - lifecycle classification;
 - size state and raw bytes when measured;
 - reclaimable bytes;
+- whether the observation contributes to host-capacity attribution;
 - evidence quality, references, and bounded errors.
 
 An unavailable or timed-out size is `null`, never zero.
+Nested detail can overlap a measured host root and therefore sets
+`capacity_accounted: false`; it remains ranked without inflating attributed
+host bytes.
 
 ## Plan data
 

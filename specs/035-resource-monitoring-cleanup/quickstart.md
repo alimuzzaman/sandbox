@@ -120,6 +120,7 @@ Do not perform this scenario against permanent or ambiguous resources.
 ```bash
 ./sb resources status --remote REMOTE_NAME --json
 ./sb resources status --remote REMOTE_NAME --thorough --budget 60 --json
+./sb resources status --remote REMOTE_NAME --thorough --budget 300 --json
 ```
 
 Expected:
@@ -127,7 +128,11 @@ Expected:
 - exact remote identity is present;
 - no local host resources are mixed into the report;
 - category timeouts remain partial remote results;
-- monitoring does not deploy or upgrade the remote runtime.
+- monitoring does not deploy or upgrade the remote runtime;
+- remote registry/job evidence comes through typed read-only repositories and
+  incomplete evidence prevents persistent cleanup;
+- host filesystem accounting does not double-count nested Docker/workspace
+  detail.
 
 ## 8. Verify MCP parity
 

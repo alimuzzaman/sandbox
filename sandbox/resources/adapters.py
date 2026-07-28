@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import shutil
 import time
+import re
 from typing import Callable, Protocol
 
 from sandbox.services.process import BoundedProcessRunner
@@ -20,6 +21,35 @@ from .models import (
     StorageTarget,
     utc_now,
 )
+
+_BUILD_CACHE_ID = re.compile(r"^[a-z0-9]{12,128}$")
+_BYTE_SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I)
+
+
+def _parse_byte_size(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if not isinstance(value, str):
+        return None
+    match = _BYTE_SIZE.fullmatch(value.strip())
+    if not match:
+        return None
+    unit = (match.group(2) or "b").lower()
+    powers = {
+        "b": 0,
+        "kb": 1, "kib": 1,
+        "mb": 2, "mib": 2,
+        "gb": 3, "gib": 3,
+        "tb": 4, "tib": 4,
+        "pb": 5, "pib": 5,
+        "eb": 6, "eib": 6,
+    }
+    power = powers.get(unit)
+    if power is None:
+        return None
+    return int(float(match.group(1)) * (1024 ** power))
 
 
 @dataclass(frozen=True)
@@ -36,7 +66,7 @@ class ResourceAdapter(Protocol):
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
-        progress=None,
+        progress=None, focus: str | None = None,
     ) -> ProviderSnapshot: ...
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None: ...
@@ -196,11 +226,33 @@ class LocalResourceAdapter:
         else:
             state = "timed_out" if image_ids_result.returncode == 124 else "unavailable"
             outcomes.append({"category": "docker_images", "status": state})
+        build_cache_result = self._run(
+            ("docker", "buildx", "du", "--format=json"), remaining(12),
+        )
+        build_cache = []
+        if build_cache_result.returncode == 0:
+            try:
+                build_cache = [
+                    json.loads(line)
+                    for line in build_cache_result.stdout.splitlines()
+                    if line.strip()
+                ]
+                state = "complete"
+            except json.JSONDecodeError:
+                build_cache, state = [], "unavailable"
+        else:
+            state = (
+                "timed_out"
+                if build_cache_result.returncode == 124
+                else "unavailable"
+            )
+        outcomes.append({"category": "docker_build_cache", "status": state})
         return {
             "containers": containers or [],
             "volumes": volumes or [],
             "networks": networks or [],
             "images": images or [],
+            "build_cache": build_cache or [],
         }, tuple(outcomes)
 
     @staticmethod
@@ -516,6 +568,34 @@ class LocalResourceAdapter:
                 ),
                 evidence=("compose_project_label",),
             ))
+        for record in inventory.get("build_cache", ()):
+            locator = record.get("ID")
+            size = _parse_byte_size(record.get("Size"))
+            if (
+                not isinstance(locator, str)
+                or not _BUILD_CACHE_ID.fullmatch(locator)
+            ):
+                continue
+            reclaimable = record.get("Reclaimable") is True
+            mutable = record.get("Mutable") is True
+            resources.append(ResourceObservation(
+                resource_id=_resource_id("build_cache", locator),
+                kind="build_cache",
+                locator=locator,
+                display_name=f"build cache {locator[:12]}",
+                owner_kind="unmanaged",
+                owner_id=None,
+                classification="unverified",
+                size_state="measured" if size is not None and size >= 0 else "unavailable",
+                size_bytes=size if size is not None and size >= 0 else None,
+                reclaimable_bytes=0,
+                references=("mutable_build_cache",) if mutable else (),
+                evidence=(
+                    "buildx_disk_usage",
+                    "engine_reports_reclaimable" if reclaimable else "engine_retained",
+                    "ownership_unverified",
+                ),
+            ))
         return resources
 
     def _ownership_index(self) -> tuple[
@@ -561,6 +641,12 @@ class LocalResourceAdapter:
                 protected_paths.setdefault(canonical, []).append(
                     "retained_job",
                 )
+                workspace_project = Path(canonical).name
+                if workspace_project:
+                    protected_projects.update((
+                        workspace_project,
+                        f"sandbox-{workspace_project}",
+                    ))
         return (
             {key: tuple(sorted(set(value))) for key, value in protected_paths.items()},
             protected_projects,
@@ -649,7 +735,7 @@ class LocalResourceAdapter:
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
-        progress=None,
+        progress=None, focus: str | None = None,
     ) -> ProviderSnapshot:
         deadline = time.monotonic() + float(budget_seconds)
         capacity = self._capacity()
@@ -766,6 +852,17 @@ class LocalResourceAdapter:
             status = "removed" if result.returncode == 0 else (
                 "timed_out" if result.returncode == 124 else "failed"
             )
+        elif candidate.kind == "build_cache":
+            if not _BUILD_CACHE_ID.fullmatch(candidate.locator):
+                status = "failed"
+            else:
+                result = self._run((
+                    "docker", "buildx", "prune", "--force", "--all",
+                    "--filter", f"id={candidate.locator}",
+                ), 60)
+                status = "removed" if result.returncode == 0 else (
+                    "timed_out" if result.returncode == 124 else "failed"
+                )
         else:
             status = "failed"
         return CleanupItemOutcome(

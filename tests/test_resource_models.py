@@ -45,6 +45,12 @@ class TestResourceModels(unittest.TestCase):
         self.assertNotIn("locator", payload)
         self.assertNotIn("top-secret", str(payload))
         self.assertIn("[redacted]", str(payload).lower())
+        self.assertTrue(payload["capacity_accounted"])
+
+    def test_capacity_accounting_marker_is_boolean(self):
+        self.assertFalse(observation(capacity_accounted=False).capacity_accounted)
+        with self.assertRaises(ValueError):
+            observation(capacity_accounted="no")
 
     def test_cache_plan_rejects_named_volumes(self):
         candidate = CleanupCandidate.from_observation(
@@ -59,6 +65,10 @@ class TestResourceModels(unittest.TestCase):
         candidate = CleanupCandidate.from_observation(observation())
         plan = CleanupPlan.create(target(), "cache", (candidate,), (), now=NOW)
         self.assertEqual(plan.expires_at - plan.created_at, timedelta(minutes=15))
+        self.assertEqual(
+            plan.estimated_reclaimable_bytes,
+            candidate.expected_reclaimable_bytes,
+        )
         self.assertEqual(CleanupPlan.from_dict(plan.to_dict()), plan)
 
     def test_private_plan_preserves_exact_secret_like_locator_but_public_omits_it(self):

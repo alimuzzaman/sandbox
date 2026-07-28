@@ -13,6 +13,7 @@ inspection:
 ```sh
 sb resources status --json
 sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
+sb resources status --remote scaleway-sandbox --thorough --budget 300 --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -22,6 +23,12 @@ unknown. Ordinary cache plans never contain named persistent volumes or
 worktrees; those require the separate stale scope and complete positive
 ownership plus non-use evidence. Never replace this workflow with a broad
 Docker prune.
+
+When a remote scan reports a large unknown bucket, rerun with a larger bounded
+budget and require complete `host_filesystem`, `docker_storage`,
+`instance_registry`, and `job_registry` outcomes before interpreting it.
+Review remote `cache` and `stale` plans separately: cache may contain exact
+immutable build-cache IDs, while volumes and worktrees remain stale-only.
 
 Apply only after the user explicitly authorizes the reviewed plan:
 

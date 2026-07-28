@@ -106,6 +106,7 @@ class ResourceObservation:
     size_state: str
     size_bytes: int | None
     reclaimable_bytes: int
+    capacity_accounted: bool = True
     age_seconds: int | None = None
     references: tuple[str, ...] = ()
     evidence: tuple[str, ...] = ()
@@ -125,6 +126,8 @@ class ResourceObservation:
         _non_negative(self.size_bytes, "size_bytes", optional=True)
         _non_negative(self.reclaimable_bytes, "reclaimable_bytes")
         _non_negative(self.age_seconds, "age_seconds", optional=True)
+        if not isinstance(self.capacity_accounted, bool):
+            raise ValueError("capacity_accounted must be a boolean")
         if self.size_state == "measured" and self.size_bytes is None:
             raise ValueError("measured resources require size_bytes")
         if self.size_state != "measured" and self.size_bytes is not None:
@@ -152,6 +155,7 @@ class ResourceObservation:
             "size_state": self.size_state,
             "size_bytes": self.size_bytes,
             "reclaimable_bytes": self.reclaimable_bytes,
+            "capacity_accounted": self.capacity_accounted,
             "age_seconds": self.age_seconds,
             "references": list(self.references),
             "evidence": list(self.evidence),
@@ -172,6 +176,7 @@ class CleanupCandidate:
     expected_owner_id: str | None
     expected_absence: tuple[str, ...]
     expected_size_bytes: int | None
+    expected_reclaimable_bytes: int
     evidence_digest: str
 
     @classmethod
@@ -191,6 +196,7 @@ class CleanupCandidate:
             expected_owner_id=item.owner_id,
             expected_absence=tuple(sorted(item.references)),
             expected_size_bytes=item.size_bytes,
+            expected_reclaimable_bytes=item.reclaimable_bytes,
             evidence_digest=hashlib.sha256(canonical.encode()).hexdigest(),
         )
 
@@ -201,6 +207,17 @@ class CleanupCandidate:
         )):
             raise ValueError("candidate identity is incomplete")
         _non_negative(self.expected_size_bytes, "expected_size_bytes", optional=True)
+        _non_negative(
+            self.expected_reclaimable_bytes,
+            "expected_reclaimable_bytes",
+        )
+        if (
+            self.expected_size_bytes is not None
+            and self.expected_reclaimable_bytes > self.expected_size_bytes
+        ):
+            raise ValueError(
+                "expected reclaimable bytes cannot exceed expected size",
+            )
 
     def to_dict(self, *, public: bool = False) -> dict:
         value = {
@@ -213,6 +230,7 @@ class CleanupCandidate:
             },
             "expected_absence": list(self.expected_absence),
             "expected_size_bytes": self.expected_size_bytes,
+            "expected_reclaimable_bytes": self.expected_reclaimable_bytes,
             "evidence_digest": self.evidence_digest,
         }
         if not public:
@@ -231,6 +249,10 @@ class CleanupCandidate:
             expected_owner_id=owner.get("id"),
             expected_absence=tuple(value.get("expected_absence") or ()),
             expected_size_bytes=value.get("expected_size_bytes"),
+            expected_reclaimable_bytes=value.get(
+                "expected_reclaimable_bytes",
+                value.get("expected_size_bytes") or 0,
+            ),
             evidence_digest=value.get("evidence_digest"),
         )
 
@@ -296,7 +318,7 @@ class CleanupPlan:
             candidates=chosen,
             exclusions=tuple(exclusions),
             estimated_reclaimable_bytes=sum(
-                item.expected_size_bytes or 0 for item in chosen
+                item.expected_reclaimable_bytes for item in chosen
             ),
         )
 

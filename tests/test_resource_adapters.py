@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from sandbox.resources.adapters import LocalResourceAdapter
+from sandbox.resources.adapters import _parse_byte_size
 from sandbox.resources.models import CleanupCandidate, ResourceObservation
 from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
@@ -38,6 +39,12 @@ class TestLocalResourceAdapter(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_build_cache_byte_sizes_accept_raw_and_human_formats(self):
+        self.assertEqual(_parse_byte_size("4096"), 4096)
+        self.assertEqual(_parse_byte_size("1.5GB"), 1610612736)
+        self.assertEqual(_parse_byte_size("2 MiB"), 2097152)
+        self.assertIsNone(_parse_byte_size("unknown"))
 
     def test_fast_scan_is_read_only_and_marks_unmeasured_stale_paths_unverified(self):
         runner = FakeRunner()
@@ -103,7 +110,12 @@ class TestLocalResourceAdapter(unittest.TestCase):
         ).read_text()
         self.assertNotIn("docker system prune", source)
         self.assertNotIn("docker volume prune", source)
-        self.assertNotIn('"prune"', source)
+        for broad_kind in ("system", "volume", "image", "network", "container"):
+            self.assertNotIn(
+                f'("docker", "{broad_kind}", "prune"',
+                source,
+            )
+        self.assertIn('"--filter", f"id={candidate.locator}"', source)
 
     def test_registry_references_protect_stopped_engine_resources(self):
         volumes = [{
@@ -170,6 +182,79 @@ class TestLocalResourceAdapter(unittest.TestCase):
         )
         self.assertEqual(item.classification, "retained")
         self.assertIn("retained_job", item.references)
+
+    def test_retained_job_reference_protects_matching_workspace_volume(self):
+        workspace = self.home / "deploy-src" / "project-workspace-deadbeef"
+        volumes = [{
+            "Name": "sandbox-project-workspace-deadbeef_modules",
+            "Labels": {
+                "com.docker.compose.project":
+                "sandbox-project-workspace-deadbeef",
+            },
+            "Mountpoint": "/private/volume",
+        }]
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(
+                "sandbox-project-workspace-deadbeef_modules\n",
+            ),
+            ("docker", "volume", "inspect"): response(json.dumps(volumes)),
+            ("docker", "network", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "buildx", "du"): response(""),
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=runner,
+            job_resource_records=lambda: {
+                "jobs": [{
+                    "project_root": str(workspace),
+                    "lifecycle": "succeeded",
+                    "cleanup_policy": "retain",
+                    "cleanup_state": "retained",
+                }],
+                "artifacts": [],
+            },
+            clock=lambda: NOW,
+            host_root=self.home,
+        )
+        item = next(
+            resource for resource in adapter.observe(
+                thorough=True, budget_seconds=30,
+            ).resources
+            if resource.kind == "volume"
+        )
+        self.assertEqual(item.classification, "retained")
+        self.assertIn("instance_registry", item.references)
+
+    def test_local_build_cache_is_visible_but_not_owned_by_name(self):
+        record = {
+            "ID": "a" * 24,
+            "Size": "4096",
+            "Reclaimable": True,
+            "Mutable": False,
+        }
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(""),
+            ("docker", "network", "ls", "-q"): response(""),
+            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "buildx", "du"): response(json.dumps(record) + "\n"),
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        item = next(
+            resource for resource in adapter.observe(
+                thorough=True, budget_seconds=30,
+            ).resources
+            if resource.kind == "build_cache"
+        )
+        self.assertEqual(item.size_bytes, 4096)
+        self.assertEqual(item.classification, "unverified")
+        self.assertEqual(item.reclaimable_bytes, 0)
 
     def test_only_expired_terminal_job_artifact_is_disposable(self):
         artifact = self.home / "runtime" / "jobs" / "job-1" / "artifacts" / "a1"

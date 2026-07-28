@@ -23,6 +23,7 @@ def observation(
     locator: str = "/managed/cache/resource-1",
     references: tuple[str, ...] = (),
     evidence: tuple[str, ...] = ("managed_root", "unused"),
+    capacity_accounted: bool = True,
 ) -> ResourceObservation:
     return ResourceObservation(
         resource_id=resource_id,
@@ -37,6 +38,7 @@ def observation(
         reclaimable_bytes=size_bytes or 0 if classification in {
             "disposable_cache", "stale_candidate",
         } else 0,
+        capacity_accounted=capacity_accounted,
         references=references,
         evidence=evidence,
     )

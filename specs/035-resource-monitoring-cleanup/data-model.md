@@ -47,6 +47,7 @@ One discovered resource or aggregate category.
 | `size_state` | enum | `measured`, `not_measured`, `timed_out`, `unavailable` |
 | `size_bytes` | integer or null | Present only when measured |
 | `reclaimable_bytes` | integer | Zero unless eligibility evidence is complete |
+| `capacity_accounted` | boolean | True only when this observation contributes to host-capacity attribution; nested detail remains visible without double counting |
 | `age_seconds` | integer or null | Non-negative when trustworthy |
 | `references` | list | Registry/runtime/job/backup/mount references that protect or explain the resource |
 | `evidence` | list | Typed ownership, liveness, retention, and boundary facts |
@@ -67,6 +68,10 @@ discovered
 
 A cleanup action never changes an observation in place. Revalidation produces a
 new observation used for the outcome.
+
+Thorough host-root observations are capacity-accounted. Nested Docker,
+workspace, volume, image, and build-cache observations are detail-only so they
+can be ranked without inflating attributed host bytes.
 
 ## StorageScan
 
@@ -104,6 +109,7 @@ Immutable candidate copied from a scan into a plan.
 | `expected_owner` | object | Positive owner identity |
 | `expected_absence` | list | References/mounts that must still be absent |
 | `expected_size_bytes` | integer or null | Estimate only |
+| `expected_reclaimable_bytes` | integer | Conservative estimated physical reclamation; may be lower than logical size |
 | `evidence_digest` | string | Digest of canonical eligibility evidence |
 
 Candidate locators are stored only in the protected local plan record, not

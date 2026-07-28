@@ -28,8 +28,8 @@ class FakeAdapter:
     def target(self):
         return self._target
 
-    def observe(self, *, thorough, budget_seconds, progress=None):
-        self.observe_calls.append((thorough, budget_seconds))
+    def observe(self, *, thorough, budget_seconds, progress=None, focus=None):
+        self.observe_calls.append((thorough, budget_seconds, focus))
         if progress:
             progress("fixture")
         return ProviderSnapshot(
@@ -133,6 +133,21 @@ class TestResourceService(unittest.TestCase):
         self.assertEqual(payload["data"]["resources"][0]["size_bytes"], None)
         self.assertEqual(payload["data"]["confidence"], "low")
 
+    def test_capacity_attribution_excludes_nested_detail_observations(self):
+        accounting_root = observation(
+            "host-root", kind="host_root", classification="retained",
+            size_bytes=60_000, capacity_accounted=True,
+        )
+        nested_volume = observation(
+            "nested-volume", kind="volume", classification="active",
+            size_bytes=40_000, capacity_accounted=False,
+        )
+        payload = self.service(FakeAdapter((
+            accounting_root, nested_volume,
+        ))).status(thorough=True, budget_seconds=15)
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 60_000)
+        self.assertEqual(payload["data"]["summary"]["unknown_bytes"], 20_000)
+
     def test_cache_plan_is_read_only_and_excludes_named_volumes(self):
         cache = observation("cache", size_bytes=500)
         volume = observation(
@@ -150,6 +165,7 @@ class TestResourceService(unittest.TestCase):
         )
         self.assertEqual(adapter.removed, [])
         self.assertTrue(payload["data"]["requires_confirmation"])
+        self.assertEqual(adapter.observe_calls[-1], (True, 15.0, "cache"))
 
     def test_cleanup_refuses_confirmation_before_adapter_access(self):
         adapter = FakeAdapter()

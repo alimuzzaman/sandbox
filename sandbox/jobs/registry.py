@@ -37,6 +37,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
+    """Read bounded job/workspace/artifact retention evidence without writes."""
+    database = Path(path).expanduser().resolve()
+    if not database.is_file():
+        return {"jobs": [], "artifacts": []}
+    connection = sqlite3.connect(
+        f"{database.as_uri()}?mode=ro",
+        uri=True,
+        timeout=1,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        jobs = [
+            dict(row) for row in connection.execute(
+                "SELECT job_id, project_root, lifecycle, workspace_label, "
+                "workspace_mode, cleanup_policy, cleanup_state, finished_at "
+                "FROM jobs ORDER BY job_id LIMIT 10000"
+            )
+        ]
+        artifacts = [
+            dict(row) for row in connection.execute(
+                "SELECT a.artifact_id, a.job_id, a.stored_relative_path, "
+                "a.display_name, a.size_bytes, a.expires_at, a.status, "
+                "j.lifecycle AS job_lifecycle "
+                "FROM artifacts a JOIN jobs j ON j.job_id=a.job_id "
+                "ORDER BY a.artifact_id LIMIT 10000"
+            )
+        ]
+        return {"jobs": jobs, "artifacts": artifacts}
+    finally:
+        connection.close()
+
+
 def _bounded_text(value: object, label: str, *, maximum: int = MAX_SUBMISSION_TEXT,
                   allow_none: bool = False) -> str | None:
     if value is None and allow_none:

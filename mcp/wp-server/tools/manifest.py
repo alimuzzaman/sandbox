@@ -9,12 +9,13 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 
 BUILTIN_TOOL_GROUPS = (
     "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
+    "resources",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
     "plugin_check", "remote", "hermes", "recovery",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "context",
+    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -23,9 +24,10 @@ DEFAULT_MCP_GROUPS = (
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
     "instances", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
+    "resources",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "runtime", "jobs", "net", "remote",
+    "instances", "runtime", "jobs", "net", "remote", "resources",
 )
 
 
@@ -50,6 +52,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "runtime": ("core", "project_instance", "runtime_service"),
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
+    "resources": ("resource_service_factory",),
 }
 
 # Exact registration ownership and order, kept separate from implementation
@@ -65,6 +68,9 @@ BUILTIN_TOOL_NAMES = {
     "mail": ("mail_list", "mail_get"),
     "context": ("focus_get", "activate_plugin", "deactivate_plugin", "load_context", "load_workflow", "load_skill"),
     "cache": ("cache_info", "cache_clear"),
+    "resources": (
+        "resource_status", "resource_cleanup_plan", "resource_cleanup_apply",
+    ),
     "abilities": ("wp_eval_live",),
     "skills": ("list_skills", "skill_write", "skill_edit", "skill_delete"),
     "debug": ("qm_capture", "xdebug"),

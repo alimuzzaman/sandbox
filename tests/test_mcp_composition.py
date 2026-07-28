@@ -75,6 +75,7 @@ class TestMcpComposition(unittest.TestCase):
 
         expected = (
             "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
+            "resources",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
             "plugin_check", "remote", "hermes", "recovery",
         )
@@ -100,6 +101,8 @@ class TestMcpComposition(unittest.TestCase):
         self.assertNotIn("wp", compose)
         self.assertIn("remote", wordpress)
         self.assertIn("remote", compose)
+        self.assertIn("resources", wordpress)
+        self.assertIn("resources", compose)
         with self.assertRaisesRegex(ValueError, "no MCP catalog"):
             project_default_groups("unsupported")
 
@@ -131,7 +134,7 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "runtime", "jobs", "hermes"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "runtime", "jobs", "hermes", "resources"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
@@ -140,10 +143,11 @@ class TestMcpComposition(unittest.TestCase):
                 "runtime": ("core", "project_instance", "runtime_service"),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
+                "resources": ("resource_service_factory",),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "runtime", "jobs", "hermes"}))
+                            if spec.group_id not in {"instances", "runtime", "jobs", "hermes", "resources"}))
 
     def test_instance_and_hermes_groups_register_against_an_isolated_fake_context(self):
         from dependencies import ToolDependencies
@@ -229,7 +233,7 @@ class TestMcpComposition(unittest.TestCase):
         groups = (
             "instances", "wp", "net", "data", "fs", "mail", "context", "cache",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
-            "plugin_check", "remote", "hermes", "recovery",
+            "plugin_check", "remote", "hermes", "recovery", "resources",
         )
         for group in groups:
             self.assertNotIn("from app import *", (root / f"{group}.py").read_text())

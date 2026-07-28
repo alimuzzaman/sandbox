@@ -5,6 +5,33 @@ description: "Operate Sandbox through its CLI first; MCP is optional client inte
 
 # Sandbox CLI-first operation
 
+## Host storage monitoring and cleanup
+
+Use the global `resources` command before raw host, Docker, or filesystem
+inspection:
+
+```sh
+sb resources status --json
+sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
+sb resources plan --scope cache --thorough --budget 60 --json
+sb resources plan --scope stale --thorough --budget 90 --json
+```
+
+Status and planning are read-only. Treat unavailable or timed-out bytes as
+unknown. Ordinary cache plans never contain named persistent volumes or
+worktrees; those require the separate stale scope and complete positive
+ownership plus non-use evidence. Never replace this workflow with a broad
+Docker prune.
+
+Apply only after the user explicitly authorizes the reviewed plan:
+
+```sh
+sb resources cleanup --plan-id PLAN_ID --confirm --json
+```
+
+Do not supply paths or engine identifiers outside the plan. Never retry a
+timed-out remote cleanup automatically; rescan and create a new plan.
+
 ## Durable remote-first jobs
 
 When a project configures `runtime.default: "remote"`, use the configured

@@ -292,6 +292,22 @@ screenshot, DOM, and console errors without you switching tabs.
 
 ## CLI-first operation (MCP optional)
 
+### Host storage monitoring and safe cleanup
+
+Inspect local or named-remote storage without booting an instance:
+
+```sh
+./sb resources status --json
+./sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
+./sb resources plan --scope cache --thorough --budget 60 --json
+./sb resources plan --scope stale --thorough --budget 90 --json
+```
+
+Planning is read-only. Cleanup requires a current target-bound plan plus
+`--confirm`, revalidates each exact candidate, and never uses a broad Docker
+prune. Cache and stale persistent-resource cleanup are deliberately separate.
+See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
+
 ### Durable remote-first jobs
 
 When `sandbox.config.json` configures a provisioned `runtime.default: "remote"`,

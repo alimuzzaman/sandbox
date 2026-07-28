@@ -15,6 +15,9 @@ class MemoryRegistryRepository:
     def all(self) -> dict[str, RegistryRecord]:
         return {key: dict(value) for key, value in self._records.items()}
 
+    def read_only_all(self) -> dict[str, RegistryRecord]:
+        return self.all()
+
     def list_for_root(self, root: str) -> list[RegistryRecord]:
         canonical = canonical_root(root)
         records = [dict(item) for item in self._records.values() if item.get("root") == canonical]

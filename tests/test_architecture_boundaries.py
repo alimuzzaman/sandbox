@@ -46,7 +46,7 @@ class TestArchitectureBoundaries(unittest.TestCase):
         from sandbox.registry import COMMANDS
 
         load_builtin_commands()
-        self.assertEqual(len(COMMANDS), 84)
+        self.assertEqual(len(COMMANDS), 85)
         self.assertEqual(validate_builtin_command_coverage(), ())
 
         import sys
@@ -54,12 +54,12 @@ class TestArchitectureBoundaries(unittest.TestCase):
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 20)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 21)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 102)
+            self.assertEqual(len(tool_names), 105)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))

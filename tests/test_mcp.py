@@ -196,6 +196,8 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("activate_plugin", "project_dir,slug"), ("deactivate_plugin", "project_dir,slug"),
             ("load_context", ""), ("load_workflow", "name"), ("load_skill", "name"),
             ("cache_info", ""), ("cache_clear", ""),
+            ("resource_status", ""), ("resource_cleanup_plan", "scope"),
+            ("resource_cleanup_apply", "plan_id"),
             ("wp_eval_live", "code,project_dir"), ("list_skills", "project_dir"),
             ("skill_write", "description,project_dir,title"), ("skill_edit", "project_dir,slug"),
             ("skill_delete", "project_dir,slug"), ("qm_capture", "project_dir"),
@@ -222,7 +224,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 102)
+        self.assertEqual(len(actual), 105)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

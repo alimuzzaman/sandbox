@@ -32,7 +32,7 @@ class TestRepositoryContractShape(unittest.TestCase):
     def test_protocol_lists_required_operations(self):
         from sandbox.project_registry.base import RegistryRepository
 
-        for name in ("all", "get", "list_for_root", "put", "remove"):
+        for name in ("all", "read_only_all", "get", "list_for_root", "put", "remove"):
             self.assertTrue(hasattr(RegistryRepository, name), name)
 
     def test_fixture_directory_contains_supported_and_future_versions(self):
@@ -70,6 +70,16 @@ class TestJsonRepository(ContractMixin, unittest.TestCase):
                          {"preserve": True})
         stored = json.loads(self.path.read_text())
         self.assertEqual(stored["version"], 2)
+
+    def test_read_only_all_migrates_in_memory_without_rewrite_or_lock(self):
+        from sandbox.project_registry.json import JsonRegistryRepository
+
+        original = self.fixture("v1.json").read_text()
+        self.path.write_text(original)
+        records = JsonRegistryRepository(self.path).read_only_all()
+        self.assertIn("/tmp/sandbox-fixture/project::default", records)
+        self.assertEqual(self.path.read_text(), original)
+        self.assertFalse(self.path.with_name("registry.lock").exists())
 
     def test_future_version_fails_without_rewrite(self):
         from sandbox.project_registry.base import UnsupportedRegistryVersion

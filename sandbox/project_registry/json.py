@@ -109,6 +109,14 @@ class JsonRegistryRepository:
                 self._write(value)
             return {key: dict(record) for key, record in value["instances"].items()}
 
+    def read_only_all(self) -> dict[str, RegistryRecord]:
+        """Return a validated in-memory view without locks, migration, or writes."""
+        value = self._migrate_v1(self._read())
+        for key, record in value["instances"].items():
+            backfill_record_identity(key, record)
+            validate_record_identity(key, record)
+        return {key: dict(record) for key, record in value["instances"].items()}
+
     def list_for_root(self, root: str) -> list[RegistryRecord]:
         canonical = canonical_root(root)
         records = [record for record in self.all().values() if record.get("root") == canonical]

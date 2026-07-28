@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-28
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: Ready PRD in `specs/035-resource-monitoring-cleanup/prd.md`
 

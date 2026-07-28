@@ -120,6 +120,30 @@ class TestHostingManifest(unittest.TestCase):
             result = hosting.validate_manifest(directory)
         self.assertEqual(result["basic_auth"]["password_secret"], "BASIC_AUTH_PASSWORD")
 
+    def test_renders_basic_auth_bypass_for_one_public_cloudflare_client_ip(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ip: 103.95.98.15\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem", "$2a$hash")
+        self.assertEqual(result["basic_auth"]["bypass_ip"], "103.95.98.15")
+        self.assertIn("remote_ip 173.245.48.0/20", rendered)
+        self.assertIn("header CF-Connecting-IP 103.95.98.15", rendered)
+        self.assertIn("handle @basic_auth_bypass", rendered)
+        self.assertIn("handle {", rendered)
+        self.assertIn("lnzr_dev $2a$hash", rendered)
+
+    def test_rejects_non_public_basic_auth_bypass_ip(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ip: 127.0.0.1\n    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "bypass_ip must be a public"):
+                hosting.validate_manifest(directory)
+
     def test_rejects_basic_auth_username_with_shell_syntax(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",

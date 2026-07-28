@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import os
 import re
 import shlex
@@ -24,6 +25,14 @@ _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 _STATE_FILE = RUNTIME_DIR / "hosts.json"
 _PORT_START = 18000
 _PORT_COUNT = 1000
+_CLOUDFLARE_PROXY_CIDRS = (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22", "2400:cb00::/32",
+    "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+    "2a06:98c0::/29", "2c0f:f248::/32",
+)
 
 
 def normalize_hostname(value: str, *, wildcard: bool = True) -> str:
@@ -149,7 +158,20 @@ def _basic_auth(env: dict) -> dict | None:
     password_secret = str(raw.get("password_secret") or "").strip()
     if not _ENV_RE.fullmatch(password_secret):
         raise HostingError("basic_auth.password_secret must be an environment variable name")
-    return {"username": username, "password_secret": password_secret}
+    bypass_ip = raw.get("bypass_ip")
+    if bypass_ip is None:
+        return {"username": username, "password_secret": password_secret}
+    try:
+        parsed_bypass_ip = ipaddress.ip_address(str(bypass_ip).strip())
+    except ValueError as exc:
+        raise HostingError("basic_auth.bypass_ip must be a valid IP address") from exc
+    if not parsed_bypass_ip.is_global:
+        raise HostingError("basic_auth.bypass_ip must be a public IP address")
+    return {
+        "username": username,
+        "password_secret": password_secret,
+        "bypass_ip": str(parsed_bypass_ip),
+    }
 
 
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
@@ -433,9 +455,26 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
         elif not basic_auth_hash.startswith("$"):
             raise HostingError("basic_auth_hash must be a Caddy password hash")
         else:
-            basic = ("    basicauth {\n"
-                     f"        {auth['username']} {basic_auth_hash}\n"
-                     "    }\n")
+            auth_block = ("        basicauth {\n"
+                          f"            {auth['username']} {basic_auth_hash}\n"
+                          "        }\n")
+            if auth.get("bypass_ip"):
+                trusted_proxies = " ".join(_CLOUDFLARE_PROXY_CIDRS)
+                basic = ("    @basic_auth_bypass {\n"
+                         f"        remote_ip {trusted_proxies}\n"
+                         f"        header CF-Connecting-IP {auth['bypass_ip']}\n"
+                         "    }\n"
+                         "    handle @basic_auth_bypass {\n"
+                         f"        reverse_proxy 127.0.0.1:{int(port)}\n"
+                         "    }\n"
+                         "    handle {\n"
+                         f"{auth_block}"
+                         f"        reverse_proxy 127.0.0.1:{int(port)}\n"
+                         "    }\n")
+            else:
+                basic = ("    basicauth {\n"
+                         f"        {auth['username']} {basic_auth_hash}\n"
+                         "    }\n")
     blocks = [f"{', '.join(served)} {{\n{basic}{tls}    reverse_proxy 127.0.0.1:{int(port)}\n}}\n"]
     for route in validated["routes"]:
         if route["mode"] == "redirect":

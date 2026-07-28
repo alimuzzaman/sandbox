@@ -158,20 +158,35 @@ def _basic_auth(env: dict) -> dict | None:
     password_secret = str(raw.get("password_secret") or "").strip()
     if not _ENV_RE.fullmatch(password_secret):
         raise HostingError("basic_auth.password_secret must be an environment variable name")
+    result = {"username": username, "password_secret": password_secret}
     bypass_ip = raw.get("bypass_ip")
-    if bypass_ip is None:
-        return {"username": username, "password_secret": password_secret}
-    try:
-        parsed_bypass_ip = ipaddress.ip_address(str(bypass_ip).strip())
-    except ValueError as exc:
-        raise HostingError("basic_auth.bypass_ip must be a valid IP address") from exc
-    if not parsed_bypass_ip.is_global:
-        raise HostingError("basic_auth.bypass_ip must be a public IP address")
-    return {
-        "username": username,
-        "password_secret": password_secret,
-        "bypass_ip": str(parsed_bypass_ip),
-    }
+    if bypass_ip is not None:
+        try:
+            parsed_bypass_ip = ipaddress.ip_address(str(bypass_ip).strip())
+        except ValueError as exc:
+            raise HostingError("basic_auth.bypass_ip must be a valid IP address") from exc
+        if not parsed_bypass_ip.is_global:
+            raise HostingError("basic_auth.bypass_ip must be a public IP address")
+        result["bypass_ip"] = str(parsed_bypass_ip)
+    bypass_paths = raw.get("bypass_paths", [])
+    if not isinstance(bypass_paths, list):
+        raise HostingError("basic_auth.bypass_paths must be a list")
+    normalized_paths: list[str] = []
+    for path in bypass_paths:
+        candidate = str(path).strip()
+        if (
+            not candidate.startswith("/")
+            or candidate == "/"
+            or ".." in candidate
+            or any(character in candidate for character in "\r\n*?{}")
+        ):
+            raise HostingError("basic_auth.bypass_paths must contain exact non-root URL paths")
+        if candidate in normalized_paths:
+            raise HostingError("basic_auth.bypass_paths must not contain duplicates")
+        normalized_paths.append(candidate)
+    if normalized_paths:
+        result["bypass_paths"] = normalized_paths
+    return result
 
 
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
@@ -458,16 +473,27 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
             auth_block = ("        basicauth {\n"
                           f"            {auth['username']} {basic_auth_hash}\n"
                           "        }\n")
+            bypass_handlers = ""
+            if auth.get("bypass_paths"):
+                public_paths = " ".join(auth["bypass_paths"])
+                bypass_handlers += ("    @basic_auth_public_paths {\n"
+                                    "        method GET\n"
+                                    f"        path {public_paths}\n"
+                                    "    }\n"
+                                    "    handle @basic_auth_public_paths {\n"
+                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
+                                    "    }\n")
             if auth.get("bypass_ip"):
                 trusted_proxies = " ".join(_CLOUDFLARE_PROXY_CIDRS)
-                basic = ("    @basic_auth_bypass {\n"
-                         f"        remote_ip {trusted_proxies}\n"
-                         f"        header CF-Connecting-IP {auth['bypass_ip']}\n"
-                         "    }\n"
-                         "    handle @basic_auth_bypass {\n"
-                         f"        reverse_proxy 127.0.0.1:{int(port)}\n"
-                         "    }\n"
-                         "    handle {\n"
+                bypass_handlers += ("    @basic_auth_bypass {\n"
+                                    f"        remote_ip {trusted_proxies}\n"
+                                    f"        header CF-Connecting-IP {auth['bypass_ip']}\n"
+                                    "    }\n"
+                                    "    handle @basic_auth_bypass {\n"
+                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
+                                    "    }\n")
+            if bypass_handlers:
+                basic = (bypass_handlers + "    handle {\n"
                          f"{auth_block}"
                          f"        reverse_proxy 127.0.0.1:{int(port)}\n"
                          "    }\n")

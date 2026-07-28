@@ -211,6 +211,8 @@ basic_auth:
   username: operator
   password_secret: MY_SITE_BASIC_AUTH_PASSWORD
   bypass_ip: 203.0.113.42
+  bypass_paths:
+    - /healthz
 ```
 
 Set the referenced secret with `./sb host secrets --set MY_SITE_BASIC_AUTH_PASSWORD`.
@@ -225,6 +227,10 @@ client bypasses Basic Auth only when the request arrives through a Cloudflare pr
 and its `CF-Connecting-IP` header exactly matches the declared address. Direct
 requests cannot spoof this bypass because Caddy also verifies the proxy source
 address against Cloudflare's published ranges.
+
+`bypass_paths` is optional and allows unauthenticated `GET` requests to exact,
+non-root paths. It is intended for public discovery or health endpoints while the
+rest of the hosted application remains behind Basic Auth.
 
 ### One-time hosted WordPress login URLs
 

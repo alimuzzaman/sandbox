@@ -214,6 +214,11 @@ basic_auth:
     - 203.0.113.42
   bypass_paths:
     - /healthz
+  bypass_routes:
+    - path: /api/oauth2/token
+      methods: [POST]
+    - path_template: /api/v1/orgs/{orgId}/projects
+      methods: [GET, POST]
 ```
 
 Set the referenced secret with `./sb host secrets --set MY_SITE_BASIC_AUTH_PASSWORD`.
@@ -232,6 +237,16 @@ Cloudflare's published ranges.
 `bypass_paths` is optional and allows unauthenticated `GET` requests to exact,
 non-root paths. It is intended for public discovery or health endpoints while the
 rest of the hosted application remains behind Basic Auth.
+
+`bypass_routes` is optional and permits only the declared HTTP methods on an
+exact `path` or a segment-based `path_template`. A template must contain at
+least one whole-segment `{parameter}`; Sandbox converts parameters to
+single-segment Caddy matchers and does not accept raw regular expressions,
+wildcards, root paths, or non-standard methods. Use this for machine protocols
+whose application authentication must receive `POST` or Bearer-token requests
+while the surrounding site remains behind Basic Auth. The application remains
+responsible for authentication, authorization, rate limiting, and tenant
+isolation on every bypassed route.
 
 ### One-time hosted WordPress login URLs
 

@@ -22,6 +22,9 @@ class HostingError(ValueError):
 
 _SERVICE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+_BASIC_AUTH_BYPASS_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
+_BASIC_AUTH_ROUTE_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]+$")
+_BASIC_AUTH_ROUTE_PARAMETER_RE = re.compile(r"\{[A-Za-z][A-Za-z0-9_]*\}$")
 _STATE_FILE = RUNTIME_DIR / "hosts.json"
 _PORT_START = 18000
 _PORT_COUNT = 1000
@@ -194,7 +197,64 @@ def _basic_auth(env: dict) -> dict | None:
         normalized_paths.append(candidate)
     if normalized_paths:
         result["bypass_paths"] = normalized_paths
+    bypass_routes = raw.get("bypass_routes", [])
+    if not isinstance(bypass_routes, list) or len(bypass_routes) > 64:
+        raise HostingError("basic_auth.bypass_routes must be a list of at most 64 routes")
+    normalized_routes: list[dict] = []
+    seen_routes: set[tuple[str, str]] = set()
+    for route in bypass_routes:
+        if not isinstance(route, dict) or not route or set(route) - {"path", "path_template", "methods"}:
+            raise HostingError("basic_auth.bypass_routes entries must contain only path or path_template plus methods")
+        has_path = "path" in route
+        has_template = "path_template" in route
+        if has_path == has_template:
+            raise HostingError("basic_auth.bypass_routes entries require exactly one of path or path_template")
+        methods = route.get("methods")
+        if not isinstance(methods, list) or not methods:
+            raise HostingError("basic_auth.bypass_routes methods must be a non-empty list")
+        normalized_methods: list[str] = []
+        for method in methods:
+            candidate_method = str(method).strip().upper()
+            if candidate_method not in _BASIC_AUTH_BYPASS_METHODS:
+                raise HostingError("basic_auth.bypass_routes methods must use standard HTTP methods")
+            if candidate_method in normalized_methods:
+                raise HostingError("basic_auth.bypass_routes methods must not contain duplicates")
+            normalized_methods.append(candidate_method)
+        field = "path" if has_path else "path_template"
+        candidate_path = str(route[field]).strip()
+        segments = candidate_path.removeprefix("/").split("/")
+        if (
+            not candidate_path.startswith("/")
+            or candidate_path == "/"
+            or not segments
+            or any(not segment for segment in segments)
+        ):
+            raise HostingError("basic_auth.bypass_routes paths must be non-root absolute URL paths")
+        has_parameter = False
+        for segment in segments:
+            if _BASIC_AUTH_ROUTE_PARAMETER_RE.fullmatch(segment):
+                has_parameter = True
+            elif segment in {".", ".."} or not _BASIC_AUTH_ROUTE_SEGMENT_RE.fullmatch(segment):
+                raise HostingError("basic_auth.bypass_routes paths contain an unsafe segment")
+        if has_template != has_parameter:
+            raise HostingError("basic_auth.bypass_routes path_template must contain at least one {parameter}")
+        route_key = (field, candidate_path)
+        if route_key in seen_routes:
+            raise HostingError("basic_auth.bypass_routes must not contain duplicates")
+        seen_routes.add(route_key)
+        normalized_routes.append({field: candidate_path, "methods": normalized_methods})
+    if normalized_routes:
+        result["bypass_routes"] = normalized_routes
     return result
+
+
+def _basic_auth_route_pattern(path_template: str) -> str:
+    segments = path_template.removeprefix("/").split("/")
+    rendered = [
+        "[^/]+" if _BASIC_AUTH_ROUTE_PARAMETER_RE.fullmatch(segment) else re.escape(segment)
+        for segment in segments
+    ]
+    return "^/" + "/".join(rendered) + "$"
 
 
 def validate_manifest(project_dir: str | Path, environment: str | None = None) -> dict:
@@ -489,6 +549,21 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
                                     f"        path {public_paths}\n"
                                     "    }\n"
                                     "    handle @basic_auth_public_paths {\n"
+                                    f"        reverse_proxy 127.0.0.1:{int(port)}\n"
+                                    "    }\n")
+            for index, route in enumerate(auth.get("bypass_routes", [])):
+                matcher_name = f"basic_auth_public_route_{index}"
+                methods = " ".join(route["methods"])
+                if "path" in route:
+                    path_matcher = f"        path {route['path']}\n"
+                else:
+                    pattern = _basic_auth_route_pattern(route["path_template"])
+                    path_matcher = f"        path_regexp {matcher_name} {pattern}\n"
+                bypass_handlers += (f"    @{matcher_name} {{\n"
+                                    f"        method {methods}\n"
+                                    f"{path_matcher}"
+                                    "    }\n"
+                                    f"    handle @{matcher_name} {{\n"
                                     f"        reverse_proxy 127.0.0.1:{int(port)}\n"
                                     "    }\n")
             for index, bypass_ip in enumerate(auth.get("bypass_ips", [])):

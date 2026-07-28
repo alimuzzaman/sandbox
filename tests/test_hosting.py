@@ -140,6 +140,43 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("handle {", rendered)
         self.assertIn("lnzr_dev $2a$hash", rendered)
 
+    def test_renders_method_scoped_exact_and_templated_basic_auth_bypass_routes(self):
+        manifest = _manifest().replace(
+            "    cloudflare:\n",
+            """    basic_auth:
+      username: lnzr_dev
+      password_secret: BASIC_AUTH_PASSWORD
+      bypass_routes:
+        - path: /api/oauth2/token
+          methods: [POST]
+        - path_template: /api/v1/orgs/{orgId}/projects/{projectId}/snapshots
+          methods: [GET, POST]
+    cloudflare:
+""",
+        )
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem", "$2a$hash")
+        self.assertEqual(
+            result["basic_auth"]["bypass_routes"],
+            [
+                {"path": "/api/oauth2/token", "methods": ["POST"]},
+                {
+                    "path_template": "/api/v1/orgs/{orgId}/projects/{projectId}/snapshots",
+                    "methods": ["GET", "POST"],
+                },
+            ],
+        )
+        self.assertIn("@basic_auth_public_route_0 {", rendered)
+        self.assertIn("method POST", rendered)
+        self.assertIn("path /api/oauth2/token", rendered)
+        self.assertIn("@basic_auth_public_route_1 {", rendered)
+        self.assertIn("method GET POST", rendered)
+        self.assertIn(
+            "path_regexp basic_auth_public_route_1 ^/api/v1/orgs/[^/]+/projects/[^/]+/snapshots$",
+            rendered,
+        )
+
     def test_rejects_non_public_basic_auth_bypass_ip(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",
@@ -157,6 +194,32 @@ class TestHostingManifest(unittest.TestCase):
         with self._write(manifest) as directory:
             with self.assertRaisesRegex(hosting.HostingError, "bypass_paths"):
                 hosting.validate_manifest(directory)
+
+    def test_rejects_unsafe_basic_auth_bypass_routes(self):
+        invalid_routes = (
+            "- path: /\n          methods: [POST]",
+            "- path: /api/*\n          methods: [POST]",
+            "- path: /api/../admin\n          methods: [POST]",
+            "- path_template: /api/{bad-name}\n          methods: [GET]",
+            "- path_template: /api/static\n          methods: [GET]",
+            "- path: /api/oauth2/token\n          methods: []",
+            "- path: /api/oauth2/token\n          methods: [TRACE]",
+            "- path: /api/oauth2/token\n          path_template: /api/{resource}\n          methods: [POST]",
+        )
+        for route in invalid_routes:
+            with self.subTest(route=route):
+                manifest = _manifest().replace(
+                    "    cloudflare:\n",
+                    "    basic_auth:\n"
+                    "      username: lnzr_dev\n"
+                    "      password_secret: BASIC_AUTH_PASSWORD\n"
+                    "      bypass_routes:\n"
+                    f"        {route}\n"
+                    "    cloudflare:\n",
+                )
+                with self._write(manifest) as directory:
+                    with self.assertRaisesRegex(hosting.HostingError, "bypass_routes"):
+                        hosting.validate_manifest(directory)
 
     def test_rejects_basic_auth_username_with_shell_syntax(self):
         manifest = _manifest().replace(

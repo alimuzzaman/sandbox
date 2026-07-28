@@ -292,7 +292,7 @@ security, and release-regression evidence across all stories.
 - [X] T137 Run disposable remote Node/PHP/WordPress/multiple-workspace/matrix/CI acceptance through `./sb` and record remote identity, job IDs, source identities, outcomes, cleanup, and any skipped environment-dependent case in `specs/032-remote-job-runtime/implementation-evidence.md`
 - [X] T138 Verify secret redaction, unsafe artifact rejection, bounded response limits, process identity mismatch protection, disk reserve behavior, and no raw remote Docker exposure in `specs/032-remote-job-runtime/security-review.md`
 - [X] T139 Validate every command in `specs/032-remote-job-runtime/quickstart.md`, update it only where observed behavior differs, and record the validation environment in `specs/032-remote-job-runtime/implementation-evidence.md`
-- [ ] T140 Run `git diff --check`, inspect `git status`, confirm no changes under `runtime/wp/` or `vendor/`, commit all passing code/docs/evidence, and push the active branch
+- [X] T140 Run `git diff --check`, inspect `git status`, confirm no changes under `runtime/wp/` or `vendor/`, commit all passing code/docs/evidence, and push the active branch
 
 ---
 

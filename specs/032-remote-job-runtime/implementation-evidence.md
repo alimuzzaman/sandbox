@@ -1087,3 +1087,5 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests with the same two skips and completed the registry and CLI self-tests.
 - `git diff --check` passed, status was inspected, and no changes existed
   under `runtime/wp/` or `vendor/` before staging.
+- Commit/push: `006fdde feat(jobs): complete remote runtime convergence`
+  pushed to `origin/latest`.

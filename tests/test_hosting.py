@@ -120,18 +120,20 @@ class TestHostingManifest(unittest.TestCase):
             result = hosting.validate_manifest(directory)
         self.assertEqual(result["basic_auth"]["password_secret"], "BASIC_AUTH_PASSWORD")
 
-    def test_renders_basic_auth_bypasses_for_public_paths_and_one_cloudflare_client_ip(self):
+    def test_renders_basic_auth_bypasses_for_public_paths_and_cloudflare_client_ips(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",
-            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ip: 103.95.98.15\n      bypass_paths: [/auth.md, /.well-known/oauth-protected-resource]\n    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ips: [103.95.98.15, 2001:4860:4860::8888]\n      bypass_paths: [/auth.md, /.well-known/oauth-protected-resource]\n    cloudflare:\n",
         )
         with self._write(manifest) as directory:
             result = hosting.validate_manifest(directory)
         rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem", "$2a$hash")
-        self.assertEqual(result["basic_auth"]["bypass_ip"], "103.95.98.15")
+        self.assertEqual(result["basic_auth"]["bypass_ips"], ["103.95.98.15", "2001:4860:4860::8888"])
         self.assertIn("remote_ip 173.245.48.0/20", rendered)
         self.assertIn("header CF-Connecting-IP 103.95.98.15", rendered)
-        self.assertIn("handle @basic_auth_bypass", rendered)
+        self.assertIn("header CF-Connecting-IP 2001:4860:4860::8888", rendered)
+        self.assertIn("handle @basic_auth_bypass_0", rendered)
+        self.assertIn("handle @basic_auth_bypass_1", rendered)
         self.assertIn("method GET", rendered)
         self.assertIn("path /auth.md /.well-known/oauth-protected-resource", rendered)
         self.assertIn("handle @basic_auth_public_paths", rendered)
@@ -141,10 +143,10 @@ class TestHostingManifest(unittest.TestCase):
     def test_rejects_non_public_basic_auth_bypass_ip(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",
-            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ip: 127.0.0.1\n    cloudflare:\n",
+            "    basic_auth:\n      username: lnzr_dev\n      password_secret: BASIC_AUTH_PASSWORD\n      bypass_ips: [127.0.0.1]\n    cloudflare:\n",
         )
         with self._write(manifest) as directory:
-            with self.assertRaisesRegex(hosting.HostingError, "bypass_ip must be a public"):
+            with self.assertRaisesRegex(hosting.HostingError, "bypass_ips must contain public"):
                 hosting.validate_manifest(directory)
 
     def test_rejects_unsafe_basic_auth_bypass_path(self):

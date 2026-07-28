@@ -210,7 +210,8 @@ An environment may also protect its public origin with Basic Auth:
 basic_auth:
   username: operator
   password_secret: MY_SITE_BASIC_AUTH_PASSWORD
-  bypass_ip: 203.0.113.42
+  bypass_ips:
+    - 203.0.113.42
   bypass_paths:
     - /healthz
 ```
@@ -222,11 +223,11 @@ argv, or included in the Compose environment. The gate is disabled when the bloc
 absent. Planning deliberately redacts the generated Caddy verifier; confirmed applies
 fail rather than silently omit a declared gate.
 
-`bypass_ip` is optional and accepts one public IPv4 or IPv6 address. The matching
+`bypass_ips` is optional and accepts public IPv4 or IPv6 addresses. Any matching
 client bypasses Basic Auth only when the request arrives through a Cloudflare proxy
-and its `CF-Connecting-IP` header exactly matches the declared address. Direct
-requests cannot spoof this bypass because Caddy also verifies the proxy source
-address against Cloudflare's published ranges.
+and its `CF-Connecting-IP` header exactly matches a declared address. Direct requests
+cannot spoof this bypass because Caddy also verifies the proxy source address against
+Cloudflare's published ranges.
 
 `bypass_paths` is optional and allows unauthenticated `GET` requests to exact,
 non-root paths. It is intended for public discovery or health endpoints while the

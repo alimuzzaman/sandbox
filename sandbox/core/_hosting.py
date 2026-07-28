@@ -159,15 +159,23 @@ def _basic_auth(env: dict) -> dict | None:
     if not _ENV_RE.fullmatch(password_secret):
         raise HostingError("basic_auth.password_secret must be an environment variable name")
     result = {"username": username, "password_secret": password_secret}
-    bypass_ip = raw.get("bypass_ip")
-    if bypass_ip is not None:
+    bypass_ips = raw.get("bypass_ips", [])
+    if not isinstance(bypass_ips, list):
+        raise HostingError("basic_auth.bypass_ips must be a list")
+    normalized_ips: list[str] = []
+    for bypass_ip in bypass_ips:
         try:
             parsed_bypass_ip = ipaddress.ip_address(str(bypass_ip).strip())
         except ValueError as exc:
-            raise HostingError("basic_auth.bypass_ip must be a valid IP address") from exc
+            raise HostingError("basic_auth.bypass_ips must contain valid IP addresses") from exc
         if not parsed_bypass_ip.is_global:
-            raise HostingError("basic_auth.bypass_ip must be a public IP address")
-        result["bypass_ip"] = str(parsed_bypass_ip)
+            raise HostingError("basic_auth.bypass_ips must contain public IP addresses")
+        candidate_ip = str(parsed_bypass_ip)
+        if candidate_ip in normalized_ips:
+            raise HostingError("basic_auth.bypass_ips must not contain duplicates")
+        normalized_ips.append(candidate_ip)
+    if normalized_ips:
+        result["bypass_ips"] = normalized_ips
     bypass_paths = raw.get("bypass_paths", [])
     if not isinstance(bypass_paths, list):
         raise HostingError("basic_auth.bypass_paths must be a list")
@@ -483,13 +491,13 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
                                     "    handle @basic_auth_public_paths {\n"
                                     f"        reverse_proxy 127.0.0.1:{int(port)}\n"
                                     "    }\n")
-            if auth.get("bypass_ip"):
+            for index, bypass_ip in enumerate(auth.get("bypass_ips", [])):
                 trusted_proxies = " ".join(_CLOUDFLARE_PROXY_CIDRS)
-                bypass_handlers += ("    @basic_auth_bypass {\n"
+                bypass_handlers += (f"    @basic_auth_bypass_{index} {{\n"
                                     f"        remote_ip {trusted_proxies}\n"
-                                    f"        header CF-Connecting-IP {auth['bypass_ip']}\n"
+                                    f"        header CF-Connecting-IP {bypass_ip}\n"
                                     "    }\n"
-                                    "    handle @basic_auth_bypass {\n"
+                                    f"    handle @basic_auth_bypass_{index} {{\n"
                                     f"        reverse_proxy 127.0.0.1:{int(port)}\n"
                                     "    }\n")
             if bypass_handlers:

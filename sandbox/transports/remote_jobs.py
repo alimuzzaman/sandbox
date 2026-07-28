@@ -40,6 +40,47 @@ def _last_json(text: str) -> dict | None:
     return None
 
 
+def workspace_refresh_command(source_path: str, workspace_path: str) -> str:
+    """Refresh a remote copy without invalidating existing bind-mount inodes."""
+    root_script = (
+        "find /workspace -mindepth 2 -maxdepth 2 -exec rm -rf -- {} +; "
+        "find /workspace -mindepth 1 -maxdepth 1 ! -type d -exec rm -f -- {} +"
+    )
+    root_clean = (
+        'docker run --rm --user 0:0 --volume "$workspace:/workspace" '
+        f"alpine:3.20 sh -c {shlex.quote(root_script)}"
+    )
+    top_level_items = '"$workspace"/* "$workspace"/.[!.]* "$workspace"/..?*'
+    clean_contents = (
+        f"for item in {top_level_items}; do "
+        'if [ ! -e "$item" ] && [ ! -L "$item" ]; then continue; fi; '
+        'if [ -d "$item" ] && [ ! -L "$item" ]; then '
+        'find "$item" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
+        'else rm -f -- "$item"; fi; done'
+    )
+    remaining_contents = (
+        'find "$workspace" -mindepth 2 -print -quit; '
+        'find "$workspace" -mindepth 1 -maxdepth 1 ! -type d -print -quit'
+    )
+    prune_stale_dirs = (
+        f"for item in {top_level_items}; do "
+        'if [ ! -e "$item" ] && [ ! -L "$item" ]; then continue; fi; '
+        'if [ -d "$item" ] && [ ! -L "$item" ]; then name=${item##*/}; '
+        'if [ ! -d "$source/$name" ] || [ -L "$source/$name" ]; then '
+        'rmdir -- "$item"; fi; fi; done'
+    )
+    return (
+        f"workspace={shlex.quote(workspace_path)}; source={shlex.quote(source_path)}; "
+        'mkdir -p "$workspace" && '
+        f"{clean_contents} 2>/dev/null || true; "
+        f'if [ -n "$({remaining_contents})" ]; then {root_clean}; fi && '
+        f"{prune_stale_dirs} && "
+        f'if [ -n "$({remaining_contents})" ]; then '
+        "echo 'remote workspace cleanup left contents' >&2; exit 1; fi && "
+        'cp -a "$source/." "$workspace"'
+    )
+
+
 class RemoteJobTransport:
     """Deploy then exchange compact job-control JSON, never child stdio pipes."""
 
@@ -145,41 +186,9 @@ class RemoteJobTransport:
         # Project resolution derives a slug from the deployed workspace name;
         # use hyphens so the copied path remains a valid project root.
         workspace_path = f"{source_path}-workspace-{suffix}"
-        # A prior generic Compose run may have written dependency files as
-        # container root into its bind-mounted checkout. Keep the workspace
-        # directory itself: an already-created reusable Compose container has
-        # that directory as a bind mount, and deleting/recreating it makes a
-        # later ``docker compose exec`` reject its working directory as outside
-        # the mount namespace. Replace contents in place instead. First use
-        # normal unprivileged cleanup; only when that fails, use a narrowly
-        # mounted disposable root cleaner for this deterministic workspace.
-        clean_contents = shlex.join([
-            "find", workspace_path, "-mindepth", "1", "-maxdepth", "1",
-            "-exec", "rm", "-rf", "--", "{}", "+",
-        ])
-        remaining_contents = shlex.join([
-            "find", workspace_path, "-mindepth", "1", "-maxdepth", "1",
-            "-print", "-quit",
-        ])
-        root_clean = shlex.join([
-            "docker", "run", "--rm", "--user", "0:0", "--volume",
-            f"{workspace_path}:/workspace", "alpine:3.20", "sh", "-c",
-            "find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
-        ])
-        command = (
-            shlex.join(["mkdir", "-p", workspace_path]) + " && "
-            # GNU find does not reliably propagate a failed -exec rm status.
-            # Check the directory after the unprivileged attempt, then use the
-            # scoped root cleaner only when root-owned bind-mount contents
-            # remain. A final emptiness check prevents cp -a merging stale
-            # dependency-store files into the refreshed source tree.
-            f"{clean_contents} 2>/dev/null || true; "
-            f"if [ -n \"$({remaining_contents})\" ]; then {root_clean}; fi && "
-            f"if [ -n \"$({remaining_contents})\" ]; then "
-            "echo 'remote workspace cleanup left contents' >&2; exit 1; fi && "
-            + shlex.join(
-            ["cp", "-a", f"{source_path}/.", workspace_path])
-        )
+        # Preserve top-level directory inodes already used by nested Compose
+        # bind mounts while replacing their contents and pruning stale dirs.
+        command = workspace_refresh_command(source_path, workspace_path)
         result = self.ssh_run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
             detail = "\n".join(part.strip() for part in (

@@ -55,6 +55,13 @@ runtime descriptor:
         ]
       }
     }
+  },
+  "tests": {
+    "modes": {
+      "node-unit": {
+        "argv": ["npm", "test"]
+      }
+    }
   }
 }
 ```
@@ -76,7 +83,7 @@ by default.
 
 ```bash
 ./sb test --remote scaleway-sandbox --workspace node-unit \
-  --timeout 1800 --output smart -- npm test
+  --timeout 1800 --output-profile smart node-unit
 ```
 
 Sandbox first deploys the exact local working tree, including supported uncommitted and
@@ -87,16 +94,19 @@ To submit without following:
 
 ```bash
 ./sb test --remote scaleway-sandbox --workspace node-unit \
-  --timeout 1800 --output quiet --detach -- npm test
+  --timeout 1800 --output-profile quiet node-unit
 ```
+
+Remote test submission is detached by design and returns a durable job ID.
 
 ## 4. Inspect and resume
 
 ```bash
-./sb job status JOB_ID --remote scaleway-sandbox
-./sb job follow JOB_ID --remote scaleway-sandbox --output agent-compact
-./sb job output JOB_ID --remote scaleway-sandbox --output full
-./sb job metrics JOB_ID --remote scaleway-sandbox
+./sb job-status JOB_ID --remote scaleway-sandbox
+./sb job-output JOB_ID --remote scaleway-sandbox \
+  --follow --profile agent-compact
+./sb job-output JOB_ID --remote scaleway-sandbox --profile full
+./sb job-metrics JOB_ID --remote scaleway-sandbox
 ```
 
 `status` shows lifecycle and health separately. A quiet process with continuing resource
@@ -108,11 +118,11 @@ attached to that SSH/MCP response.
 ## 5. Retrieve full retained output and artifacts
 
 ```bash
-./sb job output JOB_ID --remote scaleway-sandbox \
-  --stream stderr --output full --tail 262144
+./sb job-output JOB_ID --remote scaleway-sandbox \
+  --stream stderr --profile full --tail-bytes 262144
 
-./sb job artifacts JOB_ID --remote scaleway-sandbox
-./sb job artifact get JOB_ID ARTIFACT_ID --remote scaleway-sandbox \
+./sb job-artifacts JOB_ID --remote scaleway-sandbox
+./sb job-artifact-get JOB_ID ARTIFACT_ID --remote scaleway-sandbox \
   --output-file tmp/test-report.zip
 ```
 
@@ -122,15 +132,13 @@ restricted to the deployed workspace and identified by artifact ID after collect
 ## 6. Cancel a genuinely stuck job
 
 ```bash
-./sb job cancel JOB_ID --remote scaleway-sandbox \
-  --reason "no progress after inspection" --wait 30
+./sb job-cancel JOB_ID --remote scaleway-sandbox
 ```
 
 Graceful cancellation is default. Force cancellation is explicit:
 
 ```bash
-./sb job cancel JOB_ID --remote scaleway-sandbox \
-  --reason "graceful cancellation did not finish" --force
+./sb job-cancel JOB_ID --remote scaleway-sandbox --force
 ```
 
 Sandbox verifies process identity before signaling the owned process group and retains
@@ -138,13 +146,7 @@ output produced before cancellation.
 
 ## 7. Run multiple tests in one workspace
 
-Submitting two ordinary tests to `node-unit` queues the second behind the first. If the
-command and workspace are explicitly parallel-safe:
-
-```bash
-./sb test --remote scaleway-sandbox --workspace node-unit \
-  --parallel-safe --timeout 1800 -- npm run lint
-```
+Submitting two ordinary tests to `node-unit` queues the second behind the first.
 
 If immediate concurrent execution is required for a mutable test, create a different
 workspace explicitly instead of overriding safety:
@@ -157,33 +159,35 @@ workspace explicitly instead of overriding safety:
 
 ```bash
 ./sb test matrix --remote scaleway-sandbox --plan php-matrix \
-  --timeout 7200 --max-parallel 4 --cleanup on-success
+  --timeout 7200 --output-profile smart
 ```
 
 The parent job reports aggregate status. Every cell has a deterministic isolated label,
 separate instance, job ID, output, deadline, artifacts, and cleanup result. Excess cells
-queue at host capacity. Failed cells remain inspectable unless policy explicitly removes
-them.
+queue at the plan and host capacity. Configure `maxParallel` and each step's cleanup
+policy in the declared plan. Failed cells remain inspectable unless policy explicitly
+removes them.
 
 ## 9. Run compatible remote CI
 
 Always preflight first when evaluating a workflow:
 
 ```bash
-./sb ci preflight --remote scaleway-sandbox \
-  --workflow .github/workflows/test.yml
+./sb ci preflight .github/workflows/test.yml \
+  --remote scaleway-sandbox
 ```
 
 If no unaccepted compatibility difference remains:
 
 ```bash
-./sb ci run --remote scaleway-sandbox \
-  --workflow .github/workflows/test.yml \
-  --timeout 14400 --output smart --safe
+./sb ci run .github/workflows/test.yml \
+  --remote scaleway-sandbox \
+  --timeout 14400 --output-profile smart
 ```
 
-Known `act` differences are reported before execution. Safe mode skips or blocks
-deployment/release/publishing behavior and records the semantic difference.
+Known `act` differences are reported before execution. Deployment-class steps are
+skipped by default and the semantic difference is recorded; `--allow-deploy` is an
+explicit opt-in outside this safe default.
 
 ## 10. Use MCP from an agent
 
@@ -198,7 +202,7 @@ before cancelling quiet jobs, and request `full` output only when needed.
 ## 11. Explicit local override
 
 ```bash
-./sb test --local --timeout 900 -- npm test
+./sb test --local --timeout 900 node-unit
 ```
 
 The same job/status/output concepts apply locally, and the result clearly reports the
@@ -215,9 +219,8 @@ default exists.
 Reset/destroy refuse to run while the workspace has active jobs. Job cleanup is scoped:
 
 ```bash
-./sb job cleanup JOB_ID --remote scaleway-sandbox --logs --artifacts --yes
+./sb job-cleanup JOB_ID --remote scaleway-sandbox --logs --artifacts --yes
 ```
 
 Production deployment, release publishing, and destructive cleanup outside the named
 job/workspace remain outside this workflow.
-

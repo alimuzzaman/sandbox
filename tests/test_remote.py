@@ -354,6 +354,21 @@ class TestDeployTargetPath(unittest.TestCase):
         self.assertTrue(path.startswith("/srv/deploy/project-workspace-"))
         self.assertNotIn(".workspace-", path)
 
+    @patch("sandbox.core._remote.remote_workspace_path",
+           return_value="/srv/deploy/project-workspace-label")
+    @patch("sandbox.core._remote.ssh_run", return_value=_completed())
+    def test_workspace_prepare_preserves_reusable_bind_mount_directories(
+            self, run, _workspace):
+        path = sr.prepare_remote_workspace(
+            {}, "/local/path/project", "label",
+            deployed_path="/srv/deploy/project")
+
+        self.assertEqual(path, "/srv/deploy/project-workspace-label")
+        command = run.call_args.args[1]
+        self.assertIn('find "$item" -mindepth 1 -maxdepth 1', command)
+        self.assertIn('rmdir -- "$item"', command)
+        self.assertNotIn("rm -rf /srv/deploy/project-workspace-label", command)
+
     @patch("subprocess.run")
     def test_resolves_using_project_slug_and_remote_sandbox_home(self, mock_run):
         mock_run.return_value = _completed(returncode=0, stdout="/home/ubuntu/sandbox\n")

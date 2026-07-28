@@ -1015,3 +1015,75 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests.test_runtime_config tests.test_job_cli tests.test_runtime_test_modes
   tests.test_job_matrix tests.test_remote_job_transport
   tests.test_remote_first_cli -v`. Result: PASS, 56 tests.
+
+## Final remote workspace, E2E, and recovery convergence
+
+- Date: 2026-07-28. Durable service composition now runs bounded startup
+  reconciliation before exposing job services. The focused reconciliation test
+  proves composition invokes it exactly once; the existing recovery matrix
+  continues to classify boot changes, PID reuse, missing processes, stale
+  heartbeats, and incomplete active rows without inventing success.
+- Remote E2E parent `d689752d0d840d264f9e3ed07393479b` completed with
+  successful children `2dbbf8e1ec8c83a10434a1920ff40910` and
+  `8047ef06f594a9179cc24c602710a60c`. The children used distinct isolated
+  deployed roots ending in `e7e42aa98f8d03` and `39add2cce67707`. Two bounded
+  cursor reads on the second child returned no duplicate event sequence while
+  both pages reported more retained data. Aggregate E2E results now retain each
+  worker's already-bounded diagnostic output; this was required to diagnose
+  the initial disposable-fixture failure without attaching child stdio.
+- Persistent WordPress workspace jobs
+  `8c246acc0d5670966d4054277cf1e7b3` and
+  `c51e7ede48cb9815addc8665523ea430` wrote and read the same disposable
+  database marker. Job `94e455acd3ea2a22863a9fc4061b69d9` used a
+  separate workspace and failed to find that marker, proving database
+  isolation rather than merely source-path separation. The failed lookup and
+  its bounded output remain retained.
+- Root-owned workspace refresh acceptance used generic Compose fixture commit
+  `08aac6b9c79e7850d0808653fdf815eccc82c059`. Job
+  `a9b8be60cf12c39f097a3f9fd3dbe84d` created a root-owned nested directory;
+  rerun `6128894c312173c36516d434f5238bfd` succeeded, removed that content,
+  retained the fixture sentinel, and reused the existing top-level bind-mount
+  directory. The refresh fallback mounts only the deterministic workspace and
+  no public CLI/MCP surface accepts Docker arguments.
+- Cleanup completed through durable `./sb` jobs. WordPress E2E cleanup job
+  `ed900f793307191669eda37883e01b1a` and generic Compose cleanup jobs
+  `4019f8e61039e6a55c277641e22751a7` and
+  `84180455d942b411118f287e4b9417fe` all reached `succeeded` with exit code
+  zero. The generic cleanup exposed and fixed an instance lifecycle mismatch:
+  registered Compose runtime IDs may be longer than the WordPress 31-character
+  name contract and are now resolved through the registry before that
+  WordPress-only validation.
+- A live inventory read exposed that JSON inventory included an
+  authentication-bearing autologin URL. The value is intentionally not
+  recorded here. `sb instances --json` now omits `login_url`, with regression
+  coverage proving neither the field nor its token appears.
+- Commands:
+  `.cli-venv/bin/python -m unittest tests.test_runtime_transport
+  tests.test_job_reconciliation tests.test_e2e
+  tests.test_remote_job_transport tests.test_remote
+  tests.test_workspace_contracts -v`.
+  Result: PASS, 146 tests.
+
+## Quickstart command validation
+
+- Date: 2026-07-28. Every quickstart command was compared with the active CLI
+  parser help. The document now uses the registered hyphenated job commands,
+  `--output-profile` for submission, `--profile`/`--tail-bytes` for retained
+  reads, positional CI workflow paths, default-safe CI behavior, explicit
+  declared Compose test modes, and the implemented matrix-plan controls.
+- Validation environment: macOS workstation, branch `latest`, provisioned
+  `scaleway-sandbox` remote for the live commands above. No production
+  deployment, release, tag, or PR action was performed.
+
+## Final regression gate
+
+- Date: 2026-07-28.
+- Command: `.cli-venv/bin/python -m unittest discover -s tests -v`.
+  Result: PASS, 1,163 tests with two documented environment-gated skips.
+- Command:
+  `mcp/wp-server/.venv/bin/python -m unittest tests.test_server_transport -v`.
+  Result: PASS, 5 tests.
+- Command: `./sb selftest`. Result: PASS; its pure suite repeated the 1,163
+  tests with the same two skips and completed the registry and CLI self-tests.
+- `git diff --check` passed, status was inspected, and no changes existed
+  under `runtime/wp/` or `vendor/` before staging.

@@ -497,12 +497,11 @@ def remote_workspace_path(remote: dict, project_root, workspace_label: str) -> s
 def prepare_remote_workspace(remote: dict, project_root, workspace_label: str,
                              *, deployed_path: str | None = None) -> str:
     """Copy one deployed exact tree into a deterministic isolated workspace."""
+    from sandbox.transports.remote_jobs import workspace_refresh_command
+
     source = deployed_path or deploy_target_path(remote, project_root)
     target = remote_workspace_path(remote, project_root, workspace_label)
-    command = (
-        f"rm -rf {shlex.quote(target)} && mkdir -p {shlex.quote(target)} && "
-        f"cp -a {shlex.quote(source.rstrip('/') + '/.')} {shlex.quote(target)}"
-    )
+    command = workspace_refresh_command(source, target)
     result = ssh_run(remote, command, timeout=120)
     if result.returncode != 0:
         raise RuntimeError("could not prepare remote workspace")

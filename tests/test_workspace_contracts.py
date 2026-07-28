@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sandbox.application.context import _remote_workspace_control
 from sandbox.commands.workspaces import cmd_workspace, configure_parser
 
 
@@ -33,6 +34,34 @@ class WorkspaceContractTests(unittest.TestCase):
     def _cli_args(action: str, *, confirm: bool = False, json: bool = True):
         return SimpleNamespace(action=action, project_dir="/project", local=True,
                                remote=None, workspace="unit", confirm=confirm, json=json)
+
+    def test_remote_mutation_forwards_confirm_after_busy_check(self):
+        commands = []
+        target = SimpleNamespace(
+            remote_name="vps", project_root="/project",
+            workspace_label="reuse")
+
+        def run(_remote, command, timeout):
+            commands.append((command, timeout))
+            if "job-list" in command:
+                return SimpleNamespace(
+                    returncode=0, stdout='{"ok":true,"jobs":[]}\n',
+                    stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"ok":true,"destroyed":true}\n', stderr="")
+
+        with patch("sandbox.core._remote.get_remote",
+                   return_value={"provisioned": True}), \
+                patch("sandbox.core._remote.remote_workspace_path",
+                      return_value="/remote/workspace"), \
+                patch("sandbox.core._remote.remote_sb_path",
+                      return_value="/remote/sb"), \
+                patch("sandbox.core._remote.ssh_run", side_effect=run):
+            result = _remote_workspace_control(target, "destroy")
+
+        self.assertTrue(result["destroyed"])
+        self.assertIn("--confirm", commands[-1][0])
 
     def test_cli_lifecycle_forwards_one_explicit_target_request(self):
         service = _WorkspaceService()

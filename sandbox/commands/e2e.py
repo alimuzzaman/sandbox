@@ -143,6 +143,30 @@ def _shard_specs(workers: int, shard_index: int | None = None,
              "index": shard_index, "total": shard_total}]
 
 
+def _aggregate_result(result: dict, workers: int) -> dict:
+    """Keep each worker's bounded diagnostic output in the durable report."""
+    by_worker = []
+    passed = failed = 0
+    for unit in result["units"]:
+        status = unit["status"]
+        if status == "passed":
+            passed += 1
+        else:
+            failed += 1
+        worker_result = unit.get("result") or {}
+        by_worker.append({
+            "label": unit["label"],
+            "url": (unit.get("provision") or {}).get("url"),
+            "status": status,
+            "error": unit.get("error"),
+            "exit_code": worker_result.get("exit_code"),
+            "output": worker_result.get("output"),
+        })
+    return {"ok": result["ok"], "workers": workers,
+            "concurrency": result["concurrency"],
+            "passed": passed, "failed": failed, "by_worker": by_worker}
+
+
 def _remote_shard_submissions(*, target, config_path: Path, root_path: Path,
                               workers: int, timeout: int, args) -> list:
     """Build one isolated durable job per requested Playwright shard."""
@@ -333,24 +357,10 @@ def cmd_e2e(cfg, args) -> None:
         concurrency=concurrency, keep_on_fail=keep_on_fail,
         strict_provision=strict_provision, on_progress=_progress)
 
-    by_worker = []
-    passed = failed = 0
-    for u in result["units"]:
-        st = u["status"]
-        if st == "passed":
-            passed += 1
-        else:
-            failed += 1
-        by_worker.append({
-            "label": u["label"],
-            "url": (u.get("provision") or {}).get("url"),
-            "status": st,
-            "error": u.get("error"),
-            "exit_code": (u.get("result") or {}).get("exit_code"),
-        })
-    report = {"ok": result["ok"], "workers": workers,
-              "concurrency": result["concurrency"],
-              "passed": passed, "failed": failed, "by_worker": by_worker}
+    report = _aggregate_result(result, workers)
+    by_worker = report["by_worker"]
+    passed = report["passed"]
+    failed = report["failed"]
 
     if as_json:
         print(json.dumps(report))

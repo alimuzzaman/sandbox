@@ -162,5 +162,23 @@ class TestDurableRemoteE2EShards(unittest.TestCase):
         self.assertEqual(len(captured), 2)
 
 
+class TestAggregateResult(unittest.TestCase):
+    def test_failed_worker_retains_bounded_diagnostic_output(self):
+        report = e2e._aggregate_result({
+            "ok": False,
+            "concurrency": 2,
+            "units": [{
+                "label": "e2e-w0",
+                "status": "failed",
+                "error": None,
+                "provision": {"url": "http://localhost:8080"},
+                "result": {"exit_code": 1, "output": "playwright failure"},
+            }],
+        }, 1)
+
+        self.assertEqual(report["failed"], 1)
+        self.assertEqual(report["by_worker"][0]["output"], "playwright failure")
+
+
 if __name__ == "__main__":
     unittest.main()

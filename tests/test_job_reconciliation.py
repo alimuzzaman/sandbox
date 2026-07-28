@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sandbox.application.job_service import JobService
+from sandbox.application.context import durable_job_dependencies
 from sandbox.jobs.models import JobSubmission, SourceIdentity
 from sandbox.jobs.process import ProcessIdentity
 from sandbox.jobs.registry import JobRepository
@@ -81,3 +82,14 @@ class JobReconciliationTests(unittest.TestCase):
         self.repository.transition(terminal["job_id"], "succeeded", exit_code=0)
         self.assertEqual(self.service.reconcile_startup()["interrupted"], [])
         self.assertEqual(self.repository.get(terminal["job_id"])["lifecycle"], "succeeded")
+
+    def test_service_composition_runs_bounded_startup_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.core._paths.RUNTIME_DIR", Path(temp)), \
+                patch.object(JobService, "reconcile_startup",
+                             return_value={"ok": True, "interrupted": [],
+                                           "released_leases": []}) as reconcile:
+            dependencies = durable_job_dependencies()
+            self.addCleanup(dependencies["job_service"].repository.close)
+
+        reconcile.assert_called_once_with()

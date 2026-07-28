@@ -75,7 +75,9 @@ instances torn down unless `--keep-on-fail`.
 
 MCP tool: `run_e2e(project_dir, workers=2, concurrency=None, grep=None,
 keep_on_fail=False, strict_provision=False, timeout=900) -> dict` — blocking; returns the
-aggregated `{ok, workers, concurrency, passed, failed, by_worker:[...]}` report.
+aggregated `{ok, workers, concurrency, passed, failed, by_worker:[...]}` report. Each
+worker entry retains its already-bounded Playwright output so a failed detached or remote
+shard remains diagnosable through durable job output.
 (Async MCP wrapping for `run_e2e` is not yet exposed — the CLI's `--async` + `async-job`
 path works standalone; wiring an `async_=` MCP param is a small follow-up, see §7.)
 

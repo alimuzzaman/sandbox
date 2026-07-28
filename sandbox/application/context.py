@@ -178,6 +178,67 @@ def preflight_project_capability(cfg, project_root: str, capability: str, *, lab
     return runtime_service(cfg).check(project_root, capability, label=label)
 
 
+def _remote_workspace_control(resolved_target, action):
+    """Delegate one confirmed workspace lifecycle request to the remote CLI."""
+    import json
+    import shlex
+    from sandbox.core import _remote
+
+    remote = _remote.get_remote(resolved_target.remote_name)
+    deployed = None
+    if action == "create":
+        deployed = _remote.deploy_exact_working_tree(
+            remote, resolved_target.project_root)
+        workspace_path = _remote.prepare_remote_workspace(
+            remote, resolved_target.project_root,
+            resolved_target.workspace_label,
+            deployed_path=deployed["target_path"])
+    else:
+        workspace_path = _remote.remote_workspace_path(
+            remote, resolved_target.project_root,
+            resolved_target.workspace_label)
+    sb = _remote.remote_sb_path(remote)
+    if action in {"reset", "destroy"}:
+        busy_command = shlex.join([
+            sb, "job-list", "--project-dir", workspace_path,
+            "--workspace", resolved_target.workspace_label,
+            "--active-only", "--json",
+        ])
+        busy_result = _remote.ssh_run(remote, busy_command, timeout=25)
+        busy_payload = next((
+            json.loads(line)
+            for line in reversed((busy_result.stdout or "").splitlines())
+            if line.startswith("{")
+        ), None)
+        if busy_result.returncode != 0 or not busy_payload:
+            raise RuntimeError("remote workspace activity check failed")
+        if busy_payload.get("jobs"):
+            raise RuntimeError(
+                f"workspace {resolved_target.workspace_label!r} "
+                "is busy with active remote jobs")
+    command_args = [
+        sb, "workspace", action, "--local", "--project-dir",
+        workspace_path, "--workspace", resolved_target.workspace_label,
+    ]
+    if action in {"reset", "destroy"}:
+        command_args.append("--confirm")
+    command_args.append("--json")
+    result = _remote.ssh_run(
+        remote, shlex.join(command_args), timeout=60)
+    payload = next((
+        json.loads(line)
+        for line in reversed((result.stdout or "").splitlines())
+        if line.startswith("{")
+    ), None)
+    if result.returncode != 0 or not payload:
+        detail = (result.stderr or result.stdout or "").strip().replace(
+            "\n", " ")[:500]
+        raise RuntimeError(
+            f"remote workspace control failed"
+            f"{': ' + detail if detail else ''}")
+    return {**payload, "source": deployed}
+
+
 def durable_job_dependencies():
     """Compose host-local durable-job services for CLI and MCP adapters."""
     import time
@@ -205,50 +266,16 @@ def durable_job_dependencies():
         repository=repository, storage=storage,
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
-    target = TargetService(config_loader=sc.load_project_config, remote_lookup=get_remote)
-    def remote_workspace_control(resolved_target, action):
-        import json
-        import shlex
-        from sandbox.core import _remote
-        remote = _remote.get_remote(resolved_target.remote_name)
-        deployed = None
-        if action == "create":
-            deployed = _remote.deploy_exact_working_tree(remote, resolved_target.project_root)
-            workspace_path = _remote.prepare_remote_workspace(
-                remote, resolved_target.project_root, resolved_target.workspace_label,
-                deployed_path=deployed["target_path"])
-        else:
-            # Observation and lifecycle operations must address the existing
-            # reusable workspace; recreating its copy here would erase the
-            # state that status/reset/destroy are meant to inspect.
-            workspace_path = _remote.remote_workspace_path(
-                remote, resolved_target.project_root, resolved_target.workspace_label)
-        sb = _remote.remote_sb_path(remote)
-        if action in {"reset", "destroy"}:
-            busy_command = shlex.join([
-                sb, "job-list", "--project-dir", workspace_path,
-                "--workspace", resolved_target.workspace_label, "--active-only", "--json",
-            ])
-            busy_result = _remote.ssh_run(remote, busy_command, timeout=25)
-            busy_payload = next((json.loads(line) for line in reversed((busy_result.stdout or "").splitlines())
-                                 if line.startswith("{")), None)
-            if busy_result.returncode != 0 or not busy_payload:
-                raise RuntimeError("remote workspace activity check failed")
-            if busy_payload.get("jobs"):
-                raise RuntimeError(f"workspace {resolved_target.workspace_label!r} is busy with active remote jobs")
-        command = shlex.join([sb, "workspace", action, "--local", "--project-dir",
-                              workspace_path, "--workspace", resolved_target.workspace_label, "--json"])
-        result = _remote.ssh_run(remote, command, timeout=60)
-        payload = next((json.loads(line) for line in reversed((result.stdout or "").splitlines())
-                        if line.startswith("{")), None)
-        if result.returncode != 0 or not payload:
-            detail = (result.stderr or result.stdout or "").strip().replace("\n", " ")[:500]
-            raise RuntimeError(f"remote workspace control failed{': ' + detail if detail else ''}")
-        return {**payload, "source": deployed}
-
+    target = TargetService(
+        config_loader=sc.load_project_config, remote_lookup=get_remote)
     scheduler = JobScheduler(repository)
-    workspace = WorkspaceService(target, storage, remote_workspace_control, scheduler)
+    workspace = WorkspaceService(
+        target, storage, _remote_workspace_control, scheduler)
     job = JobService(repository, storage, components, scheduler=scheduler)
+    # A controller process may start after its host or a prior supervisor was
+    # interrupted. Reconcile bounded active state before exposing services so
+    # callers never inherit a stale running/lease claim as healthy work.
+    job.reconcile_startup()
     return {
         "job_service": job,
         "target_service": target,

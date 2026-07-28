@@ -238,9 +238,6 @@ def cmd_instance(cfg, args) -> None:
     if action != "delete":
         die("`./sb instance` only supports `delete` now. Create an instance by "
             "cd-ing into a plugin repo and running `./sb init` (or `./sb ensure`).")
-    if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name or ""):
-        die("instance name must be lowercase, start with [a-z0-9], "
-            "and contain only [a-z0-9_-] (max 31 chars)")
 
     owner = _core().registry_find_instance(name)
     if owner and owner.get("kind") == "compose":
@@ -251,6 +248,10 @@ def cmd_instance(cfg, args) -> None:
             die(result.message)
         ok(f"Generic instance '{name}' deleted without removing project volumes.")
         return
+
+    if not re.match(r"^[a-z0-9][a-z0-9_-]{0,30}$", name or ""):
+        die("instance name must be lowercase, start with [a-z0-9], "
+            "and contain only [a-z0-9_-] (max 31 chars)")
 
     # delete
     instances = resolve_instances(cfg)
@@ -363,7 +364,14 @@ def cmd_instances(cfg, args) -> None:
         owned = {e["instance"] for e in sc.registry_list_for_root(root)}
         rows = [r for r in rows if r["name"] in owned]
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, "instances": rows}))
+        # Inventory is observational and may be retained in durable job output.
+        # Autologin URLs contain bearer-equivalent query tokens and are not
+        # required to identify or operate an instance.
+        public_rows = [
+            {key: value for key, value in row.items() if key != "login_url"}
+            for row in rows
+        ]
+        print(json.dumps({"ok": True, "instances": public_rows}))
         return
     print()
     print(f"  {'STATUS':<10} {'NAME':<10} {'LABEL':<10} {'URL':<26} {'SERVER':<10} "

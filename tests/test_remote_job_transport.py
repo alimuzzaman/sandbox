@@ -123,8 +123,9 @@ class RemoteJobTransportTests(unittest.TestCase):
         prepare = commands[0]
         self.assertIn("docker run --rm --user 0:0", prepare)
         self.assertIn("/srv/project-workspace-", prepare)
-        self.assertIn("find /workspace -mindepth 1 -maxdepth 1", prepare)
-        self.assertIn("find /srv/project-workspace-", prepare)
+        self.assertIn("find /workspace -mindepth 2 -maxdepth 2", prepare)
+        self.assertIn('find "$item" -mindepth 1 -maxdepth 1', prepare)
+        self.assertIn('rmdir -- "$item"', prepare)
         self.assertNotIn("rm -rf /srv/project-workspace-", prepare)
 
     def test_workspace_prepare_checks_for_root_owned_contents_after_unprivileged_cleanup(self):
@@ -138,7 +139,7 @@ class RemoteJobTransportTests(unittest.TestCase):
         transport._prepare_workspace({}, "/srv/project", "workspace")
         prepare = commands[0]
         self.assertIn("-print -quit", prepare)
-        self.assertIn("if [ -n \"$(find /srv/project-workspace-", prepare)
+        self.assertIn('if [ -n "$(find "$workspace" -mindepth 2', prepare)
         self.assertIn("remote workspace cleanup left contents", prepare)
 
     def test_workspace_prepare_retains_bounded_remote_error_detail(self):

@@ -75,5 +75,55 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         self.assertIn("login_url", output.getvalue())
         self.assertIn("https://fixture.tst", output.getvalue())
 
+    def test_registered_generic_instance_can_use_generated_long_runtime_id(self):
+        import sandbox.commands.instances_cmd as commands
+        from sandbox.runtimes.base import OperationResult
+
+        runtime_id = "generic-workspace-" + "a" * 30
+        owner = {
+            "root": "/tmp/generic-project",
+            "kind": "compose",
+            "label": "default",
+        }
+        service = mock.Mock()
+        service.invoke.return_value = OperationResult(
+            True, "destroy", owner["root"], "compose", {})
+        args = types.SimpleNamespace(
+            action="delete", name=runtime_id, yes=True)
+
+        with mock.patch.object(
+                commands, "_core",
+                return_value=types.SimpleNamespace(
+                    registry_find_instance=lambda _name: owner)), \
+                mock.patch.object(
+                    commands, "runtime_service", return_value=service), \
+                contextlib.redirect_stdout(io.StringIO()):
+            commands.cmd_instance({}, args)
+
+        request = service.invoke.call_args.args[0]
+        self.assertEqual(request.operation, "destroy")
+        self.assertEqual(request.project_root, owner["root"])
+
+    def test_instance_inventory_json_omits_autologin_urls(self):
+        import json
+        import sandbox.commands.instances_cmd as commands
+
+        args = types.SimpleNamespace(project_dir=None, json=True)
+        rows = [{
+            "name": "fixture",
+            "url": "http://localhost:8188",
+            "login_url": (
+                "http://localhost:8188/?sandbox_autologin=secret-token"),
+        }]
+        output = io.StringIO()
+        with mock.patch.object(
+                commands, "collect_instance_rows", return_value=rows), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_instances({}, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertNotIn("login_url", payload["instances"][0])
+        self.assertNotIn("secret-token", output.getvalue())
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sandbox.resources.attribution import (
+    CapabilityObservation,
+    CoverageObservation,
+    DeepAttribution,
+    FilesystemObservation,
+    reconcile_attribution,
+)
 from sandbox.resources.models import ResourceObservation, StorageTarget
 
 
@@ -41,4 +48,51 @@ def observation(
         capacity_accounted=capacity_accounted,
         references=references,
         evidence=evidence,
+    )
+
+
+def deep_attribution(
+    *,
+    used_bytes: int = 80,
+    directory_allocated_bytes: int = 70,
+    deleted_open_bytes: int = 10,
+) -> DeepAttribution:
+    return DeepAttribution(
+        status="complete",
+        filesystems=(FilesystemObservation(
+            filesystem_id="filesystem-root",
+            display_name="root filesystem",
+            filesystem_type="unknown",
+            total_bytes=100,
+            used_bytes=used_bytes,
+            available_bytes=max(100 - used_bytes, 0),
+            writable=True,
+            selected=True,
+            selection_reason="root",
+            status="complete",
+            observed_allocated_bytes=directory_allocated_bytes,
+            hardlink_deduplication="confirmed",
+        ),),
+        findings=(),
+        capabilities=(CapabilityObservation(
+            category="directory",
+            name="du",
+            version=None,
+            fallback=True,
+            privilege="unprivileged",
+            status="complete",
+        ),),
+        coverage=(CoverageObservation(
+            category="directory",
+            boundary_id="filesystem-root",
+            status="complete",
+            duration_ms=1,
+            confidence="high",
+            privilege_sufficient=True,
+        ),),
+        reconciliation=reconcile_attribution(
+            used_bytes=used_bytes,
+            directory_allocated_bytes=directory_allocated_bytes,
+            deleted_open_bytes=deleted_open_bytes,
+        ),
     )

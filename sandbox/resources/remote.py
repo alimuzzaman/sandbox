@@ -7,6 +7,7 @@ from typing import Callable
 from sandbox.services.process import ProcessResult
 
 from .adapters import ProviderSnapshot
+from .attribution import DeepAttribution
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
@@ -77,8 +78,14 @@ def run(argv, timeout):
             argv, text=True, capture_output=True, timeout=remaining, check=False,
         )
         return result.returncode, result.stdout[:4000000], result.stderr[:4096]
-    except subprocess.TimeoutExpired:
-        return 124, "", "timed out"
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return 124, stdout[:4000000], (stderr + "\ntimed out")[:4096]
     except OSError:
         return 127, "", "unavailable"
 
@@ -179,6 +186,554 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
         "references": list(references),
         "evidence": list(evidence),
         "errors": list(errors),
+    }
+
+def deep_finding(kind, identity, display, observed_bytes, filesystem_id=None,
+                 owner_kind=None, owner_id=None, capacity_accounted=False,
+                 overlap="unknown", activity="unknown",
+                 guidance="monitoring_only", evidence=(), limitations=()):
+    return {
+        "finding_id": rid(kind, identity),
+        "kind": kind,
+        "display_name": display,
+        "filesystem_id": filesystem_id,
+        "owner": {"kind": owner_kind, "id": owner_id},
+        "observed_bytes": max(int(observed_bytes), 0),
+        "capacity_accounted": bool(capacity_accounted),
+        "overlap": overlap,
+        "activity": activity,
+        "guidance": guidance,
+        "evidence": list(evidence),
+        "limitations": list(limitations),
+    }
+
+def df_rows():
+    code, out, _err = run(["df", "-Pk"], 5)
+    rows = []
+    if code == 0:
+        for index, line in enumerate(out.splitlines()):
+            if index == 0 and "filesystem" in line.lower():
+                continue
+            parts = line.split(None, 5)
+            if len(parts) != 6 or not parts[5].startswith("/"):
+                continue
+            try:
+                total = int(parts[1]) * 1024
+                used = int(parts[2]) * 1024
+                available = int(parts[3]) * 1024
+            except ValueError:
+                continue
+            rows.append({
+                "source": parts[0],
+                "mount_point": parts[5],
+                "total_bytes": max(total, 0),
+                "used_bytes": max(min(used, total), 0),
+                "available_bytes": max(available, 0),
+            })
+    rows.sort(key=lambda item: (
+        len(item["mount_point"]), item["mount_point"],
+    ))
+    return rows, (
+        "complete" if code == 0 and rows else
+        "timed_out" if code == 124 else "unavailable"
+    )
+
+def mount_for(path, rows):
+    target = str(Path(path).resolve(strict=False))
+    matches = []
+    for row in rows:
+        mount = row["mount_point"]
+        if target == mount or target.startswith(mount.rstrip("/") + os.sep):
+            matches.append(mount)
+    return max(matches, key=len) if matches else None
+
+def parse_ranked_sizes(
+    output, filesystem_id, root, multiplier, safe_labels=None,
+):
+    safe_roots = {
+        "/var": "host variable data",
+        "/home": "user home data",
+        "/root": "root user data",
+        "/usr": "system software",
+        "/opt": "optional software",
+        "/srv": "service data",
+        "/tmp": "temporary data",
+        "/boot": "boot data",
+        "/etc": "host configuration",
+        "/var/lib": "host state data",
+        "/var/log": "host logs",
+        "/var/cache": "host package cache",
+    }
+    safe_roots.update(safe_labels or {})
+    rows = []
+    total = None
+    for line in output.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            measured = int(parts[0]) * multiplier
+        except ValueError:
+            continue
+        path = parts[1].strip()
+        if path.rstrip("/") == str(root).rstrip("/"):
+            total = measured
+        else:
+            rows.append((measured, path))
+    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    findings = [
+        deep_finding(
+            "directory", filesystem_id + ":" + path,
+            safe_roots.get(path, "entry " + str(index + 1)), measured,
+            filesystem_id=filesystem_id,
+            owner_kind="host",
+            capacity_accounted=False,
+            overlap="directory_root",
+            guidance="monitoring_only",
+            evidence=("allocated_blocks", "one_filesystem"),
+        )
+        for index, (measured, path) in enumerate(rows[:100])
+    ]
+    paths = {os.path.normpath(path) for _measured, path in rows}
+    frontier_total = sum(
+        measured for measured, path in rows
+        if not any(
+            parent != os.path.normpath(path)
+            and os.path.normpath(path).startswith(parent.rstrip("/") + os.sep)
+            for parent in paths
+        )
+    )
+    return findings, total if total is not None else frontier_total
+
+def deleted_open_findings(output, filesystem_id):
+    process = {}
+    current = None
+    records = []
+
+    def flush():
+        nonlocal current
+        if current:
+            records.append((dict(process), current))
+        current = None
+
+    for line in output.splitlines():
+        if not line:
+            continue
+        key, value = line[0], line[1:]
+        if key == "p":
+            flush()
+            process = {"p": value}
+        elif key == "c":
+            process["c"] = value
+        elif key == "f":
+            flush()
+            current = {"f": value}
+        elif current is not None:
+            current[key] = value
+    flush()
+    seen = set()
+    grouped = {}
+    for process, record in records:
+        if record.get("t") not in {"REG", "VREG"}:
+            continue
+        try:
+            measured = int(record.get("s", ""))
+        except ValueError:
+            continue
+        if measured <= 0:
+            continue
+        device, inode = record.get("D"), record.get("i")
+        identity = (
+            (device, inode) if device and inode else
+            (
+                process.get("p", ""), record.get("f", ""),
+                record.get("n", ""), str(measured),
+            )
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        pid = process.get("p") or "unknown"
+        grouped[pid] = grouped.get(pid, 0) + measured
+    findings = [
+        deep_finding(
+            "deleted_open", filesystem_id + ":" + pid,
+            "process " + pid, measured,
+            filesystem_id=filesystem_id,
+            owner_kind="process", owner_id=pid,
+            capacity_accounted=True, overlap="none",
+            activity="active", guidance="manual",
+            evidence=("zero_link_count", "regular_file"),
+        )
+        for pid, measured in sorted(
+            grouped.items(), key=lambda item: (item[1], item[0]), reverse=True,
+        )
+    ]
+    return findings, sum(item["observed_bytes"] for item in findings)
+
+def docker_deep_findings(output):
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError):
+        return [], 0
+    if not isinstance(payload, dict):
+        return [], 0
+    findings = []
+
+    def add(kind, identity, display, value, overlap, activity, evidence):
+        measured = byte_count(value)
+        if measured is None:
+            return
+        findings.append(deep_finding(
+            kind, identity, display[:120], measured,
+            owner_kind="container_engine",
+            capacity_accounted=False, overlap=overlap,
+            activity=activity, guidance="monitoring_only",
+            evidence=evidence,
+            limitations=("logical_engine_accounting",),
+        ))
+
+    for row in payload.get("Images") or ():
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("ID") or row.get("Repository") or "")
+        if not identity:
+            continue
+        display = str(row.get("Repository") or "image")
+        if row.get("Tag") not in {None, "", "<none>"}:
+            display += ":" + str(row.get("Tag"))
+        add(
+            "container_image", identity, display,
+            row.get("UniqueSize", row.get("Size")), "shared_layers",
+            "active" if str(row.get("Containers") or "0") != "0"
+            else "inactive",
+            ("docker_system_df", "unique_size", "shared_size_reported"),
+        )
+    for row in payload.get("Containers") or ():
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("ID") or row.get("Names") or "")
+        if identity:
+            add(
+                "container", identity, str(row.get("Names") or "container"),
+                row.get("Size"), "directory_root",
+                "active" if str(row.get("State") or "").lower() == "running"
+                else "inactive",
+                ("docker_system_df", "writable_layer"),
+            )
+    for row in payload.get("LocalVolumes") or ():
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("Name") or "")
+        if identity:
+            add(
+                "volume", identity, identity, row.get("Size"),
+                "directory_root",
+                "active" if str(row.get("Links") or "0") != "0"
+                else "inactive",
+                ("docker_system_df", "volume_detail"),
+            )
+    for row in payload.get("BuildCache") or ():
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("ID") or "")
+        if identity:
+            add(
+                "build_cache", identity,
+                "build cache " + identity[:12], row.get("Size"),
+                "logical_cache",
+                "active" if str(row.get("InUse") or "").lower() == "true"
+                else "inactive",
+                ("docker_system_df", "build_cache_detail"),
+            )
+    findings.sort(key=lambda item: (
+        item["observed_bytes"], item["kind"], item["finding_id"],
+    ), reverse=True)
+    return findings[:100], sum(
+        item["observed_bytes"] for item in findings
+    )
+
+def deep_attribution(capacity):
+    deep_started = time.monotonic()
+    rows, mount_status = df_rows()
+    if not rows:
+        rows = [{
+            "source": "target",
+            "mount_point": "/",
+            "total_bytes": capacity["total_bytes"],
+            "used_bytes": capacity["used_bytes"],
+            "available_bytes": capacity["available_bytes"],
+        }]
+    host_mount = mount_for(Path("/"), rows) or rows[0]["mount_point"]
+    sandbox_mount = mount_for(HOME, rows)
+    code, out, _err = run(
+        ["docker", "info", "--format", "{{json .DockerRootDir}}"], 4,
+    )
+    docker_root = None
+    if code == 0:
+        try:
+            docker_root = Path(json.loads(out.strip()))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    docker_mount = mount_for(docker_root, rows) if docker_root else None
+    selected = {host_mount: "root"}
+    if sandbox_mount and sandbox_mount not in selected:
+        selected[sandbox_mount] = "sandbox_home"
+    if docker_mount and docker_mount not in selected:
+        selected[docker_mount] = "container_data"
+    elevated = run(["sudo", "-n", "true"], 2)[0] == 0
+    prefix = ["sudo", "-n"] if elevated else []
+    gdu = shutil.which("gdu")
+    scanner = "gdu" if gdu else "du"
+    scanner_version = None
+    if gdu:
+        version_code, version_out, _version_err = run([gdu, "--version"], 2)
+        if version_code == 0:
+            scanner_version = (version_out.splitlines() or [None])[0]
+    filesystems = []
+    findings = []
+    coverage = [{
+        "category": "mount_inventory",
+        "boundary_id": None,
+        "status": mount_status,
+        "duration_ms": max(int((time.monotonic() - deep_started) * 1000), 0),
+        "confidence": "high" if mount_status == "complete" else "low",
+        "privilege_sufficient": True,
+        "reason": None if mount_status == "complete"
+        else "mount_inventory_unavailable",
+    }]
+    root_allocated = 0
+    directory_states = set()
+    for index, row in enumerate(rows):
+        mount = row["mount_point"]
+        selected_mount = mount in selected
+        filesystem_id = rid(
+            "filesystem", str(row.get("source") or "") + "\0" + mount,
+        )
+        category_started = time.monotonic()
+        observed = None
+        hardlinks = "unavailable"
+        reason = None
+        if selected_mount and time.monotonic() < DEADLINE:
+            if gdu:
+                argv = prefix + [
+                    gdu, "-n", "-p", "-c", "--no-prefix", "-x",
+                    "--depth", "4",
+                    "--no-delete", "--no-spawn-shell", "--no-view-file",
+                    mount,
+                ]
+                multiplier = 1
+            else:
+                argv = prefix + ["du", "-x", "-k", "-d", "4", mount]
+                multiplier = 1024
+            directory_timeout = min(
+                max(BUDGET_SECONDS - 90, 120), 600,
+            )
+            code, out, _err = run(argv, directory_timeout)
+            if code == 0 or (code == 124 and out.strip()):
+                ranked, observed = parse_ranked_sizes(
+                    out, filesystem_id, mount, multiplier, {
+                        str(HOME): "Sandbox home",
+                        str(HOME.parent): "Sandbox host account",
+                        str(HOME / "runtime"): "Sandbox runtime data",
+                        str(HOME / "deploy-src"):
+                            "Sandbox deployment sources",
+                        str(HOME / "sb-src"): "Sandbox tool source",
+                        **({
+                            str(docker_root): "Docker data root",
+                            str(docker_root / "overlay2"):
+                                "Docker image and container layers",
+                            str(docker_root / "volumes"):
+                                "Docker volume data",
+                            str(docker_root / "buildkit"):
+                                "Docker build cache data",
+                            str(docker_root / "containers"):
+                                "Docker container metadata and logs",
+                            str(docker_root / "image"):
+                                "Docker image metadata",
+                        } if docker_root else {}),
+                    },
+                )
+                findings.extend(ranked)
+                state = "complete" if code == 0 else "partial"
+                hardlinks = "confirmed" if code == 0 else "partial"
+                if state == "partial":
+                    reason = "directory_measurement_timed_out_with_partial"
+                if mount == host_mount:
+                    root_allocated = observed
+            else:
+                state = "timed_out" if code == 124 else "unavailable"
+                reason = (
+                    "directory_measurement_timed_out"
+                    if state == "timed_out"
+                    else "directory_measurement_unavailable"
+                )
+        elif selected_mount:
+            state, reason = "timed_out", "overall_budget_exhausted"
+        else:
+            state, reason = "not_selected", "unrelated_filesystem"
+        if selected_mount:
+            directory_states.add(state)
+        filesystems.append({
+            "filesystem_id": filesystem_id,
+            "display_name": (
+                "root filesystem" if mount == host_mount
+                else "filesystem " + str(index + 1)
+            ),
+            "filesystem_type": "unknown",
+            "total_bytes": row["total_bytes"],
+            "used_bytes": row["used_bytes"],
+            "available_bytes": row["available_bytes"],
+            "writable": os.access(mount, os.W_OK),
+            "selected": selected_mount,
+            "selection_reason": selected.get(mount, "unrelated"),
+            "status": state,
+            "observed_allocated_bytes": observed,
+            "hardlink_deduplication": hardlinks,
+            "limitations": ["filesystem_capabilities_unverified"],
+        })
+        coverage.append({
+            "category": "directory",
+            "boundary_id": filesystem_id,
+            "status": state,
+            "duration_ms": max(
+                int((time.monotonic() - category_started) * 1000), 0,
+            ),
+            "confidence": (
+                "high" if state == "complete"
+                else "medium"
+                if state in {"partial", "not_selected"} else "low"
+            ),
+            "privilege_sufficient": (
+                elevated or state in {"complete", "partial", "not_selected"}
+            ),
+            "reason": reason,
+        })
+    directory_status = (
+        "complete" if directory_states == {"complete"}
+        else "partial" if "partial" in directory_states
+        else "timed_out" if "timed_out" in directory_states else "partial"
+    )
+    capabilities = [{
+        "category": "directory",
+        "name": scanner,
+        "version": scanner_version,
+        "fallback": not bool(gdu),
+        "privilege": "elevated" if elevated else "unprivileged",
+        "status": directory_status,
+        "limitations": ["allocated_blocks_not_exact_physical_ownership"],
+    }]
+    deleted_started = time.monotonic()
+    lsof = shutil.which("lsof")
+    deleted_bytes = 0
+    if lsof and time.monotonic() < DEADLINE:
+        code, out, _err = run(
+            prefix + [lsof, "-nP", "-FpcfDitsn", "+L1"], 20,
+        )
+        if code in {0, 1}:
+            deleted, deleted_bytes = deleted_open_findings(
+                out,
+                next(
+                    item["filesystem_id"] for item in filesystems
+                    if item["selection_reason"] == "root"
+                ),
+            )
+            findings.extend(deleted)
+            deleted_status, deleted_reason = "complete", None
+        else:
+            deleted_status = "timed_out" if code == 124 else "unavailable"
+            deleted_reason = "deleted_open_measurement_unavailable"
+    else:
+        deleted_status = (
+            "timed_out" if time.monotonic() >= DEADLINE else "unavailable"
+        )
+        deleted_reason = (
+            "overall_budget_exhausted"
+            if deleted_status == "timed_out" else "lsof_unavailable"
+        )
+    capabilities.append({
+        "category": "deleted_open",
+        "name": "lsof" if lsof else "unavailable",
+        "version": None,
+        "fallback": False,
+        "privilege": (
+            "elevated" if elevated else
+            "unprivileged" if lsof else "unavailable"
+        ),
+        "status": deleted_status,
+        "limitations": [],
+    })
+    coverage.append({
+        "category": "deleted_open",
+        "boundary_id": None,
+        "status": deleted_status,
+        "duration_ms": max(
+            int((time.monotonic() - deleted_started) * 1000), 0,
+        ),
+        "confidence": "high" if deleted_status == "complete" else "low",
+        "privilege_sufficient": elevated or deleted_status == "complete",
+        "reason": deleted_reason,
+    })
+    docker_started = time.monotonic()
+    code, out, _err = run(
+        ["docker", "system", "df", "-v", "--format", "json"], 30,
+    )
+    if code == 0:
+        docker_findings, logical_bytes = docker_deep_findings(out)
+        findings.extend(docker_findings)
+        docker_status, docker_reason = "complete", None
+    else:
+        logical_bytes = 0
+        docker_status = "timed_out" if code == 124 else "unavailable"
+        docker_reason = "docker_accounting_unavailable"
+    capabilities.append({
+        "category": "container_storage",
+        "name": "docker_system_df",
+        "version": None,
+        "fallback": False,
+        "privilege": "unprivileged",
+        "status": docker_status,
+        "limitations": ["logical_engine_accounting"],
+    })
+    coverage.append({
+        "category": "container_storage",
+        "boundary_id": None,
+        "status": docker_status,
+        "duration_ms": max(
+            int((time.monotonic() - docker_started) * 1000), 0,
+        ),
+        "confidence": "high" if docker_status == "complete" else "low",
+        "privilege_sufficient": docker_status == "complete",
+        "reason": docker_reason,
+    })
+    raw_accounted = root_allocated + deleted_bytes
+    used = capacity["used_bytes"]
+    accounted = min(raw_accounted, used)
+    findings.sort(key=lambda item: (
+        item["observed_bytes"], item["kind"], item["finding_id"],
+    ), reverse=True)
+    incomplete = any(
+        item["status"] not in {"complete", "not_selected"}
+        for item in coverage
+    )
+    return {
+        "status": "partial" if incomplete else "complete",
+        "filesystems": filesystems,
+        "findings": findings[:300],
+        "capabilities": capabilities,
+        "coverage": coverage,
+        "reconciliation": {
+            "used_bytes": used,
+            "directory_allocated_bytes": root_allocated,
+            "deleted_open_bytes": deleted_bytes,
+            "observable_overhead_bytes": 0,
+            "overlapping_logical_bytes": logical_bytes,
+            "accounted_bytes": accounted,
+            "residual_unexplained_bytes": used - accounted,
+            "overage_bytes": max(raw_accounted - used, 0),
+            "drift_bytes": 0,
+            "drift_material": False,
+        },
     }
 
 def lifecycle_evidence():
@@ -390,6 +945,8 @@ def docker_storage_resources(thorough):
 def scan():
     global PHASE
     thorough = bool(REQUEST.get("thorough"))
+    deep_requested = bool(REQUEST.get("deep"))
+    resource_thorough = thorough and not deep_requested
     focus = REQUEST.get("focus")
     target_kind = REQUEST.get("target_kind")
     target_locator = str(REQUEST.get("target_locator") or "")
@@ -417,7 +974,11 @@ def scan():
     inventory, outcomes = docker_inventory()
     outcomes.extend(lifecycle_outcomes)
     resources = []
-    if not targeted and focus is None:
+    deep = None
+    if not targeted and focus is None and deep_requested:
+        PHASE = "deep_attribution"
+        deep = deep_attribution(capacity)
+    if not targeted and focus is None and not deep_requested:
         PHASE = "docker_storage"
         storage_resources, storage_outcomes = docker_storage_resources(thorough)
         resources.extend(storage_resources)
@@ -722,7 +1283,7 @@ def scan():
                     classification, references = "stale_candidate", ()
                 else:
                     classification, references = "unverified", ()
-                state, measured_size, error = size(path, thorough)
+                state, measured_size, error = size(path, resource_thorough)
                 if (
                     classification == "stale_candidate"
                     and state != "measured"
@@ -818,7 +1379,7 @@ def scan():
                 or expired_by_time
             )
         )
-        state, measured_size, error = size(path, thorough)
+        state, measured_size, error = size(path, resource_thorough)
         classification = "disposable_cache" if expired else "retained"
         if classification == "disposable_cache" and state != "measured":
             classification = "unverified"
@@ -840,6 +1401,7 @@ def scan():
         "resources": resources,
         "category_outcomes": outcomes,
         "drift": None,
+        "deep_attribution": deep,
     }
 
 def inside(path, root):
@@ -1003,7 +1565,7 @@ class RemoteResourceAdapter:
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
-        progress=None, focus: str | None = None,
+        progress=None, focus: str | None = None, deep: bool = False,
     ) -> ProviderSnapshot:
         entry = self._entry()
         if progress:
@@ -1015,6 +1577,7 @@ class RemoteResourceAdapter:
             "managed_host": bool(entry.get("provisioned")),
             "remote_name": self.remote_name,
             "focus": focus,
+            "deep": bool(deep),
         }, budget_seconds + 15)
         if response.returncode == 124:
             return ProviderSnapshot(
@@ -1045,6 +1608,7 @@ class RemoteResourceAdapter:
             resources,
             tuple(payload.get("category_outcomes") or ()),
             payload.get("drift"),
+            DeepAttribution.from_dict(payload.get("deep_attribution")),
         )
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:

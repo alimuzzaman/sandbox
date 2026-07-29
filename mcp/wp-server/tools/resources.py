@@ -15,12 +15,14 @@ def _service(remote: str | None):
 def resource_status(
     remote: str | None = None,
     thorough: bool = False,
+    deep: bool = False,
     budget_seconds: float = 15,
 ) -> dict:
     """Inspect local or named-remote host storage without mutation."""
     return _service(remote).status(
-        thorough=thorough,
+        thorough=thorough or deep,
         budget_seconds=budget_seconds,
+        deep=deep,
     )
 
 

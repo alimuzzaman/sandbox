@@ -78,6 +78,38 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertIsNone(worktree.size_bytes)
         self.assertEqual(worktree.reclaimable_bytes, 0)
 
+    def test_deep_observation_attaches_bounded_partial_attribution(self):
+        mount = str(self.home)
+        runner = FakeRunner({
+            ("df", "-Pk"): response(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                f"/dev/fixture 100 80 20 80% {mount}\n",
+            ),
+            ("docker", "info"): response(returncode=127),
+            ("du", "-x"): response(
+                f"20\t{mount}/deploy-src\n", returncode=124,
+                stderr="process timed out",
+            ),
+            ("docker", "system", "df"): response(returncode=127),
+            ("du", "-sk"): response("1\t/path\n"),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=30,
+        )
+        self.assertIsNotNone(snapshot.deep_attribution)
+        self.assertEqual(snapshot.deep_attribution.status, "partial")
+        self.assertEqual(
+            snapshot.deep_attribution.reconciliation.directory_allocated_bytes,
+            20 * 1024,
+        )
+        self.assertTrue(all(
+            timeout is None or 0 < timeout <= 30
+            for _command, timeout in runner.calls
+        ))
+
     def test_owned_unmounted_volume_requires_private_measurement_before_stale(self):
         containers = []
         volumes = [{

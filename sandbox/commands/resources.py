@@ -14,6 +14,11 @@ def configure_parser(parser) -> None:
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
     parser.add_argument("--thorough", action="store_true")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="run bounded filesystem, deleted-open, and engine attribution",
+    )
     parser.add_argument("--budget", type=float, default=None)
     parser.add_argument("--plan-id", default=None)
     parser.add_argument("--confirm", action="store_true")
@@ -80,6 +85,36 @@ def _emit(payload: dict, as_json: bool) -> None:
                     f"  partial: {category.get('category')} "
                     f"({category.get('status')})"
                 )
+        deep = data.get("deep_attribution") or {}
+        reconciliation = deep.get("reconciliation") or {}
+        if deep:
+            print(
+                f"  deep accounted "
+                f"{_human_bytes(reconciliation.get('accounted_bytes'))}; "
+                f"residual "
+                f"{_human_bytes(reconciliation.get('residual_unexplained_bytes'))}; "
+                f"deleted-open "
+                f"{_human_bytes(reconciliation.get('deleted_open_bytes'))}"
+            )
+            for capability in deep.get("capabilities") or ():
+                print(
+                    f"  tool {capability.get('category')}: "
+                    f"{capability.get('name')} ({capability.get('status')})"
+                )
+            for coverage in deep.get("coverage") or ():
+                if coverage.get("status") not in {"complete", "not_selected"}:
+                    print(
+                        f"  deep partial: {coverage.get('category')} "
+                        f"({coverage.get('status')}: "
+                        f"{coverage.get('reason') or 'unspecified'})"
+                    )
+            for finding in (deep.get("findings") or ())[:20]:
+                print(
+                    f"  deep {_human_bytes(finding.get('observed_bytes')):>12} "
+                    f"{finding.get('kind', 'unknown'):>16} "
+                    f"{finding.get('display_name', finding.get('finding_id'))} "
+                    f"[{finding.get('guidance', 'monitoring_only')}]"
+                )
     elif payload.get("action") == "plan":
         print(f"  plan: {data.get('plan_id')}")
         print(f"  expires: {data.get('expires_at')}")
@@ -104,11 +139,23 @@ def cmd_resources(_cfg, args) -> None:
     )
     if action == "status":
         payload = service.status(
-            thorough=bool(args.thorough),
+            thorough=bool(args.thorough or args.deep),
             budget_seconds=args.budget if args.budget is not None else 15,
             progress=progress,
+            deep=bool(args.deep),
         )
     elif action == "plan":
+        if args.deep:
+            from sandbox.resources.service import ResourceError, result
+            payload = result(
+                False, "plan", status="failed",
+                error=ResourceError(
+                    "--deep is valid only for resources status",
+                    "invalid_mode",
+                ),
+            )
+            _emit(payload, bool(args.json))
+            raise SystemExit(1)
         if not args.scope:
             from sandbox.resources.service import ResourceError, result
             payload = result(
@@ -123,6 +170,17 @@ def cmd_resources(_cfg, args) -> None:
                 progress=progress,
             )
     else:
+        if args.deep:
+            from sandbox.resources.service import ResourceError, result
+            payload = result(
+                False, "cleanup", status="refused",
+                error=ResourceError(
+                    "--deep is valid only for resources status",
+                    "invalid_mode",
+                ),
+            )
+            _emit(payload, bool(args.json))
+            raise SystemExit(1)
         if not args.plan_id:
             from sandbox.resources.service import ResourceError, result
             payload = result(

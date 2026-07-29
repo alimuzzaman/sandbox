@@ -21,6 +21,7 @@ from .models import (
     StorageTarget,
     utc_now,
 )
+from .attribution import DeepAttribution, DeepAttributionCollector
 
 _BUILD_CACHE_ID = re.compile(r"^[a-z0-9]{12,128}$")
 _BYTE_SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I)
@@ -59,6 +60,7 @@ class ProviderSnapshot:
     resources: tuple[ResourceObservation, ...]
     category_outcomes: tuple[dict, ...] = ()
     drift: dict | None = None
+    deep_attribution: DeepAttribution | None = None
 
 
 class ResourceAdapter(Protocol):
@@ -66,7 +68,7 @@ class ResourceAdapter(Protocol):
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
-        progress=None, focus: str | None = None,
+        progress=None, focus: str | None = None, deep: bool = False,
     ) -> ProviderSnapshot: ...
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None: ...
@@ -735,7 +737,7 @@ class LocalResourceAdapter:
 
     def observe(
         self, *, thorough: bool, budget_seconds: float,
-        progress=None, focus: str | None = None,
+        progress=None, focus: str | None = None, deep: bool = False,
     ) -> ProviderSnapshot:
         deadline = time.monotonic() + float(budget_seconds)
         capacity = self._capacity()
@@ -779,12 +781,25 @@ class LocalResourceAdapter:
                     thorough=True, timeout=min(remaining, 5),
                     evidence=("monitoring_only",),
                 ))
+        deep_attribution = None
+        if deep:
+            remaining = max(deadline - time.monotonic(), 0.1)
+            deep_attribution = DeepAttributionCollector(
+                self.runner,
+                host_root=self.host_root,
+                sandbox_home=self.sandbox_home,
+            ).collect(
+                capacity=capacity,
+                budget_seconds=remaining,
+                progress=progress,
+            )
         return ProviderSnapshot(
             self.target(), capacity, tuple(resources),
             tuple((*docker_outcomes, *path_outcomes, job_outcome)),
             {
                 "overlap_categories": ["job_storage_contains_job_artifacts"],
             } if job_resources else None,
+            deep_attribution,
         )
 
     def _find_current(self, candidate: CleanupCandidate) -> ResourceObservation | None:

@@ -14,6 +14,7 @@ inspection:
 sb resources status --json
 sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
 sb resources status --remote scaleway-sandbox --thorough --budget 300 --json
+sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -24,9 +25,20 @@ worktrees; those require the separate stale scope and complete positive
 ownership plus non-use evidence. Never replace this workflow with a broad
 Docker prune.
 
-When a remote scan reports a large unknown bucket, rerun with a larger bounded
-budget and require complete `host_filesystem`, `docker_storage`,
-`instance_registry`, and `job_registry` outcomes before interpreting it.
+When a remote scan reports a large unknown bucket, use `status --deep` with a
+larger bounded budget. Deep mode uses an already installed `gdu` when available
+or standard `du` as fallback, `lsof +L1`, filesystem inventory, and structured
+Docker diagnostics. It installs nothing, crosses no filesystem boundary, and
+must report missing privilege, tools, timeouts, and unselected mounts as
+partial evidence. Require complete deep coverage before interpreting the
+residual as genuinely unlocated.
+
+Deep status is diagnostic only. `existing_cache_scope` and
+`existing_stale_scope` may reference only eligibility independently established
+by the ordinary resource inventory; deleted-open files and anonymous host
+directories remain manual. Never turn a deep finding into a raw path deletion
+or process termination.
+
 Review remote `cache` and `stale` plans separately: cache may contain exact
 immutable build-cache IDs, while volumes and worktrees remain stale-only.
 

@@ -4,6 +4,7 @@ from datetime import timezone
 import math
 import secrets
 
+from .attribution import apply_cleanup_guidance
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
@@ -70,15 +71,16 @@ class ResourceService:
 
     def _scan(
         self, *, thorough: bool, budget_seconds: float, progress=None,
-        focus: str | None = None,
+        focus: str | None = None, deep: bool = False,
     ) -> StorageScan:
         budget = self._budget(budget_seconds)
         started = self.clock().astimezone(timezone.utc)
         snapshot = self.adapter.observe(
-            thorough=bool(thorough),
+            thorough=bool(thorough or deep),
             budget_seconds=budget,
             progress=progress,
             focus=focus,
+            deep=bool(deep),
         )
         target = self.adapter.target()
         if snapshot.target != target:
@@ -103,13 +105,28 @@ class ResourceService:
         accounting_items = explicitly_accounted or measured
         raw_attributed = sum(item.size_bytes or 0 for item in accounting_items)
         used = int((snapshot.capacity or {}).get("used_bytes") or 0)
-        attributed = min(raw_attributed, used)
-        unknown = max(used - attributed, 0)
+        deep_attribution = snapshot.deep_attribution
+        if deep_attribution is not None:
+            deep_attribution = apply_cleanup_guidance(
+                deep_attribution, snapshot.resources,
+            )
+        if deep and deep_attribution is not None:
+            reconciliation = deep_attribution.reconciliation
+            attributed = reconciliation.accounted_bytes
+            unknown = reconciliation.residual_unexplained_bytes
+        else:
+            attributed = min(raw_attributed, used)
+            unknown = max(used - attributed, 0)
         reclaimable = sum(item.reclaimable_bytes for item in snapshot.resources)
         incomplete = any(
             item.get("status") not in {"complete", "observed"}
             for item in snapshot.category_outcomes
         )
+        if deep and (
+            deep_attribution is None
+            or deep_attribution.status != "complete"
+        ):
+            incomplete = True
         status = "partial" if incomplete else "complete"
         confidence = "low" if incomplete else (
             "high" if thorough else "medium"
@@ -133,7 +150,7 @@ class ResourceService:
         return StorageScan(
             scan_id=secrets.token_hex(16),
             target=target,
-            mode="thorough" if thorough else "fast",
+            mode="deep" if deep else "thorough" if thorough else "fast",
             started_at=started,
             completed_at=completed,
             budget_seconds=budget,
@@ -146,11 +163,12 @@ class ResourceService:
             confidence=confidence,
             category_outcomes=snapshot.category_outcomes,
             drift=drift,
+            deep_attribution=deep_attribution,
         )
 
     def status(
         self, *, thorough: bool = False, budget_seconds: float = 15,
-        progress=None,
+        progress=None, deep: bool = False,
     ) -> dict:
         try:
             scan = self._scan(
@@ -158,6 +176,7 @@ class ResourceService:
                 budget_seconds=budget_seconds,
                 progress=progress,
                 focus=None,
+                deep=deep,
             )
             return result(
                 True, "status", status=scan.status, target=scan.target,
@@ -189,6 +208,7 @@ class ResourceService:
                 budget_seconds=budget_seconds,
                 progress=progress,
                 focus=scope,
+                deep=False,
             )
             candidates = []
             exclusions = []

@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 
 from sandbox.resources.adapters import ProviderSnapshot
+from sandbox.resources.attribution import DeepAttribution, reconcile_attribution
 from sandbox.resources.models import (
     CleanupItemOutcome,
     ResourceObservation,
@@ -17,18 +18,22 @@ from tests.resource_fixtures import NOW, observation, target
 
 
 class FakeAdapter:
-    def __init__(self, resources=(), *, partial=False):
+    def __init__(self, resources=(), *, partial=False, deep_attribution=None):
         self._target = target()
         self.resources = tuple(resources)
         self.partial = partial
         self.observe_calls = []
         self.revalidate_map = {item.resource_id: item for item in self.resources}
         self.removed = []
+        self.deep_attribution = deep_attribution
 
     def target(self):
         return self._target
 
-    def observe(self, *, thorough, budget_seconds, progress=None, focus=None):
+    def observe(
+        self, *, thorough, budget_seconds, progress=None, focus=None,
+        deep=False,
+    ):
         self.observe_calls.append((thorough, budget_seconds, focus))
         if progress:
             progress("fixture")
@@ -42,6 +47,8 @@ class FakeAdapter:
             },
             self.resources,
             ({"category": "slow", "status": "timed_out"},) if self.partial else (),
+            None,
+            self.deep_attribution,
         )
 
     def revalidate(self, candidate):
@@ -147,6 +154,34 @@ class TestResourceService(unittest.TestCase):
         ))).status(thorough=True, budget_seconds=15)
         self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 60_000)
         self.assertEqual(payload["data"]["summary"]["unknown_bytes"], 20_000)
+
+    def test_deep_reconciliation_replaces_managed_only_capacity_gap(self):
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000,
+                directory_allocated_bytes=60_000,
+                deleted_open_bytes=10_000,
+                overlapping_logical_bytes=50_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            (observation("managed", size_bytes=20_000),),
+            deep_attribution=deep,
+        )).status(deep=True, budget_seconds=15)
+        self.assertEqual(payload["data"]["mode"], "deep")
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 70_000)
+        self.assertEqual(payload["data"]["summary"]["unknown_bytes"], 10_000)
+        self.assertEqual(
+            payload["data"]["deep_attribution"]["reconciliation"][
+                "overlapping_logical_bytes"
+            ],
+            50_000,
+        )
 
     def test_cache_plan_is_read_only_and_excludes_named_volumes(self):
         cache = observation("cache", size_bytes=500)

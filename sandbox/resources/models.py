@@ -379,6 +379,7 @@ class StorageScan:
     confidence: str
     category_outcomes: tuple[dict, ...] = ()
     drift: dict | None = None
+    deep_attribution: Any | None = None
 
     def __post_init__(self) -> None:
         if self.capacity is not None:
@@ -433,7 +434,7 @@ class StorageScan:
             lambda item: f"{item.owner_kind}:{item.owner_id or 'unknown'}",
         )
         categories = aggregate(lambda item: item.kind)
-        return redact({
+        value = {
             "scan_id": self.scan_id,
             "target": self.target.to_dict(),
             "mode": self.mode,
@@ -453,7 +454,10 @@ class StorageScan:
             "resources": [item.to_dict() for item in self.resources],
             "category_outcomes": list(self.category_outcomes),
             "drift": self.drift,
-        })
+        }
+        if self.deep_attribution is not None:
+            value["deep_attribution"] = self.deep_attribution.to_dict()
+        return redact(value)
 
 
 @dataclass(frozen=True)

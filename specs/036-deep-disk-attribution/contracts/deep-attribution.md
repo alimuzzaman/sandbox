@@ -1,0 +1,118 @@
+# Interface Contract: Deep Disk Attribution
+
+## CLI
+
+```text
+sb resources status [--remote NAME] --deep [--budget SECONDS] [--json]
+```
+
+- `--deep` is read-only and implies existing thorough measurement.
+- The default budget remains explicit in the implementation and is bounded by
+  the existing 3,600-second maximum.
+- `--deep` is valid only for `status`; plan and cleanup contracts are unchanged.
+- Human output shows capacity, deep reconciliation, selected capabilities,
+  partial boundaries, and ranked findings.
+
+## MCP
+
+```text
+resource_status(
+  remote: string | null = null,
+  thorough: boolean = false,
+  deep: boolean = false,
+  budget_seconds: number = 15
+) -> ResourceEnvelope
+```
+
+`deep=true` implies thorough behavior. Existing callers omitting `deep` receive
+the prior response shape.
+
+## Additive status data
+
+The existing schema-version-1 envelope and `data` fields remain unchanged.
+Deep responses add:
+
+```json
+{
+  "mode": "deep",
+  "deep_attribution": {
+    "status": "partial",
+    "filesystems": [],
+    "findings": [],
+    "capabilities": [],
+    "coverage": [],
+    "reconciliation": {
+      "used_bytes": 162906124288,
+      "directory_allocated_bytes": 90000000000,
+      "deleted_open_bytes": 8000000000,
+      "observable_overhead_bytes": 0,
+      "overlapping_logical_bytes": 20000000000,
+      "accounted_bytes": 98000000000,
+      "residual_unexplained_bytes": 64906124288,
+      "overage_bytes": 0,
+      "drift_bytes": 0,
+      "drift_material": false
+    }
+  }
+}
+```
+
+All byte fields are raw non-negative integers. `overlapping_logical_bytes` is
+never included in `accounted_bytes`.
+
+## Filesystem record
+
+```json
+{
+  "filesystem_id": "opaque-id",
+  "display_name": "root filesystem",
+  "filesystem_type": "ext4",
+  "total_bytes": 206900281344,
+  "used_bytes": 162906124288,
+  "available_bytes": 43977379840,
+  "writable": true,
+  "selected": true,
+  "selection_reason": "root",
+  "status": "partial",
+  "observed_allocated_bytes": 98000000000,
+  "hardlink_deduplication": "confirmed",
+  "limitations": ["copy_on_write_unknown"]
+}
+```
+
+Raw device sources and mount options are excluded.
+
+## Finding record
+
+```json
+{
+  "finding_id": "opaque-id",
+  "kind": "deleted_open",
+  "display_name": "process 1234",
+  "filesystem_id": "opaque-id",
+  "owner": {"kind": "process", "id": "1234"},
+  "observed_bytes": 8000000000,
+  "capacity_accounted": true,
+  "overlap": "none",
+  "activity": "active",
+  "guidance": "manual",
+  "evidence": ["zero_link_count", "regular_file"],
+  "limitations": []
+}
+```
+
+Paths, file names, file contents, process arguments, environment values, raw
+mount options, and credential-like text are not contract fields.
+
+## Partial semantics
+
+- One unavailable collector does not fail the status operation when capacity
+  and other evidence are available.
+- Every incomplete category receives a coverage record with a stable reason.
+- Deep status is `partial` when any selected filesystem or required diagnostic
+  is incomplete.
+- Timeouts and disconnects preserve completed evidence when the transport
+  returned a valid partial payload; a total transport failure retains the
+  existing `measurement_unavailable` behavior.
+- No deep finding is automatically reclaimable and no new cleanup code is
+  introduced.

@@ -6,6 +6,7 @@ import unittest
 from sandbox.resources.remote import RemoteResourceAdapter, _program
 from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
+from tests.resource_fixtures import deep_attribution
 from tests.resource_fixtures import observation
 from sandbox.resources.models import CleanupCandidate
 
@@ -84,6 +85,70 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertNotIn("docker volume prune", program)
         self.assertNotIn("sqlite3.connect", program)
         self.assertNotIn("registry.read_text", program)
+
+    def test_remote_deep_probe_is_read_only_and_uses_installed_tool_fallbacks(self):
+        program = _program({
+            "action": "observe",
+            "thorough": True,
+            "deep": True,
+            "budget_seconds": 300,
+            "managed_host": True,
+            "remote_name": "remote-a",
+        })
+        compile(program, "<remote-resource-probe>", "exec")
+        for evidence in (
+            'shutil.which("gdu")',
+            '["du", "-x", "-k", "-d", "4", mount]',
+            '[lsof, "-nP", "-FpcfDitsn", "+L1"]',
+            '["docker", "system", "df", "-v", "--format", "json"]',
+            '"deep_attribution": deep',
+            '["sudo", "-n", "true"]',
+            "exc.stdout or",
+            "directory_measurement_timed_out_with_partial",
+            "resource_thorough = thorough and not deep_requested",
+        ):
+            self.assertIn(evidence, program)
+        for forbidden in (
+            "apt install",
+            "apt-get install",
+            "dnf install",
+            "yum install",
+            "docker system prune",
+            "docker volume prune",
+        ):
+            self.assertNotIn(forbidden, program)
+
+    def test_remote_deep_payload_is_validated_and_returned(self):
+        calls = []
+        payload = {
+            "identity": "remote-identity",
+            "capacity": {
+                "total_bytes": 100, "used_bytes": 80,
+                "available_bytes": 20, "reserved_bytes": 0,
+            },
+            "resources": [],
+            "category_outcomes": [],
+            "drift": None,
+            "deep_attribution": deep_attribution().to_dict(),
+        }
+
+        def ssh(_remote, _command, *, input_data=None, timeout=0):
+            calls.append((input_data, timeout))
+            return ProcessResult(("ssh",), 0, json.dumps(payload), "")
+
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh,
+            clock=lambda: NOW,
+        )
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=300,
+        )
+        self.assertEqual(
+            snapshot.deep_attribution.reconciliation.accounted_bytes, 80,
+        )
+        self.assertIn('"deep":true', calls[0][0])
 
     def test_targeted_remote_revalidation_uses_exact_kind_and_locator(self):
         calls = []

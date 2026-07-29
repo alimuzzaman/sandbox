@@ -14,8 +14,38 @@ class RecordingService:
     def __init__(self):
         self.calls = []
 
-    def status(self, *, thorough, budget_seconds, progress=None):
-        self.calls.append(("status", thorough, budget_seconds))
+    def status(self, *, thorough, budget_seconds, progress=None, deep=False):
+        self.calls.append(("status", thorough, deep, budget_seconds))
+        deep_payload = {}
+        if deep:
+            deep_payload = {
+                "deep_attribution": {
+                    "status": "partial",
+                    "filesystems": [],
+                    "findings": [{
+                        "finding_id": "finding-a",
+                        "kind": "deleted_open",
+                        "display_name": "process 42",
+                        "observed_bytes": 3,
+                        "guidance": "manual",
+                    }],
+                    "capabilities": [{
+                        "category": "directory",
+                        "name": "du",
+                        "status": "complete",
+                    }],
+                    "coverage": [{
+                        "category": "deleted_open",
+                        "status": "unavailable",
+                        "reason": "lsof_unavailable",
+                    }],
+                    "reconciliation": {
+                        "accounted_bytes": 3,
+                        "residual_unexplained_bytes": 2,
+                        "deleted_open_bytes": 3,
+                    },
+                },
+            }
         return {
             "schema_version": 1, "ok": True, "action": "status",
             "status": "complete", "target": {"kind": "local", "name": "local"},
@@ -23,6 +53,7 @@ class RecordingService:
                 "capacity": {"total_bytes": 10, "used_bytes": 5, "available_bytes": 5},
                 "summary": {"reclaimable_bytes": 0, "unknown_bytes": 0},
                 "resources": [], "category_outcomes": [],
+                **deep_payload,
             },
             "error": None,
         }
@@ -77,6 +108,9 @@ class TestResourceInterfaces(unittest.TestCase):
             ["cleanup", "--plan-id", "a" * 32, "--confirm"],
         )
         self.assertTrue(cleanup.confirm)
+        deep = self.parser().parse_args(["status", "--deep"])
+        self.assertTrue(deep.deep)
+        self.assertTrue(deep.action == "status")
 
     def test_cli_json_uses_shared_service_and_global_scope(self):
         from sandbox.commands import resources
@@ -88,7 +122,47 @@ class TestResourceInterfaces(unittest.TestCase):
             resources.cmd_resources({}, args)
         payload = json.loads(output.getvalue())
         self.assertTrue(payload["ok"])
-        self.assertEqual(service.calls, [("status", False, 15.0)])
+        self.assertEqual(service.calls, [("status", False, False, 15.0)])
+
+    def test_cli_deep_implies_thorough_and_is_status_only(self):
+        from sandbox.commands import resources
+        service = RecordingService()
+        args = self.parser().parse_args(["status", "--deep", "--json"])
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        self.assertEqual(service.calls, [("status", True, True, 15.0)])
+
+        args = self.parser().parse_args([
+            "plan", "--scope", "cache", "--deep", "--json",
+        ])
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output), self.assertRaises(SystemExit):
+            resources.cmd_resources({}, args)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"]["code"],
+            "invalid_mode",
+        )
+
+    def test_cli_deep_human_output_includes_reconciliation_coverage_and_guidance(self):
+        from sandbox.commands import resources
+        service = RecordingService()
+        args = self.parser().parse_args(["status", "--deep"])
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        rendered = output.getvalue()
+        self.assertIn("deep accounted", rendered)
+        self.assertIn("tool directory: du (complete)", rendered)
+        self.assertIn(
+            "deep partial: deleted_open "
+            "(unavailable: lsof_unavailable)",
+            rendered,
+        )
+        self.assertIn("[manual]", rendered)
 
     def test_cli_refusal_emits_json_then_exits_nonzero(self):
         from sandbox.commands import resources
@@ -146,12 +220,14 @@ class TestResourceInterfaces(unittest.TestCase):
                 "resource_cleanup_apply",
             ])
             self.assertTrue(resources.resource_status()["ok"])
+            self.assertTrue(resources.resource_status(deep=True)["ok"])
             self.assertTrue(resources.resource_cleanup_plan("cache")["ok"])
             self.assertTrue(
                 resources.resource_cleanup_apply("a" * 32, confirm=True)["ok"],
             )
             self.assertEqual(service.calls, [
-                ("status", False, 15),
+                ("status", False, False, 15),
+                ("status", True, True, 15),
                 ("plan", "cache", True, 60),
                 ("cleanup", "a" * 32, True),
             ])

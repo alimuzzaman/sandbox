@@ -299,6 +299,7 @@ Inspect local or named-remote storage without booting an instance:
 ```sh
 ./sb resources status --json
 ./sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
+./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -306,6 +307,9 @@ Inspect local or named-remote storage without booting an instance:
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker
 prune. Cache and stale persistent-resource cleanup are deliberately separate.
+Deep status uses an installed `gdu` or standard `du`, `lsof`, filesystem
+capacity, and structured Docker evidence to reconcile large unknown buckets;
+it installs nothing and adds no cleanup path.
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
 ### Durable remote-first jobs

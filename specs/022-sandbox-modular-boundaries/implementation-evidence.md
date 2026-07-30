@@ -1647,3 +1647,44 @@ durable jobs, remote-control contracts, and the static modularity inventory.
 It does not replace the still-open live remote gateway/WebSocket, recovery
 creation, restore, or deletion scenarios; those remain explicitly external
 authorization/configuration gates.
+
+## Current T108 local-gate replay — 2026-07-29
+
+- The focused descriptor, registry, runtime, CLI/MCP composition, shared-service,
+  Hermes-boundary, and architecture suites passed 110 tests.
+- The first fresh full repository replay passed 1,230 tests with two documented
+  environment-gated skips. The following `./sb selftest` replay exposed one
+  durable-job observer race: a successful fast PHP child was labelled
+  `interrupted` while its verified supervisor was still draining output and
+  publishing the terminal result.
+- The remote-job service repair is recorded in
+  `specs/032-remote-job-runtime/implementation-evidence.md`. Focused lifecycle
+  verification passed 34 tests, and the formerly failing PHP acceptance passed
+  20 consecutive isolated runs.
+- Post-repair `python -m unittest discover -s tests -v` and the exact
+  `./sb selftest` replay each passed 1,232 tests with two documented skips.
+- T108 remains unchecked: these local gates do not replace quickstart scenarios
+  6 and 7 or the still-open T086/T099 authenticated gateway, route, WebSocket,
+  and remote backup evidence. No public-route change, backup, restore, deletion,
+  schedule, remote configuration, or production mutation was performed.
+
+## Current T086 read-only edge replay — 2026-07-29
+
+- A fresh browser visit to `https://hermes.asb.bd/` was redirected to the
+  hostname's Cloudflare Access application. The only exposed page was
+  `Sign in · Cloudflare Access` with `Log in to Hermes Dashboard`; no dashboard
+  content or direct-origin surface was available anonymously.
+- The external Cloudflare OAuth action was not started because this run had no
+  current authorization to authenticate an account. Consequently an
+  authenticated dashboard session and WebSocket disconnect/reconnect could not
+  be tested and are not claimed.
+- Read-only post-probe Sandbox checks reported the managed gateway active and
+  healthy with one owner, the legacy gateway inactive/disabled, the dashboard
+  healthy on `127.0.0.1:9119`, upstream authentication enabled, and the remote
+  MCP healthy/authenticated on loopback. The only overall health degradation
+  remained the pre-existing `cron_drift`.
+- The bounded gateway log read showed historical service restarts but no
+  WebSocket connection evidence. T086 remains unchecked until an authorized
+  browser session can prove dashboard interaction and WebSocket reconnect.
+  No route, identity policy, tunnel, remote service, secret, backup, restore,
+  deletion, schedule, or remote configuration was changed.

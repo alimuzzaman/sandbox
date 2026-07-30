@@ -1089,3 +1089,34 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   under `runtime/wp/` or `vendor/` before staging.
 - Commit/push: `006fdde feat(jobs): complete remote runtime convergence`
   pushed to `origin/latest`.
+
+## Fast-child terminalization race repair
+
+- Date: 2026-07-29.
+- Before repair, a fresh `./sb selftest` replay ran 1,230 tests and failed only
+  `tests.acceptance.test_remote_job_runtime.DurableRuntimeAcceptanceFixtures.
+  test_php_unit_fixture`: the PHP child exited successfully, but a concurrent
+  status read changed its durable lifecycle from `running` to `interrupted`
+  before the still-valid supervisor published `succeeded`.
+- Root cause: health and startup reconciliation treated an absent recorded child
+  as lost even while its exact supervisor process identity remained valid. Fast
+  children can exit during the small output-drain/final-result window, so the
+  observer raced and permanently overrode the supervisor's authoritative
+  terminal transition.
+- Repair: the supervisor now persists an initial heartbeat with the child
+  identity; observation and startup reconciliation let a verified live
+  supervisor finish terminalization after child exit. A reused/mismatched child
+  PID, lost supervisor, or stale supervisor heartbeat still interrupts
+  fail-closed.
+- Focused verification:
+  `.cli-venv/bin/python -m unittest -v
+  tests.acceptance.test_remote_job_runtime.DurableRuntimeAcceptanceFixtures.
+  test_php_unit_fixture tests.test_job_reconciliation
+  tests.test_job_supervisor tests.test_job_service
+  tests.test_job_process_identity tests.test_job_cancellation` passed 34 tests.
+  The PHP fixture then passed 20 consecutive isolated runs.
+- Full verification:
+  `.cli-venv/bin/python -m unittest discover -s tests -v` passed 1,232
+  tests with two documented environment-gated skips. The exact
+  `./sb selftest` reproduction also passed 1,232 tests with the same two skips
+  and completed the registry and CLI self-tests.

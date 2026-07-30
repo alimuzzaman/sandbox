@@ -4,15 +4,15 @@
 
 **Created**: 2026-07-22
 
-**Last Refined**: 2026-07-23
+**Last Refined**: 2026-07-29
 
 **Input**: "Add built-in scheduled Google Drive backups for permanent sandbox instances. Scope: database, uploads, and sanitized recovery metadata; plugin source remains in Git. Default retention: 7 daily and 4 weekly backups. Include manual backup, scheduled execution, integrity verification, restore, failure reporting, and safe Google Drive authorization without creating accounts or exposing secrets."
 
 **Drafting Model**: `gpt-5.6-sol` (active-session fallback; preferred `gpt-5.6-terra` Medium was unavailable)
 
-**Final Validation**: `PENDING` — independent `gpt-5.6-sol` High override unavailable
+**Final Validation**: `REOPEN` — independent `gpt-5.6-sol` High
 
-**Validated On**: N/A
+**Validated On**: 2026-07-29
 
 **Artifact Owner**: `speckit-refine`
 
@@ -27,9 +27,11 @@
 Permanent WordPress instances can hold production database and media state that
 cannot be reconstructed from Git. Existing local snapshots live beside the
 instance they protect and may disappear with host or instance loss. Existing
-scoped recovery can safely encrypt and publish selected material, but permanent
-instances do not yet have a complete, opt-in product flow that captures their
-recoverable state, runs automatically, verifies remote durability, applies a
+scoped recovery provides fixture-verified encryption, publication, verification,
+retention, and rollback safety primitives, but no real recovery set, production
+restore, fresh-server drill, pruning, or schedule activation has been proven.
+Permanent instances do not yet have a complete, opt-in product flow that captures
+their recoverable state, runs automatically, verifies remote durability, applies a
 bounded retention policy, and restores into a usable instance.
 
 Operators need an off-host Google Drive recovery path that is automatic enough
@@ -86,11 +88,12 @@ live production data.
 
 ## Product Scenarios
 
-### Scenario 1 — Opt in a permanent instance
+### Scenario 1 — Opt in a protected-production instance
 
-- **Starting state**: Operator has an eligible managed-production or persistent
-  remote WordPress instance and an existing host-local Google Drive identity and
-  encryption secret channel.
+- **Starting state**: Operator has an eligible WordPress instance explicitly
+  classified as protected production and an existing host-local Google Drive
+  identity and encryption secret channel. Remote location or persistence alone
+  does not confer eligibility.
 - **User action**: Operator explicitly enables backups for that instance.
 - **Expected outcome**: Product validates eligibility and backup prerequisites,
   identifies exact protected instance and destination without revealing secrets,
@@ -100,11 +103,12 @@ live production data.
 
 - **Starting state**: Eligible instance is opted in and healthy enough to capture.
 - **User action**: Operator requests an on-demand backup.
-- **Expected outcome**: Product briefly blocks site writes, captures database,
-  uploads, and sanitized recovery metadata on instance host, then restores normal
-  write access. It encrypts captured state before upload, verifies complete remote
-  recovery point, and reports stable recovery-point identity and verification
-  result. Partial or unverifiable publication is never reported as successful.
+- **Expected outcome**: Product blocks site writes for no more than the confirmed
+  freeze/abort window, captures database, uploads, and sanitized recovery metadata
+  on the instance host, then restores normal write access. It encrypts captured
+  state before upload, verifies the complete remote recovery point, and reports
+  stable recovery-point identity and verification result. Partial or unverifiable
+  publication is never reported as successful.
 
 ### Scenario 3 — Run scheduled backup
 
@@ -113,7 +117,8 @@ live production data.
 - **User action**: Daily schedule becomes due, including after host downtime.
 - **Expected outcome**: One non-overlapping backup attempt runs on instance host.
   Resource pressure or an existing run produces visible skipped state rather than
-  false success. Missed schedules receive bounded catch-up behavior.
+  false success. Missed schedules receive no more than the confirmed number of
+  catch-up attempts.
 
 ### Scenario 4 — Handle failed or interrupted publication
 
@@ -131,10 +136,11 @@ live production data.
 - **User action**: Verified scheduled backup completes and retention evaluation
   runs.
 - **Expected outcome**: Product keeps 7 daily and 4 weekly verified recovery points
-  by default. Newest verified point, only verified point, incomplete/unverifiable
-  objects, and objects that cannot be confidently classified are protected from
-  automatic deletion. Retention reports what it kept and removed without exposing
-  secrets.
+  by default according to the confirmed bucket, timezone, missed-period,
+  minimum-age, and deletion-authorization policy. Newest verified point, only
+  verified point, incomplete/unverifiable objects, and objects that cannot be
+  confidently classified are protected. Retention reports what it kept and any
+  reviewed candidates or removals without exposing secrets.
 
 ### Scenario 6 — Restore into fresh target
 
@@ -172,28 +178,35 @@ live production data.
 
 ## Proposed Product Behavior
 
-- Backup eligibility is limited to managed-production or persistent remote
-  WordPress instances explicitly opted in by operator. Development instances
-  remain excluded unless their classification changes through an explicit product
-  action.
+- Backup eligibility requires an explicitly declared protected-production
+  WordPress instance opted in by the operator. A development label, remote
+  location, or persistence alone never confers eligibility. A development
+  instance must first undergo a separate explicit classification change before it
+  can be considered.
 - Backup work runs on protected instance host. That host owns access to WordPress
   state, configured Google Drive identity, and encryption secret channel.
-- Each recovery point contains logical database export, uploads, and sanitized
+- Each recovery point contains consistent recoverable database state, uploads, and sanitized
   metadata needed to identify source, scope, creation outcome, integrity, and
   restore compatibility. Plugin source is referenced through source identity but
   not copied into backup. Capture uses a brief write freeze so database and uploads
   represent one recoverable site state, and normal writes resume after every
   success or failure.
-- All protected content is encrypted before leaving host. Remote completion
-  becomes visible only after complete uploaded content is verified. Incomplete and
-  unverifiable states remain distinguishable.
+- All protected content is encrypted in owner-only host staging before leaving the
+  host. Recovery points are immutable, and retry never overwrites an existing
+  point. Remote completion becomes visible only after complete uploaded content
+  is verified. Plaintext staging is removed after both success and failure; a
+  cleanup failure is explicitly reported. Incomplete and unverifiable states
+  remain distinguishable.
 - Scheduled backup defaults to daily execution with overlap prevention, bounded
   runtime, visible skip/failure state, and missed-run catch-up. Schedule activation
-  requires one verified real backup and one successful disposable fresh-target
-  restore drill.
-- Default retention keeps 7 daily and 4 weekly verified recovery points. Pruning
-  occurs only after new recovery point is verified and must never remove only
-  verified or newest verified recovery point.
+  requires one verified real backup, one successful disposable fresh-target
+  restore drill, review of the exact schedule/profile selection, separate
+  scheduling authorization, and monitoring of the first activated run.
+- Default retention aims to protect 7 daily and 4 weekly verified recovery points.
+  Pruning is governed by the confirmed bucket/timezone, missed-period,
+  minimum-age, and deletion-authorization policy. Safety floors may retain more
+  than the nominal counts. Pruning occurs only after a new recovery point is
+  verified and must never remove the only verified or newest verified point.
 - Fresh-target restore and in-place restore are distinct operations. Fresh restore
   requires empty/new target. In-place restore normally requires exact target
   confirmation and verified pre-restore recovery point. When checkpoint creation is
@@ -203,8 +216,9 @@ live production data.
   encryption secrets never appear in command arguments, stored manifests, output,
   logs, or instance configuration.
 - Authorization consumes operator-configured Google Drive identity; product does
-  not create accounts or provider applications. Missing or invalid authorization
-  blocks operation with setup guidance.
+  not create accounts or provider applications. Authorization uses least privilege
+  limited to the configured backup destination. Missing, overbroad, or invalid
+  authorization blocks operation with setup guidance.
 - Existing local snapshots remain useful for fast local rollback but do not count
   as off-host backup evidence.
 
@@ -218,8 +232,10 @@ live production data.
   must never be selected by inference.
 - Encryption passphrase and OAuth/provider tokens must remain external secrets and
   must not cross CLI/MCP result boundaries.
-- First release supports Docker-backed managed-production or persistent remote
-  WordPress instances. Herd and generic Compose need separate product definitions.
+- First release supports Docker-backed WordPress instances explicitly classified
+  as protected production. Development-labelled instances, Herd, and generic
+  Compose need separate product definitions or an explicit classification change
+  outside this backup flow.
 - Restore mutates database and uploads and therefore requires capability checks,
   exact target resolution, confirmation, integrity checks, and recoverable failure
   handling before side effects.
@@ -232,8 +248,6 @@ live production data.
   cases to hide.
 - Existing scoped recovery safety and compatibility behavior remains rollback
   control until replacement parity is proven.
-- This feature begins formal specification and implementation only after current
-  remote-job-runtime T143 phase is verified, committed, and pushed.
 
 ## Decisions
 
@@ -243,21 +257,33 @@ live production data.
 | Backup scope | Database, uploads, sanitized recovery metadata | Protects non-Git production state while avoiding broad host backup | User, 2026-07-22 |
 | Source code | Remains in Git; excluded from Drive backup | Avoids duplicate authority and oversized archives | User, 2026-07-22 |
 | Default retention | 7 daily and 4 weekly verified points | Bounded storage with useful short- and medium-term rollback | User, 2026-07-22 |
-| Eligibility | Explicitly opted-in managed-production or persistent remote WordPress instances | Prevents disposable development data from entering production backup flow | User, 2026-07-23 |
+| Eligibility | Explicitly opted-in, protected-production WordPress instances; persistence or remote location alone is insufficient | Prevents development data from entering production backup flow while retaining explicit reclassification | User decision, 2026-07-23, refined by existing production-classification policy |
 | Execution location | Protected instance host | Avoids routing database/uploads through developer machine and keeps host-local capture coherent | User, 2026-07-23 |
 | Restore modes | Fresh-target and explicitly confirmed in-place restore | Supports disaster recovery and fast rollback while preserving separate safety gates | User, 2026-07-23 |
 | Encryption | Client-side before Drive upload using external secret channel | Existing security boundary prevents provider or project configuration from seeing plaintext secrets | Existing policy and requested security scope |
 | Authorization | Consume existing operator-configured Google Drive identity; create no account or provider app | Complies with no-live-account-creation policy and keeps credential ownership explicit | Existing policy and requested authorization scope |
-| Schedule activation | Require verified backup and disposable fresh-target restore drill | Automation must not run before recoverability is demonstrated | Existing recovery policy |
+| Schedule activation | Require verified backup, disposable fresh-target restore drill, reviewed exact schedule/profile, separate activation authorization, and first-run monitoring | Automation must not run before recoverability is demonstrated and specifically approved | Existing recovery policy |
 | Capture consistency | Briefly freeze site writes during database and uploads capture | One recovery point should represent one coherent production state | User, 2026-07-23 |
 | In-place safety | Require verified pre-restore recovery point and exact confirmation under normal conditions | Live replacement should remain recoverable and unambiguous | User restore choice plus existing destructive-operation policy |
 | Emergency in-place restore | Permit separate break-glass override when current target cannot be checkpointed | Already-unrecoverable target may still need direct disaster restoration | User, 2026-07-23 |
 
 ## Open Questions
 
-- None blocking product scope. Independent Sol High validation remains unavailable
-  in current agent tool configuration and therefore readiness cannot yet be marked
-  complete.
+- **Retention buckets and time**: Are the 7 daily and 4 weekly points distinct
+  buckets or may a weekly point also satisfy a daily slot? Which timezone defines
+  bucket boundaries, and does a period with no verified point remain empty or use
+  the nearest earlier verified point?
+- **Retention deletion authority**: What minimum-age floor protects recent
+  recovery points, and does one explicit schedule/policy activation authorize
+  routine pruning within that exact policy, or must every prune apply receive
+  separate confirmation as existing recovery deletion does?
+- **Fresh-target source responsibility**: Must the operator pre-provision the exact
+  compatible Git-owned source/runtime before restore, or does Sandbox reacquire
+  the recorded source identity? In either case, unavailable or incompatible source
+  must block database/uploads mutation.
+- **Availability limits**: What maximum write-freeze/abort window is acceptable for
+  one production capture, and how many missed daily runs may one schedule firing
+  attempt to catch up?
 
 ## Acceptance Outcomes
 
@@ -269,16 +295,20 @@ live production data.
 - Interrupted or failed upload never appears as successful recovery point, and
   status distinguishes capture, pending, incomplete, unverifiable, skipped, failed,
   and verified outcomes.
-- Scheduled backup can run daily on instance host, prevents overlap, performs
-  bounded catch-up after downtime, and exposes last attempt and last verified point.
-- With more than retention window, verified set converges to 7 daily and 4 weekly
-  points while preserving newest and only verified points and failing closed on
-  ambiguous objects.
+- Scheduled backup can run daily on instance host, prevents overlap, performs no
+  more than the confirmed number of catch-up attempts after downtime, and exposes
+  last attempt and last verified point.
+- With more than the nominal retention window, verified points satisfy the
+  confirmed 7-daily/4-weekly bucket policy while minimum-age and safety floors may
+  retain additional points; newest, only verified, and ambiguous objects remain
+  protected.
 - Fresh-target drill restores selected verified point into empty disposable target,
-  validates database and uploads, and demonstrates usable site state without
-  changing production traffic.
-- Backup capture briefly blocks writes, produces database and uploads from one
-  coherent state, and restores write access after both successful and failed runs.
+  validates database and uploads against a compatible Git-owned source/runtime,
+  and demonstrates the confirmed minimum usable-site checks without changing
+  production traffic. Unavailable or incompatible source blocks mutation.
+- Backup capture blocks writes for no more than the confirmed freeze/abort window,
+  produces database and uploads from one coherent state, and restores write access
+  after both successful and failed runs.
 - In-place restore refuses without explicit exact-target confirmation and verified
   pre-restore point under normal conditions; successful restore validates result,
   and induced failure leaves actionable rollback path.
@@ -290,9 +320,14 @@ live production data.
   redacted status and no false success.
 - Ordinary development, Herd, and generic Compose instances remain excluded in
   first release.
-- Live evidence demonstrates backup, remote verification, retention, fresh restore,
-  in-place restore, rollback, schedule behavior, and failure reporting before
-  automatic schedule activation is accepted.
+- Before schedule activation, live evidence demonstrates one verified backup and
+  one successful disposable fresh-target restore drill. The operator reviews the
+  exact schedule/profile selection, separately authorizes activation, and monitors
+  the first run; in-place restore, rollback, and destructive pruning retain their
+  separate protected gates.
+- Drive access is limited to the configured backup destination, retries never
+  overwrite an immutable recovery point, and owner-only plaintext staging is
+  removed after success and failure or a cleanup failure is explicitly reported.
 
 ## Risks and Assumptions
 
@@ -311,12 +346,12 @@ live production data.
   source code/version or runtime compatibility changed.
 - **Assumption**: Operator already controls Google Drive identity, encryption secret,
   and enough Drive quota; product provides no account creation.
-- **Assumption**: Eligible permanent instance is Docker-backed WordPress and can
-  produce logical database export and bounded uploads archive on its host.
-- **Assumption**: Git source identity and sanitized recovery metadata are sufficient
-  to reacquire compatible code separately from backup.
-- **Assumption**: Operator accepts automatic deletion only within confirmed 7-daily
-  and 4-weekly policy after successful verification safeguards apply.
+- **Assumption**: Eligible protected-production instance is Docker-backed WordPress
+  and can produce consistent recoverable database state and a bounded uploads
+  archive on its host.
+- **Assumption**: Git source identity and sanitized recovery metadata can identify
+  compatible code/runtime, but restore responsibility remains an open product
+  decision.
 
 ## Readiness for Specification
 
@@ -324,9 +359,9 @@ live production data.
 - [x] Goals and non-goals bound the product scope.
 - [x] Primary and negative scenarios are covered.
 - [x] Material constraints, dependencies, and risks are recorded.
-- [x] Consequential choices are confirmed rather than inferred.
-- [x] Acceptance outcomes are measurable and implementation-independent.
-- [x] No blocking open questions remain.
+- [ ] Consequential choices are confirmed rather than inferred.
+- [ ] Acceptance outcomes are measurable and implementation-independent.
+- [ ] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
 - [ ] The latest independent Sol High validation verdict is `PASS`.
 

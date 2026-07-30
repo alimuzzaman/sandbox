@@ -87,12 +87,16 @@ def classify(snapshot: dict, *, now: datetime | None = None) -> tuple[Health, di
     if supervisor_identity is False and child_alive:
         evidence["reasons"].append("supervisor identity is absent or no longer matches")
         return Health.SUPERVISOR_UNRESPONSIVE, evidence
-    if child_pid and not child_alive:
-        evidence["reasons"].append("recorded child PID is absent")
-        return Health.PROCESS_MISSING, evidence
     if supervisor_age is not None and supervisor_age > stall * 2:
         evidence["reasons"].append("supervisor heartbeat is stale")
         return Health.SUPERVISOR_UNRESPONSIVE, evidence
+    if child_pid and not child_alive:
+        if supervisor_identity is True:
+            evidence["reasons"].append(
+                "recorded child exited while its verified supervisor finalizes the result")
+            return Health.ACTIVE, evidence
+        evidence["reasons"].append("recorded child PID is absent")
+        return Health.PROCESS_MISSING, evidence
     # Recent metrics/progress mean a quiet command is still making observable
     # progress.  Only sustained absence of every signal becomes a stall.
     signal_ages = [age for age in (output_age, activity_age, progress_age, metric_age) if age is not None]

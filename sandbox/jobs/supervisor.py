@@ -57,6 +57,11 @@ def run_descriptor(path: str | Path) -> int:
             supervisor_pid=identity.pid, supervisor_start_identity=identity.start_identity,
             supervisor_nonce_hash=descriptor["nonce_hash"], child_pid=command.pid,
             child_pgid=command.pid, child_start_identity=child.start_identity)
+        observed_at = _iso()
+        repository.put_heartbeat(job_id, supervisor_at=observed_at, health_evidence={
+            "process_alive": True, "child_observed": True,
+        }, child_observed_at=observed_at, last_activity_at=observed_at,
+            last_progress_at=observed_at)
         selector = selectors.DefaultSelector()
         selector.register(command.stdout, selectors.EVENT_READ, "stdout")
         selector.register(command.stderr, selectors.EVENT_READ, "stderr")

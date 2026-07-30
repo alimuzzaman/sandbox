@@ -449,13 +449,20 @@ class JobService:
                     process["supervisor_nonce_hash"], process.get("child_pgid"))
                 if verify_process_identity(child_expected, child_observed):
                     continue
-                reason = "child_process_missing" if child_observed is None else "child_process_identity_mismatch"
+                # A fast child can exit after the verified supervisor records its
+                # identity but before that supervisor publishes the terminal
+                # result. The live supervisor remains the only safe owner of that
+                # transition. A different live process at the recorded PID is a
+                # real ownership mismatch and must still interrupt immediately.
+                if child_observed is None:
+                    continue
+                reason = "child_process_identity_mismatch"
                 try:
                     self.repository.transition(row["job_id"], Lifecycle.INTERRUPTED,
                         termination_reason=reason, output_completeness="partial",
                         result_json=__import__("json").dumps({
                             "reconciled": True,
-                            "evidence": "recorded child identity is absent or no longer matches",
+                            "evidence": "recorded child identity no longer matches",
                         }, sort_keys=True))
                     if self.scheduler is not None:
                         self.scheduler.release(row["job_id"])

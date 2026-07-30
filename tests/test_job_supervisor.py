@@ -37,6 +37,7 @@ class SupervisorTests(unittest.TestCase):
                         break
                     time.sleep(.05)
             self.assertEqual(state["lifecycle"], "succeeded", state)
+            self.assertIsNotNone(state["heartbeat"]["supervisor_at"])
             repository.close()
 
     def test_detached_process_drains_output_and_finishes(self):

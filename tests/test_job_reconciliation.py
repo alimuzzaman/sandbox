@@ -57,9 +57,46 @@ class JobReconciliationTests(unittest.TestCase):
         with patch("sandbox.application.job_service.capture_process_identity", side_effect=capture):
             self.service.reconcile_startup()
         state = self.repository.get(row["job_id"])
+        self.assertEqual(state["lifecycle"], "running")
+        self.assertIsNone(state["termination_reason"])
+
+    def test_missing_child_waits_for_verified_supervisor_terminalization_on_read(self):
+        row = self._running()
+        self.repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=101,
+            supervisor_start_identity="supervisor", supervisor_nonce_hash="nonce", child_pid=202,
+            child_pgid=202, child_start_identity="child")
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        self.repository.put_heartbeat(row["job_id"], supervisor_at=now,
+            health_evidence={"process_alive": True})
+
+        def capture(pid):
+            if pid == 101:
+                return ProcessIdentity("boot", 101, "supervisor", "")
+            return None
+
+        with patch("sandbox.jobs.health.capture_process_identity", side_effect=capture):
+            state = self.service.get(row["job_id"])
+        self.assertEqual(state["lifecycle"], "running")
+        self.assertEqual(state["health"], "active")
+        self.assertIn("verified supervisor finalizes",
+                      " ".join(state["health_evidence"]["reasons"]))
+
+    def test_child_identity_mismatch_still_interrupts_with_live_supervisor(self):
+        row = self._running()
+        self.repository.put_process_identity(row["job_id"], host_boot_id="boot", supervisor_pid=101,
+            supervisor_start_identity="supervisor", supervisor_nonce_hash="nonce", child_pid=202,
+            child_pgid=202, child_start_identity="child")
+
+        def capture(pid):
+            if pid == 101:
+                return ProcessIdentity("boot", 101, "supervisor", "")
+            return ProcessIdentity("boot", 202, "different-child", "")
+
+        with patch("sandbox.application.job_service.capture_process_identity", side_effect=capture):
+            self.service.reconcile_startup()
+        state = self.repository.get(row["job_id"])
         self.assertEqual(state["lifecycle"], "interrupted")
-        self.assertEqual(state["termination_reason"], "child_process_missing")
-        self.assertEqual(state["output_completeness"], "partial")
+        self.assertEqual(state["termination_reason"], "child_process_identity_mismatch")
 
     def test_on_read_orphaned_child_identity_is_interrupted(self):
         row = self._running()

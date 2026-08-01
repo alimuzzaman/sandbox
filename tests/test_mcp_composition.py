@@ -139,6 +139,7 @@ class TestMcpComposition(unittest.TestCase):
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
                     "project_instance", "resolve_instance", "safe_json", "site_url",
+                    "domain_service",
                 ),
                 "domains": ("domain_service",),
                 "runtime": ("core", "project_instance", "runtime_service"),
@@ -171,6 +172,7 @@ class TestMcpComposition(unittest.TestCase):
             "project_instance": lambda *_args: (None, {"ok": False}),
             "resolve_instance": lambda _instance: {}, "safe_json": lambda _value: None,
             "site_url": lambda _instance: "https://example.test",
+            "domain_service": lambda: object(),
         }))
         self.assertEqual(instance_server.registered, [
             "ensure_instance", "destroy_instance", "recreate_instance", "setup_domains",

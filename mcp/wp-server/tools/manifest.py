@@ -48,6 +48,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "instances": (
         "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
         "project_instance", "resolve_instance", "safe_json", "site_url",
+        "domain_service",
     ),
     "domains": ("domain_service",),
     "runtime": ("core", "project_instance", "runtime_service"),

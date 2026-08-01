@@ -15,12 +15,13 @@ _project_instance: object
 _resolve_instance: object
 _safe_json: object
 _site_url: object
+_domain_service: object
 
 
 def register(server, dependencies: ToolDependencies) -> None:
     """Bind the explicit instance context and register this group's tools."""
     global SANDBOX_ROOT, PROXY_TLD, _core, _load_sandbox_yml
-    global _project_instance, _resolve_instance, _safe_json, _site_url
+    global _project_instance, _resolve_instance, _safe_json, _site_url, _domain_service
     SANDBOX_ROOT = dependencies.require("sandbox_root")
     PROXY_TLD = dependencies.require("proxy_tld")
     _core = dependencies.require("core")
@@ -29,6 +30,7 @@ def register(server, dependencies: ToolDependencies) -> None:
     _resolve_instance = dependencies.require("resolve_instance")
     _safe_json = dependencies.require("safe_json")
     _site_url = dependencies.require("site_url")
+    _domain_service = dependencies.require("domain_service")
     for tool in (
         ensure_instance, destroy_instance, recreate_instance, setup_domains,
         secure_instance, apply_config,
@@ -202,30 +204,26 @@ def recreate_instance(project_dir: str, label: str | None = None) -> dict:
     return {"ok": False, "code": res2.returncode,
             "error": (res2.stderr or res2.stdout or "ensure failed after destroy").strip()[:1000]}
 
-def setup_domains(tld: str = "") -> dict:
-    """Set up clean, trusted HTTPS for the sandbox: assign every instance a
-    <name>.<tld> domain, start the Caddy proxy, mint per-instance certs, and
-    switch WP to https://<name>.<tld>. Wraps `./sb domains setup [tld]`.
+def setup_domains(tld: str = "", project_dir: str = ".",
+                  label: str = "default") -> dict:
+    """Compatibility name for project-scoped domain adoption.
 
-    This is the global one-time bring-up of the clean-URL proxy. After it runs,
-    new instances are secured automatically at create (see ensure_instance).
-    `tld` defaults to the project default ("tst"); a project's own `tld` config
-    overrides it. NOTE: the FIRST run on a machine installs a sudoers rule + a
-    local CA and needs an interactive terminal + one sudo; once set up, repeat
-    runs are non-interactive. Returns {ok, code, output}.
+    The MCP transport never prompts for consent or privilege. Configure a TLD in
+    the project/machine domain policy; the legacy ``tld`` argument is reported
+    but cannot silently rewrite project identity.
     """
-    sb = SANDBOX_ROOT / "sb"
-    args = [str(sb), "domains", "setup"]
+    value = _domain_service().apply(
+        project_dir, label=label, interactive=False,
+    )
+    payload = value.to_dict() if hasattr(value, "to_dict") else dict(value)
+    payload.setdefault("operation", "apply")
     if tld:
-        args.append(tld)
-    try:
-        res = subprocess.run(
-            args, capture_output=True, text=True, timeout=300, cwd=str(SANDBOX_ROOT),
+        payload["legacy_tld"] = tld
+        payload.setdefault("notices", []).append(
+            "The legacy MCP tld argument no longer rewrites project identity; "
+            "configure domains.tld explicitly.",
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "setup_domains timed out after 300s"}
-    out = ((res.stdout or "") + (res.stderr or "")).strip()
-    return {"ok": res.returncode == 0, "code": res.returncode, "output": out[:2000]}
+    return payload
 
 def secure_instance(project_dir: str, label: str | None = None) -> dict:
     """Give the project's instance a trusted https://<name>.<tld> URL without a

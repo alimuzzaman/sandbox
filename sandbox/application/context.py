@@ -320,6 +320,9 @@ def runtime_service(cfg):
     from sandbox.application.runtime_service import RuntimeService
     from sandbox.runtimes.compose import ComposeAdapter
     from sandbox.runtimes import builtin_adapter_registry
+    from sandbox.runtimes.registry import RuntimeBackendRegistry
+    from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+    from sandbox.runtimes.managed.repository import NativeRepository
 
     def resolve_descriptor(root, label=None):
         return sc.load_project_config(root, label=label)
@@ -360,7 +363,24 @@ def runtime_service(cfg):
             "wordpress.abilities",
             "wordpress.remote-deploy", "wordpress.remote-preview",
         })
-    return RuntimeService(resolve_descriptor=resolve_descriptor, adapters=adapters)
+    backends = RuntimeBackendRegistry()
+    wordpress_adapter = adapters.for_kind("wordpress").adapter
+    backends.register(
+        "compose", wordpress_adapter, project_kinds=("wordpress",), modes=("compose",),
+        owner="sandbox.runtimes.wordpress", order=10,
+    )
+    native_repository = NativeRepository(
+        sc.sandbox_base() / "runtime" / "native" / "state.json",
+    )
+    managed = ManagedNativeAdapter(
+        preflight=native_isolation_preflight(cfg), repository=native_repository,
+    )
+    backends.register(
+        "ubuntu-nspawn", managed, project_kinds=("wordpress",),
+        modes=("managed_native",), owner="sandbox.runtimes.managed.adapter", order=20,
+    )
+    return RuntimeService(resolve_descriptor=resolve_descriptor, adapters=adapters,
+                          backends=backends)
 
 
 def wordpress_runtime_service(cfg):

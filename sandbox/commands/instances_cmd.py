@@ -26,7 +26,7 @@ from sandbox.core import (
 )
 
 from sandbox.registry import register
-from sandbox.application.context import runtime_service, wordpress_runtime_service
+from sandbox.application.context import domain_service, runtime_service, wordpress_runtime_service
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -271,6 +271,20 @@ def cmd_instance(cfg, args) -> None:
         if ans != name:
             info("cancelled")
             return
+
+    # Resolver bindings are keyed by registered project identity. Reconcile them
+    # before stopping the runtime or deleting local/registry identity; an
+    # incomplete result is durably retained by DomainRepository and can be
+    # retried independently after the instance itself is gone.
+    owner = _core().registry_find_instance(name)
+    if owner and owner.get("root"):
+        domain_result = domain_service(cfg).cleanup(
+            owner["root"], label=owner.get("label", "default"), interactive=False,
+        )
+        if domain_result.state == "cleanup_incomplete":
+            info("resolver cleanup is incomplete; recovery state was retained for retry")
+        elif domain_result.ok and domain_result.mutated:
+            info("removed owned scoped resolver bindings")
 
     # 1. Stop + remove the runtime. Docker: containers + volume. Herd: drop
     #    the host DBs (while wp-config still exists), then unsecure + unlink.

@@ -126,7 +126,15 @@ def domain_service(cfg, **overrides):
                 sc, root, label, hostname, source,
             ),
         ),
-        binding_observer=overrides.pop("binding_observer", None),
+        binding_observer=overrides.pop(
+            "binding_observer",
+            lambda binding, adapter: adapter.observe(binding)
+            if hasattr(adapter, "observe") else None,
+        ),
+        authority_observer=overrides.pop(
+            "authority_observer",
+            authority.status if authority is not None else None,
+        ),
         **overrides,
     )
 

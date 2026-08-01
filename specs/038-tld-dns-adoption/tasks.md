@@ -94,14 +94,14 @@ public FQDN, conflicting pin, and incompatible-ingress fixtures through ensure a
 
 - [X] T035 [P] [US2] Write failing new-default, persisted-legacy, explicit-name, `.local`, and public-FQDN identity tests in `tests/test_hostname_intent.py`
 - [X] T036 [P] [US2] Write failing machine-override/project-pin precedence and source-reporting tests in `tests/test_domain_pins.py`
-- [ ] T037 [US2] Write failing incompatible identity preservation and per-port fallback lifecycle tests in `tests/test_domain_identity_lifecycle.py`
+- [X] T037 [US2] Write failing incompatible identity preservation and per-port fallback lifecycle tests in `tests/test_domain_identity_lifecycle.py`
 
 ### Implementation for User Story 2
 
 - [X] T038 [US2] Implement standards-safe hostname classification, `.test` defaulting, legacy preservation, and `.local` rejection in `sandbox/config/domains.py`
 - [X] T039 [US2] Implement public-answer consumption without local override and explicit-name preservation in `sandbox/application/domain_service.py`
 - [X] T040 [US2] Persist selected identity/provenance without retroactively changing existing registry entries in `sandbox/application/instance_service.py`
-- [ ] T041 [US2] Add regression fixtures for WordPress absolute URLs and generic Compose hostnames across re-ensure in `tests/test_domain_identity_lifecycle.py`
+- [X] T041 [US2] Add regression fixtures for WordPress absolute URLs and generic Compose hostnames across re-ensure in `tests/test_domain_identity_lifecycle.py`
 
 **Checkpoint**: Identity migrations cannot occur implicitly.
 
@@ -117,15 +117,15 @@ then run read-only status and repeated destroy/cleanup while comparing all forei
 
 ### Tests for User Story 3
 
-- [ ] T042 [P] [US3] Write failing resolver-change, address-mismatch, authority-down, cache-stale, and pin-source status tests in `tests/test_domain_status.py`
+- [X] T042 [P] [US3] Write failing resolver-change, address-mismatch, authority-down, cache-stale, and pin-source status tests in `tests/test_domain_status.py`
 - [X] T043 [P] [US3] Write failing drift, unreachable-manager, changed-rule, repeated-cleanup, and retained-residual tests in `tests/test_domain_cleanup.py`
-- [ ] T044 [US3] Write failing registry/local deletion-order and post-instance recovery tests in `tests/test_domain_destroy_ordering.py`
+- [X] T044 [US3] Write failing registry/local deletion-order and post-instance recovery tests in `tests/test_domain_destroy_ordering.py`
 
 ### Implementation for User Story 3
 
-- [ ] T045 [US3] Implement observed-versus-desired status and actionable reconciliation results in `sandbox/application/domain_service.py`
+- [X] T045 [US3] Implement observed-versus-desired status and actionable reconciliation results in `sandbox/application/domain_service.py`
 - [X] T046 [US3] Implement compare-before-remove cleanup and durable non-secret residual records in `sandbox/network/repository.py`
-- [ ] T047 [US3] Persist DNS cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
+- [X] T047 [US3] Persist DNS cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [ ] T048 [US3] Implement `domains detect|plan|apply|status|cleanup|reconsider` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T049 [US3] Implement import-safe MCP domain status/plan/apply/cleanup tools and setup-result delegation in `mcp/wp-server/tools/domains.py` and `mcp/wp-server/tools/instances.py`
 - [ ] T050 [US3] Run live owner-change, drift, unreachable, normal, and repeated cleanup scenarios and capture evidence in `specs/038-tld-dns-adoption/evidence/cleanup.md`

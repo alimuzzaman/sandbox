@@ -143,3 +143,14 @@ class DnsmasqAuthority:
             except OSError:
                 pass
         return True
+
+    def status(self) -> dict:
+        state = self._load()
+        pid, identity = state.get("pid"), state.get("pid_start")
+        healthy = bool(pid and identity and self.pid_matches(pid, identity))
+        return {
+            "health": "healthy" if healthy else "unhealthy",
+            "address": state.get("address"), "port": state.get("port"),
+            "config_digest": state.get("config_digest"),
+            "bindings": sorted((state.get("bindings") or {}).keys()),
+        }

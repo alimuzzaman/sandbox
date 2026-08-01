@@ -27,6 +27,7 @@ class DomainService:
         verifier: Callable | None = None, consent_decider: Callable | None = None,
         platform: str | None = None, identity_persister: Callable | None = None,
         binding_observer: Callable | None = None,
+        authority_observer: Callable | None = None,
     ) -> None:
         self.config_loader = config_loader
         self.project_registry = project_registry
@@ -44,6 +45,7 @@ class DomainService:
         self.platform = platform or ("darwin" if sys.platform == "darwin" else "linux")
         self.identity_persister = identity_persister
         self.binding_observer = binding_observer
+        self.authority_observer = authority_observer
 
     def support(self) -> dict[str, Any]:
         return {
@@ -105,12 +107,76 @@ class DomainService:
             {"owner": "unobserved", "tier": "unavailable"}
         )
         answers = observation.current_answers if observation is not None else ()
+        if observation is None:
+            expected = ()
+        else:
+            offer = self.ingress_offer(_config["root"], label) \
+                if self.ingress_offer is not None else {}
+            expected = tuple(offer.get("accepted_addresses") or ())
+            fallback = offer.get("fallback_url") or fallback
+            owner = f"{Path(_config['root']).resolve()}::{label}"
+            bindings = [
+                ResolutionBinding.from_dict(value)
+                for value in self.repository.snapshot()["bindings"].values()
+                if owner in (value.get("owners") or ())
+            ]
+            if bindings:
+                binding = next((item for item in bindings if
+                                item.name.removeprefix("*.") in hostname), bindings[0])
+                spec = self.adapters.get(binding.adapter_id)
+                adapter = spec.adapter if spec is not None else None
+                base = dict(
+                    state="drifted", hostname=hostname, policy=policy,
+                    observation=observation, expected=expected, fallback=fallback,
+                    mutated=False, ownership="residual", health="degraded",
+                )
+                if spec is None or observation.manager not in spec.managers:
+                    return self._result(
+                        **base, reason_code="resolver_owner_changed",
+                        message="The active resolver no longer matches the owned binding.",
+                    )
+                observed = (
+                    self.binding_observer(binding, adapter)
+                    if self.binding_observer is not None and adapter is not None else None
+                )
+                if observed is None:
+                    return self._result(
+                        **base, reason_code="binding_unavailable",
+                        message="The owned resolver binding could not be observed.",
+                    )
+                if canonical_digest(observed) != binding.last_applied_digest:
+                    return self._result(
+                        **base, reason_code="binding_drifted",
+                        message="The observed resolver binding differs from its owned receipt.",
+                    )
+                authority = self.authority_observer() if self.authority_observer else None
+                if authority is not None and authority.get("health") != "healthy":
+                    return self._result(
+                        **base, reason_code="authority_unhealthy",
+                        message="The scoped answering authority is not healthy.",
+                    )
+                if set(answers) != set(expected):
+                    return self._result(
+                        **base, reason_code="answer_mismatch",
+                        message="Fresh resolver answers do not match the ingress offer; a stale cache or route is possible.",
+                    )
+                if expected and not self.verifier(hostname, expected, fallback):
+                    return self._result(
+                        **base, reason_code="verification_failed",
+                        message="DNS matched, but the hostname did not reach the expected ingress.",
+                    )
+                return self._result(
+                    state="ready", hostname=hostname, policy=policy,
+                    observation=observation, expected=expected, fallback=fallback,
+                    reason_code="ready", message="Owned hostname resolution is healthy.",
+                    ok=True, mutated=False, health="healthy", ownership="owned",
+                )
         return DomainResult(
             ok=False, state="fallback", hostname=hostname,
             hostname_source=policy["hostnameSource"],
             strategy=policy.get("strategy"),
             strategy_source=policy["strategySource"], resolver=resolver,
-            actual_answers=tuple(answers), expected_addresses=(), ownership="none",
+            actual_answers=tuple(answers), expected_addresses=tuple(expected), ownership="none",
             health="fallback", fallback_url=fallback,
             reason={
                 "code": "resolver_not_selected",
@@ -330,7 +396,21 @@ class DomainService:
         try:
             config, policy, hostname, fallback = self._context(project_dir, label)
         except DomainContextError:
-            return self.status(project_dir, label=label)
+            # Cleanup receipts intentionally outlive the instance registry row.
+            # Recover identity from the project root plus persisted binding so a
+            # failed cleanup remains independently retryable after deletion.
+            config = self.config_loader(project_dir, label=label)
+            owner = f"{Path(config['root']).resolve()}::{label}"
+            retained = [
+                ResolutionBinding.from_dict(value)
+                for value in self.repository.snapshot()["bindings"].values()
+                if owner in (value.get("owners") or ())
+            ]
+            if not retained:
+                return self.status(project_dir, label=label)
+            policy = config["domains"]
+            hostname = retained[0].name.removeprefix("*.")
+            fallback = ""
         observation = self.observer(hostname) if self.observer else None
         if observation is None:
             return self.status(project_dir, label=label)

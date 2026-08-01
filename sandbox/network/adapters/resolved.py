@@ -73,3 +73,21 @@ class ResolvedAdapter:
             "sudo", "-n", self.helper, "resolved-remove", plan["suffix"], digest,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
+
+    def observe(self, binding) -> dict | None:
+        desired = dict(binding.desired)
+        destination = Path(
+            f"/etc/systemd/resolved.conf.d/80-sandbox-{desired['suffix']}.conf"
+        )
+        if not destination.exists() or destination.is_symlink():
+            return None
+        try:
+            link = self.readlink("/etc/resolv.conf")
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        except OSError:
+            return None
+        return {
+            "suffix": desired["suffix"], "address": desired["address"],
+            "port": int(desired["port"]), "fragment_digest": digest,
+            "resolv_conf_link": link,
+        }

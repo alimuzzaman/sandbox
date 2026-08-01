@@ -77,3 +77,14 @@ class MacosResolverAdapter:
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": (result.stderr or "")[:1000]}
+
+    def observe(self, binding) -> dict | None:
+        desired = dict(binding.desired)
+        destination = Path(desired["destination"])
+        if not destination.exists() or destination.is_symlink():
+            return None
+        try:
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        except OSError:
+            return None
+        return {"destination": str(destination), "content_digest": digest}

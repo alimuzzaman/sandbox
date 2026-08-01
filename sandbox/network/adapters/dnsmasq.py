@@ -114,3 +114,11 @@ class DnsmasqAdapter:
             self._write(path, prior)
             return {"ok": False, "mutated": False, "error": "dnsmasq reload failed"}
         return {"ok": True, "mutated": True}
+
+    def observe(self, binding) -> dict | None:
+        desired = dict(binding.desired)
+        path = Path(desired["path"])
+        if not path.exists() or path.is_symlink():
+            return None
+        return {"path": str(path),
+                "content_digest": hashlib.sha256(path.read_bytes()).hexdigest()}

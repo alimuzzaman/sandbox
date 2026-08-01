@@ -80,6 +80,16 @@ class TestDomainCleanup(unittest.TestCase):
         self.assertEqual(recovery["status"], "unavailable")
         self.assertEqual(adapter.calls, [])
 
+    def test_cleanup_retries_from_retained_binding_after_registry_deletion(self):
+        service, repository, binding, adapter = self._service({"route": "demo"})
+        service.project_registry = type("DeletedRegistry", (), {
+            "registry_get": staticmethod(lambda root, label=None: None),
+        })()
+        result = service.cleanup("/tmp/project")
+        self.assertTrue(result.ok)
+        self.assertIsNone(repository.binding(binding.binding_id))
+        self.assertEqual(adapter.calls, [binding.binding_id])
+
 
 if __name__ == "__main__":
     unittest.main()

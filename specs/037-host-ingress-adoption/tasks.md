@@ -35,8 +35,8 @@ the reusable transaction boundary before route mutation.
 - [X] T010 Implement the versioned locked ingress state repository in `sandbox/ingress/repository.py`
 - [X] T011 [P] Write failing full-current/full-candidate validation, atomic activation, reload, baseline-health, rollback, and timeout tests in `tests/test_ingress_transactions.py`
 - [X] T012 Implement the adapter-neutral validation/activation/health/rollback transaction runner in `sandbox/ingress/transaction.py`
-- [ ] T013 Write failing helper verb/path/service/owner/symlink/race and secret-redaction tests in `tests/test_ingress_helper.py`
-- [ ] T014 Define the fixed-verb ingress helper schema, canonical owned-fragment paths, symlink refusal, service allowlist, and install-copy flow in `tools/ingress-helper.sh`
+- [X] T013 Write failing helper verb/path/service/owner/symlink/race and secret-redaction tests in `tests/test_ingress_helper.py`
+- [X] T014 Define the fixed-verb ingress helper schema, canonical owned-fragment paths, symlink refusal, service allowlist, and install-copy flow in `tools/ingress-helper.sh`
 - [ ] T015 Compose ingress and clean-URL services with injected listener, process, HTTP, repository, domain, and runtime dependencies in `sandbox/application/context.py`
 
 **Checkpoint**: Route decisions and transactions are expressible without touching a real
@@ -86,10 +86,10 @@ with foreign route health baselines and inject validation, reload, and health fa
 
 - [ ] T027 [P] [US2] Write failing Sandbox Caddy endpoint-ownership, exact-bind, fragment, lifecycle, and fallback tests in `tests/test_ingress_sandbox_caddy.py`
 - [ ] T028 [P] [US2] Write failing Herd/Valet link/proxy/secure capability, ownership, and rollback tests in `tests/test_ingress_herd_valet.py`
-- [ ] T029 [P] [US2] Write failing system nginx owned-fragment, full-config validation, reload, health, and rollback tests in `tests/test_ingress_nginx.py`
-- [ ] T030 [P] [US2] Write failing Apache owned-fragment, module/capability, full-config validation, graceful reload, and rollback tests in `tests/test_ingress_apache.py`
-- [ ] T031 [P] [US2] Write failing persistent Caddy import-fragment, service-identity validation, reload, health, and rollback tests in `tests/test_ingress_caddy.py`
-- [ ] T032 [P] [US2] Write failing Traefik file-provider enablement, owned-file, dynamic reload, health, and rollback tests in `tests/test_ingress_traefik.py`
+- [X] T029 [P] [US2] Write failing system nginx owned-fragment, full-config validation, reload, health, and rollback tests in `tests/test_ingress_nginx.py`
+- [X] T030 [P] [US2] Write failing Apache owned-fragment, module/capability, full-config validation, graceful reload, health, and rollback tests in `tests/test_ingress_apache.py`
+- [X] T031 [P] [US2] Write failing persistent Caddy import-fragment, service-identity validation, reload, health, and rollback tests in `tests/test_ingress_caddy.py`
+- [X] T032 [P] [US2] Write failing Traefik file-provider enablement, owned-file, dynamic reload, health, and rollback tests in `tests/test_ingress_traefik.py`
 - [ ] T033 [US2] Write failing A→B→A hostname/address/capability handshake and no-route-on-DNS-failure tests in `tests/test_clean_url_service.py`
 - [ ] T034 [US2] Write failing foreign-hostname/wildcard collision, backend update, idempotency, and baseline-route preservation tests in `tests/test_ingress_service.py`
 
@@ -97,10 +97,10 @@ with foreign route health baselines and inject validation, reload, and health fa
 
 - [ ] T035 [US2] Implement exact-endpoint-safe Sandbox Caddy adapter using existing owned fragments in `sandbox/ingress/adapters/sandbox_caddy.py`
 - [ ] T036 [US2] Implement Herd/Valet route-only adapter with runtime ownership handed to C in `sandbox/ingress/adapters/herd_valet.py`
-- [ ] T037 [US2] Implement system nginx owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/nginx.py`
-- [ ] T038 [US2] Implement Apache owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/apache.py`
-- [ ] T039 [US2] Implement persistent system Caddy import-fragment adapter without ephemeral API state in `sandbox/ingress/adapters/caddy.py`
-- [ ] T040 [US2] Implement enabled Traefik file-provider adapter with owned dynamic fragment lifecycle in `sandbox/ingress/adapters/traefik.py`
+- [X] T037 [US2] Implement system nginx owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/nginx.py`
+- [X] T038 [US2] Implement Apache owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/apache.py`
+- [X] T039 [US2] Implement persistent system Caddy import-fragment adapter without ephemeral API state in `sandbox/ingress/adapters/caddy.py`
+- [X] T040 [US2] Implement enabled Traefik file-provider adapter with owned dynamic fragment lifecycle in `sandbox/ingress/adapters/traefik.py`
 - [ ] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
 - [ ] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
 - [ ] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py`

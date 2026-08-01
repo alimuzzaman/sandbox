@@ -89,7 +89,11 @@ MemoryHigh/Max, MemorySwapMax, TasksMax, I/O weight/bandwidth, and OOM policy. A
 RuntimeMaxSec to one-shot units; PHP request/worker timeouts to web/cron; LimitNOFILE to all
 payload services; server worker/connection caps and nft connection limits to network
 sockets. Apply payload seccomp deny groups, no-new-privileges, minimal address families,
-private devices, and zero ambient capabilities.
+private devices, and zero ambient capabilities. The durable container init retains only
+the small bounding set needed to switch service users and bind its web port; high-risk
+kernel/host powers such as `SYS_ADMIN`, `NET_ADMIN`, `NET_RAW`, `MKNOD`, tracing, and
+reboot are explicitly dropped. One-shot hostile payloads drop the remaining set through
+bubblewrap.
 
 **Rationale**: No single mechanism covers every resource. Fixed disk/inodes, cgroup totals,
 per-process FD ceilings, service connection ceilings, and execution deadlines together

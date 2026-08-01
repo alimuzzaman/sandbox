@@ -7,13 +7,22 @@ class NspawnCompiler:
     def compile(self, policy):
         mounts = [f"{item['source']}:{item['target']}:norbind" for item in policy.read_only_mounts]
         writable = [f"{item['source']}:{item['target']}:norbind" for item in policy.writable_mounts]
+        # Container init needs a small bounding set to switch service users and
+        # bind the web port. Host-control and kernel-facing powers are removed.
+        dropped = (
+            "CAP_AUDIT_CONTROL", "CAP_DAC_READ_SEARCH", "CAP_IPC_OWNER", "CAP_LEASE",
+            "CAP_LINUX_IMMUTABLE", "CAP_MKNOD", "CAP_NET_ADMIN", "CAP_NET_BROADCAST",
+            "CAP_NET_RAW", "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_NICE",
+            "CAP_SYS_PTRACE", "CAP_SYS_RESOURCE", "CAP_SYS_TTY_CONFIG",
+        )
         return {
             "Exec": {
                 "Boot": "yes",
                 "PrivateUsers": f"{policy.uid_map['base']}:{policy.uid_map['count']}",
                 "PrivateUsersDelegate": "0",
-                "PrivateUsersOwnership": "map", "Capability": "",
-                "DropCapability": "all", "NoNewPrivileges": "yes",
+                "PrivateUsersOwnership": "map", "Capability": (),
+                "DropCapability": dropped, "AmbientCapability": (),
+                "NoNewPrivileges": "yes",
                 "SystemCallFilter": "@system-service ~@mount ~@raw-io ~@reboot ~@swap",
                 "SystemCallErrorNumber": "EPERM",
             },

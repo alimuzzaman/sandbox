@@ -73,7 +73,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 - [X] T028 [US1] Implement read-only/writable mount compilation, canonical path and symlink checks in `sandbox/isolation/policy.py`
 - [ ] T029 [US1] Implement unique point-to-point veth allocation, no-default-route nftables policy, ingress allowance, scoped egress grants, counters, and revocation in `sandbox/isolation/network.py`
 - [ ] T030 [US1] Implement cgroup/service/disk/FD/connection/time/I/O limits and effective observation in `sandbox/isolation/resources.py`
-- [ ] T031 [US1] Implement per-instance credential injection, environment allowlist, close-range descriptor sanitation, and leak gate in `sandbox/isolation/credentials.py`
+- [X] T031 [US1] Implement per-instance credential injection, environment allowlist, close-range descriptor sanitation, and leak gate in `sandbox/isolation/credentials.py`
 - [X] T032 [US1] Implement the defense-in-depth one-shot bubblewrap profile with clearenv, source modes, nested-userns disable, capability drop, private temp, and bounded argv in `sandbox/isolation/bubblewrap.py`
 - [X] T033 [US1] Implement `IsolationLauncher` for web PHP, cron, WP-CLI/eval, exec, Composer, activation, PHPUnit, and durable jobs with no host fallback in `sandbox/isolation/launcher.py`
 - [ ] T034 [US1] Implement nginx/PHP-FPM/MariaDB/cron supervision and backend reporting inside the nspawn boundary in `sandbox/runtimes/managed/services.py` and `sandbox/runtimes/managed/database.py`

@@ -140,26 +140,64 @@ def domain_service(cfg, **overrides):
 
 
 def ingress_service(cfg, **overrides):
-    """Compose read-only kernel listener detection and proof-gated selection."""
+    """Compose listener truth, owned state, consent, and transaction services."""
     import platform as host_platform
+    import sandbox_core as sc
     from sandbox.application.ingress_service import IngressService
     from sandbox.ingress.detection import IngressDetector
     from sandbox.ingress.listeners import ListenerObserver, SocketBindProbe
     from sandbox.ingress.manifest import built_in_ingress_registry
-    from sandbox.services import BoundedProcessRunner
+    from sandbox.ingress.repository import IngressRepository
+    from sandbox.ingress.transaction import IngressTransactionRunner
+    from sandbox.ingress.verification import IngressVerifier
+    from sandbox.services import BoundedProcessRunner, UrlHttpProbe
 
     platform = overrides.pop(
         "platform", "darwin" if host_platform.system() == "Darwin" else "linux",
     )
     process = overrides.pop("process", BoundedProcessRunner())
+    http = overrides.pop("http", UrlHttpProbe())
     observer = overrides.pop(
         "listener_observer", ListenerObserver(platform=platform, process=process),
     )
     detector = overrides.pop("detector", IngressDetector(listener_observer=observer))
     registry = overrides.pop("registry", built_in_ingress_registry())
-    return IngressService(detector=detector, registry=registry,
-                          bind_address=overrides.pop("bind_address", "127.0.0.77"),
-                          bind_probe=overrides.pop("bind_probe", SocketBindProbe()))
+    network_root = sc.sandbox_base() / "runtime" / "network"
+    repository = overrides.pop(
+        "repository", IngressRepository(network_root / "ingress-state.json"),
+    )
+    verifier = overrides.pop("verifier", IngressVerifier(http=http))
+    transaction_runner = overrides.pop(
+        "transaction_runner",
+        IngressTransactionRunner(
+            baseline_probe=verifier.baseline, route_probe=verifier.route,
+        ),
+    )
+
+    def interactive_consent(identity):
+        answer = input(
+            f"Allow Sandbox to add an attributable route to {identity}? [y/N] ",
+        ).strip().lower()
+        return answer in {"y", "yes"}
+
+    return IngressService(
+        detector=detector, registry=registry, repository=repository,
+        transaction_runner=transaction_runner,
+        bind_address=overrides.pop("bind_address", "127.0.0.77"),
+        bind_probe=overrides.pop("bind_probe", SocketBindProbe()),
+        consent_decider=overrides.pop("consent_decider", interactive_consent),
+        clock=overrides.pop("clock", None), **overrides,
+    )
+
+
+def clean_url_service(cfg, **overrides):
+    """Compose the A→B→A ingress/DNS handshake without transport globals."""
+    from sandbox.application.clean_url_service import CleanUrlService
+    return CleanUrlService(
+        ingress=overrides.pop("ingress", ingress_service(cfg)),
+        domains=overrides.pop("domains", domain_service(cfg)),
+        **overrides,
+    )
 
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.

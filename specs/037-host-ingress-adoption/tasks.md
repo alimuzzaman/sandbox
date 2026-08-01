@@ -37,7 +37,7 @@ the reusable transaction boundary before route mutation.
 - [X] T012 Implement the adapter-neutral validation/activation/health/rollback transaction runner in `sandbox/ingress/transaction.py`
 - [X] T013 Write failing helper verb/path/service/owner/symlink/race and secret-redaction tests in `tests/test_ingress_helper.py`
 - [X] T014 Define the fixed-verb ingress helper schema, canonical owned-fragment paths, symlink refusal, service allowlist, and install-copy flow in `tools/ingress-helper.sh`
-- [ ] T015 Compose ingress and clean-URL services with injected listener, process, HTTP, repository, domain, and runtime dependencies in `sandbox/application/context.py`
+- [X] T015 Compose ingress and clean-URL services with injected listener, process, HTTP, repository, domain, and runtime dependencies in `sandbox/application/context.py`
 
 **Checkpoint**: Route decisions and transactions are expressible without touching a real
 incumbent; legacy clean URLs remain unchanged.
@@ -123,13 +123,13 @@ while byte-comparing foreign fragments and incumbent health.
 
 - [ ] T045 [P] [US3] Write failing unchanged, target-drifted, property-drifted, foreign-marker, and unavailable cleanup tests in `tests/test_ingress_cleanup.py`
 - [ ] T046 [P] [US3] Write failing repeated cleanup, residual retry, incumbent replacement, and uninstall aggregation tests in `tests/test_ingress_recovery.py`
-- [ ] T047 [US3] Write failing registry/local deletion-order and route-recovery survival tests in `tests/test_ingress_destroy_ordering.py`
+- [X] T047 [US3] Write failing registry/local deletion-order and route-recovery survival tests in `tests/test_ingress_destroy_ordering.py`
 
 ### Implementation for User Story 3
 
-- [ ] T048 [US3] Implement observed-versus-last-applied route status and compare-before-change cleanup in `sandbox/application/ingress_service.py`
-- [ ] T049 [US3] Persist non-secret incomplete cleanup records and retry transitions in `sandbox/ingress/repository.py`
-- [ ] T050 [US3] Persist ingress cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
+- [X] T048 [US3] Implement observed-versus-last-applied route status and compare-before-change cleanup in `sandbox/application/ingress_service.py`
+- [X] T049 [US3] Persist non-secret incomplete cleanup records and retry transitions in `sandbox/ingress/repository.py`
+- [X] T050 [US3] Persist ingress cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [ ] T051 [US3] Implement `domains ingress cleanup|reconcile` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md`
 

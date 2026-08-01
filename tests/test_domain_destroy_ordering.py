@@ -6,10 +6,12 @@ import unittest
 
 class TestDomainDestroyOrdering(unittest.TestCase):
     def test_dns_cleanup_precedes_runtime_and_identity_deletion(self):
-        from sandbox.commands.instances_cmd import cmd_instance
+        from sandbox.commands.instances_cmd import cmd_instance, _cleanup_instance_routes
 
+        helper = inspect.getsource(_cleanup_instance_routes)
+        self.assertIn("domain_service(cfg).cleanup", helper)
         source = inspect.getsource(cmd_instance)
-        cleanup = source.index("domain_service(cfg).cleanup")
+        cleanup = source.rindex("_cleanup_instance_routes(cfg, owner)")
         runtime = source.index('compose("down", "-v"')
         local_identity = source.index("_write_local_yaml(local)")
         registry_identity = source.index("sc.registry_remove")

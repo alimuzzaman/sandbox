@@ -26,7 +26,9 @@ from sandbox.core import (
 )
 
 from sandbox.registry import register
-from sandbox.application.context import domain_service, runtime_service, wordpress_runtime_service
+from sandbox.application.context import (
+    domain_service, ingress_service, runtime_service, wordpress_runtime_service,
+)
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
@@ -222,6 +224,26 @@ def cmd_init(cfg, args) -> None:
     print(f"  admin:  {entry['url']}/wp-admin")
     print(f"  test:   ./sb test --project-dir {root}")
 
+def _cleanup_instance_routes(cfg, owner) -> None:
+    """Persist route cleanup outcomes while project identity is still available."""
+    if not owner or not owner.get("root"):
+        return
+    ingress_result = ingress_service(cfg).cleanup_owner(
+        f"{Path(owner['root']).expanduser().resolve()}::{owner.get('label', 'default')}",
+    )
+    if ingress_result["state"] == "cleanup_incomplete":
+        info("ingress cleanup is incomplete; recovery state was retained for retry")
+    elif ingress_result["ok"] and ingress_result["mutated"]:
+        info("removed unchanged owned incumbent ingress routes")
+    domain_result = domain_service(cfg).cleanup(
+        owner["root"], label=owner.get("label", "default"), interactive=False,
+    )
+    if domain_result.state == "cleanup_incomplete":
+        info("resolver cleanup is incomplete; recovery state was retained for retry")
+    elif domain_result.ok and domain_result.mutated:
+        info("removed owned scoped resolver bindings")
+
+
 def cmd_instance(cfg, args) -> None:
     """Delete a sandbox instance end-to-end.
 
@@ -241,6 +263,7 @@ def cmd_instance(cfg, args) -> None:
 
     owner = _core().registry_find_instance(name)
     if owner and owner.get("kind") == "compose":
+        _cleanup_instance_routes(cfg, owner)
         result = runtime_service(cfg).invoke(OperationRequest(
             owner["root"], "destroy", label=owner.get("label", "default"),
         ))
@@ -272,19 +295,12 @@ def cmd_instance(cfg, args) -> None:
             info("cancelled")
             return
 
-    # Resolver bindings are keyed by registered project identity. Reconcile them
+    # Resolver and ingress routes are keyed by registered project identity. Reconcile them
     # before stopping the runtime or deleting local/registry identity; an
     # incomplete result is durably retained by DomainRepository and can be
     # retried independently after the instance itself is gone.
     owner = _core().registry_find_instance(name)
-    if owner and owner.get("root"):
-        domain_result = domain_service(cfg).cleanup(
-            owner["root"], label=owner.get("label", "default"), interactive=False,
-        )
-        if domain_result.state == "cleanup_incomplete":
-            info("resolver cleanup is incomplete; recovery state was retained for retry")
-        elif domain_result.ok and domain_result.mutated:
-            info("removed owned scoped resolver bindings")
+    _cleanup_instance_routes(cfg, owner)
 
     # 1. Stop + remove the runtime. Docker: containers + volume. Herd: drop
     #    the host DBs (while wp-config still exists), then unsecure + unlink.

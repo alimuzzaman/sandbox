@@ -187,6 +187,10 @@ class IngressService:
                 {"listen": naming["listen"],
                  "protocols": selection.required_protocols}, naming, backend,
             )
+            adapter_plan = {
+                **adapter_plan,
+                "_incumbent_fingerprint": selection.observation_fingerprint,
+            }
         except ValueError as exc:
             return {"ok": False, "state": "foreign_collision", "mutated": False,
                     "reason": {"code": "hostname_claimed", "message": str(exc)}}
@@ -270,6 +274,18 @@ class IngressService:
                     "status": "unavailable",
                 })
                 residual.append(route.route_id); continue
+            expected_fingerprint = dict(route.desired).get("_incumbent_fingerprint")
+            if expected_fingerprint:
+                current = next((item for item in self.detector.observe()
+                                if item.adapter_id == route.adapter_id), None)
+                if current is None or current.fingerprint != expected_fingerprint:
+                    self.repository.put_recovery(route.route_id, {
+                        "route_id": route.route_id, "adapter_id": route.adapter_id,
+                        "expected_digest": digest(route.last_applied or {}),
+                        "observed_digest": None,
+                        "reason_code": "incumbent_replaced", "status": "drifted",
+                    })
+                    residual.append(route.route_id); continue
             observed = adapter.observe_route(dict(route.desired))
             if digest(observed) != digest(route.last_applied or {}):
                 self.repository.remove_route_if_unchanged(route.route_id, observed)

@@ -28,7 +28,7 @@ class TestNativeHelper(unittest.TestCase):
             "writable_mounts": [],
             "network": {"egress": "deny", "veth": "ve-sb-demo",
                         "host_address": "10.203.0.1/30", "guest_address": "10.203.0.2/30",
-                        "default_route": False},
+                        "default_route": False, "ingress_port": 8080, "grants": []},
             "syscalls": {"no_new_privileges": True, "seccomp": "managed-v1"},
             "devices": [], "resources": {"cpu_percent": 200,
                 "memory_bytes": 2 * 1024**3, "pids": 512, "runtime_seconds": 3600,
@@ -101,6 +101,33 @@ class TestNativeHelper(unittest.TestCase):
                     mock.patch.object(helper, "atomic_install_bytes", replace_then_install):
                 helper.main(["policy-install", "sb-0123456789ab", str(path)])
             self.assertEqual((installed / "sb-0123456789ab.json").read_bytes(), original)
+
+    def test_network_apply_compiles_only_instance_drop_rules(self):
+        helper = module(); _unused, path = self.policy(Path(tempfile.mkdtemp()))
+        policy_value = json.loads(path.read_text()); calls = []
+        with mock.patch.object(helper, "applied_policy", return_value=(path, policy_value)), \
+                mock.patch.object(helper, "observed_link",
+                                  return_value={"ifalias": ""}), \
+                mock.patch.object(helper, "observed_nft_table", return_value=None), \
+                mock.patch.object(helper, "run_fixed",
+                                  side_effect=lambda argv, message, **kw: calls.append((argv, kw))):
+            helper.network_apply("sb-0123456789ab", policy_value["digest"])
+        nft = next(kwargs["input_text"] for argv, kwargs in calls if argv[:2] == ("nft", "-f"))
+        self.assertIn('input iifname "ve-sb-demo"', nft)
+        self.assertIn('forward iifname "ve-sb-demo"', nft)
+        self.assertEqual(nft.count("counter drop"), 2)
+        self.assertNotIn("masquerade", nft)
+        self.assertNotIn("policy accept; }\nadd rule inet sb_0123456789ab forward", nft)
+
+    def test_network_apply_refuses_unbrokered_egress_grants(self):
+        helper = module(); _unused, path = self.policy(Path(tempfile.mkdtemp()))
+        value = json.loads(path.read_text())
+        value["network"]["grants"] = [{"grant_id": "wordpress-org",
+            "destinations": ["8.8.8.8/32"], "ports": [443],
+            "expires_at": "later", "revoked": False}]
+        with mock.patch.object(helper, "applied_policy", return_value=(path, value)), \
+                self.assertRaises(SystemExit):
+            helper.network_apply("sb-0123456789ab", value["digest"])
 
 
 if __name__ == "__main__": unittest.main()

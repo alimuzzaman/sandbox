@@ -105,7 +105,7 @@ def validate_schema(value, machine_id):
             fail("policy writable source escapes owned roots")
     network = value["network"]
     if set(network) != {"egress", "veth", "host_address", "guest_address",
-                       "default_route"}:
+                       "default_route", "ingress_port", "grants"}:
         fail("policy point-to-point network is invalid")
     try:
         host = ipaddress.ip_interface(network["host_address"])
@@ -116,6 +116,29 @@ def validate_schema(value, machine_id):
             or not host.ip in pool or not guest.ip in pool or network.get("default_route") is not False
             or not re.fullmatch(r"ve-[a-z0-9-]{1,12}", str(network.get("veth", "")))):
         fail("policy point-to-point network is invalid")
+    ingress_port = network.get("ingress_port")
+    if (isinstance(ingress_port, bool) or not isinstance(ingress_port, int) or
+            not 1024 <= ingress_port <= 65535 or not isinstance(network.get("grants"), list)):
+        fail("policy point-to-point network is invalid")
+    for grant in network["grants"]:
+        if (not isinstance(grant, dict) or
+                set(grant) != {"grant_id", "destinations", "ports", "expires_at", "revoked"} or
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(grant.get("grant_id", ""))) or
+                not isinstance(grant.get("destinations"), list) or
+                not isinstance(grant.get("ports"), list) or
+                not isinstance(grant.get("expires_at"), str) or
+                grant.get("revoked") not in {True, False}):
+            fail("policy egress grant is invalid")
+        if any(isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+               for port in grant["ports"]):
+            fail("policy egress grant is invalid")
+        for destination in grant["destinations"]:
+            try: destination_network = ipaddress.ip_network(destination, strict=False)
+            except (TypeError, ValueError): fail("policy egress grant is invalid")
+            if (destination_network.version != 4 or destination_network.is_private or
+                    destination_network.is_loopback or destination_network.is_link_local or
+                    destination_network.is_multicast or destination_network.is_unspecified):
+                fail("policy egress grant is invalid")
     if (set(value["syscalls"]) != {"no_new_privileges", "seccomp"} or
             value["syscalls"].get("no_new_privileges") is not True or
             value["syscalls"].get("seccomp") != "managed-v1"):
@@ -222,12 +245,20 @@ def applied_policy(machine_id, digest):
     return path, value
 
 
-def run_fixed(argv, message):
-    result = subprocess.run(tuple(argv), stdin=subprocess.DEVNULL,
+def run_fixed(argv, message, *, input_text=None):
+    result = subprocess.run(tuple(argv), stdin=subprocess.DEVNULL if input_text is None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, timeout=120, check=False, close_fds=True)
+                            input=input_text, text=True, timeout=120, check=False,
+                            close_fds=True)
     if result.returncode != 0: fail(message)
     return result
+
+
+def run_optional(argv, *, input_text=None):
+    return subprocess.run(tuple(argv), stdin=subprocess.DEVNULL if input_text is None else None,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          input=input_text, text=True, timeout=30, check=False,
+                          close_fds=True)
 
 
 def image_paths(machine_id):
@@ -301,6 +332,98 @@ def image_remove(machine_id, digest):
     image.unlink()
 
 
+def network_names(machine_id):
+    return "sb_" + machine_id[3:], f"sandbox-native:{machine_id}"
+
+
+def network_marker(machine_id, digest):
+    return f"sandbox-native:{machine_id}:{digest}"
+
+
+def observed_link(veth):
+    result = run_optional(("ip", "-j", "link", "show", "dev", veth))
+    if result.returncode != 0: return None
+    try: values = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError: fail("native veth observation is invalid")
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+        fail("native veth observation is invalid")
+    return values[0]
+
+
+def observed_nft_table(table):
+    result = run_optional(("nft", "-j", "list", "table", "inet", table))
+    if result.returncode != 0: return None
+    try: document = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError: fail("native nft observation is invalid")
+    for item in document.get("nftables", ()) if isinstance(document, dict) else ():
+        row = item.get("table") if isinstance(item, dict) else None
+        if isinstance(row, dict) and row.get("family") == "inet" and row.get("name") == table:
+            return row
+    fail("native nft observation is invalid")
+
+
+def network_apply(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    network = policy["network"]
+    if any(not grant["revoked"] for grant in network["grants"]):
+        fail("native egress grants require the isolated broker")
+    table, alias_prefix = network_names(machine_id)
+    marker = network_marker(machine_id, digest)
+    veth = network["veth"]
+    link = observed_link(veth)
+    if link is None: fail("native veth is unavailable")
+    observed_alias = link.get("ifalias", "")
+    if observed_alias and observed_alias != alias_prefix:
+        fail("native veth ownership is foreign")
+    if observed_nft_table(table) is not None:
+        fail("native nft table already exists")
+    run_fixed(("ip", "link", "set", "dev", veth, "alias", alias_prefix),
+              "native veth ownership could not be marked")
+    run_fixed(("ip", "address", "replace", network["host_address"], "dev", veth),
+              "native host veth address failed")
+    guest = str(ipaddress.ip_interface(network["guest_address"]).ip)
+    script = "\n".join((
+        f'add table inet {table} {{ comment "{marker}"; }}',
+        f"add chain inet {table} input {{ type filter hook input priority filter; policy accept; }}",
+        f"add chain inet {table} forward {{ type filter hook forward priority filter; policy accept; }}",
+        f'add rule inet {table} input iifname "{veth}" ip saddr {guest} ct state established,related accept',
+        f'add rule inet {table} input iifname "{veth}" ip saddr {guest} counter drop',
+        f'add rule inet {table} forward iifname "{veth}" ip saddr {guest} counter drop',
+    )) + "\n"
+    try:
+        run_fixed(("nft", "-f", "-"), "native nft policy failed", input_text=script)
+    except BaseException:
+        run_optional(("ip", "address", "del", network["host_address"], "dev", veth))
+        raise
+
+
+def network_status(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    network = policy["network"]; table, alias_prefix = network_names(machine_id)
+    link = observed_link(network["veth"]); nft_table = observed_nft_table(table)
+    ok = bool(link and link.get("ifalias") == alias_prefix and nft_table and
+              nft_table.get("comment") == network_marker(machine_id, digest))
+    print(json.dumps({"machine_id": machine_id, "policy_digest": digest,
+                      "veth": network["veth"], "table": table, "ok": ok}, sort_keys=True))
+    if not ok: raise SystemExit(69)
+
+
+def network_remove(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    network = policy["network"]; table, alias_prefix = network_names(machine_id)
+    nft_table = observed_nft_table(table)
+    if nft_table is not None:
+        if nft_table.get("comment") != network_marker(machine_id, digest):
+            fail("native nft ownership changed")
+        run_fixed(("nft", "delete", "table", "inet", table),
+                  "native nft table removal failed")
+    link = observed_link(network["veth"])
+    if link is not None:
+        if link.get("ifalias") != alias_prefix: fail("native veth ownership changed")
+        run_optional(("ip", "address", "del", network["host_address"],
+                      "dev", network["veth"]))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sandbox-native-helper")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -308,7 +431,8 @@ def main(argv=None):
     install = sub.add_parser("install")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
-    for name in ("image-create", "image-mount", "image-unmount", "image-remove"):
+    for name in ("image-create", "image-mount", "image-unmount", "image-remove",
+                 "network-apply", "network-status", "network-remove"):
         action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
@@ -326,10 +450,13 @@ def main(argv=None):
         require_root(); identity = machine(args.machine)
         _path, value = checked_policy(POLICY_ROOT / f"{identity}.json", identity, applied=True)
         print(json.dumps({"machine_id": identity, "digest": value["digest"]}, sort_keys=True))
-    elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove"}:
+    elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove",
+                      "network-apply", "network-status", "network-remove"}:
         require_root(); identity = machine(args.machine)
         {"image-create": image_create, "image-mount": image_mount,
-         "image-unmount": image_unmount, "image-remove": image_remove}[args.verb](
+         "image-unmount": image_unmount, "image-remove": image_remove,
+         "network-apply": network_apply, "network-status": network_status,
+         "network-remove": network_remove}[args.verb](
              identity, args.digest)
 
 

@@ -80,3 +80,39 @@ class SubnetAllocator:
                     "guest_address": f"{guest}/30",
                     "veth": "ve-" + hashlib.sha256(machine_id.encode()).hexdigest()[:10]}
         raise ValueError("managed subnet pool is exhausted")
+
+
+class ManagedNetwork:
+    """Delegate only digest-bound network lifecycle verbs to the root helper."""
+
+    def __init__(self, *, process, helper):
+        self.process = process
+        self.helper = helper
+
+    def plan(self, policy):
+        network = dict(policy.network)
+        if network.get("egress") != "deny" or network.get("default_route") is not False:
+            raise ValueError("managed network must remain default-deny")
+        if not isinstance(network.get("ingress_port"), int):
+            raise ValueError("managed ingress port is unavailable")
+        return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
+                **network}
+
+    def _run(self, verb, plan):
+        return self.process.run(("sudo", "-n", self.helper, verb,
+                                 plan["machine_id"], plan["policy_digest"]), timeout=120)
+
+    def apply(self, plan):
+        result = self._run("network-apply", plan)
+        if result.returncode != 0:
+            raise RuntimeError("managed default-deny network apply failed")
+        return {"ok": True, "mutated": True}
+
+    def status(self, plan):
+        result = self._run("network-status", plan)
+        return {"ok": result.returncode == 0, "mutated": False,
+                "stdout": result.stdout or ""}
+
+    def remove(self, plan):
+        result = self._run("network-remove", plan)
+        return {"ok": result.returncode == 0, "mutated": result.returncode == 0}

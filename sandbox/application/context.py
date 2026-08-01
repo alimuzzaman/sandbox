@@ -253,6 +253,15 @@ def native_isolation_preflight(cfg, **overrides):
         effective_probe=overrides.pop("effective_probe", effective),
     )
 
+
+def managed_package_planner(cfg, **overrides):
+    """Compose read-only configured-source APT planning; never installs."""
+    from sandbox.runtimes.managed.packages import AptPackageSimulator, ManagedPackagePlanner
+    from sandbox.services import BoundedProcessRunner
+    process = overrides.pop("process", BoundedProcessRunner())
+    apt = overrides.pop("apt", AptPackageSimulator(process=process))
+    return ManagedPackagePlanner(simulate=apt.simulate, sources=apt.sources)
+
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.
 

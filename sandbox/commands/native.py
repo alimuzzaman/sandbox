@@ -38,6 +38,24 @@ def cmd_native(cfg, args):
     elif args.action == "preflight":
         from sandbox.application.context import native_isolation_preflight
         result = native_isolation_preflight(cfg).inspect()
+    elif args.action == "install-plan":
+        from sandbox.application.context import managed_package_planner
+        try:
+            plan = managed_package_planner(cfg).plan(web_server=args.web_server)
+            result = {"ok": True, "operation": "native_install_plan", "state": "ready",
+                      "mutated": False, "matrix_id": plan.matrix_id,
+                      "host_packages": [dict(item) for item in plan.host_packages],
+                      "image_packages": [dict(item) for item in plan.image_packages],
+                      "sources": [dict(item) for item in plan.sources],
+                      "service_effects": [dict(item) for item in plan.service_effects],
+                      "owned_roots": list(plan.owned_roots),
+                      "privilege_actions": list(plan.privilege_actions),
+                      "simulation_digest": plan.simulation_digest,
+                      "reason": {"code": "ready"}}
+        except (OSError, ValueError) as exc:
+            result = {"ok": False, "operation": "native_install_plan", "state": "blocked",
+                      "mutated": False,
+                      "reason": {"code": "version_unavailable", "message": str(exc)}}
     else:
         result = {"ok": False, "operation": f"native_{args.action.replace('-', '_')}",
                   "state": "unsupported", "mutated": False,

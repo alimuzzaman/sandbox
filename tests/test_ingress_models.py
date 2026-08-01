@@ -22,8 +22,9 @@ class TestIngressModels(unittest.TestCase):
     def test_ipv6_wildcard_overlaps_ipv4_only_when_dual_stack(self):
         from sandbox.ingress.models import ListenerEndpoint
         requested = ListenerEndpoint("127.0.0.77", 80)
-        self.assertFalse(requested.overlaps(ListenerEndpoint("::", 80)))
+        self.assertFalse(requested.overlaps(ListenerEndpoint("::", 80, dual_stack=False)))
         self.assertTrue(requested.overlaps(ListenerEndpoint("::", 80, dual_stack=True)))
+        self.assertTrue(requested.overlaps(ListenerEndpoint("::", 80)))
 
     def test_observation_fingerprint_changes_with_listener_scope(self):
         from sandbox.ingress.models import IngressObservation, ListenerEndpoint

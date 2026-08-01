@@ -26,6 +26,14 @@ class TestIngressDetection(unittest.TestCase):
         self.assertEqual(result[0].endpoints, (nginx,))
         self.assertEqual(IngressDetector(listener_observer=Observer(())).observe(), ())
 
+    def test_non_ingress_ports_are_not_reported_as_ingress_products(self):
+        from sandbox.ingress.detection import IngressDetector
+        from sandbox.ingress.models import ListenerEndpoint
+        result = IngressDetector(listener_observer=Observer((
+            ListenerEndpoint("0.0.0.0", 5432, process={"command": "postgres"}),
+        ))).observe()
+        self.assertEqual(result, ())
+
     def test_sandbox_owner_requires_container_and_process_evidence(self):
         from sandbox.ingress.detection import IngressDetector
         from sandbox.ingress.models import ListenerEndpoint

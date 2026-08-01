@@ -32,7 +32,7 @@ class ListenerEndpoint:
     address: str
     port: int
     protocol: str = "tcp"
-    dual_stack: bool = False
+    dual_stack: bool | None = None
     socket_id: str | None = None
     process: Mapping[str, Any] | None = None
     service: Mapping[str, Any] | None = None
@@ -46,7 +46,9 @@ class ListenerEndpoint:
         object.__setattr__(self, "port", int(self.port))
         if self.protocol not in {"tcp", "udp"}:
             raise ValueError("listener protocol is invalid")
-        if self.dual_stack and not (address.version == 6 and address.is_unspecified):
+        if self.dual_stack not in {True, False, None}:
+            raise ValueError("dual_stack must be boolean or unknown")
+        if self.dual_stack is not None and not (address.version == 6 and address.is_unspecified):
             raise ValueError("dual_stack applies only to an IPv6 wildcard")
         if self.owner_confidence not in {"proven", "probable", "unknown"}:
             raise ValueError("listener owner confidence is invalid")
@@ -71,7 +73,8 @@ class ListenerEndpoint:
             return left == right or left.is_unspecified or right.is_unspecified
         ipv6 = self if left.version == 6 else other
         ipv4 = other if left.version == 6 else self
-        return ipv6.wildcard and ipv6.dual_stack and ipaddress.ip_address(ipv4.address).version == 4
+        return ipv6.wildcard and ipv6.dual_stack is not False \
+            and ipaddress.ip_address(ipv4.address).version == 4
 
     def to_dict(self) -> dict:
         return {

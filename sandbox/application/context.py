@@ -144,7 +144,7 @@ def ingress_service(cfg, **overrides):
     import platform as host_platform
     from sandbox.application.ingress_service import IngressService
     from sandbox.ingress.detection import IngressDetector
-    from sandbox.ingress.listeners import ListenerObserver
+    from sandbox.ingress.listeners import ListenerObserver, SocketBindProbe
     from sandbox.ingress.manifest import built_in_ingress_registry
     from sandbox.services import BoundedProcessRunner
 
@@ -158,7 +158,8 @@ def ingress_service(cfg, **overrides):
     detector = overrides.pop("detector", IngressDetector(listener_observer=observer))
     registry = overrides.pop("registry", built_in_ingress_registry())
     return IngressService(detector=detector, registry=registry,
-                          bind_address=overrides.pop("bind_address", "127.0.0.77"))
+                          bind_address=overrides.pop("bind_address", "127.0.0.77"),
+                          bind_probe=overrides.pop("bind_probe", SocketBindProbe()))
 
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.

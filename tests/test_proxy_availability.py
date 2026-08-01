@@ -11,6 +11,11 @@ class Observer:
         return self.endpoints
 
 
+class Probe:
+    def __init__(self, result): self.result = result
+    def check(self, endpoint): return self.result
+
+
 class TestProxyAvailability(unittest.TestCase):
     def test_docker_binary_alone_does_not_claim_availability(self):
         from sandbox.core._domains import proxy_availability
@@ -18,6 +23,7 @@ class TestProxyAvailability(unittest.TestCase):
         result = proxy_availability(
             observer=Observer((ListenerEndpoint("0.0.0.0", 80),)),
             docker_path="/usr/bin/docker", running=False,
+            bind_probe=Probe("unavailable"),
         )
         self.assertFalse(result["available"])
         self.assertEqual(result["reason_code"], "listener_conflict")
@@ -29,6 +35,7 @@ class TestProxyAvailability(unittest.TestCase):
         result = proxy_availability(
             observer=Observer((ListenerEndpoint("127.0.0.1", 80),)),
             docker_path="/usr/bin/docker", running=False,
+            bind_probe=Probe("unavailable"),
         )
         self.assertTrue(result["available"])
         self.assertEqual(result["reason_code"], "endpoints_free")

@@ -194,9 +194,9 @@ def _valet_proxy_active(domain: str) -> bool:
 
 
 def proxy_availability(*, observer=None, docker_path=None,
-                       running: bool | None = None) -> dict:
+                       running: bool | None = None, bind_probe=None) -> dict:
     """Return structured exact-endpoint availability for Sandbox Caddy."""
-    from sandbox.ingress.listeners import ListenerObserver
+    from sandbox.ingress.listeners import ListenerObserver, SocketBindProbe
     from sandbox.ingress.models import ListenerEndpoint
 
     docker_path = shutil.which("docker") if docker_path is None else docker_path
@@ -216,15 +216,20 @@ def proxy_availability(*, observer=None, docker_path=None,
         ListenerEndpoint(PROXY_BIND_IP, 80),
         ListenerEndpoint(PROXY_BIND_IP, 443),
     )
+    probe = bind_probe or SocketBindProbe()
+    probe_results = tuple(probe.check(endpoint) for endpoint in requested)
+    if all(result == "free" for result in probe_results):
+        return {"available": True, "reason_code": "endpoints_free",
+                "message": "Sandbox ingress endpoints are free.", "conflicts": []}
     snapshot = observer.snapshot()
     conflicts = tuple(
         listener for listener in snapshot
         if any(listener.overlaps(endpoint) for endpoint in requested)
     )
-    if conflicts:
+    if conflicts or "conflict" in probe_results:
         rendered = ", ".join(
             f"{item.address}:{item.port}" for item in conflicts
-        )
+        ) or f"{PROXY_BIND_IP}:80/443"
         return {"available": False, "reason_code": "listener_conflict",
                 "message": f"Another listener overlaps Sandbox ingress: {rendered}.",
                 "conflicts": [item.to_dict() for item in conflicts]}

@@ -24,6 +24,21 @@ class TestLinuxIngressListeners(unittest.TestCase):
         self.assertTrue(ListenerEndpoint("0.0.0.0", 80).overlaps(requested))
         self.assertFalse(ListenerEndpoint("127.0.0.1", 80).overlaps(requested))
 
+    def test_bind_probe_reports_real_free_and_conflicting_endpoints(self):
+        import socket
+        from sandbox.ingress.listeners import SocketBindProbe
+        from sandbox.ingress.models import ListenerEndpoint
+        owner = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        owner.bind(("127.0.0.1", 0)); owner.listen(1)
+        port = owner.getsockname()[1]
+        try:
+            self.assertEqual(SocketBindProbe().check(
+                ListenerEndpoint("127.0.0.1", port)), "conflict")
+        finally:
+            owner.close()
+        self.assertEqual(SocketBindProbe().check(
+            ListenerEndpoint("127.0.0.1", port)), "free")
+
 
 if __name__ == "__main__":
     unittest.main()

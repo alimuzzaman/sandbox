@@ -41,6 +41,8 @@ class IngressDetector:
         grouped = defaultdict(list)
         names = {}
         for endpoint in self.listener_observer.snapshot():
+            if endpoint.protocol != "tcp" or endpoint.port not in {80, 443}:
+                continue
             adapter_id, product = self._identity(endpoint)
             grouped[adapter_id].append(endpoint)
             names[adapter_id] = product

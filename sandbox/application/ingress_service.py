@@ -9,10 +9,12 @@ PROTOCOL_PORTS = {"http": 80, "https": 443}
 
 
 class IngressService:
-    def __init__(self, *, detector, registry, bind_address="127.0.0.77"):
+    def __init__(self, *, detector, registry, bind_address="127.0.0.77",
+                 bind_probe=None):
         self.detector = detector
         self.registry = registry
         self.bind_address = bind_address
+        self.bind_probe = bind_probe
 
     def support(self):
         return {"ok": True, "operation": "ingress_support", "state": "ready",
@@ -28,6 +30,21 @@ class IngressService:
 
     def detect(self):
         observations = self.detector.observe()
+        requested = []
+        for protocol, port in PROTOCOL_PORTS.items():
+            endpoint = ListenerEndpoint(self.bind_address, port)
+            overlap = [
+                item.to_dict() for observation in observations
+                for item in observation.endpoints if item.overlaps(endpoint)
+            ]
+            probe = self.bind_probe.check(endpoint) if self.bind_probe else "unavailable"
+            requested.append({
+                "protocol": protocol, "address": self.bind_address, "port": port,
+                "kernel_bind": probe,
+                "state": "free" if probe == "free" else
+                         "conflict" if probe == "conflict" or overlap else "unknown",
+                "overlaps": overlap,
+            })
         return {"ok": True, "operation": "ingress_detect", "state": "ready",
                 "observations": [{
                     "adapter_id": item.adapter_id, "product": item.product,
@@ -35,7 +52,8 @@ class IngressService:
                     "capabilities": sorted(item.capabilities),
                     "fingerprint": item.fingerprint,
                     "endpoints": [endpoint.to_dict() for endpoint in item.endpoints],
-                } for item in observations], "mutated": False}
+                } for item in observations], "requested_endpoints": requested,
+                "mutated": False}
 
     def select(self, *, required_protocols=("http",), required_capabilities=(),
                pin=None, pin_source=None):

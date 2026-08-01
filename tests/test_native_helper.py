@@ -83,5 +83,24 @@ class TestNativeHelper(unittest.TestCase):
                         helper.checked_policy(path, "sb-0123456789ab")
                     _helper, path = self.policy(root)
 
+    def test_policy_install_uses_validated_bytes_not_a_reopened_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); helper, path = self.policy(root)
+            installed = root / "installed"
+            original = path.read_bytes()
+            replacement = b'{"attacker":"replacement"}'
+            real_install = helper.atomic_install_bytes
+
+            def replace_then_install(payload, destination):
+                path.unlink(); path.write_bytes(replacement)
+                return real_install(payload, destination)
+
+            with mock.patch.object(helper, "STAGING_ROOT", root), \
+                    mock.patch.object(helper, "POLICY_ROOT", installed), \
+                    mock.patch.object(helper, "require_root"), \
+                    mock.patch.object(helper, "atomic_install_bytes", replace_then_install):
+                helper.main(["policy-install", "sb-0123456789ab", str(path)])
+            self.assertEqual((installed / "sb-0123456789ab.json").read_bytes(), original)
+
 
 if __name__ == "__main__": unittest.main()

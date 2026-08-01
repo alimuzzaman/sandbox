@@ -143,29 +143,46 @@ def validate_schema(value, machine_id):
         fail("policy credential reference is invalid")
 
 
-def checked_policy(path_value, machine_id, *, applied=False):
+def _read_checked_policy(path_value, machine_id, *, applied=False):
     path = Path(path_value)
-    try: details = path.lstat()
-    except OSError: fail("policy file is unavailable")
-    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
-        fail("policy must be a regular non-symlink")
     expected_root = POLICY_ROOT if applied else STAGING_ROOT
-    try: canonical = path.resolve(strict=True); canonical.relative_to(expected_root)
-    except (OSError, ValueError): fail("policy path is outside its fixed root")
     expected = expected_root / f"{machine_id}.json"
-    if canonical != expected: fail("policy path does not match machine identity")
-    expected_uid = 0 if applied else int(os.environ.get("SUDO_UID", os.getuid()))
-    if details.st_uid != expected_uid: fail("policy owner mismatch")
-    if details.st_mode & 0o022: fail("policy must not be group/world writable")
-    if details.st_size > 1024 * 1024: fail("policy is too large")
-    try: value = json.loads(canonical.read_text())
-    except (OSError, json.JSONDecodeError): fail("policy JSON is invalid")
+    try:
+        if path.absolute() != expected.absolute():
+            fail("policy path does not match machine identity")
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        fail("policy file is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            fail("policy must be a regular non-symlink")
+        expected_uid = 0 if applied else int(os.environ.get("SUDO_UID", os.getuid()))
+        if details.st_uid != expected_uid: fail("policy owner mismatch")
+        if details.st_mode & 0o022: fail("policy must not be group/world writable")
+        if details.st_size > 1024 * 1024: fail("policy is too large")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+        if len(payload) != details.st_size: fail("policy changed during validation")
+    finally:
+        os.close(descriptor)
+    try: value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError): fail("policy JSON is invalid")
     if not isinstance(value, dict): fail("policy schema is invalid")
     validate_schema(value, machine_id)
     supplied = value.get("digest"); basis = {key: val for key, val in value.items() if key != "digest"}
     if not isinstance(supplied, str) or supplied != canonical_digest(basis):
         fail("policy digest mismatch")
-    return canonical, value
+    return expected, value, payload
+
+
+def checked_policy(path_value, machine_id, *, applied=False):
+    path, value, _payload = _read_checked_policy(path_value, machine_id, applied=applied)
+    return path, value
 
 
 def atomic_install(source, destination):
@@ -175,6 +192,21 @@ def atomic_install(source, destination):
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as output, source.open("rb") as input_stream:
             shutil.copyfileobj(input_stream, output); output.flush(); os.fsync(output.fileno())
+        os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def atomic_install_bytes(payload, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", dir=destination.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(payload); output.flush(); os.fsync(output.fileno())
         os.replace(temporary, destination)
         directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
         try: os.fsync(directory)
@@ -286,12 +318,10 @@ def main(argv=None):
         os.chmod(INSTALL_PATH, 0o755)
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
-        source, value = checked_policy(args.path, identity)
-        # Re-read and re-hash immediately before the root-owned copy closes the staging race.
-        if canonical_digest({k: v for k, v in json.loads(source.read_text()).items()
-                             if k != "digest"}) != value["digest"]:
-            fail("policy changed during validation")
-        atomic_install(source, POLICY_ROOT / f"{identity}.json")
+        _source, _value, payload = _read_checked_policy(args.path, identity)
+        # Install the exact bytes read from the validated O_NOFOLLOW descriptor;
+        # never reopen the user-controlled staging pathname.
+        atomic_install_bytes(payload, POLICY_ROOT / f"{identity}.json")
     elif args.verb == "policy-status":
         require_root(); identity = machine(args.machine)
         _path, value = checked_policy(POLICY_ROOT / f"{identity}.json", identity, applied=True)

@@ -15,4 +15,31 @@ class HostsAdapter:
                 "address": address, "marker": "sandbox-resolver-v1"}
 
     def apply(self, _plan):
-        raise RuntimeError("hosts mutation remains proof-gated")
+        plan = _plan
+        result = self.process.run((
+            "sudo", "-n", self.helper, "hosts-apply",
+            plan["hostname"], plan["address"],
+        ), timeout=30)
+        return {"ok": result.returncode == 0,
+                "mutated": result.returncode == 0 and
+                           (result.stdout or "").strip() != "unchanged",
+                "applied": {"hostname": plan["hostname"], "address": plan["address"]},
+                "error": (result.stderr or "")[:1000]}
+
+    def cleanup(self, binding):
+        desired = dict(binding.desired)
+        result = self.process.run((
+            "sudo", "-n", self.helper, "hosts-remove",
+            desired["hostname"], desired["address"],
+        ), timeout=30)
+        return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
+                "error": (result.stderr or "")[:1000]}
+
+    def rollback(self, plan: dict) -> dict:
+        desired = plan.get("applied") or plan
+        result = self.process.run((
+            "sudo", "-n", self.helper, "hosts-remove",
+            desired["hostname"], desired["address"],
+        ), timeout=30)
+        return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
+                "error": (result.stderr or "")[:1000]}

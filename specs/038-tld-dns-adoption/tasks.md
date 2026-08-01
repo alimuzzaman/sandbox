@@ -59,8 +59,8 @@ unrelated answers before/after, resolve the instance name freshly, and request i
 - [X] T018 [P] [US1] Write failing read-only owner/mode/extension/actual-answer detection tests in `tests/test_domain_detection.py`
 - [X] T019 [P] [US1] Write failing non-forwarding authority config, endpoint collision, idempotency, and last-owner shutdown tests in `tests/test_domain_authority.py`
 - [X] T020 [P] [US1] Write failing systemd-resolved route-only, resolv.conf-symlink-preservation, reload, and rollback tests in `tests/test_domain_resolved.py`
-- [ ] T021 [P] [US1] Write failing NetworkManager, direct dnsmasq, and exact-name hosts scoped-extension, validation, ownership, and rollback tests in `tests/test_domain_linux_adapters.py`
-- [ ] T022 [P] [US1] Write failing macOS resolver-file scoped ownership, validation, and rollback tests in `tests/test_domain_macos_adapter.py`
+- [X] T021 [P] [US1] Write failing NetworkManager, direct dnsmasq, and exact-name hosts scoped-extension, validation, ownership, and rollback tests in `tests/test_domain_linux_adapters.py`
+- [X] T022 [P] [US1] Write failing macOS resolver-file scoped ownership, validation, and rollback tests in `tests/test_domain_macos_adapter.py`
 - [X] T023 [P] [US1] Write failing Herd/Valet integration, WSL2 detect-only, and unsupported-manager zero-mutation tests in `tests/test_domain_incumbent_adapters.py`
 - [X] T024 [US1] Write failing service sequence, consent, fresh-answer, ingress-handshake, and fallback integration tests in `tests/test_domain_service.py`
 
@@ -69,9 +69,9 @@ unrelated answers before/after, resolve the instance name freshly, and request i
 - [X] T025 [US1] Implement bounded read-only resolver ownership and current-answer detection in `sandbox/network/detection.py`
 - [X] T026 [US1] Implement Sandbox-owned non-forwarding dnsmasq configuration, supervision, health, and reference counting in `sandbox/network/authority.py`
 - [X] T027 [US1] Implement systemd-resolved scoped routing without global resolver replacement in `sandbox/network/adapters/resolved.py`
-- [ ] T028 [US1] Implement NetworkManager, existing dnsmasq, and attributable exact-name hosts adapters in `sandbox/network/adapters/networkmanager.py`, `sandbox/network/adapters/dnsmasq.py`, and `sandbox/network/adapters/hosts.py`
-- [ ] T029 [US1] Implement macOS `/etc/resolver` owned-fragment adapter in `sandbox/network/adapters/macos.py`
-- [ ] T030 [US1] Implement Herd/Valet scoped integration plus detect-only external-manager results in `sandbox/network/adapters/incumbent.py` and `sandbox/network/adapters/external.py`
+- [X] T028 [US1] Implement NetworkManager, existing dnsmasq, and attributable exact-name hosts adapters in `sandbox/network/adapters/networkmanager.py`, `sandbox/network/adapters/dnsmasq.py`, and `sandbox/network/adapters/hosts.py`
+- [X] T029 [US1] Implement macOS `/etc/resolver` owned-fragment adapter in `sandbox/network/adapters/macos.py`
+- [X] T030 [US1] Implement Herd/Valet scoped integration plus detect-only external-manager results in `sandbox/network/adapters/incumbent.py` and `sandbox/network/adapters/external.py`
 - [X] T031 [US1] Implement fresh uncached DNS verification followed by ingress HTTP verification in `sandbox/network/verification.py`
 - [X] T032 [US1] Implement plan/apply/status sequencing, TTY-only consent, rollback, and per-port fallback in `sandbox/application/domain_service.py`
 - [ ] T033 [US1] Delegate legacy domain entry points to the application service while retaining rollback compatibility in `sandbox/core/_domains.py`

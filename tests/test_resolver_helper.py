@@ -101,6 +101,38 @@ class TestResolverHelper(unittest.TestCase):
             )
         self.assertNotEqual(result.returncode, 0)
 
+    def test_macos_candidate_has_a_separate_exact_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authority = root / "authority"
+            authority.mkdir()
+            candidate = authority / "macos-test.resolver"
+            candidate.write_text(
+                "# sandbox-resolver v1 suffix=test\n"
+                "nameserver 127.0.0.54\n"
+                "port 5300\n"
+            )
+            candidate.chmod(0o600)
+            accepted = self.run_helper(
+                "check-macos-candidate", str(root), str(candidate),
+                "test", "127.0.0.54", "5300",
+            )
+            wrong_schema = self.run_helper(
+                "check-candidate", str(root), str(candidate),
+                "test", "127.0.0.54", "5300",
+            )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertNotEqual(wrong_schema.returncode, 0)
+
+    def test_mutation_verbs_reject_invalid_values_before_privilege(self):
+        for invocation in (
+            ("hosts-apply", "../bad", "127.0.0.1"),
+            ("hosts-remove", "demo.test", "8.8.8.8"),
+            ("macos-remove", "../bad", "not-a-digest"),
+        ):
+            result = self.run_helper(*invocation)
+            self.assertNotEqual(result.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

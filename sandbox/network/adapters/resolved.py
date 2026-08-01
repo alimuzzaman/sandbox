@@ -58,7 +58,8 @@ class ResolvedAdapter:
         if after != before:
             return {"ok": False, "mutated": True,
                     "error": "resolver-managed resolv.conf relationship changed"}
-        return {"ok": True, "mutated": True, "applied": {
+        return {"ok": True, "mutated": (result.stdout or "").strip() != "unchanged",
+                "applied": {
             "suffix": suffix, "address": address, "port": int(port),
             "fragment_digest": hashlib.sha256(candidate.read_bytes()).hexdigest(),
             "resolv_conf_link": before,

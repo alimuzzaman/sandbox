@@ -29,8 +29,8 @@ the reusable transaction boundary before route mutation.
 
 - [X] T005 Write failing endpoint normalization, bind-overlap, protocol-set, ownership, digest, and transition tests in `tests/test_ingress_models.py`
 - [X] T006 Implement immutable listener, observation, selection, route, consent, support, transaction, and cleanup models in `sandbox/ingress/models.py`
-- [ ] T007 [P] Write failing deterministic adapter order, duplicate registration, capability, tier, and proof-gate tests in `tests/test_ingress_registry.py`
-- [ ] T008 Implement ingress adapter protocol, registry, and product support/proof manifest in `sandbox/ingress/registry.py` and `sandbox/ingress/manifest.py`
+- [X] T007 [P] Write failing deterministic adapter order, duplicate registration, capability, tier, and proof-gate tests in `tests/test_ingress_registry.py`
+- [X] T008 Implement ingress adapter protocol, registry, and product support/proof manifest in `sandbox/ingress/registry.py` and `sandbox/ingress/manifest.py`
 - [ ] T009 [P] Write failing repository locking, atomicity, migration, attribution, drift, and residual-retention tests in `tests/test_ingress_repository.py`
 - [ ] T010 Implement the versioned locked ingress state repository in `sandbox/ingress/repository.py`
 - [ ] T011 [P] Write failing full-current/full-candidate validation, atomic activation, reload, baseline-health, rollback, and timeout tests in `tests/test_ingress_transactions.py`

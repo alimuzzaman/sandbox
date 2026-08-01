@@ -114,9 +114,26 @@ class DomainRepository:
             existing = value["bindings"].get(binding.binding_id)
             if existing is not None:
                 prior = ResolutionBinding.from_dict(existing)
-                if prior.adapter_id != binding.adapter_id or prior.name != binding.name:
+                if (prior.adapter_id != binding.adapter_id or prior.name != binding.name
+                        or prior.target != binding.target):
                     raise ValueError("binding identity collision")
+                binding = prior.with_owners(tuple((*prior.owners, *binding.owners)))
             value["bindings"][binding.binding_id] = binding.to_dict()
+
+    def release_binding_owner(self, binding_id: str, owner: str) -> str:
+        """Release one owner, retaining external state until the final owner."""
+        with self.transaction() as value:
+            raw = value["bindings"].get(binding_id)
+            if raw is None:
+                return "absent"
+            binding = ResolutionBinding.from_dict(raw)
+            if owner not in binding.owners:
+                return "absent"
+            remaining = tuple(item for item in binding.owners if item != owner)
+            if not remaining:
+                return "last"
+            value["bindings"][binding_id] = binding.with_owners(remaining).to_dict()
+            return "retained"
 
     def remove_binding_if_unchanged(self, binding_id: str, observed_digest: str) -> str:
         with self.transaction() as value:

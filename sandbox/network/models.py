@@ -232,9 +232,12 @@ class ResolutionBinding:
     def create(cls, *, kind: str, name: str, target: str, adapter_id: str,
                owners: tuple[str, ...], desired: Mapping[str, Any]):
         identity = {"kind": kind, "name": name, "target": target,
-                    "adapter_id": adapter_id, "owners": sorted(set(owners))}
+                    "adapter_id": adapter_id}
         return cls(canonical_digest(identity), kind, name, target, adapter_id,
                    owners, desired)
+
+    def with_owners(self, owners: tuple[str, ...]):
+        return replace(self, owners=owners)
 
     @property
     def last_applied_digest(self) -> str | None:

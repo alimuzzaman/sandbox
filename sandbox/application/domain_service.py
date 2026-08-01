@@ -346,6 +346,33 @@ class DomainService:
                 reason_code="resolver_changed",
                 message="Resolver ownership changed after planning; retry from observation.",
             )
+        existing = self.repository.binding(prepared["binding"].binding_id)
+        if existing is not None and existing.last_applied is not None:
+            if not self.verifier(
+                prepared["hostname"], prepared["accepted"], prepared["fallback"],
+            ):
+                return self._result(
+                    state="drifted", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="shared_binding_unhealthy",
+                    message="The existing shared resolver binding failed fresh verification.",
+                    mutated=False, health="degraded", ownership="residual",
+                )
+            self.repository.put_binding(prepared["binding"])
+            if self.identity_persister is not None:
+                self.identity_persister(
+                    prepared["config"]["root"], label, prepared["hostname"],
+                    prepared["policy"]["hostnameSource"],
+                )
+            return self._result(
+                state="ready", hostname=prepared["hostname"],
+                policy=prepared["policy"], observation=current,
+                expected=prepared["accepted"], fallback=prepared["fallback"],
+                reason_code="shared_binding_joined",
+                message="Joined an existing healthy owned resolver binding.",
+                ok=True, mutated=True, health="healthy", ownership="shared",
+            )
         if self.authority is None:
             return self._result(
                 state="fallback", hostname=prepared["hostname"],
@@ -430,6 +457,10 @@ class DomainService:
         incomplete = False
         mutated = False
         for binding in bindings:
+            if len(binding.owners) > 1:
+                if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
+                    mutated = True
+                    continue
             spec = self.adapters.get(binding.adapter_id)
             adapter = spec.adapter if spec is not None else None
             observed = (

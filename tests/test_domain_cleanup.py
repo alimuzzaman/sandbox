@@ -90,6 +90,26 @@ class TestDomainCleanup(unittest.TestCase):
         self.assertIsNone(repository.binding(binding.binding_id))
         self.assertEqual(adapter.calls, [binding.binding_id])
 
+    def test_shared_binding_is_removed_only_by_final_owner(self):
+        from sandbox.network.models import ResolutionBinding
+
+        service, repository, binding, adapter = self._service({"route": "demo"})
+        second = ResolutionBinding.create(
+            kind="exact", name="demo.test", target="127.0.0.77",
+            adapter_id="resolved", owners=("/tmp/two::default",),
+            desired={"route": "demo"},
+        )
+        repository.put_binding(second)
+        first = service.cleanup("/tmp/project")
+        self.assertTrue(first.ok)
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(repository.binding(binding.binding_id).owners,
+                         ("/tmp/two::default",))
+        final = service.cleanup("/tmp/two")
+        self.assertTrue(final.ok)
+        self.assertEqual(adapter.calls, [binding.binding_id])
+        self.assertIsNone(repository.binding(binding.binding_id))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -144,13 +144,13 @@ consumer, and compare public/foreign namespace behavior throughout.
 
 ### Tests for User Story 4
 
-- [ ] T051 [P] [US4] Write failing exact-preference, wildcard-capability, local-suffix, public-delegation, and foreign-zone tests in `tests/test_domain_wildcards.py`
-- [ ] T052 [US4] Write failing shared-zone reference-count and last-owner cleanup tests in `tests/test_domain_wildcard_lifecycle.py`
+- [X] T051 [P] [US4] Write failing exact-preference, wildcard-capability, local-suffix, public-delegation, and foreign-zone tests in `tests/test_domain_wildcards.py`
+- [X] T052 [US4] Write failing shared-zone reference-count and last-owner cleanup tests in `tests/test_domain_wildcard_lifecycle.py`
 
 ### Implementation for User Story 4
 
-- [ ] T053 [US4] Implement safe local-zone classification, exact-first planning, and wildcard capability refusal in `sandbox/application/domain_service.py`
-- [ ] T054 [US4] Implement wildcard-zone authority records with attributable shared owners in `sandbox/network/authority.py`
+- [X] T053 [US4] Implement safe local-zone classification, exact-first planning, and wildcard capability refusal in `sandbox/application/domain_service.py`
+- [X] T054 [US4] Implement wildcard-zone authority records with attributable shared owners in `sandbox/network/authority.py`
 - [ ] T055 [US4] Run live unseen-subdomain, shared-owner, final-owner, and public-refusal proof and capture evidence in `specs/038-tld-dns-adoption/evidence/wildcards.md`
 
 **Checkpoint**: Multisite receives truthful wildcard readiness without broad shadowing.

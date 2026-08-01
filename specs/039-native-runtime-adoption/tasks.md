@@ -60,7 +60,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 - [X] T018 [P] [US1] Write failing OS/kernel/systemd/cgroup/nspawn/bubblewrap/nftables/LSM effective-preflight tests in `tests/test_isolation_preflight.py`
 - [X] T019 [P] [US1] Write failing mount visibility, read-only source, writable-subpath, and symlink-escape tests in `tests/test_isolation_policy.py`
 - [X] T020 [P] [US1] Write failing private UID/PID/IPC/UTS/device/capability/seccomp/nested-userns tests in `tests/test_isolation_namespaces.py`
-- [ ] T021 [P] [US1] Write failing veth default-deny, host/sibling/private/metadata denial, ingress-reply, grant, and revoke tests in `tests/test_isolation_network.py`
+- [X] T021 [P] [US1] Write failing veth default-deny, host/sibling/private/metadata denial, ingress-reply, grant, and revoke tests in `tests/test_isolation_network.py`
 - [ ] T022 [P] [US1] Write failing CPU/memory/PID/time/disk/inode/FD/connection/I/O exhaustion tests in `tests/test_isolation_resources.py`
 - [X] T023 [P] [US1] Write failing inherited-FD/environment/credential/control-socket leakage tests in `tests/test_isolation_credentials.py`
 - [X] T024 [US1] Write failing all-entry-path policy-digest and no-host-fallback integration tests in `tests/test_isolation_execution_paths.py`

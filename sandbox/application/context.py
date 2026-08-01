@@ -199,6 +199,60 @@ def clean_url_service(cfg, **overrides):
         **overrides,
     )
 
+
+def native_isolation_preflight(cfg, **overrides):
+    """Compose read-only effective managed-native prerequisite probes."""
+    import os
+    from pathlib import Path
+    import shutil
+
+    from sandbox.isolation.preflight import IsolationPreflight
+    from sandbox.services import BoundedProcessRunner
+    process = overrides.pop("process", BoundedProcessRunner())
+
+    def facts():
+        values = {}
+        try:
+            for line in Path("/etc/os-release").read_text().splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1); values[key] = value.strip().strip('"')
+        except OSError: pass
+        version = 0
+        try:
+            output = (process.run(("systemd", "--version"), timeout=2).stdout or "").split()
+            version = int(output[1]) if len(output) > 1 else 0
+        except (OSError, ValueError, IndexError): pass
+        return {"os_id": values.get("ID"), "version_id": values.get("VERSION_ID"),
+                "systemd_version": version}
+
+    def effective(gate):
+        if gate == "pid1_systemd":
+            try: return Path("/proc/1/comm").read_text().strip() == "systemd"
+            except OSError: return False
+        if gate == "cgroup_v2": return Path("/sys/fs/cgroup/cgroup.controllers").is_file()
+        if gate == "cgroup_delegation":
+            return os.access("/sys/fs/cgroup", os.W_OK) and Path("/sys/fs/cgroup/cgroup.subtree_control").is_file()
+        if gate == "user_namespaces":
+            try: return int(Path("/proc/sys/user/max_user_namespaces").read_text()) > 0
+            except (OSError, ValueError): return False
+        if gate == "apparmor_enforcing":
+            try: return "Y" in Path("/sys/module/apparmor/parameters/enabled").read_text()
+            except OSError: return False
+        if gate == "seccomp":
+            try: return any(line.startswith("Seccomp:") and int(line.split()[1]) > 0
+                            for line in Path("/proc/self/status").read_text().splitlines())
+            except (OSError, ValueError, IndexError): return False
+        # Private networking and nft policy are effective runtime proofs, not
+        # inferred from installed binaries. They stay false before a probe machine exists.
+        if gate in {"private_network", "nftables"}: return False
+        return False
+
+    return IsolationPreflight(
+        facts=overrides.pop("facts", facts),
+        command_probe=overrides.pop("command_probe", lambda command: shutil.which(command) is not None),
+        effective_probe=overrides.pop("effective_probe", effective),
+    )
+
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.
 

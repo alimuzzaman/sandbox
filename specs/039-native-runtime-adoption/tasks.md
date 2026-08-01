@@ -18,8 +18,8 @@ throughout the migration.
 - [X] T001 Create runtime/isolation package skeletons and public exports in `sandbox/runtimes/incumbent/__init__.py`, `sandbox/runtimes/managed/__init__.py`, and `sandbox/isolation/__init__.py`
 - [X] T002 [P] Add managed-native hostile probe fixtures for PHP, shell, plugin activation, Composer, and PHPUnit in `tests/hostile/`
 - [X] T003 [P] Add Ubuntu 24.04 managed-native matrix fixture with exact expected capability fields in `tests/fixtures/native/ubuntu-24.04.json`
-- [ ] T004 Register the feature-owned `native` command module and parser contract in `sandbox/commands/manifest.py` and `sandbox/commands/native.py`
-- [ ] T005 Update static CLI/MCP/modularity inventory expectations for the new registered surfaces in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
+- [X] T004 Register the feature-owned `native` command module and parser contract in `sandbox/commands/manifest.py` and `sandbox/commands/native.py`
+- [X] T005 Update static CLI/MCP/modularity inventory expectations for the new registered surfaces in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
 
 ---
 

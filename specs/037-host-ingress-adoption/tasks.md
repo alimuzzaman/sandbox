@@ -15,7 +15,7 @@ the first shippable slice and per-port access preserved throughout.
 
 **Purpose**: Establish explicit feature packages, registrations, and host fixtures.
 
-- [ ] T001 Create ingress and adapter package exports in `sandbox/ingress/__init__.py` and `sandbox/ingress/adapters/__init__.py`
+- [X] T001 Create ingress and adapter package exports in `sandbox/ingress/__init__.py` and `sandbox/ingress/adapters/__init__.py`
 - [ ] T002 [P] Add free, exact-loopback, dedicated-loopback, IPv4/IPv6 wildcard, split-owner, and product listener fixtures in `tests/host_fixtures/ingress/`
 - [ ] T003 Register ingress surfaces through the shared domains command/MCP manifests in `sandbox/commands/manifest.py`, `sandbox/commands/domains.py`, and `mcp/wp-server/tools/manifest.py`
 - [ ] T004 Update static command/MCP/modularity inventories for new ingress dependencies in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
@@ -27,8 +27,8 @@ the first shippable slice and per-port access preserved throughout.
 **Purpose**: Establish typed endpoint semantics, deterministic adapters, owned state, and
 the reusable transaction boundary before route mutation.
 
-- [ ] T005 Write failing endpoint normalization, bind-overlap, protocol-set, ownership, digest, and transition tests in `tests/test_ingress_models.py`
-- [ ] T006 Implement immutable listener, observation, selection, route, consent, support, transaction, and cleanup models in `sandbox/ingress/models.py`
+- [X] T005 Write failing endpoint normalization, bind-overlap, protocol-set, ownership, digest, and transition tests in `tests/test_ingress_models.py`
+- [X] T006 Implement immutable listener, observation, selection, route, consent, support, transaction, and cleanup models in `sandbox/ingress/models.py`
 - [ ] T007 [P] Write failing deterministic adapter order, duplicate registration, capability, tier, and proof-gate tests in `tests/test_ingress_registry.py`
 - [ ] T008 Implement ingress adapter protocol, registry, and product support/proof manifest in `sandbox/ingress/registry.py` and `sandbox/ingress/manifest.py`
 - [ ] T009 [P] Write failing repository locking, atomicity, migration, attribution, drift, and residual-retention tests in `tests/test_ingress_repository.py`
@@ -54,15 +54,15 @@ comparing all process/listener state before and after.
 
 ### Tests for User Story 1
 
-- [ ] T016 [P] [US1] Write failing Linux `/proc` and `ss` exact/wildcard IPv4/IPv6 bind-overlap tests in `tests/test_ingress_listeners_linux.py`
-- [ ] T017 [P] [US1] Write failing macOS `lsof` listener normalization and partial-process-evidence tests in `tests/test_ingress_listeners_macos.py`
+- [X] T016 [P] [US1] Write failing Linux `/proc` and `ss` exact/wildcard IPv4/IPv6 bind-overlap tests in `tests/test_ingress_listeners_linux.py`
+- [X] T017 [P] [US1] Write failing macOS `lsof` listener normalization and partial-process-evidence tests in `tests/test_ingress_listeners_macos.py`
 - [ ] T018 [P] [US1] Write failing Sandbox-owner, foreign-owner, unknown-owner, stale-process, and permission-limited tests in `tests/test_ingress_detection.py`
 - [ ] T019 [P] [US1] Write failing required-protocol, unrequested-protocol, split-owner, TLS, and wildcard-capability selection tests in `tests/test_ingress_selection.py`
 - [ ] T020 [US1] Write failing `proxy_available`, startup error, and per-port fallback regression tests in `tests/test_proxy_availability.py`
 
 ### Implementation for User Story 1
 
-- [ ] T021 [US1] Implement kernel-authoritative endpoint observation and exact/wildcard IPv4/IPv6 overlap in `sandbox/ingress/listeners.py`
+- [X] T021 [US1] Implement kernel-authoritative endpoint observation and exact/wildcard IPv4/IPv6 overlap in `sandbox/ingress/listeners.py`
 - [ ] T022 [US1] Implement best-effort process/product evidence without using it as bind authority in `sandbox/ingress/detection.py`
 - [ ] T023 [US1] Implement capability-aware one-ingress selection and explicit split-owner refusal in `sandbox/application/ingress_service.py`
 - [ ] T024 [US1] Replace binary-only proxy availability and misleading Docker errors with structured listener results in `sandbox/core/_domains.py`

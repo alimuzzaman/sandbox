@@ -26,6 +26,11 @@ APPARMOR_ROOT = Path("/etc/apparmor.d")
 POLICY_KEYS = {"policy_version", "machine_id", "uid_map", "root_image",
                "read_only_mounts", "writable_mounts", "network", "syscalls",
                "devices", "resources", "credentials", "digest"}
+FIXED_ENVIRONMENT = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
 
 
 def fail(message, code=65):
@@ -253,7 +258,7 @@ def run_fixed(argv, message, *, input_text=None):
     result = subprocess.run(tuple(argv), stdin=subprocess.DEVNULL if input_text is None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             input=input_text, text=True, timeout=120, check=False,
-                            close_fds=True)
+                            close_fds=True, env=FIXED_ENVIRONMENT)
     if result.returncode != 0: fail(message)
     return result
 
@@ -262,7 +267,7 @@ def run_optional(argv, *, input_text=None):
     return subprocess.run(tuple(argv), stdin=subprocess.DEVNULL if input_text is None else None,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           input=input_text, text=True, timeout=30, check=False,
-                          close_fds=True)
+                          close_fds=True, env=FIXED_ENVIRONMENT)
 
 
 def image_paths(machine_id):

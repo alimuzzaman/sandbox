@@ -45,6 +45,16 @@ class TestNativeHelper(unittest.TestCase):
         with self.assertRaises(SystemExit): helper.main(["check-policy", "../../host", "/tmp/x"])
         with self.assertRaises(SystemExit): helper.main(["shell", "anything"])
 
+    def test_privileged_subprocess_discards_the_caller_environment(self):
+        helper = module()
+        result = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(helper.subprocess, "run", return_value=result) as run:
+            helper.run_fixed(("nft", "list", "ruleset"), "failed")
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment, helper.FIXED_ENVIRONMENT)
+        self.assertNotIn("HOME", environment)
+        self.assertNotIn("LD_PRELOAD", environment)
+
     def test_policy_path_symlink_mode_owner_and_fixed_root_are_enforced(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); helper, path = self.policy(root)

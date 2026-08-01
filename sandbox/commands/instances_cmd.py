@@ -235,9 +235,15 @@ def _cleanup_instance_routes(cfg, owner) -> None:
         info("ingress cleanup is incomplete; recovery state was retained for retry")
     elif ingress_result["ok"] and ingress_result["mutated"]:
         info("removed unchanged owned incumbent ingress routes")
-    domain_result = domain_service(cfg).cleanup(
-        owner["root"], label=owner.get("label", "default"), interactive=False,
-    )
+    try:
+        domain_result = domain_service(cfg).cleanup(
+            owner["root"], label=owner.get("label", "default"), interactive=False,
+        )
+    except Exception as exc:
+        if not isinstance(exc, (OSError, ValueError)) and exc.__class__.__name__ != "ConfigError":
+            raise
+        info(f"resolver cleanup could not inspect the project; retained state for retry: {exc}")
+        return
     if domain_result.state == "cleanup_incomplete":
         info("resolver cleanup is incomplete; recovery state was retained for retry")
     elif domain_result.ok and domain_result.mutated:

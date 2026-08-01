@@ -193,11 +193,48 @@ def _valet_proxy_active(domain: str) -> bool:
     return (Path.home() / ".config" / "valet" / "Nginx" / domain).exists()
 
 
+def proxy_availability(*, observer=None, docker_path=None,
+                       running: bool | None = None) -> dict:
+    """Return structured exact-endpoint availability for Sandbox Caddy."""
+    from sandbox.ingress.listeners import ListenerObserver
+    from sandbox.ingress.models import ListenerEndpoint
+
+    docker_path = shutil.which("docker") if docker_path is None else docker_path
+    if not docker_path:
+        return {"available": False, "reason_code": "docker_binary_unavailable",
+                "message": "Docker is not installed.", "conflicts": []}
+    running = _proxy_container_running() if running is None else running
+    if running:
+        return {"available": True, "reason_code": "sandbox_proxy_owned",
+                "message": "Sandbox Caddy already owns the ingress endpoints.",
+                "conflicts": []}
+    observer = observer or ListenerObserver(
+        platform="darwin" if sys.platform == "darwin" else "linux",
+        process=__import__("sandbox.services", fromlist=["BoundedProcessRunner"]).BoundedProcessRunner(),
+    )
+    requested = (
+        ListenerEndpoint(PROXY_BIND_IP, 80),
+        ListenerEndpoint(PROXY_BIND_IP, 443),
+    )
+    snapshot = observer.snapshot()
+    conflicts = tuple(
+        listener for listener in snapshot
+        if any(listener.overlaps(endpoint) for endpoint in requested)
+    )
+    if conflicts:
+        rendered = ", ".join(
+            f"{item.address}:{item.port}" for item in conflicts
+        )
+        return {"available": False, "reason_code": "listener_conflict",
+                "message": f"Another listener overlaps Sandbox ingress: {rendered}.",
+                "conflicts": [item.to_dict() for item in conflicts]}
+    return {"available": True, "reason_code": "endpoints_free",
+            "message": "Sandbox ingress endpoints are free.", "conflicts": []}
+
+
 def proxy_available() -> bool:
-    """True when the sandbox proxy CAN serve clean no-port URLs: just Docker.
-    The DEFAULT path is plain HTTP (no cert/CA needed) — so this no longer
-    requires mkcert trust. HTTPS is the opt-in `./sb secure`."""
-    return shutil.which("docker") is not None
+    """Compatibility boolean backed by kernel listener truth."""
+    return bool(proxy_availability()["available"])
 
 
 def _https_offer_declined() -> bool:
@@ -785,8 +822,14 @@ def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
             info(f"proxy is running but the config reload failed: "
                  f"{detail or 'no output'}")
         else:
-            info(f"proxy container did not start (is Docker running?)"
-                 f"{': ' + detail if detail else '.'}")
+            availability = proxy_availability(running=False)
+            if availability["reason_code"] == "listener_conflict":
+                info(f"proxy container did not start: {availability['message']} "
+                     "The localhost:<port> URL remains available.")
+            else:
+                info(f"proxy startup failed"
+                     f"{': ' + detail if detail else '.'} "
+                     "The localhost:<port> URL remains available.")
         return False, cfg
     return True, cfg
 

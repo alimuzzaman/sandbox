@@ -56,16 +56,16 @@ comparing all process/listener state before and after.
 
 - [X] T016 [P] [US1] Write failing Linux `/proc` and `ss` exact/wildcard IPv4/IPv6 bind-overlap tests in `tests/test_ingress_listeners_linux.py`
 - [X] T017 [P] [US1] Write failing macOS `lsof` listener normalization and partial-process-evidence tests in `tests/test_ingress_listeners_macos.py`
-- [ ] T018 [P] [US1] Write failing Sandbox-owner, foreign-owner, unknown-owner, stale-process, and permission-limited tests in `tests/test_ingress_detection.py`
-- [ ] T019 [P] [US1] Write failing required-protocol, unrequested-protocol, split-owner, TLS, and wildcard-capability selection tests in `tests/test_ingress_selection.py`
-- [ ] T020 [US1] Write failing `proxy_available`, startup error, and per-port fallback regression tests in `tests/test_proxy_availability.py`
+- [X] T018 [P] [US1] Write failing Sandbox-owner, foreign-owner, unknown-owner, stale-process, and permission-limited tests in `tests/test_ingress_detection.py`
+- [X] T019 [P] [US1] Write failing required-protocol, unrequested-protocol, split-owner, TLS, and wildcard-capability selection tests in `tests/test_ingress_selection.py`
+- [X] T020 [US1] Write failing `proxy_available`, startup error, and per-port fallback regression tests in `tests/test_proxy_availability.py`
 
 ### Implementation for User Story 1
 
 - [X] T021 [US1] Implement kernel-authoritative endpoint observation and exact/wildcard IPv4/IPv6 overlap in `sandbox/ingress/listeners.py`
-- [ ] T022 [US1] Implement best-effort process/product evidence without using it as bind authority in `sandbox/ingress/detection.py`
-- [ ] T023 [US1] Implement capability-aware one-ingress selection and explicit split-owner refusal in `sandbox/application/ingress_service.py`
-- [ ] T024 [US1] Replace binary-only proxy availability and misleading Docker errors with structured listener results in `sandbox/core/_domains.py`
+- [X] T022 [US1] Implement best-effort process/product evidence without using it as bind authority in `sandbox/ingress/detection.py`
+- [X] T023 [US1] Implement capability-aware one-ingress selection and explicit split-owner refusal in `sandbox/application/ingress_service.py`
+- [X] T024 [US1] Replace binary-only proxy availability and misleading Docker errors with structured listener results in `sandbox/core/_domains.py`
 - [ ] T025 [US1] Expose read-only `domains ingress detect|support|status` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T026 [US1] Run live free/exact/wildcard/owned/foreign detection and capture non-mutating listener evidence in `specs/037-host-ingress-adoption/evidence/listeners.md`
 

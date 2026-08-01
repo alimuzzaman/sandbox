@@ -21,18 +21,33 @@ class IsolationVerifier:
         for name in MANDATORY_NAMESPACES:
             if namespaces.get(name) is not True: failures.append(f"namespace:{name}")
         if observed.get("no_new_privileges") is not True: failures.append("no_new_privileges")
-        if observed.get("capabilities") not in ((), [], None): failures.append("capabilities")
+        if observed.get("capabilities") not in ((), []): failures.append("capabilities")
+        expected_profile = f"sandbox-native-{policy.machine_id}//guest"
+        if observed.get("apparmor_profile") != expected_profile: failures.append("apparmor_profile")
+        if observed.get("nested_userns") is not False: failures.append("nested_userns")
+        if observed.get("ambient_capabilities") not in ((), []): failures.append("ambient_capabilities")
+        if observed.get("dangerous_capabilities") not in ((), []): failures.append("dangerous_capabilities")
+        allowed_devices = {"null", "zero", "full", "random", "urandom", "tty", "pts", "ptmx", "shm"}
+        if not isinstance(observed.get("devices"), (list, tuple, set, frozenset)) or \
+                set(observed["devices"]) - allowed_devices:
+            failures.append("devices")
         if observed.get("seccomp") is not True: failures.append("seccomp")
         if observed.get("nft_default_drop") is not True: failures.append("nft_default_drop")
         if observed.get("default_route") is not False: failures.append("default_route")
+        expected_guest = str(policy.network.get("guest_address", ""))
+        if observed.get("guest_address") != expected_guest: failures.append("guest_address")
+        for boundary in ("host", "sibling", "metadata", "public"):
+            if observed.get("reachability", {}).get(boundary) is not False:
+                failures.append(f"reachability:{boundary}")
         if observed.get("cgroup_limits") != dict(policy.resources): failures.append("cgroup_limits")
         expected_ro = {item["target"] for item in policy.read_only_mounts}
         expected_rw = {item["target"] for item in policy.writable_mounts}
         if set(observed.get("read_only_mounts", ())) != expected_ro: failures.append("read_only_mounts")
         if set(observed.get("writable_mounts", ())) != expected_rw: failures.append("writable_mounts")
-        if observed.get("unexpected_host_mounts"): failures.append("unexpected_host_mounts")
-        if observed.get("leaked_fds") or observed.get("leaked_environment") \
-                or observed.get("control_sockets"): failures.append("credential_or_control_leak")
+        if observed.get("unexpected_host_mounts") not in ((), []):
+            failures.append("unexpected_host_mounts")
+        for field in ("leaked_fds", "leaked_environment", "control_sockets"):
+            if observed.get(field) not in ((), []): failures.append("credential_or_control_leak")
         return {"ok": not failures, "state": "ready" if not failures else "blocked",
                 "mutated": False, "machine_id": policy.machine_id,
                 "policy_digest": policy.digest,

@@ -8,7 +8,8 @@ def policy():
         {"path": "/images/demo.img"},
         ({"source": "/src", "target": "/workspace"},),
         ({"source": "/state", "target": "/state"},),
-        {"egress": "deny"}, {"no_new_privileges": True}, frozenset(),
+        {"egress": "deny", "guest_address": "10.203.0.2/30"},
+        {"no_new_privileges": True}, frozenset(),
         {"memory_max": 1024, "pids_max": 64}, (),
     )
 
@@ -18,7 +19,13 @@ def healthy(target):
             "private_namespaces": {name: True for name in
                 ("user", "mount", "pid", "ipc", "uts", "network")},
             "no_new_privileges": True, "capabilities": [], "seccomp": True,
+            "apparmor_profile": f"sandbox-native-{target.machine_id}//guest",
+            "nested_userns": False, "ambient_capabilities": [],
+            "dangerous_capabilities": [], "devices": ["null", "zero", "urandom"],
             "nft_default_drop": True, "default_route": False,
+            "guest_address": target.network["guest_address"],
+            "reachability": {"host": False, "sibling": False,
+                             "metadata": False, "public": False},
             "cgroup_limits": dict(target.resources),
             "read_only_mounts": ["/workspace"], "writable_mounts": ["/state"],
             "unexpected_host_mounts": [], "leaked_fds": [],
@@ -37,7 +44,8 @@ class TestIsolationVerification(unittest.TestCase):
         for key, value in (
             ("default_route", True), ("nft_default_drop", False),
             ("unexpected_host_mounts", ["/home"]), ("leaked_fds", [3]),
-            ("cgroup_limits", {}),
+            ("cgroup_limits", {}), ("apparmor_profile", "unconfined"),
+            ("nested_userns", True), ("reachability", {}),
         ):
             with self.subTest(key=key):
                 observed = healthy(target); observed[key] = value

@@ -40,6 +40,24 @@ class TestNativeHelper(unittest.TestCase):
         path = root / f"{identity}.json"; path.write_text(json.dumps(value)); path.chmod(0o600)
         return helper, path
 
+    def install_plan(self, root):
+        helper = module()
+        def rows(scope, names):
+            return [{"name": name, "version": "1.0", "action": "install", "scope": scope,
+                     "origin": "http://archive.ubuntu.com/ubuntu"} for name in names]
+        basis = {"matrix_id": "ubuntu-24.04-systemd-255",
+            "host_packages": rows("host", helper.HOST_PACKAGE_ROOTS),
+            "image_packages": rows("image", (*helper.IMAGE_PACKAGE_ROOTS, "nginx")),
+            "sources": [{"uri": "http://archive.ubuntu.com/ubuntu", "suite": "noble",
+                         "signed": True, "kind": "archive"}],
+            "service_effects": [{"scope": "image", "policy_rc_d": "deny-service-start"}],
+            "owned_roots": ["/var/lib/sandbox/native", "/etc/sandbox/native"],
+            "privilege_actions": ["policy-install", "image-create", "image-bootstrap"]}
+        digest = helper.canonical_digest(basis); value = {**basis, "simulation_digest": digest}
+        path = root / f"install-{os.getuid()}-{digest}.json"
+        path.write_text(json.dumps(value)); path.chmod(0o600)
+        return helper, path, digest, value
+
     def test_fixed_verbs_and_invalid_identity_are_rejected(self):
         helper = module()
         with self.assertRaises(SystemExit): helper.main(["check-policy", "../../host", "/tmp/x"])
@@ -193,6 +211,34 @@ class TestNativeHelper(unittest.TestCase):
                              helper.compile_apparmor_profile("sb-0123456789ab", value["digest"]))
             self.assertEqual(calls[0][:3],
                              ("apparmor_parser", "--replace", "--skip-cache"))
+
+    def test_install_plan_accepts_only_fixed_digest_path_and_package_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); helper, path, digest, _value = self.install_plan(root)
+            with mock.patch.object(helper, "STAGING_ROOT", root):
+                _plan, versions = helper.read_install_plan(path, digest)
+                self.assertEqual(set(versions), set(helper.HOST_PACKAGE_ROOTS))
+                with self.assertRaises(SystemExit):
+                    helper.read_install_plan(root / "other.json", digest)
+
+    def test_host_package_apply_uses_only_exact_roots_and_official_source_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); helper, _path, digest, value = self.install_plan(root)
+            source = root / "ubuntu.sources"
+            source.write_text("Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n")
+            calls = []
+            versions = {name: "1.0" for name in helper.HOST_PACKAGE_ROOTS}
+            with mock.patch.object(helper, "OFFICIAL_APT_SOURCE", source), \
+                    mock.patch.object(helper, "read_install_plan", return_value=(value, versions)), \
+                    mock.patch.object(helper, "run_fixed",
+                                      side_effect=lambda argv, message, **kw: calls.append((argv, kw))):
+                helper.host_packages_apply("ignored", digest)
+            installs = calls[-1][0]
+            package_specs = {item.split("=", 1)[0] for item in installs
+                             if item.split("=", 1)[0] in helper.HOST_PACKAGE_ROOTS}
+            self.assertEqual(package_specs, set(helper.HOST_PACKAGE_ROOTS))
+            self.assertIn(f"Dir::Etc::sourcelist={source}", installs)
+            self.assertEqual(calls[-1][1]["environment"]["DEBIAN_FRONTEND"], "noninteractive")
 
 
 if __name__ == "__main__": unittest.main()

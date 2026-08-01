@@ -47,6 +47,16 @@ class PackageTransactionPlan:
         if self.confirmation is not None:
             object.__setattr__(self, "confirmation", _frozen(self.confirmation, "confirmation"))
 
+    def to_dict(self):
+        return {"matrix_id": self.matrix_id,
+                "host_packages": [dict(value) for value in self.host_packages],
+                "image_packages": [dict(value) for value in self.image_packages],
+                "sources": [dict(value) for value in self.sources],
+                "service_effects": [dict(value) for value in self.service_effects],
+                "owned_roots": list(self.owned_roots),
+                "privilege_actions": list(self.privilege_actions),
+                "simulation_digest": self.simulation_digest}
+
 
 @dataclass(frozen=True)
 class NativeBackendRecord:

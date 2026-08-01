@@ -31,6 +31,12 @@ FIXED_ENVIRONMENT = {
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
 }
+OFFICIAL_APT_SOURCE = Path("/etc/apt/sources.list.d/ubuntu.sources")
+OFFICIAL_APT_URIS = {"http://archive.ubuntu.com/ubuntu", "http://security.ubuntu.com/ubuntu",
+                     "https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu"}
+HOST_PACKAGE_ROOTS = ("systemd-container", "bubblewrap", "nftables", "debootstrap", "e2fsprogs")
+IMAGE_PACKAGE_ROOTS = {"php8.3-fpm", "php8.3-cli", "mariadb-server", "cron",
+                       "ca-certificates"}
 
 
 def fail(message, code=65):
@@ -254,11 +260,11 @@ def applied_policy(machine_id, digest):
     return path, value
 
 
-def run_fixed(argv, message, *, input_text=None):
+def run_fixed(argv, message, *, input_text=None, timeout=120, environment=None):
     result = subprocess.run(tuple(argv), stdin=subprocess.DEVNULL if input_text is None else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            input=input_text, text=True, timeout=120, check=False,
-                            close_fds=True, env=FIXED_ENVIRONMENT)
+                            input=input_text, text=True, timeout=timeout, check=False,
+                            close_fds=True, env=environment or FIXED_ENVIRONMENT)
     if result.returncode != 0: fail(message)
     return result
 
@@ -274,6 +280,95 @@ def image_paths(machine_id):
     instance = Path("/var/lib/sandbox/native/instances") / machine_id
     mountpoint = Path("/var/lib/sandbox/native/mounts") / machine_id
     return instance, instance / "root.img", mountpoint
+
+
+def ensure_root_directory(path, mode):
+    if path.exists() or path.is_symlink():
+        details = path.lstat()
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
+            fail(f"owned directory {path} is foreign")
+    else:
+        path.mkdir(parents=True, mode=mode)
+    os.chown(path, 0, 0); os.chmod(path, mode)
+
+
+def read_install_plan(path_value, digest):
+    digest = digest_value(digest); uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    expected = STAGING_ROOT / f"install-{uid}-{digest}.json"
+    path = Path(path_value)
+    if path.absolute() != expected.absolute(): fail("install plan path is outside its fixed root")
+    try: descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError: fail("install plan is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != uid or
+                details.st_mode & 0o022 or details.st_size > 4 * 1024 * 1024):
+            fail("install plan ownership is invalid")
+        payload = b""
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            payload += chunk
+        if len(payload) != details.st_size: fail("install plan changed during validation")
+    finally: os.close(descriptor)
+    try: value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError): fail("install plan JSON is invalid")
+    keys = {"matrix_id", "host_packages", "image_packages", "sources", "service_effects",
+            "owned_roots", "privilege_actions", "simulation_digest"}
+    if not isinstance(value, dict) or set(value) != keys: fail("install plan schema is invalid")
+    if value["matrix_id"] != "ubuntu-24.04-systemd-255": fail("install plan matrix is invalid")
+    basis = {key: item for key, item in value.items() if key != "simulation_digest"}
+    if value["simulation_digest"] != digest or canonical_digest(basis) != digest:
+        fail("install plan digest mismatch")
+    for key in ("host_packages", "image_packages", "sources", "service_effects",
+                "owned_roots", "privilege_actions"):
+        if not isinstance(value[key], list): fail("install plan schema is invalid")
+    version_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+:~_-]{0,255}")
+    for scope in ("host", "image"):
+        for row in value[f"{scope}_packages"]:
+            if (not isinstance(row, dict) or not isinstance(row.get("name"), str) or
+                    not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,127}", row["name"]) or
+                    not isinstance(row.get("version"), str) or
+                    not version_pattern.fullmatch(row["version"]) or
+                    row.get("scope") != scope or row.get("action") not in {"install", "keep"}):
+                fail("install package row is invalid")
+    host_versions = {row["name"]: row["version"] for row in value["host_packages"]}
+    if set(HOST_PACKAGE_ROOTS) - set(host_versions): fail("host package roots are incomplete")
+    image_names = {row["name"] for row in value["image_packages"]}
+    if (not IMAGE_PACKAGE_ROOTS <= image_names or
+            len({"nginx", "apache2"} & image_names) != 1):
+        fail("image package roots are incomplete")
+    for source in value["sources"]:
+        if (not isinstance(source, dict) or source.get("uri") not in OFFICIAL_APT_URIS or
+                source.get("signed") is not True or "noble" not in source.get("suite", "").split() or
+                source.get("kind", "archive") != "archive"):
+            fail("install source is not an official signed Noble archive")
+    if value["service_effects"] != [{"scope": "image", "policy_rc_d": "deny-service-start"}]:
+        fail("install service effects are invalid")
+    if value["owned_roots"] != ["/var/lib/sandbox/native", "/etc/sandbox/native"]:
+        fail("install owned roots are invalid")
+    if value["privilege_actions"] != ["policy-install", "image-create", "image-bootstrap"]:
+        fail("install privilege actions are invalid")
+    return value, host_versions
+
+
+def host_packages_apply(path_value, digest):
+    _plan, versions = read_install_plan(path_value, digest)
+    try: source_text = OFFICIAL_APT_SOURCE.read_text()
+    except OSError: fail("official Ubuntu APT source is unavailable")
+    configured_uris = [token for line in source_text.splitlines() if line.startswith("URIs:")
+                       for token in line.split(":", 1)[1].split()]
+    if not configured_uris or any(uri not in OFFICIAL_APT_URIS for uri in configured_uris):
+        fail("configured Ubuntu APT source is not official")
+    source_options = ("-o", f"Dir::Etc::sourcelist={OFFICIAL_APT_SOURCE}",
+                      "-o", "Dir::Etc::sourceparts=-", "-o", "APT::Get::List-Cleanup=0")
+    packages = tuple(f"{name}={versions[name]}" for name in HOST_PACKAGE_ROOTS)
+    base = ("apt-get", *source_options, "--no-install-recommends")
+    run_fixed((*base, "--simulate", "install", *packages),
+              "host package re-simulation failed", timeout=120)
+    environment = {**FIXED_ENVIRONMENT, "DEBIAN_FRONTEND": "noninteractive"}
+    run_fixed((*base, "--yes", "install", *packages), "host package installation failed",
+              timeout=900, environment=environment)
 
 
 def image_create(machine_id, digest):
@@ -656,6 +751,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="verb", required=True)
     check = sub.add_parser("check-policy"); check.add_argument("machine"); check.add_argument("path")
     install = sub.add_parser("install")
+    host_apply = sub.add_parser("host-packages-apply")
+    host_apply.add_argument("path"); host_apply.add_argument("digest")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
@@ -667,8 +764,16 @@ def main(argv=None):
     if args.verb == "check-policy":
         identity = machine(args.machine); checked_policy(args.path, identity); print("policy-ok")
     elif args.verb == "install":
-        require_root(); atomic_install(Path(__file__).resolve(), INSTALL_PATH)
+        require_root()
+        ensure_root_directory(Path("/var/lib/sandbox"), 0o755)
+        ensure_root_directory(Path("/var/lib/sandbox/native"), 0o755)
+        ensure_root_directory(STAGING_ROOT, 0o1777)
+        ensure_root_directory(Path("/etc/sandbox"), 0o755)
+        ensure_root_directory(POLICY_ROOT, 0o755)
+        atomic_install(Path(__file__).resolve(), INSTALL_PATH)
         os.chmod(INSTALL_PATH, 0o755)
+    elif args.verb == "host-packages-apply":
+        require_root(); host_packages_apply(args.path, args.digest)
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
         _source, _value, payload = _read_checked_policy(args.path, identity)

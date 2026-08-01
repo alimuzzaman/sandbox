@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from sandbox.runtimes.managed.models import PackageTransactionPlan
+import hashlib
+import json
+import os
 import re
 from pathlib import Path
+import stat
 
 
 HOST_PACKAGES = ("systemd-container", "bubblewrap", "nftables", "debootstrap", "e2fsprogs")
@@ -153,3 +157,96 @@ class ManagedPackageService:
             return {"ok": False, "state": "blocked", "mutated": bool(result.get("mutated")),
                     "reason": {"code": "host_service_baseline_changed"}}
         return result
+
+
+class PackagePlanStager:
+    """Write one user-owned, digest-named plan for the fixed root helper."""
+
+    def __init__(self, root="/var/lib/sandbox/native/staging"):
+        self.root = Path(root)
+
+    def stage(self, plan):
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / f"install-{os.getuid()}-{plan.simulation_digest}.json"
+        payload = (json.dumps(plan.to_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode()
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload); output.flush(); os.fsync(output.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return path
+
+
+class NativeHostPackageApplier:
+    def __init__(self, *, process, repository_helper, installed_helper, stager=None):
+        self.process = process
+        self.repository_helper = repository_helper
+        self.installed_helper = installed_helper
+        self.stager = stager or PackagePlanStager()
+
+    def apply(self, plan):
+        installed = self.process.run(("sudo", self.repository_helper, "install"), timeout=120)
+        if installed.returncode != 0:
+            return {"ok": False, "state": "failed", "mutated": False,
+                    "reason": {"code": "native_helper_install_failed"}}
+        path = self.stager.stage(plan)
+        try:
+            result = self.process.run(("sudo", "-n", self.installed_helper,
+                                       "host-packages-apply", str(path),
+                                       plan.simulation_digest), timeout=900)
+        finally:
+            path.unlink(missing_ok=True)
+        return {"ok": result.returncode == 0,
+                "state": "ready" if result.returncode == 0 else "failed",
+                # The helper installation already changed a root-owned path even
+                # if the subsequent exact APT transaction fails.
+                "mutated": True,
+                "reason": {"code": "ready" if result.returncode == 0 else
+                           "host_package_apply_failed"},
+                "simulation_digest": plan.simulation_digest}
+
+
+class HostServiceBaseline:
+    """Digest foreign service state/config/data without exposing their contents."""
+
+    UNITS = ("nginx.service", "apache2.service", "mariadb.service",
+             "mysql.service", "php8.3-fpm.service")
+    CONFIG_ROOTS = ("/etc/nginx", "/etc/apache2", "/etc/mysql", "/etc/php/8.3/fpm")
+    DATA_ROOTS = ("/var/lib/mysql",)
+
+    def __init__(self, *, process, config_roots=None, data_roots=None):
+        self.process = process
+        self.config_roots = tuple(Path(value) for value in (config_roots or self.CONFIG_ROOTS))
+        self.data_roots = tuple(Path(value) for value in (data_roots or self.DATA_ROOTS))
+
+    @staticmethod
+    def _tree_digest(root, *, content):
+        digest = hashlib.sha256()
+        if not root.exists() and not root.is_symlink(): return "absent"
+        paths = (root, *sorted(root.rglob("*"))) if root.is_dir() and not root.is_symlink() else (root,)
+        for path in paths:
+            details = path.lstat(); relative = str(path.relative_to(root.parent))
+            digest.update(relative.encode()); digest.update(str(stat.S_IFMT(details.st_mode)).encode())
+            digest.update(str(details.st_mode & 0o7777).encode())
+            digest.update(str(details.st_size).encode()); digest.update(str(details.st_mtime_ns).encode())
+            if path.is_symlink(): digest.update(os.readlink(path).encode())
+            elif content and path.is_file():
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(65536), b""): digest.update(chunk)
+        return digest.hexdigest()
+
+    def observe(self):
+        units = {}
+        for unit in self.UNITS:
+            result = self.process.run(("systemctl", "show", unit, "--no-pager",
+                                       "--property=LoadState,ActiveState,UnitFileState,FragmentPath"),
+                                      timeout=3)
+            units[unit] = {line.split("=", 1)[0]: line.split("=", 1)[1]
+                           for line in (result.stdout or "").splitlines() if "=" in line}
+        return {"units": units,
+                "config": {str(root): self._tree_digest(root, content=True)
+                           for root in self.config_roots},
+                "data": {str(root): self._tree_digest(root, content=False)
+                         for root in self.data_roots}}

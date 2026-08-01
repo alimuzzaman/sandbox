@@ -46,6 +46,7 @@ class ManagedProvisioner:
             if "network" in completed: rollback.append(self.network.remove(plan["network"]))
             if "machine" in completed: rollback.append(self.machine.stop(plan))
             if "mount" in completed: rollback.append(self.image.unmount(plan["image"]))
+            if "image" in completed: rollback.append(self.image.remove(plan["image"]))
             if "apparmor" in completed: rollback.append(self.apparmor.remove(plan["apparmor"]))
             return {"ok": False, "state": "rollback_complete"
                     if all(item.get("ok", False) for item in rollback) else "rollback_incomplete",

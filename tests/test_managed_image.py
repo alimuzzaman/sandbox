@@ -1,4 +1,6 @@
 import subprocess
+from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -40,6 +42,28 @@ class TestManagedImage(unittest.TestCase):
             "policy_digest": "a" * 64, "mounted": True}).remove(plan)
         self.assertFalse(drift["ok"]); self.assertFalse(mounted["ok"])
         self.assertEqual(process.calls, [])
+
+    def test_rootfs_bootstrap_uses_staged_exact_plan_and_cleans_it(self):
+        from sandbox.runtimes.managed.image import ManagedRootfs
+
+        class PackagePlan:
+            simulation_digest = "b" * 64
+        class Stager:
+            def __init__(self, path): self.path = path
+            def stage(self, _plan): self.path.write_text("staged"); return self.path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plan.json"; process = Process()
+            rootfs = ManagedRootfs(process=process, helper="/fixed/helper",
+                                   stager=Stager(path))
+            rootfs.configure({"machine_id": Policy.machine_id,
+                "policy_digest": Policy.digest, "package_plan": PackagePlan(),
+                "web_server": "nginx"})
+            self.assertFalse(path.exists())
+        argv, timeout = process.calls[0]
+        self.assertEqual(argv[:4], ("sudo", "-n", "/fixed/helper", "image-bootstrap"))
+        self.assertEqual(argv[-2:], (PackagePlan.simulation_digest, "nginx"))
+        self.assertEqual(timeout, 1900)
 
 
 if __name__ == "__main__": unittest.main()

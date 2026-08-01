@@ -55,6 +55,7 @@ class TestManagedProvisioner(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertNotIn("database", events); self.assertNotIn("services", events)
         self.assertIn("network-remove", events); self.assertIn("machine-stop", events)
+        self.assertIn("image-remove", events)
         self.assertIn("apparmor-remove", events)
         self.assertIn("image-unmount", events)
 

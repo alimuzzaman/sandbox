@@ -48,3 +48,23 @@ class ManagedImage:
             return {"ok": False, "mutated": False, "reason": "image policy drifted"}
         result = self._run("image-remove", plan)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
+
+
+class ManagedRootfs:
+    """Bootstrap exact image packages through the fixed helper."""
+
+    def __init__(self, *, process, helper, stager):
+        self.process = process; self.helper = helper; self.stager = stager
+
+    def configure(self, plan):
+        package_plan = plan["package_plan"]
+        path = self.stager.stage(package_plan)
+        try:
+            result = self.process.run(("sudo", "-n", self.helper, "image-bootstrap",
+                                       plan["machine_id"], plan["policy_digest"], str(path),
+                                       package_plan.simulation_digest, plan["web_server"]),
+                                      timeout=1900)
+        finally:
+            path.unlink(missing_ok=True)
+        if result.returncode != 0: raise RuntimeError("managed Noble rootfs bootstrap failed")
+        return {"ok": True, "mutated": True}

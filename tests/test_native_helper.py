@@ -240,5 +240,14 @@ class TestNativeHelper(unittest.TestCase):
             self.assertIn(f"Dir::Etc::sourcelist={source}", installs)
             self.assertEqual(calls[-1][1]["environment"]["DEBIAN_FRONTEND"], "noninteractive")
 
+    def test_rootfs_writer_rejects_symlink_parent_escape_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image = root / "image"; outside = root / "outside"
+            image.mkdir(); outside.mkdir(); (image / "etc").symlink_to(outside)
+            helper = module()
+            with self.assertRaises(SystemExit):
+                helper.write_rootfs(image, "/etc/escaped", "payload")
+            self.assertFalse((outside / "escaped").exists())
+
 
 if __name__ == "__main__": unittest.main()

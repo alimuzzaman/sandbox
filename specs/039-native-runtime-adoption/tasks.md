@@ -106,7 +106,7 @@ foreign baselines remain unchanged.
 ### Implementation for User Story 2
 
 - [X] T042 [US2] Implement exact configured-source host/image APT simulation, package closure, effects, owned roots, and digest output in `sandbox/runtimes/managed/packages.py`
-- [ ] T043 [US2] Implement TTY-only confirmed package apply with re-simulation, image-local service-start suppression, and host baseline verification in `sandbox/runtimes/managed/packages.py` and `tools/native-helper/native-helper.py`
+- [X] T043 [US2] Implement TTY-only confirmed package apply with re-simulation, image-local service-start suppression, and host baseline verification in `sandbox/runtimes/managed/packages.py` and `tools/native-helper/native-helper.py`
 - [ ] T044 [US2] Implement Noble rootfs bootstrap and exact PHP 8.3/MariaDB 10.11/nginx-or-Apache image configuration in `sandbox/runtimes/managed/image.py`
 - [X] T045 [US2] Implement Apache 2.4 managed service configuration and veth backend parity in `sandbox/runtimes/managed/services.py`
 - [ ] T046 [US2] Implement `native support|preflight|install-plan|install` CLI JSON/text contracts in `sandbox/commands/native.py`

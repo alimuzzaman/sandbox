@@ -374,6 +374,116 @@ def host_packages_apply(path_value, digest):
               timeout=900, environment=environment)
 
 
+def rootfs_path(root, relative):
+    if not isinstance(relative, str) or not relative.startswith("/") or ".." in Path(relative).parts:
+        fail("native rootfs path is invalid")
+    root = root.resolve(strict=True); destination = root / relative.lstrip("/")
+    current = root
+    for part in Path(relative).parent.parts:
+        if part in {"/", ""}: continue
+        current = current / part
+        if current.exists() or current.is_symlink():
+            details = current.lstat()
+            if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+                fail("native rootfs path escapes the image")
+        else:
+            current.mkdir(mode=0o755)
+    if destination.is_symlink(): fail("native rootfs path is a symlink")
+    return destination
+
+
+def write_rootfs(root, relative, payload, mode=0o644):
+    destination = rootfs_path(root, relative)
+    atomic_install_bytes(payload.encode() if isinstance(payload, str) else payload, destination)
+    os.chmod(destination, mode)
+
+
+def mask_rootfs_unit(root, unit):
+    if not re.fullmatch(r"[a-zA-Z0-9@_.-]+\.(?:service|socket)", unit):
+        fail("native unit is invalid")
+    destination = rootfs_path(root, f"/etc/systemd/system/{unit}")
+    if destination.exists() and not destination.is_symlink():
+        fail("native service mask collides with a file")
+    if destination.is_symlink():
+        if os.readlink(destination) != "/dev/null": fail("native service mask is foreign")
+        return
+    destination.symlink_to("/dev/null")
+
+
+def image_bootstrap(machine_id, policy_digest, plan_path, plan_digest, web_server):
+    _policy_path, policy = applied_policy(machine_id, policy_digest)
+    plan, _host_versions = read_install_plan(plan_path, plan_digest)
+    if web_server not in {"nginx", "apache"}: fail("native web server is invalid")
+    image_names = {row["name"] for row in plan["image_packages"]}
+    expected_web = "nginx" if web_server == "nginx" else "apache2"
+    if expected_web not in image_names or ({"nginx", "apache2"} - {expected_web}) & image_names:
+        fail("native image package variant is invalid")
+    _instance, image, mountpoint = image_paths(machine_id)
+    if not os.path.ismount(mountpoint): fail("native image is not mounted for bootstrap")
+    loops = run_fixed(("losetup", "-j", str(image)), "native loop ownership unavailable")
+    if not loops.stdout.strip(): fail("native bootstrap target is not the owned image")
+    marker = mountpoint / "etc/sandbox-native/bootstrap.json"
+    expected_marker = {"machine_id": machine_id, "policy_digest": policy_digest,
+                       "package_digest": plan_digest, "web_server": web_server,
+                       "matrix_id": "ubuntu-24.04-systemd-255"}
+    if marker.exists():
+        try: observed_marker = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError): fail("native bootstrap marker is invalid")
+        if observed_marker != expected_marker: fail("native bootstrap marker changed")
+        return
+    entries = [item.name for item in mountpoint.iterdir() if item.name != "lost+found"]
+    if entries: fail("native bootstrap image is not empty")
+    archive = next((source["uri"] for source in plan["sources"]
+                    if "security.ubuntu.com" not in source["uri"]), None)
+    if archive is None: fail("native bootstrap archive is unavailable")
+    keyring = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+    run_fixed(("debootstrap", "--variant=minbase",
+               "--components=main,universe,restricted,multiverse",
+               f"--keyring={keyring}", "noble", str(mountpoint), archive),
+              "native Noble bootstrap failed", timeout=1800)
+    components_allowed = {"main", "universe", "restricted", "multiverse"}
+    source_stanzas = []
+    for source in plan["sources"]:
+        components = source.get("components", "main universe").split()
+        if not components or any(item not in components_allowed for item in components):
+            fail("native image source components are invalid")
+        source_stanzas.append(
+            "Types: deb\n"
+            f"URIs: {source['uri']}\n"
+            f"Suites: {source['suite']}\n"
+            f"Components: {' '.join(components)}\n"
+            "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+        )
+    write_rootfs(mountpoint, "/etc/apt/sources.list.d/ubuntu.sources",
+                 "\n".join(source_stanzas))
+    write_rootfs(mountpoint, "/usr/sbin/policy-rc.d", "#!/bin/sh\nexit 101\n", 0o755)
+    write_rootfs(mountpoint, "/etc/resolv.conf", Path("/etc/resolv.conf").read_text())
+    write_rootfs(mountpoint, "/etc/hostname", machine_id + "\n")
+    write_rootfs(mountpoint, "/etc/hosts",
+                 f"127.0.0.1 localhost\n127.0.1.1 {machine_id}\n::1 localhost\n")
+    for unit in ("systemd-networkd.service", "systemd-networkd.socket",
+                 "systemd-resolved.service", "nginx.service", "apache2.service",
+                 "php8.3-fpm.service", "mariadb.service", "mysql.service", "cron.service"):
+        mask_rootfs_unit(mountpoint, unit)
+    package_specs = tuple(f"{row['name']}={row['version']}" for row in plan["image_packages"])
+    apt = ("chroot", str(mountpoint), "/usr/bin/apt-get", "--no-install-recommends")
+    environment = {**FIXED_ENVIRONMENT, "DEBIAN_FRONTEND": "noninteractive"}
+    run_fixed((*apt, "update"), "native image APT metadata refresh failed",
+              timeout=900, environment=environment)
+    run_fixed((*apt, "--yes", "--allow-downgrades", "install", *package_specs),
+              "native image package installation failed", timeout=1800,
+              environment=environment)
+    write_rootfs(mountpoint, "/etc/resolv.conf", "# DNS disabled; use an explicit egress broker grant.\n")
+    write_rootfs(mountpoint, "/etc/machine-id", "")
+    for directory, mode in (("/var/lib/sandbox", 0o700), ("/var/log/sandbox", 0o700),
+                            ("/var/lib/sandbox/tmp", 0o1770),
+                            ("/var/lib/sandbox/sessions", 0o1770)):
+        path = rootfs_path(mountpoint, directory); path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, mode)
+    write_rootfs(mountpoint, "/etc/sandbox-native/bootstrap.json",
+                 json.dumps(expected_marker, sort_keys=True) + "\n", 0o600)
+
+
 def image_create(machine_id, digest):
     _path, policy = applied_policy(machine_id, digest)
     instance, image, _mountpoint = image_paths(machine_id)
@@ -756,6 +866,10 @@ def main(argv=None):
     install = sub.add_parser("install")
     host_apply = sub.add_parser("host-packages-apply")
     host_apply.add_argument("path"); host_apply.add_argument("digest")
+    bootstrap = sub.add_parser("image-bootstrap")
+    bootstrap.add_argument("machine"); bootstrap.add_argument("policy_digest")
+    bootstrap.add_argument("plan_path"); bootstrap.add_argument("plan_digest")
+    bootstrap.add_argument("web_server", choices=("nginx", "apache"))
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
@@ -777,6 +891,9 @@ def main(argv=None):
         os.chmod(INSTALL_PATH, 0o755)
     elif args.verb == "host-packages-apply":
         require_root(); host_packages_apply(args.path, args.digest)
+    elif args.verb == "image-bootstrap":
+        require_root(); image_bootstrap(machine(args.machine), digest_value(args.policy_digest),
+                                        args.plan_path, args.plan_digest, args.web_server)
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
         _source, _value, payload = _read_checked_policy(args.path, identity)

@@ -24,6 +24,7 @@ class Ingress:
             reason_code="selected", required_protocols=frozenset({"http"}),
             required_capabilities=frozenset({"http"}))
     def naming_offer(self, selection, **kwargs): self.events.append("offer"); return {"accepted_addresses": selection.accepted_addresses}
+    def authorize(self, selection, **kwargs): self.events.append("consent"); return {"ok": True}
     def plan_route(self, *args): self.events.append("route-plan"); return {"ok": True}
     def apply_route(self, *args, **kwargs):
         self.events.append("route-apply")
@@ -38,7 +39,7 @@ class TestCleanUrlService(unittest.TestCase):
         result = service.apply("/tmp/project", backend={"address": "127.0.0.1", "port": 8123},
                                fallback_url="http://localhost:8123")
         self.assertTrue(result["ok"])
-        self.assertEqual(events, ["select", "offer", "dns", "route-plan", "route-apply"])
+        self.assertEqual(events, ["select", "offer", "consent", "dns", "route-plan", "route-apply"])
 
     def test_dns_failure_never_plans_or_applies_route(self):
         from sandbox.application.clean_url_service import CleanUrlService
@@ -47,7 +48,7 @@ class TestCleanUrlService(unittest.TestCase):
         result = service.apply("/tmp/project", backend={"address": "127.0.0.1", "port": 8123},
                                fallback_url="http://localhost:8123")
         self.assertFalse(result["ok"])
-        self.assertEqual(events, ["select", "offer", "dns"])
+        self.assertEqual(events, ["select", "offer", "consent", "dns"])
 
     def test_route_failure_cleans_new_dns_ownership(self):
         from sandbox.application.clean_url_service import CleanUrlService

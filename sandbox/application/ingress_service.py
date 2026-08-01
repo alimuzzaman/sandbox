@@ -5,6 +5,7 @@ from __future__ import annotations
 from sandbox.ingress.models import IngressSelection, ListenerEndpoint
 from sandbox.ingress.models import RouteRecord
 from sandbox.ingress.models import digest
+from datetime import datetime, timezone
 
 
 PROTOCOL_PORTS = {"http": 80, "https": 443}
@@ -102,9 +103,16 @@ class IngressService:
                 "selected", observation.fingerprint if observation else None,
                 pin, pin_source,
             )
+        pinned = self.registry.get(pin) if pin else None
+        pinned_observed = pin and any(item.adapter_id == pin for item in observations)
+        if pinned and pinned_observed:
+            tier = pinned.declaration.support_tier
+            reason = "credential_pending" if tier == "credential_pending" \
+                else "detected_not_adoptable"
+        else:
+            reason = "pin_unavailable" if pin else "no_live_proven_ingress"
         return IngressSelection(
-            protocols, capabilities, None, (),
-            "pin_unavailable" if pin else "no_live_proven_ingress", None,
+            protocols, capabilities, None, (), reason, None,
             pin, pin_source,
         )
 
@@ -121,6 +129,43 @@ class IngressService:
             "capabilities": {name: True for name in selection.required_capabilities},
             "fallback_url": fallback_url,
         }
+
+    @staticmethod
+    def consent_identity(selection):
+        return f"{selection.adapter_id}:{selection.observation_fingerprint or 'free'}"
+
+    def authorize(self, selection, *, interactive=False, fallback_url=""):
+        if selection.adapter_id is None:
+            return {"ok": False, "state": "fallback", "mutated": False,
+                    "fallback_url": fallback_url,
+                    "reason": {"code": selection.reason_code}}
+        if self.repository is None:
+            return {"ok": False, "state": "fallback", "mutated": False,
+                    "fallback_url": fallback_url,
+                    "reason": {"code": "ingress_repository_unavailable"}}
+        identity = self.consent_identity(selection)
+        consent = self.repository.snapshot()["consents"].get(identity)
+        if consent and consent.get("decision") == "accepted":
+            return {"ok": True, "state": "ready", "mutated": False,
+                    "consent_identity": identity, "reason": {"code": "consent_remembered"}}
+        if consent and consent.get("decision") == "declined":
+            return {"ok": False, "state": "fallback", "mutated": False,
+                    "fallback_url": fallback_url, "consent_identity": identity,
+                    "reason": {"code": "consent_declined"}}
+        if not interactive:
+            return {"ok": False, "state": "pending_consent", "mutated": False,
+                    "fallback_url": fallback_url, "consent_identity": identity,
+                    "reason": {"code": "consent_required"}}
+        accepted = bool(self.consent_decider(identity))
+        now = self.clock() if self.clock else datetime.now(timezone.utc).isoformat()
+        self.repository.put_consent(identity, {
+            "decision": "accepted" if accepted else "declined",
+            "policy_version": 1, "decided_at": str(now),
+        })
+        return {"ok": accepted, "state": "ready" if accepted else "fallback",
+                "mutated": True, "fallback_url": fallback_url,
+                "consent_identity": identity,
+                "reason": {"code": "consent_accepted" if accepted else "consent_declined"}}
 
     def plan_route(self, selection, naming, backend):
         if selection.adapter_id is None:
@@ -153,7 +198,7 @@ class IngressService:
         return {"ok": True, "state": "planned", "mutated": False,
                 "selection": selection, "adapter_plan": adapter_plan,
                 "route": route, "adapter": spec.adapter,
-                "consent_identity": f"{selection.adapter_id}:{selection.observation_fingerprint or 'free'}"}
+                "consent_identity": self.consent_identity(selection)}
 
     def apply_route(self, planned, *, interactive=False, fallback_url=""):
         if not planned.get("ok"):
@@ -162,26 +207,11 @@ class IngressService:
             return {"ok": False, "state": "fallback", "mutated": False,
                     "fallback_url": fallback_url,
                     "reason": {"code": "ingress_transaction_unavailable"}}
-        identity = planned["consent_identity"]
-        consent = self.repository.snapshot()["consents"].get(identity)
-        if consent and consent.get("decision") == "declined":
-            return {"ok": False, "state": "fallback", "mutated": False,
-                    "fallback_url": fallback_url,
-                    "reason": {"code": "consent_declined"}}
-        if not consent:
-            if not interactive:
-                return {"ok": False, "state": "pending_consent", "mutated": False,
-                        "fallback_url": fallback_url,
-                        "reason": {"code": "consent_required"}}
-            accepted = bool(self.consent_decider(identity))
-            self.repository.put_consent(identity, {
-                "decision": "accepted" if accepted else "declined",
-                "policy_version": 1,
-            })
-            if not accepted:
-                return {"ok": False, "state": "fallback", "mutated": False,
-                        "fallback_url": fallback_url,
-                        "reason": {"code": "consent_declined"}}
+        authorized = self.authorize(
+            planned["selection"], interactive=interactive, fallback_url=fallback_url,
+        )
+        if not authorized["ok"]:
+            return authorized
         existing = self.repository.route(planned["route"].route_id)
         if existing is not None and existing.last_applied is not None:
             observed = planned["adapter"].observe_route(planned["adapter_plan"])

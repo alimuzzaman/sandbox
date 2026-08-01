@@ -147,8 +147,8 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 
 ### Tests for User Story 4
 
-- [ ] T053 [P] [US4] Write failing accept/decline/reconsider, incumbent identity, and machine-scope consent tests in `tests/test_ingress_consent.py`
-- [ ] T054 [P] [US4] Write failing non-TTY pending-consent/pending-credential/no-prompt/no-mutation tests in `tests/test_ingress_noninteractive.py`
+- [X] T053 [P] [US4] Write failing accept/decline/reconsider, incumbent identity, and machine-scope consent tests in `tests/test_ingress_consent.py`
+- [X] T054 [P] [US4] Write failing non-TTY pending-consent/pending-credential/no-prompt/no-mutation tests in `tests/test_ingress_noninteractive.py`
 - [ ] T055 [P] [US4] Write failing project-pin/machine-override precedence, unavailable-pin, and pin-source tests in `tests/test_ingress_pins.py`
 - [ ] T056 [P] [US4] Write failing NPM/DDEV/Local/XAMPP/Laragon/WAMP detect-only/outside-platform tests in `tests/test_ingress_detect_only.py`
 - [ ] T057 [US4] Write failing CLI/MCP parity, support matrix, secret-redaction, and fallback-result tests in `tests/test_ingress_cli_mcp.py`

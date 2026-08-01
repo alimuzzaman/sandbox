@@ -20,6 +20,11 @@ class CleanUrlService:
                     "fallback_url": fallback_url,
                     "reason": {"code": selection.reason_code}}
         offer = self.ingress.naming_offer(selection, fallback_url=fallback_url)
+        authorization = self.ingress.authorize(
+            selection, interactive=interactive, fallback_url=fallback_url,
+        )
+        if not authorization["ok"]:
+            return authorization
         naming = self.domains.apply(
             project_dir, label=label, interactive=interactive, offer_override=offer,
         )

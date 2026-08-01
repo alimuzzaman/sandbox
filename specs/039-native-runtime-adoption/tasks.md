@@ -68,7 +68,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 ### Implementation for User Story 1
 
 - [X] T025 [US1] Implement effective host prerequisite, observed-policy verification, and policy-drift preflight with fail-closed results in `sandbox/isolation/preflight.py` and `sandbox/isolation/verification.py`
-- [ ] T026 [US1] Implement fixed-size/inode ext4 image creation, ownership verification, mount options, and conservative unmount in `sandbox/runtimes/managed/image.py`
+- [X] T026 [US1] Implement fixed-size/inode ext4 image creation, ownership verification, mount options, and conservative unmount in `sandbox/runtimes/managed/image.py`
 - [ ] T027 [US1] Implement private-user nspawn descriptors, namespace/device/capability/seccomp settings, and observed-policy verification in `sandbox/isolation/nspawn.py`
 - [ ] T028 [US1] Implement read-only/writable mount compilation, canonical path and symlink checks in `sandbox/isolation/policy.py`
 - [ ] T029 [US1] Implement unique point-to-point veth allocation, no-default-route nftables policy, ingress allowance, scoped egress grants, counters, and revocation in `sandbox/isolation/network.py`

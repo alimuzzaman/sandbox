@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -34,6 +35,11 @@ def require_root():
 
 def machine(value):
     if not MACHINE.fullmatch(value): fail("invalid machine id")
+    return value
+
+
+def digest_value(value):
+    if not re.fullmatch(r"[a-f0-9]{64}", value): fail("invalid policy digest")
     return value
 
 
@@ -102,6 +108,92 @@ def atomic_install(source, destination):
         if os.path.exists(temporary): os.unlink(temporary)
 
 
+def applied_policy(machine_id, digest):
+    path, value = checked_policy(POLICY_ROOT / f"{machine_id}.json", machine_id,
+                                 applied=True)
+    if value["digest"] != digest_value(digest): fail("applied policy digest changed")
+    return path, value
+
+
+def run_fixed(argv, message):
+    result = subprocess.run(tuple(argv), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, timeout=120, check=False, close_fds=True)
+    if result.returncode != 0: fail(message)
+    return result
+
+
+def image_paths(machine_id):
+    instance = Path("/var/lib/sandbox/native/instances") / machine_id
+    mountpoint = Path("/var/lib/sandbox/native/mounts") / machine_id
+    return instance, instance / "root.img", mountpoint
+
+
+def image_create(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    instance, image, _mountpoint = image_paths(machine_id)
+    if instance.exists() and (instance.is_symlink() or not instance.is_dir()):
+        fail("native instance root is foreign")
+    instance.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if image.exists() or image.is_symlink(): fail("native image already exists")
+    spec = policy["root_image"]
+    size = spec.get("bytes"); inodes = spec.get("inodes")
+    if (isinstance(size, bool) or not isinstance(size, int) or
+            not 1024**3 <= size <= 1024**4): fail("native image size is invalid")
+    if (isinstance(inodes, bool) or not isinstance(inodes, int) or
+            not 10000 <= inodes <= 10000000): fail("native image inode limit is invalid")
+    try:
+        run_fixed(("truncate", "--size", str(size), str(image)), "image allocation failed")
+        run_fixed(("mkfs.ext4", "-F", "-q", "-m", "0", "-N", str(inodes), str(image)),
+                  "image format failed")
+        os.chown(image, 0, 0); os.chmod(image, 0o600)
+    except BaseException:
+        if image.exists() and not image.is_symlink(): image.unlink()
+        raise
+
+
+def image_mount(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    _instance, image, mountpoint = image_paths(machine_id)
+    if not image.is_file() or image.is_symlink() or image.stat().st_uid != 0:
+        fail("owned native image is unavailable")
+    if mountpoint.exists() and (mountpoint.is_symlink() or not mountpoint.is_dir()):
+        fail("native mountpoint is foreign")
+    mountpoint.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.path.ismount(mountpoint): fail("native image is already mounted")
+    run_fixed(("mount", "-o", "loop,nodev,nosuid,noatime", str(image), str(mountpoint)),
+              "native image mount failed")
+    if not os.path.ismount(mountpoint): fail("native image mount was not observed")
+
+
+def image_unmount(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    _instance, image, mountpoint = image_paths(machine_id)
+    if mountpoint.is_symlink(): fail("native mountpoint is foreign")
+    if not os.path.ismount(mountpoint): return
+    backing = run_fixed(("findmnt", "-n", "-o", "FSROOT", "--target", str(mountpoint)),
+                        "native mount ownership could not be observed")
+    # A loop-mounted ext4 image must expose filesystem root '/'. Other values
+    # indicate an unexpected bind/subvolume and are never unmounted by Sandbox.
+    if backing.stdout.strip() != "/": fail("native mount ownership is ambiguous")
+    loops = run_fixed(("losetup", "-j", str(image)), "native loop ownership unavailable")
+    if not loops.stdout.strip(): fail("native mount is not backed by the owned image")
+    run_fixed(("umount", str(mountpoint)), "native image unmount failed")
+    try: mountpoint.rmdir()
+    except OSError: pass
+
+
+def image_remove(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    _instance, image, mountpoint = image_paths(machine_id)
+    if os.path.ismount(mountpoint): fail("native image remains mounted")
+    if not image.exists(): return
+    details = image.lstat()
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or details.st_uid != 0:
+        fail("native image ownership changed")
+    image.unlink()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sandbox-native-helper")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -109,6 +201,8 @@ def main(argv=None):
     install = sub.add_parser("install")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
+    for name in ("image-create", "image-mount", "image-unmount", "image-remove"):
+        action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
         identity = machine(args.machine); checked_policy(args.path, identity); print("policy-ok")
@@ -127,6 +221,11 @@ def main(argv=None):
         require_root(); identity = machine(args.machine)
         _path, value = checked_policy(POLICY_ROOT / f"{identity}.json", identity, applied=True)
         print(json.dumps({"machine_id": identity, "digest": value["digest"]}, sort_keys=True))
+    elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove"}:
+        require_root(); identity = machine(args.machine)
+        {"image-create": image_create, "image-mount": image_mount,
+         "image-unmount": image_unmount, "image-remove": image_remove}[args.verb](
+             identity, args.digest)
 
 
 if __name__ == "__main__": main()

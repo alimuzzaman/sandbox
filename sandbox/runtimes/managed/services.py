@@ -14,10 +14,12 @@ class ManagedServiceCompiler:
         if not 1024 <= port <= 65535: raise ValueError("managed backend port is invalid")
         guest = str(policy.network.get("guest_address", "")).split("/", 1)[0]
         if not guest: raise ValueError("managed guest address is unavailable")
+        connections = int(policy.resources.get("connections", 128))
+        php_children = max(2, min(32, connections // 4))
         common_php = (
             "[sandbox]\nuser = www-data\ngroup = www-data\n"
             "listen = /run/php/sandbox.sock\nlisten.owner = www-data\nlisten.group = www-data\n"
-            "pm = dynamic\npm.max_children = 16\npm.start_servers = 2\n"
+            f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
             "pm.min_spare_servers = 1\npm.max_spare_servers = 4\n"
             "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
             "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
@@ -41,7 +43,7 @@ class ManagedServiceCompiler:
                    "    </FilesMatch>\n</VirtualHost>\n")
             units = ("mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service")
         database = ("[mysqld]\nbind-address=127.0.0.1\nskip-networking=1\n"
-                    "socket=/run/mysqld/mysqld.sock\nmax_connections=128\n")
+                    f"socket=/run/mysqld/mysqld.sock\nmax_connections={connections}\n")
         files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
                  "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
                  "/etc/cron.d/sandbox-wordpress":

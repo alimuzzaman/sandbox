@@ -16,5 +16,16 @@ class TestIsolationResources(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 ResourcePolicyCompiler().compile({"memory_bytes": value})
 
+    def test_effective_observation_must_report_every_exact_limit(self):
+        from sandbox.isolation.resources import ResourcePolicyCompiler, ResourceVerifier
+        desired = ResourcePolicyCompiler().compile({})
+        observed = {key: desired[key] for key in ResourceVerifier.FIELDS}
+        self.assertTrue(ResourceVerifier().verify(desired, observed)["ok"])
+        for key in ResourceVerifier.FIELDS:
+            with self.subTest(key=key):
+                changed = dict(observed); changed.pop(key)
+                result = ResourceVerifier().verify(desired, changed)
+                self.assertFalse(result["ok"]); self.assertIn(key, result["reason"]["failed_limits"])
+
 
 if __name__ == "__main__": unittest.main()

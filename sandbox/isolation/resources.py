@@ -24,3 +24,18 @@ class ResourcePolicyCompiler:
             "RuntimeMaxSec": policy["runtime_seconds"], "LimitNOFILE": policy["fds"],
             "IOWeight": policy["io_weight"],
         }}
+
+
+class ResourceVerifier:
+    FIELDS = ("cpu_percent", "memory_bytes", "pids", "runtime_seconds",
+              "disk_bytes", "inodes", "fds", "connections", "io_weight")
+
+    def verify(self, desired, observed):
+        failures = []
+        for field in self.FIELDS:
+            expected = desired.get(field); actual = observed.get(field)
+            if not isinstance(actual, int) or actual != expected:
+                failures.append(field)
+        return {"ok": not failures, "state": "ready" if not failures else "blocked",
+                "reason": {"code": "ready" if not failures else "resource_limit_drift",
+                           "failed_limits": failures}}

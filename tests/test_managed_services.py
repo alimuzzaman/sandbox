@@ -4,6 +4,7 @@ import unittest
 class Policy:
     machine_id = "sb-0123456789ab"; digest = "a" * 64
     network = {"guest_address": "10.203.0.2/30"}
+    resources = {"connections": 128}
 
 
 class TestManagedServices(unittest.TestCase):

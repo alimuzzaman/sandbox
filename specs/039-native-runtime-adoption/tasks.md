@@ -61,7 +61,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 - [X] T019 [P] [US1] Write failing mount visibility, read-only source, writable-subpath, and symlink-escape tests in `tests/test_isolation_policy.py`
 - [X] T020 [P] [US1] Write failing private UID/PID/IPC/UTS/device/capability/seccomp/nested-userns tests in `tests/test_isolation_namespaces.py`
 - [X] T021 [P] [US1] Write failing veth default-deny, host/sibling/private/metadata denial, ingress-reply, grant, and revoke tests in `tests/test_isolation_network.py`
-- [ ] T022 [P] [US1] Write failing CPU/memory/PID/time/disk/inode/FD/connection/I/O exhaustion tests in `tests/test_isolation_resources.py`
+- [X] T022 [P] [US1] Write failing CPU/memory/PID/time/disk/inode/FD/connection/I/O exhaustion tests in `tests/test_isolation_resources.py`
 - [X] T023 [P] [US1] Write failing inherited-FD/environment/credential/control-socket leakage tests in `tests/test_isolation_credentials.py`
 - [X] T024 [US1] Write failing all-entry-path policy-digest and no-host-fallback integration tests in `tests/test_isolation_execution_paths.py`
 
@@ -72,7 +72,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 - [X] T027 [US1] Implement private-user nspawn descriptors, namespace/device/capability/seccomp settings, and observed-policy verification in `sandbox/isolation/nspawn.py`
 - [X] T028 [US1] Implement read-only/writable mount compilation, canonical path and symlink checks in `sandbox/isolation/policy.py`
 - [ ] T029 [US1] Implement unique point-to-point veth allocation, no-default-route nftables policy, ingress allowance, scoped egress grants, counters, and revocation in `sandbox/isolation/network.py`
-- [ ] T030 [US1] Implement cgroup/service/disk/FD/connection/time/I/O limits and effective observation in `sandbox/isolation/resources.py`
+- [X] T030 [US1] Implement cgroup/service/disk/FD/connection/time/I/O limits and effective observation in `sandbox/isolation/resources.py`
 - [X] T031 [US1] Implement per-instance credential injection, environment allowlist, close-range descriptor sanitation, and leak gate in `sandbox/isolation/credentials.py`
 - [X] T032 [US1] Implement the defense-in-depth one-shot bubblewrap profile with clearenv, source modes, nested-userns disable, capability drop, private temp, and bounded argv in `sandbox/isolation/bubblewrap.py`
 - [X] T033 [US1] Implement `IsolationLauncher` for web PHP, cron, WP-CLI/eval, exec, Composer, activation, PHPUnit, and durable jobs with no host fallback in `sandbox/isolation/launcher.py`

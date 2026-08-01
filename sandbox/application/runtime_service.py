@@ -13,10 +13,11 @@ from sandbox.runtimes.base import (
 
 class RuntimeService:
     def __init__(self, *, resolve_descriptor: Callable, adapters: AdapterRegistry,
-                 backends=None) -> None:
+                 backends=None, resolve_persisted=None) -> None:
         self._resolve_descriptor = resolve_descriptor
         self._adapters = adapters
         self._backends = backends
+        self._resolve_persisted = resolve_persisted
 
     @staticmethod
     def _descriptor_kind(descriptor: object) -> str:
@@ -77,6 +78,17 @@ class RuntimeService:
         if kind == "wordpress" and self._backends is not None and isinstance(runtime, Mapping):
             mode = runtime.get("mode", "compose")
             adapter_id = runtime.get("adapter", "compose")
+            persisted = self._resolve_persisted(request.project_root, request.label) \
+                if self._resolve_persisted else None
+            if persisted and persisted.get("populated") and (
+                persisted.get("mode") != mode or persisted.get("adapter") != adapter_id
+            ):
+                return OperationError(
+                    "runtime_mode_change",
+                    "a populated instance cannot change runtime mode through an ordinary operation",
+                    kind, request.operation,
+                    suggestion="Export, recreate in the explicit mode, then import.",
+                )
             if mode != "compose" and not runtime.get("explicit"):
                 return OperationError(
                     "explicit_selection_required",

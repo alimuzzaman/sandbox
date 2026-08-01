@@ -25,13 +25,14 @@ class TestNativeRuntimeService(unittest.TestCase):
                           modes=("incumbent_native",), owner="test", order=30)
         return registry, adapters
 
-    def service(self, runtime):
+    def service(self, runtime, persisted=None):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes.base import AdapterRegistry
         backends, adapters = self.registry()
         service = RuntimeService(resolve_descriptor=lambda *_args, **_kwargs: {
             "kind": "wordpress", "wordpressRuntime": runtime,
-        }, adapters=AdapterRegistry(), backends=backends)
+        }, adapters=AdapterRegistry(), backends=backends,
+            resolve_persisted=lambda _root, _label: persisted)
         return service, adapters
 
     def test_resolves_project_kind_mode_and_adapter_as_three_dimensions(self):
@@ -69,6 +70,17 @@ class TestNativeRuntimeService(unittest.TestCase):
             registry.register("ubuntu-nspawn", adapters["ubuntu-nspawn"],
                               project_kinds=("wordpress",), modes=("managed_native",),
                               owner="duplicate")
+
+    def test_populated_instance_refuses_mode_or_adapter_switch(self):
+        from sandbox.runtimes.base import OperationRequest
+        service, adapters = self.service(
+            {"mode": "compose", "adapter": "compose", "explicit": False},
+            persisted={"mode": "managed_native", "adapter": "ubuntu-nspawn",
+                       "populated": True},
+        )
+        result = service.invoke(OperationRequest("/tmp/project", "ensure"))
+        self.assertEqual(result.code, "runtime_mode_change")
+        self.assertTrue(all(not adapter.calls for adapter in adapters.values()))
 
 
 if __name__ == "__main__": unittest.main()

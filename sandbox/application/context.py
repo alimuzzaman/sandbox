@@ -325,6 +325,7 @@ def runtime_service(cfg):
     """Compose WordPress compatibility and the framework-neutral Compose adapter."""
     import sandbox.core as core
     import sandbox_core as sc
+    from pathlib import Path
 
     from sandbox.application.runtime_service import RuntimeService
     from sandbox.runtimes.compose import ComposeAdapter
@@ -388,8 +389,18 @@ def runtime_service(cfg):
         "ubuntu-nspawn", managed, project_kinds=("wordpress",),
         modes=("managed_native",), owner="sandbox.runtimes.managed.adapter", order=20,
     )
+    def persisted_selection(root, label):
+        owner = f"{Path(root).expanduser().resolve()}::{label}"
+        state = native_repository.snapshot()
+        selected = state["selections"].get(owner)
+        if selected: return selected
+        backend = next((value for value in state["backends"].values()
+                        if value.get("owner") == owner), None)
+        return {"mode": backend.get("mode"), "adapter": backend.get("adapter"),
+                "populated": True} if backend else None
+
     return RuntimeService(resolve_descriptor=resolve_descriptor, adapters=adapters,
-                          backends=backends)
+                          backends=backends, resolve_persisted=persisted_selection)
 
 
 def wordpress_runtime_service(cfg):

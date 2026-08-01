@@ -44,6 +44,7 @@ class TestManagedProvisioner(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertLess(events.index("verify"), events.index("database"))
         self.assertLess(events.index("verify"), events.index("services"))
+        self.assertLess(events.index("image-unmount"), events.index("machine-minimal"))
         self.assertEqual(events[-1], "persist")
 
     def test_verification_failure_rolls_back_without_database_or_services(self):

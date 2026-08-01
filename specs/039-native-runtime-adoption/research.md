@@ -95,6 +95,12 @@ kernel/host powers such as `SYS_ADMIN`, `NET_ADMIN`, `NET_RAW`, `MKNOD`, tracing
 reboot are explicitly dropped. One-shot hostile payloads drop the remaining set through
 bubblewrap.
 
+Ubuntu 24.04's systemd 255 predates nspawn `PrivateUsersDelegate=` and nspawn-level
+`RestrictAddressFamilies=` (introduced in later systemd releases), so the supported matrix
+does not emit those settings. It delegates no extra UID ranges, and the supervising unit
+allows the minimal families nspawn needs to construct the namespace, including netlink;
+effective nested-userns and payload-socket denial remain mandatory live gates.
+
 **Rationale**: No single mechanism covers every resource. Fixed disk/inodes, cgroup totals,
 per-process FD ceilings, service connection ceilings, and execution deadlines together
 bound the requested failure modes and make effective maxima observable.

@@ -129,5 +129,32 @@ class TestNativeHelper(unittest.TestCase):
                 self.assertRaises(SystemExit):
             helper.network_apply("sb-0123456789ab", value["digest"])
 
+    def test_machine_command_is_fixed_digest_bound_and_systemd_255_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper, path = self.policy(Path(directory)); value = json.loads(path.read_text())
+            command, description = helper.machine_command(value)
+        self.assertEqual(command[:5], ("systemd-run", "--no-block", "--collect",
+                                       "--unit=sandbox-native-sb-0123456789ab.service",
+                                       "--service-type=notify"))
+        self.assertIn("--settings=no", command)
+        self.assertIn("--private-network", command)
+        self.assertIn("--network-veth-extra=ve-sb-demo:host0", command)
+        self.assertIn("--no-new-privileges=yes", command)
+        self.assertTrue(any(value.startswith("--drop-capability=") and "CAP_SYS_ADMIN" in value
+                            for value in command))
+        self.assertFalse(any("private-users-delegate" in value for value in command))
+        self.assertFalse(any(value.startswith("--restrict-address-families=")
+                             for value in command))
+        self.assertIn(value["digest"], description)
+
+    def test_machine_start_refuses_when_apparmor_is_not_loaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper, path = self.policy(Path(directory)); value = json.loads(path.read_text())
+            with mock.patch.object(helper, "applied_policy", return_value=(path, value)), \
+                    mock.patch.object(helper, "apparmor_loaded", return_value=False), \
+                    mock.patch.object(helper, "run_fixed") as run, self.assertRaises(SystemExit):
+                helper.machine_start_minimal("sb-0123456789ab", value["digest"])
+            run.assert_not_called()
+
 
 if __name__ == "__main__": unittest.main()

@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 MACHINE = re.compile(r"^sb-[a-f0-9]{12,32}$")
@@ -79,7 +80,8 @@ def validate_schema(value, machine_id):
         source = Path(mount["source"])
         if mount["target"] != "/workspace" or project_root is not None:
             fail("policy must expose exactly one project root")
-        if not source.is_absolute() or source.is_symlink() or not source.is_dir():
+        if (not source.is_absolute() or source.is_symlink() or not source.is_dir() or
+                ":" in mount["source"] or any(ord(char) < 32 for char in mount["source"])):
             fail("policy project root is unavailable")
         project_root = source.resolve(strict=True)
     if project_root is None: fail("policy project root is required")
@@ -91,7 +93,8 @@ def validate_schema(value, machine_id):
         if not isinstance(mount["source"], str) or not isinstance(mount["target"], str):
             fail("policy writable mount is invalid")
         source = Path(mount["source"])
-        if not source.is_absolute() or source.is_symlink() or not source.exists():
+        if (not source.is_absolute() or source.is_symlink() or not source.exists() or
+                ":" in mount["source"] or any(ord(char) < 32 for char in mount["source"])):
             fail("policy writable source is unavailable")
         resolved = source.resolve(strict=True)
         raw_target = mount["target"]
@@ -424,6 +427,110 @@ def network_remove(machine_id, digest):
                       "dev", network["veth"]))
 
 
+def machine_names(machine_id):
+    return f"sandbox-native-{machine_id}.service", f"sandbox-native-{machine_id}"
+
+
+def apparmor_loaded(machine_id):
+    profile = f"sandbox-native-{machine_id}"
+    try:
+        return any(line.startswith(profile + " ")
+                   for line in Path("/sys/kernel/security/apparmor/profiles").read_text().splitlines())
+    except OSError:
+        return False
+
+
+def unit_description(unit):
+    result = run_optional(("systemctl", "show", unit, "--property=Description", "--value"))
+    return (result.stdout or "").strip() if result.returncode == 0 else ""
+
+
+def machine_command(policy):
+    machine_id = policy["machine_id"]; digest = policy["digest"]
+    unit, profile = machine_names(machine_id)
+    resources = policy["resources"]
+    description = f"Sandbox native {machine_id} policy {digest}"
+    properties = (
+        f"Description={description}", "KillMode=mixed", "DevicePolicy=closed",
+        "DeviceAllow=/dev/null rw", "DeviceAllow=/dev/zero rw",
+        "DeviceAllow=/dev/full rw", "DeviceAllow=/dev/random r",
+        "DeviceAllow=/dev/urandom r", "DeviceAllow=/dev/loop-control rw",
+        "DeviceAllow=block-loop rwm",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        "LockPersonality=yes", "RestrictSUIDSGID=yes", "NoNewPrivileges=yes",
+        f"AppArmorProfile={profile}", f"CPUQuota={resources['cpu_percent']}%",
+        f"MemoryMax={resources['memory_bytes']}", "MemorySwapMax=0",
+        f"TasksMax={resources['pids']}", f"RuntimeMaxSec={resources['runtime_seconds']}",
+        f"LimitNOFILE={resources['fds']}", f"IOWeight={resources['io_weight']}",
+    )
+    dropped = ("CAP_AUDIT_CONTROL", "CAP_DAC_READ_SEARCH", "CAP_IPC_OWNER", "CAP_LEASE",
+               "CAP_LINUX_IMMUTABLE", "CAP_MKNOD", "CAP_NET_ADMIN", "CAP_NET_BROADCAST",
+               "CAP_NET_RAW", "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_NICE",
+               "CAP_SYS_PTRACE", "CAP_SYS_RESOURCE", "CAP_SYS_TTY_CONFIG")
+    nspawn = ["/usr/bin/systemd-nspawn", "--quiet", "--boot", "--keep-unit",
+              "--register=yes", "--settings=no", f"--machine={machine_id}",
+              f"--image={policy['root_image']['path']}",
+              f"--private-users={policy['uid_map']['base']}:{policy['uid_map']['count']}",
+              "--private-users-ownership=map",
+              "--private-network",
+              f"--network-veth-extra={policy['network']['veth']}:host0",
+              "--resolv-conf=off", "--link-journal=no-host", "--no-new-privileges=yes",
+              "--drop-capability=" + ",".join(dropped),
+              "--system-call-filter=@system-service ~@mount ~@raw-io ~@reboot ~@swap"]
+    for mount in policy["read_only_mounts"]:
+        nspawn.append(f"--bind-ro={mount['source']}:{mount['target']}:norbind")
+    for mount in policy["writable_mounts"]:
+        nspawn.append(f"--bind={mount['source']}:{mount['target']}:norbind")
+    command = ["systemd-run", "--no-block", "--collect", f"--unit={unit}",
+               "--service-type=notify"]
+    command.extend(f"--property={value}" for value in properties)
+    command.extend(nspawn)
+    return tuple(command), description
+
+
+def machine_start_minimal(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    unit, _profile = machine_names(machine_id)
+    if not apparmor_loaded(machine_id): fail("native AppArmor profile is not loaded")
+    _instance, image, mountpoint = image_paths(machine_id)
+    if not image.is_file() or image.is_symlink() or image.stat().st_uid != 0:
+        fail("owned native image is unavailable")
+    if os.path.ismount(mountpoint): fail("native image remains mounted for provisioning")
+    if unit_description(unit): fail("native machine unit already exists")
+    machine = run_optional(("machinectl", "show", machine_id))
+    if machine.returncode == 0: fail("native machine identity already exists")
+    command, description = machine_command(policy)
+    run_fixed(command, "native machine start failed")
+    for _attempt in range(100):
+        if unit_description(unit) == description and observed_link(policy["network"]["veth"]):
+            return
+        time.sleep(0.1)
+    fail("native machine did not expose its owned unit and veth")
+
+
+def machine_status(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    unit, _profile = machine_names(machine_id)
+    expected = f"Sandbox native {machine_id} policy {digest}"
+    active = run_optional(("systemctl", "is-active", unit))
+    machine = run_optional(("machinectl", "show", machine_id))
+    ok = (unit_description(unit) == expected and active.returncode == 0 and
+          (active.stdout or "").strip() == "active" and machine.returncode == 0)
+    print(json.dumps({"machine_id": machine_id, "policy_digest": digest,
+                      "unit": unit, "ok": ok}, sort_keys=True))
+    if not ok: raise SystemExit(69)
+
+
+def machine_stop(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    unit, _profile = machine_names(machine_id)
+    description = unit_description(unit)
+    if not description: return
+    if description != f"Sandbox native {machine_id} policy {digest}":
+        fail("native machine unit ownership changed")
+    run_fixed(("systemctl", "stop", unit), "native machine stop failed")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sandbox-native-helper")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -432,7 +539,8 @@ def main(argv=None):
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
-                 "network-apply", "network-status", "network-remove"):
+                 "network-apply", "network-status", "network-remove",
+                 "machine-start-minimal", "machine-status", "machine-stop"):
         action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
@@ -451,12 +559,14 @@ def main(argv=None):
         _path, value = checked_policy(POLICY_ROOT / f"{identity}.json", identity, applied=True)
         print(json.dumps({"machine_id": identity, "digest": value["digest"]}, sort_keys=True))
     elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove",
-                      "network-apply", "network-status", "network-remove"}:
+                      "network-apply", "network-status", "network-remove",
+                      "machine-start-minimal", "machine-status", "machine-stop"}:
         require_root(); identity = machine(args.machine)
         {"image-create": image_create, "image-mount": image_mount,
          "image-unmount": image_unmount, "image-remove": image_remove,
          "network-apply": network_apply, "network-status": network_status,
-         "network-remove": network_remove}[args.verb](
+         "network-remove": network_remove, "machine-start-minimal": machine_start_minimal,
+         "machine-status": machine_status, "machine-stop": machine_stop}[args.verb](
              identity, args.digest)
 
 

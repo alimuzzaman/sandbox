@@ -21,6 +21,10 @@ class ManagedProvisioner:
             self.image.create(plan["image"]); completed.append("image")
             self.image.mount(plan["image"]); completed.append("mount")
             self.rootfs.configure(plan); completed.append("rootfs")
+            unmounted = self.image.unmount(plan["image"])
+            if isinstance(unmounted, dict) and not unmounted.get("ok"):
+                raise RuntimeError("managed image could not be closed after provisioning")
+            completed.remove("mount")
             # Start only init/network. Web, PHP, database and cron remain masked,
             # so project files cannot execute before effective isolation proof.
             self.machine.start_minimal(plan); completed.append("machine")

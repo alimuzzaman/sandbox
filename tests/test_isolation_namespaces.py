@@ -19,11 +19,14 @@ class TestIsolationNamespaces(unittest.TestCase):
         self.assertEqual(result["Exec"]["NoNewPrivileges"], "yes")
         self.assertEqual(result["Network"]["Private"], "yes")
         self.assertIn("~@mount", result["Exec"]["SystemCallFilter"])
-        self.assertEqual(result["Exec"]["PrivateUsersDelegate"], "0")
+        self.assertNotIn("PrivateUsersDelegate", result["Exec"])
         self.assertEqual(result["Network"]["VirtualEthernetExtra"], "ve-sb-demo:host0")
         self.assertEqual(result["Files"]["ReadOnly"], "no")
         self.assertEqual(result["Service"]["DevicePolicy"], "closed")
         self.assertNotIn("/dev/kmsg rw", result["Service"]["DeviceAllow"])
+        self.assertIn("/dev/loop-control rw", result["Service"]["DeviceAllow"])
+        self.assertNotIn("/dev/loop-control", result["Service"]["ContainerDevices"])
+        self.assertIn("AF_NETLINK", result["Service"]["RestrictAddressFamilies"])
         self.assertEqual(result["Security"]["AppArmorProfile"],
                          "sandbox-native-sb-0123456789ab")
 

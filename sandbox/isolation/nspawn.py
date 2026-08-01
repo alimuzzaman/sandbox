@@ -19,7 +19,6 @@ class NspawnCompiler:
             "Exec": {
                 "Boot": "yes",
                 "PrivateUsers": f"{policy.uid_map['base']}:{policy.uid_map['count']}",
-                "PrivateUsersDelegate": "0",
                 "PrivateUsersOwnership": "map", "Capability": (),
                 "DropCapability": dropped, "AmbientCapability": (),
                 "NoNewPrivileges": "yes",
@@ -36,9 +35,14 @@ class NspawnCompiler:
                          "PolicyDigest": policy.digest},
             "Service": {
                 "DevicePolicy": "closed",
+                # Loop access belongs to the trusted nspawn supervisor so it can
+                # attach the image. Those nodes are absent from the guest /dev.
                 "DeviceAllow": ("/dev/null rw", "/dev/zero rw", "/dev/full rw",
-                                "/dev/random r", "/dev/urandom r"),
-                "RestrictAddressFamilies": ("AF_UNIX", "AF_INET", "AF_INET6"),
+                                "/dev/random r", "/dev/urandom r",
+                                "/dev/loop-control rw", "block-loop rwm"),
+                "ContainerDevices": ("/dev/null", "/dev/zero", "/dev/full",
+                                     "/dev/random", "/dev/urandom"),
+                "RestrictAddressFamilies": ("AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"),
                 "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
             },
             "Security": {"AppArmorProfile": f"sandbox-native-{policy.machine_id}"},

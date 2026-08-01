@@ -32,6 +32,72 @@ class FakeAuthority:
 
 
 class TestDomainServiceIntegration(unittest.TestCase):
+    def test_public_name_is_verify_only_and_never_calls_local_adapter(self):
+        from sandbox.application.domain_service import DomainService
+        from sandbox.network.models import ResolverObservation
+        from sandbox.network.manifest import built_in_resolver_registry
+        from sandbox.network.repository import DomainRepository
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        observation = ResolverObservation.create(
+            owner_id="external:public", manager="external", mode="public",
+            support_tier="external", current_answers=("127.0.0.77",),
+        )
+        service = DomainService(
+            config_loader=lambda root, label=None: {
+                "root": root, "domains": {
+                    "hostname": "app.example.com", "tld": "com", "strategy": None,
+                    "wildcard": False, "suffixClass": "public",
+                    "hostnameSource": "project", "strategySource": "default",
+                },
+            },
+            project_registry=type("Registry", (), {
+                "registry_get": staticmethod(lambda root, label=None: {
+                    "instance": "demo", "url": "http://localhost:8123",
+                }),
+            }),
+            adapters=built_in_resolver_registry(),
+            repository=DomainRepository(Path(temporary.name) / "state.json"),
+            process=object(), http=object(), endpoints=object(),
+            observer=lambda _hostname: observation,
+            ingress_offer=lambda _root, _label: {
+                "accepted_addresses": ("127.0.0.77",),
+                "fallback_url": "http://localhost:8123", "capabilities": {},
+            },
+            verifier=lambda *_args: True,
+        )
+        result = service.apply("/tmp/project", interactive=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.state, "ready")
+        self.assertFalse(result.mutated)
+
+    def test_unregistered_project_fails_without_synthesizing_identity(self):
+        from sandbox.application.domain_service import DomainService
+        from sandbox.network.manifest import built_in_resolver_registry
+        from sandbox.network.repository import DomainRepository
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        service = DomainService(
+            config_loader=lambda root, label=None: {
+                "root": root, "slug": "demo",
+                "domains": {"hostname": None, "tld": "test", "strategy": None,
+                            "hostnameSource": "default", "strategySource": "default"},
+            },
+            project_registry=type("Registry", (), {
+                "registry_get": staticmethod(lambda root, label=None: None),
+            }),
+            adapters=built_in_resolver_registry(),
+            repository=DomainRepository(Path(temporary.name) / "state.json"),
+            process=object(), http=object(), endpoints=object(),
+        )
+        result = service.status("/tmp/unregistered")
+        self.assertEqual(result.state, "invalid")
+        self.assertIsNone(result.hostname)
+        self.assertEqual(result.reason["code"], "project_not_registered")
+        self.assertFalse(result.mutated)
+
     def _service(self, *, interactive_consent=False, verified=True, changed=False):
         from sandbox.application.domain_service import DomainService
         from sandbox.network.models import ResolverObservation
@@ -84,6 +150,7 @@ class TestDomainServiceIntegration(unittest.TestCase):
             authority=authority,
             verifier=lambda hostname, addresses, fallback: verified,
             consent_decider=lambda owner: interactive_consent,
+            identity_persister=lambda *_args: None,
         )
         return service, adapter, authority
 

@@ -92,15 +92,15 @@ public FQDN, conflicting pin, and incompatible-ingress fixtures through ensure a
 
 ### Tests for User Story 2
 
-- [ ] T035 [P] [US2] Write failing new-default, persisted-legacy, explicit-name, `.local`, and public-FQDN identity tests in `tests/test_hostname_intent.py`
-- [ ] T036 [P] [US2] Write failing machine-override/project-pin precedence and source-reporting tests in `tests/test_domain_pins.py`
+- [X] T035 [P] [US2] Write failing new-default, persisted-legacy, explicit-name, `.local`, and public-FQDN identity tests in `tests/test_hostname_intent.py`
+- [X] T036 [P] [US2] Write failing machine-override/project-pin precedence and source-reporting tests in `tests/test_domain_pins.py`
 - [ ] T037 [US2] Write failing incompatible identity preservation and per-port fallback lifecycle tests in `tests/test_domain_identity_lifecycle.py`
 
 ### Implementation for User Story 2
 
-- [ ] T038 [US2] Implement standards-safe hostname classification, `.test` defaulting, legacy preservation, and `.local` rejection in `sandbox/config/domains.py`
-- [ ] T039 [US2] Implement public-answer consumption without local override and explicit-name preservation in `sandbox/application/domain_service.py`
-- [ ] T040 [US2] Persist selected identity/provenance without retroactively changing existing registry entries in `sandbox/application/instance_service.py`
+- [X] T038 [US2] Implement standards-safe hostname classification, `.test` defaulting, legacy preservation, and `.local` rejection in `sandbox/config/domains.py`
+- [X] T039 [US2] Implement public-answer consumption without local override and explicit-name preservation in `sandbox/application/domain_service.py`
+- [X] T040 [US2] Persist selected identity/provenance without retroactively changing existing registry entries in `sandbox/application/instance_service.py`
 - [ ] T041 [US2] Add regression fixtures for WordPress absolute URLs and generic Compose hostnames across re-ensure in `tests/test_domain_identity_lifecycle.py`
 
 **Checkpoint**: Identity migrations cannot occur implicitly.

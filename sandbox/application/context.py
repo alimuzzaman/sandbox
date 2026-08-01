@@ -49,6 +49,7 @@ def domain_service(cfg, **overrides):
     import sandbox_core as sc
 
     from sandbox.application.domain_service import DomainService
+    from sandbox.application.instance_service import persist_hostname_intent
     from sandbox.network.adapters.resolved import ResolvedAdapter
     from sandbox.network.authority import DnsmasqAuthority
     from sandbox.network.detection import ResolverDetector
@@ -119,6 +120,12 @@ def domain_service(cfg, **overrides):
         verifier=verifier,
         consent_decider=overrides.pop("consent_decider", interactive_consent),
         platform=platform,
+        identity_persister=overrides.pop(
+            "identity_persister",
+            lambda root, label, hostname, source: persist_hostname_intent(
+                sc, root, label, hostname, source,
+            ),
+        ),
         **overrides,
     )
 

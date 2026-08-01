@@ -13,6 +13,10 @@ from sandbox.network.models import (
 )
 
 
+class DomainContextError(ValueError):
+    pass
+
+
 class DomainService:
     def __init__(
         self, *, config_loader: Callable, project_registry: Any,
@@ -20,7 +24,7 @@ class DomainService:
         observer: Callable | None = None, ingress_offer: Callable | None = None,
         clock: Any | None = None, authority: Any | None = None,
         verifier: Callable | None = None, consent_decider: Callable | None = None,
-        platform: str | None = None,
+        platform: str | None = None, identity_persister: Callable | None = None,
     ) -> None:
         self.config_loader = config_loader
         self.project_registry = project_registry
@@ -36,6 +40,7 @@ class DomainService:
         self.verifier = verifier or (lambda _hostname, _addresses, _fallback: False)
         self.consent_decider = consent_decider or (lambda _owner: False)
         self.platform = platform or ("darwin" if sys.platform == "darwin" else "linux")
+        self.identity_persister = identity_persister
 
     def support(self) -> dict[str, Any]:
         return {
@@ -57,6 +62,11 @@ class DomainService:
         root = str(Path(config["root"]).resolve())
         policy = config["domains"]
         record = self.project_registry.registry_get(root, label=label) or {}
+        if not record:
+            raise DomainContextError(
+                "No Sandbox instance is registered for this project and label. "
+                "Run `./sb ensure --project-dir <project>` first.",
+            )
         hostname = policy.get("hostname")
         if not hostname:
             stem = record.get("instance") or config.get("slug") or Path(root).name
@@ -71,7 +81,19 @@ class DomainService:
         return config, policy, hostname, fallback
 
     def status(self, project_dir: str, *, label: str = "default") -> DomainResult:
-        _config, policy, hostname, fallback = self._context(project_dir, label)
+        try:
+            _config, policy, hostname, fallback = self._context(project_dir, label)
+        except DomainContextError as exc:
+            return DomainResult(
+                ok=False, state="invalid", hostname=None,
+                hostname_source="default", strategy=None,
+                strategy_source="default",
+                resolver={"owner": "none", "tier": "unavailable"},
+                actual_answers=(), expected_addresses=(), ownership="none",
+                health="fallback", fallback_url="",
+                reason={"code": "project_not_registered", "message": str(exc)},
+                mutated=False,
+            )
         observation = self.observer(hostname) if self.observer else None
         resolver = (
             {"owner": observation.owner_id, "tier": observation.support_tier,
@@ -111,7 +133,10 @@ class DomainService:
         )
 
     def _prepare(self, project_dir: str, label: str):
-        config, policy, hostname, fallback = self._context(project_dir, label)
+        try:
+            config, policy, hostname, fallback = self._context(project_dir, label)
+        except DomainContextError:
+            return None, self.status(project_dir, label=label)
         if self.observer is None or self.ingress_offer is None:
             return None, self.status(project_dir, label=label)
         observation = self.observer(hostname)
@@ -124,6 +149,30 @@ class DomainService:
                 observation=observation, expected=(), fallback=fallback,
                 reason_code="ingress_address_unavailable",
                 message="Ingress supplied no acceptable local listener address.",
+            )
+        if policy.get("suffixClass") == "public":
+            if set(observation.current_answers).intersection(accepted) and self.verifier(
+                hostname, accepted, fallback,
+            ):
+                return None, self._result(
+                    state="ready", hostname=hostname, policy=policy,
+                    observation=observation, expected=accepted, fallback=fallback,
+                    reason_code="external_answer_verified",
+                    message="Public DNS already resolves to the selected ingress.",
+                    ok=True, mutated=False, health="healthy", ownership="external",
+                )
+            return None, self._result(
+                state="incompatible_identity", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="external_answer_incompatible",
+                message="Public DNS does not resolve to an accepted ingress address.",
+            )
+        if policy.get("migrationState") == "required":
+            return None, self._result(
+                state="incompatible_identity", hostname=hostname, policy=policy,
+                observation=observation, expected=accepted, fallback=fallback,
+                reason_code="legacy_identity_requires_migration",
+                message="The persisted hostname is preserved but requires an explicit migration.",
             )
         pin = policy.get("strategy")
         if pin:
@@ -261,6 +310,11 @@ class DomainService:
             )
         binding = prepared["binding"].with_applied(applied.get("applied") or {})
         self.repository.put_binding(binding)
+        if self.identity_persister is not None:
+            self.identity_persister(
+                prepared["config"]["root"], label, prepared["hostname"],
+                prepared["policy"]["hostnameSource"],
+            )
         return self._result(
             state="ready", hostname=prepared["hostname"], policy=prepared["policy"],
             observation=current, expected=prepared["accepted"], fallback=prepared["fallback"],

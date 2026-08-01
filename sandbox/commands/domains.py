@@ -12,7 +12,7 @@ from sandbox.registry import CommandSpec, register_specs
 LEGACY_ACTIONS = frozenset({"setup", "up", "down", "teardown", "repair-ca", "list"})
 DOMAIN_ACTIONS = (
     "setup", "up", "down", "teardown", "repair-ca", "list",
-    "detect", "support", "plan", "apply", "status", "cleanup", "reconsider",
+    "detect", "support", "plan", "apply", "status", "cleanup", "reconsider", "ingress",
 )
 
 
@@ -69,6 +69,37 @@ def cmd_domains(cfg, args) -> None:
         return
     if args.action == "support":
         _emit(_support(), bool(args.json))
+        return
+
+    if args.action == "ingress":
+        from sandbox.application.context import ingress_service
+        subaction = args.tld or "status"
+        if subaction not in {"detect", "support", "status", "plan"}:
+            _emit({"ok": False, "operation": f"ingress_{subaction}",
+                   "state": "unsupported", "mutated": False,
+                   "reason": {"code": "ingress_action_not_implemented",
+                              "message": "This ingress mutation action is not implemented yet."}},
+                  bool(args.json))
+            return
+        service = ingress_service(cfg)
+        if subaction == "support":
+            payload = service.support()
+        elif subaction in {"detect", "status"}:
+            payload = service.detect()
+            payload["operation"] = f"ingress_{subaction}"
+        else:
+            selection = service.select(required_protocols=("http", "https"))
+            payload = {
+                "ok": selection.adapter_id is not None,
+                "operation": "ingress_plan",
+                "state": "ready" if selection.adapter_id else "fallback",
+                "ingress": selection.adapter_id,
+                "accepted_addresses": list(selection.accepted_addresses),
+                "reason": {"code": selection.reason_code,
+                           "message": selection.reason_code.replace("_", " ")},
+                "mutated": False,
+            }
+        _emit(payload, bool(args.json))
         return
 
     from sandbox.application.context import domain_service

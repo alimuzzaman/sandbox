@@ -141,7 +141,7 @@ class TestMcpComposition(unittest.TestCase):
                     "project_instance", "resolve_instance", "safe_json", "site_url",
                     "domain_service",
                 ),
-                "domains": ("domain_service",),
+                "domains": ("domain_service", "ingress_service"),
                 "runtime": ("core", "project_instance", "runtime_service"),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),

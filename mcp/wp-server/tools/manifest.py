@@ -50,7 +50,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
         "project_instance", "resolve_instance", "safe_json", "site_url",
         "domain_service",
     ),
-    "domains": ("domain_service",),
+    "domains": ("domain_service", "ingress_service"),
     "runtime": ("core", "project_instance", "runtime_service"),
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
@@ -61,7 +61,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 # imports so duplicate ownership fails before FastMCP is initialized.
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
-    "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support"),
+    "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support"),
     "runtime": ("instance_status", "instance_logs", "instance_exec"),
     "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),

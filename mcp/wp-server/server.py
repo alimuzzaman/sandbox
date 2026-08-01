@@ -32,6 +32,12 @@ def _domain_service():
     return domain_service(load_config())
 
 
+def _ingress_service():
+    from sandbox.application.context import ingress_service
+    from sandbox.core._config import load_config
+    return ingress_service(load_config())
+
+
 def _resource_service(remote=None):
     from sandbox.resources.context import resource_service
     return resource_service(remote)
@@ -110,6 +116,7 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "site_url": _site_url,
     "runtime_service": _runtime_service,
     "domain_service": _domain_service,
+    "ingress_service": _ingress_service,
     "resource_service_factory": _resource_service,
     "hermes_service": _HermesCommandAdapter(),
     **_job_dependencies,

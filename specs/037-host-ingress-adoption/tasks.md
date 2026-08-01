@@ -17,7 +17,7 @@ the first shippable slice and per-port access preserved throughout.
 
 - [X] T001 Create ingress and adapter package exports in `sandbox/ingress/__init__.py` and `sandbox/ingress/adapters/__init__.py`
 - [ ] T002 [P] Add free, exact-loopback, dedicated-loopback, IPv4/IPv6 wildcard, split-owner, and product listener fixtures in `tests/host_fixtures/ingress/`
-- [ ] T003 Register ingress surfaces through the shared domains command/MCP manifests in `sandbox/commands/manifest.py`, `sandbox/commands/domains.py`, and `mcp/wp-server/tools/manifest.py`
+- [X] T003 Register ingress surfaces through the shared domains command/MCP manifests in `sandbox/commands/manifest.py`, `sandbox/commands/domains.py`, and `mcp/wp-server/tools/manifest.py`
 - [ ] T004 Update static command/MCP/modularity inventories for new ingress dependencies in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
 
 ---
@@ -66,7 +66,7 @@ comparing all process/listener state before and after.
 - [X] T022 [US1] Implement best-effort process/product evidence without using it as bind authority in `sandbox/ingress/detection.py`
 - [X] T023 [US1] Implement capability-aware one-ingress selection and explicit split-owner refusal in `sandbox/application/ingress_service.py`
 - [X] T024 [US1] Replace binary-only proxy availability and misleading Docker errors with structured listener results in `sandbox/core/_domains.py`
-- [ ] T025 [US1] Expose read-only `domains ingress detect|support|status` JSON/text contracts in `sandbox/commands/domains.py`
+- [X] T025 [US1] Expose read-only `domains ingress detect|support|status` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T026 [US1] Run live free/exact/wildcard/owned/foreign detection and capture non-mutating listener evidence in `specs/037-host-ingress-adoption/evidence/listeners.md`
 
 **Checkpoint**: Detection is independently useful and safe even before any adopter is

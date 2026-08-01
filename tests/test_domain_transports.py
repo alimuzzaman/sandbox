@@ -83,6 +83,10 @@ class TestDomainTransports(unittest.TestCase):
             "resolve_instance": lambda *_args: {}, "safe_json": json.loads,
             "site_url": lambda *_args: "http://localhost:8123",
             "domain_service": lambda: service,
+            "ingress_service": lambda: type("Ingress", (), {
+                "detect": lambda self: {"ok": True, "mutated": False},
+                "support": lambda self: {"ok": True, "mutated": False},
+            })(),
         })
         domain_tools.register(Server(), dependencies)
         instances.register(Server(), dependencies)

@@ -60,6 +60,28 @@ def domain_service(cfg, **overrides):
         BoundedProcessRunner, SocketDnsEndpointAllocator, UrlHttpProbe,
     )
 
+
+def ingress_service(cfg, **overrides):
+    """Compose read-only kernel listener detection and proof-gated selection."""
+    import platform as host_platform
+    from sandbox.application.ingress_service import IngressService
+    from sandbox.ingress.detection import IngressDetector
+    from sandbox.ingress.listeners import ListenerObserver
+    from sandbox.ingress.manifest import built_in_ingress_registry
+    from sandbox.services import BoundedProcessRunner
+
+    platform = overrides.pop(
+        "platform", "darwin" if host_platform.system() == "Darwin" else "linux",
+    )
+    process = overrides.pop("process", BoundedProcessRunner())
+    observer = overrides.pop(
+        "listener_observer", ListenerObserver(platform=platform, process=process),
+    )
+    detector = overrides.pop("detector", IngressDetector(listener_observer=observer))
+    registry = overrides.pop("registry", built_in_ingress_registry())
+    return IngressService(detector=detector, registry=registry,
+                          bind_address=overrides.pop("bind_address", "127.0.0.77"))
+
     network_root = sc.sandbox_base() / "runtime" / "network"
     state_path = network_root / "resolver-state.json"
     process = overrides.pop("process", BoundedProcessRunner())

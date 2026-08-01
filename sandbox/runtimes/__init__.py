@@ -17,6 +17,7 @@ from .base import (
 from .registry import wordpress_registry
 from .wordpress import WordPressAdapter
 from .compose import ComposeAdapter
+from .manifest import RUNTIME_DECLARATIONS
 
 
 def builtin_adapter_registry(operations: Mapping[str, Callable], *, compose=None) -> AdapterRegistry:
@@ -38,4 +39,5 @@ __all__ = [
     "AdapterRegistry", "AdapterSpec", "OperationError", "OperationRequest",
     "OperationResult", "ProjectDescriptor", "RuntimeAdapter", "RuntimeDependencies",
     "SchemaRegistry", "SchemaSpec", "builtin_adapter_registry",
+    "RUNTIME_DECLARATIONS",
 ]

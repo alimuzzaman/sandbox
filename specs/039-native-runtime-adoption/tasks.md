@@ -36,7 +36,7 @@ required before any native story can mutate state.
 - [X] T011 [P] Implement immutable native/isolation models and canonical digest validation in `sandbox/isolation/models.py` and `sandbox/runtimes/managed/models.py`
 - [ ] T012 [P] Write failing migration, locking, compare-before-change, and residual-survival tests in `tests/test_native_ownership.py`
 - [ ] T013 Implement the versioned locked native state repository and ownership comparison in `sandbox/runtimes/managed/repository.py`
-- [ ] T014 Define and register the exact Ubuntu/incumbent support and proof manifest in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`
+- [X] T014 Define and register the exact Ubuntu/incumbent support and proof manifest in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`
 - [ ] T015 Write failing helper argument/path/symlink/race/non-owner tests in `tests/test_native_helper.py`
 - [ ] T016 Write the fixed-verb root-helper schema, path/ID validation, policy-digest verification, and install-copy logic in `tools/native-helper/native-helper.py` and `tools/native-helper/VERSION`
 - [ ] T017 Compose the runtime service with injected process/http/path/registry/isolation/package/network/database dependencies in `sandbox/application/context.py`

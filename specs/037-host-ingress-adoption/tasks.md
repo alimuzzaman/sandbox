@@ -31,10 +31,10 @@ the reusable transaction boundary before route mutation.
 - [X] T006 Implement immutable listener, observation, selection, route, consent, support, transaction, and cleanup models in `sandbox/ingress/models.py`
 - [X] T007 [P] Write failing deterministic adapter order, duplicate registration, capability, tier, and proof-gate tests in `tests/test_ingress_registry.py`
 - [X] T008 Implement ingress adapter protocol, registry, and product support/proof manifest in `sandbox/ingress/registry.py` and `sandbox/ingress/manifest.py`
-- [ ] T009 [P] Write failing repository locking, atomicity, migration, attribution, drift, and residual-retention tests in `tests/test_ingress_repository.py`
-- [ ] T010 Implement the versioned locked ingress state repository in `sandbox/ingress/repository.py`
-- [ ] T011 [P] Write failing full-current/full-candidate validation, atomic activation, reload, baseline-health, rollback, and timeout tests in `tests/test_ingress_transactions.py`
-- [ ] T012 Implement the adapter-neutral validation/activation/health/rollback transaction runner in `sandbox/ingress/transaction.py`
+- [X] T009 [P] Write failing repository locking, atomicity, migration, attribution, drift, and residual-retention tests in `tests/test_ingress_repository.py`
+- [X] T010 Implement the versioned locked ingress state repository in `sandbox/ingress/repository.py`
+- [X] T011 [P] Write failing full-current/full-candidate validation, atomic activation, reload, baseline-health, rollback, and timeout tests in `tests/test_ingress_transactions.py`
+- [X] T012 Implement the adapter-neutral validation/activation/health/rollback transaction runner in `sandbox/ingress/transaction.py`
 - [ ] T013 Write failing helper verb/path/service/owner/symlink/race and secret-redaction tests in `tests/test_ingress_helper.py`
 - [ ] T014 Define the fixed-verb ingress helper schema, canonical owned-fragment paths, symlink refusal, service allowlist, and install-copy flow in `tools/ingress-helper.sh`
 - [ ] T015 Compose ingress and clean-URL services with injected listener, process, HTTP, repository, domain, and runtime dependencies in `sandbox/application/context.py`

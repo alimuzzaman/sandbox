@@ -162,6 +162,30 @@ class RouteRecord:
             digest(value) == digest(self.last_applied) else "drifted"
         return replace(self, observed=value, lifecycle=lifecycle)
 
+    def to_dict(self):
+        return {
+            "route_id": self.route_id, "owner": self.owner,
+            "hostname": self.hostname, "backend": dict(self.backend),
+            "adapter_id": self.adapter_id, "protocols": sorted(self.protocols),
+            "capabilities": sorted(self.capabilities), "desired": dict(self.desired),
+            "last_applied": dict(self.last_applied) if self.last_applied else None,
+            "observed": dict(self.observed) if self.observed else None,
+            "lifecycle": self.lifecycle,
+        }
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(
+            value["route_id"], value["owner"], value["hostname"],
+            MappingProxyType(dict(value.get("backend") or {})), value["adapter_id"],
+            frozenset(value.get("protocols") or ()),
+            frozenset(value.get("capabilities") or ()),
+            MappingProxyType(dict(value.get("desired") or {})),
+            MappingProxyType(dict(value["last_applied"])) if value.get("last_applied") else None,
+            MappingProxyType(dict(value["observed"])) if value.get("observed") else None,
+            value.get("lifecycle", "planned"),
+        )
+
 
 @dataclass(frozen=True)
 class RouteTransaction:

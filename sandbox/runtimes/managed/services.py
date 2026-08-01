@@ -27,7 +27,7 @@ class ManagedServiceCompiler:
         if web_server == "nginx":
             web_path = "/etc/nginx/sites-enabled/sandbox.conf"
             web = (f"server {{\n    listen {guest}:{port} default_server;\n"
-                   "    server_name _;\n    root /workspace;\n    index index.php;\n"
+                   "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
                    "    location / { try_files $uri $uri/ /index.php?$args; }\n"
                    "    location ~ \\.php$ { include fastcgi_params; "
                    "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; "
@@ -36,8 +36,8 @@ class ManagedServiceCompiler:
         else:
             web_path = "/etc/apache2/sites-enabled/000-sandbox.conf"
             web = (f"Listen {guest}:{port}\n<VirtualHost {guest}:{port}>\n"
-                   "    DocumentRoot /workspace\n    DirectoryIndex index.php\n"
-                   "    <Directory /workspace>\n        AllowOverride All\n        Require all granted\n"
+                   "    DocumentRoot /var/www/html\n    DirectoryIndex index.php\n"
+                   "    <Directory /var/www/html>\n        AllowOverride All\n        Require all granted\n"
                    "    </Directory>\n"
                    "    <FilesMatch \\.php$>\n        SetHandler \"proxy:unix:/run/php/sandbox.sock|fcgi://localhost/\"\n"
                    "    </FilesMatch>\n</VirtualHost>\n")
@@ -47,7 +47,7 @@ class ManagedServiceCompiler:
         files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
                  "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
                  "/etc/cron.d/sandbox-wordpress":
-                 "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/workspace >/dev/null 2>&1\n"}
+                 "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/var/www/html >/dev/null 2>&1\n"}
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "web_server": web_server, "backend": {"address": guest, "port": port},
                 "files": files, "file_digests": {path: hashlib.sha256(content.encode()).hexdigest()

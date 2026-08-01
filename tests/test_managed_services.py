@@ -14,6 +14,8 @@ class TestManagedServices(unittest.TestCase):
         web = result["files"]["/etc/nginx/sites-enabled/sandbox.conf"]
         database = result["files"]["/etc/mysql/mariadb.conf.d/90-sandbox.cnf"]
         self.assertIn("listen 10.203.0.2:8080", web)
+        self.assertIn("root /var/www/html", web)
+        self.assertNotIn("root /workspace", web)
         self.assertIn("fastcgi_pass unix:/run/php/sandbox.sock", web)
         self.assertIn("skip-networking=1", database)
         self.assertIn("mariadb.service", result["units"])
@@ -23,6 +25,7 @@ class TestManagedServices(unittest.TestCase):
         result = ManagedServiceCompiler().compile(Policy(), web_server="apache")
         web = result["files"]["/etc/apache2/sites-enabled/000-sandbox.conf"]
         self.assertIn("VirtualHost 10.203.0.2:8080", web)
+        self.assertIn("DocumentRoot /var/www/html", web)
         self.assertIn("proxy:unix:/run/php/sandbox.sock", web)
         self.assertIn("apache2.service", result["units"])
         self.assertNotIn("nginx.service", result["units"])

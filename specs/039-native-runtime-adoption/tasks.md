@@ -79,7 +79,7 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 - [ ] T034 [US1] Implement nginx/PHP-FPM/MariaDB/cron supervision and backend reporting inside the nspawn boundary in `sandbox/runtimes/managed/services.py` and `sandbox/runtimes/managed/database.py`
 - [ ] T035 [US1] Implement managed-native preflight/ensure/status/exec/test operations and policy-digest enforcement in `sandbox/runtimes/managed/adapter.py`
 - [ ] T036 [US1] Route current WordPress CLI/eval/exec/dependency/activation/test/job call sites through the runtime isolation gateway in `sandbox/core/_docker.py`, `sandbox/core/_provision.py`, `sandbox/core/_tests.py`, `sandbox/commands/runtime.py`, `sandbox/jobs/supervisor.py`, and `mcp/wp-server/tools/wp.py`
-- [ ] T037 [US1] Run the simulated and unprivileged isolation integration suite, verify the proof gate remains unadvertised before live rootfs installation, and capture results in `specs/039-native-runtime-adoption/evidence/pre-live-gate.md`
+- [X] T037 [US1] Run the simulated and unprivileged isolation integration suite, verify the proof gate remains unadvertised before live rootfs installation, and capture results in `specs/039-native-runtime-adoption/evidence/pre-live-gate.md`
 
 **Checkpoint**: The managed isolation boundary composes and fails closed under tests but
 remains unadvertised until package/rootfs installation and the live hostile matrix pass;

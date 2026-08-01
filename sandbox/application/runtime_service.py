@@ -12,9 +12,11 @@ from sandbox.runtimes.base import (
 
 
 class RuntimeService:
-    def __init__(self, *, resolve_descriptor: Callable, adapters: AdapterRegistry) -> None:
+    def __init__(self, *, resolve_descriptor: Callable, adapters: AdapterRegistry,
+                 backends=None) -> None:
         self._resolve_descriptor = resolve_descriptor
         self._adapters = adapters
+        self._backends = backends
 
     @staticmethod
     def _descriptor_kind(descriptor: object) -> str:
@@ -65,10 +67,40 @@ class RuntimeService:
         return None
 
     def invoke(self, request: OperationRequest) -> OperationResult | OperationError:
-        kind, error = self._resolve_kind(request.project_root, label=request.label,
-                                         capability=request.operation)
-        if error is not None:
-            return error
+        try:
+            descriptor = self._resolve_descriptor(request.project_root, label=request.label)
+            kind = self._descriptor_kind(descriptor)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            return OperationError("invalid_descriptor", f"runtime descriptor is invalid: {exc}",
+                                  requested_capability=request.operation)
+        runtime = descriptor.get("wordpressRuntime") if isinstance(descriptor, Mapping) else None
+        if kind == "wordpress" and self._backends is not None and isinstance(runtime, Mapping):
+            mode = runtime.get("mode", "compose")
+            adapter_id = runtime.get("adapter", "compose")
+            if mode != "compose" and not runtime.get("explicit"):
+                return OperationError(
+                    "explicit_selection_required",
+                    "native runtime requires an explicit machine-local selection",
+                    kind, request.operation, suggestion="Use a gitignored machine override.",
+                )
+            spec = self._backends.resolve(kind, mode, adapter_id)
+            if spec is None:
+                return OperationError("unsupported_runtime",
+                                      f"runtime backend {adapter_id!r} is unavailable for {mode!r}",
+                                      kind, request.operation)
+            capabilities = frozenset(getattr(spec.adapter, "capabilities", ()))
+            if request.operation not in capabilities:
+                return OperationError("unsupported_capability",
+                                      f"runtime backend {adapter_id!r} does not support {request.operation!r}",
+                                      kind, request.operation, tuple(sorted(capabilities)))
+            result = spec.adapter.invoke(request)
+            if not isinstance(result, OperationResult) or result.operation != request.operation \
+                    or result.project_kind != kind:
+                return OperationError("invalid_adapter_result",
+                                      "runtime adapter returned an invalid or mismatched operation result",
+                                      kind, request.operation)
+            return result
+
         error = self._capability_error(kind, request.operation)
         if error is not None:
             return error

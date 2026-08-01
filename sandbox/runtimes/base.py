@@ -100,6 +100,21 @@ class RuntimeSelection:
 
 
 @dataclass(frozen=True)
+class RuntimeCapabilityDeclaration:
+    adapter_id: str
+    project_kinds: tuple[str, ...]
+    modes: tuple[str, ...]
+    isolation_level: str
+    capabilities: frozenset[str]
+    support_tier: str
+    evidence_id: str | None = None
+
+    @property
+    def adoptable(self):
+        return self.support_tier == "adoptable" and bool(self.evidence_id)
+
+
+@dataclass(frozen=True)
 class ProjectDescriptor:
     root: str
     kind: str = "wordpress"

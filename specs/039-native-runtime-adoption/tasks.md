@@ -30,8 +30,8 @@ required before any native story can mutate state.
 
 - [X] T006 Write failing provenance, default-Compose, explicit-native, unknown-key, and runtime-switch schema tests in `tests/test_wordpress_runtime_config.py`
 - [X] T007 Implement `wordpressRuntime` normalization and machine-override provenance without overloading job `runtime` config in `sandbox/config/wordpress_runtime.py` and register it in `sandbox/config/manifest.py`
-- [ ] T008 Write failing two-dimensional project-kind/backend selection and duplicate-adapter registration tests in `tests/test_native_runtime_service.py`
-- [ ] T009 Extend runtime models/registry/service to resolve `(project kind, local mode, adapter id)` and structured capability results in `sandbox/runtimes/base.py`, `sandbox/runtimes/registry.py`, and `sandbox/application/runtime_service.py`
+- [X] T008 Write failing two-dimensional project-kind/backend selection and duplicate-adapter registration tests in `tests/test_native_runtime_service.py`
+- [X] T009 Extend runtime models/registry/service to resolve `(project kind, local mode, adapter id)` and structured capability results in `sandbox/runtimes/base.py`, `sandbox/runtimes/registry.py`, and `sandbox/application/runtime_service.py`
 - [X] T010 [P] Write failing validation/state-transition/secret-redaction tests for RuntimeSelection, ManagedIsolationPolicy, PackageTransactionPlan, NativeBackendRecord, EgressGrant, and CleanupRecovery in `tests/test_native_models.py`
 - [X] T011 [P] Implement immutable native/isolation models and canonical digest validation in `sandbox/isolation/models.py` and `sandbox/runtimes/managed/models.py`
 - [X] T012 [P] Write failing migration, locking, compare-before-change, and residual-survival tests in `tests/test_native_ownership.py`

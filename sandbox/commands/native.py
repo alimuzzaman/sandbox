@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 from sandbox.registry import CommandSpec, register_specs
 
@@ -54,6 +55,18 @@ def cmd_native(cfg, args):
                       "reason": {"code": "ready"}}
         except (OSError, ValueError) as exc:
             result = {"ok": False, "operation": "native_install_plan", "state": "blocked",
+                      "mutated": False,
+                      "reason": {"code": "version_unavailable", "message": str(exc)}}
+    elif args.action == "install":
+        from sandbox.application.context import managed_package_planner, managed_package_service
+        try:
+            plan = managed_package_planner(cfg).plan(web_server=args.web_server)
+            interactive = bool(sys.stdin.isatty() and sys.stdout.isatty())
+            result = {"operation": "native_install",
+                      **managed_package_service(cfg, web_server=args.web_server).apply(
+                          plan, interactive=interactive)}
+        except (OSError, ValueError) as exc:
+            result = {"ok": False, "operation": "native_install", "state": "blocked",
                       "mutated": False,
                       "reason": {"code": "version_unavailable", "message": str(exc)}}
     else:

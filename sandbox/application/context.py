@@ -262,6 +262,41 @@ def managed_package_planner(cfg, **overrides):
     apt = overrides.pop("apt", AptPackageSimulator(process=process))
     return ManagedPackagePlanner(simulate=apt.simulate, sources=apt.sources)
 
+
+def managed_package_service(cfg, *, web_server="nginx", **overrides):
+    """Compose the explicit TTY-only host prerequisite transaction."""
+    from pathlib import Path
+    from sandbox.runtimes.managed.packages import (
+        HostServiceBaseline, ManagedPackageService, NativeHostPackageApplier,
+    )
+    from sandbox.services import BoundedProcessRunner
+
+    process = overrides.pop("process", BoundedProcessRunner())
+    planner = overrides.pop("planner", managed_package_planner(cfg, process=process))
+    repository_helper = Path(__file__).resolve().parents[2] / "tools/native-helper/native-helper.py"
+    applier = overrides.pop("applier", NativeHostPackageApplier(
+        process=process, repository_helper=str(repository_helper),
+        installed_helper="/usr/local/libexec/sandbox-native-helper",
+    ))
+    baseline = overrides.pop("baseline", HostServiceBaseline(process=process))
+
+    def confirmation(plan):
+        packages = ", ".join(f"{item['name']}={item['version']}"
+                             for item in plan.host_packages
+                             if item.get("name") in {"systemd-container", "bubblewrap", "nftables",
+                                                     "debootstrap", "e2fsprogs"})
+        print(f"Host prerequisites: {packages}")
+        print("nginx/Apache, PHP and MariaDB will be installed only inside instance images.")
+        answer = input(f"Apply native install plan {plan.simulation_digest}? [y/N] ").strip().lower()
+        return answer in {"y", "yes"}
+
+    return ManagedPackageService(
+        replanner=overrides.pop("replanner", lambda: planner.plan(web_server=web_server)),
+        apply_transaction=overrides.pop("apply_transaction", applier.apply),
+        baseline_observer=overrides.pop("baseline_observer", baseline.observe),
+        confirmation=overrides.pop("confirmation", confirmation),
+    )
+
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.
 

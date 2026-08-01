@@ -39,7 +39,7 @@ required before any native story can mutate state.
 - [X] T014 Define and register the exact Ubuntu/incumbent support and proof manifest in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`
 - [X] T015 Write failing helper argument/path/symlink/race/non-owner tests in `tests/test_native_helper.py`
 - [X] T016 Write the fixed-verb root-helper schema, path/ID validation, policy-digest verification, and install-copy logic in `tools/native-helper/native-helper.py` and `tools/native-helper/VERSION`
-- [ ] T017 Compose the runtime service with injected process/http/path/registry/isolation/package/network/database dependencies in `sandbox/application/context.py`
+- [X] T017 Compose the runtime service with injected process/http/path/registry/isolation/package/network/database dependencies in `sandbox/application/context.py`
 
 **Checkpoint**: Compose still behaves unchanged; native requests can be validated and
 rejected before side effects through typed contracts.

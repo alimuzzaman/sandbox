@@ -10,7 +10,11 @@ FORBIDDEN_TARGETS = ("/proc", "/sys", "/dev", "/run/host", "/run/systemd")
 
 class MountPolicyCompiler:
     def __init__(self, *, allowed_sources, writable_sources=()):
-        self.allowed_sources = tuple(Path(item).expanduser().resolve() for item in allowed_sources)
+        self._allowed_entries = tuple(
+            (Path(item).expanduser().absolute(), Path(item).expanduser().resolve())
+            for item in allowed_sources
+        )
+        self.allowed_sources = tuple(resolved for _declared, resolved in self._allowed_entries)
         self.writable_sources = tuple(Path(item).expanduser().resolve() for item in writable_sources)
 
     @staticmethod
@@ -24,16 +28,24 @@ class MountPolicyCompiler:
         return text
 
     def _source(self, value, *, writable=False):
-        source = Path(value).expanduser()
-        current = Path(source.anchor)
-        for part in source.parts[1:]:
+        source = Path(value).expanduser().absolute()
+        resolved = source.resolve(strict=True)
+        allowed = next((entry for entry in self._allowed_entries
+                        if resolved == entry[1] or resolved.is_relative_to(entry[1])), None)
+        if allowed is None:
+            raise ValueError("mount source is outside allowed roots")
+
+        declared_root, canonical_root = allowed
+        try:
+            relative = source.relative_to(declared_root)
+            current = declared_root
+        except ValueError:
+            relative = resolved.relative_to(canonical_root)
+            current = canonical_root
+        for part in relative.parts:
             current /= part
             if current.is_symlink():
                 raise ValueError("mount source contains a symlink")
-        resolved = source.resolve(strict=True)
-        if not any(resolved == root or resolved.is_relative_to(root)
-                   for root in self.allowed_sources):
-            raise ValueError("mount source is outside allowed roots")
         if writable and not any(resolved == root or resolved.is_relative_to(root)
                                 for root in self.writable_sources):
             raise ValueError("writable mount source is outside explicit writable roots")

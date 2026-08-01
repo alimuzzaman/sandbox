@@ -173,6 +173,10 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("ensure_instance", "project_dir"), ("destroy_instance", "project_dir"),
             ("recreate_instance", "project_dir"), ("setup_domains", ""),
             ("secure_instance", "project_dir"), ("apply_config", "project_dir"),
+            ("domain_status", "project_dir"), ("domain_plan", "project_dir"),
+            ("domain_apply", "project_dir"), ("domain_cleanup", "project_dir"),
+            ("domain_support", ""), ("ingress_status", ""),
+            ("ingress_support", ""),
             ("instance_status", "project_dir"), ("instance_logs", "project_dir"),
             ("instance_exec", "command,project_dir"),
             ("native_support", ""), ("native_preflight", ""),
@@ -226,7 +230,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 105)
+        self.assertEqual(len(actual), 115)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

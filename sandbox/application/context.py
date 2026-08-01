@@ -356,6 +356,39 @@ def wordpress_runtime_dependencies(cfg, *, core=None, registry=None, **overrides
     )
 
 
+def managed_native_dependencies(cfg, *, registry, allowed_roots, **overrides):
+    """Compose managed-native mechanisms without selecting a host fallback.
+
+    Construction is deliberately inert: helper-backed mechanisms are injected
+    for later capability-gated operations, not invoked while a runtime service
+    is being composed.
+    """
+    from sandbox.isolation.network import ManagedNetwork
+    from sandbox.runtimes.managed.adapter import ManagedRuntimeDependencies
+    from sandbox.runtimes.managed.database import ManagedDatabase
+    from sandbox.services import AllowedRootPathPolicy, BoundedProcessRunner, UrlHttpProbe
+
+    process = overrides.pop("process", BoundedProcessRunner())
+    helper = overrides.pop("helper", "/usr/local/libexec/sandbox-native-helper")
+    isolation = overrides.pop("isolation", None)
+    if isolation is None:
+        isolation = native_isolation_preflight(cfg, process=process)
+    packages = overrides.pop("packages", None)
+    if packages is None:
+        packages = managed_package_planner(cfg, process=process)
+    return ManagedRuntimeDependencies(
+        process=process,
+        http=overrides.pop("http", UrlHttpProbe()),
+        paths=overrides.pop("paths", AllowedRootPathPolicy(allowed_roots)),
+        registry=registry,
+        isolation=isolation,
+        packages=packages,
+        network=overrides.pop("network", ManagedNetwork(process=process, helper=helper)),
+        database=overrides.pop("database", ManagedDatabase()),
+        **overrides,
+    )
+
+
 def runtime_service(cfg):
     """Compose WordPress compatibility and the framework-neutral Compose adapter."""
     import sandbox.core as core
@@ -417,8 +450,12 @@ def runtime_service(cfg):
     native_repository = NativeRepository(
         sc.sandbox_base() / "runtime" / "native" / "state.json",
     )
+    managed_dependencies = managed_native_dependencies(
+        cfg, registry=sc, allowed_roots=(core.ROOT, core.BASE),
+    )
     managed = ManagedNativeAdapter(
-        preflight=native_isolation_preflight(cfg), repository=native_repository,
+        preflight=managed_dependencies.isolation, repository=native_repository,
+        dependencies=managed_dependencies,
     )
     backends.register(
         "ubuntu-nspawn", managed, project_kinds=("wordpress",),

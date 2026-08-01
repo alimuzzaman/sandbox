@@ -2,7 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 from sandbox.runtimes.base import OperationResult
+
+
+@dataclass(frozen=True)
+class ManagedRuntimeDependencies:
+    """Mechanisms injected at the managed-native composition root.
+
+    Keeping these mechanisms together makes the native adapter's authority
+    explicit.  The adapter must never obtain a Compose facade (or a host-global
+    service) as a fallback when managed-native was selected.
+    """
+
+    process: Any
+    http: Any
+    paths: Any
+    registry: Any
+    isolation: Any
+    packages: Any
+    network: Any
+    database: Any
 
 
 class ManagedProvisioner:
@@ -61,9 +83,11 @@ class ManagedNativeAdapter:
         "exec", "test", "apply", "destroy",
     })
 
-    def __init__(self, *, preflight, repository, launcher=None, evidence_id=None):
+    def __init__(self, *, preflight, repository, dependencies=None, launcher=None,
+                 evidence_id=None):
         self.preflight = preflight
         self.repository = repository
+        self.dependencies = dependencies
         self.launcher = launcher
         self.evidence_id = evidence_id
 

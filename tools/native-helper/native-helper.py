@@ -22,6 +22,7 @@ MACHINE = re.compile(r"^sb-[a-f0-9]{12,32}$")
 STAGING_ROOT = Path("/var/lib/sandbox/native/staging")
 POLICY_ROOT = Path("/etc/sandbox/native/policies")
 INSTALL_PATH = Path("/usr/local/libexec/sandbox-native-helper")
+APPARMOR_ROOT = Path("/etc/apparmor.d")
 POLICY_KEYS = {"policy_version", "machine_id", "uid_map", "root_image",
                "read_only_mounts", "writable_mounts", "network", "syscalls",
                "devices", "resources", "credentials", "digest"}
@@ -452,13 +453,106 @@ def machine_names(machine_id):
     return f"sandbox-native-{machine_id}.service", f"sandbox-native-{machine_id}"
 
 
+def compile_apparmor_profile(machine_id, policy_digest):
+    profile = f"sandbox-native-{machine_id}"
+    return f"""#include <tunables/global>
+
+# Sandbox policy {policy_digest}
+profile {profile} flags=(attach_disconnected,mediate_deleted) {{
+  #include <abstractions/base>
+  capability,
+  network,
+  mount,
+  remount,
+  umount,
+  pivot_root,
+  ptrace,
+  signal,
+  dbus,
+  userns,
+  /** rwklm,
+  /** ix,
+  /usr/lib/systemd/systemd cx -> guest,
+  /lib/systemd/systemd cx -> guest,
+  /sbin/init cx -> guest,
+
+  profile guest flags=(attach_disconnected,mediate_deleted) {{
+    #include <abstractions/base>
+    capability audit_write,
+    capability chown,
+    capability dac_override,
+    capability fowner,
+    capability fsetid,
+    capability kill,
+    capability net_bind_service,
+    capability setfcap,
+    capability setgid,
+    capability setpcap,
+    capability setuid,
+    capability sys_chroot,
+    network inet stream,
+    network inet6 stream,
+    network unix stream,
+    network unix dgram,
+    signal,
+    dbus,
+    /** rwklm,
+    /** ix,
+  }}
+}}
+"""
+
+
 def apparmor_loaded(machine_id):
     profile = f"sandbox-native-{machine_id}"
     try:
-        return any(line.startswith(profile + " ")
-                   for line in Path("/sys/kernel/security/apparmor/profiles").read_text().splitlines())
+        names = {line.split(" ", 1)[0]
+                 for line in Path("/sys/kernel/security/apparmor/profiles").read_text().splitlines()}
+        return profile in names and profile + "//guest" in names
     except OSError:
         return False
+
+
+def apparmor_install(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
+    payload = compile_apparmor_profile(machine_id, digest).encode()
+    if destination.exists() or destination.is_symlink():
+        details = destination.lstat()
+        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
+                details.st_uid != 0 or destination.read_bytes() != payload):
+            fail("native AppArmor profile ownership changed")
+    else:
+        atomic_install_bytes(payload, destination)
+    run_fixed(("apparmor_parser", "--replace", "--skip-cache", str(destination)),
+              "native AppArmor profile load failed")
+    if not apparmor_loaded(machine_id): fail("native AppArmor profiles were not observed")
+
+
+def apparmor_status(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    ok = apparmor_loaded(machine_id)
+    print(json.dumps({"machine_id": machine_id, "policy_digest": digest,
+                      "profile": f"sandbox-native-{machine_id}", "ok": ok}, sort_keys=True))
+    if not ok: raise SystemExit(69)
+
+
+def apparmor_remove(machine_id, digest):
+    _path, _policy = applied_policy(machine_id, digest)
+    unit, _profile = machine_names(machine_id)
+    if unit_description(unit): fail("native machine must stop before AppArmor removal")
+    destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
+    if not destination.exists():
+        if apparmor_loaded(machine_id): fail("native AppArmor profile file is missing")
+        return
+    payload = compile_apparmor_profile(machine_id, digest).encode()
+    details = destination.lstat()
+    if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
+            details.st_uid != 0 or destination.read_bytes() != payload):
+        fail("native AppArmor profile ownership changed")
+    run_fixed(("apparmor_parser", "--remove", "--skip-cache", str(destination)),
+              "native AppArmor profile removal failed")
+    destination.unlink()
 
 
 def unit_description(unit):
@@ -561,7 +655,8 @@ def main(argv=None):
     status = sub.add_parser("policy-status"); status.add_argument("machine")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
                  "network-apply", "network-status", "network-remove",
-                 "machine-start-minimal", "machine-status", "machine-stop"):
+                 "machine-start-minimal", "machine-status", "machine-stop",
+                 "apparmor-install", "apparmor-status", "apparmor-remove"):
         action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
@@ -581,13 +676,16 @@ def main(argv=None):
         print(json.dumps({"machine_id": identity, "digest": value["digest"]}, sort_keys=True))
     elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove",
                       "network-apply", "network-status", "network-remove",
-                      "machine-start-minimal", "machine-status", "machine-stop"}:
+                      "machine-start-minimal", "machine-status", "machine-stop",
+                      "apparmor-install", "apparmor-status", "apparmor-remove"}:
         require_root(); identity = machine(args.machine)
         {"image-create": image_create, "image-mount": image_mount,
          "image-unmount": image_unmount, "image-remove": image_remove,
          "network-apply": network_apply, "network-status": network_status,
          "network-remove": network_remove, "machine-start-minimal": machine_start_minimal,
-         "machine-status": machine_status, "machine-stop": machine_stop}[args.verb](
+         "machine-status": machine_status, "machine-stop": machine_stop,
+         "apparmor-install": apparmor_install, "apparmor-status": apparmor_status,
+         "apparmor-remove": apparmor_remove}[args.verb](
              identity, args.digest)
 
 

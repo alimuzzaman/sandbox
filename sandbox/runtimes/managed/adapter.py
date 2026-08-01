@@ -7,9 +7,10 @@ from sandbox.runtimes.base import OperationResult
 
 class ManagedProvisioner:
     """Provision infrastructure first; activate project services only after proof."""
-    def __init__(self, *, policy, image, rootfs, machine, network, verifier,
+    def __init__(self, *, policy, apparmor, image, rootfs, machine, network, verifier,
                  database, services, health, repository):
-        self.policy = policy; self.image = image; self.rootfs = rootfs
+        self.policy = policy; self.apparmor = apparmor
+        self.image = image; self.rootfs = rootfs
         self.machine = machine; self.network = network; self.verifier = verifier
         self.database = database; self.services = services; self.health = health
         self.repository = repository
@@ -18,6 +19,7 @@ class ManagedProvisioner:
         completed = []
         try:
             self.policy.install(plan["policy"]); completed.append("policy")
+            self.apparmor.install(plan["apparmor"]); completed.append("apparmor")
             self.image.create(plan["image"]); completed.append("image")
             self.image.mount(plan["image"]); completed.append("mount")
             self.rootfs.configure(plan); completed.append("rootfs")
@@ -44,6 +46,7 @@ class ManagedProvisioner:
             if "network" in completed: rollback.append(self.network.remove(plan["network"]))
             if "machine" in completed: rollback.append(self.machine.stop(plan))
             if "mount" in completed: rollback.append(self.image.unmount(plan["image"]))
+            if "apparmor" in completed: rollback.append(self.apparmor.remove(plan["apparmor"]))
             return {"ok": False, "state": "rollback_complete"
                     if all(item.get("ok", False) for item in rollback) else "rollback_incomplete",
                     "mutated": bool(completed), "error": str(exc), "completed": completed,

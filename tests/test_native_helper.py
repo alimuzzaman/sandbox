@@ -162,5 +162,27 @@ class TestNativeHelper(unittest.TestCase):
                 helper.machine_start_minimal("sb-0123456789ab", value["digest"])
             run.assert_not_called()
 
+    def test_helper_and_control_plane_compile_identical_apparmor_profiles(self):
+        from sandbox.isolation.apparmor import compile_apparmor_profile
+        helper = module(); identity = "sb-0123456789ab"; digest = "a" * 64
+        self.assertEqual(helper.compile_apparmor_profile(identity, digest),
+                         compile_apparmor_profile(identity, digest))
+
+    def test_apparmor_install_writes_only_the_fixed_owned_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); helper, policy_path = self.policy(root)
+            value = json.loads(policy_path.read_text()); calls = []
+            with mock.patch.object(helper, "APPARMOR_ROOT", root / "profiles"), \
+                    mock.patch.object(helper, "applied_policy", return_value=(policy_path, value)), \
+                    mock.patch.object(helper, "apparmor_loaded", return_value=True), \
+                    mock.patch.object(helper, "run_fixed",
+                                      side_effect=lambda argv, message, **kw: calls.append(argv)):
+                helper.apparmor_install("sb-0123456789ab", value["digest"])
+            installed = root / "profiles" / "sandbox-native-sb-0123456789ab"
+            self.assertEqual(installed.read_text(),
+                             helper.compile_apparmor_profile("sb-0123456789ab", value["digest"]))
+            self.assertEqual(calls[0][:3],
+                             ("apparmor_parser", "--replace", "--skip-cache"))
+
 
 if __name__ == "__main__": unittest.main()

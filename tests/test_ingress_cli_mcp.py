@@ -14,6 +14,16 @@ class Service:
 
 
 class TestIngressCliMcp(unittest.TestCase):
+    def test_concrete_domain_and_ingress_composition_roots_are_distinct_services(self):
+        from sandbox.application.context import domain_service, ingress_service
+        from unittest import mock
+        import sandbox_core as sc
+        with mock.patch.object(sc, "sandbox_base", return_value=__import__("pathlib").Path("/tmp/sandbox-context-test")):
+            domain = domain_service({})
+            ingress = ingress_service({})
+        self.assertEqual(type(domain).__name__, "DomainService")
+        self.assertEqual(type(ingress).__name__, "IngressService")
+
     def test_cli_read_only_ingress_actions_emit_one_json_object(self):
         from sandbox.commands.domains import cmd_domains
         for subaction in ("detect", "status", "support"):

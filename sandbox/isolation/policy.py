@@ -9,8 +9,9 @@ FORBIDDEN_TARGETS = ("/proc", "/sys", "/dev", "/run/host", "/run/systemd")
 
 
 class MountPolicyCompiler:
-    def __init__(self, *, allowed_sources):
+    def __init__(self, *, allowed_sources, writable_sources=()):
         self.allowed_sources = tuple(Path(item).expanduser().resolve() for item in allowed_sources)
+        self.writable_sources = tuple(Path(item).expanduser().resolve() for item in writable_sources)
 
     @staticmethod
     def _target(value):
@@ -22,7 +23,7 @@ class MountPolicyCompiler:
             raise ValueError("container mount target exposes a control surface")
         return text
 
-    def _source(self, value):
+    def _source(self, value, *, writable=False):
         source = Path(value).expanduser()
         current = Path(source.anchor)
         for part in source.parts[1:]:
@@ -33,13 +34,16 @@ class MountPolicyCompiler:
         if not any(resolved == root or resolved.is_relative_to(root)
                    for root in self.allowed_sources):
             raise ValueError("mount source is outside allowed roots")
+        if writable and not any(resolved == root or resolved.is_relative_to(root)
+                                for root in self.writable_sources):
+            raise ValueError("writable mount source is outside explicit writable roots")
         return str(resolved)
 
     def compile(self, *, read_only=(), writable=()):
         ro = tuple({"source": self._source(item["source"]),
                     "target": self._target(item["target"]), "mode": "ro"}
                    for item in read_only)
-        rw = tuple({"source": self._source(item["source"]),
+        rw = tuple({"source": self._source(item["source"], writable=True),
                     "target": self._target(item["target"]), "mode": "rw"}
                    for item in writable)
         targets = [item["target"] for item in (*ro, *rw)]

@@ -9,7 +9,7 @@ class TestIsolationPolicy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); source = root / "project"; state = root / "state"
             source.mkdir(); state.mkdir()
-            result = MountPolicyCompiler(allowed_sources=(root,)).compile(
+            result = MountPolicyCompiler(allowed_sources=(root,), writable_sources=(state,)).compile(
                 read_only=({"source": source, "target": "/workspace"},),
                 writable=({"source": state, "target": "/var/lib/sandbox"},),
             )
@@ -30,6 +30,14 @@ class TestIsolationPolicy(unittest.TestCase):
             ):
                 with self.subTest(item=item), self.assertRaises(ValueError):
                     compiler.compile(read_only=(item,))
+
+    def test_project_source_cannot_be_promoted_to_writable(self):
+        from sandbox.isolation.policy import MountPolicyCompiler
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"; project.mkdir()
+            compiler = MountPolicyCompiler(allowed_sources=(project,), writable_sources=())
+            with self.assertRaisesRegex(ValueError, "explicit writable"):
+                compiler.compile(writable=({"source": project, "target": "/workspace"},))
 
 
 if __name__ == "__main__": unittest.main()

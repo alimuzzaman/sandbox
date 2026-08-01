@@ -58,8 +58,8 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 ### Tests for User Story 1
 
 - [X] T018 [P] [US1] Write failing OS/kernel/systemd/cgroup/nspawn/bubblewrap/nftables/LSM effective-preflight tests in `tests/test_isolation_preflight.py`
-- [ ] T019 [P] [US1] Write failing mount visibility, read-only source, writable-subpath, and symlink-escape tests in `tests/test_isolation_policy.py`
-- [ ] T020 [P] [US1] Write failing private UID/PID/IPC/UTS/device/capability/seccomp/nested-userns tests in `tests/test_isolation_namespaces.py`
+- [X] T019 [P] [US1] Write failing mount visibility, read-only source, writable-subpath, and symlink-escape tests in `tests/test_isolation_policy.py`
+- [X] T020 [P] [US1] Write failing private UID/PID/IPC/UTS/device/capability/seccomp/nested-userns tests in `tests/test_isolation_namespaces.py`
 - [ ] T021 [P] [US1] Write failing veth default-deny, host/sibling/private/metadata denial, ingress-reply, grant, and revoke tests in `tests/test_isolation_network.py`
 - [ ] T022 [P] [US1] Write failing CPU/memory/PID/time/disk/inode/FD/connection/I/O exhaustion tests in `tests/test_isolation_resources.py`
 - [X] T023 [P] [US1] Write failing inherited-FD/environment/credential/control-socket leakage tests in `tests/test_isolation_credentials.py`
@@ -69,12 +69,12 @@ every undeclared host/sibling access fails and disabling any gate prevents paylo
 
 - [X] T025 [US1] Implement effective host prerequisite, observed-policy verification, and policy-drift preflight with fail-closed results in `sandbox/isolation/preflight.py` and `sandbox/isolation/verification.py`
 - [X] T026 [US1] Implement fixed-size/inode ext4 image creation, ownership verification, mount options, and conservative unmount in `sandbox/runtimes/managed/image.py`
-- [ ] T027 [US1] Implement private-user nspawn descriptors, namespace/device/capability/seccomp settings, and observed-policy verification in `sandbox/isolation/nspawn.py`
-- [ ] T028 [US1] Implement read-only/writable mount compilation, canonical path and symlink checks in `sandbox/isolation/policy.py`
+- [X] T027 [US1] Implement private-user nspawn descriptors, namespace/device/capability/seccomp settings, and observed-policy verification in `sandbox/isolation/nspawn.py`
+- [X] T028 [US1] Implement read-only/writable mount compilation, canonical path and symlink checks in `sandbox/isolation/policy.py`
 - [ ] T029 [US1] Implement unique point-to-point veth allocation, no-default-route nftables policy, ingress allowance, scoped egress grants, counters, and revocation in `sandbox/isolation/network.py`
 - [ ] T030 [US1] Implement cgroup/service/disk/FD/connection/time/I/O limits and effective observation in `sandbox/isolation/resources.py`
 - [ ] T031 [US1] Implement per-instance credential injection, environment allowlist, close-range descriptor sanitation, and leak gate in `sandbox/isolation/credentials.py`
-- [ ] T032 [US1] Implement the defense-in-depth one-shot bubblewrap profile with clearenv, source modes, nested-userns disable, capability drop, private temp, and bounded argv in `sandbox/isolation/bubblewrap.py`
+- [X] T032 [US1] Implement the defense-in-depth one-shot bubblewrap profile with clearenv, source modes, nested-userns disable, capability drop, private temp, and bounded argv in `sandbox/isolation/bubblewrap.py`
 - [X] T033 [US1] Implement `IsolationLauncher` for web PHP, cron, WP-CLI/eval, exec, Composer, activation, PHPUnit, and durable jobs with no host fallback in `sandbox/isolation/launcher.py`
 - [ ] T034 [US1] Implement nginx/PHP-FPM/MariaDB/cron supervision and backend reporting inside the nspawn boundary in `sandbox/runtimes/managed/services.py` and `sandbox/runtimes/managed/database.py`
 - [ ] T035 [US1] Implement managed-native preflight/ensure/status/exec/test operations and policy-digest enforcement in `sandbox/runtimes/managed/adapter.py`

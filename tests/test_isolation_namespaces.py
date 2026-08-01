@@ -11,11 +11,14 @@ class TestIsolationNamespaces(unittest.TestCase):
             {"seccomp": "managed-v1"}, frozenset(), {"memory": 1024}, (),
         )
         result = NspawnCompiler().compile(policy)
-        self.assertEqual(result["Exec"]["PrivateUsers"], "pick")
+        self.assertEqual(result["Exec"]["PrivateUsers"], "200000:65536")
         self.assertEqual(result["Exec"]["DropCapability"], "all")
         self.assertEqual(result["Exec"]["NoNewPrivileges"], "yes")
         self.assertEqual(result["Network"]["Private"], "yes")
         self.assertIn("~@mount", result["Exec"]["SystemCallFilter"])
+        self.assertEqual(result["Exec"]["Sysctl"], ("user.max_user_namespaces=0",))
+        self.assertEqual(result["Service"]["DevicePolicy"], "closed")
+        self.assertNotIn("/dev/kmsg rw", result["Service"]["DeviceAllow"])
 
 
 if __name__ == "__main__": unittest.main()

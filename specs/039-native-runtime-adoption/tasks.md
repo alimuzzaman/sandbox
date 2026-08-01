@@ -98,14 +98,14 @@ foreign baselines remain unchanged.
 
 ### Tests for User Story 2
 
-- [ ] T038 [P] [US2] Write failing APT-source/version/simulation/plan-digest/unavailable-version tests in `tests/test_managed_package_plan.py`
-- [ ] T039 [P] [US2] Write failing TTY confirmation, digest-drift, remote-script/PPA/source-build refusal, and noninteractive-zero-mutation tests in `tests/test_managed_package_apply.py`
+- [X] T038 [P] [US2] Write failing APT-source/version/simulation/plan-digest/unavailable-version tests in `tests/test_managed_package_plan.py`
+- [X] T039 [P] [US2] Write failing TTY confirmation, digest-drift, remote-script/PPA/source-build refusal, and noninteractive-zero-mutation tests in `tests/test_managed_package_apply.py`
 - [ ] T040 [P] [US2] Write failing host-service active/enabled/config/data coexistence tests in `tests/test_managed_coexistence.py`
 - [ ] T041 [P] [US2] Write failing Apache variant service/backend/PHP/database lifecycle tests in `tests/test_managed_apache.py`
 
 ### Implementation for User Story 2
 
-- [ ] T042 [US2] Implement exact configured-source host/image APT simulation, package closure, effects, owned roots, and digest output in `sandbox/runtimes/managed/packages.py`
+- [X] T042 [US2] Implement exact configured-source host/image APT simulation, package closure, effects, owned roots, and digest output in `sandbox/runtimes/managed/packages.py`
 - [ ] T043 [US2] Implement TTY-only confirmed package apply with re-simulation, image-local service-start suppression, and host baseline verification in `sandbox/runtimes/managed/packages.py` and `tools/native-helper/native-helper.py`
 - [ ] T044 [US2] Implement Noble rootfs bootstrap and exact PHP 8.3/MariaDB 10.11/nginx-or-Apache image configuration in `sandbox/runtimes/managed/image.py`
 - [ ] T045 [US2] Implement Apache 2.4 managed service configuration and veth backend parity in `sandbox/runtimes/managed/services.py`

@@ -3,8 +3,12 @@ import unittest
 
 VERSIONS = {"systemd-container": "255.4", "bubblewrap": "0.9.0", "nftables": "1.0.9",
             "debootstrap": "1.0", "e2fsprogs": "1.47", "php8.3-fpm": "8.3.6",
-            "php8.3-cli": "8.3.6", "mariadb-server": "1:10.11.8", "cron": "3.0",
-            "ca-certificates": "2024", "nginx": "1.24.0", "apache2": "2.4.58"}
+            "php8.3-cli": "8.3.6", "php8.3-mysql": "8.3.6", "php8.3-curl": "8.3.6",
+            "php8.3-gd": "8.3.6", "php8.3-mbstring": "8.3.6", "php8.3-xml": "8.3.6",
+            "php8.3-zip": "8.3.6", "php8.3-intl": "8.3.6", "php8.3-opcache": "8.3.6",
+            "mariadb-server": "1:10.11.8", "mariadb-client": "1:10.11.8",
+            "cron": "3.0", "ca-certificates": "2024", "curl": "8.5", "unzip": "6.0",
+            "git": "2.43", "composer": "2.7", "nginx": "1.24.0", "apache2": "2.4.58"}
 
 
 class TestManagedPackagePlan(unittest.TestCase):

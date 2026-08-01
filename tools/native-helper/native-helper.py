@@ -35,8 +35,11 @@ OFFICIAL_APT_SOURCE = Path("/etc/apt/sources.list.d/ubuntu.sources")
 OFFICIAL_APT_URIS = {"http://archive.ubuntu.com/ubuntu", "http://security.ubuntu.com/ubuntu",
                      "https://archive.ubuntu.com/ubuntu", "https://security.ubuntu.com/ubuntu"}
 HOST_PACKAGE_ROOTS = ("systemd-container", "bubblewrap", "nftables", "debootstrap", "e2fsprogs")
-IMAGE_PACKAGE_ROOTS = {"php8.3-fpm", "php8.3-cli", "mariadb-server", "cron",
-                       "ca-certificates"}
+IMAGE_PACKAGE_ROOTS = {"php8.3-fpm", "php8.3-cli", "php8.3-mysql", "php8.3-curl",
+                       "php8.3-gd", "php8.3-mbstring", "php8.3-xml", "php8.3-zip",
+                       "php8.3-intl", "php8.3-opcache", "mariadb-server",
+                       "mariadb-client", "cron", "ca-certificates", "curl", "unzip",
+                       "git", "composer"}
 
 
 def fail(message, code=65):

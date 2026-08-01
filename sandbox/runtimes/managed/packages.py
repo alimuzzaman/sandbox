@@ -12,7 +12,12 @@ import stat
 
 
 HOST_PACKAGES = ("systemd-container", "bubblewrap", "nftables", "debootstrap", "e2fsprogs")
-IMAGE_COMMON = ("php8.3-fpm", "php8.3-cli", "mariadb-server", "cron", "ca-certificates")
+IMAGE_COMMON = (
+    "php8.3-fpm", "php8.3-cli", "php8.3-mysql", "php8.3-curl", "php8.3-gd",
+    "php8.3-mbstring", "php8.3-xml", "php8.3-zip", "php8.3-intl", "php8.3-opcache",
+    "mariadb-server", "mariadb-client", "cron", "ca-certificates", "curl", "unzip",
+    "git", "composer",
+)
 EXPECTED_PREFIXES = {"php8.3-fpm": "8.3", "php8.3-cli": "8.3",
                      "mariadb-server": "1:10.11", "nginx": "1.24", "apache2": "2.4"}
 OFFICIAL_URIS = ("http://archive.ubuntu.com/ubuntu", "http://security.ubuntu.com/ubuntu",
@@ -120,6 +125,8 @@ class ManagedPackagePlanner:
         if missing: raise ValueError(f"managed package versions unavailable: {missing}")
         incompatible = [name for name, prefix in EXPECTED_PREFIXES.items()
                         if name in image_names and not by_name[name].startswith(prefix)]
+        incompatible.extend(name for name in image_names if name.startswith("php8.3-")
+                            and not by_name[name].startswith("8.3"))
         if incompatible: raise ValueError(f"managed package versions unsupported: {incompatible}")
         return PackageTransactionPlan(
             "ubuntu-24.04-systemd-255", host, image, source_rows,

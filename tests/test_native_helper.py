@@ -109,6 +109,7 @@ class TestNativeHelper(unittest.TestCase):
                 mock.patch.object(helper, "observed_link",
                                   return_value={"ifalias": ""}), \
                 mock.patch.object(helper, "observed_nft_table", return_value=None), \
+                mock.patch.object(helper, "machine_leader", return_value=4242), \
                 mock.patch.object(helper, "run_fixed",
                                   side_effect=lambda argv, message, **kw: calls.append((argv, kw))):
             helper.network_apply("sb-0123456789ab", policy_value["digest"])
@@ -116,8 +117,13 @@ class TestNativeHelper(unittest.TestCase):
         self.assertIn('input iifname "ve-sb-demo"', nft)
         self.assertIn('forward iifname "ve-sb-demo"', nft)
         self.assertEqual(nft.count("counter drop"), 2)
+        self.assertNotIn("counter drop\nip saddr", nft)
         self.assertNotIn("masquerade", nft)
         self.assertNotIn("policy accept; }\nadd rule inet sb_0123456789ab forward", nft)
+        namespace_calls = [argv for argv, _kwargs in calls if argv[:5] ==
+                           ("nsenter", "--target", "4242", "--net", "--")]
+        self.assertTrue(any(argv[-4:] == ("route", "flush", "table", "main")
+                            for argv in namespace_calls))
 
     def test_network_apply_refuses_unbrokered_egress_grants(self):
         helper = module(); _unused, path = self.policy(Path(tempfile.mkdtemp()))

@@ -343,6 +343,15 @@ def network_marker(machine_id, digest):
     return f"sandbox-native:{machine_id}:{digest}"
 
 
+def machine_leader(machine_id):
+    result = run_optional(("machinectl", "show", machine_id, "--property=Leader", "--value"))
+    try: leader = int((result.stdout or "").strip())
+    except ValueError: fail("native machine leader is unavailable")
+    if result.returncode != 0 or leader <= 1 or not Path(f"/proc/{leader}/ns/net").exists():
+        fail("native machine leader is unavailable")
+    return leader
+
+
 def observed_link(veth):
     result = run_optional(("ip", "-j", "link", "show", "dev", veth))
     if result.returncode != 0: return None
@@ -385,13 +394,25 @@ def network_apply(machine_id, digest):
     run_fixed(("ip", "address", "replace", network["host_address"], "dev", veth),
               "native host veth address failed")
     guest = str(ipaddress.ip_interface(network["guest_address"]).ip)
+    leader = machine_leader(machine_id)
+    namespace = ("nsenter", "--target", str(leader), "--net", "--")
+    run_fixed((*namespace, "ip", "address", "flush", "dev", "host0", "scope", "global"),
+              "native guest address reset failed")
+    run_fixed((*namespace, "ip", "route", "flush", "table", "main"),
+              "native guest route reset failed")
+    run_fixed((*namespace, "ip", "address", "replace", network["guest_address"],
+               "dev", "host0"), "native guest veth address failed")
+    run_fixed((*namespace, "ip", "link", "set", "dev", "host0", "up"),
+              "native guest veth activation failed")
+    run_fixed((*namespace, "ip", "link", "set", "dev", "lo", "up"),
+              "native guest loopback activation failed")
     script = "\n".join((
         f'add table inet {table} {{ comment "{marker}"; }}',
         f"add chain inet {table} input {{ type filter hook input priority filter; policy accept; }}",
         f"add chain inet {table} forward {{ type filter hook forward priority filter; policy accept; }}",
         f'add rule inet {table} input iifname "{veth}" ip saddr {guest} ct state established,related accept',
-        f'add rule inet {table} input iifname "{veth}" ip saddr {guest} counter drop',
-        f'add rule inet {table} forward iifname "{veth}" ip saddr {guest} counter drop',
+        f'add rule inet {table} input iifname "{veth}" counter drop',
+        f'add rule inet {table} forward iifname "{veth}" counter drop',
     )) + "\n"
     try:
         run_fixed(("nft", "-f", "-"), "native nft policy failed", input_text=script)

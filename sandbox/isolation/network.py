@@ -42,7 +42,7 @@ class NetworkPolicyCompiler:
         rules = [
             f"iifname \"{veth}\" ct state established,related accept",
             f"oifname \"{veth}\" ip daddr {guest.ip} tcp dport {port} ct state new accept",
-            f"iifname \"{veth}\" ip saddr {guest.ip} counter drop",
+            f"iifname \"{veth}\" counter drop",
         ]
         routes, grant_ids = [], []
         for grant in grants:

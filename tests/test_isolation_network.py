@@ -8,6 +8,7 @@ class TestIsolationNetwork(unittest.TestCase):
             machine_id="sb-0123456789ab", veth="ve-sb-demo",
             host_address="10.77.0.1/30", guest_address="10.77.0.2/30", ingress_port=8080,
         )
+        self.assertIn('iifname "ve-sb-demo" counter drop', result["rules"][-1])
         self.assertFalse(result["default_route"])
         self.assertEqual(result["forward_policy"], "drop")
         self.assertIn("counter drop", result["rules"][-1])

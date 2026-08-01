@@ -5,7 +5,7 @@ MANAGED_ISOLATION_MATRICES = ({
     "platform": {"id": "ubuntu", "version": "24.04"},
     "systemd_min": 255,
     "required_commands": (
-        "systemd-nspawn", "machinectl", "bwrap", "nft", "ip", "apparmor_parser",
+        "systemd-nspawn", "machinectl", "bwrap", "nft", "ip", "nsenter", "apparmor_parser",
         "debootstrap", "mkfs.ext4",
     ),
     "required_effective_gates": (

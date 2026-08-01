@@ -180,10 +180,16 @@ file path.
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
   "server": "nginx",    // nginx (default) | apache | litespeed | herd
 
-  // Local domain TLD for the `./sb domains` proxy: instances serve at
-  // <name>.<tld> (e.g. https://myplugin.tst). Default "tst". Avoid "sb"
-  // (a real ccTLD) and "test" (owned by Herd/Valet).
-  "tld": "tst",
+  // Scoped local hostname policy. Omission defaults new identity to .test;
+  // persisted .tst identities remain unchanged. .local is rejected for new
+  // names and public suffixes are verify-only (never locally shadowed).
+  "domains": {
+    "enabled": false,
+    "tld": "test",
+    "hostname": null,
+    "strategy": null,
+    "wildcard": false
+  },
 
   // wp-config.php constants, applied with their JSON types (bool/int/string/
   // null). See "wp-config constants" below.

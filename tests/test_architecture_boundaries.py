@@ -54,12 +54,12 @@ class TestArchitectureBoundaries(unittest.TestCase):
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 21)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 22)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 105)
+            self.assertEqual(len(tool_names), 110)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))
@@ -123,6 +123,28 @@ class TestArchitectureBoundaries(unittest.TestCase):
     def test_mcp_helpers_do_not_read_registry_json_directly(self):
         app = (ROOT / "mcp" / "wp-server" / "app.py").read_text()
         self.assertNotIn('(RUNTIME_DIR / "registry.json").read_text()', app)
+
+    def test_resolver_state_has_one_repository_owner_and_no_transport_consumers(self):
+        allowed = {"sandbox/application/context.py", "sandbox/network/repository.py"}
+        violations = []
+        for path in production_python_files():
+            relative = str(path.relative_to(ROOT))
+            if relative in allowed:
+                continue
+            text = path.read_text()
+            if "resolver-state.json" in text or re.search(
+                r"runtime[^\n]{0,80}(?:resolver|domain)[^\n]{0,80}\.json", text,
+            ):
+                violations.append(relative)
+        self.assertEqual(violations, [])
+
+    def test_unregistered_domain_result_cannot_reach_host_mutation(self):
+        service = (ROOT / "sandbox" / "application" / "domain_service.py").read_text()
+        context_index = service.index("def _context")
+        prepare_index = service.index("def _prepare")
+        section = service[context_index:prepare_index]
+        self.assertIn("project_not_registered", service)
+        self.assertIn("raise DomainContextError", section)
 
     def test_recovery_modules_do_not_depend_on_runtime_mechanisms(self):
         forbidden = re.compile(r"(?:docker\s+compose|subprocess\.run\(\[?['\"]docker|from sandbox\.core import)")

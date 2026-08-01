@@ -6,6 +6,14 @@ proxy (§4), live-verified end-to-end. One narrower piece (systemd-resolved/Netw
 managed systems) intentionally left as a documented follow-up rather than a guessed,
 unverified port — see §4.
 
+> Current adoption status: the newer project-scoped resolver service supersedes
+> broad takeover as adapters earn live evidence. `./sb domains support --json`
+> is authoritative: implemented-but-unproven adapters do not mutate. Linux
+> systemd-resolved/NetworkManager, direct dnsmasq, exact hosts, macOS
+> `/etc/resolver`, Herd/Valet, WSL2, and unknown managers each report a distinct
+> tier. WSL2/external/unknown are read-only. The historical section below is
+> retained as evidence, not as the current support advertisement.
+
 ## 1. Where this started
 
 Before this session, the codebase already had MORE Linux awareness than a from-scratch

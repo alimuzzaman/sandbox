@@ -101,17 +101,18 @@ adds an SSH-backed application connection and the latter removes saved Reader
 configuration. Those remain explicit operator commands. `reader ls` is safe
 for an operator to inspect configured Reader roots.
 
-**`domains setup` asks which local TLD to use** (or pass it directly:
-`./sb domains setup tst`), defaulting to **`tst`**. Instances then serve at
-`<name>.<tld>` (e.g. `https://myplugin.tst`). Avoid `.sb` (a real ccTLD) and
-`.test` (owned by Herd/Valet).
+New projects whose hostname is omitted use the standards-reserved **`.test`**
+suffix. Existing persisted names—including `.tst`—are preserved. Use
+`./sb domains status --project-dir . --json` to see the requested name, source,
+active resolver, actual and expected address, ownership, health, and fallback.
+Sandbox never creates a local override for a public FQDN or a new `.local` name.
 
 A project can pin its own TLD with `"tld": "<your-tld>"` in its
 `sandbox.config.json` (overrides the prompt for that project):
 
 ```jsonc
 // sandbox.config.json
-{ "tld": "tst" }   // ← omit for the tst default
+{ "domains": { "tld": "test", "strategy": "systemd-resolved" } }
 ```
 
 `domains setup` is optional — without it, instances still work at
@@ -447,18 +448,19 @@ without re-importing content:
 ./sb server <name> apache       # → back to apache
 ```
 
-### Clean URLs — `https://<name>.tst`
+### Clean URLs — scoped `.test` resolution
 
 By default instances serve at `http://localhost:<port>`. Upgrade to a trusted,
 no-port HTTPS URL with one optional setup:
 
 ```bash
-./sb domains setup     # one-time, asks your password ONCE (installs a local CA)
-./sb secure <name>     # mint a trusted cert for one instance → https://<name>.tst
+./sb domains plan --project-dir .
+./sb domains apply --project-dir .   # first mutation asks only in a terminal
+./sb domains cleanup --project-dir . # compare-before-remove; safe to retry
 ```
 
-It coexists with Laravel Valet (separate loopback IP). Undo with
-`./sb domains teardown`.
+If adoption is unsupported, unproven, declined, or unhealthy, the instance stays
+usable at `http://localhost:<port>`. See [domain resolution](docs/domain-resolution.md).
 
 ---
 

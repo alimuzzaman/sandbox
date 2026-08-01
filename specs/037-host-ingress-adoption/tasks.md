@@ -90,7 +90,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T030 [P] [US2] Write failing Apache owned-fragment, module/capability, full-config validation, graceful reload, health, and rollback tests in `tests/test_ingress_apache.py`
 - [X] T031 [P] [US2] Write failing persistent Caddy import-fragment, service-identity validation, reload, health, and rollback tests in `tests/test_ingress_caddy.py`
 - [X] T032 [P] [US2] Write failing Traefik file-provider enablement, owned-file, dynamic reload, health, and rollback tests in `tests/test_ingress_traefik.py`
-- [ ] T033 [US2] Write failing A→B→A hostname/address/capability handshake and no-route-on-DNS-failure tests in `tests/test_clean_url_service.py`
+- [X] T033 [US2] Write failing A→B→A hostname/address/capability handshake and no-route-on-DNS-failure tests in `tests/test_clean_url_service.py`
 - [ ] T034 [US2] Write failing foreign-hostname/wildcard collision, backend update, idempotency, and baseline-route preservation tests in `tests/test_ingress_service.py`
 
 ### Implementation for User Story 2
@@ -102,7 +102,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T039 [US2] Implement persistent system Caddy import-fragment adapter without ephemeral API state in `sandbox/ingress/adapters/caddy.py`
 - [X] T040 [US2] Implement enabled Traefik file-provider adapter with owned dynamic fragment lifecycle in `sandbox/ingress/adapters/traefik.py`
 - [ ] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
-- [ ] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
+- [X] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
 - [ ] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py`
 - [ ] T044 [US2] Run live system Caddy add/request/update/request/remove, foreign-route, and rollback conformance and capture evidence in `specs/037-host-ingress-adoption/evidence/system-caddy.md`
 

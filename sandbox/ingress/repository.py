@@ -116,3 +116,11 @@ class IngressRepository:
     def put_recovery(self, route_id, recovery):
         with self.transaction() as value:
             value["recovery"][route_id] = dict(recovery)
+
+    def put_consent(self, identity, consent):
+        with self.transaction() as value:
+            value["consents"][identity] = dict(consent)
+
+    def remove_consent(self, identity):
+        with self.transaction() as value:
+            return value["consents"].pop(identity, None) is not None

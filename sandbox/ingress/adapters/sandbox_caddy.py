@@ -65,6 +65,7 @@ class SandboxCaddyAdapter:
         candidate = current.replace(owned, block) if owned else current.rstrip() + "\n\n" + block
         return {"adapter_id": "sandbox-caddy", "route_id": route_id,
                 "hostname": hostname, "backend": {"port": port},
+                "protocols": tuple(sorted(selection.get("protocols") or ("http",))),
                 "wildcard": bool(naming.get("wildcard")), "prior": current,
                 "candidate": candidate, "block": block,
                 "block_digest": hashlib.sha256(block.encode()).hexdigest()}

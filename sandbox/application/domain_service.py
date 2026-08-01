@@ -201,7 +201,7 @@ class DomainService:
             reason={"code": reason_code, "message": message}, mutated=mutated,
         )
 
-    def _prepare(self, project_dir: str, label: str):
+    def _prepare(self, project_dir: str, label: str, offer_override=None):
         try:
             config, policy, hostname, fallback = self._context(project_dir, label)
         except DomainContextError:
@@ -209,7 +209,7 @@ class DomainService:
         if self.observer is None or self.ingress_offer is None:
             return None, self.status(project_dir, label=label)
         observation = self.observer(hostname)
-        offer = self.ingress_offer(config["root"], label)
+        offer = offer_override or self.ingress_offer(config["root"], label)
         accepted = tuple(offer.get("accepted_addresses") or ())
         fallback = offer.get("fallback_url") or fallback
         if not accepted:
@@ -297,8 +297,9 @@ class DomainService:
             },
         }, None
 
-    def plan(self, project_dir: str, *, label: str = "default") -> DomainResult:
-        prepared, result = self._prepare(project_dir, label)
+    def plan(self, project_dir: str, *, label: str = "default",
+             offer_override=None) -> DomainResult:
+        prepared, result = self._prepare(project_dir, label, offer_override)
         if result is not None:
             return result
         return self._result(
@@ -310,8 +311,8 @@ class DomainService:
         )
 
     def apply(self, project_dir: str, *, label: str = "default",
-              interactive: bool = False) -> DomainResult:
-        prepared, result = self._prepare(project_dir, label)
+              interactive: bool = False, offer_override=None) -> DomainResult:
+        prepared, result = self._prepare(project_dir, label, offer_override)
         if result is not None:
             return result
         observation = prepared["observation"]

@@ -36,6 +36,7 @@ class HerdValetAdapter:
         return {"adapter_id": "herd-valet", "product": self.product,
                 "route_id": route_id, "hostname": hostname, "site": site,
                 "backend": f"http://{address}:{port}",
+                "protocols": tuple(sorted(selection.get("protocols") or ("http",))),
                 "secure": "https" in set(selection.get("protocols") or ()),
                 "prior": prior}
 

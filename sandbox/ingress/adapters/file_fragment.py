@@ -39,6 +39,7 @@ class FileFragmentAdapter:
         candidate = self.staging_root / self.adapter_id / f"{route_id}.{self.extension}"
         return {"adapter_id": self.adapter_id, "route_id": route_id,
                 "hostname": hostname, "backend": {"address": address, "port": port},
+                "protocols": tuple(sorted(selection.get("protocols") or ("http",))),
                 "listen": listen, "candidate": str(candidate), "content": content,
                 "content_digest": hashlib.sha256(content.encode()).hexdigest(),
                 "prior": prior}

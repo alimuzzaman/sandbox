@@ -592,14 +592,6 @@ Per-project (each plugin carries its own sandbox.config.json):
     un.add_argument("--purge", action="store_true",
         help="also remove the install directory")
 
-    dm = sub.add_parser("domains",
-        help="Manage custom domains + HTTPS proxy (setup|up|down|teardown|list)")
-    dm.add_argument("action", nargs="?",
-        choices=["setup", "up", "down", "teardown", "repair-ca", "list"],
-        default="list")
-    dm.add_argument("tld", nargs="?",
-        help="Local TLD for clean URLs (e.g. tst). On `setup`, prompted if omitted.")
-
     ca = sub.add_parser("cache",
         help="Inspect or clear the shared plugin/theme/core download cache")
     ca.add_argument("action", nargs="?", choices=["info", "clear"], default="info",

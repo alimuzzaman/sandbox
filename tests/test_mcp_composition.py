@@ -74,7 +74,7 @@ class TestMcpComposition(unittest.TestCase):
         from tools.manifest import BUILTIN_TOOL_GROUPS, built_in_tool_registry
 
         expected = (
-            "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
+            "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
             "resources",
             "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
             "plugin_check", "remote", "hermes", "recovery",
@@ -134,12 +134,13 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "runtime", "jobs", "hermes", "resources"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "hermes", "resources"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
                     "project_instance", "resolve_instance", "safe_json", "site_url",
                 ),
+                "domains": ("domain_service",),
                 "runtime": ("core", "project_instance", "runtime_service"),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
@@ -147,7 +148,7 @@ class TestMcpComposition(unittest.TestCase):
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "runtime", "jobs", "hermes", "resources"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "hermes", "resources"}))
 
     def test_instance_and_hermes_groups_register_against_an_isolated_fake_context(self):
         from dependencies import ToolDependencies

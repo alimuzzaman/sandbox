@@ -29,6 +29,13 @@ memory/repros/
 
 # OS
 .DS_Store
+Thumbs.db
+
+# Editors and transient files
+.vscode/
+.idea/
+*.tmp
+*.swp
 
 # Tooling venvs — auto-managed by ./sb
 .cli-venv/

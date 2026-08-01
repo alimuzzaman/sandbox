@@ -8,14 +8,14 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 
 
 BUILTIN_TOOL_GROUPS = (
-    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
     "resources",
     "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
     "plugin_check", "remote", "hermes", "recovery",
 )
 
 DEFAULT_MCP_GROUPS = (
-    "instances", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "context", "resources",
 )
 
 # A scoped server advertises only tools useful to its declared runtime.  The
@@ -23,11 +23,11 @@ DEFAULT_MCP_GROUPS = (
 # many-project registration model; clients that want a precise catalog start
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
-    "instances", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
+    "instances", "domains", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
     "resources",
 )
 COMPOSE_PROJECT_GROUPS = (
-    "instances", "runtime", "jobs", "net", "remote", "resources",
+    "instances", "domains", "runtime", "jobs", "net", "remote", "resources",
 )
 
 
@@ -49,6 +49,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
         "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
         "project_instance", "resolve_instance", "safe_json", "site_url",
     ),
+    "domains": ("domain_service",),
     "runtime": ("core", "project_instance", "runtime_service"),
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
@@ -59,6 +60,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 # imports so duplicate ownership fails before FastMCP is initialized.
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
+    "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support"),
     "runtime": ("instance_status", "instance_logs", "instance_exec"),
     "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),

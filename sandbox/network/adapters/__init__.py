@@ -1,0 +1,2 @@
+"""Manifest-registered resolver adapters."""
+

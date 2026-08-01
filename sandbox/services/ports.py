@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+import ipaddress
 import socket
 from typing import Protocol
 
@@ -58,3 +59,69 @@ class SocketPortAllocator:
     def reserve(self, preferred: int | None = None) -> SocketPortReservation:
         sock = self._bind(preferred)
         return SocketPortReservation(sock, int(sock.getsockname()[1]))
+
+
+@dataclass
+class SocketDnsEndpointReservation(AbstractContextManager["SocketDnsEndpointReservation"]):
+    _tcp_socket: socket.socket
+    _udp_socket: socket.socket
+    address: str
+    port: int
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._udp_socket.close()
+        self._tcp_socket.close()
+
+
+class SocketDnsEndpointAllocator:
+    """Atomically reserve one loopback endpoint for both DNS transports."""
+
+    def __init__(self, address: str = "127.0.0.54", *, attempts: int = 32) -> None:
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("DNS endpoint address must be loopback") from exc
+        if not parsed.is_loopback:
+            raise ValueError("DNS endpoint address must be loopback")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("DNS endpoint attempts must be positive")
+        self.address = str(parsed)
+        self.attempts = attempts
+        self.family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+
+    @staticmethod
+    def _validate_port(preferred: int | None) -> None:
+        if preferred is not None and (
+            isinstance(preferred, bool) or not isinstance(preferred, int)
+            or not 1024 <= preferred <= 65535
+        ):
+            raise ValueError("preferred DNS port must be between 1024 and 65535")
+
+    def _once(self, preferred: int | None) -> SocketDnsEndpointReservation:
+        tcp = socket.socket(self.family, socket.SOCK_STREAM)
+        udp = socket.socket(self.family, socket.SOCK_DGRAM)
+        try:
+            tcp.bind((self.address, preferred or 0))
+            port = int(tcp.getsockname()[1])
+            udp.bind((self.address, port))
+            return SocketDnsEndpointReservation(tcp, udp, self.address, port)
+        except OSError:
+            udp.close()
+            tcp.close()
+            raise
+
+    def reserve(self, preferred: int | None = None) -> SocketDnsEndpointReservation:
+        self._validate_port(preferred)
+        for _attempt in range(1 if preferred is not None else self.attempts):
+            try:
+                return self._once(preferred)
+            except OSError as exc:
+                if preferred is not None:
+                    raise ValueError(
+                        f"DNS endpoint {self.address}:{preferred} is unavailable",
+                    ) from exc
+        raise RuntimeError("no paired UDP/TCP DNS endpoint available")
+
+    def allocate(self, preferred: int | None = None) -> tuple[str, int]:
+        with self.reserve(preferred) as reservation:
+            return reservation.address, reservation.port

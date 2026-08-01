@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 
 from .descriptors import _load_mapping
+from .domains import raw_domain_layer
 
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -28,12 +29,24 @@ class ComposeSchemaProvider:
         if config_path is None:
             raise ValueError("generic Compose project requires sandbox.config.json or sandbox.config.yml")
         document = _load_mapping(config_path)
+        project_domains = raw_domain_layer(document)
+        machine_domains = {}
+        override = next((root / name for name in (
+            "sandbox.config.override.json", "sandbox.config.override.yml",
+            "sandbox.config.override.yaml",
+        ) if (root / name).exists()), None)
+        if override is not None:
+            override_doc = _load_mapping(override)
+            document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
+            document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
+            machine_domains.update(raw_domain_layer(override_doc))
         if label:
             override = next((root / f"sandbox.config.{label}{suffix}" for suffix in (".json", ".yml", ".yaml") if (root / f"sandbox.config.{label}{suffix}").exists()), None)
             if override is not None:
                 override_doc = _load_mapping(override)
                 document["compose"] = {**document.get("compose", {}), **override_doc.get("compose", {})}
                 document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
+                machine_domains.update(raw_domain_layer(override_doc))
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
@@ -103,4 +116,6 @@ class ComposeSchemaProvider:
                 "tests": {"modes": normalized_modes},
                 "display_name": root.name, "label": label or "default",
                 "runtime": document.get("runtime"),
+                "_domains_raw": {"project": project_domains,
+                                 "machine_override": machine_domains},
                 "root": str(root), "source": config_path.name}

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
+
+from .descriptors import _load_mapping
+from .domains import raw_domain_layer
 
 
 _TEST_SUITES = frozenset(("auto", "unit", "integration"))
@@ -13,7 +17,31 @@ class WordPressSchemaProvider:
         self._legacy_loader = legacy_loader
 
     def resolve(self, root, *, label=None) -> dict:
+        root = Path(root)
+        project_path = next((root / name for name in (
+            "sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml",
+        ) if (root / name).exists()), None)
+        project_domains = raw_domain_layer(
+            _load_mapping(project_path) if project_path is not None else {},
+        )
+        machine_domains = {}
+        for path in (
+            next((root / name for name in (
+                "sandbox.config.override.json", "sandbox.config.override.yml",
+                "sandbox.config.override.yaml",
+            ) if (root / name).exists()), None),
+            next((root / f"sandbox.config.{label}{suffix}"
+                  for suffix in (".json", ".yml", ".yaml")
+                  if label and label != "default" and
+                  (root / f"sandbox.config.{label}{suffix}").exists()), None),
+        ):
+            if path is not None:
+                machine_domains.update(raw_domain_layer(_load_mapping(path)))
         result = dict(self._legacy_loader(root, label=label))
+        result["_domains_raw"] = {
+            "project": project_domains,
+            "machine_override": machine_domains,
+        }
         if "tests" not in result:
             result["tests"] = {"suite": "auto"}
         tests = result["tests"]

@@ -41,6 +41,87 @@ def runtime_neutral_dependencies(
     )
 
 
+def domain_service(cfg, **overrides):
+    """Compose scoped naming policy without importing a compatibility facade."""
+    import platform as host_platform
+    import shutil
+    from pathlib import Path
+    import sandbox_core as sc
+
+    from sandbox.application.domain_service import DomainService
+    from sandbox.network.adapters.resolved import ResolvedAdapter
+    from sandbox.network.authority import DnsmasqAuthority
+    from sandbox.network.detection import ResolverDetector
+    from sandbox.network.manifest import built_in_resolver_registry
+    from sandbox.network.repository import DomainRepository
+    from sandbox.network.verification import DomainVerifier
+    from sandbox.services import (
+        BoundedProcessRunner, SocketDnsEndpointAllocator, UrlHttpProbe,
+    )
+
+    network_root = sc.sandbox_base() / "runtime" / "network"
+    state_path = network_root / "resolver-state.json"
+    process = overrides.pop("process", BoundedProcessRunner())
+    http = overrides.pop("http", UrlHttpProbe())
+    platform = overrides.pop(
+        "platform", "darwin" if host_platform.system() == "Darwin" else "linux",
+    )
+    observer = overrides.pop(
+        "observer", ResolverDetector(process=process, platform=platform).observe,
+    )
+    helper = Path(__file__).resolve().parents[2] / "tools" / "resolver-helper.sh"
+    implementations = {}
+    if platform == "linux":
+        implementations["systemd-resolved"] = ResolvedAdapter(
+            process=process, helper=str(helper), network_root=network_root,
+        )
+    dnsmasq = shutil.which("dnsmasq")
+    authority = overrides.pop("authority", None)
+    if authority is None and dnsmasq:
+        authority = DnsmasqAuthority(
+            network_root / "authority", process=process, binary=dnsmasq,
+        )
+
+    def compatibility_offer(root, label):
+        record = sc.registry_get(root, label=label) or {}
+        port = record.get("wordpress_port") or record.get("http_port")
+        fallback = record.get("url") or (
+            f"http://localhost:{port}" if port else "http://localhost"
+        )
+        return {
+            "accepted_addresses": ("127.0.0.77",),
+            "fallback_url": fallback,
+            "capabilities": {"wildcard": True, "tls": True},
+        }
+
+    verifier = overrides.pop(
+        "verifier", DomainVerifier(process=process, http=http, platform=platform).verify,
+    )
+
+    def interactive_consent(owner_id):
+        answer = input(
+            f"Allow Sandbox to add a scoped local DNS route through {owner_id}? [y/N] ",
+        ).strip().lower()
+        return answer in {"y", "yes"}
+
+    return DomainService(
+        config_loader=overrides.pop("config_loader", sc.load_project_config),
+        project_registry=overrides.pop("project_registry", sc),
+        adapters=overrides.pop("adapters", built_in_resolver_registry(implementations)),
+        repository=overrides.pop("repository", DomainRepository(state_path)),
+        process=process,
+        http=http,
+        endpoints=overrides.pop("endpoints", SocketDnsEndpointAllocator()),
+        observer=observer,
+        ingress_offer=overrides.pop("ingress_offer", compatibility_offer),
+        clock=overrides.pop("clock", None),
+        authority=authority,
+        verifier=verifier,
+        consent_decider=overrides.pop("consent_decider", interactive_consent),
+        platform=platform,
+        **overrides,
+    )
+
 def wordpress_proxy_facade(cfg, *, core=None):
     """Adapt declared WordPress routes to the existing aggregate Caddy owner.
 

@@ -174,5 +174,5 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/035-resource-monitoring-cleanup/plan.md
+at specs/039-native-runtime-adoption/plan.md
 <!-- SPECKIT END -->

@@ -10,9 +10,9 @@
 
 **Drafting Model**: `claude-opus-5[1m]` (fallback; `gpt-5.6-terra` Medium not available in this session)
 
-**Final Validation**: `PENDING` — `gpt-5.6-sol` High
+**Final Validation**: PASS — gpt-5.6-sol High
 
-**Validated On**: N/A
+**Validated On**: 2026-08-01
 
 **Artifact Owner**: `speckit-refine`
 
@@ -46,25 +46,28 @@ registers routes through Valet with `valet proxy <domain> http://127.0.0.1:<port
 not even for Herd, which Sandbox already drives as a server runtime
 (`sandbox/core/_herd.py`) and which is Valet-compatible.
 
-The competing tools have the same gap. DDEV's router owns :80/:443 and its
-documented remedy for a conflict is to stop the competing application; its
-port-override setting has been reported broken across releases. Local and Laragon
-also expect to own the ports and register hostnames by writing the system hosts
-file. Adopting an incumbent rather than fighting it is therefore both the missing
-capability and a genuine differentiator.
+The repository has no uniform product model for these incumbents. Some expose a
+supported command or configuration interface, some require credentials, and some
+can only be identified safely. The missing capability is therefore broader than a
+single adapter: Sandbox must distinguish what it can adopt from what it can only
+detect, and report that distinction before changing the host.
 
 **Why now**: Sandbox is being positioned for use on shared dev servers and on
 developer machines that already have a full stack, not only on clean Docker hosts.
-Every such machine currently loses clean URLs.
+Many such machines currently lose clean URLs or receive a misleading failure.
+Valet is an existing exception, and a listener that does not overlap
+`127.0.0.77:80/443` may coexist without conflict.
 
 ## Users and Desired Outcomes
 
 - **Developer on a machine with an existing web server** (system nginx/Apache,
   Herd, Valet, XAMPP): creates a Sandbox instance and reaches it at its clean
-  hostname, without stopping or reconfiguring the server they already depend on.
-- **Developer on a machine with an existing container ingress** (Traefik, Nginx
-  Proxy Manager, an existing Caddy, a DDEV router): same outcome, with routes
-  appearing in the ingress they already operate and observe.
+  hostname, without stopping or manually reconfiguring the server they already
+  depend on.
+- **Developer on a machine with an adoptable container ingress** (a compatible
+  Traefik file provider or existing Caddy): same outcome, with routes appearing in
+  the ingress they already operate and observe. Detect-only products such as Nginx
+  Proxy Manager or a DDEV router are named accurately without private-state mutation.
 - **Developer whose machine has nothing on :80/:443**: sees no change — Sandbox's
   own proxy continues to serve clean URLs exactly as it does today.
 - **Developer whose incumbent cannot be driven automatically**: is told precisely
@@ -76,8 +79,8 @@ Every such machine currently loses clean URLs.
 
 ## Goals
 
-- Detect which process, if any, currently owns :80 and :443, and identify it as a
-  known ingress product where possible.
+- Detect the owner of each conflicting bind endpoint on :80 and :443, and identify
+  it as a known ingress product where the operating system exposes enough evidence.
 - Register and unregister Sandbox instance hostnames through a detected incumbent,
   so instances are reachable at clean URLs without Sandbox binding :80/:443.
 - Keep the existing Sandbox Caddy proxy as the behavior when no incumbent is
@@ -87,6 +90,8 @@ Every such machine currently loses clean URLs.
 - Replace the misleading port-conflict failure with an accurate report naming the
   owning process and the available options.
 - Let a project or machine pin which ingress to use, overriding detection.
+- Classify every named incumbent as adoptable, credential-pending, detect-only, or
+  outside the supported platform, so coverage is not confused with adoption.
 
 ## Non-Goals
 
@@ -141,8 +146,9 @@ Every such machine currently loses clean URLs.
 
 - **Starting state**: A machine with Docker and nothing bound to :80/:443.
 - **User action**: The developer creates an instance and asks for a clean URL.
-- **Expected outcome**: Today's behavior, unchanged: the Sandbox Caddy proxy starts
-  and serves the clean URL.
+- **Expected outcome**: The Sandbox Caddy proxy remains the selected ingress and serves
+  the hostname supplied by spec B. Existing persisted hostnames remain unchanged; new
+  unpinned hostname policy belongs to spec B.
 
 ### Scenario 5 — Incumbent detected but not adoptable
 
@@ -187,14 +193,16 @@ Every such machine currently loses clean URLs.
 - **Starting state**: Sandbox has registered routes through one or more incumbents
   over time.
 - **User action**: The developer uninstalls Sandbox.
-- **Expected outcome**: Every route Sandbox added is removed from every incumbent it
-  touched, each incumbent reloads, and configuration the user authored is unchanged.
+- **Expected outcome**: Every unchanged Sandbox-owned route in an available incumbent is
+  removed and the incumbent reloads without changing user-authored configuration. Any
+  unavailable, drifted, or rejected cleanup is reported as incomplete and retains the
+  minimum recovery record needed to retry; uninstall never claims it was removed.
 
 ### Scenario 10 — Incumbent requires credentials, first detection, interactive
 
 - **Starting state**: A machine running an ingress that manages routes only through
-  an authenticated interface (Nginx Proxy Manager). Sandbox has no credentials for
-  it. The developer is at an interactive terminal.
+  a documented authenticated interface supported by its adapter. Sandbox has no
+  credentials for it. The developer is at an interactive terminal.
 - **User action**: The developer creates an instance and asks for a clean URL.
 - **Expected outcome**: Sandbox reports that this ingress owns the ports and can be
   adopted with credentials, and offers to take them now. Supplying them completes
@@ -231,13 +239,60 @@ Every such machine currently loses clean URLs.
   If the pinned ingress is absent or unusable, Sandbox reports that plainly rather
   than silently choosing another.
 
+### Scenario 14 — First adoption from a non-interactive caller
+
+- **Starting state**: An adoptable incumbent is detected, but the machine has no
+  recorded adoption consent. The request comes from MCP or CI.
+- **User action**: The caller requests a clean URL.
+- **Expected outcome**: Sandbox does not prompt, block, or mutate the incumbent. It
+  reports adoption as pending consent, states how to grant or decline it from an
+  interactive terminal, and leaves the instance on its per-port URL. A previously
+  declined decision can be reconsidered only through an explicit user action.
+
+### Scenario 15 — Route changed outside Sandbox
+
+- **Starting state**: Sandbox created a marked route, after which an operator changed
+  its target or other material properties directly in the incumbent.
+- **User action**: Sandbox re-ensures or removes the instance.
+- **Expected outcome**: Sandbox detects that the marked route no longer matches its
+  last known state and does not overwrite or remove it automatically. It reports the
+  drift and the explicit reconciliation or cleanup action available to the operator.
+
+### Scenario 16 — Partial or split port ownership
+
+- **Starting state**: Only :443 conflicts, or :80 and :443 are held by different
+  products or bind addresses.
+- **User action**: The developer requests a clean URL.
+- **Expected outcome**: Sandbox reports the owner and bind address for each endpoint
+  separately and applies the confirmed split-ownership policy. It never treats a
+  listener on `127.0.0.1` as conflicting with `127.0.0.77` unless the actual bind
+  scopes overlap.
+
+### Scenario 17 — Sandbox already owns the endpoints
+
+- **Starting state**: Sandbox's proxy is already serving other instances on its
+  dedicated loopback endpoints.
+- **User action**: Another instance is ensured or status is requested.
+- **Expected outcome**: Sandbox identifies its own proxy as the current owner, keeps
+  using it without asking to adopt itself, and preserves all existing routes.
+
+### Scenario 18 — Incumbent configuration or reload is unhealthy
+
+- **Starting state**: A selected nginx, Apache, or Caddy has pre-existing invalid
+  configuration, or rejects/reports unhealthy after a candidate Sandbox route is applied.
+- **User action**: The developer requests or updates a clean URL.
+- **Expected outcome**: Sandbox validates the complete incumbent configuration before
+  mutation. On validation or reload failure it restores the prior state, verifies the
+  incumbent's pre-existing routes remain healthy where they were healthy before, reports
+  the actual failure, and leaves the Sandbox instance on its per-port URL.
+
 ## Proposed Product Behavior
 
 - **Detection before action.** Before any attempt to serve clean URLs, Sandbox
-  determines whether :80 and :443 are held, and by what. Detection reports one of:
-  free, held by a recognized adoptable ingress, held by a recognized non-adoptable
-  ingress, or held by an unidentified process. Detection is read-only and never
-  changes machine state.
+  determines the owner and bind scope of each relevant :80 and :443 endpoint.
+  Detection distinguishes free, Sandbox-owned, recognized adoptable,
+  credential-pending, detect-only, outside-platform, and unidentified states.
+  Detection is read-only and never changes machine state.
 
 - **Adoption in preference to binding.** When a recognized adoptable incumbent holds
   the ports, Sandbox registers through it and does not start its own proxy. When the
@@ -260,7 +315,10 @@ Every such machine currently loses clean URLs.
   Sandbox asks for confirmation the first time it adopts a given incumbent on a given
   machine and remembers the answer, matching the existing one-time-consent pattern
   used for privileged host actions (`sandbox/core/_domains.py:714-751`). A declined
-  offer is remembered and not re-asked.
+  offer is remembered and not re-asked. Without recorded consent, a non-interactive
+  caller never prompts or mutates; it receives a pending-consent result and the
+  instance remains on its per-port URL. Reconsidering a decline requires an explicit
+  user action.
 
 - **Credentials are offered, never demanded.** Where an incumbent can only be driven
   with credentials, Sandbox offers to collect them the first time it detects that
@@ -280,7 +338,14 @@ Every such machine currently loses clean URLs.
 
 - **Explicit override.** Configuration can pin the ingress for a machine or a
   project, including pinning Sandbox's own proxy or disabling clean URLs entirely.
-  An explicit pin is never silently overridden by detection.
+  An explicit pin is never silently overridden by detection. A machine-local project
+  override wins over the committed project pin, matching the repository's existing
+  global → project → machine-override merge order.
+
+- **Transactional validation and reload.** For configuration-file incumbents, Sandbox
+  validates the incumbent's complete current configuration before mutation, validates the
+  candidate state before activation, and rolls back its owned fragment if activation or
+  post-apply health fails. It never uses a failed reload as proof that the route exists.
 
 - **Extensibility as a product property.** The set of supported incumbents grows
   over time. Support for a given incumbent is declared, discoverable, and reportable
@@ -292,22 +357,35 @@ Every such machine currently loses clean URLs.
   example TLS, or wildcard hostnames for subdomain multisite — Sandbox reports that
   limitation for that instance rather than presenting a URL that will not work.
 
+- **Drift-aware ownership.** A Sandbox mark is necessary but not sufficient to edit
+  or remove a route. The observed route must also match the state Sandbox last wrote.
+  A changed or ambiguous route is reported for reconciliation and is left untouched
+  by ordinary ensure, destroy, and uninstall operations.
+
+- **Recoverable cleanup.** If an incumbent is absent or rejects cleanup, Sandbox
+  reports the residual route and retains the minimum non-secret ownership and recovery
+  record needed to retry. It never claims complete cleanup while a known route remains.
+
 ## Constraints and Dependencies
 
 - **Depends on name resolution (spec B).** A registered route only produces a working
-  clean URL if the hostname resolves to the machine. This feature's acceptance is
-  therefore stated in terms of the route being served for a given hostname, with
-  resolution assumed or arranged out of band.
+  clean URL if spec B supplies the hostname and resolves it to an address on which the
+  selected ingress accepts requests. Resolution to `127.0.0.77` is not sufficient for
+  an incumbent bound only to `127.0.0.1`, and the inverse must not be assumed either.
+  This feature consumes that hostname/address decision; it does not silently replace
+  the hostname or TLD.
 - **Privileged operations.** Writing into `/etc/nginx`, `/etc/apache2`, or an
   equivalent, and reloading a system service, requires elevated privileges. Sandbox's
   established policy is a single explicit consent step, after which host actions are
   password-free and non-interactive (`sandbox/core/_domains.py:670-690`); privileged
   calls must never block on an interactive password prompt, because they run from
   non-interactive contexts including the MCP server and CI.
-- **Credentialed incumbents.** Some ingresses (for example Nginx Proxy Manager)
-  expose route management only through an authenticated interface. Sandbox cannot
-  adopt these without credentials the user supplies. Credentials are per-machine
-  secrets and are subject to the existing secrets policy: they live in
+- **Credentialed incumbents.** A future or installed supported adapter may expose route
+  management only through a documented authenticated interface. Sandbox cannot adopt
+  it without credentials the user supplies. Nginx Proxy Manager is not such an adapter
+  in the initial matrix because its public documentation does not establish an external
+  route-management API. Credentials are per-machine secrets and are subject to the
+  existing secrets policy: they live in
   `sandbox.local.yml` / `.env.local` and are never echoed to output, a commit, a
   comment, or a memory file (constitution, Additional Constraints).
 - **Non-scriptable incumbents.** Some products (for example Local) own the ports but
@@ -330,17 +408,39 @@ Every such machine currently loses clean URLs.
   the capability.
 - **Module boundaries (CLAUDE.md).** Ingress support registers through an explicit
   manifest/contract; capability checks precede side effects.
-- **Backward compatibility.** Machines with no incumbent must see no behavioral
-  change. The existing Valet integration must keep working or be superseded by an
-  equivalent that is verified before the old path is removed (constitution VI).
+- **Backward compatibility.** Machines with no incumbent keep Sandbox's own Caddy ingress,
+  and existing persisted hostnames remain unchanged. Spec B may choose a standards-safe
+  default for new unpinned projects. The existing Valet integration must keep working or
+  be superseded by an equivalent that is verified before the old path is removed
+  (constitution VI).
+
+## Incumbent Coverage Policy
+
+| Product or family | Initial tier | Boundary |
+|-------------------|--------------|----------|
+| Laravel Herd / Valet | Adoptable | Use the documented site/proxy lifecycle exposed by the incumbent CLI. |
+| System nginx | Adoptable | Only when Sandbox can add an isolated owned route, validate the complete configuration, and perform a graceful reload. |
+| System Apache HTTP Server | Adoptable | Only when an isolated owned virtual host can be validated and gracefully reloaded. |
+| System Caddy | Adoptable | Only through its documented administration/configuration surface with collision protection; an unavailable or unprotected control surface is detect-only. |
+| Traefik | Conditionally adoptable | Adoptable only when an existing file-provider directory is enabled and available for an isolated owned route; Sandbox does not reconfigure Traefik's install/static configuration. |
+| Nginx Proxy Manager | Detect-only | Its public documentation does not establish a supported external route-management API; Sandbox does not automate a private UI API or internal database. |
+| DDEV router | Detect-only | Sandbox identifies the router but does not inject configuration into a DDEV-owned project or container network without a documented external-route contract. |
+| Local | Detect-only | Local exposes an in-process add-on API, not a supported external route-registration interface; installing a Local add-on is outside this feature. |
+| Laragon / WAMP | Outside native platform; detect-only from WSL2 | Sandbox has no native Windows entry point and does not reach across WSL2 to mutate Windows-side services. |
+| XAMPP | Detect-only initially | Product-specific adoption requires a supported POSIX control/configuration contract and live proof; a Windows-side install remains outside the native platform. |
+| Unidentified listener | Detect-only | Report bind endpoint and available owner evidence; never mutate. |
+
+These tiers describe the initial product contract, not an implementation sequence.
+A detect-only product can become adoptable later only when it has a documented control
+surface and passes the same live-stack ownership, collision, update, and cleanup proof.
 
 ## Decisions
 
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
-| Breadth of incumbent support | All named ingresses, adopting whichever is active at the time | The user's environment determines the incumbent; a partial list leaves the same silent-failure gap on the machines not covered | User |
+| Breadth of incumbent coverage | Every named ingress is classified and reported; only products with a supported, live-proven control path are called adoptable | Detect-only and outside-platform products must not be advertised as adopted, while still eliminating misleading bind failures | User scope; repository safety policy |
 | Feature split | Ingress adoption is its own feature, separate from TLD/DNS adoption and native runtimes | Port ownership and name resolution fail independently; a machine can have Apache on :80 and systemd-resolved on DNS | User |
-| Behavior with no incumbent | Unchanged — Sandbox's own Caddy proxy | Avoids regressing the common clean-Docker-host case | User (input) |
+| Behavior with no incumbent | Sandbox's own Caddy remains the ingress; hostname selection comes from spec B | Preserves the fallback without duplicating or contradicting DNS/TLD policy | User (input); A/B boundary |
 | Port stealing | Never; Sandbox does not bind a port it found held, and never stops an incumbent | Taking a port would break services the user depends on | User (input) |
 | Reversibility | Every Sandbox-created route is attributable and individually removable | Adoption writes into services the user owns; it must be undoable | User (input) |
 | Failure posture | Degrade to per-port URL, never block instance creation | Matches the existing clean-URL posture, which is an opt-in upgrade over a working per-port URL | Existing policy (`sandbox/core/_domains.py:770-773`) |
@@ -349,8 +449,14 @@ Every such machine currently loses clean URLs.
 | Detection side effects | Read-only | Detection runs on ordinary status commands; it must be safe on any machine | Existing policy (`sb doctor` health checks are read-only) |
 | Windows-only incumbents | Out of scope natively; WSL2-side incumbents are in scope, and a Windows-side holder of the port is detected and reported | Sandbox has no native Windows entry point; porting it is a larger change than this feature and a prerequisite to it | User; repository evidence (`docs/cross-platform-support.md` §5) |
 | Non-scriptable incumbents | Detect, report precisely, fall back to the per-port URL. Sandbox does not write into a product's private configuration | Reverse-engineered writes break on the product's own updates and risk corrupting the user's other sites — a worse outcome than an honest, actionable message | User |
-| Credentialed incumbents | Supported. On first detection at an interactive terminal Sandbox offers to take credentials; non-interactive callers are never prompted and the ingress is reported as pending credentials | Improves discovery where a human is present, while honoring the existing rule that privileged/interactive paths must never block the MCP server or CI | User; existing policy (`sandbox/core/_domains.py:717-721`) |
+| Credentialed incumbents | Supported only when an adapter uses a documented authenticated control surface. On first detection at an interactive terminal Sandbox may offer to take credentials; non-interactive callers are never prompted. Nginx Proxy Manager remains detect-only in the initial matrix | Improves discovery without treating a private UI API as a stable product contract | User intent refined by primary-source research; existing policy (`sandbox/core/_domains.py:717-721`) |
 | Declining a credential offer | Remembered per incumbent per machine; not re-asked | Matches the existing declined-offer marker for the HTTPS upgrade | Existing policy (`sandbox/core/_domains.py:203-213`) |
+| Unrecorded consent in non-interactive contexts | Do not prompt or mutate; report pending consent and use the per-port URL | MCP and CI must never hang, and changing a user-owned service requires prior consent | Existing non-interactive policy (`sandbox/core/_domains.py:717-721`) |
+| Route drift | Leave a changed marked route untouched until explicit reconciliation | A marker alone cannot prove the user did not subsequently take ownership of the route | Ownership and reversibility policy |
+| Cleanup while incumbent is absent | Retain recovery state and report residual configuration; retry when the incumbent is available | Removal cannot be truthfully guaranteed against an unavailable tool | Truthful-reporting policy |
+| Split ownership | One hostname has one authoritative ingress for all protocols it advertises; Sandbox never divides HTTP and HTTPS for that hostname across products | Split ownership makes redirects, certificates, health, attribution, and rollback ambiguous | Industry ingress practice; conservative ownership policy |
+| Partial conflict | Select an ingress capable of every protocol requested for the hostname; otherwise use the per-port URL. A listener on an unrequested protocol is reported but does not justify taking or rewriting it | Capability follows the URL actually promised while preserving every foreign listener | Least-mutation and truthful-reporting policy |
+| Incompatible explicit hostname/TLD | Preserve it and fall back; never silently rewrite project identity. An interactive command may offer an explicit migration owned by spec B | Silent hostname changes alter WordPress URLs, callbacks, and stored content | Backward compatibility and explicit-mutation policy |
 
 ## Open Questions
 
@@ -363,19 +469,23 @@ Every such machine currently loses clean URLs.
   that incumbent, and the Sandbox proxy is not running.
 - On that same machine, every service the incumbent served before the operation is
   still served after it.
-- On a machine with nothing on :80/:443, the observable result of creating an
-  instance and requesting a clean URL is identical to the current release.
-- Destroying an instance leaves the incumbent with no route for that instance's
-  hostname, and with every other route unchanged.
-- Uninstalling Sandbox leaves no Sandbox-created route in any incumbent, and no
-  user-authored configuration modified.
+- On a machine with nothing on the required :80/:443 endpoints, Sandbox's own Caddy is
+  selected, existing persisted hostnames keep serving, and a new unpinned instance serves
+  the standards-safe hostname supplied by spec B.
+- Destroying an instance removes its unchanged Sandbox-owned route from every available
+  incumbent and leaves every other route unchanged; unavailable or drifted routes produce
+  an explicit incomplete-cleanup result and retained recovery record.
+- Uninstalling Sandbox removes every unchanged owned route it can verify, modifies no
+  user-authored configuration, and explicitly lists any residual route it could not safely
+  remove.
 - Running any adoption action twice in a row produces the same end state as running
   it once, with no error on the second run.
-- When adoption is impossible, the reported reason names the process holding the
-  port; no port-conflict situation produces a message attributing the failure to
-  Docker being unavailable.
-- The instance is created and reachable at its per-port URL in every failure case
-  above.
+- When adoption is impossible, the reported reason names the conflicting endpoint
+  and, where the operating system permits identification, its process or product; no
+  port-conflict situation produces a message attributing the failure to Docker being
+  unavailable.
+- The instance is created and reachable at its per-port URL after every
+  ingress-adoption failure above, assuming instance creation itself succeeds.
 - A user can list which ingresses this build can adopt and what each requires.
 - Sandbox reports which ingress currently serves each instance's clean URL.
 - An explicitly pinned ingress is always the one used, or the reason it cannot be
@@ -390,6 +500,24 @@ Every such machine currently loses clean URLs.
   any file tracked by git.
 - Detecting a product whose configuration Sandbox does not write into leaves that
   product's files unmodified, verifiable by comparing them before and after.
+- A change to an instance's per-port target updates its unchanged Sandbox-owned route;
+  a foreign hostname collision or externally changed route is refused and reported.
+- If an incumbent disappears, status reports the clean URL unhealthy; uninstall or
+  destroy reports any route it could not remove and preserves a retryable recovery
+  record rather than claiming complete cleanup.
+- A non-interactive first adoption with no recorded consent performs no incumbent
+  mutation, and an explicit user action can later grant consent or reconsider a
+  remembered decline.
+- HTTP-only and HTTPS-capable incumbents are reported and verified according to their
+  declared capabilities; a :443-only conflict is not collapsed into a generic port
+  error.
+- Each named product has a visible support tier, and live acceptance evidence covers
+  every product advertised as adoptable or credential-pending.
+- A pre-existing invalid configuration, candidate validation failure, or reload/health
+  failure leaves the incumbent's prior configuration restored, its previously healthy
+  routes healthy, and the Sandbox instance available at its per-port URL.
+- When project and machine-local ingress pins differ, the machine-local override is used
+  and status identifies the effective pinned source.
 
 ## Risks and Assumptions
 
@@ -422,8 +550,6 @@ Every such machine currently loses clean URLs.
   sites, and would rather Sandbox join it than replace it.
 - **Assumption**: The hostname already resolves to the local machine, or spec B
   arranges it. This feature's outcomes are not observable without that.
-- **Assumption**: A single machine has at most one ingress that meaningfully owns
-  :80/:443 at a time; where several are installed, only the running one matters.
 - **Assumption**: The one-time consent pattern already used for privileged host
   actions is acceptable to users for this class of change as well.
 
@@ -433,13 +559,13 @@ Every such machine currently loses clean URLs.
 - [x] Goals and non-goals bound the product scope.
 - [x] Primary and negative scenarios are covered.
 - [x] Material constraints, dependencies, and risks are recorded.
-- [x] Consequential choices are confirmed rather than inferred.
+- [x] Consequential choices are confirmed or explicitly accepted as grounded product
+      policy.
 - [x] Acceptance outcomes are measurable and implementation-independent.
 - [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent Sol High validation verdict is `PASS`. — not run;
-      no `gpt-5.6-sol` High reviewer is exposed in this session.
+- [x] The latest independent Sol High validation verdict is `PASS`.
 
-**Readiness**: `NOT READY`
+**Readiness**: READY FOR SPECKIT
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

@@ -397,7 +397,6 @@ def cmd_specgate(cfg, args):
 
 
 register({
-    'domains': cmd_domains,
     'secure': cmd_secure,
     'server': cmd_server,
     'pxdiff': cmd_pxdiff,

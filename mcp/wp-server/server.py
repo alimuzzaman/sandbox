@@ -38,6 +38,18 @@ def _ingress_service():
     return ingress_service(load_config())
 
 
+def _native_preflight():
+    from sandbox.application.context import native_isolation_preflight
+    from sandbox.core._config import load_config
+    return native_isolation_preflight(load_config())
+
+
+def _managed_package_planner():
+    from sandbox.application.context import managed_package_planner
+    from sandbox.core._config import load_config
+    return managed_package_planner(load_config())
+
+
 def _resource_service(remote=None):
     from sandbox.resources.context import resource_service
     return resource_service(remote)
@@ -117,6 +129,8 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "runtime_service": _runtime_service,
     "domain_service": _domain_service,
     "ingress_service": _ingress_service,
+    "native_preflight": _native_preflight,
+    "managed_package_planner": _managed_package_planner,
     "resource_service_factory": _resource_service,
     "hermes_service": _HermesCommandAdapter(),
     **_job_dependencies,

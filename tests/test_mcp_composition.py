@@ -96,7 +96,7 @@ class TestMcpComposition(unittest.TestCase):
         wordpress = project_default_groups("wordpress")
         compose = project_default_groups("compose")
         self.assertIn("wp", wordpress)
-        self.assertNotIn("runtime", wordpress)
+        self.assertIn("runtime", wordpress)
         self.assertIn("runtime", compose)
         self.assertNotIn("wp", compose)
         self.assertIn("remote", wordpress)
@@ -142,7 +142,8 @@ class TestMcpComposition(unittest.TestCase):
                     "domain_service",
                 ),
                 "domains": ("domain_service", "ingress_service"),
-                "runtime": ("core", "project_instance", "runtime_service"),
+                "runtime": ("core", "project_instance", "runtime_service",
+                            "native_preflight", "managed_package_planner"),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
                 "resources": ("resource_service_factory",),

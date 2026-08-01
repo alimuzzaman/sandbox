@@ -71,7 +71,7 @@ class TestModularityInventory(unittest.TestCase):
                 "cli_commands": 86,
                 "mcp_tools": 50,
                 "wildcard_imports": 20,
-                "runtime_kind_branches": 100,
+                "runtime_kind_branches": 101,
             },
         )
 

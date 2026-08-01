@@ -13,14 +13,19 @@ from dependencies import ToolDependencies
 _core = None
 _project_instance = None
 _runtime_service = None
+_native_preflight = None
+_managed_package_planner = None
 
 
 def register(server, dependencies: ToolDependencies) -> None:
-    global _core, _project_instance, _runtime_service
+    global _core, _project_instance, _runtime_service, _native_preflight, _managed_package_planner
     _core = dependencies.require("core")
     _project_instance = dependencies.require("project_instance")
     _runtime_service = dependencies.require("runtime_service")
-    for tool in (instance_status, instance_logs, instance_exec):
+    _native_preflight = dependencies.require("native_preflight")
+    _managed_package_planner = dependencies.require("managed_package_planner")
+    for tool in (instance_status, instance_logs, instance_exec,
+                 native_support, native_preflight, native_install_plan):
         server.tool()(tool)
 
 
@@ -89,3 +94,31 @@ def instance_exec(command: list[str], project_dir: str,
                                    output_profile=output_profile, kind="runtime-exec")
         return {"ok": bool(job.get("ok")), "operation": "exec", **job}
     return _typed_invoke(project_dir, label, "exec", {"argv": command})
+
+
+def native_support() -> dict:
+    """List truthful local runtime/isolation proof tiers without mutation."""
+    from sandbox.runtimes.manifest import RUNTIME_DECLARATIONS
+    return {"ok": True, "operation": "native_support", "state": "ready",
+            "runtimes": [dict(item) for item in RUNTIME_DECLARATIONS], "mutated": False}
+
+
+def native_preflight() -> dict:
+    """Run read-only effective managed-native prerequisite checks."""
+    return _native_preflight().inspect()
+
+
+def native_install_plan(web_server: str = "nginx") -> dict:
+    """Preview exact signed-source package closure; never install or prompt."""
+    try:
+        plan = _managed_package_planner().plan(web_server=web_server)
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "operation": "native_install_plan", "state": "blocked",
+                "mutated": False,
+                "reason": {"code": "version_unavailable", "message": str(exc)}}
+    return {"ok": True, "operation": "native_install_plan", "state": "ready",
+            "mutated": False, "matrix_id": plan.matrix_id,
+            "host_packages": [dict(item) for item in plan.host_packages],
+            "image_packages": [dict(item) for item in plan.image_packages],
+            "sources": [dict(item) for item in plan.sources],
+            "simulation_digest": plan.simulation_digest}

@@ -175,6 +175,8 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("secure_instance", "project_dir"), ("apply_config", "project_dir"),
             ("instance_status", "project_dir"), ("instance_logs", "project_dir"),
             ("instance_exec", "command,project_dir"),
+            ("native_support", ""), ("native_preflight", ""),
+            ("native_install_plan", ""),
             ("job_start", "command,project_dir"), ("job_matrix", "command,project_dir,workspaces"), ("job_status", "job_id"),
             ("job_list", ""), ("job_output", "job_id"),
             ("job_follow", "job_id"), ("job_metrics", "job_id"), ("job_reconcile", ""), ("job_retention", ""), ("job_cancel", "job_id"),

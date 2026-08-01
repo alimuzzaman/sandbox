@@ -23,7 +23,7 @@ DEFAULT_MCP_GROUPS = (
 # many-project registration model; clients that want a precise catalog start
 # `sb mcp --project-dir PROJECT` instead.
 WORDPRESS_PROJECT_GROUPS = (
-    "instances", "domains", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
+    "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "remote",
     "resources",
 )
 COMPOSE_PROJECT_GROUPS = (
@@ -51,7 +51,8 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
         "domain_service",
     ),
     "domains": ("domain_service", "ingress_service"),
-    "runtime": ("core", "project_instance", "runtime_service"),
+    "runtime": ("core", "project_instance", "runtime_service", "native_preflight",
+                "managed_package_planner"),
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
     "resources": ("resource_service_factory",),
@@ -62,7 +63,8 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
     "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support"),
-    "runtime": ("instance_status", "instance_logs", "instance_exec"),
+    "runtime": ("instance_status", "instance_logs", "instance_exec",
+                "native_support", "native_preflight", "native_install_plan"),
     "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),

@@ -76,6 +76,30 @@ class RuntimeDependencies:
 
 
 @dataclass(frozen=True)
+class RuntimeSelection:
+    project_root: str
+    label: str
+    mode: str
+    adapter_id: str
+    source: str
+    versions: Mapping[str, str] = field(default_factory=dict)
+    isolation_level: str = "compose"
+    capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self):
+        if self.mode not in {"compose", "incumbent_native", "managed_native"}:
+            raise ValueError("runtime selection mode is invalid")
+        if self.source not in {"default", "project_requirement", "machine_override", "persisted"}:
+            raise ValueError("runtime selection source is invalid")
+        expected = {"compose": "compose", "incumbent_native": "trusted_shared_host",
+                    "managed_native": "managed_container"}[self.mode]
+        if self.isolation_level != expected:
+            raise ValueError("runtime selection isolation level is invalid")
+        object.__setattr__(self, "versions", MappingProxyType(dict(self.versions)))
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+
+
+@dataclass(frozen=True)
 class ProjectDescriptor:
     root: str
     kind: str = "wordpress"

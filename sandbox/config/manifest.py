@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from .domains import normalize_domain_policy
 from .runtime import normalize_runtime_policy
+from .wordpress_runtime import normalize_wordpress_runtime
 
 
 COMMON_CONFIG_PROVIDERS = (
     ("runtime", lambda result: normalize_runtime_policy(result.get("runtime")),
      "sandbox.config.runtime", 10),
     ("domains", normalize_domain_policy, "sandbox.config.domains", 20),
+    ("wordpressRuntime", normalize_wordpress_runtime,
+     "sandbox.config.wordpress_runtime", 30),
 )
 
 
@@ -19,4 +22,5 @@ def apply_common_config(result: dict) -> dict:
         resolved[key] = provider(resolved)
     resolved.pop("_domains_raw", None)
     resolved.pop("_persisted_hostname", None)
+    resolved.pop("_wordpress_runtime_raw", None)
     return resolved

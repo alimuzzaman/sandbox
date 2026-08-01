@@ -1,0 +1,10 @@
+{
+  "matrix_id": "ubuntu-24.04-systemd-255",
+  "host": {"id": "ubuntu", "version": "24.04", "systemd_min": 255, "cgroup": "v2"},
+  "required": ["systemd-nspawn", "machinectl", "bubblewrap", "nft", "debootstrap", "mkfs.ext4"],
+  "versions": {"php": "8.3", "database": "mariadb-10.11", "nginx": "1.24", "apache": "2.4"},
+  "isolation": "managed_container",
+  "egress_default": "deny",
+  "adoptable": false,
+  "evidence_id": null
+}

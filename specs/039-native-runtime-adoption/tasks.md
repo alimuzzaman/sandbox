@@ -15,9 +15,9 @@ throughout the migration.
 
 **Purpose**: Establish explicit files/manifests without changing runtime behavior.
 
-- [ ] T001 Create runtime/isolation package skeletons and public exports in `sandbox/runtimes/incumbent/__init__.py`, `sandbox/runtimes/managed/__init__.py`, and `sandbox/isolation/__init__.py`
-- [ ] T002 [P] Add managed-native hostile probe fixtures for PHP, shell, plugin activation, Composer, and PHPUnit in `tests/hostile/`
-- [ ] T003 [P] Add Ubuntu 24.04 managed-native matrix fixture with exact expected capability fields in `tests/fixtures/native/ubuntu-24.04.json`
+- [X] T001 Create runtime/isolation package skeletons and public exports in `sandbox/runtimes/incumbent/__init__.py`, `sandbox/runtimes/managed/__init__.py`, and `sandbox/isolation/__init__.py`
+- [X] T002 [P] Add managed-native hostile probe fixtures for PHP, shell, plugin activation, Composer, and PHPUnit in `tests/hostile/`
+- [X] T003 [P] Add Ubuntu 24.04 managed-native matrix fixture with exact expected capability fields in `tests/fixtures/native/ubuntu-24.04.json`
 - [ ] T004 Register the feature-owned `native` command module and parser contract in `sandbox/commands/manifest.py` and `sandbox/commands/native.py`
 - [ ] T005 Update static CLI/MCP/modularity inventory expectations for the new registered surfaces in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
 
@@ -28,12 +28,12 @@ throughout the migration.
 **Purpose**: Build the typed selection, adapter, policy, repository, and helper boundaries
 required before any native story can mutate state.
 
-- [ ] T006 Write failing provenance, default-Compose, explicit-native, unknown-key, and runtime-switch schema tests in `tests/test_wordpress_runtime_config.py`
-- [ ] T007 Implement `wordpressRuntime` normalization and machine-override provenance without overloading job `runtime` config in `sandbox/config/wordpress_runtime.py` and register it in `sandbox/config/manifest.py`
+- [X] T006 Write failing provenance, default-Compose, explicit-native, unknown-key, and runtime-switch schema tests in `tests/test_wordpress_runtime_config.py`
+- [X] T007 Implement `wordpressRuntime` normalization and machine-override provenance without overloading job `runtime` config in `sandbox/config/wordpress_runtime.py` and register it in `sandbox/config/manifest.py`
 - [ ] T008 Write failing two-dimensional project-kind/backend selection and duplicate-adapter registration tests in `tests/test_native_runtime_service.py`
 - [ ] T009 Extend runtime models/registry/service to resolve `(project kind, local mode, adapter id)` and structured capability results in `sandbox/runtimes/base.py`, `sandbox/runtimes/registry.py`, and `sandbox/application/runtime_service.py`
-- [ ] T010 [P] Write failing validation/state-transition/secret-redaction tests for RuntimeSelection, ManagedIsolationPolicy, PackageTransactionPlan, NativeBackendRecord, EgressGrant, and CleanupRecovery in `tests/test_native_models.py`
-- [ ] T011 [P] Implement immutable native/isolation models and canonical digest validation in `sandbox/isolation/models.py` and `sandbox/runtimes/managed/models.py`
+- [X] T010 [P] Write failing validation/state-transition/secret-redaction tests for RuntimeSelection, ManagedIsolationPolicy, PackageTransactionPlan, NativeBackendRecord, EgressGrant, and CleanupRecovery in `tests/test_native_models.py`
+- [X] T011 [P] Implement immutable native/isolation models and canonical digest validation in `sandbox/isolation/models.py` and `sandbox/runtimes/managed/models.py`
 - [ ] T012 [P] Write failing migration, locking, compare-before-change, and residual-survival tests in `tests/test_native_ownership.py`
 - [ ] T013 Implement the versioned locked native state repository and ownership comparison in `sandbox/runtimes/managed/repository.py`
 - [ ] T014 Define and register the exact Ubuntu/incumbent support and proof manifest in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`

@@ -58,12 +58,17 @@ class TestManagedImage(unittest.TestCase):
                                    stager=Stager(path))
             rootfs.configure({"machine_id": Policy.machine_id,
                 "policy_digest": Policy.digest, "package_plan": PackagePlan(),
-                "web_server": "nginx"})
+                "web_server": "nginx", "services": {"digest": "c" * 64}})
             self.assertFalse(path.exists())
-        argv, timeout = process.calls[0]
-        self.assertEqual(argv[:4], ("sudo", "-n", "/fixed/helper", "image-bootstrap"))
-        self.assertEqual(argv[-2:], (PackagePlan.simulation_digest, "nginx"))
-        self.assertEqual(timeout, 1900)
+        bootstrap, configure = process.calls
+        self.assertEqual(bootstrap[0][:4],
+                         ("sudo", "-n", "/fixed/helper", "image-bootstrap"))
+        self.assertEqual(bootstrap[0][-2:], (PackagePlan.simulation_digest, "nginx"))
+        self.assertEqual(bootstrap[1], 1900)
+        self.assertEqual(configure[0][:4],
+                         ("sudo", "-n", "/fixed/helper", "image-configure"))
+        self.assertEqual(configure[0][-2:], ("nginx", "c" * 64))
+        self.assertEqual(configure[1], 300)
 
 
 if __name__ == "__main__": unittest.main()

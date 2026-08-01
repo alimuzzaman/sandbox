@@ -7,6 +7,49 @@ import hashlib
 from sandbox.isolation.models import canonical_digest
 
 
+def compile_service_files(guest, connections, *, web_server, backend_port):
+    php_children = max(2, min(32, connections // 4))
+    common_php = (
+        "[sandbox]\nuser = www-data\ngroup = www-data\n"
+        "listen = /run/php/sandbox.sock\nlisten.owner = www-data\nlisten.group = www-data\n"
+        f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
+        "pm.min_spare_servers = 1\npm.max_spare_servers = 4\nclear_env = yes\n"
+        "security.limit_extensions = .php\ncatch_workers_output = yes\n"
+        "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
+        "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
+        "php_admin_value[open_basedir] = /var/www/html:/workspace:/var/lib/sandbox:/tmp:/usr/share/php\n"
+    )
+    if web_server == "nginx":
+        web_path = "/etc/nginx/sites-enabled/sandbox.conf"
+        web = (f"server {{\n    listen {guest}:{backend_port} default_server;\n"
+               "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
+               "    client_max_body_size 64m;\n"
+               "    location / { try_files $uri $uri/ /index.php?$args; }\n"
+               "    location ~ \\.php$ { try_files $uri =404; include fastcgi_params; "
+               "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; "
+               "fastcgi_pass unix:/run/php/sandbox.sock; }\n"
+               "    location ~ /\\. { deny all; }\n}\n")
+        units = ("mariadb.service", "php8.3-fpm.service", "nginx.service", "cron.service")
+    else:
+        web_path = "/etc/apache2/sites-enabled/000-sandbox.conf"
+        web = (f"Listen {guest}:{backend_port}\n<VirtualHost {guest}:{backend_port}>\n"
+               "    DocumentRoot /var/www/html\n    DirectoryIndex index.php\n"
+               "    <Directory /var/www/html>\n        Options FollowSymLinks\n"
+               "        AllowOverride All\n        Require all granted\n"
+               "    </Directory>\n"
+               "    <FilesMatch \\.php$>\n"
+               "        SetHandler \"proxy:unix:/run/php/sandbox.sock|fcgi://localhost/\"\n"
+               "    </FilesMatch>\n</VirtualHost>\n")
+        units = ("mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service")
+    database = ("[mysqld]\nskip-networking=1\nskip-name-resolve=1\nlocal-infile=0\n"
+                f"socket=/run/mysqld/mysqld.sock\nmax_connections={connections}\n")
+    files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
+             "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
+             "/etc/cron.d/sandbox-wordpress":
+             "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/var/www/html >/dev/null 2>&1\n"}
+    return files, units
+
+
 class ManagedServiceCompiler:
     def compile(self, policy, *, web_server="nginx", backend_port=8080):
         if web_server not in {"nginx", "apache"}: raise ValueError("managed web server is invalid")
@@ -15,39 +58,8 @@ class ManagedServiceCompiler:
         guest = str(policy.network.get("guest_address", "")).split("/", 1)[0]
         if not guest: raise ValueError("managed guest address is unavailable")
         connections = int(policy.resources.get("connections", 128))
-        php_children = max(2, min(32, connections // 4))
-        common_php = (
-            "[sandbox]\nuser = www-data\ngroup = www-data\n"
-            "listen = /run/php/sandbox.sock\nlisten.owner = www-data\nlisten.group = www-data\n"
-            f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
-            "pm.min_spare_servers = 1\npm.max_spare_servers = 4\n"
-            "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
-            "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
-        )
-        if web_server == "nginx":
-            web_path = "/etc/nginx/sites-enabled/sandbox.conf"
-            web = (f"server {{\n    listen {guest}:{port} default_server;\n"
-                   "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
-                   "    location / { try_files $uri $uri/ /index.php?$args; }\n"
-                   "    location ~ \\.php$ { include fastcgi_params; "
-                   "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; "
-                   "fastcgi_pass unix:/run/php/sandbox.sock; }\n}\n")
-            units = ("mariadb.service", "php8.3-fpm.service", "nginx.service", "cron.service")
-        else:
-            web_path = "/etc/apache2/sites-enabled/000-sandbox.conf"
-            web = (f"Listen {guest}:{port}\n<VirtualHost {guest}:{port}>\n"
-                   "    DocumentRoot /var/www/html\n    DirectoryIndex index.php\n"
-                   "    <Directory /var/www/html>\n        AllowOverride All\n        Require all granted\n"
-                   "    </Directory>\n"
-                   "    <FilesMatch \\.php$>\n        SetHandler \"proxy:unix:/run/php/sandbox.sock|fcgi://localhost/\"\n"
-                   "    </FilesMatch>\n</VirtualHost>\n")
-            units = ("mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service")
-        database = ("[mysqld]\nbind-address=127.0.0.1\nskip-networking=1\n"
-                    f"socket=/run/mysqld/mysqld.sock\nmax_connections={connections}\n")
-        files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
-                 "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
-                 "/etc/cron.d/sandbox-wordpress":
-                 "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/var/www/html >/dev/null 2>&1\n"}
+        files, units = compile_service_files(guest, connections, web_server=web_server,
+                                             backend_port=port)
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "web_server": web_server, "backend": {"address": guest, "port": port},
                 "files": files, "file_digests": {path: hashlib.sha256(content.encode()).hexdigest()

@@ -64,7 +64,12 @@ class ManagedRootfs:
                                        plan["machine_id"], plan["policy_digest"], str(path),
                                        package_plan.simulation_digest, plan["web_server"]),
                                       timeout=1900)
+            if result.returncode == 0:
+                services = plan["services"]
+                result = self.process.run(("sudo", "-n", self.helper, "image-configure",
+                                           plan["machine_id"], plan["policy_digest"],
+                                           plan["web_server"], services["digest"]), timeout=300)
         finally:
             path.unlink(missing_ok=True)
-        if result.returncode != 0: raise RuntimeError("managed Noble rootfs bootstrap failed")
+        if result.returncode != 0: raise RuntimeError("managed Noble rootfs configuration failed")
         return {"ok": True, "mutated": True}

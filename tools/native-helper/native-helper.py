@@ -374,7 +374,7 @@ def host_packages_apply(path_value, digest):
               timeout=900, environment=environment)
 
 
-def rootfs_path(root, relative):
+def rootfs_path(root, relative, *, allow_final_symlink=False):
     if not isinstance(relative, str) or not relative.startswith("/") or ".." in Path(relative).parts:
         fail("native rootfs path is invalid")
     root = root.resolve(strict=True); destination = root / relative.lstrip("/")
@@ -388,7 +388,8 @@ def rootfs_path(root, relative):
                 fail("native rootfs path escapes the image")
         else:
             current.mkdir(mode=0o755)
-    if destination.is_symlink(): fail("native rootfs path is a symlink")
+    if destination.is_symlink() and not allow_final_symlink:
+        fail("native rootfs path is a symlink")
     return destination
 
 
@@ -401,13 +402,117 @@ def write_rootfs(root, relative, payload, mode=0o644):
 def mask_rootfs_unit(root, unit):
     if not re.fullmatch(r"[a-zA-Z0-9@_.-]+\.(?:service|socket)", unit):
         fail("native unit is invalid")
-    destination = rootfs_path(root, f"/etc/systemd/system/{unit}")
+    destination = rootfs_path(root, f"/etc/systemd/system/{unit}", allow_final_symlink=True)
     if destination.exists() and not destination.is_symlink():
         fail("native service mask collides with a file")
     if destination.is_symlink():
         if os.readlink(destination) != "/dev/null": fail("native service mask is foreign")
         return
     destination.symlink_to("/dev/null")
+
+
+def remove_rootfs_entry(root, relative):
+    destination = rootfs_path(root, relative, allow_final_symlink=True)
+    if not destination.exists() and not destination.is_symlink(): return
+    details = destination.lstat()
+    if stat.S_ISDIR(details.st_mode): fail("native rootfs removal target is a directory")
+    destination.unlink()
+
+
+def compile_service_files(guest, connections, web_server, backend_port):
+    php_children = max(2, min(32, connections // 4))
+    common_php = (
+        "[sandbox]\nuser = www-data\ngroup = www-data\n"
+        "listen = /run/php/sandbox.sock\nlisten.owner = www-data\nlisten.group = www-data\n"
+        f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
+        "pm.min_spare_servers = 1\npm.max_spare_servers = 4\nclear_env = yes\n"
+        "security.limit_extensions = .php\ncatch_workers_output = yes\n"
+        "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
+        "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
+        "php_admin_value[open_basedir] = /var/www/html:/workspace:/var/lib/sandbox:/tmp:/usr/share/php\n"
+    )
+    if web_server == "nginx":
+        web_path = "/etc/nginx/sites-enabled/sandbox.conf"
+        web = (f"server {{\n    listen {guest}:{backend_port} default_server;\n"
+               "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
+               "    client_max_body_size 64m;\n"
+               "    location / { try_files $uri $uri/ /index.php?$args; }\n"
+               "    location ~ \\.php$ { try_files $uri =404; include fastcgi_params; "
+               "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; "
+               "fastcgi_pass unix:/run/php/sandbox.sock; }\n"
+               "    location ~ /\\. { deny all; }\n}\n")
+        units = ("mariadb.service", "php8.3-fpm.service", "nginx.service", "cron.service")
+    else:
+        web_path = "/etc/apache2/sites-enabled/000-sandbox.conf"
+        web = (f"Listen {guest}:{backend_port}\n<VirtualHost {guest}:{backend_port}>\n"
+               "    DocumentRoot /var/www/html\n    DirectoryIndex index.php\n"
+               "    <Directory /var/www/html>\n        Options FollowSymLinks\n"
+               "        AllowOverride All\n        Require all granted\n"
+               "    </Directory>\n"
+               "    <FilesMatch \\.php$>\n"
+               "        SetHandler \"proxy:unix:/run/php/sandbox.sock|fcgi://localhost/\"\n"
+               "    </FilesMatch>\n</VirtualHost>\n")
+        units = ("mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service")
+    database = ("[mysqld]\nskip-networking=1\nskip-name-resolve=1\nlocal-infile=0\n"
+                f"socket=/run/mysqld/mysqld.sock\nmax_connections={connections}\n")
+    files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
+             "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
+             "/etc/cron.d/sandbox-wordpress":
+             "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/var/www/html >/dev/null 2>&1\n"}
+    return files, units
+
+
+def image_configure(machine_id, policy_digest, web_server, service_digest):
+    _policy_path, policy = applied_policy(machine_id, policy_digest)
+    if web_server not in {"nginx", "apache"}: fail("native web server is invalid")
+    _instance, image, mountpoint = image_paths(machine_id)
+    if not os.path.ismount(mountpoint): fail("native image is not mounted for configuration")
+    loops = run_fixed(("losetup", "-j", str(image)), "native loop ownership unavailable")
+    if not loops.stdout.strip(): fail("native configuration target is not the owned image")
+    bootstrap = mountpoint / "etc/sandbox-native/bootstrap.json"
+    if not bootstrap.is_file() or bootstrap.is_symlink(): fail("native image is not bootstrapped")
+    try: bootstrap_value = json.loads(bootstrap.read_text())
+    except (OSError, json.JSONDecodeError): fail("native bootstrap marker is invalid")
+    if (bootstrap_value.get("machine_id") != machine_id or
+            bootstrap_value.get("policy_digest") != policy_digest or
+            bootstrap_value.get("web_server") != web_server):
+        fail("native bootstrap marker changed")
+    guest = str(ipaddress.ip_interface(policy["network"]["guest_address"]).ip)
+    files, units = compile_service_files(guest, policy["resources"]["connections"],
+                                         web_server, policy["network"]["ingress_port"])
+    observed_digest = canonical_digest(files)
+    if service_digest != observed_digest: fail("native service configuration digest mismatch")
+    marker_value = {"machine_id": machine_id, "policy_digest": policy_digest,
+                    "service_digest": service_digest, "web_server": web_server,
+                    "units": list(units)}
+    marker = mountpoint / "etc/sandbox-native/services.json"
+    if marker.exists():
+        try: observed = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError): fail("native service marker is invalid")
+        if observed != marker_value: fail("native service marker changed")
+        return
+    for relative, content in files.items(): write_rootfs(mountpoint, relative, content)
+    os.chmod(rootfs_path(mountpoint, "/etc/cron.d/sandbox-wordpress"), 0o644)
+    remove_rootfs_entry(mountpoint, "/etc/php/8.3/fpm/pool.d/www.conf")
+    rootfs_path(mountpoint, "/var/www/html").mkdir(parents=True, exist_ok=True)
+    for directory in ("/var/www/html", "/var/lib/sandbox/tmp", "/var/lib/sandbox/sessions"):
+        run_fixed(("chroot", str(mountpoint), "/usr/bin/chown", "-R", "www-data:www-data",
+                   directory), "native service ownership configuration failed")
+    run_fixed(("chroot", str(mountpoint), "/usr/sbin/php-fpm8.3", "--test"),
+              "native PHP-FPM configuration failed")
+    if web_server == "nginx":
+        remove_rootfs_entry(mountpoint, "/etc/nginx/sites-enabled/default")
+        run_fixed(("chroot", str(mountpoint), "/usr/sbin/nginx", "-t"),
+                  "native nginx configuration failed")
+    else:
+        remove_rootfs_entry(mountpoint, "/etc/apache2/sites-enabled/000-default.conf")
+        run_fixed(("chroot", str(mountpoint), "/usr/sbin/a2enmod",
+                   "proxy", "proxy_fcgi", "rewrite", "setenvif"),
+                  "native Apache module configuration failed")
+        run_fixed(("chroot", str(mountpoint), "/usr/sbin/apache2ctl", "configtest"),
+                  "native Apache configuration failed")
+    write_rootfs(mountpoint, "/etc/sandbox-native/services.json",
+                 json.dumps(marker_value, sort_keys=True) + "\n", 0o600)
 
 
 def image_bootstrap(machine_id, policy_digest, plan_path, plan_digest, web_server):
@@ -870,6 +975,10 @@ def main(argv=None):
     bootstrap.add_argument("machine"); bootstrap.add_argument("policy_digest")
     bootstrap.add_argument("plan_path"); bootstrap.add_argument("plan_digest")
     bootstrap.add_argument("web_server", choices=("nginx", "apache"))
+    configure = sub.add_parser("image-configure")
+    configure.add_argument("machine"); configure.add_argument("policy_digest")
+    configure.add_argument("web_server", choices=("nginx", "apache"))
+    configure.add_argument("service_digest")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
@@ -894,6 +1003,9 @@ def main(argv=None):
     elif args.verb == "image-bootstrap":
         require_root(); image_bootstrap(machine(args.machine), digest_value(args.policy_digest),
                                         args.plan_path, args.plan_digest, args.web_server)
+    elif args.verb == "image-configure":
+        require_root(); image_configure(machine(args.machine), digest_value(args.policy_digest),
+                                        args.web_server, digest_value(args.service_digest))
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
         _source, _value, payload = _read_checked_policy(args.path, identity)

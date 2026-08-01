@@ -249,5 +249,16 @@ class TestNativeHelper(unittest.TestCase):
                 helper.write_rootfs(image, "/etc/escaped", "payload")
             self.assertFalse((outside / "escaped").exists())
 
+    def test_helper_and_control_plane_compile_identical_service_files(self):
+        from sandbox.runtimes.managed.services import compile_service_files
+        helper = module()
+        for server in ("nginx", "apache"):
+            with self.subTest(server=server):
+                self.assertEqual(
+                    helper.compile_service_files("10.203.0.2", 512, server, 8080),
+                    compile_service_files("10.203.0.2", 512,
+                                          web_server=server, backend_port=8080),
+                )
+
 
 if __name__ == "__main__": unittest.main()

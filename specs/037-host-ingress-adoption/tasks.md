@@ -84,8 +84,8 @@ with foreign route health baselines and inject validation, reload, and health fa
 
 ### Tests for User Story 2
 
-- [ ] T027 [P] [US2] Write failing Sandbox Caddy endpoint-ownership, exact-bind, fragment, lifecycle, and fallback tests in `tests/test_ingress_sandbox_caddy.py`
-- [ ] T028 [P] [US2] Write failing Herd/Valet link/proxy/secure capability, ownership, and rollback tests in `tests/test_ingress_herd_valet.py`
+- [X] T027 [P] [US2] Write failing Sandbox Caddy endpoint-ownership, exact-bind, fragment, lifecycle, and fallback tests in `tests/test_ingress_sandbox_caddy.py`
+- [X] T028 [P] [US2] Write failing Herd/Valet link/proxy/secure capability, ownership, and rollback tests in `tests/test_ingress_herd_valet.py`
 - [X] T029 [P] [US2] Write failing system nginx owned-fragment, full-config validation, reload, health, and rollback tests in `tests/test_ingress_nginx.py`
 - [X] T030 [P] [US2] Write failing Apache owned-fragment, module/capability, full-config validation, graceful reload, health, and rollback tests in `tests/test_ingress_apache.py`
 - [X] T031 [P] [US2] Write failing persistent Caddy import-fragment, service-identity validation, reload, health, and rollback tests in `tests/test_ingress_caddy.py`
@@ -95,8 +95,8 @@ with foreign route health baselines and inject validation, reload, and health fa
 
 ### Implementation for User Story 2
 
-- [ ] T035 [US2] Implement exact-endpoint-safe Sandbox Caddy adapter using existing owned fragments in `sandbox/ingress/adapters/sandbox_caddy.py`
-- [ ] T036 [US2] Implement Herd/Valet route-only adapter with runtime ownership handed to C in `sandbox/ingress/adapters/herd_valet.py`
+- [X] T035 [US2] Implement exact-endpoint-safe Sandbox Caddy adapter using existing owned fragments in `sandbox/ingress/adapters/sandbox_caddy.py`
+- [X] T036 [US2] Implement Herd/Valet route-only adapter with runtime ownership handed to C in `sandbox/ingress/adapters/herd_valet.py`
 - [X] T037 [US2] Implement system nginx owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/nginx.py`
 - [X] T038 [US2] Implement Apache owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/apache.py`
 - [X] T039 [US2] Implement persistent system Caddy import-fragment adapter without ephemeral API state in `sandbox/ingress/adapters/caddy.py`

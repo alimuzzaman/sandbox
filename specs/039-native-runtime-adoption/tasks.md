@@ -34,8 +34,8 @@ required before any native story can mutate state.
 - [ ] T009 Extend runtime models/registry/service to resolve `(project kind, local mode, adapter id)` and structured capability results in `sandbox/runtimes/base.py`, `sandbox/runtimes/registry.py`, and `sandbox/application/runtime_service.py`
 - [X] T010 [P] Write failing validation/state-transition/secret-redaction tests for RuntimeSelection, ManagedIsolationPolicy, PackageTransactionPlan, NativeBackendRecord, EgressGrant, and CleanupRecovery in `tests/test_native_models.py`
 - [X] T011 [P] Implement immutable native/isolation models and canonical digest validation in `sandbox/isolation/models.py` and `sandbox/runtimes/managed/models.py`
-- [ ] T012 [P] Write failing migration, locking, compare-before-change, and residual-survival tests in `tests/test_native_ownership.py`
-- [ ] T013 Implement the versioned locked native state repository and ownership comparison in `sandbox/runtimes/managed/repository.py`
+- [X] T012 [P] Write failing migration, locking, compare-before-change, and residual-survival tests in `tests/test_native_ownership.py`
+- [X] T013 Implement the versioned locked native state repository and ownership comparison in `sandbox/runtimes/managed/repository.py`
 - [X] T014 Define and register the exact Ubuntu/incumbent support and proof manifest in `sandbox/isolation/manifest.py` and `sandbox/runtimes/manifest.py`
 - [ ] T015 Write failing helper argument/path/symlink/race/non-owner tests in `tests/test_native_helper.py`
 - [ ] T016 Write the fixed-verb root-helper schema, path/ID validation, policy-digest verification, and install-copy logic in `tools/native-helper/native-helper.py` and `tools/native-helper/VERSION`

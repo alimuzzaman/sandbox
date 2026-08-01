@@ -126,6 +126,7 @@ def domain_service(cfg, **overrides):
                 sc, root, label, hostname, source,
             ),
         ),
+        binding_observer=overrides.pop("binding_observer", None),
         **overrides,
     )
 

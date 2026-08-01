@@ -9,7 +9,8 @@ from typing import Any, Callable
 
 from sandbox.config.domains import normalize_hostname
 from sandbox.network.models import (
-    ConsentRecord, DomainResult, ResolutionBinding,
+    CleanupRecovery, ConsentRecord, DomainResult, ResolutionBinding,
+    canonical_digest,
 )
 
 
@@ -25,6 +26,7 @@ class DomainService:
         clock: Any | None = None, authority: Any | None = None,
         verifier: Callable | None = None, consent_decider: Callable | None = None,
         platform: str | None = None, identity_persister: Callable | None = None,
+        binding_observer: Callable | None = None,
     ) -> None:
         self.config_loader = config_loader
         self.project_registry = project_registry
@@ -41,6 +43,7 @@ class DomainService:
         self.consent_decider = consent_decider or (lambda _owner: False)
         self.platform = platform or ("darwin" if sys.platform == "darwin" else "linux")
         self.identity_persister = identity_persister
+        self.binding_observer = binding_observer
 
     def support(self) -> dict[str, Any]:
         return {
@@ -324,7 +327,77 @@ class DomainService:
 
     def cleanup(self, project_dir: str, *, label: str = "default",
                 interactive: bool = False) -> DomainResult:
-        return self.status(project_dir, label=label)
+        try:
+            config, policy, hostname, fallback = self._context(project_dir, label)
+        except DomainContextError:
+            return self.status(project_dir, label=label)
+        observation = self.observer(hostname) if self.observer else None
+        if observation is None:
+            return self.status(project_dir, label=label)
+        owner = f"{Path(config['root']).resolve()}::{label}"
+        bindings = [
+            ResolutionBinding.from_dict(value)
+            for value in self.repository.snapshot()["bindings"].values()
+            if owner in (value.get("owners") or ())
+        ]
+        if not bindings:
+            return self._result(
+                state="ready", hostname=hostname, policy=policy,
+                observation=observation, expected=(), fallback=fallback,
+                reason_code="already_absent", message="No owned resolver binding remains.",
+                ok=True, mutated=False, health="fallback", ownership="none",
+            )
+        incomplete = False
+        mutated = False
+        for binding in bindings:
+            spec = self.adapters.get(binding.adapter_id)
+            adapter = spec.adapter if spec is not None else None
+            observed = (
+                self.binding_observer(binding, adapter)
+                if self.binding_observer is not None and adapter is not None else None
+            )
+            if observed is None or adapter is None:
+                self.repository.put_recovery(CleanupRecovery(
+                    binding.binding_id, binding.adapter_id,
+                    binding.last_applied_digest or canonical_digest(binding.desired),
+                    None, "resolver_unavailable", None, "unavailable",
+                ))
+                incomplete = True
+                continue
+            observed_digest = canonical_digest(observed)
+            if observed_digest != binding.last_applied_digest:
+                self.repository.remove_binding_if_unchanged(
+                    binding.binding_id, observed_digest,
+                )
+                incomplete = True
+                continue
+            result = adapter.cleanup(binding)
+            if not result.get("ok"):
+                self.repository.put_recovery(CleanupRecovery(
+                    binding.binding_id, binding.adapter_id,
+                    binding.last_applied_digest, observed_digest,
+                    "resolver_cleanup_failed", None, "unavailable",
+                ))
+                incomplete = True
+                continue
+            if self.authority is not None:
+                self.authority.remove(binding.binding_id)
+            self.repository.remove_binding_if_unchanged(binding.binding_id, observed_digest)
+            mutated = True
+        if incomplete:
+            return self._result(
+                state="cleanup_incomplete", hostname=hostname, policy=policy,
+                observation=observation, expected=(), fallback=fallback,
+                reason_code="cleanup_incomplete",
+                message="One or more resolver bindings drifted or were unavailable; retry state was retained.",
+                mutated=mutated, ownership="residual",
+            )
+        return self._result(
+            state="ready", hostname=hostname, policy=policy,
+            observation=observation, expected=(), fallback=fallback,
+            reason_code="cleanup_complete", message="Owned resolver bindings were removed.",
+            ok=True, mutated=mutated, ownership="none",
+        )
 
     def reconsider(self, resolver_id: str | None) -> dict[str, Any]:
         if not resolver_id:

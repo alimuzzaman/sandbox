@@ -118,13 +118,13 @@ then run read-only status and repeated destroy/cleanup while comparing all forei
 ### Tests for User Story 3
 
 - [ ] T042 [P] [US3] Write failing resolver-change, address-mismatch, authority-down, cache-stale, and pin-source status tests in `tests/test_domain_status.py`
-- [ ] T043 [P] [US3] Write failing drift, unreachable-manager, changed-rule, repeated-cleanup, and retained-residual tests in `tests/test_domain_cleanup.py`
+- [X] T043 [P] [US3] Write failing drift, unreachable-manager, changed-rule, repeated-cleanup, and retained-residual tests in `tests/test_domain_cleanup.py`
 - [ ] T044 [US3] Write failing registry/local deletion-order and post-instance recovery tests in `tests/test_domain_destroy_ordering.py`
 
 ### Implementation for User Story 3
 
 - [ ] T045 [US3] Implement observed-versus-desired status and actionable reconciliation results in `sandbox/application/domain_service.py`
-- [ ] T046 [US3] Implement compare-before-remove cleanup and durable non-secret residual records in `sandbox/network/repository.py`
+- [X] T046 [US3] Implement compare-before-remove cleanup and durable non-secret residual records in `sandbox/network/repository.py`
 - [ ] T047 [US3] Persist DNS cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [ ] T048 [US3] Implement `domains detect|plan|apply|status|cleanup|reconsider` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T049 [US3] Implement import-safe MCP domain status/plan/apply/cleanup tools and setup-result delegation in `mcp/wp-server/tools/domains.py` and `mcp/wp-server/tools/instances.py`

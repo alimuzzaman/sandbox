@@ -18,6 +18,7 @@ class TestIsolationNamespaces(unittest.TestCase):
         self.assertIn("~@mount", result["Exec"]["SystemCallFilter"])
         self.assertEqual(result["Exec"]["PrivateUsersDelegate"], "0")
         self.assertEqual(result["Network"]["VirtualEthernetExtra"], "ve-sb-demo:host0")
+        self.assertEqual(result["Files"]["ReadOnly"], "no")
         self.assertEqual(result["Service"]["DevicePolicy"], "closed")
         self.assertNotIn("/dev/kmsg rw", result["Service"]["DeviceAllow"])
         self.assertEqual(result["Security"]["AppArmorProfile"],

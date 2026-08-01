@@ -17,7 +17,9 @@ class NspawnCompiler:
                 "SystemCallFilter": "@system-service ~@mount ~@raw-io ~@reboot ~@swap",
                 "SystemCallErrorNumber": "EPERM",
             },
-            "Files": {"ReadOnly": "yes", "BindReadOnly": tuple(mounts),
+            # The bounded ext4 root must remain writable for database/web runtime
+            # state. Host project source is independently bind-mounted read-only.
+            "Files": {"ReadOnly": "no", "BindReadOnly": tuple(mounts),
                       "Bind": tuple(writable), "PrivateUsersChown": "no"},
             "Network": {"Private": "yes", "VirtualEthernet": "no",
                         "VirtualEthernetExtra": f"{policy.network.get('veth')}:host0"},

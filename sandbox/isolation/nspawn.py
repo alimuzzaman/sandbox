@@ -11,16 +11,16 @@ class NspawnCompiler:
             "Exec": {
                 "Boot": "yes",
                 "PrivateUsers": f"{policy.uid_map['base']}:{policy.uid_map['count']}",
+                "PrivateUsersDelegate": "0",
                 "PrivateUsersOwnership": "map", "Capability": "",
                 "DropCapability": "all", "NoNewPrivileges": "yes",
                 "SystemCallFilter": "@system-service ~@mount ~@raw-io ~@reboot ~@swap",
                 "SystemCallErrorNumber": "EPERM",
-                "Sysctl": ("user.max_user_namespaces=0",),
             },
             "Files": {"ReadOnly": "yes", "BindReadOnly": tuple(mounts),
                       "Bind": tuple(writable), "PrivateUsersChown": "no"},
-            "Network": {"Private": "yes", "VirtualEthernet": "yes",
-                        "Interface": policy.network.get("veth")},
+            "Network": {"Private": "yes", "VirtualEthernet": "no",
+                        "VirtualEthernetExtra": f"{policy.network.get('veth')}:host0"},
             "Identity": {"MachineID": policy.machine_id,
                          "PolicyDigest": policy.digest},
             "Service": {
@@ -30,4 +30,5 @@ class NspawnCompiler:
                 "RestrictAddressFamilies": ("AF_UNIX", "AF_INET", "AF_INET6"),
                 "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
             },
+            "Security": {"AppArmorProfile": f"sandbox-native-{policy.machine_id}"},
         }

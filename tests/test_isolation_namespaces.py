@@ -16,9 +16,12 @@ class TestIsolationNamespaces(unittest.TestCase):
         self.assertEqual(result["Exec"]["NoNewPrivileges"], "yes")
         self.assertEqual(result["Network"]["Private"], "yes")
         self.assertIn("~@mount", result["Exec"]["SystemCallFilter"])
-        self.assertEqual(result["Exec"]["Sysctl"], ("user.max_user_namespaces=0",))
+        self.assertEqual(result["Exec"]["PrivateUsersDelegate"], "0")
+        self.assertEqual(result["Network"]["VirtualEthernetExtra"], "ve-sb-demo:host0")
         self.assertEqual(result["Service"]["DevicePolicy"], "closed")
         self.assertNotIn("/dev/kmsg rw", result["Service"]["DeviceAllow"])
+        self.assertEqual(result["Security"]["AppArmorProfile"],
+                         "sandbox-native-sb-0123456789ab")
 
 
 if __name__ == "__main__": unittest.main()

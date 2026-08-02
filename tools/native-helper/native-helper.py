@@ -3400,14 +3400,19 @@ def preflight_probe(probe):
         if (existing.returncode == 0 and
                 (existing.stdout or "").strip() not in {"", "not-found"}):
             return {"ok": False, "probe": probe, "state": "collision"}
-        command = ["systemd-run", "--quiet", "--wait", "--collect",
+        command = ["systemd-run", "--quiet", "--collect",
                    f"--unit={unit}", f"--description={marker}"]
         if probe == "private-network":
-            command.extend(("--property=PrivateNetwork=yes", "--property=IPAddressDeny=any"))
+            command.extend(("--wait", "--property=PrivateNetwork=yes",
+                            "--property=IPAddressDeny=any"))
         elif probe == "seccomp":
-            command.extend(("--property=NoNewPrivileges=yes",
+            command.extend(("--wait", "--property=NoNewPrivileges=yes",
                             "--property=SystemCallFilter=@system-service"))
         else:
+            # A scope runs synchronously in the caller's context, and systemd
+            # refuses `--wait` with `--scope` outright ("--wait may not be
+            # combined with --scope"). Passing both made the cgroup-delegation
+            # gate impossible to satisfy on any host.
             command.extend(("--scope", "--property=Delegate=yes"))
         command.extend((str(INSTALL_PATH), "_preflight-child", probe, token))
         command = tuple(command)

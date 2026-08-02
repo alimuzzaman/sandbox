@@ -42,3 +42,29 @@ class TestIpv6DefaultRouteDetection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScopeProbeCommandShape(unittest.TestCase):
+    """systemd refuses `--wait` together with `--scope`, so the
+    cgroup-delegation gate could never pass while both were passed."""
+
+    def test_scope_probe_does_not_pass_wait(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        block = source.split("if probe == \"private-network\":", 1)[1].split("command.extend((str(", 1)[0]
+        scope_branch = block.split("else:", 1)[1]
+        arguments = [line for line in scope_branch.splitlines()
+                     if "command.extend" in line]
+        self.assertTrue(arguments)
+        self.assertIn("--scope", arguments[0])
+        self.assertNotIn("--wait", arguments[0])
+
+    def test_waiting_probes_still_wait(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        block = source.split("if probe == \"private-network\":", 1)[1].split("else:", 1)[0]
+        self.assertIn("--wait", block)

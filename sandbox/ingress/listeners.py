@@ -35,14 +35,74 @@ def parse_linux_proc(text: str, *, family: str, dual_stack: bool | None = None):
     return tuple(endpoints)
 
 
+INSTALLED_INGRESS_HELPER = "/usr/local/libexec/sandbox-ingress-helper"
+
+
+def parse_helper_listeners(text: str) -> dict:
+    """{(address, port): evidence} from the helper's fixed-shape output."""
+    found = {}
+    for line in text.splitlines():
+        columns = line.split()
+        if len(columns) != 5:
+            continue
+        address, port, pid, command, executable = columns
+        if not port.isdigit():
+            continue
+        address = "0.0.0.0" if address in {"*", "0.0.0.0"} else address.strip("[]")
+        if address == "::" or address == "":
+            address = "::"
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        found[(address, int(port))] = {
+            "pid": int(pid) if pid.isdigit() else None,
+            "command": None if command == "-" else command,
+            "executable": None if executable == "-" else executable,
+            "start": None,
+        }
+    return found
+
+
 class ListenerObserver:
     def __init__(self, *, platform="linux", read_text=None, process=None,
-                 ipv6_dual_stack=None, proc_root="/proc"):
+                 ipv6_dual_stack=None, proc_root="/proc",
+                 privileged_helper=INSTALLED_INGRESS_HELPER):
         self.platform = platform
         self.read_text = read_text or (lambda path: Path(path).read_text())
         self.process = process
         self.ipv6_dual_stack = ipv6_dual_stack
         self.proc_root = Path(proc_root)
+        # An unprivileged caller cannot read /proc/<pid>/fd for a root-owned
+        # incumbent, so the documented conformance target (system Caddy under
+        # systemd) is invisible without this read-only privileged fallback.
+        self.privileged_helper = privileged_helper
+
+    def _attribute_privileged(self, endpoints):
+        if not endpoints or self.process is None or not self.privileged_helper:
+            return endpoints
+        if all(item.process for item in endpoints):
+            return endpoints
+        result = self.process.run(
+            ("sudo", "-n", self.privileged_helper, "listeners"), timeout=10,
+        )
+        if getattr(result, "returncode", 1) != 0:
+            return endpoints
+        found = parse_helper_listeners(getattr(result, "stdout", "") or "")
+        if not found:
+            return endpoints
+        from dataclasses import replace
+        attributed = []
+        for item in endpoints:
+            evidence = found.get((item.address, item.port))
+            if item.process or not evidence or not evidence.get("pid"):
+                attributed.append(item)
+                continue
+            attributed.append(replace(
+                item, process=evidence,
+                owner_confidence="proven" if evidence.get("executable") else "probable",
+            ))
+        return tuple(attributed)
 
     def snapshot(self) -> tuple[ListenerEndpoint, ...]:
         if self.platform == "linux":
@@ -55,7 +115,8 @@ class ListenerObserver:
                     ))
                 except OSError:
                     continue
-            return enrich_linux_processes(tuple(values), self.proc_root)
+            return self._attribute_privileged(
+                enrich_linux_processes(tuple(values), self.proc_root))
         if self.platform in {"darwin", "macos"} and self.process is not None:
             result = self.process.run(("lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"), timeout=2)
             return parse_macos_lsof(result.stdout if result.returncode == 0 else "")

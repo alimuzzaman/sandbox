@@ -360,8 +360,8 @@ case "$verb" in
             "/etc/sandbox-ingress/applied/$uid"
         sudoers="/etc/sudoers.d/sandbox-ingress-$uid"; temporary="$sudoers.new.$$"; alias="SANDBOX_INGRESS_$uid"
         {
-            printf 'Cmnd_Alias %s = %s authorization-status *, %s preflight *, %s validate-current *, %s prepare *, %s activate *, %s observe *, %s rollback *, %s cleanup *\n' \
-                "$alias" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed"
+            printf 'Cmnd_Alias %s = %s authorization-status *, %s preflight *, %s validate-current *, %s prepare *, %s activate *, %s observe *, %s rollback *, %s cleanup *, %s listeners\n' \
+                "$alias" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed" "$installed"
             printf '%s ALL=(root) NOPASSWD: %s\n' "$user" "$alias"
         } >"$temporary"
         chown root:root "$temporary"; chmod 0440 "$temporary"
@@ -434,6 +434,25 @@ case "$verb" in
         printf '%s\n' "$plan" "$expected" >"$temporary"
         chown root:root "$temporary"; chmod 0400 "$temporary"; mv -f "$temporary" "$applied"
         sha256sum "$destination" | cut -d' ' -f1 ;;
+    listeners)
+        # Read-only privileged attribution for the required ports. An
+        # unprivileged caller cannot read /proc/<pid>/fd for a root-owned
+        # incumbent, so system Caddy -- the documented conformance target --
+        # was permanently "unidentified" and could never be selected. Emits one
+        # fixed-shape line per listening socket and mutates nothing.
+        [ "$#" -eq 0 ] || usage; require_root
+        ss -lntpH 2>/dev/null | while read -r _state _recvq _sendq local _peer users; do
+            address=${local%:*}; port=${local##*:}
+            case "$port" in ''|*[!0-9]*) continue ;; esac
+            pid=${users#*pid=}; pid=${pid%%,*}
+            case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+            command=""; executable=""
+            if [ -n "$pid" ] && [ -r "/proc/$pid/comm" ]; then
+                command=$(tr -d "\n" < "/proc/$pid/comm")
+                executable=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+            fi
+            printf '%s %s %s %s %s\n' "$address" "$port" "${pid:--}" "${command:--}" "${executable:--}"
+        done ;;
     observe)
         [ "$#" -eq 3 ] || usage; require_root; require_applied_receipt "$@"
         route=$3; destination=$(destination "$route")

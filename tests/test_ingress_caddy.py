@@ -80,3 +80,55 @@ class TestWildcardBindIsRestrictedToLoopbackClients(unittest.TestCase):
                 {"hostname": "demo.test", "owner": "/tmp/project::default"},
                 {"address": "127.0.0.1", "port": 8188},
             )
+
+
+class TestRootAndClientRenderersAgree(unittest.TestCase):
+    """The helper re-renders the fragment as root and compares digests, so the
+    two renderers must produce identical bytes for every accepted listen shape."""
+
+    SHELL = """set -eu
+route=$1; hostname=$2; backend=$3; backend_port=$4; listen=$5
+rendered_backend=$backend
+loopback_only=no
+case "$listen" in 0.0.0.0|::) loopback_only=yes ;; esac
+printf '# sandbox-ingress v1 route=%s\\n' "$route"
+printf 'http://%s {\\n' "$hostname"
+printf '    bind %s\\n' "$listen"
+if [ "$loopback_only" = yes ]; then
+    printf '    @loopback remote_ip 127.0.0.0/8 ::1\\n'
+    printf '    handle @loopback {\\n'
+    printf '        reverse_proxy %s:%s\\n' "$rendered_backend" "$backend_port"
+    printf '    }\\n'
+    printf '    handle {\\n'
+    printf '        respond 403\\n'
+    printf '    }\\n'
+else
+    printf '    reverse_proxy %s:%s\\n' "$rendered_backend" "$backend_port"
+fi
+printf '}\\n'
+"""
+
+    def test_identical_output_for_loopback_and_wildcard(self):
+        import subprocess
+
+        from sandbox.ingress.adapters.caddy import render_caddy
+
+        for address in ("127.0.0.1", "::", "0.0.0.0"):
+            with self.subTest(address=address):
+                shell = subprocess.run(
+                    ("sh", "-c", self.SHELL, "sh", "abc123", "demo.test",
+                     "127.0.0.1", "8188", address),
+                    capture_output=True, text=True, timeout=15,
+                )
+                listen = {"address": address, "port": 80,
+                          "loopback_clients_only": address in {"::", "0.0.0.0"}}
+                python = render_caddy("abc123", "demo.test", "127.0.0.1", 8188, listen)
+                self.assertEqual(shell.stdout, python)
+
+    def test_helper_renderer_covers_the_wildcard_case(self):
+        from pathlib import Path
+
+        helper = (Path(__file__).resolve().parents[1] / "tools"
+                  / "ingress-helper.sh").read_text()
+        self.assertIn("loopback_only=yes", helper)
+        self.assertIn("@loopback remote_ip 127.0.0.0/8 ::1", helper)

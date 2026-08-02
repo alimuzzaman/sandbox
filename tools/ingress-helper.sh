@@ -111,11 +111,26 @@ plan_digest() { printf '%s\0' "$@" | sha256sum | cut -d' ' -f1; }
 render_candidate() {
     output=$1 route=$2 hostname=$3 backend=$4 backend_port=$5 listen=$6
     rendered_backend=$backend; case "$backend" in *:*) rendered_backend="[$backend]" ;; esac
+    # Root renders the fragment itself and compares digests, so this must match
+    # the unprivileged renderer byte for byte -- including the loopback-client
+    # restriction used when the incumbent listens on a wildcard.
+    loopback_only=no
+    case "$listen" in 0.0.0.0|::) loopback_only=yes ;; esac
     {
         printf '# sandbox-ingress v1 route=%s\n' "$route"
         printf 'http://%s {\n' "$hostname"
         printf '    bind %s\n' "$listen"
-        printf '    reverse_proxy %s:%s\n' "$rendered_backend" "$backend_port"
+        if [ "$loopback_only" = yes ]; then
+            printf '    @loopback remote_ip 127.0.0.0/8 ::1\n'
+            printf '    handle @loopback {\n'
+            printf '        reverse_proxy %s:%s\n' "$rendered_backend" "$backend_port"
+            printf '    }\n'
+            printf '    handle {\n'
+            printf '        respond 403\n'
+            printf '    }\n'
+        else
+            printf '    reverse_proxy %s:%s\n' "$rendered_backend" "$backend_port"
+        fi
         printf '}\n'
     } >"$output"
     chown root:root "$output"; chmod 0600 "$output"

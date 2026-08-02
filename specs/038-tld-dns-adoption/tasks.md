@@ -211,14 +211,14 @@ T023 incumbent adapter tests
 Sandbox-owned resolution is the DEFAULT strategy; resolver adoption is opt-in and
 proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
 
-- [X] T060 Keep the Sandbox-owned resolution bootstrap selected whenever no resolver
+- [X] T062 Keep the Sandbox-owned resolution bootstrap selected whenever no resolver
       adoption is chosen, and report a per-port fallback only when the default itself is
       unavailable, in `sandbox/core/_domains.py`
-- [X] T061 Expose the strategy switch through `./sb domains use <provider>` and the
+- [X] T063 Expose the strategy switch through `./sb domains use <provider>` and the
       `domains.strategy`/`domains.ingress` precedence chain in `sandbox/commands/domains.py`
-- [X] T062 Document the default strategy and the switch in `docs/domain-resolution.md`,
+- [X] T064 Document the default strategy and the switch in `docs/domain-resolution.md`,
       `docs/clean-url-default.md`, and `docs/sandbox-config-reference.md`
-- [~] T063 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
+- [~] T065 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
       through the default ingress) and capture evidence in
       `specs/038-tld-dns-adoption/evidence/default-strategy.md`
       (macOS proven 2026-08-02; Linux still open)

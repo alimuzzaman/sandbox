@@ -1,7 +1,7 @@
 # Default resolution strategy live proof (macOS)
 
 **Scope**: live proof that Sandbox-owned scoped resolution is the default strategy and works
-with zero adoptable resolver adapters. Covers T063 on darwin only; Linux remains unproven.
+with zero adoptable resolver adapters. Covers T065 on darwin only; Linux remains unproven.
 
 **Host**: macOS 15 (Darwin 25.6.0). Date 2026-08-02.
 

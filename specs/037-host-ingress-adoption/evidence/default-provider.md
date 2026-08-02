@@ -1,7 +1,7 @@
 # Default provider live proof (macOS)
 
 **Scope**: live proof that the default Docker/Caddy ingress serves clean URLs with zero
-adoptable incumbent adapters. Covers T055 on darwin only; Linux remains unproven.
+adoptable incumbent adapters. Covers T075 on darwin only; Linux remains unproven.
 
 **Host**: macOS 15 (Darwin 25.6.0), OrbStack Docker, Herd installed. Date 2026-08-02.
 

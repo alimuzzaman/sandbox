@@ -220,25 +220,25 @@ T032 Traefik tests
 The Docker/Caddy provider is the DEFAULT, adoption is opt-in, and disabling the legacy
 path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
 
-- [X] T050 Restore the default clean-URL bootstrap and select it whenever no adoption is
+- [X] T070 Restore the default clean-URL bootstrap and select it whenever no adoption is
       chosen in `sandbox/core/_domains.py` (`_ensure_url_proxy`, `clean_url_setup`,
       `proxy_setup`, `_secure_at_create`)
-- [X] T051 Restore `tools/proxy-helper.sh` with the privileged target moved out of the
+- [X] T071 Restore `tools/proxy-helper.sh` with the privileged target moved out of the
       checkout: root-owned `/usr/local/libexec/sandbox-proxy-helper` plus a scoped
       `/etc/sudoers.d/sandbox-proxy-<uid>` rule, and refuse privileged verbs from any
       other path
-- [X] T052 Add the on-demand switch surface `./sb domains use <provider>` backed by
+- [X] T072 Add the on-demand switch surface `./sb domains use <provider>` backed by
       `domains.ingress` precedence (env, machine-local, project, default) in
       `sandbox/commands/domains.py` and `sandbox/core/_domains.py`
-- [X] T053 Add policy guard tests for the default provider, helper integrity, sudoers
+- [X] T073 Add policy guard tests for the default provider, helper integrity, sudoers
       target, and spec/docs synchronization in `tests/test_clean_url_default_policy.py`
-- [X] T054 Land the policy in `docs/clean-url-default.md`, `README.md`, `CLAUDE.md`,
+- [X] T074 Land the policy in `docs/clean-url-default.md`, `README.md`, `CLAUDE.md`,
       `AGENTS.md`, `docs/host-ingress.md`, and `docs/sandbox-config-reference.md`
-- [~] T055 Prove the restored default live on macOS and Linux: `./sb domains setup`,
+- [~] T075 Prove the restored default live on macOS and Linux: `./sb domains setup`,
       request through `http(s)://<name>.<tld>`, then `./sb domains use <incumbent>` and
       back, capturing evidence in `specs/037-host-ingress-adoption/evidence/default-provider.md`
       (macOS proven 2026-08-02; Linux and the incumbent round trip still open)
-- [ ] T056 Detect the published-but-not-listening ingress state in `./sb doctor` and name
+- [ ] T076 Detect the published-but-not-listening ingress state in `./sb doctor` and name
       the owning process, per FR-034 (found live: OrbStack widened a `127.0.0.77:80`
       publish to a wildcard bind that Herd's nginx blocked)
 

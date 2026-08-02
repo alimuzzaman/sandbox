@@ -402,3 +402,62 @@ class TestDnsmasqArgumentForm(unittest.TestCase):
                              "space-separated form is rejected by dnsmasq")
             self.assertTrue(any(item.startswith("--conf-file=") for item in call),
                             f"no --conf-file= argument in {call}")
+
+
+class TestStaleAuthorityRecordSelfHeals(unittest.TestCase):
+    """A recorded authority process that is GONE is a stale record, not drift.
+    Refusing there left the authority unstartable after any reboot or kill."""
+
+    def _authority(self, tmp, *, pid_reader, pid_matches, pid_executable, process):
+        from sandbox.network.authority import DnsmasqAuthority
+
+        return DnsmasqAuthority(
+            Path(tmp), process=process, binary="/usr/sbin/dnsmasq",
+            pid_reader=pid_reader, pid_matches=pid_matches,
+            pid_executable=pid_executable, listener_matches=lambda *_args: True,
+        )
+
+    @staticmethod
+    def _binding():
+        from sandbox.network.models import ResolutionBinding
+
+        return ResolutionBinding.create(
+            kind="exact", name="one.test", target="127.0.0.77", adapter_id="resolved",
+            owners=("/tmp/one::default",), desired={},
+        )
+
+    def test_dead_recorded_process_is_restarted(self):
+        binding = self._binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            live = self._authority(
+                tmp, process=RecordingProcess(), pid_reader=lambda _p: (321, "boot:9"),
+                pid_matches=lambda *_a: True, pid_executable=lambda _pid: True)
+            live.ensure((binding,), address="127.0.0.55", port=5300)
+
+            # The process is gone: no pid file, nothing matches.
+            process = RecordingProcess()
+            healed = self._authority(
+                tmp, process=process, pid_reader=lambda _p: (None, None),
+                pid_matches=lambda *_a: False, pid_executable=lambda _pid: False)
+            result = healed.ensure((binding,), address="127.0.0.55", port=5300)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(any(call and call[0].endswith("dnsmasq")
+                            for call, _kwargs in process.calls))
+
+    def test_live_unprovable_process_is_still_refused(self):
+        binding = self._binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            live = self._authority(
+                tmp, process=RecordingProcess(), pid_reader=lambda _p: (321, "boot:9"),
+                pid_matches=lambda *_a: True, pid_executable=lambda _pid: True)
+            live.ensure((binding,), address="127.0.0.55", port=5300)
+
+            # Same pid still alive, but its start marker no longer matches ours.
+            foreign = self._authority(
+                tmp, process=RecordingProcess(), pid_reader=lambda _p: (321, "boot:99"),
+                pid_matches=lambda *_a: True, pid_executable=lambda _pid: True)
+            with self.assertRaises(RuntimeError) as caught:
+                foreign.ensure((binding,), address="127.0.0.55", port=5300)
+
+        self.assertIn("drifted", str(caught.exception))

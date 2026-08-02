@@ -222,7 +222,19 @@ class DnsmasqAuthority:
                 "healthy", digest,
             )
         if owned and not self._process_owned(state, pid, pid_start):
-            raise RuntimeError("owned authority process identity drifted")
+            # Distinguish "our process is gone" from "someone else holds it".
+            # A recorded process that no longer exists is a stale record — after
+            # a reboot, an OOM kill, or an operator stopping it — and refusing
+            # there left the authority permanently unstartable with no verb to
+            # reset it. Only a LIVE process we cannot prove is ours is drift.
+            recorded = state.get("pid")
+            live_foreign = bool(
+                recorded and pid and int(recorded) == int(pid)
+                and (self.pid_matches(pid, pid_start) or self.pid_executable(pid))
+            )
+            if live_foreign:
+                raise RuntimeError("owned authority process identity drifted")
+            state = {**state, "pid": None, "pid_start": None}
         self._atomic_write(self.config_path, text)
         # dnsmasq only accepts the equals form for long options; a separate
         # argument is rejected with "junk found in command line", which read as

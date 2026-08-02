@@ -113,8 +113,14 @@ def main() -> None:
             service.cleanup(project, label=label, interactive=True))
 
     observed["after"] = host_state()
+    def _answer_set(answers: dict) -> dict:
+        # Round-robin records come back in a different order on every query, so
+        # compare the SET of answers; an order change is not a resolution change.
+        return {name: frozenset(value.split("\n")) for name, value in answers.items()}
+
     observed["unrelated_answers_unchanged"] = (
-        observed["before"]["unrelated_answers"] == observed["after"]["unrelated_answers"]
+        _answer_set(observed["before"]["unrelated_answers"])
+        == _answer_set(observed["after"]["unrelated_answers"])
     )
     observed["resolv_conf_unchanged"] = (
         observed["before"]["resolv_conf"] == observed["after"]["resolv_conf"]

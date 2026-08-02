@@ -284,6 +284,16 @@ class DnsmasqAuthority:
             "healthy" if self._healthy(state, pid, pid_start) else "starting", digest,
         )
 
+    def _forget(self, state: dict) -> None:
+        """Drop generated artifacts and state for an authority that is not running."""
+        for path in (self.config_path, self.pid_file, self.state_path):
+            try:
+                if path.is_symlink():
+                    continue
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     def remove(self, binding_id: str) -> bool:
         with self._locked():
             state = self._load()
@@ -298,7 +308,17 @@ class DnsmasqAuthority:
             self._owned_config(state)
             pid, identity = state.get("pid"), state.get("pid_start")
             if not self._process_owned(state, pid, identity):
-                return False
+                # The recorded process is gone -- killed, OOMed, or lost to a
+                # reboot. Its final owned zone is being removed anyway, so the
+                # goal state is already reached; refusing here reported cleanup
+                # as incomplete forever with nothing left to clean.
+                current, _ = self.pid_reader(self.pid_file)
+                if current and self.pid_executable(current):
+                    # Something IS running under that pid; identity drift there
+                    # is a preservation case, not a cleanup case.
+                    return False
+                self._forget(state)
+                return True
             terminated = self.process.run(("kill", "-TERM", str(pid)), timeout=5)
             if terminated.returncode != 0:
                 return False

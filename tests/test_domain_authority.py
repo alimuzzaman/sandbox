@@ -461,3 +461,59 @@ class TestStaleAuthorityRecordSelfHeals(unittest.TestCase):
                 foreign.ensure((binding,), address="127.0.0.55", port=5300)
 
         self.assertIn("drifted", str(caught.exception))
+
+
+class TestFinalRemovalWhenAuthorityIsGone(unittest.TestCase):
+    """Removing the last owned zone when the process is already dead must
+    converge: refusing left cleanup incomplete forever with nothing to clean."""
+
+    @staticmethod
+    def _binding():
+        from sandbox.network.models import ResolutionBinding
+
+        return ResolutionBinding.create(
+            kind="exact", name="demo.test", target="127.0.0.77", adapter_id="resolved",
+            owners=("/tmp/demo::default",), desired={},
+        )
+
+    def test_dead_process_allows_final_removal(self):
+        from sandbox.network.authority import DnsmasqAuthority
+
+        binding = self._binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            live = DnsmasqAuthority(
+                Path(tmp), process=RecordingProcess(), binary="/usr/sbin/dnsmasq",
+                pid_reader=lambda _path: (123, "boot:1"),
+                pid_matches=lambda *_args: True, pid_executable=lambda _pid: True,
+                listener_matches=lambda *_args: True, sleeper=lambda _s: None)
+            live.ensure((binding,), address="127.0.0.55", port=5300)
+
+            gone = DnsmasqAuthority(
+                Path(tmp), process=RecordingProcess(), binary="/usr/sbin/dnsmasq",
+                pid_reader=lambda _path: (None, None),
+                pid_matches=lambda *_args: False, pid_executable=lambda _pid: False,
+                listener_matches=lambda *_args: False, sleeper=lambda _s: None)
+            self.assertTrue(gone.remove(binding.binding_id))
+            self.assertFalse(gone.config_path.exists())
+            self.assertFalse(gone.state_path.exists())
+
+    def test_a_live_process_is_still_preserved(self):
+        from sandbox.network.authority import DnsmasqAuthority
+
+        binding = self._binding()
+        with tempfile.TemporaryDirectory() as tmp:
+            live = DnsmasqAuthority(
+                Path(tmp), process=RecordingProcess(), binary="/usr/sbin/dnsmasq",
+                pid_reader=lambda _path: (123, "boot:1"),
+                pid_matches=lambda *_args: True, pid_executable=lambda _pid: True,
+                listener_matches=lambda *_args: True, sleeper=lambda _s: None)
+            live.ensure((binding,), address="127.0.0.55", port=5300)
+
+            drifted = DnsmasqAuthority(
+                Path(tmp), process=RecordingProcess(), binary="/usr/sbin/dnsmasq",
+                pid_reader=lambda _path: (123, "boot:9"),
+                pid_matches=lambda _pid, expected: expected == "boot:9",
+                pid_executable=lambda _pid: True,
+                listener_matches=lambda *_args: True, sleeper=lambda _s: None)
+            self.assertFalse(drifted.remove(binding.binding_id))
+            self.assertTrue(drifted.state_path.exists())

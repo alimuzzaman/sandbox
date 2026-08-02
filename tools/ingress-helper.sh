@@ -274,10 +274,14 @@ surface_ready() {
     [ "$(file_uid /etc/caddy/Caddyfile)" -eq 0 ] || fail "Caddyfile is not root-owned"
     mode=$(file_mode /etc/caddy/Caddyfile); [ $((0$mode & 022)) -eq 0 ] \
         || fail "Caddyfile is group/world writable"
-    grep -Eq '^[[:space:]]*import[[:space:]]+(/etc/caddy/)?conf\.d/\*' /etc/caddy/Caddyfile \
+    # Accept the fragment-directory import with or without a file-glob suffix:
+    # Caddy's own packaging ships `import /etc/caddy/conf.d/*.caddy`, which the
+    # bare-`*` pattern rejected as a foreign policy surface -- so the documented
+    # conformance host failed its own preflight.
+    grep -Eq '^[[:space:]]*import[[:space:]]+(/etc/caddy/)?conf\.d/\*(\.[A-Za-z0-9]+)?[[:space:]]*$' /etc/caddy/Caddyfile \
         || fail "Caddyfile does not import the owned fragment directory"
     grep -E '^[[:space:]]*import[[:space:]]+' /etc/caddy/Caddyfile \
-        | grep -Ev '^[[:space:]]*import[[:space:]]+(/etc/caddy/)?conf\.d/\*[[:space:]]*$' \
+        | grep -Ev '^[[:space:]]*import[[:space:]]+(/etc/caddy/)?conf\.d/\*(\.[A-Za-z0-9]+)?[[:space:]]*$' \
         | grep -q . && fail "Caddyfile imports an unproven policy surface" || true
     python3 - /etc/caddy <<'PY' || exit 65
 import os

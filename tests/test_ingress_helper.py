@@ -110,3 +110,44 @@ class TestIngressHelper(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TestCaddyfileImportPolicy(unittest.TestCase):
+    """The helper must accept Caddy's own packaged import line. Requiring a bare
+    `conf.d/*` rejected `import /etc/caddy/conf.d/*.caddy`, so the documented
+    conformance host failed its own preflight."""
+
+    PATTERN = (r'^[[:space:]]*import[[:space:]]+(/etc/caddy/)?conf\.d/'
+               r'\*(\.[A-Za-z0-9]+)?[[:space:]]*$')
+
+    def _matches(self, line: str) -> bool:
+        import subprocess
+
+        result = subprocess.run(
+            ("grep", "-Eq", self.PATTERN), input=line, text=True,
+            capture_output=True, timeout=10,
+        )
+        return result.returncode == 0
+
+    def test_helper_uses_the_suffix_tolerant_pattern(self):
+        from pathlib import Path
+
+        helper = (Path(__file__).resolve().parents[1] / "tools"
+                  / "ingress-helper.sh").read_text()
+        self.assertIn(r"conf\.d/\*(\.[A-Za-z0-9]+)?", helper)
+
+    def test_packaged_and_bare_forms_are_accepted(self):
+        for line in ("import /etc/caddy/conf.d/*.caddy",
+                     "import /etc/caddy/conf.d/*",
+                     "import conf.d/*.caddy",
+                     "    import /etc/caddy/conf.d/*.caddy   "):
+            with self.subTest(line=line):
+                self.assertTrue(self._matches(line))
+
+    def test_foreign_imports_are_still_rejected(self):
+        for line in ("import /etc/caddy/other/*.caddy",
+                     "import /home/user/evil.caddy",
+                     "import /etc/caddy/conf.d/../evil.caddy",
+                     "import /etc/caddy/conf.d/*.caddy extra"):
+            with self.subTest(line=line):
+                self.assertFalse(self._matches(line))

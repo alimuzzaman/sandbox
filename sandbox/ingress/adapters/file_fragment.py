@@ -9,6 +9,17 @@ from pathlib import Path
 from sandbox.config.domains import normalize_hostname
 
 
+def _diagnostic(text):
+    """Keep the END of a helper's stderr.
+
+    The privileged verbs run `caddy validate`, which prints pages of warnings
+    before the actual refusal, so a head-truncated message showed only noise and
+    hid the reason the operation failed.
+    """
+    value = (text or "").strip()
+    return value if len(value) <= 1000 else "…" + value[-999:]
+
+
 class FileFragmentAdapter:
     adapter_id = ""
     extension = "conf"
@@ -91,7 +102,7 @@ class FileFragmentAdapter:
         return {"ok": result.returncode == 0,
                 "state": "ready" if result.returncode == 0 else "pending_privilege",
                 "mutated": result.returncode == 0,
-                "error": (result.stderr or "")[:1000]}
+                "error": _diagnostic(result.stderr)}
 
     def ready(self):
         result = self._run("preflight", self.network_root, self.adapter_id, timeout=10)
@@ -106,7 +117,7 @@ class FileFragmentAdapter:
 
     def validate_current(self, plan):
         result = self._run("validate-current", self.network_root, self.adapter_id, timeout=10)
-        return {"ok": result.returncode == 0, "error": (result.stderr or "")[:1000]}
+        return {"ok": result.returncode == 0, "error": _diagnostic(result.stderr)}
 
     def capture_prior(self, plan):
         return {"route_id": plan["route_id"]}
@@ -118,12 +129,12 @@ class FileFragmentAdapter:
 
     def validate_candidate(self, stage):
         result = self._run("prepare", *self._plan_arguments(stage))
-        return {"ok": result.returncode == 0, "error": (result.stderr or "")[:1000]}
+        return {"ok": result.returncode == 0, "error": _diagnostic(result.stderr)}
 
     def activate(self, stage):
         result = self._run("activate", self.network_root, self.adapter_id,
                            stage["route_id"])
-        return {"ok": result.returncode == 0, "error": (result.stderr or "")[:1000]}
+        return {"ok": result.returncode == 0, "error": _diagnostic(result.stderr)}
 
     def observe_route(self, plan):
         result = self._run("observe", self.network_root, self.adapter_id,
@@ -135,11 +146,11 @@ class FileFragmentAdapter:
     def rollback(self, stage, prior):
         result = self._run("rollback", self.network_root, self.adapter_id,
                            stage["route_id"])
-        return {"ok": result.returncode == 0, "error": (result.stderr or "")[:1000]}
+        return {"ok": result.returncode == 0, "error": _diagnostic(result.stderr)}
 
     def cleanup(self, route):
         applied = dict(route.last_applied or {})
         result = self._run("cleanup", self.network_root, self.adapter_id,
                            route.route_id, applied.get("content_digest", ""))
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
-                "error": (result.stderr or "")[:1000]}
+                "error": _diagnostic(result.stderr)}

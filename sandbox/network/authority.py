@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
+import stat
+import time
 from typing import Callable, Iterable
 
 from .models import AnsweringAuthority, ResolutionBinding
@@ -15,7 +19,10 @@ from .models import AnsweringAuthority, ResolutionBinding
 class DnsmasqAuthority:
     def __init__(self, root: str | Path, *, process, binary: str,
                  pid_reader: Callable | None = None,
-                 pid_matches: Callable | None = None) -> None:
+                 pid_matches: Callable | None = None,
+                 pid_executable: Callable | None = None,
+                 listener_matches: Callable | None = None,
+                 sleeper: Callable[[float], None] | None = None) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.process = process
@@ -24,8 +31,12 @@ class DnsmasqAuthority:
         self.pid_file = self.root / "dnsmasq.pid"
         self.log_file = self.root / "dnsmasq.log"
         self.state_path = self.root / "authority-state.json"
+        self.lock_path = self.root / "authority.lock"
         self.pid_reader = pid_reader or self._read_pid
         self.pid_matches = pid_matches or self._pid_matches
+        self.pid_executable = pid_executable or self._pid_executable
+        self.listener_matches = listener_matches or self._listener_matches
+        self.sleeper = sleeper or time.sleep
 
     @staticmethod
     def render_config(*, address: str, port: int,
@@ -40,8 +51,11 @@ class DnsmasqAuthority:
         ]
         for binding in sorted(bindings, key=lambda item: (item.name, item.binding_id)):
             name = binding.name.removeprefix("*.")
-            lines.append(f"address=/{name}/{binding.target}")
-            lines.append(f"local=/{name}/")
+            if binding.kind == "zone":
+                lines.append(f"address=/{name}/{binding.target}")
+                lines.append(f"local=/{name}/")
+            else:
+                lines.append(f"host-record={name},{binding.target}")
         return "\n".join(lines) + "\n"
 
     def _atomic_write(self, path: Path, text: str, mode: int = 0o600) -> None:
@@ -58,16 +72,74 @@ class DnsmasqAuthority:
                 os.unlink(temporary)
 
     def _load(self) -> dict:
-        if not self.state_path.exists():
+        payload = self._owned_file_bytes(self.state_path)
+        if payload is None:
             return {}
-        value = json.loads(self.state_path.read_text())
+        value = json.loads(payload.decode("utf-8"))
         return value if isinstance(value, dict) else {}
+
+    def _owned_file_bytes(self, path: Path) -> bytes | None:
+        try:
+            descriptor = os.open(
+                path, os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RuntimeError(f"unsafe authority path: {path}") from exc
+        try:
+            details = os.fstat(descriptor)
+            if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                    or details.st_uid != os.getuid() or details.st_mode & 0o077):
+                raise RuntimeError(f"unsafe authority path: {path}")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
+    def _owned_config(self, state: dict) -> str | None:
+        payload = self._owned_file_bytes(self.config_path)
+        expected = state.get("config_digest")
+        if not expected:
+            if payload is not None:
+                raise RuntimeError("foreign authority config exists without an ownership receipt")
+            return None
+        if payload is None:
+            raise RuntimeError("owned authority config is missing")
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise RuntimeError("owned authority config drifted")
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("owned authority config is not valid UTF-8") from exc
 
     def _save(self, value: dict) -> None:
         self._atomic_write(
             self.state_path,
             json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
         )
+
+    @contextmanager
+    def _locked(self):
+        descriptor = os.open(
+            self.lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            details = os.fstat(descriptor)
+            if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                    or details.st_uid != os.getuid() or details.st_mode & 0o077):
+                raise RuntimeError("authority lock ownership is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def _read_pid(self, path: Path):
         try:
@@ -84,7 +156,49 @@ class DnsmasqAuthority:
         except (OSError, IndexError):
             return False
 
-    def ensure(self, bindings: Iterable[ResolutionBinding], *, address: str, port: int):
+    def _pid_executable(self, pid: int) -> bool:
+        try:
+            return Path(f"/proc/{pid}/exe").resolve() == Path(self.binary).resolve()
+        except OSError:
+            return False
+
+    def _listener_matches(self, pid: int, address: str, port: int) -> bool:
+        try:
+            result = self.process.run(("ss", "-H", "-lntup"), timeout=2)
+        except (OSError, TypeError):
+            return None
+        if result.returncode != 0:
+            return None
+        endpoint = f"{address}:{int(port)}"
+        lines = [line for line in (result.stdout or "").splitlines()
+                 if endpoint in line and f"pid={pid}," in line]
+        return any(line.startswith("tcp") for line in lines) and any(
+            line.startswith("udp") for line in lines
+        )
+
+    def _healthy(self, state: dict, pid, pid_start) -> bool:
+        return bool(self._process_owned(state, pid, pid_start)
+                    and self.listener_matches(
+                        pid, state.get("address"), int(state.get("port", 0)),
+                    ))
+
+    def _process_owned(self, state: dict, pid, pid_start) -> bool:
+        return bool(
+            pid and pid_start and state.get("pid") == pid
+            and state.get("pid_start") == pid_start
+            and self.pid_matches(pid, pid_start)
+            and self.pid_executable(pid)
+        )
+
+    def ensure(self, bindings: Iterable[ResolutionBinding], *, address: str, port: int,
+               reservation=None):
+        with self._locked():
+            return self._ensure(
+                bindings, address=address, port=port, reservation=reservation,
+            )
+
+    def _ensure(self, bindings: Iterable[ResolutionBinding], *, address: str, port: int,
+                reservation=None):
         bindings = tuple(bindings)
         text = self.render_config(
             address=address, port=port, bindings=bindings,
@@ -92,22 +206,55 @@ class DnsmasqAuthority:
         )
         digest = hashlib.sha256(text.encode()).hexdigest()
         state = self._load()
+        previous_config = self._owned_config(state)
+        owned = state.get("bindings") or {}
+        if owned and (
+            state.get("address") != address or int(state.get("port", 0)) != int(port)
+        ):
+            raise RuntimeError(
+                "refusing to move an active shared DNS authority endpoint"
+            )
         pid, pid_start = self.pid_reader(self.pid_file)
-        if state.get("config_digest") == digest and pid and self.pid_matches(pid, pid_start):
+        if state.get("config_digest") == digest and self._healthy(state, pid, pid_start):
             return AnsweringAuthority(
                 "sandbox-dnsmasq", address, port, self.binary, str(self.config_path),
                 tuple(item.binding_id for item in bindings), pid, pid_start,
                 "healthy", digest,
             )
-        if state.get("pid") and state.get("pid_start") and self.pid_matches(
-            state["pid"], state["pid_start"],
-        ):
-            self.process.run(("kill", "-TERM", str(state["pid"])), timeout=5)
+        if owned and not self._process_owned(state, pid, pid_start):
+            raise RuntimeError("owned authority process identity drifted")
         self._atomic_write(self.config_path, text)
+        checked = self.process.run(
+            (self.binary, "--test", "--conf-file", str(self.config_path)), timeout=10,
+        )
+        if checked.returncode != 0:
+            if previous_config is None:
+                self.config_path.unlink(missing_ok=True)
+            else:
+                self._atomic_write(self.config_path, previous_config)
+            raise RuntimeError((checked.stderr or "dnsmasq authority config rejected")[:1000])
+        if reservation is not None:
+            if reservation.address != address or int(reservation.port) != int(port):
+                raise RuntimeError("DNS endpoint reservation does not match the authority plan")
+            reservation.release()
+            reservation = None
+        if self._process_owned(state, pid, pid_start):
+            self.process.run(("kill", "-TERM", str(state["pid"])), timeout=5)
         result = self.process.run(
             (self.binary, "--conf-file", str(self.config_path)), timeout=10,
         )
         if result.returncode != 0:
+            if previous_config is None:
+                self.config_path.unlink(missing_ok=True)
+            else:
+                self._atomic_write(self.config_path, previous_config)
+                restored = self.process.run(
+                    (self.binary, "--conf-file", str(self.config_path)), timeout=10,
+                )
+                if restored.returncode == 0:
+                    restored_pid, restored_start = self.pid_reader(self.pid_file)
+                    state.update({"pid": restored_pid, "pid_start": restored_start})
+                    self._save(state)
             raise RuntimeError((result.stderr or "dnsmasq authority failed")[:1000])
         pid, pid_start = self.pid_reader(self.pid_file)
         state = {
@@ -119,35 +266,51 @@ class DnsmasqAuthority:
         return AnsweringAuthority(
             "sandbox-dnsmasq", address, port, self.binary, str(self.config_path),
             tuple(item.binding_id for item in bindings), pid, pid_start,
-            "healthy" if pid and self.pid_matches(pid, pid_start) else "starting", digest,
+            "healthy" if self._healthy(state, pid, pid_start) else "starting", digest,
         )
 
     def remove(self, binding_id: str) -> bool:
-        state = self._load()
-        bindings = state.get("bindings") or {}
-        if binding_id not in bindings:
-            return False
-        del bindings[binding_id]
-        if bindings:
-            values = tuple(ResolutionBinding.from_dict(item) for item in bindings.values())
-            self.ensure(values, address=state["address"], port=int(state["port"]))
+        with self._locked():
+            state = self._load()
+            bindings = state.get("bindings") or {}
+            if binding_id not in bindings:
+                return False
+            del bindings[binding_id]
+            if bindings:
+                values = tuple(ResolutionBinding.from_dict(item) for item in bindings.values())
+                self._ensure(values, address=state["address"], port=int(state["port"]))
+                return True
+            self._owned_config(state)
+            pid, identity = state.get("pid"), state.get("pid_start")
+            if not self._process_owned(state, pid, identity):
+                return False
+            terminated = self.process.run(("kill", "-TERM", str(pid)), timeout=5)
+            if terminated.returncode != 0:
+                return False
+            for _attempt in range(20):
+                still_owned = self.pid_matches(pid, identity)
+                still_listening = self.listener_matches(
+                    pid, state.get("address"), int(state.get("port", 0)),
+                )
+                if not still_owned and still_listening is False:
+                    break
+                self.sleeper(0.05)
+            else:
+                return False
+            for path in (self.config_path, self.pid_file, self.state_path):
+                if os.path.lexists(path) and path.is_symlink():
+                    return False
+            for path in (self.config_path, self.pid_file, self.state_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    return False
             return True
-        pid, identity = state.get("pid"), state.get("pid_start")
-        if pid and identity and self.pid_matches(pid, identity):
-            self.process.run(("kill", "-TERM", str(pid)), timeout=5)
-        for path in (self.config_path, self.pid_file, self.state_path):
-            try:
-                if path.is_symlink():
-                    raise RuntimeError(f"refusing to remove symlinked authority path: {path}")
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return True
 
     def status(self) -> dict:
         state = self._load()
         pid, identity = state.get("pid"), state.get("pid_start")
-        healthy = bool(pid and identity and self.pid_matches(pid, identity))
+        healthy = self._healthy(state, pid, identity)
         return {
             "health": "healthy" if healthy else "unhealthy",
             "address": state.get("address"), "port": state.get("port"),

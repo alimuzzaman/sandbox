@@ -114,15 +114,23 @@ def enrich_linux_processes(endpoints, proc_root=Path("/proc")):
         except OSError:
             command = None
         try:
+            executable = os.path.realpath(process_dir / "exe")
+            if not os.path.isabs(executable) or not os.path.exists(executable):
+                executable = None
+        except OSError:
+            executable = None
+        try:
             start = (process_dir / "stat").read_text().split()[21]
         except (OSError, IndexError):
             start = None
-        evidence = {"pid": int(process_dir.name), "start": start, "command": command}
+        evidence = {"pid": int(process_dir.name), "start": start,
+                    "command": command, "executable": executable}
         for inode in matched:
             found[inode] = evidence
     from dataclasses import replace
     return tuple(replace(item, process=found[item.socket_id],
-                         owner_confidence="probable")
+                         owner_confidence=("proven" if found[item.socket_id].get("executable")
+                                           else "probable"))
                  if item.socket_id in found else item for item in endpoints)
 
 

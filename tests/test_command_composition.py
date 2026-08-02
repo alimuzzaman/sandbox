@@ -66,6 +66,14 @@ class TestCommandComposition(unittest.TestCase):
         self.assertIn("CommandSpec(", (root / "sandbox/commands/recovery.py").read_text())
         self.assertNotIn('"recovery"', (root / "sandbox/cli.py").read_text())
 
+    def test_domains_command_keeps_ingress_transport_in_its_feature_boundary(self):
+        from sandbox.commands.domains import DOMAIN_ACTIONS, INGRESS_ACTIONS
+        self.assertIn("ingress", DOMAIN_ACTIONS)
+        self.assertEqual(
+            INGRESS_ACTIONS,
+            {"detect", "support", "status", "plan", "apply", "cleanup", "reconcile", "reconsider"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

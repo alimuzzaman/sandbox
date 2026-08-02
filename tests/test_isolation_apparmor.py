@@ -14,7 +14,9 @@ class TestIsolationAppArmor(unittest.TestCase):
         from sandbox.isolation.apparmor import AppArmorCompiler
         result = AppArmorCompiler().compile(Policy())
         content = result["content"]
-        supervisor, guest = content.split("  profile guest", 1)
+        supervisor, remainder = content.split("  profile guest", 1)
+        guest, remainder = remainder.split("  profile bwrap", 1)
+        bwrap, payload = remainder.split("  profile payload", 1)
         self.assertIn("userns,", supervisor)
         self.assertIn("cx -> guest", supervisor)
         self.assertNotIn("userns,", guest)
@@ -23,6 +25,13 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertNotIn("network netlink", guest)
         self.assertNotIn("network packet", guest)
         self.assertNotIn("capability sys_admin", guest)
+        self.assertIn("userns,", bwrap)
+        self.assertIn("mount,", bwrap)
+        self.assertIn("capability sys_admin", bwrap)
+        self.assertIn("/** cx -> payload", bwrap)
+        self.assertNotIn("userns,", payload)
+        self.assertNotIn("mount,", payload)
+        self.assertNotIn("capability sys_admin", payload)
 
     def test_profile_is_accepted_by_the_supported_apparmor_parser(self):
         parser = shutil.which("apparmor_parser")

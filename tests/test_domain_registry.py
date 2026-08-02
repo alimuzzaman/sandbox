@@ -45,6 +45,33 @@ class TestDomainRegistry(unittest.TestCase):
         self.assertTrue(all(not item.adoptable for item in BUILTIN_RESOLVER_ADAPTERS
                             if item.support_tier != "external"))
 
+    def test_proof_evidence_is_invocation_scoped_and_does_not_change_manifest(self):
+        from sandbox.network.manifest import (
+            BUILTIN_RESOLVER_ADAPTERS, ResolverProofAttestation,
+            built_in_resolver_registry,
+        )
+
+        ordinary = built_in_resolver_registry({"systemd-resolved": object()})
+        proof = built_in_resolver_registry(
+            {"systemd-resolved": object()},
+            proof_attestation=ResolverProofAttestation(
+                "systemd-resolved", "ubuntu-24.04-conformance-run",
+            ),
+        )
+        forged_string = built_in_resolver_registry(
+            {"systemd-resolved": object()}, proof_attestation="ubuntu-live",
+        )
+        forged_mapping = built_in_resolver_registry(
+            {"systemd-resolved": object()},
+            proof_attestation={"systemd-resolved": "ubuntu-live"},
+        )
+        self.assertFalse(ordinary.get("systemd-resolved").adoptable)
+        self.assertTrue(proof.get("systemd-resolved").adoptable)
+        self.assertFalse(forged_string.get("systemd-resolved").adoptable)
+        self.assertFalse(forged_mapping.get("systemd-resolved").adoptable)
+        self.assertEqual(BUILTIN_RESOLVER_ADAPTERS[0].support_tier,
+                         "implemented_unproven")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,8 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 TEST_MODES = frozenset(("auto", "unit", "integration"))
+MANAGED_NATIVE_PHPUNIT = Path("/usr/local/libexec/sandbox-phpunit.phar")
+MANAGED_NATIVE_COMPOSER = Path("/usr/bin/composer")
 _TEST_SCAN_BYTES = 256 * 1024
 _TEST_SCAN_FILES = 512
 _WORDPRESS_TEST_MARKERS = (
@@ -233,6 +235,11 @@ def _write_wp_tests_config() -> Path:
 
 def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path) -> None:
     """Install only the project's Composer dependencies in a bounded container."""
+    gateway = _managed_execution_gate(
+        inst, "exec", "composer", ("/usr/bin/composer", "install"),
+    )
+    if gateway is not None:
+        return gateway.returncode
     plug = str(root)
     if not (Path(root) / "composer.json").is_file():
         return
@@ -278,7 +285,10 @@ def _ensure_project_dependencies_docker(inst: str, root: str, composer: Path) ->
 def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> int:
     """Run PHPUnit with the external WordPress harness mounted."""
     plug = str(root)
-    _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    dependency = _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    if isinstance(dependency, int): return dependency
+    gateway = _managed_execution_gate(inst, "test", "phpunit", ("php", "/phpunit.phar", *extra))
+    if gateway is not None: return gateway.returncode
     info("running phpunit…")
     r = compose("run", "--rm",
                 "-v", f"{suite}:/wordpress-phpunit",
@@ -298,7 +308,13 @@ def _run_tests(inst: str, root: str, suite: Path, tools: dict, extra: list) -> i
 def _run_tests_unit(inst: str, root: str, tools: dict, extra: list) -> int:
     """Run a pure PHPUnit suite without WordPress harness or test DB setup."""
     plug = str(root)
-    _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    dependency = _ensure_project_dependencies_docker(inst, root, tools["composer"])
+    if isinstance(dependency, int): return dependency
+    phpunit = str(tools["phpunit"])
+    gateway = _managed_execution_gate(
+        inst, "test", "phpunit", ("php", phpunit, *extra),
+    )
+    if gateway is not None: return gateway.returncode
     info("running pure PHPUnit unit suite…")
     r = compose("run", "--rm", "--no-deps",
                 "-v", f"{tools['phpunit']}:/phpunit.phar:ro",

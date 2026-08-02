@@ -329,7 +329,7 @@ class TestProxyHealthChecks(unittest.TestCase):
 
 
 class TestSecureAtCreateRollback(unittest.TestCase):
-    def test_rollback_pops_domain_and_tld(self):
+    def test_failed_composed_adoption_never_enters_legacy_mutation_path(self):
         local = {"instances": {"a": {"domain": "a.tst", "tld": "tst"}}}
         written = {}
 
@@ -346,8 +346,8 @@ class TestSecureAtCreateRollback(unittest.TestCase):
              mock.patch.object(domains_core, "regen_caddyfile") as regen:
             self.assertFalse(domains_core._secure_at_create({}, "a"))
 
-        self.assertEqual(written["instances"]["a"], {})
-        regen.assert_called_once()
+        self.assertEqual(written, {})
+        regen.assert_not_called()
 
 
 class TestDomainValidation(unittest.TestCase):

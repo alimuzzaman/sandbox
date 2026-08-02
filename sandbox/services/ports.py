@@ -68,9 +68,12 @@ class SocketDnsEndpointReservation(AbstractContextManager["SocketDnsEndpointRese
     address: str
     port: int
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
+    def release(self) -> None:
         self._udp_socket.close()
         self._tcp_socket.close()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.release()
 
 
 class SocketDnsEndpointAllocator:

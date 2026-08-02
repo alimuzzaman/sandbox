@@ -158,11 +158,40 @@ def _herd_isolate(name: str, php_v: str) -> bool:
     return False
 
 
+class _LegacyHerdIngressProcess:
+    """Adapt the frozen core CLI runner to A's explicit ingress contract."""
+
+    def __init__(self, *, cwd): self.cwd = cwd
+
+    def run(self, argv, *, timeout):
+        # A's facade owns the command selection.  This compatibility wrapper
+        # only preserves the old cwd and bounded process invocation.
+        return _herd(*argv[1:], cwd=self.cwd)
+
+
+def _herd_ingress_facade(*, cwd):
+    """Return A's legacy Herd route facade; C runtime code never receives it."""
+    from sandbox.ingress.adapters.herd_valet import HerdSiteCompatibilityFacade
+    return HerdSiteCompatibilityFacade(
+        executable=_herd_cli(), process=_LegacyHerdIngressProcess(cwd=cwd),
+    )
+
+
+def _provision_herd_route(name: str, directory: Path) -> dict:
+    """A-owned compatibility handoff for legacy link/secure route setup."""
+    return _herd_ingress_facade(cwd=directory).provision(name, secure=True)
+
+
+def _cleanup_herd_route(name: str, directory: Path | None = None) -> dict:
+    """A-owned compatibility handoff for legacy route/TLS teardown."""
+    return _herd_ingress_facade(cwd=directory).cleanup(name)
+
+
 def _provision_herd(name: str, pconf: dict) -> None:
     """Host-side counterpart of `compose up`: make runtime/wp-<name>/ a Herd
-    site at https://<name>.test. `herd link` serves the dir, `secure` mints +
-    trusts the .test TLS cert, then `isolate` pins the site's PHP to the
-    project's phpVersion. Isolate runs LAST (after the site is registered) and
+    site at https://<name>.test. A's compatibility ingress facade owns link +
+    secure; C retains only the PHP runtime pin. Isolate runs LAST (after A has
+    registered the site) and
     is verified+retried — on a fresh link it otherwise fails ("site could not
     be found"). CLI/phpunit run the same pinned PHP via _herd_php().
     Everything is idempotent; isolate/secure failures degrade, not abort."""
@@ -170,14 +199,13 @@ def _provision_herd(name: str, pconf: dict) -> None:
     wpd = wp_dir(name)
     wpd.mkdir(parents=True, exist_ok=True)
     info(f"herd: linking {wpd.name}/ → {_herd_domain(name)} …")
-    res = _herd("link", name, cwd=wpd)
-    if res.returncode != 0:
-        die(f"herd link failed: {(res.stderr or res.stdout or '').strip()[:400]}")
+    route = _provision_herd_route(name, wpd)
+    if not route["ok"]:
+        die(f"herd link failed: {route.get('error', 'unknown error')[:400]}")
     info(f"herd: securing https://{_herd_domain(name)} …")
-    r = _herd("secure", name)
-    if r.returncode != 0:
+    if not route["secure"]:
         info(f"⚠ herd secure failed (site stays on http): "
-             f"{(r.stderr or r.stdout or '').strip()[:200]}")
+             f"{route.get('error', 'unknown error')[:200]}")
     # Isolate AFTER secure: the site is now in Herd's list, so isolate resolves
     # and sticks. Verified against `herd isolated` so the web tier really serves
     # the pinned PHP (a silent default would defeat the point of the pin).

@@ -14,6 +14,7 @@ class TestNativeCli(unittest.TestCase):
                        if item["adapter_id"] == "ubuntu-nspawn")
         self.assertFalse(managed["adoptable"])
         self.assertEqual(managed["support_tier"], "implemented_unproven")
+        self.assertIsNone(managed["evidence_id"])
 
     def test_preflight_cli_emits_one_nonmutating_json_object(self):
         from sandbox.commands.native import cmd_native

@@ -16,7 +16,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 from sandbox.core import (
-    CONFIG_LOCAL, ROOT, RUNTIME_DIR, _cert_paths, _core, _herd,
+    CONFIG_LOCAL, ROOT, RUNTIME_DIR, _cert_paths, _cleanup_herd_route, _core, _herd,
     _herd_tests_db, _hosts_edit, _local_yaml, _provision_test_harness,
     _valet_proxy_active, _write_local_yaml, active_project_file,
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
@@ -250,6 +250,28 @@ def _cleanup_instance_routes(cfg, owner) -> None:
         info("removed owned scoped resolver bindings")
 
 
+def _cleanup_native_owner(cfg, owner) -> bool:
+    """Retain registry identity when conservative native cleanup is incomplete.
+
+    Ingress cleanup remains an independent A-owned transaction.  It is invoked
+    while the owner identity exists, but no local registry identity is removed
+    until C reports that all of its owned resources were safely reconciled.
+    """
+    _cleanup_instance_routes(cfg, owner)
+    result = runtime_service(cfg).invoke(OperationRequest(
+        owner["root"], "destroy", label=owner.get("label", "default"),
+    ))
+    if isinstance(result, OperationError):
+        info(f"native cleanup is blocked; retained identity for retry: {result.code}")
+        return False
+    data = dict(result.data)
+    cleanup = data.get("cleanup") if isinstance(data.get("cleanup"), dict) else {}
+    if not result.ok or cleanup.get("complete") is not True:
+        info("native cleanup is incomplete; retained identity and recovery state for retry")
+        return False
+    return True
+
+
 def cmd_instance(cfg, args) -> None:
     """Delete a sandbox instance end-to-end.
 
@@ -268,6 +290,14 @@ def cmd_instance(cfg, args) -> None:
             "cd-ing into a plugin repo and running `./sb init` (or `./sb ensure`).")
 
     owner = _core().registry_find_instance(name)
+    if owner and owner.get("runtime_mode") == "managed_native":
+        if not _cleanup_native_owner(cfg, owner):
+            return
+        _core().registry_remove(owner["root"], label=owner.get("label"))
+        info(f"deregistered '{name}' after complete native cleanup")
+        ok(f"Native instance '{name}' deleted.")
+        return
+
     if owner and owner.get("kind") == "compose":
         _cleanup_instance_routes(cfg, owner)
         result = runtime_service(cfg).invoke(OperationRequest(
@@ -320,8 +350,7 @@ def cmd_instance(cfg, args) -> None:
         # Drop the PHP isolation entry so a stale row doesn't linger in
         # `herd isolated` after the site is gone.
         _herd("unisolate", "--site", name)
-        _herd("unsecure", name)
-        _herd("unlink", name, cwd=wp_dir(name) if wp_dir(name).exists() else None)
+        _cleanup_herd_route(name, wp_dir(name) if wp_dir(name).exists() else None)
     else:
         info(f"stopping + removing containers + volume for '{name}'")
         compose("down", "-v", instance=name, check=False)
@@ -363,25 +392,12 @@ def cmd_instance(cfg, args) -> None:
         sc.registry_remove(owner["root"], label=owner.get("label"))
         info(f"deregistered '{name}' from the instance registry")
 
-    # 7. Tear down its custom domain. Primary: drop its route from the HTTPS
-    #    proxy (regenerate the Caddyfile from the now-reduced config + reload).
-    #    Fallbacks: a legacy Valet proxy and/or an /etc/hosts mapping. All are
-    #    no-ops if not present. (The wp-dir removal already deleted the mu-plugin.)
+    # The receipt-owned ingress/resolver state was reconciled before identity
+    # deletion.  Preserve any unreceipted aggregate proxy, Valet, hosts, cert,
+    # or DNS artifact; compare-before-remove cannot attribute it safely.
     dom = instances.get(name, {}).get("domain")
     if dom:
-        if proxy_available():
-            # Drop the cert + route, then regenerate from the reduced config.
-            for p in _cert_paths(dom):
-                p.unlink(missing_ok=True)
-            regen_caddyfile(load_config())
-            reload_proxy()
-            info(f"removed HTTPS proxy route + cert for {dom}")
-        if _valet_proxy_active(dom):
-            valet_proxy_remove(dom)
-            info(f"removed valet proxy for {dom}")
-        okh, msg = _hosts_edit("remove", dom)
-        if okh:
-            info(f"removed domain {dom} from /etc/hosts")
+        info(f"preserved unreceipted legacy domain artifacts for {dom}")
 
     ok(f"Instance '{name}' deleted.")
 

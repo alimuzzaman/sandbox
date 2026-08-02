@@ -44,7 +44,7 @@ def runtime_neutral_dependencies(
 def domain_service(cfg, **overrides):
     """Compose scoped naming policy without importing a compatibility facade."""
     import platform as host_platform
-    import shutil
+    import stat
     from pathlib import Path
     import sandbox_core as sc
 
@@ -70,13 +70,23 @@ def domain_service(cfg, **overrides):
     observer = overrides.pop(
         "observer", ResolverDetector(process=process, platform=platform).observe,
     )
-    helper = Path(__file__).resolve().parents[2] / "tools" / "resolver-helper.sh"
+    repository_helper = Path(__file__).resolve().parents[2] / "tools" / "resolver-helper.sh"
+    installed_helper = "/usr/local/libexec/sandbox-resolver-helper"
     implementations = {}
     if platform == "linux":
         implementations["systemd-resolved"] = ResolvedAdapter(
-            process=process, helper=str(helper), network_root=network_root,
+            process=process, helper=installed_helper,
+            repository_helper=str(repository_helper), network_root=network_root,
         )
-    dnsmasq = shutil.which("dnsmasq")
+    dnsmasq_path = Path("/usr/sbin/dnsmasq")
+    dnsmasq = None
+    try:
+        details = dnsmasq_path.lstat()
+        if (stat.S_ISREG(details.st_mode) and details.st_uid == 0
+                and details.st_nlink == 1 and not details.st_mode & 0o022):
+            dnsmasq = str(dnsmasq_path)
+    except OSError:
+        pass
     authority = overrides.pop("authority", None)
     if authority is None and dnsmasq:
         authority = DnsmasqAuthority(
@@ -101,14 +111,21 @@ def domain_service(cfg, **overrides):
 
     def interactive_consent(owner_id):
         answer = input(
-            f"Allow Sandbox to add a scoped local DNS route through {owner_id}? [y/N] ",
+            "Allow Sandbox to install its fixed resolver helper and add a scoped "
+            f"local DNS route through {owner_id}? [y/N] ",
         ).strip().lower()
         return answer in {"y", "yes"}
 
     return DomainService(
         config_loader=overrides.pop("config_loader", sc.load_project_config),
         project_registry=overrides.pop("project_registry", sc),
-        adapters=overrides.pop("adapters", built_in_resolver_registry(implementations)),
+        adapters=overrides.pop(
+            "adapters",
+            built_in_resolver_registry(
+                implementations,
+                proof_attestation=overrides.pop("proof_attestation", None),
+            ),
+        ),
         repository=overrides.pop("repository", DomainRepository(state_path)),
         process=process,
         http=http,
@@ -144,6 +161,7 @@ def ingress_service(cfg, **overrides):
     import platform as host_platform
     import sandbox_core as sc
     from sandbox.application.ingress_service import IngressService
+    from sandbox.ingress.adapters.caddy import CaddyAdapter
     from sandbox.ingress.detection import IngressDetector
     from sandbox.ingress.listeners import ListenerObserver, SocketBindProbe
     from sandbox.ingress.manifest import built_in_ingress_registry
@@ -157,16 +175,29 @@ def ingress_service(cfg, **overrides):
     )
     process = overrides.pop("process", BoundedProcessRunner())
     http = overrides.pop("http", UrlHttpProbe())
+    network_root = sc.sandbox_base() / "runtime" / "network"
     observer = overrides.pop(
         "listener_observer", ListenerObserver(platform=platform, process=process),
     )
     detector = overrides.pop("detector", IngressDetector(listener_observer=observer))
-    registry = overrides.pop("registry", built_in_ingress_registry())
-    network_root = sc.sandbox_base() / "runtime" / "network"
+    implementations = {}
+    if platform == "linux":
+        implementations["system-caddy"] = CaddyAdapter(
+            helper=overrides.pop(
+                "ingress_helper", "/usr/local/libexec/sandbox-ingress-helper",
+            ),
+            process=process, network_root=network_root,
+        )
+    registry = overrides.pop("registry", built_in_ingress_registry(
+        implementations,
+        proof_attestation=overrides.pop("proof_attestation", None),
+    ))
     repository = overrides.pop(
         "repository", IngressRepository(network_root / "ingress-state.json"),
     )
-    verifier = overrides.pop("verifier", IngressVerifier(http=http))
+    verifier = overrides.pop("verifier", IngressVerifier(
+        http=http, baseline_urls=lambda plan: tuple(plan.get("_baseline_urls", ())),
+    ))
     transaction_runner = overrides.pop(
         "transaction_runner",
         IngressTransactionRunner(
@@ -200,15 +231,34 @@ def clean_url_service(cfg, **overrides):
     )
 
 
+def _native_helper_effective_probe(process, helper, gate):
+    import json
+
+    probes = {"private_network": "private-network", "nftables": "nftables",
+              "cgroup_delegation": "cgroup-delegation", "seccomp": "seccomp"}
+    probe = probes.get(gate)
+    if probe is None:
+        return None
+    try:
+        result = process.run(("sudo", "-n", helper, "preflight-probe", probe), timeout=20)
+        observed = json.loads(result.stdout or "")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(result.returncode == 0 and isinstance(observed, dict) and
+                set(observed) == {"ok", "probe", "state"} and
+                observed.get("ok") is True and observed.get("probe") == probe and
+                observed.get("state") == "ready")
+
+
 def native_isolation_preflight(cfg, **overrides):
     """Compose read-only effective managed-native prerequisite probes."""
-    import os
     from pathlib import Path
     import shutil
 
     from sandbox.isolation.preflight import IsolationPreflight
     from sandbox.services import BoundedProcessRunner
     process = overrides.pop("process", BoundedProcessRunner())
+    helper = overrides.pop("helper", "/usr/local/libexec/sandbox-native-helper")
 
     def facts():
         values = {}
@@ -226,25 +276,20 @@ def native_isolation_preflight(cfg, **overrides):
                 "systemd_version": version}
 
     def effective(gate):
+        helper_result = _native_helper_effective_probe(process, helper, gate)
+        if helper_result is not None:
+            return helper_result
         if gate == "pid1_systemd":
             try: return Path("/proc/1/comm").read_text().strip() == "systemd"
             except OSError: return False
         if gate == "cgroup_v2": return Path("/sys/fs/cgroup/cgroup.controllers").is_file()
-        if gate == "cgroup_delegation":
-            return os.access("/sys/fs/cgroup", os.W_OK) and Path("/sys/fs/cgroup/cgroup.subtree_control").is_file()
         if gate == "user_namespaces":
             try: return int(Path("/proc/sys/user/max_user_namespaces").read_text()) > 0
             except (OSError, ValueError): return False
         if gate == "apparmor_enforcing":
             try: return "Y" in Path("/sys/module/apparmor/parameters/enabled").read_text()
             except OSError: return False
-        if gate == "seccomp":
-            try: return any(line.startswith("Seccomp:") and int(line.split()[1]) > 0
-                            for line in Path("/proc/self/status").read_text().splitlines())
-            except (OSError, ValueError, IndexError): return False
-        # Private networking and nft policy are effective runtime proofs, not
-        # inferred from installed binaries. They stay false before a probe machine exists.
-        if gate in {"private_network", "nftables"}: return False
+        if gate == "seccomp": return False
         return False
 
     return IsolationPreflight(
@@ -263,11 +308,23 @@ def managed_package_planner(cfg, **overrides):
     return ManagedPackagePlanner(simulate=apt.simulate, sources=apt.sources)
 
 
+def managed_host_service_baseline(cfg, **overrides):
+    """Compose the fixed privileged foreign-service snapshot observer."""
+    from sandbox.runtimes.managed.packages import PrivilegedHostServiceBaseline
+    from sandbox.services import BoundedProcessRunner
+
+    return PrivilegedHostServiceBaseline(
+        process=overrides.pop("process", BoundedProcessRunner()),
+        helper=overrides.pop("helper", "/usr/local/libexec/sandbox-native-helper"),
+    )
+
+
 def managed_package_service(cfg, *, web_server="nginx", **overrides):
     """Compose the explicit TTY-only host prerequisite transaction."""
     from pathlib import Path
     from sandbox.runtimes.managed.packages import (
-        HostServiceBaseline, ManagedPackageService, NativeHostPackageApplier,
+        ManagedPackageService, NativeHostPackageApplier,
+        PrivilegedHostServiceBaseline,
     )
     from sandbox.services import BoundedProcessRunner
 
@@ -278,7 +335,12 @@ def managed_package_service(cfg, *, web_server="nginx", **overrides):
         process=process, repository_helper=str(repository_helper),
         installed_helper="/usr/local/libexec/sandbox-native-helper",
     ))
-    baseline = overrides.pop("baseline", HostServiceBaseline(process=process))
+    baseline = overrides.pop(
+        "baseline",
+        PrivilegedHostServiceBaseline(
+            process=process, helper="/usr/local/libexec/sandbox-native-helper",
+        ),
+    )
 
     def confirmation(plan):
         packages = ", ".join(f"{item['name']}={item['version']}"
@@ -295,15 +357,15 @@ def managed_package_service(cfg, *, web_server="nginx", **overrides):
         apply_transaction=overrides.pop("apply_transaction", applier.apply),
         baseline_observer=overrides.pop("baseline_observer", baseline.observe),
         confirmation=overrides.pop("confirmation", confirmation),
+        prepare_transaction=overrides.pop("prepare_transaction", applier.prepare),
     )
 
 def wordpress_proxy_facade(cfg, *, core=None):
-    """Adapt declared WordPress routes to the existing aggregate Caddy owner.
+    """Read-only compatibility facade for retired aggregate proxy state.
 
-    Route policy and host mutations remain in ``sandbox.core``. This facade
-    validates exact route identity and delegates apply/remove operations.
-    Removal is allowed only after the owning config entry has been removed,
-    matching the existing instance-delete ordering.
+    New route authority belongs to the composed ingress/resolver services.  The
+    historical aggregate proxy has no root-owned applied receipt, so this
+    facade validates declarations but deliberately preserves its state.
     """
     if core is None:
         import sandbox.core as core
@@ -323,15 +385,12 @@ def wordpress_proxy_facade(cfg, *, core=None):
             raise ValueError("proxy plan does not match a declared WordPress route")
 
     def apply_route(_hostname, _port):
-        core._ensure_proxy_up(cfg)
+        return None
 
     def remove_route(hostname):
-        current = core.load_config()
-        if declared(current, hostname):
+        if declared(cfg, hostname):
             raise ValueError(f"proxy route {hostname!r} is still declared")
-        core.regen_caddyfile(current)
-        if not core.reload_proxy():
-            raise RuntimeError(f"failed to reload proxy after removing {hostname!r}")
+        return None
 
     return CallbackProxyManager(
         apply_route=apply_route,
@@ -356,16 +415,36 @@ def wordpress_runtime_dependencies(cfg, *, core=None, registry=None, **overrides
     )
 
 
-def managed_native_dependencies(cfg, *, registry, allowed_roots, **overrides):
+def managed_native_dependencies(cfg, *, registry, allowed_roots,
+                                native_repository=None, **overrides):
     """Compose managed-native mechanisms without selecting a host fallback.
 
     Construction is deliberately inert: helper-backed mechanisms are injected
     for later capability-gated operations, not invoked while a runtime service
     is being composed.
     """
-    from sandbox.isolation.network import ManagedNetwork
-    from sandbox.runtimes.managed.adapter import ManagedRuntimeDependencies
+    from sandbox.isolation.apparmor import ManagedAppArmor
+    from sandbox.isolation.bubblewrap import BubblewrapCompiler
+    from sandbox.isolation.credentials import (
+        CredentialInjector, HelperCredentialInstaller, NativeCredentialStore,
+    )
+    from sandbox.isolation.launcher import IsolationLauncher
+    from sandbox.isolation.network import EgressGrantReconciler, ManagedNetwork
+    from sandbox.isolation.resources import ResourcePolicyCompiler
+    from sandbox.isolation.verification import IsolationVerifier
+    from sandbox.runtimes.managed.adapter import (
+        ManagedNativeCleanup, ManagedProvisioner, ManagedRuntimeDependencies,
+    )
     from sandbox.runtimes.managed.database import ManagedDatabase
+    from sandbox.runtimes.managed.helper import (
+        ManagedCleanupObserver, ManagedIsolationObserver, ManagedMachineExecutor,
+    )
+    from sandbox.runtimes.managed.image import ManagedImage, ManagedRootfs
+    from sandbox.runtimes.managed.machine import ManagedMachine
+    from sandbox.runtimes.managed.packages import PackagePlanStager
+    from sandbox.runtimes.managed.plan import ManagedPlanBuilder, ManagedPolicyStore
+    from sandbox.runtimes.managed.services import ManagedServiceCompiler, ManagedServiceSupervisor
+    from sandbox.runtimes.managed.wordpress import ManagedWordPressBootstrap
     from sandbox.services import AllowedRootPathPolicy, BoundedProcessRunner, UrlHttpProbe
 
     process = overrides.pop("process", BoundedProcessRunner())
@@ -376,15 +455,79 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots, **overrides):
     packages = overrides.pop("packages", None)
     if packages is None:
         packages = managed_package_planner(cfg, process=process)
+    grants = overrides.pop("grants", EgressGrantReconciler(process=process, helper=helper))
+    network = overrides.pop("network", ManagedNetwork(process=process, helper=helper))
+    database = overrides.pop("database", ManagedDatabase(process=process, helper=helper))
+    services = overrides.pop(
+        "services", ManagedServiceSupervisor(process=process, helper=helper),
+    )
+    credential_installer = overrides.pop(
+        "credential_installer", HelperCredentialInstaller(process=process, helper=helper),
+    )
+    native_root = registry.sandbox_base() / "runtime" / "native"
+    credential_store = overrides.pop(
+        "credential_store", NativeCredentialStore(native_root / "credentials"),
+    )
+    credentials = overrides.pop("credentials", CredentialInjector(
+        secret_provider=credential_store, installer=credential_installer,
+    ))
+    observer = overrides.pop(
+        "observer", ManagedIsolationObserver(process=process, helper=helper),
+    )
+    verifier = overrides.pop("verifier", IsolationVerifier(observe=observer))
+    image = overrides.pop("image", ManagedImage(process=process, helper=helper))
+    apparmor = overrides.pop("apparmor", ManagedAppArmor(process=process, helper=helper))
+    machine = overrides.pop("machine", ManagedMachine(process=process, helper=helper))
+    policy = overrides.pop("policy", ManagedPolicyStore(process=process, helper=helper))
+    service_compiler = overrides.pop("service_compiler", ManagedServiceCompiler())
+    paths = overrides.pop("paths", AllowedRootPathPolicy(allowed_roots))
+    plan_builder = overrides.pop("plan_builder", None)
+    if plan_builder is None and native_repository is not None:
+        plan_builder = ManagedPlanBuilder(
+            repository=native_repository, packages=packages,
+            resources=ResourcePolicyCompiler(), network=network, image=image,
+            apparmor=apparmor, machine=machine, database=database,
+            services=service_compiler,
+            descriptor_resolver=registry.load_project_config,
+            paths=paths,
+        )
+    wordpress = overrides.pop(
+        "wordpress", ManagedWordPressBootstrap(process=process, helper=helper),
+    )
+    rootfs = overrides.pop(
+        "rootfs", ManagedRootfs(process=process, helper=helper, stager=PackagePlanStager()),
+    )
+    provisioner = overrides.pop("provisioner", None)
+    if provisioner is None and native_repository is not None:
+        provisioner = ManagedProvisioner(
+            policy=policy, apparmor=apparmor, image=image, rootfs=rootfs,
+            machine=machine, network=network, verifier=verifier,
+            credentials=credentials, database=database, wordpress=wordpress,
+            services=services, health=lambda plan: services.backend_health(plan["services"]),
+            repository=native_repository, grants=grants,
+        )
+    launcher = overrides.pop("launcher", IsolationLauncher(
+        verifier=verifier, bubblewrap=BubblewrapCompiler("/usr/bin/bwrap"),
+        machine_exec=ManagedMachineExecutor(process=process, helper=helper),
+    ))
+    cleanup = overrides.pop("cleanup", None)
+    if cleanup is None and native_repository is not None:
+        cleanup = ManagedNativeCleanup(
+            repository=native_repository, services=services, database=database,
+            network=network, machine=machine, image=image, policy=policy,
+            observe=ManagedCleanupObserver(process=process, helper=helper),
+        )
     return ManagedRuntimeDependencies(
         process=process,
         http=overrides.pop("http", UrlHttpProbe()),
-        paths=overrides.pop("paths", AllowedRootPathPolicy(allowed_roots)),
+        paths=paths,
         registry=registry,
         isolation=isolation,
         packages=packages,
-        network=overrides.pop("network", ManagedNetwork(process=process, helper=helper)),
-        database=overrides.pop("database", ManagedDatabase()),
+        network=network, database=database, services=services, credentials=credentials,
+        grants=grants,
+        verifier=verifier, launcher=launcher, plan_builder=plan_builder,
+        provisioner=provisioner, cleanup=cleanup,
         **overrides,
     )
 
@@ -392,6 +535,7 @@ def managed_native_dependencies(cfg, *, registry, allowed_roots, **overrides):
 def runtime_service(cfg):
     """Compose WordPress compatibility and the framework-neutral Compose adapter."""
     import sandbox.core as core
+    import os
     import sandbox_core as sc
     from pathlib import Path
 
@@ -399,7 +543,10 @@ def runtime_service(cfg):
     from sandbox.runtimes.compose import ComposeAdapter
     from sandbox.runtimes import builtin_adapter_registry
     from sandbox.runtimes.registry import RuntimeBackendRegistry
-    from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+    from sandbox.runtimes.managed.adapter import (
+        ManagedNativeAdapter, _proof_candidate_authority,
+    )
+    from sandbox.runtimes.manifest import RUNTIME_DECLARATIONS
     from sandbox.runtimes.managed.repository import NativeRepository
 
     def resolve_descriptor(root, label=None):
@@ -435,6 +582,7 @@ def runtime_service(cfg):
     )
     adapters.for_kind("wordpress").adapter.capabilities = frozenset({
             *adapters.for_kind("wordpress").adapter.capabilities,
+            "compose.exec",
             "wordpress.cli", "wordpress.exec", "wordpress.rest",
             "wordpress.snapshot", "wordpress.restore", "wordpress.reset",
             "wordpress.database", "wordpress.files", "wordpress.mail",
@@ -452,10 +600,24 @@ def runtime_service(cfg):
     )
     managed_dependencies = managed_native_dependencies(
         cfg, registry=sc, allowed_roots=(core.ROOT, core.BASE),
+        native_repository=native_repository,
+    )
+    managed_declaration = next(
+        value for value in RUNTIME_DECLARATIONS
+        if value["adapter_id"] == "ubuntu-nspawn"
+    )
+    managed_evidence = (
+        managed_declaration.get("evidence_id")
+        if managed_declaration.get("adoptable") is True
+        and managed_declaration.get("support_tier") == "adoptable"
+        else None
     )
     managed = ManagedNativeAdapter(
         preflight=managed_dependencies.isolation, repository=native_repository,
-        dependencies=managed_dependencies,
+        dependencies=managed_dependencies, evidence_id=managed_evidence,
+        proof_candidate_authority=_proof_candidate_authority(
+            os.environ.get("SANDBOX_NATIVE_PROOF_CANDIDATE"),
+        ),
     )
     backends.register(
         "ubuntu-nspawn", managed, project_kinds=("wordpress",),
@@ -500,6 +662,60 @@ def preflight_instance_capability(cfg, instance: str, capability: str):
 def preflight_project_capability(cfg, project_root: str, capability: str, *, label: str = "default"):
     """Validate a project-scoped operation before any remote or local mutation."""
     return runtime_service(cfg).check(project_root, capability, label=label)
+
+
+def execute_project(cfg, execution):
+    """Run one validated project payload through its selected runtime adapter."""
+    from sandbox.runtimes.base import (
+        ExecutionRequest, ExecutionResult, OperationError, OperationRequest,
+    )
+    if not isinstance(execution, ExecutionRequest):
+        raise ValueError("project execution request is invalid")
+    operation = {
+        "wordpress_cli": "wordpress_cli", "wp_eval": "wordpress_cli",
+        "exec": "exec", "composer": "exec", "plugin_activation": "exec",
+        "phpunit": "test", "durable_job": "exec",
+    }[execution.entry_path]
+    result = runtime_service(cfg).invoke(OperationRequest(
+        execution.project_root, operation, label=execution.label,
+        arguments={"execution": execution},
+    ))
+    if isinstance(result, OperationError):
+        return ExecutionResult(False, 126, "blocked", {
+            "stdout": "", "stderr": result.message,
+            "reason": {"code": result.code, "message": result.message},
+        })
+    data = dict(result.data)
+    return ExecutionResult(result.ok, data.get("exit_code", 0 if result.ok else 126),
+                           data.get("state", "ready" if result.ok else "blocked"), {
+        "stdout": data.get("stdout", ""), "stderr": data.get("stderr", ""),
+        "reason": data.get("reason", {"code": "ready" if result.ok else
+                                        "isolated_payload_failed"}),
+    })
+
+
+def managed_native_project_selected(project_root: str, *, label: str = "default") -> bool:
+    """Read the selected runtime through the application boundary.
+
+    Legacy execution callers use this solely to fail closed before dispatching
+    project-controlled argv to Compose, Herd, or a host subprocess.
+    """
+    import sandbox_core as sc
+
+    config = sc.load_project_config(project_root, label=label)
+    runtime = config.get("wordpressRuntime", {}) if isinstance(config, dict) else {}
+    return runtime.get("mode", "compose") == "managed_native"
+
+
+def managed_native_instance_selected(instance: str) -> tuple[str, str] | None:
+    """Return a managed instance owner, or ``None`` for legacy runtimes."""
+    import sandbox_core as sc
+
+    owner = sc.registry_find_instance(instance) or {}
+    root, label = owner.get("root"), owner.get("label", "default")
+    if not root or not managed_native_project_selected(str(root), label=label):
+        return None
+    return str(root), label
 
 
 def _remote_workspace_control(resolved_target, action):
@@ -595,7 +811,10 @@ def durable_job_dependencies():
     scheduler = JobScheduler(repository)
     workspace = WorkspaceService(
         target, storage, _remote_workspace_control, scheduler)
-    job = JobService(repository, storage, components, scheduler=scheduler)
+    job = JobService(
+        repository, storage, components, scheduler=scheduler,
+        runtime_selector=managed_native_project_selected,
+    )
     # A controller process may start after its host or a prior supervisor was
     # interrupted. Reconcile bounded active state before exposing services so
     # callers never inherit a stale running/lease claim as healthy work.

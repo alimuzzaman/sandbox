@@ -32,6 +32,45 @@ class TestResolverHelper(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("usage", result.stderr.lower())
 
+    def test_resolved_mutation_is_rendered_by_root_and_never_consumes_a_candidate(self):
+        text = HELPER.read_text()
+        self.assertIn("resolved-apply OWNER_SHA256 SUFFIX ADDRESS PORT", text)
+        resolved = text.split("    resolved-apply)", 1)[1].split("    resolved-remove)", 1)[0]
+        self.assertNotIn("canonical_candidate", resolved)
+        self.assertIn("printf '# sandbox-resolver v1", resolved)
+        self.assertIn("sandbox-resolver-helper resolved-apply *", text)
+        self.assertNotIn("NOPASSWD: /usr/local/libexec/sandbox-resolver-helper *", text)
+        self.assertNotIn("sandbox-resolver-helper authorize *", text)
+        self.assertIn("visudo -cf", text)
+
+    def test_apply_and_remove_require_exact_root_authorization_receipts(self):
+        text = HELPER.read_text()
+        resolved_apply = text.split("    resolved-apply)", 1)[1].split(
+            "    resolved-remove)", 1,
+        )[0]
+        resolved_remove = text.split("    resolved-remove)", 1)[1].split(
+            "    macos-apply)", 1,
+        )[0]
+        self.assertIn("check_authorization resolved", resolved_apply)
+        self.assertIn("check_authorization resolved", resolved_remove)
+        self.assertIn("/var/lib/sandbox/resolver/authorizations", text)
+        self.assertIn("owner=%s", text)
+        self.assertIn("echo \"retained\"", resolved_remove)
+        self.assertIn("check_applied resolved", resolved_remove)
+        self.assertIn("refusing to adopt an identical foreign resolver fragment", resolved_apply)
+        revoke = text.split("    revoke-authorization)", 1)[1].split(
+            "    authorization-status)", 1,
+        )[0]
+        self.assertIn("applied resolver ownership cannot be revoked", revoke)
+        self.assertNotIn("resolved-remove", revoke)
+        self.assertNotIn("macos-remove", revoke)
+
+    def test_direct_mutation_without_a_receipt_fails_closed(self):
+        result = self.run_helper(
+            "resolved-apply", "b" * 64, "test", "127.0.0.54", "5300", "a" * 64,
+        )
+        self.assertNotEqual(result.returncode, 0)
+
     def test_candidate_schema_accepts_only_owned_bounded_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -63,8 +102,18 @@ class TestResolverHelper(unittest.TestCase):
                 "check-candidate", str(root), str(candidate),
                 "test", "0.0.0.0", "5300",
             )
+            injected = self.run_helper(
+                "check-candidate", str(root), str(candidate),
+                "test", "127.0.0.1\nDomains=~.", "5300",
+            )
+            public = self.run_helper(
+                "check-candidate", str(root), str(candidate),
+                "com", "127.0.0.54", "5300",
+            )
         self.assertNotEqual(suffix.returncode, 0)
         self.assertNotEqual(address.returncode, 0)
+        self.assertNotEqual(injected.returncode, 0)
+        self.assertNotEqual(public.returncode, 0)
 
     def test_symlink_and_outside_root_candidates_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

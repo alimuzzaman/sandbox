@@ -25,9 +25,10 @@ class TestDomainCleanup(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         repository = DomainRepository(Path(temporary.name) / "state.json")
+        owner = f"{Path('/tmp/project').resolve()}::default"
         binding = ResolutionBinding.create(
             kind="exact", name="demo.test", target="127.0.0.77",
-            adapter_id="resolved", owners=("/tmp/project::default",),
+            adapter_id="resolved", owners=(owner,),
             desired={"route": "demo"},
         ).with_applied({"route": "demo"})
         repository.put_binding(binding)
@@ -94,9 +95,10 @@ class TestDomainCleanup(unittest.TestCase):
         from sandbox.network.models import ResolutionBinding
 
         service, repository, binding, adapter = self._service({"route": "demo"})
+        second_owner = f"{Path('/tmp/two').resolve()}::default"
         second = ResolutionBinding.create(
             kind="exact", name="demo.test", target="127.0.0.77",
-            adapter_id="resolved", owners=("/tmp/two::default",),
+            adapter_id="resolved", owners=(second_owner,),
             desired={"route": "demo"},
         )
         repository.put_binding(second)
@@ -104,7 +106,7 @@ class TestDomainCleanup(unittest.TestCase):
         self.assertTrue(first.ok)
         self.assertEqual(adapter.calls, [])
         self.assertEqual(repository.binding(binding.binding_id).owners,
-                         ("/tmp/two::default",))
+                         (second_owner,))
         final = service.cleanup("/tmp/two")
         self.assertTrue(final.ok)
         self.assertEqual(adapter.calls, [binding.binding_id])

@@ -3,12 +3,16 @@ import re
 
 from app import SANDBOX_ROOT, _run_sandbox_json, mcp
 
+try:
+    from app import _require_project_capability, _require_project_deployment_capability
+except ImportError:
+    _require_project_capability = None
+    _require_project_deployment_capability = None
+
 
 def _capability_error(project_dir: str, capability: str):
     """Keep the legacy module-import test harness compatible with old app fakes."""
-    try:
-        from app import _require_project_capability
-    except ImportError:
+    if _require_project_capability is None:
         return None
     return _require_project_capability(project_dir, None, capability)
 
@@ -51,9 +55,7 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
 
     Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url, error}.
     """
-    try:
-        from app import _require_project_deployment_capability
-    except ImportError:
+    if _require_project_deployment_capability is None:
         # Command-forwarding unit harnesses do not compose the full app.
         capability_error = _capability_error(project_dir, "wordpress.remote-deploy")
     else:

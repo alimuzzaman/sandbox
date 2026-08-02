@@ -36,10 +36,25 @@ class TestNativeModels(unittest.TestCase):
         from sandbox.isolation.models import EgressGrant
         for destination in ("127.0.0.1/32", "10.0.0.0/8", "169.254.169.254/32"):
             with self.subTest(destination=destination), self.assertRaises(ValueError):
-                EgressGrant("g", "owner", "public_cidr_tcp", (destination,), (443,), "later")
+                EgressGrant("g", "owner", "public_cidr_tcp", (destination,), (443,),
+                            "2999-01-01T00:00:00Z")
         grant = EgressGrant("g", "owner", "hostname_https", ("api.wordpress.org",),
-                            (443,), "later")
+                            (443,), "2999-01-01T00:00:00Z")
         self.assertFalse(grant.revoked)
+
+    def test_grant_set_uses_the_helper_canonical_staged_schema(self):
+        from sandbox.isolation.models import EgressGrant, EgressGrantSet
+        grant = EgressGrant("api", "sb-0123456789ab", "public_cidr_tcp",
+                            ("8.8.8.8/32",), (443,), "2999-01-01T00:00:00Z")
+        grants = EgressGrantSet("sb-0123456789ab", "a" * 64, (grant,))
+        document = grants.to_dict()
+        self.assertEqual(set(document), {"version", "machine_id", "base_policy_digest",
+                                         "grant_authority", "grants", "grant_digest"})
+        self.assertEqual(document["grant_authority"], "staged-v1")
+        self.assertEqual(document["grant_digest"], grants.digest)
+        self.assertEqual(EgressGrantSet.from_dict(document), grants)
+        document["grant_digest"] = "0" * 64
+        with self.assertRaises(ValueError): EgressGrantSet.from_dict(document)
 
     def test_package_plan_digest_and_secret_redaction(self):
         from sandbox.runtimes.managed.models import PackageTransactionPlan

@@ -1,7 +1,9 @@
 import math
+import ipaddress
 import urllib.error
 from urllib.parse import urlsplit
 import urllib.request
+import http.client
 from typing import Protocol
 
 class HttpProbe(Protocol):
@@ -29,4 +31,27 @@ class UrlHttpProbe:
                     status = response.getcode()
                 return isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 400
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return False
+
+    def probe_route(self, address: str, port: int, host: str, *, timeout: float = 5) -> bool:
+        """Probe an exact HTTP endpoint without DNS, proxies, or redirects."""
+        try:
+            parsed_address = ipaddress.ip_address(address)
+            parsed_port = int(port)
+            if not parsed_address.is_loopback or not 1 <= parsed_port <= 65535:
+                return False
+            if (not isinstance(host, str) or not host or len(host) > 253
+                    or any(ord(char) < 33 or ord(char) == 127 for char in host)):
+                return False
+            connection = http.client.HTTPConnection(
+                str(parsed_address), parsed_port, timeout=timeout,
+            )
+            try:
+                connection.request("GET", "/", headers={"Host": host,
+                                                          "Connection": "close"})
+                response = connection.getresponse()
+                return 200 <= int(response.status) < 400
+            finally:
+                connection.close()
+        except (ValueError, TypeError, OSError, TimeoutError, http.client.HTTPException):
             return False

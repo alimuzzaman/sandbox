@@ -1,0 +1,6 @@
+{
+  "description": "A dual-stack IPv6 wildcard listener conflicts with IPv4 and IPv6 endpoints on its port.",
+  "listeners": [
+    {"address": "::", "port": 443, "protocol": "tcp", "dual_stack": true, "process": {"command": "caddy"}}
+  ]
+}

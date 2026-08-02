@@ -62,6 +62,52 @@ SHARED_CAPABILITIES = frozenset({
 })
 
 
+_EXECUTION_PATHS = frozenset({
+    "wordpress_cli", "wp_eval", "exec", "composer", "plugin_activation",
+    "phpunit", "durable_job",
+})
+
+
+@dataclass(frozen=True)
+class ExecutionRequest:
+    """Validated project-code request for an isolation-aware runtime gateway."""
+
+    project_root: str
+    label: str
+    entry_path: str
+    argv: tuple[str, ...]
+    timeout: int = 300
+
+    def __post_init__(self):
+        object.__setattr__(self, "project_root", _transport_text(self.project_root, "project root"))
+        object.__setattr__(self, "label", _transport_text(self.label, "project label", allow_spaces=False))
+        if self.entry_path not in _EXECUTION_PATHS:
+            raise ValueError("execution entry path is invalid")
+        if (not isinstance(self.argv, tuple) or not self.argv or
+                any(not isinstance(item, str) or not item or "\x00" in item for item in self.argv)):
+            raise ValueError("execution argv is invalid")
+        if isinstance(self.timeout, bool) or not isinstance(self.timeout, int) or not 1 <= self.timeout <= 3600:
+            raise ValueError("execution timeout is invalid")
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """Secret-free synchronous result shape returned by an execution gateway."""
+
+    ok: bool
+    exit_code: int | None
+    state: str
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not isinstance(self.ok, bool) or not isinstance(self.state, str) or not self.state:
+            raise ValueError("execution result is invalid")
+        if self.exit_code is not None and (isinstance(self.exit_code, bool) or
+                                           not isinstance(self.exit_code, int)):
+            raise ValueError("execution exit code is invalid")
+        object.__setattr__(self, "data", MappingProxyType(_transport_mapping(self.data, "execution result data")))
+
+
 @dataclass(frozen=True)
 class RuntimeDependencies:
     """Explicitly supplied shared services available to a runtime adapter."""

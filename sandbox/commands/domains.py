@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from sandbox.network.manifest import BUILTIN_RESOLVER_ADAPTERS
 from sandbox.registry import CommandSpec, register_specs
@@ -14,6 +15,9 @@ DOMAIN_ACTIONS = (
     "setup", "up", "down", "teardown", "repair-ca", "list",
     "detect", "support", "plan", "apply", "status", "cleanup", "reconsider", "ingress",
 )
+INGRESS_ACTIONS = frozenset({
+    "detect", "support", "status", "plan", "apply", "cleanup", "reconcile", "reconsider",
+})
 
 
 def configure_parser(parser) -> None:
@@ -62,6 +66,26 @@ def _support() -> dict:
     }
 
 
+def _ingress_plan(service, args) -> dict:
+    selection = service.select(required_protocols=("http", "https"))
+    return {
+        "ok": selection.adapter_id is not None,
+        "operation": "ingress_plan",
+        "state": "ready" if selection.adapter_id else "fallback",
+        "ingress": selection.adapter_id,
+        "pin": selection.pin,
+        "pin_source": selection.pin_source,
+        "accepted_addresses": list(selection.accepted_addresses),
+        "reason": {"code": selection.reason_code,
+                   "message": selection.reason_code.replace("_", " ")},
+        "mutated": False,
+    }
+
+
+def _ingress_owner(args) -> str:
+    return f"{Path(args.project_dir or '.').expanduser().resolve()}::{args.label}"
+
+
 def cmd_domains(cfg, args) -> None:
     if args.action in LEGACY_ACTIONS:
         from sandbox.commands.net import cmd_domains as legacy_domains
@@ -74,7 +98,7 @@ def cmd_domains(cfg, args) -> None:
     if args.action == "ingress":
         from sandbox.application.context import ingress_service
         subaction = args.tld or "status"
-        if subaction not in {"detect", "support", "status", "plan"}:
+        if subaction not in INGRESS_ACTIONS:
             _emit({"ok": False, "operation": f"ingress_{subaction}",
                    "state": "unsupported", "mutated": False,
                    "reason": {"code": "ingress_action_not_implemented",
@@ -87,18 +111,29 @@ def cmd_domains(cfg, args) -> None:
         elif subaction in {"detect", "status"}:
             payload = service.detect()
             payload["operation"] = f"ingress_{subaction}"
+        elif subaction == "plan":
+            payload = _ingress_plan(service, args)
+        elif subaction == "cleanup":
+            payload = service.cleanup_owner(_ingress_owner(args))
+            payload["operation"] = "ingress_cleanup"
+        elif subaction == "reconcile":
+            payload = service.reconcile_owner(_ingress_owner(args))
+        elif subaction == "reconsider":
+            if not args.resolver:
+                payload = {"ok": False, "operation": "ingress_reconsider",
+                           "state": "invalid", "mutated": False,
+                           "reason": {"code": "consent_identity_required"}}
+            else:
+                payload = service.reconsider(args.resolver)
+                payload["operation"] = "ingress_reconsider"
         else:
-            selection = service.select(required_protocols=("http", "https"))
-            payload = {
-                "ok": selection.adapter_id is not None,
-                "operation": "ingress_plan",
-                "state": "ready" if selection.adapter_id else "fallback",
-                "ingress": selection.adapter_id,
-                "accepted_addresses": list(selection.accepted_addresses),
-                "reason": {"code": selection.reason_code,
-                           "message": selection.reason_code.replace("_", " ")},
-                "mutated": False,
-            }
+            # Route activation is deliberately composed through the A→B→A
+            # compatibility handoff, not this low-level transport.  Returning a
+            # typed no-op keeps noninteractive CLI automation safe until it can
+            # supply B's verified naming result.
+            payload = {"ok": False, "operation": "ingress_apply",
+                       "state": "requires_domain_handoff", "mutated": False,
+                       "reason": {"code": "verified_naming_required"}}
         _emit(payload, bool(args.json))
         return
 

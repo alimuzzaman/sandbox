@@ -98,7 +98,7 @@ class TestPathsAndProxy(unittest.TestCase):
             manager.apply(plan)
         self.assertEqual(calls, [("apply", "fixture.test", 8080), ("remove", "fixture.test")])
 
-    def test_wordpress_proxy_facade_delegates_existing_policy_without_reimplementing_it(self):
+    def test_wordpress_proxy_facade_preserves_unreceipted_existing_policy(self):
         from sandbox.application.context import wordpress_proxy_facade
 
         cfg = {"instances": {"demo": {"domain": "demo.tst", "wordpress_port": 8188}}}
@@ -113,10 +113,9 @@ class TestPathsAndProxy(unittest.TestCase):
         manager = wordpress_proxy_facade(cfg, core=core)
         plan = manager.plan("demo.tst", 8188)
         manager.apply(plan)
-        manager.remove("demo.tst")
-        self.assertEqual(calls, [
-            ("ensure", cfg), ("regen", {"instances": {}}), ("reload",),
-        ])
+        with self.assertRaises(ValueError):
+            manager.remove("demo.tst")
+        self.assertEqual(calls, [])
 
     def test_wordpress_proxy_facade_rejects_undeclared_apply_and_declared_remove(self):
         from sandbox.application.context import wordpress_proxy_facade

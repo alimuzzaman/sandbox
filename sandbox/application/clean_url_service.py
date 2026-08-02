@@ -12,8 +12,14 @@ class CleanUrlService:
     def apply(self, project_dir, *, label="default", backend,
               protocols=("http",), capabilities=(), interactive=False,
               fallback_url):
+        policy = (self.domains.ingress_policy(project_dir, label=label)
+                  if hasattr(self.domains, "ingress_policy") else {})
+        canonical_root = policy.get("project_root") or str(
+            Path(project_dir).expanduser().resolve()
+        )
         selection = self.ingress.select(
             required_protocols=protocols, required_capabilities=capabilities,
+            pin=policy.get("pin"), pin_source=policy.get("pin_source"),
         )
         if selection.adapter_id is None:
             return {"ok": False, "state": "fallback", "mutated": False,
@@ -26,7 +32,7 @@ class CleanUrlService:
         if not authorization["ok"]:
             return authorization
         naming = self.domains.apply(
-            project_dir, label=label, interactive=interactive, offer_override=offer,
+            canonical_root, label=label, interactive=interactive, offer_override=offer,
         )
         if not naming.ok:
             return {"ok": False, "state": naming.state, "mutated": naming.mutated,
@@ -34,7 +40,7 @@ class CleanUrlService:
         accepted = set(selection.accepted_addresses)
         if not set(naming.actual_answers).intersection(accepted):
             if naming.mutated:
-                self.domains.cleanup(project_dir, label=label, interactive=False)
+                self.domains.cleanup(canonical_root, label=label, interactive=False)
             return {"ok": False, "state": "fallback", "mutated": naming.mutated,
                     "fallback_url": fallback_url,
                     "reason": {"code": "naming_address_mismatch"}}
@@ -42,13 +48,13 @@ class CleanUrlService:
                   "port": 443 if "https" in protocols else 80}
         planned = self.ingress.plan_route(selection, {
             "hostname": naming.hostname,
-            "owner": f"{Path(project_dir).expanduser().resolve()}::{label}",
+            "owner": f"{canonical_root}::{label}",
             "wildcard": "wildcard" in capabilities, "listen": listen,
         }, backend)
         result = self.ingress.apply_route(
             planned, interactive=interactive, fallback_url=fallback_url,
         )
         if not result.get("ok") and naming.mutated:
-            cleanup = self.domains.cleanup(project_dir, label=label, interactive=False)
+            cleanup = self.domains.cleanup(canonical_root, label=label, interactive=False)
             result["naming_cleanup"] = cleanup.to_dict()
         return result

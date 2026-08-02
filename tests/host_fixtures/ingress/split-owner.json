@@ -1,0 +1,7 @@
+{
+  "description": "Different incumbents own HTTP and HTTPS; one hostname must not be split between them.",
+  "listeners": [
+    {"address": "0.0.0.0", "port": 80, "protocol": "tcp", "process": {"command": "nginx"}},
+    {"address": "0.0.0.0", "port": 443, "protocol": "tcp", "process": {"command": "caddy"}}
+  ]
+}

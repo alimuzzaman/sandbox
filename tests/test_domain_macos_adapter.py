@@ -22,38 +22,56 @@ class TestMacosDomainAdapter(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             adapter = MacosResolverAdapter(
-                helper="/fixed/helper", process=object(), staging_root=Path(tmp),
+                process=object(), staging_root=Path(tmp),
             )
             plan = adapter.plan("test", "127.0.0.54", 5300)
         self.assertEqual(plan["destination"], "/etc/resolver/test")
         self.assertNotIn("/etc/resolv.conf", str(plan))
 
-    def test_apply_stages_owned_candidate_and_uses_fixed_helper_contract(self):
+    def test_apply_uses_fixed_helper_without_a_user_mutable_candidate(self):
         from sandbox.network.adapters.macos import MacosResolverAdapter
 
         with tempfile.TemporaryDirectory() as tmp:
             process = Process()
             adapter = MacosResolverAdapter(
-                helper="/fixed/helper", process=process, staging_root=Path(tmp),
+                process=process, staging_root=Path(tmp),
             )
             plan = adapter.plan("test", "127.0.0.54", 5300)
+            plan["owner_digest"] = "b" * 64
             result = adapter.apply(plan)
-            candidate = Path(plan["candidate"])
-            self.assertEqual(candidate.read_text(), plan["content"])
-            self.assertEqual(candidate.stat().st_mode & 0o777, 0o600)
         self.assertTrue(result["ok"])
-        self.assertEqual(process.calls[0][0][3:5], ("macos-apply", str(Path(tmp).resolve())))
+        self.assertEqual(process.calls[0][0], (
+            "sudo", "-n", "/usr/local/libexec/sandbox-resolver-helper",
+            "macos-apply", "b" * 64, "test", "127.0.0.54", "5300",
+            result["applied"]["content_digest"],
+        ))
 
     def test_apply_failure_is_reported_without_claiming_mutation(self):
         from sandbox.network.adapters.macos import MacosResolverAdapter
 
         with tempfile.TemporaryDirectory() as tmp:
             adapter = MacosResolverAdapter(
-                helper="/fixed/helper", process=Process(65), staging_root=Path(tmp),
+                process=Process(65), staging_root=Path(tmp),
             )
-            result = adapter.apply(adapter.plan("test", "127.0.0.54", 5300))
+            plan = adapter.plan("test", "127.0.0.54", 5300)
+            plan["owner_digest"] = "b" * 64
+            result = adapter.apply(plan)
         self.assertFalse(result["ok"])
         self.assertFalse(result["mutated"])
+
+    def test_preapply_revoke_cannot_remove_a_resolver_fragment(self):
+        from sandbox.network.adapters.macos import MacosResolverAdapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            process = Process()
+            adapter = MacosResolverAdapter(process=process, staging_root=Path(tmp))
+            plan = adapter.plan("test", "127.0.0.54", 5300)
+            plan["owner_digest"] = "b" * 64
+            adapter.revoke_authorization(plan)
+        self.assertEqual(process.calls[0][0][3:5], (
+            "revoke-authorization", "macos",
+        ))
+        self.assertNotIn("macos-remove", process.calls[0][0])
 
 
 if __name__ == "__main__":

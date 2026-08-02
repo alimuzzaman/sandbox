@@ -16,6 +16,7 @@ class TestNativeRuntimeService(unittest.TestCase):
         from sandbox.runtimes.registry import RuntimeBackendRegistry
         registry = RuntimeBackendRegistry()
         adapters = {name: Adapter(name) for name in ("compose", "ubuntu-nspawn", "herd")}
+        adapters["compose"].capabilities = frozenset({"ensure", "status", "wordpress.cli"})
         registry.register("compose", adapters["compose"], project_kinds=("wordpress",),
                           modes=("compose",), owner="test", order=10)
         registry.register("ubuntu-nspawn", adapters["ubuntu-nspawn"],
@@ -29,11 +30,25 @@ class TestNativeRuntimeService(unittest.TestCase):
         from sandbox.application.runtime_service import RuntimeService
         from sandbox.runtimes.base import AdapterRegistry
         backends, adapters = self.registry()
+        common = AdapterRegistry()
+        common_adapter = Adapter("common")
+        common_adapter.capabilities = frozenset({"ensure", "status", "wordpress.cli"})
+        common.register("wordpress", common_adapter, kinds=("wordpress",), owner="test")
         service = RuntimeService(resolve_descriptor=lambda *_args, **_kwargs: {
             "kind": "wordpress", "wordpressRuntime": runtime,
-        }, adapters=AdapterRegistry(), backends=backends,
+        }, adapters=common, backends=backends,
             resolve_persisted=lambda _root, _label: persisted)
         return service, adapters
+
+    def test_capability_check_uses_selected_backend_not_generic_wordpress_adapter(self):
+        service, _adapters = self.service({"mode": "managed_native",
+                                           "adapter": "ubuntu-nspawn", "explicit": True})
+        error = service.check("/tmp/project", "wordpress.cli")
+        self.assertEqual(error.code, "unsupported_capability")
+        self.assertNotIn("wordpress.cli", error.available_capabilities)
+
+        compose, _adapters = self.service({"mode": "compose", "adapter": "compose"})
+        self.assertIsNone(compose.check("/tmp/project", "wordpress.cli"))
 
     def test_resolves_project_kind_mode_and_adapter_as_three_dimensions(self):
         from sandbox.runtimes.base import OperationRequest

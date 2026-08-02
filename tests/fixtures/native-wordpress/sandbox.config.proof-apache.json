@@ -1,0 +1,27 @@
+{
+  "wordpressRuntime": {
+    "mode": "managed-native",
+    "adapter": "ubuntu-nspawn",
+    "webServer": "apache",
+    "resources": {
+      "cpu_percent": 100,
+      "memory_bytes": 1073741824,
+      "pids": 256,
+      "runtime_seconds": 1800,
+      "disk_bytes": 4294967296,
+      "inodes": 250000,
+      "fds": 2048,
+      "connections": 128,
+      "io_weight": 100
+    },
+    "egress": [
+      {
+        "grant_id": "example-https",
+        "kind": "hostname_https",
+        "destinations": ["example.com"],
+        "ports": [443],
+        "expires_at": "2027-08-01T00:00:00Z"
+      }
+    ]
+  }
+}

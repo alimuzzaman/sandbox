@@ -10,7 +10,7 @@ class ManagedImage:
                  observer=None):
         self.process = process; self.helper = helper
         self.native_root = Path(native_root)
-        self.observer = observer or (lambda _machine: {})
+        self.observer = observer
 
     def plan(self, policy):
         expected = self.native_root / "instances" / policy.machine_id / "root.img"
@@ -34,18 +34,20 @@ class ManagedImage:
     def mount(self, plan): return self._run("image-mount", plan)
 
     def unmount(self, plan):
-        observed = dict(self.observer(plan["machine_id"]))
-        if observed.get("policy_digest") != plan["policy_digest"]:
-            return {"ok": False, "mutated": False, "reason": "image policy drifted"}
+        if self.observer is not None:
+            observed = dict(self.observer(plan["machine_id"]))
+            if observed.get("policy_digest") != plan["policy_digest"]:
+                return {"ok": False, "mutated": False, "reason": "image policy drifted"}
         result = self._run("image-unmount", plan)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
 
     def remove(self, plan):
-        observed = dict(self.observer(plan["machine_id"]))
-        if observed.get("mounted"):
-            return {"ok": False, "mutated": False, "reason": "image remains mounted"}
-        if observed.get("policy_digest") != plan["policy_digest"]:
-            return {"ok": False, "mutated": False, "reason": "image policy drifted"}
+        if self.observer is not None:
+            observed = dict(self.observer(plan["machine_id"]))
+            if observed.get("mounted"):
+                return {"ok": False, "mutated": False, "reason": "image remains mounted"}
+            if observed.get("policy_digest") != plan["policy_digest"]:
+                return {"ok": False, "mutated": False, "reason": "image policy drifted"}
         result = self._run("image-remove", plan)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0}
 

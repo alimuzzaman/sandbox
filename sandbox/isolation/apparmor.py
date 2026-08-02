@@ -5,7 +5,6 @@ from __future__ import annotations
 
 def compile_apparmor_profile(machine_id, policy_digest):
     profile = f"sandbox-native-{machine_id}"
-    guest = f"{profile}//guest"
     return f"""#include <tunables/global>
 
 # Sandbox policy {policy_digest}
@@ -28,7 +27,6 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
   /sbin/init cx -> guest,
 
   profile guest flags=(attach_disconnected,mediate_deleted) {{
-    #include <abstractions/base>
     capability audit_write,
     capability chown,
     capability dac_override,
@@ -48,6 +46,48 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     signal,
     dbus,
     /** rwklm,
+    /usr/bin/bwrap cx -> bwrap,
+    /** ix,
+  }}
+
+  # Only root can execute /usr/bin/bwrap in the managed image (0750). This
+  # transition owns the narrowly-scoped namespace/mount setup, then every
+  # command exec transitions irreversibly into the payload profile.
+  profile bwrap flags=(attach_disconnected,mediate_deleted) {{
+    capability chown,
+    capability dac_override,
+    capability fowner,
+    capability setgid,
+    capability setuid,
+    capability sys_admin,
+    capability sys_chroot,
+    userns,
+    mount,
+    remount,
+    umount,
+    pivot_root,
+    network inet stream,
+    network inet6 stream,
+    network unix stream,
+    network unix dgram,
+    signal,
+    /** rwklm,
+    /** cx -> payload,
+  }}
+
+  profile payload flags=(attach_disconnected,mediate_deleted) {{
+    #include <abstractions/base>
+    network inet stream,
+    network inet6 stream,
+    network unix stream,
+    network unix dgram,
+    signal,
+    /** rwklm,
+    /run/credentials/sandbox/* r,
+    deny /run/credentials/** wklmx,
+    deny /run/sandbox-native-credentials/** rwklmx,
+    deny /run/systemd/** rwklmx,
+    deny /run/dbus/** rwklmx,
     /** ix,
   }}
 }}
@@ -59,6 +99,8 @@ class AppArmorCompiler:
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "profile": f"sandbox-native-{policy.machine_id}",
                 "guest_profile": f"sandbox-native-{policy.machine_id}//guest",
+                "bwrap_profile": f"sandbox-native-{policy.machine_id}//bwrap",
+                "payload_profile": f"sandbox-native-{policy.machine_id}//payload",
                 "content": compile_apparmor_profile(policy.machine_id, policy.digest)}
 
 
@@ -72,7 +114,9 @@ class ManagedAppArmor:
     def plan(self, policy):
         return {"machine_id": policy.machine_id, "policy_digest": policy.digest,
                 "profile": f"sandbox-native-{policy.machine_id}",
-                "guest_profile": f"sandbox-native-{policy.machine_id}//guest"}
+                "guest_profile": f"sandbox-native-{policy.machine_id}//guest",
+                "bwrap_profile": f"sandbox-native-{policy.machine_id}//bwrap",
+                "payload_profile": f"sandbox-native-{policy.machine_id}//payload"}
 
     def _run(self, verb, plan):
         return self.process.run(("sudo", "-n", self.helper, verb,

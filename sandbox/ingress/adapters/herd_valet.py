@@ -100,3 +100,47 @@ class HerdValetAdapter:
         result = self._run("unproxy", desired["site"])
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": (result.stderr or "")[:1000]}
+
+
+class HerdSiteCompatibilityFacade:
+    """A-owned compatibility seam for legacy Herd document-root sites.
+
+    Older Herd runtime provisioning used to issue link/secure/unsecure/unlink
+    commands directly.  Those commands create and remove hostname/TLS route
+    state, so the compatibility route is deliberately housed beside A's normal
+    Herd/Valet ingress adapter rather than in C's runtime adapter.
+    """
+
+    def __init__(self, *, executable, process):
+        self.executable = executable
+        self.process = process
+
+    def _run(self, *args, timeout=20):
+        return self.process.run((self.executable, *args), timeout=timeout)
+
+    def provision(self, site, *, secure=True):
+        linked = self._run("link", site)
+        if linked.returncode != 0:
+            return {"ok": False, "linked": False, "secure": False,
+                    "error": (linked.stderr or linked.stdout or "link failed")[:1000]}
+        if not secure:
+            return {"ok": True, "linked": True, "secure": False}
+        secured = self._run("secure", site)
+        # Preserve the established compatible behavior: a linked HTTP site
+        # remains usable when Herd cannot mint/trust TLS on this host.
+        return {"ok": True, "linked": True, "secure": secured.returncode == 0,
+                "error": "" if secured.returncode == 0 else
+                (secured.stderr or secured.stdout or "secure failed")[:1000]}
+
+    def cleanup(self, site):
+        # Attempt both operations even when TLS state is already absent.  This
+        # matches the legacy idempotent teardown sequence without taking any C
+        # runtime action.
+        unsecured = self._run("unsecure", site)
+        unlinked = self._run("unlink", site)
+        ok = unsecured.returncode == 0 and unlinked.returncode == 0
+        return {"ok": ok, "mutated": unsecured.returncode == 0 or unlinked.returncode == 0,
+                "errors": tuple(value for value in (
+                    (unsecured.stderr or unsecured.stdout or "")[:1000] if unsecured.returncode else "",
+                    (unlinked.stderr or unlinked.stdout or "")[:1000] if unlinked.returncode else "",
+                ) if value)}

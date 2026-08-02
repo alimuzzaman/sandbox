@@ -104,27 +104,33 @@ def _valid_domain(domain: str) -> str:
 
 
 def _hosts_passwordless() -> bool:
-    """True if the passwordless sudoers rule for the hosts-helper is installed."""
-    return SUDOERS_FILE.exists()
+    """Legacy repository-helper sudo authority is never considered usable."""
+    return False
 
 
 def _hosts_edit(action: str, domain: str) -> tuple[bool, str]:
-    """Add/remove a domain mapping via the helper. ALWAYS uses `sudo -n`
-    (non-interactive) so it can NEVER hang on a password prompt — critical for
-    the web server, where a blocking sudo would freeze the job forever. With
-    the passwordless rule installed it succeeds silently; without it, it fails
-    immediately and the caller falls back + tells the user to run
-    `./sb domains setup`. Returns (ok, message)."""
-    res = subprocess.run(
-        ["sudo", "-n", str(HOSTS_HELPER), action, domain],
-        capture_output=True, text=True)
-    if res.returncode == 0:
-        return True, (res.stdout or "").strip()
-    if not _hosts_passwordless():
-        return False, ("custom domains need a one-time setup: run "
-                       "`./sb domains setup` (or `sudo ./tools/hosts-helper.sh "
-                       f"{action} {domain}`)")
-    return False, (res.stderr or res.stdout or "sudo failed").strip()
+    """Retired: never execute a checkout path through stale sudo policy."""
+    return False, ("legacy /etc/hosts mutation is disabled; use the scoped "
+                   "resolver service or the per-port fallback")
+
+
+def revoke_legacy_sudoers(*, interactive: bool = False) -> tuple[bool, str]:
+    """Remove only the two known unsafe repository-helper sudoers rules.
+
+    This is an explicit upgrade action with a normal sudo prompt.  It never
+    invokes either user-writable helper and never broadens the fixed target set.
+    """
+    targets = tuple(path for path in (SUDOERS_FILE, PROXY_SUDOERS) if path.exists())
+    if not targets:
+        return True, "legacy repository-helper sudo authority is absent"
+    if not interactive:
+        return False, "interactive sudo is required to revoke legacy helper authority"
+    result = subprocess.run(["sudo", "rm", "-f", *map(str, targets)],
+                            capture_output=True, text=True)
+    if result.returncode != 0 or any(path.exists() for path in targets):
+        return False, (result.stderr or result.stdout or
+                       "legacy sudoers revocation did not complete").strip()
+    return True, "legacy repository-helper sudo authority revoked"
 
 
 def _valet_tld() -> str:
@@ -157,31 +163,14 @@ def valet_proxy_add(domain: str, port: int) -> bool:
     interactive terminal (let it through so the user can type it once), but in a
     non-interactive context (web UI / CI) we close stdin so it fails fast
     instead of hanging forever on the prompt."""
-    if not domain or not _valet_available():
-        return False
-    cmd = ["valet", "proxy", domain, f"http://127.0.0.1:{port}"]
-    if sys.stdin.isatty():
-        # Interactive: let valet's own sudo prompt reach the terminal.
-        res = subprocess.run(cmd)
-    else:
-        # Non-interactive: never hang on a password prompt.
-        res = subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                             capture_output=True, text=True)
-    return res.returncode == 0
+    return False
 
 
 def valet_proxy_remove(domain: str) -> None:
     """Remove a Valet proxy (`valet unproxy`), if Valet is available. Same
     interactive/non-interactive handling as valet_proxy_add (it also reloads
     nginx via sudo)."""
-    if not (domain and _valet_available()):
-        return
-    cmd = ["valet", "unproxy", domain]
-    if sys.stdin.isatty():
-        subprocess.run(cmd)
-    else:
-        subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True)
+    return None
 
 
 def _valet_proxy_active(domain: str) -> bool:
@@ -535,13 +524,13 @@ def regen_caddyfile(cfg: dict) -> None:
 
 
 def _dns_flush() -> None:
-    """Self-heal DNS so the user NEVER runs a terminal command: reload the live
-    dnsmasq (drops stale cached *.tst records that would shadow the wildcard) and
-    flush macOS's resolver cache. Passwordless via the proxy-helper sudoers rule;
-    silent no-op if that rule isn't installed. Called after every domain change."""
-    if _proxy_sudoers_installed():
-        subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-flush"],
-                       capture_output=True, text=True)
+    """Legacy no-password DNS flushing is retired.
+
+    Scoped resolver adapters perform their own bounded reload/verification.
+    Keeping this compatibility hook as a no-op prevents an old registry path
+    from invoking the user-writable proxy helper with root authority.
+    """
+    return None
 
 
 def _proxy_started_at() -> float | None:
@@ -676,6 +665,9 @@ def site_url(inst_cfg: dict) -> str:
     that won't resolve on a clean box, so the browser hangs ("loading forever").
     localhost:<port> always works because the WP container publishes that port.
     """
+    verified = inst_cfg.get("url")
+    if isinstance(verified, str) and verified.startswith(("http://", "https://")):
+        return verified
     port = inst_cfg.get("http_port", inst_cfg["wordpress_port"])
     dom = inst_cfg.get("domain")
     # herd (host) instances are served by Herd at https://<name>.test — no
@@ -690,6 +682,235 @@ def site_url(inst_cfg: dict) -> str:
     return f"http://localhost:{port}"
 
 
+def clean_url_compatibility_handoff(cfg: dict, instance: str, *,
+                                    interactive: bool = False,
+                                    protocols=("http",), service_factory=None) -> dict:
+    """Offer one legacy instance to the composed A → B → A clean-URL path.
+
+    This is a compatibility facade, not a second route implementation: ingress
+    owns route activation, DomainService owns DNS, and a declined/unproven
+    selection returns the existing per-port URL without invoking proxy helpers.
+    Legacy callers can retain their established proxy rollback path when the
+    composed service is unavailable or returns a fallback result.
+    """
+    owner = registry_find_instance(instance) or {}
+    root = owner.get("root")
+    if not root:
+        return {"ok": False, "state": "fallback", "mutated": False,
+                "reason": {"code": "project_owner_unavailable"}}
+    instance_config = resolve_instances(cfg).get(instance) or {}
+    port = (instance_config.get("wordpress_port") or owner.get("wordpress_port")
+            or owner.get("http_port"))
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        return {"ok": False, "state": "fallback", "mutated": False,
+                "reason": {"code": "backend_unavailable"}}
+    fallback = owner.get("url") or f"http://localhost:{port}"
+    if service_factory is None:
+        from sandbox.application.context import clean_url_service
+        service_factory = clean_url_service
+    try:
+        result = service_factory(cfg).apply(
+            root, label=owner.get("label", "default"),
+            backend={"address": "127.0.0.1", "port": port},
+            protocols=tuple(protocols),
+            capabilities=("wildcard",) if _multisite_mode(instance_config) == "subdomain" else (),
+            interactive=interactive, fallback_url=fallback,
+        )
+    except Exception as exc:
+        if not isinstance(exc, (OSError, RuntimeError, TypeError, ValueError)) \
+                and exc.__class__.__name__ != "ConfigError":
+            raise
+        return {"ok": False, "state": "fallback", "mutated": False,
+                "fallback_url": fallback,
+                "reason": {"code": "compatibility_handoff_unavailable",
+                           "message": str(exc)}}
+    if not isinstance(result, dict):
+        return {"ok": False, "state": "fallback", "mutated": False,
+                "fallback_url": fallback,
+                "reason": {"code": "compatibility_handoff_invalid"}}
+    return {"fallback_url": fallback, **result}
+
+
+def _compatibility_targets(cfg: dict) -> tuple[str, ...]:
+    """Return registered local instances once, without reading registry state files."""
+    names = list(resolve_instances(cfg))
+    names.extend(
+        entry.get("instance") for entry in _generic_proxy_entries()
+        if entry.get("instance")
+    )
+    return tuple(dict.fromkeys(
+        name for name in names
+        if (registry_find_instance(name) or {}).get("root")
+    ))
+
+
+def _result_dict(result) -> dict:
+    if isinstance(result, dict):
+        return dict(result)
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+    return {"ok": False, "state": "invalid", "mutated": False,
+            "reason": {"code": "compatibility_result_invalid"}}
+
+
+def _cleanup_composed_owner(cfg: dict, owner: dict, *,
+                            ingress_factory=None, domain_factory=None) -> dict:
+    """Remove only attributable application-service state for one owner."""
+    if ingress_factory is None or domain_factory is None:
+        from sandbox.application.context import domain_service, ingress_service
+        ingress_factory = ingress_factory or ingress_service
+        domain_factory = domain_factory or domain_service
+    root, label = owner.get("root"), owner.get("label", "default")
+    if not root:
+        return {"ok": False, "state": "cleanup_incomplete", "mutated": False,
+                "owner": None, "ingress": {}, "domains": {},
+                "reason": {"code": "project_owner_unavailable"}}
+    owner_id = f"{Path(root).expanduser().resolve()}::{label}"
+    try:
+        ingress = _result_dict(ingress_factory(cfg).cleanup_owner(owner_id))
+    except Exception as exc:
+        if not isinstance(exc, (OSError, RuntimeError, TypeError, ValueError)) \
+                and exc.__class__.__name__ != "ConfigError":
+            raise
+        ingress = {"ok": False, "state": "cleanup_incomplete", "mutated": False,
+                   "reason": {"code": "ingress_cleanup_unavailable",
+                              "message": str(exc)}}
+    try:
+        domains = _result_dict(domain_factory(cfg).cleanup(
+            root, label=label, interactive=False,
+        ))
+    except Exception as exc:
+        if not isinstance(exc, (OSError, RuntimeError, TypeError, ValueError)) \
+                and exc.__class__.__name__ != "ConfigError":
+            raise
+        domains = {"ok": False, "state": "cleanup_incomplete", "mutated": False,
+                   "reason": {"code": "domain_cleanup_unavailable",
+                              "message": str(exc)}}
+    complete = bool(ingress.get("ok") and domains.get("ok"))
+    return {"ok": complete,
+            "state": "ready" if complete else "cleanup_incomplete",
+            "mutated": bool(ingress.get("mutated") or domains.get("mutated")),
+            "owner": owner_id, "ingress": ingress, "domains": domains}
+
+
+def clean_url_lifecycle_handoff(cfg: dict, action: str, *,
+                                interactive: bool = False,
+                                protocols=("http",), service_factory=None,
+                                ingress_factory=None, domain_factory=None) -> dict:
+    """Delegate legacy setup/up/down/teardown through application services.
+
+    Setup and up are batch-atomic from the compatibility caller's perspective.
+    If one owner cannot adopt, only state newly created by this attempt is
+    rolled back before the caller is allowed to use the legacy proxy. Down and
+    teardown clean application-owned state first and report incomplete cleanup
+    rather than concealing it behind a successful legacy command.
+    """
+    if action not in {"setup", "up", "down", "teardown"}:
+        raise ValueError("unsupported clean URL compatibility action")
+    targets = _compatibility_targets(cfg)
+    if not targets:
+        return {"ok": False, "state": "fallback", "mutated": False,
+                "action": action, "results": [], "rollback": {"complete": True},
+                "safe_to_fallback": True,
+                "reason": {"code": "no_registered_clean_url_targets"}}
+
+    if action in {"down", "teardown"}:
+        results = []
+        for name in targets:
+            owner = registry_find_instance(name) or {}
+            results.append({"instance": name, **_cleanup_composed_owner(
+                cfg, owner, ingress_factory=ingress_factory,
+                domain_factory=domain_factory,
+            )})
+        complete = all(item["ok"] for item in results)
+        return {"ok": complete,
+                "state": "ready" if complete else "cleanup_incomplete",
+                "mutated": any(item["mutated"] for item in results),
+                "action": action, "results": results,
+                "rollback": {"complete": complete},
+                "safe_to_fallback": complete,
+                "reason": {"code": "cleanup_complete" if complete
+                           else "cleanup_incomplete"}}
+
+    attempted = []
+    for name in targets:
+        result = clean_url_compatibility_handoff(
+            cfg, name, interactive=interactive, protocols=protocols,
+            service_factory=service_factory,
+        )
+        attempted.append({"instance": name, "protocols": tuple(protocols), **result})
+        if result.get("ok"):
+            continue
+        rollback = []
+        for prior in attempted:
+            if not prior.get("mutated"):
+                continue
+            owner = registry_find_instance(prior["instance"]) or {}
+            rollback.append({"instance": prior["instance"],
+                             **_cleanup_composed_owner(
+                                 cfg, owner, ingress_factory=ingress_factory,
+                                 domain_factory=domain_factory,
+                             )})
+        complete = all(item["ok"] for item in rollback)
+        return {"ok": False,
+                "state": "fallback" if complete else "rollback_incomplete",
+                "mutated": any(item.get("mutated") for item in attempted),
+                "action": action, "results": attempted,
+                "rollback": {"complete": complete, "results": rollback},
+                "safe_to_fallback": complete,
+                "reason": {"code": result.get("reason", {}).get(
+                    "code", "composed_clean_url_unavailable")}}
+    return {"ok": True, "state": "ready",
+            "mutated": any(item.get("mutated") for item in attempted),
+            "action": action, "results": attempted,
+            "rollback": {"complete": True}, "safe_to_fallback": False,
+            "reason": {"code": "composed_clean_urls_ready"}}
+
+
+def _persist_composed_clean_urls(cfg: dict, lifecycle: dict) -> dict:
+    """Persist verified names only after the entire composed batch succeeds."""
+    local = _local_yaml()
+    instances = local.setdefault("instances", {})
+    changed = False
+    for item in lifecycle.get("results", ()):
+        hostname = item.get("hostname")
+        owner = registry_find_instance(item.get("instance")) or {}
+        if not (isinstance(hostname, str) and hostname and owner.get("root")):
+            continue
+        protocols = tuple(item.get("protocols") or ())
+        scheme = "https" if "https" in protocols else "http"
+        verified_url = item.get("url") or f"{scheme}://{hostname}"
+        block = instances.setdefault(item["instance"], {})
+        desired = {"domain": hostname, "tld": hostname.rsplit(".", 1)[-1],
+                   "url": verified_url}
+        if any(block.get(key) != value for key, value in desired.items()):
+            block.update(desired); changed = True
+        registry_put(owner["root"], label=owner.get("label", "default"),
+                     domain=hostname, url=verified_url)
+        item["url"] = verified_url
+    refreshed = cfg
+    if changed:
+        _write_local_yaml(local)
+        try:
+            refreshed = load_config()
+        except Exception as exc:
+            if not isinstance(exc, (OSError, RuntimeError, TypeError, ValueError)) \
+                    and exc.__class__.__name__ != "ConfigError":
+                raise
+    resolved = resolve_instances(refreshed)
+    for item in lifecycle.get("results", ()):
+        name, verified_url = item.get("instance"), item.get("url")
+        if name not in resolved or not verified_url or not _instance_running(name):
+            continue
+        if verified_url.startswith("https://"):
+            _write_ssl_muplugin(name)
+        wpcli(["option", "update", "siteurl", verified_url],
+              instance=name, check=False)
+        wpcli(["option", "update", "home", verified_url],
+              instance=name, check=False)
+    return refreshed
+
+
 def _site_host(inst_cfg: dict) -> str:
     """Host[:port] of the instance's URL — DOMAIN_CURRENT_SITE must match
     wp_site.domain byte-for-byte, and `wp core multisite-convert` stores the
@@ -699,144 +920,51 @@ def _site_host(inst_cfg: dict) -> str:
 
 
 def _ensure_proxy_up(cfg: dict) -> None:
-    """Restore the lo0 alias (dropped on reboot) and start the proxy if it's
-    not running. Best-effort, passwordless, silent on success."""
-    if _proxy_sudoers_installed():
-        subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
-                       capture_output=True, text=True)
-    if not _proxy_container_running():
+    """Restart only an already-provisioned legacy proxy without root actions."""
+    if (_lo0_alias_present() and all(_resolver_present(tld)
+                                    for tld in _distinct_tlds(cfg))
+            and not _proxy_container_running()):
         regen_caddyfile(cfg)
         reload_proxy()
 
 
 def _proxy_sudoers_installed() -> bool:
-    """True if the passwordless rule for proxy-helper.sh is installed."""
-    try:
-        if not PROXY_SUDOERS.exists():
-            return False
-    except PermissionError:
-        # Some VPS images make /etc/sudoers.d searchable only by root. If we
-        # cannot even stat the file, treat the proxy helper as unavailable
-        # instead of crashing unrelated remote instance creation.
-        return False
-    try:
-        return str(PROXY_HELPER) in PROXY_SUDOERS.read_text()
-    except PermissionError:
-        # The rule lands as 0440 root:wheel, so a non-root process can't read
-        # its contents — but only our setup creates this exact file, so its
-        # mere existence means the rule is installed. (Without this, every
-        # non-root `sb` run thinks setup never happened and demands a TTY.)
-        return True
-    except OSError:
-        return False
+    """The repository-path legacy sudo rule is never trusted or invoked."""
+    return False
+
+
+def clean_url_setup(cfg: dict, *, tld=None, interactive: bool = False) -> dict:
+    """Use only the composed HTTP service for new clean-URL authority."""
+    revoked, detail = revoke_legacy_sudoers(interactive=interactive)
+    if not revoked:
+        return {"ok": False, "state": "pending_privilege", "mutated": False,
+                "mode": "application", "cfg": cfg, "safe_to_fallback": False,
+                "reason": {"code": "legacy_authority_revocation_required",
+                           "message": detail}}
+    lifecycle = clean_url_lifecycle_handoff(
+        cfg, "setup", interactive=interactive, protocols=("http",),
+    )
+    if lifecycle["ok"]:
+        refreshed = _persist_composed_clean_urls(cfg, lifecycle)
+        return {**lifecycle, "mode": "application", "cfg": refreshed}
+    return {**lifecycle, "mode": "application", "cfg": cfg,
+            "safe_to_fallback": False,
+            "reason": lifecycle.get("reason") or {
+                "code": "composed_clean_url_unavailable"}}
 
 
 def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
-    """Ensure the clean-URL HTTP proxy infra is up (no certs): the passwordless
-    sudoers rule, the lo0 alias, dnsmasq/resolver for *.tst, the boot LaunchDaemon,
-    and the running Caddy container. This is the DEFAULT path — plain http://
-    <name>.tst, no mkcert, no 'Not Secure'. One-time sudo for the sudoers rule;
-    after that it's password-free. Returns (ok, cfg). Requires an interactive
-    terminal the first time (sudoers install)."""
-    if shutil.which("docker") is None:
-        if not quiet:
-            info("Docker not found — clean URLs need it. Using localhost:<port>.")
-        return False, cfg
+    """Legacy privileged bootstrap is retired; composed A/B owns new setup.
 
-    # Linux has its own working implementation now (tools/proxy-helper.sh:
-    # a self-managed dnsmasq + /etc/resolv.conf override, live-verified —
-    # see docs/cross-platform-support.md §4) — no platform gate needed here
-    # anymore. proxy-helper.sh itself declines (exit 3, caught below as a
-    # nonzero returncode) on the ONE case that couldn't be verified safely:
-    # a symlinked /etc/resolv.conf (systemd-resolved/NetworkManager-managed),
-    # or port 53 already held by something that isn't our own dnsmasq — both
-    # fall through to the existing "could not set up ... using localhost"
-    # message below, same as any other proxy-setup failure.
-
-    # 1. Passwordless sudoers rule for proxy-helper.sh (alias + dnsmasq). One
-    #    sudo prompt, once. Skipped if already installed.
-    if not _proxy_sudoers_installed():
-        if not sys.stdin.isatty():
-            if not quiet:
-                info("clean URLs need a one-time setup (a password) — run "
-                     "`./sb domains setup` in your terminal. Using localhost.")
-            return False, cfg
-        import getpass
-        user = getpass.getuser()
-        rule = (f"# Installed by the sandbox — lets it manage the lo0 alias and "
-                f"dnsmasq/resolver for *.{PROXY_TLD} without a password.\n"
-                f"{user} ALL=(root) NOPASSWD: {PROXY_HELPER}\n")
-        info("One-time setup for clean http://<name>.tst URLs — your password "
-             "ONCE (no certificate, no browser warning).")
-        tmp = RUNTIME_DIR / "sandbox-proxy.sudoers"
-        tmp.write_text(rule)
-        _SUDOERS_REASON = (
-            "Sandbox would like to set up clean local URLs so your sites open at "
-            "http://<name>.tst instead of localhost:8188. This one-time step lets "
-            "it manage local DNS for *.tst without asking again — all local, and "
-            "undoable anytime with ./sb uninstall.")
-        chk = _sudo(["visudo", "-cf", str(tmp)], reason=_SUDOERS_REASON,
-                    capture_output=True, text=True)
-        if chk.returncode != 0:
-            tmp.unlink(missing_ok=True)
-            info(f"sudoers rule failed validation: {chk.stderr.strip()}")
-            return False, cfg
-        inst = _sudo(
-            ["install", "-m", "0440", "-o", "root", "-g",
-             "wheel" if sys.platform == "darwin" else "root",
-             str(tmp), str(PROXY_SUDOERS)], reason=_SUDOERS_REASON,
-            capture_output=True, text=True)
-        tmp.unlink(missing_ok=True)
-        if inst.returncode != 0:
-            info(f"failed to install sudoers rule: {inst.stderr.strip()}")
-            return False, cfg
-        ok("clean-URL host actions are now password-free.")
-
-    # 2. lo0 alias + dnsmasq/resolver for each configured TLD. Only sudo for what
-    #    is MISSING: the alias + resolver persist (the LaunchDaemon re-adds the
-    #    alias on boot, the resolver/dnsmasq files stay), so once the one-time
-    #    `domains setup` ran, securing needs NO sudo per ensure. That's what lets
-    #    secure-at-create work from the MCP server's subprocess, which can't
-    #    `sudo -n` (no controlling tty/session) — the cause of MCP-created
-    #    instances falling back to localhost.
-    ok_all = True
-    if not _lo0_alias_present():
-        ok_all = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
-                                capture_output=True, text=True).returncode == 0
-    tlds = _distinct_tlds(cfg) | ({tld} if tld else set())
-    for t in tlds:
-        if not _resolver_present(t):
-            r = subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-up", t],
-                               capture_output=True, text=True)
-            ok_all = ok_all and r.returncode == 0
-    if not ok_all:
-        info(f"could not set up *.{'/'.join(sorted(tlds))} "
-             "resolution — using localhost for now.")
-        return False, cfg
-    PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 3. Boot-time alias restore + start the proxy with current routes.
-    _install_alias_launchd()
-    PROXY_COMPOSE.write_text(render_proxy_compose())
-    regen_caddyfile(cfg)
-    up, detail = proxy_apply()
-    if not up:
-        if _proxy_container_running():
-            # The container IS up — this is a config apply failure, not Docker
-            # being down. Say so, and show what Caddy actually reported.
-            info(f"proxy is running but the config reload failed: "
-                 f"{detail or 'no output'}")
-        else:
-            availability = proxy_availability(running=False)
-            if availability["reason_code"] == "listener_conflict":
-                info(f"proxy container did not start: {availability['message']} "
-                     "The localhost:<port> URL remains available.")
-            else:
-                info(f"proxy startup failed"
-                     f"{': ' + detail if detail else '.'} "
-                     "The localhost:<port> URL remains available.")
-        return False, cfg
-    return True, cfg
+    The old flow installed a NOPASSWD rule pointing at a user-writable checkout
+    helper.  Never recreate or invoke that authority.  An already-running
+    legacy proxy remains a rollback control, but missing DNS/alias state must be
+    reconciled by the scoped ingress and resolver services.
+    """
+    if not quiet:
+        info("legacy clean-URL privilege bootstrap is disabled; using the "
+             "composed ingress/resolver service or localhost:<port> fallback")
+    return False, cfg
 
 
 def proxy_setup(cfg, tld=None) -> bool:
@@ -846,6 +974,23 @@ def proxy_setup(cfg, tld=None) -> bool:
     per proxy instance, switching them to https. Interactive (password once for the
     CA). `tld` overrides the per-project default for newly-assigned domains.
     The DEFAULT install path does NOT call this — plain http needs no cert."""
+    revoked, detail = revoke_legacy_sudoers(interactive=sys.stdin.isatty())
+    if not revoked:
+        info(detail)
+        return False
+    lifecycle = clean_url_lifecycle_handoff(
+        cfg, "setup", interactive=sys.stdin.isatty(), protocols=("https",),
+    )
+    if lifecycle["ok"]:
+        _persist_composed_clean_urls(cfg, lifecycle)
+        return True
+    info("proof-scoped HTTPS adoption is unavailable; preserved the existing "
+         "route and per-port fallback without invoking legacy helpers")
+    return False
+    if not lifecycle.get("safe_to_fallback"):
+        info("composed clean-URL rollback is incomplete; legacy proxy setup was not started")
+        return False
+
     # 1. Ensure the base HTTP proxy infra (sudoers, alias, dnsmasq, container).
     up, cfg = _ensure_url_proxy(cfg, tld=tld)
     if not up:
@@ -926,6 +1071,23 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     ic = resolve_instances(cfg).get(name, {})
     if ic.get("server") == "herd":
         return False
+    handoff = clean_url_compatibility_handoff(cfg, name, protocols=("https",))
+    hostname = handoff.get("hostname") if handoff.get("ok") else None
+    if isinstance(hostname, str) and hostname:
+        verified_url = handoff.get("url") or f"https://{hostname}"
+        local = _local_yaml()
+        block = local.setdefault("instances", {}).setdefault(name, {})
+        block.update({"domain": hostname, "tld": hostname.rsplit(".", 1)[-1],
+                      "url": verified_url})
+        _write_local_yaml(local)
+        owner = registry_find_instance(name) or {}
+        if owner.get("root"):
+            registry_put(owner["root"], label=owner.get("label", "default"),
+                         domain=hostname, url=verified_url)
+        return True
+    # No receipt-owned composed route was created.  Preserve localhost rather
+    # than entering the retired aggregate proxy/certificate mutation path.
+    return False
     ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
     if not (shutil.which("mkcert") and ca_ok):
         return False
@@ -1049,6 +1211,8 @@ def secure_generic_instance(instance: str, *, tld=None) -> tuple[bool, str | Non
     entry = registry_find_instance(instance)
     if not entry or entry.get("kind") != "compose":
         return False, f"generic instance {instance!r} was not found"
+    return False, ("generic HTTPS requires a proof-scoped ingress/resolver route; "
+                   "the unreceipted aggregate proxy is retired")
     chosen_tld = tld or _generic_tld(entry)
     domain = entry.get("domain") or f"{instance}.{chosen_tld}"
     # A configured proxy is already sufficient for an existing generic route;
@@ -1073,34 +1237,43 @@ def secure_generic_instance(instance: str, *, tld=None) -> tuple[bool, str | Non
     return True, f"https://{domain}"
 
 
-def proxy_teardown(cfg) -> None:
+def proxy_up(cfg: dict) -> bool:
+    """Restore composed clean URLs, falling back only after a clean rollback."""
+    instances = tuple(resolve_instances(cfg).values())
+    secure = any(
+        str(item.get("url") or "").startswith("https://")
+        or (item.get("domain") and _cert_paths(item["domain"])[0].exists())
+        for item in instances
+    )
+    lifecycle = clean_url_lifecycle_handoff(
+        cfg, "up", protocols=("https",) if secure else ("http",),
+    )
+    if lifecycle["ok"]:
+        _persist_composed_clean_urls(cfg, lifecycle)
+        return True
+    info("composed clean URL is unavailable; preserved legacy state and per-port fallback")
+    return False
+
+
+def proxy_down(cfg: dict) -> bool:
+    """Clean receipt-owned routes without mutating unreceipted legacy state."""
+    lifecycle = clean_url_lifecycle_handoff(cfg, "down")
+    return lifecycle["ok"] or lifecycle.get("reason", {}).get("code") == \
+        "no_registered_clean_url_targets"
+
+
+def proxy_teardown(cfg) -> bool:
     """Reverse proxy_setup: stop the proxy, untrust the CA, remove dnsmasq/
     resolver + the lo0 alias + the LaunchDaemon + the sudoers rule. Each step is
     best-effort so a partial state still cleans up."""
-    subprocess.run(["docker", "compose", "-p", PROXY_PROJECT, "-f",
-                    str(PROXY_COMPOSE), "--project-directory", str(ROOT),
-                    "down"], capture_output=True, text=True)
-    if _proxy_sudoers_installed():
-        for tld in _distinct_tlds(cfg):
-            subprocess.run(["sudo", "-n", str(PROXY_HELPER), "dns-down", tld],
-                           capture_output=True, text=True)
-        subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-down"],
-                       capture_output=True, text=True)
-    if shutil.which("mkcert"):
-        subprocess.run(["mkcert", "-uninstall"], capture_output=True, text=True)
-    _UNINSTALL_REASON = (
-        "Sandbox is cleaning up its clean-URL setup — removing the startup item "
-        "and the local DNS rule it added. Your Mac password confirms this final "
-        "step.")
-    if sys.platform == "darwin":
-        # `launchctl` doesn't exist on Linux at all — calling it there raises
-        # FileNotFoundError unconditionally (unlike a nonzero exit code,
-        # capture_output doesn't shield a missing executable). The LaunchDaemon
-        # is only ever installed on macOS (_install_alias_launchd, gated in
-        # _ensure_url_proxy), so this step is meaningless on Linux anyway.
-        _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
-              reason=_UNINSTALL_REASON, capture_output=True, text=True)
-    _sudo(["rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS)],
-          reason=_UNINSTALL_REASON, capture_output=True, text=True)
-    ok("HTTPS proxy torn down (certs left in runtime/proxy/certs — delete "
-       "manually if desired).")
+    lifecycle = clean_url_lifecycle_handoff(cfg, "teardown")
+    if not lifecycle["ok"] and not lifecycle.get("safe_to_fallback"):
+        info("composed clean-URL cleanup is incomplete; legacy DNS teardown was not attempted")
+        return False
+    revoked, detail = revoke_legacy_sudoers(interactive=sys.stdin.isatty())
+    if not revoked:
+        info(detail)
+        return False
+    ok("receipt-owned clean URLs removed; unreceipted legacy routes and certs "
+       "were preserved for manual recovery")
+    return True

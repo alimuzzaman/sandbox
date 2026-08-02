@@ -134,7 +134,7 @@ class TestMcpComposition(unittest.TestCase):
         specs = built_in_tool_registry().specs()
         self.assertEqual(tuple(spec.group_id for spec in specs), BUILTIN_TOOL_GROUPS)
         self.assertEqual(
-            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "hermes", "resources"}},
+            {spec.group_id: spec.dependencies for spec in specs if spec.group_id in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources"}},
             {
                 "instances": (
                     "sandbox_root", "proxy_tld", "core", "load_sandbox_yml",
@@ -144,13 +144,26 @@ class TestMcpComposition(unittest.TestCase):
                 "domains": ("domain_service", "ingress_service"),
                 "runtime": ("core", "project_instance", "runtime_service",
                             "native_preflight", "managed_package_planner"),
+                "wp": (
+                    "sandbox_root", "compose", "herd_host_env", "host_run", "is_herd",
+                    "project_instance", "require_project_capability", "resolve_instance",
+                    "safe_json", "wp_root", "wpcli",
+                ),
                 "jobs": ("job_service", "target_service", "workspace_service"),
                 "hermes": ("hermes_service",),
                 "resources": ("resource_service_factory",),
             },
         )
         self.assertTrue(all(spec.dependencies == ("app",) for spec in specs
-                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "hermes", "resources"}))
+                            if spec.group_id not in {"instances", "domains", "runtime", "jobs", "wp", "hermes", "resources"}))
+
+    def test_domains_group_declares_the_full_ingress_transport_contract(self):
+        from tools.manifest import BUILTIN_TOOL_NAMES
+        self.assertEqual(
+            BUILTIN_TOOL_NAMES["domains"][-7:],
+            ("ingress_status", "ingress_support", "ingress_plan", "ingress_cleanup",
+             "ingress_reconcile", "ingress_reconsider", "ingress_apply"),
+        )
 
     def test_instance_and_hermes_groups_register_against_an_isolated_fake_context(self):
         from dependencies import ToolDependencies
@@ -202,7 +215,7 @@ class TestMcpComposition(unittest.TestCase):
         import ast
 
         root = Path(__file__).parent.parent / "mcp" / "wp-server" / "tools"
-        for group in ("instances", "hermes"):
+        for group in ("instances", "wp", "hermes"):
             tree = ast.parse((root / f"{group}.py").read_text())
             app_imports = [node for node in ast.walk(tree)
                            if isinstance(node, ast.ImportFrom) and node.module == "app"]

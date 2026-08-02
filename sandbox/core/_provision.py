@@ -864,6 +864,11 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
     non-plugin `mappings`/`mappings_inactive` (other wp-paths) are still handled
     here. NOTE: absolute symlinks only resolve inside the container when the target
     is under a bind-mounted host path (the extra_mounts collector handles that)."""
+    gateway = _managed_execution_gate(
+        name, "wordpress.cli", "plugin_activation", ("wp", "plugin", "activate"),
+    )
+    if gateway is not None:
+        raise RuntimeError(gateway.stderr)
     pdir = plugins_dir(name)
     pdir.mkdir(parents=True, exist_ok=True)
     root_path = Path(root)
@@ -973,6 +978,11 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
     needs an extra_mounts bind like plugin paths do). Activation is a
     separate explicit step: `theme install --activate` is silently ignored
     on multisite installs."""
+    gateway = _managed_execution_gate(
+        name, "wordpress.cli", "plugin_activation", ("wp", "theme", "activate"),
+    )
+    if gateway is not None:
+        raise RuntimeError(gateway.stderr)
     themes = [t for t in (pconf.get("themes") or []) if t and isinstance(t, str)]
     if not themes:
         return

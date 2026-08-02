@@ -8,7 +8,7 @@ import sys
 from sandbox.registry import CommandSpec, register_specs
 
 
-ACTIONS = ("support", "preflight", "install-plan", "install", "status", "cleanup")
+ACTIONS = ("support", "preflight", "baseline", "install-plan", "install", "status", "cleanup")
 
 
 def configure_parser(parser):
@@ -28,6 +28,25 @@ def _emit(value, as_json):
         print(f"  {reason['code']}: {', '.join(reason.get('missing', ())) or reason.get('message', '')}")
 
 
+def _runtime_result(cfg, args, operation):
+    """Keep status and conservative cleanup on the adapter contract.
+
+    This command never calls package management: installed host packages are
+    shared prerequisites and have a separate reviewed lifecycle.
+    """
+    from sandbox.application.context import runtime_service
+    from sandbox.runtimes.base import OperationError, OperationRequest
+
+    result = runtime_service(cfg).invoke(OperationRequest(
+        args.project_dir, operation, label=args.label,
+    ))
+    if isinstance(result, OperationError):
+        return {"ok": False, "operation": f"native_{operation}", "state": "blocked",
+                "mutated": False, "reason": {"code": result.code,
+                                                "message": result.message}}
+    return {"ok": result.ok, "operation": f"native_{operation}", **dict(result.data)}
+
+
 def support():
     from sandbox.runtimes.manifest import RUNTIME_DECLARATIONS
     return {"ok": True, "operation": "native_support", "state": "ready",
@@ -39,6 +58,18 @@ def cmd_native(cfg, args):
     elif args.action == "preflight":
         from sandbox.application.context import native_isolation_preflight
         result = native_isolation_preflight(cfg).inspect()
+    elif args.action == "baseline":
+        from sandbox.application.context import managed_host_service_baseline
+        try:
+            observed = managed_host_service_baseline(cfg).observe()
+            result = {"operation": "native_baseline", "state": "ready",
+                      "mutated": False, **observed,
+                      "reason": {"code": "ready"}}
+        except (OSError, RuntimeError, ValueError) as exc:
+            result = {"ok": False, "operation": "native_baseline",
+                      "state": "blocked", "mutated": False,
+                      "reason": {"code": "host_service_baseline_unavailable",
+                                 "message": str(exc)}}
     elif args.action == "install-plan":
         from sandbox.application.context import managed_package_planner
         try:
@@ -69,6 +100,10 @@ def cmd_native(cfg, args):
             result = {"ok": False, "operation": "native_install", "state": "blocked",
                       "mutated": False,
                       "reason": {"code": "version_unavailable", "message": str(exc)}}
+    elif args.action == "status":
+        result = _runtime_result(cfg, args, "status")
+    elif args.action == "cleanup":
+        result = _runtime_result(cfg, args, "destroy")
     else:
         result = {"ok": False, "operation": f"native_{args.action.replace('-', '_')}",
                   "state": "unsupported", "mutated": False,

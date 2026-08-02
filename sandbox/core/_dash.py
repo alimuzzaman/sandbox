@@ -14,6 +14,50 @@ import threading
 from contextlib import redirect_stdout, redirect_stderr
 
 
+def runtime_health_lines(data: dict | None) -> tuple[str, ...]:
+    """Render one stable, secret-free runtime health summary.
+
+    Status, doctor, and the dashboard share this formatter so native isolation
+    drift and capability gaps cannot disappear behind transport-specific UI.
+    The function is deliberately observational and accepts only an operation
+    result already obtained through the runtime service.
+    """
+    if not isinstance(data, dict):
+        return ("Runtime health: unavailable",)
+    runtime = data.get("runtime") if isinstance(data.get("runtime"), dict) else {}
+    identity = "/".join(str(runtime.get(key, "unknown"))
+                        for key in ("mode", "adapter", "isolation"))
+    state = str(data.get("state") or data.get("status") or "unknown")
+    health = data.get("health") if isinstance(data.get("health"), dict) else {}
+    isolation_ok = health.get("ok")
+    if isolation_ok is None:
+        isolation = "adapter-reported" if state == "ready" else "not-reported"
+    else:
+        isolation = "effective" if isolation_ok else "drifted"
+    capabilities = data.get("capabilities")
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    required = capabilities.get("required")
+    required = required if isinstance(required, dict) else {}
+    optional = capabilities.get("optional")
+    optional = optional if isinstance(optional, dict) else {}
+    required_ok = sum(1 for detail in required.values()
+                      if isinstance(detail, dict) and detail.get("supported"))
+    optional_ok = sum(1 for detail in optional.values()
+                      if isinstance(detail, dict) and detail.get("supported"))
+    gaps = sorted(name for name, detail in optional.items()
+                  if isinstance(detail, dict) and not detail.get("supported"))
+    lines = [f"Runtime: {identity}",
+             f"Runtime health: state={state}; isolation={isolation}",
+             (f"Capabilities: required={required_ok}/{len(required)}; "
+              f"optional={optional_ok}/{len(optional)}")]
+    if gaps:
+        lines.append("Optional runtime gaps: " + ", ".join(gaps))
+    recovery = data.get("recovery")
+    if isinstance(recovery, (list, tuple)) and recovery:
+        lines.append(f"Runtime recovery: pending={len(recovery)}")
+    return tuple(lines)
+
+
 def collect_instance_rows(cfg: dict) -> list[dict]:
     """Per-instance view-model shared by `cmd_instances` (static print) and the
     `dashboard` TUI, so the two never drift. One dict per instance with status,
@@ -587,6 +631,11 @@ def _web_do_action(payload: dict) -> dict:
                 line = (payload.get("cmd") or "").strip()
                 if not line:
                     print("(empty)"); return True
+                from sandbox.application.context import managed_native_instance_selected
+                if managed_native_instance_selected(name) is not None:
+                    print("managed-native terminal requires an adapter-owned "
+                          "transport; Compose/host fallback is disabled")
+                    return False
                 import shlex as _shlex
                 if line == "wp" or line.startswith("wp "):
                     rest = line[2:].strip()

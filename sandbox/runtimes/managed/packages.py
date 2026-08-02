@@ -17,6 +17,7 @@ IMAGE_COMMON = (
     "php8.3-mbstring", "php8.3-xml", "php8.3-zip", "php8.3-intl", "php8.3-opcache",
     "mariadb-server", "mariadb-client", "cron", "ca-certificates", "curl", "unzip",
     "git", "composer",
+    "bubblewrap", "iproute2", "util-linux",
 )
 EXPECTED_PREFIXES = {"php8.3-fpm": "8.3", "php8.3-cli": "8.3",
                      "mariadb-server": "1:10.11", "nginx": "1.24", "apache2": "2.4"}
@@ -138,11 +139,12 @@ class ManagedPackagePlanner:
 
 class ManagedPackageService:
     def __init__(self, *, replanner, apply_transaction, baseline_observer,
-                 confirmation):
+                 confirmation, prepare_transaction=None):
         self.replanner = replanner
         self.apply_transaction = apply_transaction
         self.baseline_observer = baseline_observer
         self.confirmation = confirmation
+        self.prepare_transaction = prepare_transaction
 
     def apply(self, plan, *, interactive=False):
         if not interactive:
@@ -157,13 +159,23 @@ class ManagedPackageService:
             return {"ok": False, "state": "drifted", "mutated": False,
                     "reason": {"code": "package_plan_drift"},
                     "simulation_digest": current.simulation_digest}
+        prepared = {"ok": True, "mutated": False}
+        if self.prepare_transaction is not None:
+            prepared = self.prepare_transaction()
+            if not isinstance(prepared, dict) or not prepared.get("ok"):
+                return {"ok": False, "state": "failed",
+                        "mutated": bool(isinstance(prepared, dict) and
+                                        prepared.get("mutated")),
+                        "reason": {"code": "native_helper_install_failed"}}
         before = self.baseline_observer()
         result = self.apply_transaction(current)
         after = self.baseline_observer()
         if before != after:
             return {"ok": False, "state": "blocked", "mutated": bool(result.get("mutated")),
                     "reason": {"code": "host_service_baseline_changed"}}
-        return result
+        return {**result, "mutated": bool(prepared.get("mutated") or result.get("mutated")),
+                "host_service_baseline_digest": before.get("digest")
+                if isinstance(before, dict) else None}
 
 
 class PackagePlanStager:
@@ -193,11 +205,15 @@ class NativeHostPackageApplier:
         self.installed_helper = installed_helper
         self.stager = stager or PackagePlanStager()
 
-    def apply(self, plan):
+    def prepare(self):
         installed = self.process.run(("sudo", self.repository_helper, "install"), timeout=120)
         if installed.returncode != 0:
             return {"ok": False, "state": "failed", "mutated": False,
                     "reason": {"code": "native_helper_install_failed"}}
+        return {"ok": True, "state": "ready", "mutated": True,
+                "reason": {"code": "ready"}}
+
+    def apply(self, plan):
         path = self.stager.stage(plan)
         try:
             result = self.process.run(("sudo", "-n", self.installed_helper,
@@ -205,14 +221,42 @@ class NativeHostPackageApplier:
                                        plan.simulation_digest), timeout=900)
         finally:
             path.unlink(missing_ok=True)
+        detail = (getattr(result, "stderr", "") or "").strip()[:300]
         return {"ok": result.returncode == 0,
                 "state": "ready" if result.returncode == 0 else "failed",
                 # The helper installation already changed a root-owned path even
                 # if the subsequent exact APT transaction fails.
                 "mutated": True,
                 "reason": {"code": "ready" if result.returncode == 0 else
-                           "host_package_apply_failed"},
+                           "host_package_apply_failed",
+                           **({"message": detail} if detail and result.returncode != 0 else {})},
                 "simulation_digest": plan.simulation_digest}
+
+
+class PrivilegedHostServiceBaseline:
+    """Read the fixed, content-free host baseline through the installed helper."""
+
+    def __init__(self, *, process, helper="/usr/local/libexec/sandbox-native-helper"):
+        self.process = process
+        self.helper = helper
+
+    def observe(self):
+        result = self.process.run(
+            ("sudo", "-n", self.helper, "host-baseline-observe"), timeout=120,
+        )
+        output = result.stdout or ""
+        if result.returncode != 0 or len(output.encode()) > 1024 * 1024:
+            raise RuntimeError("native host service baseline is unavailable")
+        try: value = json.loads(output)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("native host service baseline is invalid") from exc
+        if (not isinstance(value, dict) or set(value) != {"ok", "digest", "baseline"}
+                or value.get("ok") is not True
+                or not isinstance(value.get("digest"), str)
+                or len(value["digest"]) != 64
+                or not isinstance(value.get("baseline"), dict)):
+            raise RuntimeError("native host service baseline is invalid")
+        return value
 
 
 class HostServiceBaseline:
@@ -255,5 +299,5 @@ class HostServiceBaseline:
         return {"units": units,
                 "config": {str(root): self._tree_digest(root, content=True)
                            for root in self.config_roots},
-                "data": {str(root): self._tree_digest(root, content=False)
+                "data": {str(root): self._tree_digest(root, content=True)
                          for root in self.data_roots}}

@@ -17,7 +17,17 @@ belongs to mDNS. Public FQDNs are verify-only and are never shadowed locally.
 
 Read-only operations finish within two seconds per external probe. Mutations use a
 30-second bound. First mutation of a user-owned resolver requires recorded consent and
-may prompt only on an interactive terminal. MCP and CI return `pending_consent` or
+may prompt only on an interactive terminal. That interaction performs the one-time
+installation of `/usr/local/libexec/sandbox-resolver-helper` plus a caller-scoped sudoers
+rule. Subsequent mutations use only its fixed, schema-validating verbs; project files are
+never privileged mutation candidates. A separate passworded `authorize` call creates a
+root-owned receipt binding the caller UID, project-owner digest, local suffix, loopback
+endpoint, and rendered-fragment digest. `authorize` is excluded from NOPASSWD; apply,
+status, and cleanup fail without the exact receipt. Authorization is not ownership: the
+helper creates a separate applied-state receipt only after a successful install/reload,
+and an identical fragment without a valid applied receipt remains foreign. Shared-owner
+applied receipts keep a suffix route alive until the final successful CAS cleanup. MCP and
+CI return `pending_consent` or
 `pending_privilege`; they never hang for input. A resolver pin in the machine-local
 override beats project configuration, which beats detection, and status reports that
 source.
@@ -40,6 +50,16 @@ Exact records are preferred. A wildcard is created only for a declared feature a
 below its declared local name. Shared zones are reference-counted; the resolver rule and
 non-forwarding authority survive until the final owner leaves.
 
+All suffix routes share one locked authority endpoint. Adding a project regenerates the
+authority from the complete owned binding set, while cleanup removes a suffix route only
+after its final binding is gone. A racing plan cannot move an active endpoint or replace
+another project's fragment.
+
+Fresh HTTP verification parses the stored fallback only to recover an explicit loopback
+address and port, then uses a no-DNS, no-proxy, no-redirect route probe with the intended
+Host header. Public, link-local metadata, credential-bearing, and HTTPS fallback URLs are
+never ambient-probed.
+
 ## Support and threat boundary
 
 `adoptable` means the exact adapter/platform combination has live fresh-lookup, unrelated
@@ -50,3 +70,14 @@ The scoped dnsmasq authority listens on a collision-checked unprivileged loopbac
 pair, has no upstream resolver, ignores host resolver files, and answers only owned names.
 Resolver adoption does not provide workload isolation; managed native runtimes enforce
 their own network namespace and default-deny egress separately.
+
+The disposable live conformance harness may inject an in-memory typed proof attestation.
+No CLI flag, project setting, machine override, string, or mapping can promote an adapter.
+The attestation affects only that composed service object and never changes the built-in
+manifest, MCP behavior, or later commands. Evidence review and a separate manifest change
+are required before support is advertised.
+
+Legacy `domains setup|up|down|teardown` remains a rollback control while adoption is
+unadvertised. Instance lifecycle entry points first offer the composed ingress→DNS→ingress
+handoff; fallback retains the existing per-port/proxy path. Removing that compatibility
+path requires separate live parity approval.

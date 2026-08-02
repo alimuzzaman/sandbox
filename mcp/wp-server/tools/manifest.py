@@ -53,6 +53,11 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "domains": ("domain_service", "ingress_service"),
     "runtime": ("core", "project_instance", "runtime_service", "native_preflight",
                 "managed_package_planner"),
+    "wp": (
+        "sandbox_root", "compose", "herd_host_env", "host_run", "is_herd",
+        "project_instance", "require_project_capability", "resolve_instance",
+        "safe_json", "wp_root", "wpcli",
+    ),
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
     "resources": ("resource_service_factory",),
@@ -62,7 +67,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
 # imports so duplicate ownership fails before FastMCP is initialized.
 BUILTIN_TOOL_NAMES = {
     "instances": ("ensure_instance", "destroy_instance", "recreate_instance", "setup_domains", "secure_instance", "apply_config"),
-    "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support"),
+    "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support", "ingress_plan", "ingress_cleanup", "ingress_reconcile", "ingress_reconsider", "ingress_apply"),
     "runtime": ("instance_status", "instance_logs", "instance_exec",
                 "native_support", "native_preflight", "native_install_plan"),
     "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),

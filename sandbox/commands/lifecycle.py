@@ -29,7 +29,7 @@ from sandbox.core import (
     info, mcp_server_name, ok, plugins_dir,
     proxy_available, resolve_instances, run, save_local_app_password,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
-    wp_dir, wpcli,
+    runtime_health_lines, wp_dir, wpcli,
 )
 
 from sandbox.registry import register
@@ -57,13 +57,8 @@ def cmd_up(cfg: dict, args) -> None:
             _remove_obsolete_builder_authoring_assets(inst)
         ok(f"WordPress: {site_url(inst_cfg)}  (host-served by Herd)")
         return
-    # If this instance uses the HTTPS proxy, make sure the loopback alias is
-    # present (it's dropped on reboot) and the proxy is running before we report
-    # the https URL. Cheap + silent; passwordless via the sudoers rule.
-    dom = inst_cfg.get("domain")
-    if dom and dom.endswith(f".{_tld(inst_cfg)}") and proxy_available():
-        proxy = wordpress_runtime_dependencies(cfg).proxy
-        proxy.apply(proxy.plan(dom, inst_cfg["wordpress_port"]))
+    # Clean-URL reconciliation is owned by the composed ingress/resolver
+    # lifecycle.  Never invoke the unreceipted aggregate proxy on instance up.
     # Reconcile the declared service set on every boot.  In particular, this
     # removes stale sidecars left behind after switching web-server modes
     # (for example an old nginx service), so repeated setup cannot accumulate
@@ -160,12 +155,16 @@ def cmd_status(cfg, args) -> None:
         return
     inst = args.resolved_instance
     owner = _core().registry_find_instance(inst)
+    runtime_data = None
     if owner and owner.get("kind") == "compose":
         result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "status", label=owner.get("label", "default")))
         if isinstance(result, OperationError):
             die(result.message)
         data = dict(result.data)
+        runtime_data = data
         ok(f"Generic Compose instance: {inst} ({data.get('status')}) at {data.get('url', '')}")
+        for line in runtime_health_lines(runtime_data):
+            (info if line.startswith("Optional runtime gaps:") else ok)(line)
         return
     if owner and owner.get("root"):
         result = runtime_service(cfg).invoke(OperationRequest(
@@ -175,6 +174,7 @@ def cmd_status(cfg, args) -> None:
         ))
         if isinstance(result, OperationError):
             die(result.message)
+        runtime_data = dict(result.data)
     if _is_herd_instance(inst):
         entry = owner or {}
         up = _instance_reachable(entry)
@@ -189,6 +189,9 @@ def cmd_status(cfg, args) -> None:
     ok(f"Server: {resolve_instances(cfg)[inst].get('server', 'nginx')}")
     if owner and owner.get("root"):
         ok(f"Project: {owner['root']}")
+    if runtime_data is not None:
+        for line in runtime_health_lines(runtime_data):
+            (info if line.startswith("Optional runtime gaps:") else ok)(line)
     else:
         info("No project registered (cd into a plugin repo and run ./sb ensure)")
     if ff.exists():
@@ -273,6 +276,10 @@ def cmd_shell(cfg, args) -> None:
     error = preflight_instance_capability(cfg, args.resolved_instance, "wordpress.exec")
     if error is not None:
         die(error.message)
+    from sandbox.application.context import managed_native_instance_selected
+    if managed_native_instance_selected(args.resolved_instance) is not None:
+        die("managed-native interactive shell requires an adapter-owned terminal; "
+            "Compose/host fallback is disabled")
     if _is_herd_instance(args.resolved_instance):
         die("no containers on a herd instance — the WP install is on the host "
             f"at runtime/wp-{args.resolved_instance}/")
@@ -525,6 +532,29 @@ def cmd_doctor(cfg, args) -> None:
                 line += f"\n      → {hint}"
         print(line)
 
+    print("\nRuntime:")
+    owner = _core().registry_find_instance(inst)
+    runtime_data = None
+    runtime_error = ""
+    if owner and owner.get("root"):
+        runtime_result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], "status", label=owner.get("label", "default")))
+        if isinstance(runtime_result, OperationError):
+            runtime_error = runtime_result.message
+        else:
+            runtime_data = dict(runtime_result.data)
+    if runtime_data is None:
+        check("runtime status available", False,
+              runtime_error or "register this project with ./sb ensure")
+    else:
+        state = runtime_data.get("state") or runtime_data.get("status")
+        healthy = bool(runtime_result.ok) and state not in {"blocked", "drifted",
+                                                            "cleanup_incomplete"}
+        check("runtime and isolation health", healthy,
+              "inspect ./sb status and native recovery state before running payloads")
+        for line in runtime_health_lines(runtime_data):
+            info("  " + line)
+
     print("\nContainers:")
     ps = compose("ps", "--format", "json", instance=inst,
                  check=False, capture=True)
@@ -605,7 +635,6 @@ def cmd_doctor(cfg, args) -> None:
 
     print("\nState:")
     # Per-project model: the instance maps to a project root in the registry.
-    owner = _core().registry_find_instance(inst)
     proj_root = owner.get("root") if owner else None
     check(f"project: {proj_root or '—'}", True,
           hint="cd into a plugin repo and run `./sb ensure` to register one")

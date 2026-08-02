@@ -11,7 +11,7 @@ from pathlib import Path
 from sandbox.application.context import preflight_instance_capability, runtime_service
 from sandbox.core import _core, die
 from sandbox.registry import CommandSpec, register_specs
-from sandbox.runtimes.base import OperationError, OperationRequest
+from sandbox.runtimes.base import ExecutionRequest, OperationError, OperationRequest
 
 
 _GUIDES = {
@@ -167,10 +167,35 @@ def cmd_exec(cfg, args) -> None:
             die(f"{exc.code}: {exc}")
         project_root = target.project_root
 
-    capability_error = preflight_instance_capability(cfg, args.resolved_instance, "compose.exec")
+    owner = _core().registry_find_instance(args.resolved_instance) or {}
+    core = _core()
+    load_project_config = getattr(core, "load_project_config", None)
+    descriptor = load_project_config(owner["root"], label=owner.get("label", "default")) \
+        if owner.get("root") and load_project_config is not None else {}
+    managed = descriptor.get("wordpressRuntime", {}).get("mode") == "managed_native"
+    if managed:
+        execution_request = ExecutionRequest(
+            owner["root"], owner.get("label", "default"), "exec", tuple(command),
+            args.timeout or 900,
+        )
+    capability_error = preflight_instance_capability(
+        cfg, args.resolved_instance, "exec" if managed else "compose.exec",
+    )
     if capability_error is not None:
         die(capability_error.message)
-    owner = _core().registry_find_instance(args.resolved_instance) or {}
+    if managed:
+        from sandbox.application.context import execute_project
+        execution = execute_project(cfg, execution_request)
+        data = {"ok": execution.ok, "operation": "exec", "state": execution.state,
+                "exit_code": execution.exit_code, **dict(execution.data)}
+        if getattr(args, "json", False):
+            print(json.dumps(data))
+        else:
+            print(data.get("stdout", ""), end="")
+        if not execution.ok:
+            die(data.get("stderr") or data.get("reason", {}).get("message") or
+                "managed isolated execution failed")
+        return
     result = runtime_service(cfg).invoke(OperationRequest(
         project_root=project_root or owner["root"], operation="exec",
         label=owner.get("label", "default"), arguments={

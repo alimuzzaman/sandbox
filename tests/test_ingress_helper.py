@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,26 +16,14 @@ class TestIngressHelper(unittest.TestCase):
     def run_helper(self, *args):
         return subprocess.run([str(HELPER), *map(str, args)], capture_output=True,
                               text=True, timeout=5,
-                              env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")})
+                              env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
+                                   "SUDO_UID": str(os.getuid())})
 
-    def test_fixed_candidate_path_owner_mode_header_and_adapter(self):
-        route = "a" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); candidate = root / "ingress/candidates/system-nginx" / f"{route}.conf"
-            candidate.parent.mkdir(parents=True)
-            candidate.write_text(
-                f"# sandbox-ingress v1 route={route}\nserver {{\n"
-                "    listen 127.0.0.1:80;\n    server_name demo.test;\n"
-                "    location / {\n        proxy_pass http://127.0.0.1:8123;\n"
-                "        proxy_set_header Host $host;\n"
-                "        proxy_set_header X-Forwarded-Proto $scheme;\n    }\n}\n"
-            )
-            candidate.chmod(0o600)
-            accepted = self.run_helper("check-candidate", root, candidate, "system-nginx", route)
-            outside = root / "outside.conf"; outside.write_text(candidate.read_text()); outside.chmod(0o600)
-            rejected = self.run_helper("check-candidate", root, outside, "system-nginx", route)
-        self.assertEqual(accepted.returncode, 0, accepted.stderr)
-        self.assertNotEqual(rejected.returncode, 0)
+    def test_only_live_proven_system_caddy_is_allowlisted(self):
+        text = HELPER.read_text()
+        self.assertIn('[ "$1" = system-caddy ]', text)
+        for adapter in ("system-nginx", "system-apache", "traefik"):
+            self.assertNotIn(f"{adapter})", text)
 
     def test_unknown_verbs_adapters_routes_and_digests_are_rejected(self):
         for args in (("shell",), ("validate-current", "../../nginx"),
@@ -42,38 +31,82 @@ class TestIngressHelper(unittest.TestCase):
                      ("cleanup", "/tmp", "system-nginx", "a" * 64, "secret")):
             self.assertNotEqual(self.run_helper(*args).returncode, 0)
 
-    def test_symlink_and_writable_candidate_are_rejected(self):
-        route = "b" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); directory = root / "ingress/candidates/system-nginx"; directory.mkdir(parents=True)
-            actual = directory / "actual"; actual.write_text(f"# sandbox-ingress v1 route={route}\n"); actual.chmod(0o666)
-            candidate = directory / f"{route}.conf"; candidate.symlink_to(actual)
-            result = self.run_helper("check-candidate", root, candidate, "system-nginx", route)
-        self.assertNotEqual(result.returncode, 0)
-
     def test_helper_source_contains_only_allowlisted_service_and_config_surfaces(self):
         text = HELPER.read_text()
-        for service in ("nginx.service", "apache2.service", "caddy.service"):
-            self.assertIn(service, text)
+        self.assertIn("caddy.service", text)
+        for service in ("nginx.service", "apache2.service", "traefik.service"):
+            self.assertNotIn(service, text)
         self.assertNotIn("eval ", text)
         self.assertNotIn("sh -c", text)
 
-    def test_candidate_with_extra_privileged_directive_is_rejected(self):
-        route = "c" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); candidate = root / "ingress/candidates/system-nginx" / f"{route}.conf"
-            candidate.parent.mkdir(parents=True)
-            candidate.write_text(
-                f"# sandbox-ingress v1 route={route}\nserver {{\n"
-                "    listen 127.0.0.1:80;\n    server_name demo.test;\n"
-                "    location / {\n        proxy_pass http://127.0.0.1:8123;\n"
-                "        proxy_set_header Host $host;\n"
-                "        proxy_set_header X-Forwarded-Proto $scheme;\n"
-                "        include /etc/shadow;\n    }\n}\n"
-            )
-            candidate.chmod(0o600)
-            result = self.run_helper("check-candidate", root, candidate, "system-nginx", route)
-        self.assertNotEqual(result.returncode, 0)
+    def test_root_renders_only_the_authorized_scalar_plan(self):
+        text = HELPER.read_text()
+        self.assertIn('render_candidate "$transaction/staged"', text)
+        self.assertIn('bind %s', text)
+        self.assertNotIn("candidate_path", text)
+        self.assertNotIn("check-candidate", text)
+        self.assertNotIn('FILE ADAPTER', text)
+
+    def test_privileged_prepare_requires_receipt_before_root_rendering(self):
+        text = HELPER.read_text()
+        prepare = text[text.index('    prepare)'):text.index('    activate)')]
+        self.assertLess(
+            prepare.index('require_plan_receipt "$@"'),
+            prepare.index('render_candidate "$transaction/staged"'),
+        )
+        self.assertNotIn("candidate_path", prepare)
+        self.assertNotIn('install -o root -g root -m 0600 "$candidate"', prepare)
+        self.assertNotIn("rm -rf", prepare)
+
+    def test_install_writes_a_scoped_sudoers_alias_without_install_privilege(self):
+        text = HELPER.read_text()
+        install = text[text.index('    install)'):text.index('    preflight)')]
+        self.assertIn("/etc/sandbox-ingress/owners/$uid.root", install)
+        self.assertIn("/etc/sandbox-ingress/authorizations", install)
+        self.assertIn("/etc/sandbox-ingress/applied", install)
+        self.assertIn("visudo -cf", install)
+        sudoers_line = next(line for line in install.splitlines() if "Cmnd_Alias" in line)
+        self.assertNotIn(" install ", sudoers_line)
+        self.assertNotIn(" authorize ", sudoers_line)
+        self.assertIn("authorization-status", sudoers_line)
+
+    def test_every_mutating_nopasswd_verb_requires_a_root_receipt(self):
+        text = HELPER.read_text()
+        for start, end, marker in (
+            ('    prepare)', '    activate)', 'require_plan_receipt'),
+            ('    activate)', '    observe)', 'authorization_path'),
+            ('    cleanup)', '    *) usage', 'require_applied_receipt'),
+        ):
+            section = text[text.index(start):text.index(end)]
+            self.assertIn(marker, section)
+
+    def test_authorization_is_bound_to_exact_systemd_socket_identity(self):
+        text = HELPER.read_text()
+        self.assertIn("selected listener is not owned by caddy.service", text)
+        self.assertIn("/proc/{pid}/fd", text)
+        self.assertIn("/proc/net/tcp6", text)
+        self.assertIn("selected Caddy process was replaced", text)
+        self.assertIn("Caddy executable digest changed", text)
+
+    def test_hostname_collision_uses_full_adapted_policy(self):
+        text = HELPER.read_text()
+        self.assertIn("hostname_unclaimed", text)
+        self.assertIn("caddy adapt --config /etc/caddy/Caddyfile", text)
+        self.assertIn("hostname is already claimed by incumbent Caddy policy", text)
+        authorize = text[text.index('    authorize)'):text.index('    authorization-status)')]
+        prepare = text[text.index('    prepare)'):text.index('    activate)')]
+        self.assertIn('hostname_unclaimed "$5" "$3"', authorize)
+        self.assertIn('hostname_unclaimed "$5" "$3"', prepare)
+
+    def test_applied_cas_receipt_is_separate_from_immutable_authorization(self):
+        text = HELPER.read_text()
+        self.assertIn("/etc/sandbox-ingress/authorizations", text)
+        self.assertIn("/etc/sandbox-ingress/applied", text)
+        activate = text[text.index('    activate)'):text.index('    observe)')]
+        cleanup = text[text.index('    cleanup)'):text.index('    *) usage')]
+        self.assertIn('mv -f "$temporary" "$applied"', activate)
+        self.assertIn('require_applied_receipt', cleanup)
+        self.assertIn('owned route drifted', cleanup)
 
 
 if __name__ == "__main__": unittest.main()

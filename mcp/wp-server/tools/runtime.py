@@ -45,7 +45,9 @@ def _typed_invoke(project_dir: str, label: str | None, operation: str, arguments
     if hasattr(result, "message") and hasattr(result, "code"):
         return {"ok": False, "code": result.code, "error": result.message,
                 "project_kind": result.project_kind,
-                "available_capabilities": list(result.available_capabilities)}
+                "available_capabilities": list(result.available_capabilities),
+                **({"alternative": result.suggestion} if result.suggestion else {}),
+                "mutated": False}
     return {"ok": bool(result.ok), "operation": result.operation,
             **dict(result.data)}
 

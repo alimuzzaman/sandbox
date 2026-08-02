@@ -1,0 +1,6 @@
+{
+  "description": "A foreign process owns only the ordinary IPv4 loopback endpoint.",
+  "listeners": [
+    {"address": "127.0.0.1", "port": 80, "protocol": "tcp", "process": {"command": "nginx"}}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "description": "A wildcard IPv4 listener conflicts with every IPv4 loopback address on its port.",
+  "listeners": [
+    {"address": "0.0.0.0", "port": 80, "protocol": "tcp", "process": {"command": "apache2"}}
+  ]
+}

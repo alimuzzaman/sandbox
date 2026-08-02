@@ -10,6 +10,11 @@ ENTRY_PATHS = frozenset({
     "plugin_activation", "phpunit", "durable_job",
 })
 
+# These paths live inside the per-instance image; they are not host bind mounts.
+INSTANCE_WRITABLE_TARGETS = frozenset({
+    "/var/www/html", "/var/lib/sandbox", "/var/log/sandbox", "/run/mysqld",
+})
+
 
 class IsolationLauncher:
     def __init__(self, *, verifier, bubblewrap, machine_exec):
@@ -18,7 +23,7 @@ class IsolationLauncher:
         self.machine_exec = machine_exec
 
     def launch(self, policy, *, entry_path, command, environment=None,
-               credential_refs=(), timeout=300):
+               credential_refs=(), timeout=300, grants=None):
         if entry_path not in ENTRY_PATHS:
             return {"ok": False, "state": "blocked", "mutated": False,
                     "reason": {"code": "unsupported_execution_path"}}
@@ -28,15 +33,43 @@ class IsolationLauncher:
                     "reason": {"code": "isolation_prerequisite_missing",
                                "details": verified.get("reason")}}
         context = sanitize_execution_context(environment or {}, credential_refs)
+        active_grants = ()
+        if grants is not None:
+            values = getattr(grants, "grants", grants)
+            if not isinstance(values, (tuple, list)):
+                return {"ok": False, "state": "blocked", "mutated": False,
+                        "reason": {"code": "invalid_egress_grant_state"}}
+            active_grants = tuple(grant for grant in values
+                                  if not getattr(grant, "revoked", False))
+        if active_grants:
+            host = str(policy.network["host_address"]).split("/", 1)[0]
+            proxy = f"http://{host}:18443"
+            context["environment"].update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy})
         argv = self.bubblewrap.argv(
-            environment=context["environment"], command=tuple(command),
+            environment=context["environment"],
+            writable_targets=tuple({
+                *(item["target"] for item in policy.writable_mounts),
+                *INSTANCE_WRITABLE_TARGETS,
+            }),
+            credential_names=tuple(ref.rsplit("/", 1)[-1]
+                                   for ref in context["credential_refs"]),
+            command=tuple(command),
         )
         result = self.machine_exec(
             policy.machine_id, argv, context=context, timeout=timeout,
             expected_policy_digest=policy.digest,
         )
+        stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
+        if not isinstance(stdout, str): stdout = str(stdout)
+        if not isinstance(stderr, str): stderr = str(stderr)
+        # Project output is user-visible transport data, never an authority
+        # channel. Bound it so a hostile payload cannot exhaust the caller.
+        stdout = stdout[:1024 * 1024]
+        stderr = stderr[:1024 * 1024]
         return {"ok": result.returncode == 0, "state": "ready" if result.returncode == 0
                 else "failed", "operation": entry_path, "mutated": False,
                 "exit_code": result.returncode,
+                "stdout": stdout, "stderr": stderr,
                 "reason": {"code": "ready" if result.returncode == 0 else
                            "isolated_payload_failed"}}

@@ -22,7 +22,9 @@ class NspawnCompiler:
                 "PrivateUsersOwnership": "map", "Capability": (),
                 "DropCapability": dropped, "AmbientCapability": (),
                 "NoNewPrivileges": "yes",
-                "SystemCallFilter": "@system-service ~@mount ~@raw-io ~@reboot ~@swap",
+                # Mount/user-namespace setup is admitted only for the root-only
+                # bwrap transition by AppArmor. Guest and payload profiles deny it.
+                "SystemCallFilter": "@system-service ~@raw-io ~@reboot ~@swap",
                 "SystemCallErrorNumber": "EPERM",
             },
             # The bounded ext4 root must remain writable for database/web runtime

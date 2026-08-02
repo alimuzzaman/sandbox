@@ -48,29 +48,8 @@ def cmd_secure(cfg, args) -> None:
     print(f"\n▸ Securing https://{dom} — installs + trusts a local certificate.")
     if not proxy_setup(cfg):   # ensures proxy + mkcert CA trusted + mints certs
         die("could not enable HTTPS (see messages above).")
-    cfg = load_config()
-    # Subdomain multisite: add a `*.<name>.tst` SAN so every sub-site host is
-    # covered by this one cert.
-    sans = [_wildcard_san(dom)] if _multisite_mode(inst) == "subdomain" else None
-    _mint_cert(dom, extra_sans=sans)
-    _write_ssl_muplugin(name)
-    regen_caddyfile(cfg)
-    reload_proxy()
-    # Regenerate the instance's compose + recreate its web tier so the LIVE
-    # container always matches the current generated compose. Without this, a
-    # container created before a compose-template change (e.g. the nginx
-    # plugins_host mount that lets symlinked-plugin assets resolve) keeps its
-    # stale mounts — so a secured nginx instance 404s plugin assets and renders
-    # the admin UI blank. Cheap + idempotent; recreates only the web service(s).
-    write_compose_files(cfg)
-    inst = resolve_instances(cfg)[name]
-    compose("up", "-d", "--force-recreate",
-            *_web_services(inst.get("server", "nginx")),
-            instance=name, check=False)
-    url = f"https://{dom}"
-    wpcli(["option", "update", "siteurl", url], instance=name, check=False)
-    wpcli(["option", "update", "home", url], instance=name, check=False)
-    ok(f"{name} now serves {url}  (hard-refresh your browser)")
+    ok(f"{name} clean-URL authority was reconciled by the proof-scoped services")
+    return
 
 def cmd_server(cfg, args) -> None:
     """Switch an existing instance's web server in place: apache | nginx |
@@ -174,59 +153,28 @@ def cmd_domains(cfg, args) -> None:
         return
 
     if action == "up":
-        if not proxy_available():
-            die("HTTPS proxy not set up yet — run `./sb domains setup` first.")
-        # Restore the loopback alias (dropped on reboot), then start the proxy.
-        if _proxy_sudoers_installed():
-            subprocess.run(["sudo", "-n", str(PROXY_HELPER), "alias-up"],
-                           capture_output=True, text=True)
-        regen_caddyfile(cfg)
-        ok("HTTPS proxy up." if reload_proxy() else "proxy failed to start.")
+        if proxy_up(cfg):
+            ok("Clean URL ingress up.")
+        else:
+            info("clean URL ingress failed to start; per-port URLs remain available.")
         return
 
     if action == "down":
-        subprocess.run(["docker", "compose", "-p", PROXY_PROJECT, "-f",
-                        str(PROXY_COMPOSE), "--project-directory", str(ROOT),
-                        "down"], capture_output=True, text=True)
-        ok("HTTPS proxy stopped.")
+        if proxy_down(cfg):
+            ok("Clean URL ingress stopped.")
+        else:
+            info("clean URL cleanup is incomplete; recovery state was retained.")
         return
 
     if action == "teardown":
-        proxy_teardown(cfg)
+        if not proxy_teardown(cfg):
+            info("clean URL teardown is incomplete; retry after resolving the reported owner")
         return
 
     if action == "repair-ca":
-        if not sys.stdin.isatty():
-            die("repair-ca needs an interactive terminal (re-trusts the CA via "
-                "sudo). Run it directly in your shell.")
-        info("Repairing the local CA — removes stale/duplicate mkcert CAs and "
-             "re-trusts a single fresh one (asks your password).")
-        # mkcert -uninstall removes the CA from every trust store; -install then
-        # creates + trusts a clean one. This clears the 'multiple stale CAs,
-        # none trusted' state that causes ERR_CERT_AUTHORITY_INVALID.
-        subprocess.run(["mkcert", "-uninstall"])
-        if subprocess.run(["mkcert", "-install"]).returncode != 0:
-            die("mkcert -install failed — run it yourself, then re-run repair-ca.")
-        if sys.platform == "darwin" and not _ca_trusted_macos():
-            die("CA still not trusted after reinstall. A keychain GUI prompt may "
-                "need approving — open Keychain Access, or run `mkcert -install` "
-                "interactively, then re-run.")
-        ok("CA is trusted (verified).")
-        # Re-mint every instance's cert against the new CA + reload the proxy.
-        n = 0
-        for name, ic in resolve_instances(cfg).items():
-            dom = ic.get("domain")
-            if dom and dom.endswith(f".{_tld(ic)}"):
-                for p in _cert_paths(dom):
-                    p.unlink(missing_ok=True)
-                sans = [_wildcard_san(dom)] if _multisite_mode(ic) == "subdomain" else None
-                if _mint_cert(dom, extra_sans=sans):
-                    n += 1
-        regen_caddyfile(cfg)
-        reload_proxy()
-        ok(f"re-minted {n} cert(s) against the trusted CA. Hard-refresh your "
-           f"browser (or restart it) to drop the cached cert verdict.")
-        return
+        die("legacy aggregate CA repair is retired because its routes and certs "
+            "lack applied ownership receipts; use proof-scoped clean URLs or "
+            "the per-port fallback")
 
     if action == "list":
         print()

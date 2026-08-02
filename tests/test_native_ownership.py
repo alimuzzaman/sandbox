@@ -52,5 +52,35 @@ class TestNativeOwnership(unittest.TestCase):
         self.assertEqual(result["version"], 1)
         self.assertIn("old", result["recovery"])
 
+    def test_network_reservations_are_locked_unique_and_idempotent(self):
+        repository = self.repository()
+        machine_ids = [f"sb-{index:012x}" for index in range(12)]
+        reservations = {}
+        guard = threading.Lock()
+
+        def reserve(machine_id):
+            value = repository.reserve_network(machine_id)
+            with guard:
+                reservations[machine_id] = value
+
+        threads = [threading.Thread(target=reserve, args=(machine_id,))
+                   for machine_id in machine_ids]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(len(reservations), len(machine_ids))
+        self.assertEqual(len({value["subnet"] for value in reservations.values()}),
+                         len(machine_ids))
+        first = machine_ids[0]
+        self.assertEqual(repository.reserve_network(first), reservations[first])
+        self.assertEqual(repository.release_network(first, reservations[first]), "removed")
+
+    def test_drifted_network_reservation_is_preserved_for_recovery(self):
+        repository = self.repository()
+        machine_id = "sb-0123456789ab"
+        reserved = repository.reserve_network(machine_id)
+        observed = {**reserved, "subnet": "10.203.255.252/30"}
+        self.assertEqual(repository.release_network(machine_id, observed), "drifted")
+        self.assertIn(f"networks:{machine_id}", repository.snapshot()["recovery"])
+
 
 if __name__ == "__main__": unittest.main()

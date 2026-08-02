@@ -17,9 +17,10 @@ class TestDomainStatus(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         repository = DomainRepository(Path(temporary.name) / "state.json")
+        owner = f"{Path('/tmp/project').resolve()}::default"
         binding = ResolutionBinding.create(
             kind="exact", name="demo.test", target="127.0.0.77",
-            adapter_id="resolved-adapter", owners=("/tmp/project::default",),
+            adapter_id="resolved-adapter", owners=(owner,),
             desired={"route": "demo"},
         ).with_applied({"route": "demo"})
         repository.put_binding(binding)

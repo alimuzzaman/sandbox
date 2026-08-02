@@ -1,0 +1,13 @@
+{
+  "description": "Sandbox's own Caddy is identifiable only with container and process evidence.",
+  "listeners": [
+    {
+      "address": "127.0.0.77",
+      "port": 80,
+      "protocol": "tcp",
+      "process": {"command": "caddy"},
+      "service": {"container": "sandbox-proxy"},
+      "owner_confidence": "proven"
+    }
+  ]
+}

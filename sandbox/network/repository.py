@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 from typing import Any, Iterator
@@ -37,18 +38,41 @@ class DomainRepository:
         except OSError:
             pass
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.operation_lock_path = self.path.with_suffix(self.path.suffix + ".operations.lock")
         self._thread_lock = threading.RLock()
+
+    @staticmethod
+    def _open_lock_file(path: Path) -> int:
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_nlink != 1
+                or details.st_uid != os.getuid() or details.st_mode & 0o077):
+            os.close(descriptor)
+            raise RuntimeError("resolver lock ownership is unsafe")
+        return descriptor
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
         with self._thread_lock:
-            descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+            descriptor = self._open_lock_file(self.lock_path)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 yield
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
+
+    @contextmanager
+    def operation(self) -> Iterator[None]:
+        """Serialize resolver repository, authority, and helper transactions."""
+        descriptor = self._open_lock_file(self.operation_lock_path)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def _read(self) -> tuple[dict[str, Any], bool]:
         if not self.path.exists():

@@ -142,12 +142,13 @@ def cmd_setup(cfg, args) -> None:
     # it up now means every later instance — CLI or dashboard — gets a clean URL.
     if not server and sys.stdin.isatty() and not getattr(args, "no_domain", False):
         print("\n▸ Setting up clean URLs (http://<name>.tst, no port)…")
-        up, cfg = _ensure_url_proxy(cfg)
-        if up:
-            cfg = _assign_domains_to_all(cfg)
-            regen_caddyfile(cfg)
-            reload_proxy()
-            ok("clean URLs ready — instances serve http://<name>.tst")
+        setup = clean_url_setup(cfg, interactive=True)
+        if setup["ok"]:
+            cfg = setup["cfg"]
+            if setup["mode"] == "application":
+                ok("clean URLs ready through the selected host ingress and resolver")
+            else:
+                ok("clean URLs ready — instances serve http://<name>.tst")
         else:
             info("staying on http://localhost:<port> (clean URLs are optional).")
 

@@ -11,7 +11,10 @@ class TestManagedApache(unittest.TestCase):
         self.assertEqual(result["units"], (
             "mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service",
         ))
-        self.assertTrue(all(path.startswith("/etc/") for path in result["files"]))
+        self.assertTrue(all(path.startswith("/etc/") or
+                            path in {"/usr/local/libexec/sandbox-php-fpm",
+                                     "/usr/local/libexec/sandbox-wordpress-cron"}
+                            for path in result["files"]))
 
 
 if __name__ == "__main__": unittest.main()

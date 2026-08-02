@@ -69,9 +69,9 @@ class TestModularityInventory(unittest.TestCase):
             audit_metrics(),
             {
                 "cli_commands": 86,
-                "mcp_tools": 50,
+                "mcp_tools": 43,
                 "wildcard_imports": 20,
-                "runtime_kind_branches": 101,
+                "runtime_kind_branches": 110,
             },
         )
 

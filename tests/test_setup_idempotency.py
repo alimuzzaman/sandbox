@@ -44,7 +44,7 @@ class TestSetupIdempotency(unittest.TestCase):
             "up", "-d", "--remove-orphans", "wp", "nginx", instance="demo"
         )
 
-    def test_up_routes_proxy_work_through_runtime_dependencies(self):
+    def test_up_never_mutates_unreceipted_legacy_proxy_state(self):
         cfg = {"instances": {"demo": {"server": "nginx"}}}
         args = types.SimpleNamespace(resolved_instance="demo")
         inst = {"server": "nginx", "domain": "demo.tst", "tld": "tst",
@@ -61,8 +61,8 @@ class TestSetupIdempotency(unittest.TestCase):
              patch.object(lifecycle, "site_url", return_value="http://demo.tst"), \
              patch.object(lifecycle, "wp_dir", return_value=types.SimpleNamespace(exists=lambda: False)):
             lifecycle.cmd_up(cfg, args)
-        proxy.plan.assert_called_once_with("demo.tst", 8188)
-        proxy.apply.assert_called_once_with({"hostname": "demo.tst", "port": 8188})
+        proxy.plan.assert_not_called()
+        proxy.apply.assert_not_called()
         legacy_ensure.assert_not_called()
 
     def test_port_conflicts_reassign_all_instance_ports(self):

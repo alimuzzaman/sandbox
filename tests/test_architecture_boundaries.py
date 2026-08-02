@@ -13,6 +13,65 @@ def production_python_files():
 
 
 class TestArchitectureBoundaries(unittest.TestCase):
+    def test_native_proof_opt_in_cannot_enter_payload_or_persisted_models(self):
+        opt_in = "SANDBOX_NATIVE_PROOF_CANDIDATE"
+        launcher = (ROOT / "sandbox/isolation/launcher.py").read_text()
+        helper = (ROOT / "tools/native-helper/native-helper.py").read_text()
+        repository = (ROOT / "sandbox/runtimes/managed/repository.py").read_text()
+        models = (ROOT / "sandbox/runtimes/base.py").read_text()
+        self.assertNotIn(opt_in, launcher)
+        self.assertNotIn(opt_in, helper)
+        self.assertNotIn(opt_in, repository)
+        self.assertNotIn(opt_in, models)
+
+    def test_managed_native_project_payloads_cannot_bypass_execution_gateway(self):
+        """Project argv is gated before legacy Compose, Herd, or host dispatch.
+
+        This is deliberately a narrow allow-list rather than a repository-wide
+        ban on ``subprocess``: fixed, reviewed control helpers (for example the
+        native service and package helper verbs) remain valid mechanism code.
+        The protected functions below are the only legacy entry points which
+        accept project-controlled PHP/CLI payloads.
+        """
+        boundaries = (
+            ("sandbox/core/_docker.py", "wpcli", "_managed_execution_gate", "compose("),
+            ("sandbox/core/_tests.py", "_ensure_project_dependencies_docker", "_managed_execution_gate", "compose("),
+            ("sandbox/core/_tests.py", "_run_tests", "_managed_execution_gate", "compose("),
+            ("sandbox/core/_tests.py", "_run_tests_unit", "_managed_execution_gate", "compose("),
+            ("sandbox/core/_provision.py", "_wire_project_plugins", "_managed_execution_gate", "wpcli("),
+            ("sandbox/core/_provision.py", "_wire_project_themes", "_managed_execution_gate", "wpcli("),
+            ("sandbox/jobs/supervisor.py", "run_descriptor", "_managed_native_job", "subprocess.Popen("),
+            ("mcp/wp-server/tools/wp.py", "wp_cli", "_managed_execution_unavailable", "_wpcli("),
+            ("mcp/wp-server/tools/wp.py", "wp_exec", "_managed_execution_unavailable", "_host_run("),
+            ("mcp/wp-server/tools/wp.py", "run_tests", "_managed_execution_unavailable", "subprocess.run("),
+            ("mcp/wp-server/tools/wp.py", "wp_cli_async", "_managed_execution_unavailable", "subprocess.run("),
+        )
+
+        def function_source(path, name):
+            source = path.read_text()
+            tree = ast.parse(source)
+            node = next(
+                candidate for candidate in ast.walk(tree)
+                if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and candidate.name == name
+            )
+            lines = source.splitlines(keepends=True)
+            return "".join(lines[node.lineno - 1:node.end_lineno])
+
+        for relative, function, gate, dispatch in boundaries:
+            section = function_source(ROOT / relative, function)
+            self.assertIn(gate, section, f"{relative}:{function} has no managed-native gate")
+            self.assertIn(dispatch, section, f"{relative}:{function} has no legacy dispatch")
+            self.assertLess(
+                section.index(gate), section.index(dispatch),
+                f"{relative}:{function} dispatches a project payload before its managed-native gate",
+            )
+
+        command = (ROOT / "sandbox/commands/runtime.py").read_text()
+        self.assertLess(command.index("ExecutionRequest("), command.index("execute_project(cfg, execution_request)"))
+        self.assertLess(command.index("execute_project(cfg, execution_request)"),
+                        command.index("runtime_service(cfg).invoke("))
+
     def test_compatibility_facade_consumer_baseline_does_not_grow(self):
         sandbox_core_consumers = set()
         hermes_facade_consumers = set()
@@ -59,7 +118,7 @@ class TestArchitectureBoundaries(unittest.TestCase):
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 115)
+            self.assertEqual(len(tool_names), 120)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))
@@ -136,6 +195,41 @@ class TestArchitectureBoundaries(unittest.TestCase):
                 r"runtime[^\n]{0,80}(?:resolver|domain)[^\n]{0,80}\.json", text,
             ):
                 violations.append(relative)
+        self.assertEqual(violations, [])
+
+    def test_ingress_state_has_one_repository_owner_and_no_transport_consumers(self):
+        allowed = {"sandbox/application/context.py", "sandbox/ingress/repository.py"}
+        violations = []
+        for path in production_python_files():
+            relative = str(path.relative_to(ROOT))
+            if relative in allowed:
+                continue
+            text = path.read_text()
+            if "ingress-state.json" in text or re.search(
+                r"runtime[^\n]{0,80}ingress[^\n]{0,80}\.json", text,
+            ):
+                violations.append(relative)
+        self.assertEqual(violations, [])
+
+    def test_ingress_adapters_are_manifest_declared_and_do_not_import_compatibility_facades(self):
+        manifest = (ROOT / "sandbox" / "ingress" / "manifest.py").read_text()
+        declared = {
+            "sandbox-caddy", "herd-valet", "system-nginx", "system-apache",
+            "system-caddy", "traefik", "nginx-proxy-manager", "ddev", "local",
+            "xampp", "laragon", "wamp", "unidentified",
+        }
+        for adapter_id in declared:
+            self.assertIn(f'"{adapter_id}"', manifest)
+        forbidden = re.compile(
+            r"(?:from|import)\s+sandbox\.core(?:\._domains)?(?:\s+import|\s|$)",
+        )
+        violations = []
+        for path in (ROOT / "sandbox" / "ingress").rglob("*.py"):
+            if forbidden.search(path.read_text()):
+                violations.append(str(path.relative_to(ROOT)))
+        service = ROOT / "sandbox" / "application" / "ingress_service.py"
+        if forbidden.search(service.read_text()):
+            violations.append(str(service.relative_to(ROOT)))
         self.assertEqual(violations, [])
 
     def test_unregistered_domain_result_cannot_reach_host_mutation(self):

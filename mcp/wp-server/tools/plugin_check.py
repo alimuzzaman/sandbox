@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from app import SANDBOX_ROOT, _run_sandbox_json, mcp
 
+try:
+    from app import _require_project_capability
+except ImportError:  # Legacy isolated registration fakes do not expose it.
+    _require_project_capability = None
+
 
 def _capability_error(project_dir: str, capability: str):
     """Keep legacy isolated app fakes import-compatible during migration."""
-    try:
-        from app import _require_project_capability
-    except ImportError:
+    if _require_project_capability is None:
         return None
     return _require_project_capability(project_dir, None, capability)
 

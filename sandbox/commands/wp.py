@@ -18,7 +18,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from sandbox.core import *  # noqa: F401,F403
 
 from sandbox.registry import register
-from sandbox.application.context import preflight_instance_capability
+from sandbox.application.context import (
+    managed_native_instance_selected, preflight_instance_capability,
+)
 
 
 
@@ -35,6 +37,9 @@ def cmd_wp(cfg, args) -> None:
             pt = pt[1:]
         if not pt:
             die("usage: ./sb wp --async <wp-cli args>")
+        if managed_native_instance_selected(args.resolved_instance) is not None:
+            die("managed-native async wp requires an adapter-native durable "
+                "transport; host/legacy job fallback is disabled")
         from sandbox.commands.jobs import launch_job
         jid = launch_job(args.resolved_instance, pt)
         ok(f"started background job {jid}")

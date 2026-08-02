@@ -535,6 +535,85 @@ import**, so restore is a true point-in-time replacement: tables created
 are dropped, not merged. `--add-drop-table` alone only drops tables present in
 the dump, so without the pre-reset those newer tables would survive.
 
+## Host ingress and clean URLs
+
+Host ingress is separate from the project resolver policy. The committed project pin, when
+supported by the project schema, is an intent only; a gitignored machine-local override is
+the effective choice when both are present. Pins name an ingress adapter (or `disabled`),
+not a process, port, or private product database. An unavailable pin is reported as
+`pin_unavailable`; Sandbox does not silently choose another incumbent.
+
+```jsonc
+// sandbox.config.json — portable intent
+{ "domains": { "ingress": "system-caddy" } }
+
+// sandbox.config.override.json — machine-local preference
+{ "domains": { "ingress": "herd-valet" } }
+```
+
+Use `./sb domains ingress support --json` to inspect tiers and `detect`, `status`, or `plan`
+to inspect listener ownership without mutation. `cleanup` and `reconcile` operate only on
+an attributable, unchanged route record for the selected project/label. They retain a
+minimal non-secret recovery record on drift or incumbent unavailability.
+
+First route mutation requires interactive consent for the observed incumbent identity. MCP
+and other non-TTY calls never prompt: they return `pending_consent` or
+`pending_credentials` with a machine-local credential reference only. Do not place password
+or token values in either project config, ingress-state JSON, output, or a recovery record.
+The detailed listener and adapter rules are in [host-ingress.md](host-ingress.md).
+
+The first enabled mutation candidate is `system-caddy` on Linux for exact HTTP hostnames
+only. It requires an existing imported `/etc/caddy/conf.d/*.caddy` surface and the explicit
+UID/network-root-scoped helper installation documented there. An HTTPS or wildcard request
+returns the per-port fallback; it is never silently downgraded to HTTP.
+
+## WordPress runtime selection
+
+`wordpressRuntime` is separate from the durable-job `runtime` policy below. Omission keeps
+the existing Compose backend. A committed project may declare version requirements, but a
+native mode becomes active only when the same project has an explicit gitignored machine
+override (normally `sandbox.config.override.json`).
+
+```jsonc
+// sandbox.config.override.json — machine-local and gitignored
+{
+  "wordpressRuntime": {
+    "mode": "managed-native",          // compose | managed-native | incumbent-native
+    "adapter": "ubuntu-nspawn",
+    "php": "8.3",
+    "database": "mariadb-10.11",
+    "webServer": "nginx",              // nginx | apache
+    "resources": {
+      "cpu_percent": 200,
+      "memory_bytes": 2147483648,
+      "pids": 512,
+      "runtime_seconds": 3600,
+      "disk_bytes": 8589934592,
+      "inodes": 500000,
+      "fds": 4096,
+      "connections": 512,
+      "io_weight": 100
+    },
+    "egress": []
+  }
+}
+```
+
+Unknown keys and implicit native adapters are errors. `resources` are hard ceilings, not
+hints. Source is read-only by default; no writable host path is inferred. Egress remains
+deny-by-default. A scoped grant must name an instance owner, exact public CIDR and TCP ports
+or an HTTPS hostname, expiry, and revocation state; unsafe or unproven grants stay closed.
+
+Incumbent adapters use `mode: "incumbent-native"` and require an explicit user database
+reference in the operation/local secret configuration. Passwords and tokens must not be
+placed in `sandbox.config.json`, runtime ownership state, or committed overrides. Herd,
+Valet, and POSIX status truthfully reports shared-host/lower isolation.
+
+Mode/adapter changes are refused once an instance contains data. Export/recreate/import is a
+separate future workflow; ordinary `ensure` and `apply` never migrate between runtimes.
+Use `./sb native support --json` and `./sb native preflight --project-dir . --json` before
+selection. See [native-runtime-isolation.md](native-runtime-isolation.md).
+
 ## Where it's consumed
 
 - `ensure_instance(project_dir)` / `sandbox init` / `sandbox ensure` — boot the

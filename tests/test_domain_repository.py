@@ -63,6 +63,19 @@ class TestDomainRepository(unittest.TestCase):
             self.assertEqual(repository.snapshot()["recovery"]["residual"]["reason_code"],
                              "resolver_unavailable")
 
+    def test_operation_lock_refuses_symlink_substitution(self):
+        from sandbox.network.repository import DomainRepository
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "resolver-state.json"
+            repository = DomainRepository(path)
+            target = Path(tmp) / "foreign.lock"
+            target.write_text("")
+            repository.operation_lock_path.symlink_to(target)
+            with self.assertRaises(OSError):
+                with repository.operation():
+                    self.fail("unsafe operation lock must not be entered")
+
 
 if __name__ == "__main__":
     unittest.main()

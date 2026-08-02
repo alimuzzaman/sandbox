@@ -65,6 +65,18 @@ class TestDomainConfig(unittest.TestCase):
         self.assertEqual(policy["hostnameSource"], "machine_override")
         self.assertEqual(policy["strategySource"], "machine_override")
 
+    def test_machine_ingress_pin_wins_and_preserves_its_source(self):
+        from sandbox.config.domains import normalize_domain_policy
+
+        policy = normalize_domain_policy({
+            "_domains_raw": {
+                "project": {"ingress": "system-caddy"},
+                "machine_override": {"ingress": "herd-valet"},
+            },
+        })
+        self.assertEqual(policy["ingress"], "herd-valet")
+        self.assertEqual(policy["ingressSource"], "machine_override")
+
     def test_new_local_identity_is_rejected_before_observation(self):
         from sandbox.config.domains import normalize_domain_policy
 

@@ -6,7 +6,7 @@ import re
 from typing import Any, Mapping
 
 
-_DOMAIN_KEYS = frozenset({"enabled", "hostname", "strategy", "wildcard", "tld"})
+_DOMAIN_KEYS = frozenset({"enabled", "hostname", "strategy", "wildcard", "tld", "ingress"})
 _STRATEGY = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -125,6 +125,7 @@ def normalize_domain_policy(result: Mapping[str, Any] | None) -> dict[str, Any]:
     enabled, enabled_source = _selected("enabled", project, machine, False)
     wildcard, wildcard_source = _selected("wildcard", project, machine, False)
     strategy, strategy_source = _selected("strategy", project, machine, None)
+    ingress, ingress_source = _selected("ingress", project, machine, None)
     if not isinstance(enabled, bool):
         raise ValueError("domains enabled must be a boolean")
     if not isinstance(wildcard, bool):
@@ -133,6 +134,11 @@ def normalize_domain_policy(result: Mapping[str, Any] | None) -> dict[str, Any]:
         not isinstance(strategy, str) or not _STRATEGY.fullmatch(strategy)
     ):
         raise ValueError("domains strategy must be a lowercase adapter id")
+    if ingress is not None and (
+        not isinstance(ingress, str)
+        or (ingress != "disabled" and not _STRATEGY.fullmatch(ingress))
+    ):
+        raise ValueError("domains ingress must be a lowercase adapter id or disabled")
 
     explicit = bool(project or machine)
     return {
@@ -140,11 +146,13 @@ def normalize_domain_policy(result: Mapping[str, Any] | None) -> dict[str, Any]:
         "hostname": hostname,
         "tld": tld,
         "strategy": strategy,
+        "ingress": ingress,
         "wildcard": wildcard,
         "suffixClass": classification,
         "hostnameSource": hostname_source,
         "tldSource": tld_source,
         "strategySource": strategy_source,
+        "ingressSource": ingress_source,
         "enabledSource": enabled_source,
         "wildcardSource": wildcard_source,
         "explicit": explicit,

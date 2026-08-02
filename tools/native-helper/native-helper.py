@@ -4,13 +4,22 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import errno
+import fcntl
 import hashlib
 import ipaddress
 import json
 import os
+import pwd
 from pathlib import Path, PurePosixPath
 import re
+import selectors
+import shlex
 import shutil
+import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -20,8 +29,23 @@ import time
 
 MACHINE = re.compile(r"^sb-[a-f0-9]{12,32}$")
 STAGING_ROOT = Path("/var/lib/sandbox/native/staging")
+INJECTED_ROOT = Path("/var/lib/sandbox/native/injected")
+RUNTIME_ROOT = Path("/run/sandbox-native")
+GUEST_CREDENTIAL_SOURCE_ROOT = "/run/sandbox-native-credentials"
+GUEST_CREDENTIAL_TARGET_ROOT = "/run/credentials/sandbox"
 POLICY_ROOT = Path("/etc/sandbox/native/policies")
+POLICY_OWNER_ROOT = Path("/etc/sandbox/native/owners")
+NETWORK_STATE_ROOT = Path("/etc/sandbox/native/networks")
 INSTALL_PATH = Path("/usr/local/libexec/sandbox-native-helper")
+BROKER_SOURCE = Path(__file__).with_name("native-egress-broker.py")
+BROKER_INSTALL_PATH = Path("/usr/local/libexec/sandbox-native-egress-broker")
+EGRESS_ROOT = Path("/etc/sandbox/native/egress")
+GRANT_ROOT = Path("/etc/sandbox/native/grants")
+GRANT_LOCK_ROOT = Path("/run/lock/sandbox-native")
+FOREIGN_DATA_SENTINEL = Path("/var/lib/mysql/.sandbox-native-coexistence-sentinel")
+GRANT_AUTHORITY = "staged-v1"
+ABSENT_GRANT_DIGEST = "0" * 64
+BROKER_PORT = 18443
 APPARMOR_ROOT = Path("/etc/apparmor.d")
 POLICY_KEYS = {"policy_version", "machine_id", "uid_map", "root_image",
                "read_only_mounts", "writable_mounts", "network", "syscalls",
@@ -39,7 +63,39 @@ IMAGE_PACKAGE_ROOTS = {"php8.3-fpm", "php8.3-cli", "php8.3-mysql", "php8.3-curl"
                        "php8.3-gd", "php8.3-mbstring", "php8.3-xml", "php8.3-zip",
                        "php8.3-intl", "php8.3-opcache", "mariadb-server",
                        "mariadb-client", "cron", "ca-certificates", "curl", "unzip",
-                       "git", "composer"}
+                       "git", "composer", "bubblewrap", "iproute2", "util-linux"}
+WORDPRESS_URL = "https://wordpress.org/wordpress-6.8.2.tar.gz"
+WORDPRESS_SHA256 = "d85a72e392bfe866816b3c2ebc6a44699072aa50cc3a620f1c4ed2f13b645e2b"
+WP_CLI_URL = "https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar"
+WP_CLI_SHA256 = "ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c"
+PHPUNIT_URL = "https://phar.phpunit.de/phpunit-9.6.34.phar"
+PHPUNIT_SHA256 = "e7264ae61fe58a487c2bd741905b85940d8fbc2b32cf4a279949b6d9a172a06a"
+PHPUNIT_PATH = "/usr/local/libexec/sandbox-phpunit.phar"
+EXECUTION_ENV_ALLOWLIST = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "USER", "LOGNAME",
+                           "WP_ENVIRONMENT_TYPE", "XDEBUG_TRIGGER", "HTTP_PROXY", "HTTPS_PROXY"}
+EXECUTION_WRITABLE_TARGETS = {"/var/www/html", "/var/lib/sandbox", "/var/log/sandbox",
+                              "/run/mysqld"}
+PERSISTENT_WRITABLE_TARGETS = EXECUTION_WRITABLE_TARGETS | {"/run/php"}
+GRANT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+GRANT_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$")
+HOSTNAME = re.compile(
+    r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
+)
+FORBIDDEN_IPV4 = tuple(ipaddress.ip_network(value) for value in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+))
+REQUIRED_NETWORK_RULES = (
+    "guest_host_established", "guest_host_drop", "ingress",
+    "host_guest_drop", "guest_forward_drop", "guest_forward_reply_drop",
+)
+BROKER_NETWORK_RULES = ("egress_broker_request", "egress_broker_reply")
+CREDENTIAL_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+PROBE_TOKEN = re.compile(r"^[a-f0-9]{16}$")
+LOGIN_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 def fail(message, code=65):
@@ -58,6 +114,30 @@ def machine(value):
 def digest_value(value):
     if not re.fullmatch(r"[a-f0-9]{64}", value): fail("invalid policy digest")
     return value
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def parse_expiry(value):
+    if not isinstance(value, str) or not value or len(value) > 64:
+        fail("policy egress grant expiry is invalid")
+    try: parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError: fail("policy egress grant expiry is invalid")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        fail("policy egress grant expiry must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def public_ipv4_network(value):
+    try: network = ipaddress.ip_network(value, strict=True)
+    except (TypeError, ValueError): fail("policy egress grant destination is invalid")
+    if (network.version != 4 or not network.network_address.is_global or
+            not network.broadcast_address.is_global or
+            any(network.overlaps(blocked) for blocked in FORBIDDEN_IPV4)):
+        fail("policy egress grant destination must be an exact public IPv4 CIDR")
+    return network
 
 
 def canonical_digest(value):
@@ -122,8 +202,11 @@ def validate_schema(value, machine_id):
         if not (resolved.is_relative_to(project_root) or resolved.is_relative_to(state_root)):
             fail("policy writable source escapes owned roots")
     network = value["network"]
-    if set(network) != {"egress", "veth", "host_address", "guest_address",
-                       "default_route", "ingress_port", "grants"}:
+    legacy_network = set(network) == {"egress", "veth", "host_address", "guest_address",
+                                      "default_route", "ingress_port", "grants"}
+    delegated_network = set(network) == {"egress", "veth", "host_address", "guest_address",
+                                         "default_route", "ingress_port", "grant_authority"}
+    if not (legacy_network or delegated_network):
         fail("policy point-to-point network is invalid")
     try:
         host = ipaddress.ip_interface(network["host_address"])
@@ -136,27 +219,47 @@ def validate_schema(value, machine_id):
         fail("policy point-to-point network is invalid")
     ingress_port = network.get("ingress_port")
     if (isinstance(ingress_port, bool) or not isinstance(ingress_port, int) or
-            not 1024 <= ingress_port <= 65535 or not isinstance(network.get("grants"), list)):
+            not 1024 <= ingress_port <= 65535):
         fail("policy point-to-point network is invalid")
-    for grant in network["grants"]:
+    if delegated_network and network.get("grant_authority") != GRANT_AUTHORITY:
+        fail("policy grant authority is invalid")
+    if legacy_network and not isinstance(network.get("grants"), list):
+        fail("policy point-to-point network is invalid")
+    grant_ids = set()
+    for grant in network.get("grants", ()):
         if (not isinstance(grant, dict) or
-                set(grant) != {"grant_id", "destinations", "ports", "expires_at", "revoked"} or
-                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(grant.get("grant_id", ""))) or
+                set(grant) != {"grant_id", "owner", "kind", "destinations", "ports",
+                               "expires_at", "revoked"} or
+                not GRANT_ID.fullmatch(str(grant.get("grant_id", ""))) or
+                not GRANT_OWNER.fullmatch(str(grant.get("owner", ""))) or
+                grant.get("owner") != machine_id or
+                grant.get("grant_id") in grant_ids or
+                grant.get("kind") not in {"public_cidr_tcp", "hostname_https"} or
                 not isinstance(grant.get("destinations"), list) or
+                not grant.get("destinations") or
                 not isinstance(grant.get("ports"), list) or
+                not grant.get("ports") or
                 not isinstance(grant.get("expires_at"), str) or
-                grant.get("revoked") not in {True, False}):
+                not isinstance(grant.get("revoked"), bool)):
             fail("policy egress grant is invalid")
+        grant_ids.add(grant["grant_id"])
         if any(isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
                for port in grant["ports"]):
             fail("policy egress grant is invalid")
-        for destination in grant["destinations"]:
-            try: destination_network = ipaddress.ip_network(destination, strict=False)
-            except (TypeError, ValueError): fail("policy egress grant is invalid")
-            if (destination_network.version != 4 or destination_network.is_private or
-                    destination_network.is_loopback or destination_network.is_link_local or
-                    destination_network.is_multicast or destination_network.is_unspecified):
-                fail("policy egress grant is invalid")
+        if (len(set(grant["ports"])) != len(grant["ports"]) or
+                len(set(grant["destinations"])) != len(grant["destinations"])):
+            fail("policy egress grant is invalid")
+        expiry = parse_expiry(grant["expires_at"])
+        if not grant["revoked"] and expiry <= utc_now():
+            fail("policy active egress grant is expired")
+        if grant["kind"] == "hostname_https":
+            if grant["ports"] != [443] or any(
+                    not isinstance(destination, str) or not HOSTNAME.fullmatch(destination)
+                    or destination != destination.lower().rstrip(".")
+                    for destination in grant["destinations"]):
+                fail("policy hostname HTTPS grant is invalid")
+        else:
+            for destination in grant["destinations"]: public_ipv4_network(destination)
     if (set(value["syscalls"]) != {"no_new_privileges", "seccomp"} or
             value["syscalls"].get("no_new_privileges") is not True or
             value["syscalls"].get("seccomp") != "managed-v1"):
@@ -168,7 +271,7 @@ def validate_schema(value, machine_id):
     ranges = {"cpu_percent": (10, 6400), "memory_bytes": (128 * 1024**2, 256 * 1024**3),
               "pids": (32, 65536), "runtime_seconds": (1, 86400),
               "disk_bytes": (1024**3, 1024**4), "inodes": (10000, 10000000),
-              "fds": (128, 1048576), "connections": (16, 65535),
+              "fds": (128, 1048576), "connections": (16, 20000),
               "io_weight": (1, 10000)}
     resources = value["resources"]
     if set(resources) != required_resources or any(
@@ -226,6 +329,138 @@ def checked_policy(path_value, machine_id, *, applied=False):
     return path, value
 
 
+def invoking_uid():
+    raw = os.environ.get("SUDO_UID")
+    if raw is None or not raw.isdigit():
+        fail("native helper requires an authenticated sudo caller", 77)
+    value = int(raw)
+    if value <= 0: fail("native helper caller is invalid", 77)
+    return value
+
+
+def project_source_identity(policy, uid):
+    source = Path(policy["read_only_mounts"][0]["source"])
+    try:
+        resolved = source.resolve(strict=True)
+        details = resolved.stat()
+        home = Path(pwd.getpwuid(uid).pw_dir).resolve(strict=True)
+    except (KeyError, OSError):
+        fail("policy project root ownership is unavailable")
+    if (source.absolute() != resolved or resolved in {Path("/"), home}
+            or details.st_uid != uid or not stat.S_ISDIR(details.st_mode)):
+        fail("policy project root is not an owner-controlled scoped directory")
+    return {"owner_uid": uid, "source": str(resolved),
+            "source_dev": details.st_dev, "source_ino": details.st_ino}
+
+
+def policy_owner_path(machine_id):
+    return POLICY_OWNER_ROOT / f"{machine_id}.json"
+
+
+def exact_privileged_file(path, payload):
+    """Return whether a fixed helper-owned file exists with these exact bytes."""
+    if not os.path.lexists(path):
+        return False
+    try:
+        details = path.lstat()
+        observed = path.read_bytes()
+    except OSError:
+        fail("native privileged ownership record is unavailable")
+    if (not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode)
+            or details.st_nlink != 1 or details.st_uid != os.geteuid()
+            or details.st_mode & 0o077 or observed != payload):
+        fail("native privileged ownership collision")
+    return True
+
+
+def read_policy_owner(machine_id, policy):
+    path = policy_owner_path(machine_id)
+    try:
+        details = path.lstat(); payload = path.read_bytes(); value = json.loads(payload)
+    except (OSError, json.JSONDecodeError):
+        fail("native policy owner record is unavailable")
+    keys = {"machine_id", "policy_digest", "owner_uid", "source",
+            "source_dev", "source_ino"}
+    if (not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode)
+            or details.st_uid != os.geteuid() or details.st_mode & 0o077 or set(value) != keys
+            or value["machine_id"] != machine_id
+            or value["policy_digest"] != policy["digest"]
+            or value["owner_uid"] != invoking_uid()):
+        fail("native policy caller ownership changed", 77)
+    observed = project_source_identity(policy, value["owner_uid"])
+    if any(value[key] != observed[key] for key in observed):
+        fail("native policy project source identity changed")
+    return value
+
+
+def read_partial_policy_owner(machine_id, digest):
+    path = policy_owner_path(machine_id)
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        fail("native policy owner record is unavailable")
+    keys = {"machine_id", "policy_digest", "owner_uid", "source",
+            "source_dev", "source_ino"}
+    if (not isinstance(value, dict) or set(value) != keys
+            or value.get("machine_id") != machine_id
+            or value.get("policy_digest") != digest
+            or value.get("owner_uid") != invoking_uid()):
+        fail("native policy caller ownership changed", 77)
+    expected = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    exact_privileged_file(path, expected)
+    try:
+        source = Path(value["source"])
+        resolved = source.resolve(strict=True)
+        details = resolved.stat()
+    except (OSError, TypeError):
+        fail("native policy project source identity changed")
+    if (source.absolute() != resolved or details.st_uid != value["owner_uid"]
+            or not stat.S_ISDIR(details.st_mode) or details.st_dev != value["source_dev"]
+            or details.st_ino != value["source_ino"]):
+        fail("native policy project source identity changed")
+    return value
+
+
+def install_policy_pair(machine_id, value, payload):
+    """Install or repair only an exact policy/owner pair.
+
+    Either half may survive a crash. Exact helper-created halves are completed;
+    unsafe or drifted halves remain untouched and fail closed.
+    """
+    owner = {"machine_id": machine_id, "policy_digest": value["digest"],
+             **project_source_identity(value, invoking_uid())}
+    owner_payload = (json.dumps(owner, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    destination = POLICY_ROOT / f"{machine_id}.json"
+    owner_destination = policy_owner_path(machine_id)
+    policy_exists = exact_privileged_file(destination, payload)
+    owner_exists = exact_privileged_file(owner_destination, owner_payload)
+    if policy_exists and owner_exists:
+        return
+    if policy_exists:
+        atomic_install_bytes(owner_payload, owner_destination)
+        exact_privileged_file(owner_destination, owner_payload)
+        return
+    if owner_exists:
+        atomic_install_bytes(payload, destination)
+        exact_privileged_file(destination, payload)
+        return
+    try:
+        atomic_install_bytes(owner_payload, owner_destination)
+        exact_privileged_file(owner_destination, owner_payload)
+        atomic_install_bytes(payload, destination)
+        exact_privileged_file(destination, payload)
+    except BaseException:
+        # If the policy write did not complete, retire only the exact owner half
+        # created by this transaction. A completed exact pair remains retryable.
+        if not os.path.lexists(destination):
+            try:
+                if exact_privileged_file(owner_destination, owner_payload):
+                    owner_destination.unlink()
+            except (OSError, SystemExit):
+                pass
+        raise
+
+
 def atomic_install(source, destination):
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", dir=destination.parent)
@@ -260,6 +495,7 @@ def applied_policy(machine_id, digest):
     path, value = checked_policy(POLICY_ROOT / f"{machine_id}.json", machine_id,
                                  applied=True)
     if value["digest"] != digest_value(digest): fail("applied policy digest changed")
+    read_policy_owner(machine_id, value)
     return path, value
 
 
@@ -293,6 +529,17 @@ def ensure_root_directory(path, mode):
     else:
         path.mkdir(parents=True, mode=mode)
     os.chown(path, 0, 0); os.chmod(path, mode)
+
+
+def ensure_user_directory(path, uid, mode=0o700):
+    if path.exists() or path.is_symlink():
+        details = path.lstat()
+        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode) or
+                details.st_uid != uid or details.st_mode & 0o077):
+            fail(f"owned directory {path} is foreign")
+    else:
+        path.mkdir(parents=True, mode=mode)
+    os.chown(path, uid, uid); os.chmod(path, mode)
 
 
 def read_install_plan(path_value, digest):
@@ -342,8 +589,10 @@ def read_install_plan(path_value, digest):
             len({"nginx", "apache2"} & image_names) != 1):
         fail("image package roots are incomplete")
     for source in value["sources"]:
+        suites = source.get("suite", "").split() if isinstance(source, dict) else ()
         if (not isinstance(source, dict) or source.get("uri") not in OFFICIAL_APT_URIS or
-                source.get("signed") is not True or "noble" not in source.get("suite", "").split() or
+                source.get("signed") is not True or not suites or
+                any(suite != "noble" and not suite.startswith("noble-") for suite in suites) or
                 source.get("kind", "archive") != "archive"):
             fail("install source is not an official signed Noble archive")
     if value["service_effects"] != [{"scope": "image", "policy_rc_d": "deny-service-start"}]:
@@ -419,7 +668,26 @@ def remove_rootfs_entry(root, relative):
     destination.unlink()
 
 
-def compile_service_files(guest, connections, web_server, backend_port):
+def _persistent_payload(command, writable_targets):
+    argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
+            "--unshare-user", "--disable-userns", "--assert-userns-disabled",
+            "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--ro-bind", "/", "/"]
+    for target in sorted(PERSISTENT_WRITABLE_TARGETS | set(writable_targets)):
+        argv.extend(("--bind", target, target))
+    argv.extend(("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                 "--tmpfs", "/run/credentials", "--dir", "/run/credentials/sandbox",
+                 "--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
+                 "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                 "--chdir", "/workspace", "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                 "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                 "--setenv", "HOME", "/var/www", "--setenv", "USER", "www-data",
+                 "--setenv", "LOGNAME", "www-data", "--", *command))
+    return "#!/bin/sh\nset -eu\nexec " + shlex.join(argv) + "\n"
+
+
+def compile_service_files(guest, connections, runtime_seconds, web_server, backend_port,
+                          writable_targets=()):
     php_children = max(2, min(32, connections // 4))
     common_php = (
         "[sandbox]\nuser = www-data\ngroup = www-data\n"
@@ -427,12 +695,21 @@ def compile_service_files(guest, connections, web_server, backend_port):
         f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
         "pm.min_spare_servers = 1\npm.max_spare_servers = 4\nclear_env = yes\n"
         "security.limit_extensions = .php\ncatch_workers_output = yes\n"
+        f"request_terminate_timeout = {runtime_seconds}s\n"
         "php_admin_value[upload_tmp_dir] = /var/lib/sandbox/tmp\n"
         "php_admin_value[session.save_path] = /var/lib/sandbox/sessions\n"
         "php_admin_value[open_basedir] = /var/www/html:/workspace:/var/lib/sandbox:/tmp:/usr/share/php\n"
     )
     if web_server == "nginx":
         web_path = "/etc/nginx/sites-enabled/sandbox.conf"
+        nginx = ("user www-data;\nworker_processes 1;\npid /run/nginx.pid;\n"
+                 "error_log /var/log/nginx/error.log;\n"
+                 f"events {{ worker_connections {connections}; }}\n"
+                 "http {\n    include /etc/nginx/mime.types;\n"
+                 "    default_type application/octet-stream;\n"
+                 "    access_log /var/log/nginx/access.log;\n"
+                 "    sendfile on;\n    keepalive_timeout 15;\n"
+                 "    include /etc/nginx/sites-enabled/*;\n}\n")
         web = (f"server {{\n    listen {guest}:{backend_port} default_server;\n"
                "    server_name _;\n    root /var/www/html;\n    index index.php;\n"
                "    client_max_body_size 64m;\n"
@@ -444,6 +721,12 @@ def compile_service_files(guest, connections, web_server, backend_port):
         units = ("mariadb.service", "php8.3-fpm.service", "nginx.service", "cron.service")
     else:
         web_path = "/etc/apache2/sites-enabled/000-sandbox.conf"
+        apache_limits = ("KeepAlive Off\n<IfModule mpm_prefork_module>\n"
+                         "    StartServers 1\n    MinSpareServers 1\n"
+                         f"    MaxSpareServers {min(10, connections)}\n"
+                         f"    ServerLimit {connections}\n"
+                         f"    MaxRequestWorkers {connections}\n"
+                         "    MaxConnectionsPerChild 10000\n</IfModule>\n")
         web = (f"Listen {guest}:{backend_port}\n<VirtualHost {guest}:{backend_port}>\n"
                "    DocumentRoot /var/www/html\n    DirectoryIndex index.php\n"
                "    <Directory /var/www/html>\n        Options FollowSymLinks\n"
@@ -455,10 +738,25 @@ def compile_service_files(guest, connections, web_server, backend_port):
         units = ("mariadb.service", "php8.3-fpm.service", "apache2.service", "cron.service")
     database = ("[mysqld]\nskip-networking=1\nskip-name-resolve=1\nlocal-infile=0\n"
                 f"socket=/run/mysqld/mysqld.sock\nmax_connections={connections}\n")
+    php_command = ("/usr/sbin/php-fpm8.3", "--nodaemonize", "--force-stderr",
+                   "--fpm-config", "/etc/php/8.3/fpm/php-fpm.conf")
+    cron_command = ("/usr/bin/timeout", "--signal=TERM", "--kill-after=5s",
+                    f"{runtime_seconds}s", "/usr/local/bin/wp", "cron", "event", "run", "--due-now",
+                    "--path=/var/www/html")
     files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
              "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
+             "/usr/local/libexec/sandbox-php-fpm":
+             _persistent_payload(php_command, writable_targets),
+             "/usr/local/libexec/sandbox-wordpress-cron":
+             _persistent_payload(cron_command, writable_targets),
+             "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
+             "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o www-data -g www-data -m 0770 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
-             "*/5 * * * * www-data /usr/local/bin/wp cron event run --due-now --path=/var/www/html >/dev/null 2>&1\n"}
+             "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n"}
+    if web_server == "nginx":
+        files["/etc/nginx/nginx.conf"] = nginx
+    else:
+        files["/etc/apache2/conf-enabled/sandbox-limits.conf"] = apache_limits
     return files, units
 
 
@@ -479,7 +777,9 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
         fail("native bootstrap marker changed")
     guest = str(ipaddress.ip_interface(policy["network"]["guest_address"]).ip)
     files, units = compile_service_files(guest, policy["resources"]["connections"],
-                                         web_server, policy["network"]["ingress_port"])
+                                         policy["resources"]["runtime_seconds"],
+                                         web_server, policy["network"]["ingress_port"],
+                                         tuple(item["target"] for item in policy["writable_mounts"]))
     observed_digest = canonical_digest(files)
     if service_digest != observed_digest: fail("native service configuration digest mismatch")
     marker_value = {"machine_id": machine_id, "policy_digest": policy_digest,
@@ -493,8 +793,21 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
         return
     for relative, content in files.items(): write_rootfs(mountpoint, relative, content)
     os.chmod(rootfs_path(mountpoint, "/etc/cron.d/sandbox-wordpress"), 0o644)
+    for executable in ("/usr/local/libexec/sandbox-php-fpm",
+                       "/usr/local/libexec/sandbox-wordpress-cron"):
+        os.chmod(rootfs_path(mountpoint, executable), 0o750)
     remove_rootfs_entry(mountpoint, "/etc/php/8.3/fpm/pool.d/www.conf")
     rootfs_path(mountpoint, "/var/www/html").mkdir(parents=True, exist_ok=True)
+    plugin_link = rootfs_path(
+        mountpoint, "/var/www/html/wp-content/plugins/sandbox-project",
+        allow_final_symlink=True,
+    )
+    if plugin_link.exists() or plugin_link.is_symlink():
+        if not plugin_link.is_symlink() or os.readlink(plugin_link) != "/workspace":
+            fail("native project plugin link changed")
+    else:
+        plugin_link.parent.mkdir(parents=True, exist_ok=True)
+        plugin_link.symlink_to("/workspace")
     for directory in ("/var/www/html", "/var/lib/sandbox/tmp", "/var/lib/sandbox/sessions"):
         run_fixed(("chroot", str(mountpoint), "/usr/bin/chown", "-R", "www-data:www-data",
                    directory), "native service ownership configuration failed")
@@ -506,6 +819,10 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
                   "native nginx configuration failed")
     else:
         remove_rootfs_entry(mountpoint, "/etc/apache2/sites-enabled/000-default.conf")
+        run_fixed(("chroot", str(mountpoint), "/usr/sbin/a2dismod", "mpm_event"),
+                  "native Apache event MPM disable failed")
+        run_fixed(("chroot", str(mountpoint), "/usr/sbin/a2enmod", "mpm_prefork"),
+                  "native Apache prefork MPM enable failed")
         run_fixed(("chroot", str(mountpoint), "/usr/sbin/a2enmod",
                    "proxy", "proxy_fcgi", "rewrite", "setenvif"),
                   "native Apache module configuration failed")
@@ -513,6 +830,105 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
                   "native Apache configuration failed")
     write_rootfs(mountpoint, "/etc/sandbox-native/services.json",
                  json.dumps(marker_value, sort_keys=True) + "\n", 0o600)
+    database_script = """#!/bin/sh
+set -eu
+umask 077
+case "${1-}:${2-}:${3-}" in
+  *[!a-z0-9_:]*|'') exit 65 ;;
+esac
+production=$1
+tests=$2
+database_user=$3
+credential=/run/sandbox-native-credentials/db-credential
+test -f "$credential" || exit 66
+password=$(cat "$credential")
+case "$password" in
+  ''|*[!A-Za-z0-9_-]*) exit 65 ;;
+esac
+sql=$(mktemp /run/sandbox-db-bootstrap.XXXXXX)
+trap 'rm -f "$sql"' EXIT HUP INT TERM
+printf "CREATE DATABASE IF NOT EXISTS %s;\\nCREATE DATABASE IF NOT EXISTS %s;\\nCREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '%s';\\nALTER USER '%s'@'localhost' IDENTIFIED BY '%s';\\nGRANT ALL ON %s.* TO '%s'@'localhost';\\nGRANT ALL ON %s.* TO '%s'@'localhost';\\nFLUSH PRIVILEGES;\\n" \\
+  "$production" "$tests" "$database_user" "$password" "$database_user" "$password" \\
+  "$production" "$database_user" "$tests" "$database_user" >"$sql"
+unset password
+/usr/bin/mariadb --protocol=socket --socket=/run/mysqld/mysqld.sock <"$sql" >/dev/null
+"""
+    write_rootfs(mountpoint, "/usr/local/libexec/sandbox-db-bootstrap",
+                 database_script, 0o700)
+    wordpress_script = """#!/bin/sh
+set -eu
+umask 077
+credential=/run/credentials/sandbox/db-credential
+test -f "$credential" || exit 66
+cd /var/www/html
+if test ! -f wp-config.php; then
+  cat "$credential" | /usr/local/bin/wp config create --path=/var/www/html --dbname="$1" --dbuser="$2" --dbhost=localhost --prompt=dbpass --skip-check --quiet
+fi
+if ! /usr/local/bin/wp core is-installed --path=/var/www/html --quiet; then
+  cat "$credential" | /usr/local/bin/wp core install --path=/var/www/html --url=http://sandbox.invalid --title=Sandbox --admin_user=admin --admin_email=admin@example.invalid --prompt=admin_password --skip-email --quiet
+fi
+/usr/local/bin/wp config set WP_PROXY_HOST "$3" --path=/var/www/html --quiet
+/usr/local/bin/wp config set WP_PROXY_PORT "$4" --path=/var/www/html --raw --quiet
+/usr/local/bin/wp config set WP_PROXY_BYPASS_HOSTS 'localhost,127.0.0.1' --path=/var/www/html --quiet
+/usr/local/bin/wp plugin activate sandbox-project --path=/var/www/html --quiet
+"""
+    write_rootfs(mountpoint, "/usr/local/libexec/sandbox-wordpress-bootstrap",
+                 wordpress_script, 0o755)
+
+
+def install_wordpress_artifacts(mountpoint):
+    """Download fixed releases, verify bytes, and extract without remote installers."""
+    mountpoint = Path(mountpoint).resolve(strict=True)
+    marker = rootfs_path(mountpoint, "/etc/sandbox-native/artifacts.json")
+    expected = {"wordpress": {"url": WORDPRESS_URL, "sha256": WORDPRESS_SHA256},
+                "wp_cli": {"url": WP_CLI_URL, "sha256": WP_CLI_SHA256},
+                "phpunit": {"url": PHPUNIT_URL, "sha256": PHPUNIT_SHA256}}
+    wp_cli = rootfs_path(mountpoint, "/usr/local/bin/wp")
+    phpunit = rootfs_path(mountpoint, PHPUNIT_PATH)
+    if marker.exists():
+        try: observed = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError): fail("native artifact marker is invalid")
+        installed = ((wp_cli, WP_CLI_SHA256, 0o755),
+                     (phpunit, PHPUNIT_SHA256, 0o555))
+        if observed != expected or any(
+                not path.is_file() or path.is_symlink()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != digest
+                or path.stat().st_uid != 0 or path.stat().st_gid != 0
+                or stat.S_IMODE(path.stat().st_mode) != mode
+                for path, digest, mode in installed):
+            fail("native artifact state changed")
+        return
+    artifact_root = rootfs_path(mountpoint, "/var/lib/sandbox/artifacts")
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    wordpress_archive = artifact_root / "wordpress.tar.gz"
+    wp_cli_download = artifact_root / "wp-cli.phar"
+    phpunit_download = artifact_root / "phpunit.phar"
+    for url, destination, digest in (
+            (WORDPRESS_URL, wordpress_archive, WORDPRESS_SHA256),
+            (WP_CLI_URL, wp_cli_download, WP_CLI_SHA256),
+            (PHPUNIT_URL, phpunit_download, PHPUNIT_SHA256)):
+        relative = "/" + str(destination.relative_to(mountpoint))
+        run_fixed(("chroot", str(mountpoint), "/usr/bin/curl", "--fail", "--silent",
+                   "--show-error", "--location", "--proto", "=https", "--tlsv1.2",
+                   "--output", relative, url), "native artifact download failed", timeout=300)
+        digest_observed = hashlib.sha256(destination.read_bytes()).hexdigest()
+        if digest_observed != digest:
+            fail("native artifact digest mismatch")
+    document_root = rootfs_path(mountpoint, "/var/www/html")
+    document_root.mkdir(parents=True, exist_ok=True)
+    run_fixed(("tar", "--extract", "--gzip", "--file", str(wordpress_archive),
+               "--directory", str(document_root), "--strip-components=1",
+               "--no-same-owner", "--no-same-permissions"),
+              "native WordPress extraction failed", timeout=300)
+    wp_cli.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(wp_cli_download, wp_cli)
+    os.chown(wp_cli, 0, 0); os.chmod(wp_cli, 0o755)
+    phpunit.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(phpunit_download, phpunit)
+    os.chown(phpunit, 0, 0); os.chmod(phpunit, 0o555)
+    wordpress_archive.unlink(); wp_cli_download.unlink(); phpunit_download.unlink()
+    write_rootfs(mountpoint, "/etc/sandbox-native/artifacts.json",
+                 json.dumps(expected, sort_keys=True) + "\n", 0o600)
 
 
 def image_bootstrap(machine_id, policy_digest, plan_path, plan_digest, web_server):
@@ -578,11 +994,19 @@ def image_bootstrap(machine_id, policy_digest, plan_path, plan_digest, web_serve
     run_fixed((*apt, "--yes", "--allow-downgrades", "install", *package_specs),
               "native image package installation failed", timeout=1800,
               environment=environment)
+    bwrap = rootfs_path(mountpoint, "/usr/bin/bwrap")
+    if not bwrap.is_file() or bwrap.is_symlink() or bwrap.stat().st_uid != 0:
+        fail("native image bubblewrap binary is invalid")
+    # Project payloads run as www-data and cannot invoke the setup transition
+    # with attacker-controlled bwrap arguments. Only root-owned gateways can.
+    os.chmod(bwrap, 0o750)
+    install_wordpress_artifacts(mountpoint)
     write_rootfs(mountpoint, "/etc/resolv.conf", "# DNS disabled; use an explicit egress broker grant.\n")
     write_rootfs(mountpoint, "/etc/machine-id", "")
     for directory, mode in (("/var/lib/sandbox", 0o700), ("/var/log/sandbox", 0o700),
                             ("/var/lib/sandbox/tmp", 0o1770),
-                            ("/var/lib/sandbox/sessions", 0o1770)):
+                            ("/var/lib/sandbox/sessions", 0o1770),
+                            ("/run/php", 0o770)):
         path = rootfs_path(mountpoint, directory); path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, mode)
     write_rootfs(mountpoint, "/etc/sandbox-native/bootstrap.json",
@@ -662,6 +1086,81 @@ def network_marker(machine_id, digest):
     return f"sandbox-native:{machine_id}:{digest}"
 
 
+def expected_network_chains():
+    return {name: {"type": "filter", "hook": name, "prio": 0, "policy": "accept"}
+            for name in ("input", "output", "forward")}
+
+
+def desired_network_state(machine_id, policy_digest, network, *, broker=False,
+                          grant_digest=ABSENT_GRANT_DIGEST):
+    basis = {"version": 1, "machine_id": machine_id, "policy_digest": policy_digest,
+             "grant_digest": grant_digest,
+             "marker": network_marker(machine_id, policy_digest),
+             "network_digest": canonical_digest(network),
+             "chains": expected_network_chains(),
+             "rules": [list(item) for item in expected_network_rules(
+                 network, broker=broker)]}
+    return {**basis, "digest": canonical_digest(basis)}
+
+
+def network_state_record(machine_id):
+    path = NETWORK_STATE_ROOT / f"{machine_id}.json"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        fail("native network ownership record is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or
+                details.st_mode & 0o077 or not 1 <= details.st_size <= 65536):
+            fail("native network ownership record is invalid")
+        payload = b""
+        while len(payload) <= 65536:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            payload += chunk
+        if len(payload) != details.st_size:
+            fail("native network ownership record changed")
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("native network ownership record is invalid")
+    keys = {"version", "machine_id", "policy_digest", "grant_digest", "marker", "network_digest",
+            "chains", "rules", "digest"}
+    if (not isinstance(value, dict) or set(value) != keys or value.get("version") != 1 or
+            value.get("machine_id") != machine_id or
+            not isinstance(value.get("policy_digest"), str) or
+            not re.fullmatch(r"[a-f0-9]{64}", str(value.get("grant_digest", ""))) or
+            not isinstance(value.get("marker"), str) or
+            not isinstance(value.get("network_digest"), str) or
+            not isinstance(value.get("chains"), dict) or
+            not isinstance(value.get("rules"), list)):
+        fail("native network ownership record is invalid")
+    basis = {key: item for key, item in value.items() if key != "digest"}
+    if value["digest"] != canonical_digest(basis):
+        fail("native network ownership record digest changed")
+    return value
+
+
+def write_network_state(record):
+    ensure_root_directory(NETWORK_STATE_ROOT, 0o755)
+    atomic_install_bytes((json.dumps(record, sort_keys=True,
+                                     separators=(",", ":")) + "\n").encode(),
+                         NETWORK_STATE_ROOT / f"{record['machine_id']}.json")
+
+
+def record_rule_tuple(record):
+    try:
+        return tuple((str(item[0]), str(item[1])) for item in record["rules"]
+                     if isinstance(item, list) and len(item) == 2)
+    except (KeyError, TypeError):
+        return ()
+
+
 def machine_leader(machine_id):
     result = run_optional(("machinectl", "show", machine_id, "--property=Leader", "--value"))
     try: leader = int((result.stdout or "").strip())
@@ -693,11 +1192,624 @@ def observed_nft_table(table):
     fail("native nft observation is invalid")
 
 
+def observed_nft_state(table):
+    result = run_optional(("nft", "-j", "list", "table", "inet", table))
+    if result.returncode != 0: return None
+    try: document = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError: fail("native nft observation is invalid")
+    if not isinstance(document, dict) or not isinstance(document.get("nftables"), list):
+        fail("native nft observation is invalid")
+    table_row = None; chains = {}; rules = []; counters = {}
+    for item in document["nftables"]:
+        if not isinstance(item, dict): fail("native nft observation is invalid")
+        row = item.get("table")
+        if isinstance(row, dict) and row.get("family") == "inet" and row.get("name") == table:
+            table_row = row
+        chain = item.get("chain")
+        if isinstance(chain, dict) and chain.get("family") == "inet" and chain.get("table") == table:
+            name = chain.get("name")
+            if not isinstance(name, str): fail("native nft observation is invalid")
+            if name in chains: fail("native nft observation is invalid")
+            chains[name] = {"type": chain.get("type"), "hook": chain.get("hook"),
+                            "prio": chain.get("prio"), "policy": chain.get("policy")}
+        rule = item.get("rule")
+        if isinstance(rule, dict) and rule.get("family") == "inet" and rule.get("table") == table:
+            comment = rule.get("comment")
+            if (not isinstance(comment, str) or comment in counters or
+                    comment not in (*REQUIRED_NETWORK_RULES, *BROKER_NETWORK_RULES)):
+                fail("native nft rule identity is invalid")
+            expressions = rule.get("expr")
+            if not isinstance(expressions, list): fail("native nft observation is invalid")
+            counter = None
+            for expression in expressions:
+                if isinstance(expression, dict) and isinstance(expression.get("counter"), dict):
+                    counter = expression["counter"]; break
+            if (not isinstance(counter, dict) or
+                    isinstance(counter.get("packets"), bool) or
+                    not isinstance(counter.get("packets"), int) or
+                    isinstance(counter.get("bytes"), bool) or
+                    not isinstance(counter.get("bytes"), int)):
+                fail("native nft counter observation is invalid")
+            counters[comment] = {"packets": counter["packets"], "bytes": counter["bytes"]}
+            rules.append((comment, canonical_digest({
+                "chain": rule.get("chain"),
+                "expr": normalize_nft_value(expressions),
+            })))
+    if table_row is None: fail("native nft observation is invalid")
+    return {"table": table_row, "chains": chains, "rules": rules, "counters": counters}
+
+
+def normalize_nft_value(value):
+    """Canonicalize nft JSON while retaining all authorization semantics."""
+    if isinstance(value, list):
+        return [normalize_nft_value(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if set(value) == {"counter"} and isinstance(value["counter"], dict):
+        return {"counter": {}}
+    result = {key: normalize_nft_value(item) for key, item in value.items()}
+    if set(result) == {"set"} and isinstance(result["set"], list):
+        result["set"] = sorted(result["set"], key=lambda item: json.dumps(item, sort_keys=True))
+    return result
+
+
+def expected_network_rules(network, *, broker=False):
+    guest = str(ipaddress.ip_interface(network["guest_address"]).ip)
+    veth = network["veth"]
+
+    def match(left, right):
+        return {"match": {"op": "==", "left": left, "right": right}}
+
+    meta_iif = {"meta": {"key": "iifname"}}
+    meta_oif = {"meta": {"key": "oifname"}}
+    saddr = {"payload": {"protocol": "ip", "field": "saddr"}}
+    daddr = {"payload": {"protocol": "ip", "field": "daddr"}}
+    dport = {"payload": {"protocol": "tcp", "field": "dport"}}
+    ct_state = {"ct": {"key": "state"}}
+    counter = {"counter": {}}
+    accept = {"accept": None}
+    drop = {"drop": None}
+    rows = {
+        "guest_host_established": ("input", [
+            match(meta_iif, veth), match(saddr, guest),
+            match(ct_state, {"set": ["established", "related"]}), counter, accept,
+        ]),
+        "guest_host_drop": ("input", [match(meta_iif, veth), counter, drop]),
+        "ingress": ("output", [
+            match(meta_oif, veth), match(daddr, guest),
+            match(dport, network["ingress_port"]),
+            match(ct_state, {"set": ["new", "established"]}), counter, accept,
+        ]),
+        "host_guest_drop": ("output", [match(meta_oif, veth), counter, drop]),
+        "guest_forward_drop": ("forward", [match(meta_iif, veth), counter, drop]),
+        "guest_forward_reply_drop": ("forward", [match(meta_oif, veth), counter, drop]),
+    }
+    if broker:
+        host = str(ipaddress.ip_interface(network["host_address"]).ip)
+        request = ("input", [
+            match(meta_iif, veth), match(saddr, guest), match(daddr, host),
+            match(dport, BROKER_PORT), match(ct_state, "new"), counter, accept,
+        ])
+        source_port = {"payload": {"protocol": "tcp", "field": "sport"}}
+        reply = ("output", [
+            match(meta_oif, veth), match(saddr, host), match(daddr, guest),
+            match(source_port, BROKER_PORT),
+            match(ct_state, {"set": ["established", "related"]}), counter, accept,
+        ])
+        rows = {
+            "guest_host_established": rows["guest_host_established"],
+            "egress_broker_request": request,
+            "guest_host_drop": rows["guest_host_drop"],
+            "ingress": rows["ingress"],
+            "egress_broker_reply": reply,
+            "host_guest_drop": rows["host_guest_drop"],
+            "guest_forward_drop": rows["guest_forward_drop"],
+            "guest_forward_reply_drop": rows["guest_forward_reply_drop"],
+        }
+    return tuple((name, canonical_digest({
+                     "chain": chain, "expr": normalize_nft_value(expressions),
+                 }))
+                 for name, (chain, expressions) in rows.items())
+
+
+def observed_guest_network(machine_id):
+    leader = machine_leader(machine_id)
+    namespace = ("nsenter", "--target", str(leader), "--net", "--")
+    address = run_optional((*namespace, "ip", "-j", "address", "show", "dev", "host0"))
+    routes = run_optional((*namespace, "ip", "-j", "route", "show", "table", "main"))
+    if address.returncode != 0 or routes.returncode != 0:
+        fail("native guest network observation failed")
+    try:
+        address_rows = json.loads(address.stdout or "[]")
+        route_rows = json.loads(routes.stdout or "[]")
+    except json.JSONDecodeError: fail("native guest network observation is invalid")
+    if (not isinstance(address_rows, list) or len(address_rows) != 1 or
+            not isinstance(address_rows[0], dict) or not isinstance(route_rows, list)):
+        fail("native guest network observation is invalid")
+    global_ipv4 = [item for item in address_rows[0].get("addr_info", ())
+                   if isinstance(item, dict) and item.get("family") == "inet" and
+                   item.get("scope") == "global"]
+    if len(global_ipv4) != 1: fail("native guest IPv4 observation is invalid")
+    item = global_ipv4[0]
+    try: guest_address = str(ipaddress.ip_interface(
+        f"{item['local']}/{int(item['prefixlen'])}"))
+    except (KeyError, TypeError, ValueError): fail("native guest IPv4 observation is invalid")
+    destinations = []
+    for route in route_rows:
+        if not isinstance(route, dict): fail("native guest route observation is invalid")
+        destination = route.get("dst", "default")
+        if not isinstance(destination, str): fail("native guest route observation is invalid")
+        destinations.append(destination)
+    return {"guest_address": guest_address, "default_route": "default" in destinations,
+            "routes": sorted(destinations)}
+
+
+def active_egress_grants(network):
+    return tuple(grant for grant in network.get("grants", ()) if not grant["revoked"])
+
+
+def validate_grant_list(grants, machine_id, *, allow_expired=False):
+    if not isinstance(grants, list):
+        fail("native grant document grants are invalid")
+    ids = set()
+    for grant in grants:
+        if (not isinstance(grant, dict) or
+                set(grant) != {"grant_id", "owner", "kind", "destinations", "ports",
+                               "expires_at", "revoked"} or
+                not GRANT_ID.fullmatch(str(grant.get("grant_id", ""))) or
+                grant.get("owner") != machine_id or grant.get("grant_id") in ids or
+                grant.get("kind") not in {"public_cidr_tcp", "hostname_https"} or
+                not isinstance(grant.get("destinations"), list) or
+                not grant.get("destinations") or
+                not isinstance(grant.get("ports"), list) or not grant.get("ports") or
+                not isinstance(grant.get("expires_at"), str) or
+                not isinstance(grant.get("revoked"), bool)):
+            fail("native grant document grant is invalid")
+        ids.add(grant["grant_id"])
+        if (len(set(grant["ports"])) != len(grant["ports"]) or
+                len(set(grant["destinations"])) != len(grant["destinations"]) or
+                any(isinstance(port, bool) or not isinstance(port, int) or
+                    not 1 <= port <= 65535 for port in grant["ports"])):
+            fail("native grant document grant is invalid")
+        expiry = parse_expiry(grant["expires_at"])
+        if not allow_expired and not grant["revoked"] and expiry <= utc_now():
+            fail("native active grant is expired")
+        if grant["kind"] == "hostname_https":
+            if (grant["ports"] != [443] or any(
+                    not isinstance(destination, str) or not HOSTNAME.fullmatch(destination) or
+                    destination != destination.lower().rstrip(".")
+                    for destination in grant["destinations"])):
+                fail("native hostname HTTPS grant is invalid")
+        else:
+            for destination in grant["destinations"]:
+                public_ipv4_network(destination)
+    return grants
+
+
+def grant_document(machine_id, base_policy_digest, grants):
+    basis = {"version": 1, "machine_id": machine_id,
+             "base_policy_digest": base_policy_digest,
+             "grant_authority": GRANT_AUTHORITY, "grants": grants}
+    return {**basis, "grant_digest": canonical_digest(basis)}
+
+
+def _validate_grant_document(value, machine_id, base_policy_digest, desired_digest, *,
+                             allow_expired=False):
+    keys = {"version", "machine_id", "base_policy_digest", "grant_authority",
+            "grants", "grant_digest"}
+    if (not isinstance(value, dict) or set(value) != keys or value.get("version") != 1 or
+            value.get("machine_id") != machine_id or
+            value.get("base_policy_digest") != base_policy_digest or
+            value.get("grant_authority") != GRANT_AUTHORITY or
+            value.get("grant_digest") != desired_digest):
+        fail("native grant document schema is invalid")
+    validate_grant_list(value["grants"], machine_id, allow_expired=allow_expired)
+    basis = {key: item for key, item in value.items() if key != "grant_digest"}
+    if canonical_digest(basis) != desired_digest:
+        fail("native grant document digest mismatch")
+    return value
+
+
+def _read_grant_file(path, machine_id, base_policy_digest, grant_digest, owner_uid, *,
+                     allow_expired=False):
+    try: descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError: fail("native grant document is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != owner_uid or
+                details.st_mode & 0o077 or not 1 <= details.st_size <= 1024 * 1024):
+            fail("native grant document ownership is invalid")
+        payload = b""
+        while len(payload) <= 1024 * 1024:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            payload += chunk
+        if len(payload) != details.st_size:
+            fail("native grant document changed")
+    finally: os.close(descriptor)
+    try: value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("native grant document JSON is invalid")
+    if isinstance(value, dict):
+        base_policy_digest = base_policy_digest or value.get("base_policy_digest")
+        grant_digest = grant_digest or value.get("grant_digest")
+    if (not re.fullmatch(r"[a-f0-9]{64}", str(base_policy_digest or "")) or
+            not re.fullmatch(r"[a-f0-9]{64}", str(grant_digest or ""))):
+        fail("native grant document digest is invalid")
+    return _validate_grant_document(
+        value, machine_id, base_policy_digest, grant_digest,
+        allow_expired=allow_expired), payload
+
+
+def installed_grant_record(machine_id, base_policy_digest=None):
+    path = GRANT_ROOT / f"{machine_id}.json"
+    try: path.lstat()
+    except FileNotFoundError: return None
+    except OSError: fail("native installed grant document is unavailable")
+    value, _payload = _read_grant_file(path, machine_id, base_policy_digest, None, 0,
+                                      allow_expired=True)
+    return value
+
+
+@contextmanager
+def grant_machine_lock(machine_id):
+    ensure_root_directory(GRANT_LOCK_ROOT, 0o755)
+    path = GRANT_LOCK_ROOT / f"{machine_id}.lock"
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+                             0o600)
+    except OSError:
+        fail("native grant lock is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or
+                details.st_mode & 0o077):
+            fail("native grant lock ownership is invalid")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def observed_forbidden_networks():
+    result = {str(value) for value in FORBIDDEN_IPV4}
+    addresses = run_optional(("ip", "-j", "address", "show"))
+    if addresses.returncode != 0:
+        fail("native host address observation failed")
+    try:
+        rows = json.loads(addresses.stdout or "[]")
+    except json.JSONDecodeError:
+        fail("native host address observation is invalid")
+    if not isinstance(rows, list):
+        fail("native host address observation is invalid")
+    for row in rows:
+        if not isinstance(row, dict):
+            fail("native host address observation is invalid")
+        for item in row.get("addr_info", ()):
+            if not isinstance(item, dict):
+                fail("native host address observation is invalid")
+            if item.get("family") == "inet":
+                try: result.add(str(ipaddress.ip_network(f"{item['local']}/32")))
+                except (KeyError, ValueError): fail("native host address observation is invalid")
+    try:
+        resolvers = Path("/etc/resolv.conf").read_text().splitlines()
+    except OSError:
+        resolvers = ()
+    for line in resolvers:
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == "nameserver":
+            try:
+                address = ipaddress.ip_address(fields[1])
+            except ValueError:
+                continue
+            if address.version == 4:
+                result.add(f"{address}/32")
+    return tuple(sorted(result))
+
+
+def resolve_public_hostname(hostname, forbidden):
+    try:
+        rows = socket.getaddrinfo(hostname, 443, socket.AF_INET, socket.SOCK_STREAM)
+    except socket.gaierror:
+        fail("native egress hostname resolution failed")
+    blocked = tuple(ipaddress.ip_network(item, strict=False) for item in forbidden)
+    values = []
+    for row in rows:
+        try: address = ipaddress.ip_address(row[4][0])
+        except (IndexError, TypeError, ValueError): fail("native egress resolution is invalid")
+        public_ipv4_network(f"{address}/32")
+        if any(address in network for network in blocked):
+            fail("native egress hostname resolves to a host or control address")
+        values.append(str(address))
+    result = sorted(set(values))
+    if not result:
+        fail("native egress hostname resolution is empty")
+    return result
+
+
+def build_egress_config(machine_id, digest, network, connection_limit, *,
+                        grants=None, grant_digest=None):
+    if (isinstance(connection_limit, bool) or not isinstance(connection_limit, int) or
+            not 16 <= connection_limit <= 20000):
+        fail("native egress connection ceiling is invalid")
+    forbidden = observed_forbidden_networks()
+    configured = []
+    source_grants = active_egress_grants(network) if grants is None else tuple(
+        grant for grant in grants if not grant["revoked"])
+    for grant in source_grants:
+        pins = {}
+        if grant["kind"] == "hostname_https":
+            for hostname in grant["destinations"]:
+                pins[hostname] = resolve_public_hostname(hostname, forbidden)
+        else:
+            blocked = tuple(ipaddress.ip_network(item, strict=False) for item in forbidden)
+            for destination in grant["destinations"]:
+                network_value = public_ipv4_network(destination)
+                if any(network_value.overlaps(item) for item in blocked):
+                    fail("native fixed egress grant overlaps a host or control address")
+        configured.append({"grant_id": grant["grant_id"], "kind": grant["kind"],
+                       "destinations": list(grant["destinations"]),
+                       "ports": list(grant["ports"]),
+                       "expires_at": grant["expires_at"], "pins": pins})
+    if not configured:
+        fail("native egress activation requires an active grant")
+    if grant_digest is None:
+        grant_digest = canonical_digest({"grants": list(source_grants)})
+    digest_value(grant_digest)
+    basis = {"version": 1, "machine_id": machine_id, "policy_digest": digest,
+             "grant_digest": grant_digest,
+             "host_address": str(ipaddress.ip_interface(network["host_address"]).ip),
+             "guest_address": str(ipaddress.ip_interface(network["guest_address"]).ip),
+             "interface": network["veth"], "port": BROKER_PORT,
+             "connection_limit": connection_limit,
+             "forbidden": list(forbidden), "grants": configured}
+    return {**basis, "config_digest": canonical_digest(basis)}
+
+
+def egress_config_record(machine_id):
+    path = EGRESS_ROOT / f"{machine_id}.json"
+    try: descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError: return None
+    except OSError: fail("native egress configuration is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or
+                details.st_mode & 0o077 or not 1 <= details.st_size <= 1024 * 1024):
+            fail("native egress configuration is invalid")
+        payload = b""
+        while len(payload) <= 1024 * 1024:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            payload += chunk
+        if len(payload) != details.st_size: fail("native egress configuration changed")
+    finally: os.close(descriptor)
+    try: value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError): fail("native egress configuration is invalid")
+    if (not isinstance(value, dict) or value.get("machine_id") != machine_id or
+            not re.fullmatch(r"[a-f0-9]{64}", str(value.get("policy_digest", ""))) or
+            not re.fullmatch(r"[a-f0-9]{64}", str(value.get("grant_digest", ""))) or
+            not re.fullmatch(r"[a-f0-9]{64}", str(value.get("config_digest", "")))):
+        fail("native egress configuration is invalid")
+    basis = {key: item for key, item in value.items() if key != "config_digest"}
+    if value["config_digest"] != canonical_digest(basis):
+        fail("native egress configuration digest changed")
+    return value
+
+
+def write_egress_config(value):
+    ensure_root_directory(EGRESS_ROOT, 0o755)
+    atomic_install_bytes((json.dumps(value, sort_keys=True,
+                                     separators=(",", ":")) + "\n").encode(),
+                         EGRESS_ROOT / f"{value['machine_id']}.json")
+
+
+def egress_names(machine_id):
+    suffix = machine_id[3:]
+    return (f"sandbox-native-egress-{suffix}.service",
+            f"sandbox-native-egress-{suffix}",
+            Path("/run") / f"sandbox-native-egress-{suffix}" / "control.sock")
+
+
+def egress_description(config):
+    return (f"Sandbox native egress {config['machine_id']} policy "
+            f"{config['policy_digest']} grants {config['grant_digest']} "
+            f"config {config['config_digest']}")
+
+
+def query_egress_status(config):
+    _unit, _runtime, control_path = egress_names(config["machine_id"])
+    try:
+        details = control_path.lstat()
+        parent = control_path.parent.lstat()
+    except OSError:
+        return None
+    if (not stat.S_ISSOCK(details.st_mode) or details.st_mode & 0o077 or
+            not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o077):
+        return None
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    payload = b""
+    try:
+        client.settimeout(2)
+        client.connect(str(control_path)); client.sendall(b"status\n")
+        while len(payload) <= 65536:
+            chunk = client.recv(65536)
+            if not chunk: break
+            payload += chunk
+    except OSError:
+        return None
+    finally: client.close()
+    if len(payload) > 65536: return None
+    try: value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError): return None
+    expected_grants = {grant["grant_id"] for grant in config["grants"]}
+    if (not isinstance(value, dict) or value.get("ok") is not True or
+            value.get("machine_id") != config["machine_id"] or
+            value.get("policy_digest") != config["policy_digest"] or
+            value.get("grant_digest") != config["grant_digest"] or
+            value.get("config_digest") != config["config_digest"] or
+            value.get("connection_limit") != config["connection_limit"] or
+            value.get("expired") != [] or
+            not isinstance(value.get("grants"), dict) or
+            set(value["grants"]) != expected_grants or
+            value.get("listener") != {"address": config["host_address"],
+                                      "port": config["port"],
+                                      "interface": config["interface"]}):
+        return None
+    for counter in value["grants"].values():
+        if (not isinstance(counter, dict) or
+                set(counter) != {"accepted", "rejected", "bytes", "active"} or
+                any(isinstance(item, bool) or not isinstance(item, int) or item < 0
+                    for item in counter.values())):
+            return None
+    return value
+
+
+def stop_owned_egress(machine_id):
+    unit, _runtime, _control = egress_names(machine_id)
+    prior = egress_config_record(machine_id)
+    description = unit_description(unit)
+    if description:
+        if prior is None or description != egress_description(prior):
+            fail("native egress unit ownership is unproven")
+        run_fixed(("systemctl", "stop", unit), "native egress stop before reconcile failed")
+    return prior
+
+
+def start_egress_config(config):
+    machine_id = config["machine_id"]
+    unit, runtime, control_path = egress_names(machine_id)
+    write_egress_config(config)
+    allowed = {f"{config['host_address']}/32", f"{config['guest_address']}/32"}
+    for grant in config["grants"]:
+        if grant["kind"] == "public_cidr_tcp": allowed.update(grant["destinations"])
+        else:
+            for values in grant["pins"].values():
+                allowed.update(f"{value}/32" for value in values)
+    command = ["systemd-run", "--no-block", "--collect", f"--unit={unit}",
+               "--service-type=exec", f"--description={egress_description(config)}",
+               "--property=DynamicUser=yes", f"--property=RuntimeDirectory={runtime}",
+               "--property=RuntimeDirectoryMode=0700", "--property=UMask=0077",
+               "--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict",
+               "--property=ProtectHome=yes", "--property=PrivateTmp=yes",
+               "--property=PrivateDevices=yes", "--property=ProtectKernelTunables=yes",
+               "--property=ProtectKernelModules=yes", "--property=ProtectControlGroups=yes",
+               "--property=RestrictSUIDSGID=yes", "--property=LockPersonality=yes",
+               "--property=MemoryDenyWriteExecute=yes", "--property=RestrictNamespaces=yes",
+               "--property=ProtectClock=yes", "--property=ProtectHostname=yes",
+               "--property=ProtectProc=invisible", "--property=ProcSubset=pid",
+               "--property=RestrictRealtime=yes", "--property=RemoveIPC=yes",
+               "--property=RestrictAddressFamilies=AF_UNIX AF_INET",
+               "--property=CapabilityBoundingSet=CAP_NET_RAW",
+               "--property=AmbientCapabilities=CAP_NET_RAW",
+               "--property=SocketBindDeny=any",
+               f"--property=SocketBindAllow=ipv4:tcp:{BROKER_PORT}",
+               "--property=IPAddressDeny=any", "--property=MemoryMax=134217728",
+               f"--property=TasksMax={config['connection_limit'] + 8}",
+               f"--property=LoadCredential=egress.json:{EGRESS_ROOT / (machine_id + '.json')}"]
+    command.extend(f"--property=IPAddressAllow={value}" for value in sorted(allowed))
+    command.extend((str(BROKER_INSTALL_PATH), str(control_path)))
+    run_fixed(tuple(command), "native egress broker start failed")
+    for _attempt in range(30):
+        if (unit_description(unit) == egress_description(config) and
+                query_egress_status(config) is not None):
+            return
+        time.sleep(0.1)
+    if unit_description(unit) == egress_description(config):
+        run_optional(("systemctl", "stop", unit))
+    fail("native egress broker did not expose exact status")
+
+
+def egress_apply(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    config = build_egress_config(machine_id, digest, policy["network"],
+                                 policy["resources"]["connections"])
+    prior = egress_config_record(machine_id)
+    unit, _runtime, _control = egress_names(machine_id)
+    if (prior == config and unit_description(unit) == egress_description(config) and
+            query_egress_status(config) is not None):
+        return
+    stop_owned_egress(machine_id)
+    start_egress_config(config)
+
+
+def egress_status(machine_id, digest):
+    digest_value(digest)
+    config = egress_config_record(machine_id)
+    unit, _runtime, _control = egress_names(machine_id)
+    observed = query_egress_status(config) if config is not None else None
+    ok = bool(config and config["policy_digest"] == digest and observed and
+              unit_description(unit) == egress_description(config))
+    print(json.dumps({"ok": ok, "machine_id": machine_id, "policy_digest": digest,
+                      "grant_digest": config.get("grant_digest") if config else None,
+                      "config_digest": config.get("config_digest") if config else None,
+                      "grants": observed.get("grants", {}) if observed else {}}, sort_keys=True))
+    if not ok: raise SystemExit(69)
+
+
+def egress_remove(machine_id, digest):
+    digest_value(digest)
+    config = egress_config_record(machine_id)
+    unit, _runtime, _control = egress_names(machine_id)
+    description = unit_description(unit)
+    if description:
+        if config is None or description != egress_description(config):
+            fail("native egress unit ownership changed")
+        run_fixed(("systemctl", "stop", unit), "native egress broker stop failed")
+    if config is not None:
+        try: (EGRESS_ROOT / f"{machine_id}.json").unlink()
+        except OSError: fail("native egress configuration removal failed")
+
+
+def network_nft_statements(table, marker, network, *, broker=False, replace=False):
+    veth = network["veth"]
+    host = str(ipaddress.ip_interface(network["host_address"]).ip)
+    guest = str(ipaddress.ip_interface(network["guest_address"]).ip)
+    statements = []
+    if replace: statements.append(f"delete table inet {table}")
+    statements.extend((
+        f'add table inet {table} {{ comment "{marker}"; }}',
+        f"add chain inet {table} input {{ type filter hook input priority filter; policy accept; }}",
+        f"add chain inet {table} output {{ type filter hook output priority filter; policy accept; }}",
+        f"add chain inet {table} forward {{ type filter hook forward priority filter; policy accept; }}",
+        f'add rule inet {table} input iifname "{veth}" ip saddr {guest} '
+        f'ct state established,related counter accept comment "guest_host_established"',
+    ))
+    if broker:
+        statements.append(
+            f'add rule inet {table} input iifname "{veth}" ip saddr {guest} '
+            f'ip daddr {host} tcp dport {BROKER_PORT} ct state new counter accept '
+            f'comment "egress_broker_request"')
+    statements.extend((
+        f'add rule inet {table} input iifname "{veth}" counter drop comment "guest_host_drop"',
+        f'add rule inet {table} output oifname "{veth}" ip daddr {guest} '
+        f'tcp dport {network["ingress_port"]} ct state new,established '
+        f'counter accept comment "ingress"',
+    ))
+    if broker:
+        statements.append(
+            f'add rule inet {table} output oifname "{veth}" ip saddr {host} '
+            f'ip daddr {guest} tcp sport {BROKER_PORT} ct state established,related '
+            f'counter accept comment "egress_broker_reply"')
+    statements.extend((
+        f'add rule inet {table} output oifname "{veth}" counter drop comment "host_guest_drop"',
+        f'add rule inet {table} forward iifname "{veth}" '
+        f'counter drop comment "guest_forward_drop"',
+        f'add rule inet {table} forward oifname "{veth}" '
+        f'counter drop comment "guest_forward_reply_drop"',
+    ))
+    return statements
+
+
+def nft_state_matches_record(observed, record):
+    names = {item[0] for item in record_rule_tuple(record)}
+    return bool(observed and observed["chains"] == record["chains"] and
+                observed["rules"] == record_rule_tuple(record) and
+                set(observed["counters"]) == names)
+
+
 def network_apply(machine_id, digest):
     _path, policy = applied_policy(machine_id, digest)
     network = policy["network"]
-    if any(not grant["revoked"] for grant in network["grants"]):
-        fail("native egress grants require the isolated broker")
     table, alias_prefix = network_names(machine_id)
     marker = network_marker(machine_id, digest)
     veth = network["veth"]
@@ -706,8 +1818,36 @@ def network_apply(machine_id, digest):
     observed_alias = link.get("ifalias", "")
     if observed_alias and observed_alias != alias_prefix:
         fail("native veth ownership is foreign")
-    if observed_nft_table(table) is not None:
-        fail("native nft table already exists")
+    existing_table = observed_nft_table(table)
+    prior_record = network_state_record(machine_id)
+    grant_record = installed_grant_record(machine_id, digest) \
+        if network.get("grant_authority") == GRANT_AUTHORITY else None
+    grants = grant_record["grants"] if grant_record else []
+    grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
+    broker = any(not grant["revoked"] for grant in grants)
+    if broker:
+        config = egress_config_record(machine_id)
+        unit, _runtime, _control = egress_names(machine_id)
+        if (config is None or config.get("grant_digest") != grant_digest or
+                unit_description(unit) != egress_description(config) or
+                query_egress_status(config) is None):
+            fail("native egress broker proof is unavailable")
+    desired_record = desired_network_state(
+        machine_id, digest, network, broker=broker, grant_digest=grant_digest)
+    unrecorded_exact = False
+    if existing_table is not None:
+        if prior_record is None:
+            if existing_table.get("comment") != desired_record["marker"]:
+                fail("native nft table ownership is unproven")
+            partial_state = observed_nft_state(table)
+            if not nft_state_matches_record(partial_state, desired_record):
+                fail("native nft table ownership is unproven")
+            unrecorded_exact = True
+        elif existing_table.get("comment") != prior_record["marker"]:
+            fail("native nft table ownership is unproven")
+        existing_state = observed_nft_state(table)
+        if prior_record is not None and not nft_state_matches_record(existing_state, prior_record):
+            fail("native nft owned state drifted")
     run_fixed(("ip", "link", "set", "dev", veth, "alias", alias_prefix),
               "native veth ownership could not be marked")
     run_fixed(("ip", "address", "replace", network["host_address"], "dev", veth),
@@ -725,38 +1865,271 @@ def network_apply(machine_id, digest):
               "native guest veth activation failed")
     run_fixed((*namespace, "ip", "link", "set", "dev", "lo", "up"),
               "native guest loopback activation failed")
-    script = "\n".join((
-        f'add table inet {table} {{ comment "{marker}"; }}',
-        f"add chain inet {table} input {{ type filter hook input priority filter; policy accept; }}",
-        f"add chain inet {table} forward {{ type filter hook forward priority filter; policy accept; }}",
-        f'add rule inet {table} input iifname "{veth}" ip saddr {guest} ct state established,related accept',
-        f'add rule inet {table} input iifname "{veth}" counter drop',
-        f'add rule inet {table} forward iifname "{veth}" counter drop',
-    )) + "\n"
+    statements = network_nft_statements(
+        table, marker, network, broker=broker, replace=existing_table is not None and
+        prior_record != desired_record,
+    )
+    script = "\n".join(statements) + "\n"
     try:
-        run_fixed(("nft", "-f", "-"), "native nft policy failed", input_text=script)
+        if existing_table is None or (not unrecorded_exact and prior_record != desired_record):
+            run_fixed(("nft", "-f", "-"), "native nft policy failed", input_text=script)
     except BaseException:
         run_optional(("ip", "address", "del", network["host_address"], "dev", veth))
         raise
+    try:
+        write_network_state(desired_record)
+    except BaseException:
+        # A state write can fail after nft accepted the exact policy. Recover a
+        # newly created table by exact comparison, or restore the prior exact
+        # policy for updates. Unknown/drifted tables are never touched.
+        current_table = observed_nft_table(table)
+        current_state = observed_nft_state(table) if current_table is not None else None
+        current_record = network_state_record(machine_id)
+        current_exact = bool(
+            current_table is not None
+            and current_table.get("comment") == desired_record["marker"]
+            and nft_state_matches_record(current_state, desired_record)
+        )
+        if current_record == desired_record and current_exact:
+            raise
+        if current_exact and prior_record is None:
+            removed = run_optional(("nft", "delete", "table", "inet", table))
+            if removed.returncode == 0 and observed_nft_table(table) is None:
+                run_optional(("ip", "address", "del", network["host_address"], "dev", veth))
+        elif current_exact and prior_record is not None:
+            prior_broker = any(
+                name in BROKER_NETWORK_RULES for name, _rule in record_rule_tuple(prior_record)
+            )
+            rollback_script = "\n".join(network_nft_statements(
+                table, prior_record["marker"], network,
+                broker=prior_broker, replace=True,
+            )) + "\n"
+            run_fixed(("nft", "-f", "-"), "native nft rollback failed",
+                      input_text=rollback_script)
+        raise
+
+
+def network_grants_apply(machine_id, digest):
+    _path, policy = applied_policy(machine_id, digest)
+    network = policy["network"]
+    if not active_egress_grants(network):
+        fail("native egress firewall activation requires an active grant")
+    config = egress_config_record(machine_id)
+    unit, _runtime, _control = egress_names(machine_id)
+    if (config is None or config["policy_digest"] != digest or
+            unit_description(unit) != egress_description(config) or
+            query_egress_status(config) is None):
+        fail("native egress broker proof is unavailable")
+    table, _alias_prefix = network_names(machine_id)
+    marker = network_marker(machine_id, digest)
+    existing_table = observed_nft_table(table)
+    prior_record = network_state_record(machine_id)
+    if (existing_table is None or prior_record is None or
+            existing_table.get("comment") != prior_record["marker"] or
+            not nft_state_matches_record(observed_nft_state(table), prior_record)):
+        fail("native baseline nft ownership is unproven")
+    desired = desired_network_state(machine_id, digest, network, broker=True)
+    if prior_record == desired:
+        return
+    script = "\n".join(network_nft_statements(
+        table, marker, network, broker=True, replace=True,
+    )) + "\n"
+    run_fixed(("nft", "-f", "-"), "native egress firewall activation failed",
+              input_text=script)
+    write_network_state(desired)
+
+
+def _replace_and_observe_network(machine_id, policy_digest, network, *, broker,
+                                 grant_digest):
+    table, _alias = network_names(machine_id)
+    marker = network_marker(machine_id, policy_digest)
+    script = "\n".join(network_nft_statements(
+        table, marker, network, broker=broker, replace=True,
+    )) + "\n"
+    run_fixed(("nft", "-f", "-"), "native grant firewall reconcile failed",
+              input_text=script)
+    observed = observed_nft_state(table)
+    desired = desired_network_state(machine_id, policy_digest, network,
+                                    broker=broker, grant_digest=grant_digest)
+    if not observed or not nft_state_matches_record(observed, desired):
+        fail("native grant firewall observation failed")
+    return desired
+
+
+def grant_reconcile(machine_id, base_policy_digest, expected_grant_digest,
+                    desired_grant_digest):
+    expected_grant_digest = digest_value(expected_grant_digest)
+    desired_grant_digest = digest_value(desired_grant_digest)
+    _path, policy = applied_policy(machine_id, base_policy_digest)
+    network = policy["network"]
+    if (network.get("grant_authority") != GRANT_AUTHORITY or "grants" in network):
+        fail("native base policy does not delegate grants")
+    uid = invoking_uid()
+    staged_path = STAGING_ROOT / f"grants-{uid}-{desired_grant_digest}.json"
+    desired, desired_payload = _read_grant_file(
+        staged_path, machine_id, base_policy_digest, desired_grant_digest, uid)
+    desired_active = tuple(grant for grant in desired["grants"] if not grant["revoked"])
+    table, _alias = network_names(machine_id)
+    with grant_machine_lock(machine_id):
+        current = installed_grant_record(machine_id, base_policy_digest)
+        current_digest = current["grant_digest"] if current else ABSENT_GRANT_DIGEST
+        if current_digest != expected_grant_digest:
+            fail("native grant compare-and-swap failed", 73)
+        record = network_state_record(machine_id)
+        nft = observed_nft_state(table)
+        if (record is None or record.get("policy_digest") != base_policy_digest or
+                record.get("grant_digest") != current_digest or nft is None or
+                nft.get("table", {}).get("comment") != network_marker(
+                    machine_id, base_policy_digest) or
+                not nft_state_matches_record(nft, record)):
+            fail("native grant baseline ownership is unproven")
+        current_payload = None
+        if current is not None:
+            current_payload = (json.dumps(current, sort_keys=True,
+                                          separators=(",", ":")) + "\n").encode()
+        desired_installed = False
+        final_record = None
+        try:
+            # Close the only guest-to-host exception atomically before touching
+            # the old broker. This also makes revocation close first; stopping
+            # the old unit then terminates every accepted connection.
+            baseline = _replace_and_observe_network(
+                machine_id, base_policy_digest, network, broker=False,
+                grant_digest=current_digest)
+            stop_owned_egress(machine_id)
+            config_path = EGRESS_ROOT / f"{machine_id}.json"
+            if desired_active:
+                config = build_egress_config(
+                    machine_id, base_policy_digest, network,
+                    policy["resources"]["connections"],
+                    grants=desired["grants"], grant_digest=desired_grant_digest)
+                start_egress_config(config)
+                unit, _runtime, _control = egress_names(machine_id)
+                if (unit_description(unit) != egress_description(config) or
+                        query_egress_status(config) is None):
+                    fail("native desired egress broker proof is unavailable")
+                final_record = _replace_and_observe_network(
+                    machine_id, base_policy_digest, network, broker=True,
+                    grant_digest=desired_grant_digest)
+            else:
+                if config_path.exists():
+                    try: config_path.unlink()
+                    except OSError: fail("native empty grant configuration cleanup failed")
+                final_record = desired_network_state(
+                    machine_id, base_policy_digest, network, broker=False,
+                    grant_digest=desired_grant_digest)
+                # The closed baseline was produced with the previous CAS digest;
+                # its nft authorization is identical, but bind the final record
+                # to the explicit empty/revoked desired set.
+                if not nft_state_matches_record(observed_nft_state(table), final_record):
+                    fail("native empty grant firewall observation failed")
+            ensure_root_directory(GRANT_ROOT, 0o755)
+            atomic_install_bytes(desired_payload, GRANT_ROOT / f"{machine_id}.json")
+            desired_installed = True
+            write_network_state(final_record)
+        except BaseException:
+            # Any failed transaction converges to closed before returning. Never
+            # preserve a broker exception without matching durable state.
+            rollback_record = None
+            try:
+                rollback_record = _replace_and_observe_network(
+                    machine_id, base_policy_digest, network, broker=False,
+                    grant_digest=current_digest)
+            except BaseException:
+                pass
+            # Keep this independent from nft repair: if the firewall mechanism
+            # itself has failed, killing the broker still closes the capability
+            # and all active connections.
+            try:
+                stop_owned_egress(machine_id)
+            except BaseException:
+                pass
+            try:
+                if rollback_record is not None:
+                    write_network_state(rollback_record)
+            except BaseException:
+                pass
+            try:
+                destination = GRANT_ROOT / f"{machine_id}.json"
+                if desired_installed:
+                    if current_payload is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        atomic_install_bytes(current_payload, destination)
+            except BaseException:
+                pass
+            raise
+        try: staged_path.unlink()
+        except FileNotFoundError: pass
+        except OSError: pass
+        print(json.dumps({"ok": True, "machine_id": machine_id,
+                          "base_policy_digest": base_policy_digest,
+                          "expected_grant_digest": expected_grant_digest,
+                          "grant_digest": desired_grant_digest,
+                          "active_grants": sorted(grant["grant_id"]
+                                                  for grant in desired_active)},
+                         sort_keys=True, separators=(",", ":")))
 
 
 def network_status(machine_id, digest):
     _path, policy = applied_policy(machine_id, digest)
     network = policy["network"]; table, alias_prefix = network_names(machine_id)
-    link = observed_link(network["veth"]); nft_table = observed_nft_table(table)
-    ok = bool(link and link.get("ifalias") == alias_prefix and nft_table and
-              nft_table.get("comment") == network_marker(machine_id, digest))
+    link = observed_link(network["veth"]); nft_state = observed_nft_state(table)
+    guest = observed_guest_network(machine_id)
+    record = network_state_record(machine_id)
+    expected_chains = expected_network_chains()
+    expected_routes = [str(ipaddress.ip_interface(network["guest_address"]).network)]
+    grant_record = installed_grant_record(machine_id, digest) \
+        if network.get("grant_authority") == GRANT_AUTHORITY else None
+    grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
+    grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
+    broker = any(not grant["revoked"] for grant in grants)
+    egress = egress_config_record(machine_id)
+    egress_observed = query_egress_status(egress) if broker and egress is not None else None
+    egress_unit, _egress_runtime, _egress_control = egress_names(machine_id)
+    expected_rule_names = {name for name, _digest in expected_network_rules(
+        network, broker=broker)}
+    ok = bool(record == desired_network_state(machine_id, digest, network, broker=broker,
+                                               grant_digest=grant_digest) and
+              link and link.get("ifalias") == alias_prefix and nft_state and
+              nft_state["table"].get("comment") == network_marker(machine_id, digest) and
+              nft_state["chains"] == expected_chains and
+              nft_state["rules"] == expected_network_rules(network, broker=broker) and
+              set(nft_state["counters"]) == expected_rule_names and
+              ((not broker and egress is None and not unit_description(egress_unit)) or
+               (broker and egress["policy_digest"] == digest and
+                egress["grant_digest"] == grant_digest and egress_observed and
+                unit_description(egress_unit) == egress_description(egress))) and
+              guest["guest_address"] == network["guest_address"] and
+              guest["default_route"] is False and guest["routes"] == expected_routes)
     print(json.dumps({"machine_id": machine_id, "policy_digest": digest,
-                      "veth": network["veth"], "table": table, "ok": ok}, sort_keys=True))
+                      "grant_digest": grant_digest,
+                      "veth": network["veth"], "table": table, "ok": ok,
+                      "default_route": guest["default_route"],
+                      "guest_address": guest["guest_address"],
+                      "routes": guest["routes"],
+                      "counters": nft_state["counters"] if nft_state else {},
+                      "grant_counters": egress_observed.get("grants", {})
+                      if egress_observed else {}}, sort_keys=True))
     if not ok: raise SystemExit(69)
 
 
 def network_remove(machine_id, digest):
     _path, policy = applied_policy(machine_id, digest)
     network = policy["network"]; table, alias_prefix = network_names(machine_id)
+    record = network_state_record(machine_id)
+    grant_record = installed_grant_record(machine_id, digest) \
+        if network.get("grant_authority") == GRANT_AUTHORITY else None
+    grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
+    if grant_record and any(not grant["revoked"] for grant in grant_record["grants"]):
+        fail("native active grants must be revoked before network removal")
+    desired_values = (desired_network_state(machine_id, digest, network,
+                                            grant_digest=grant_digest),)
+    if record is not None and record not in desired_values:
+        fail("native network ownership record changed")
     nft_table = observed_nft_table(table)
     if nft_table is not None:
-        if nft_table.get("comment") != network_marker(machine_id, digest):
+        if record is None or nft_table.get("comment") != record["marker"]:
             fail("native nft ownership changed")
         run_fixed(("nft", "delete", "table", "inet", table),
                   "native nft table removal failed")
@@ -765,6 +2138,804 @@ def network_remove(machine_id, digest):
         if link.get("ifalias") != alias_prefix: fail("native veth ownership changed")
         run_optional(("ip", "address", "del", network["host_address"],
                       "dev", network["veth"]))
+    path = NETWORK_STATE_ROOT / f"{machine_id}.json"
+    if record is not None:
+        try: path.unlink()
+        except OSError: fail("native network ownership record removal failed")
+    if grant_record is not None:
+        try: (GRANT_ROOT / f"{machine_id}.json").unlink()
+        except OSError: fail("native grant record removal failed")
+
+
+def guest_run(machine_id, argv, message, *, timeout=120):
+    machine(machine_id)
+    return run_fixed(("machinectl", "shell", "--quiet", machine_id, *tuple(argv)),
+                     message, timeout=timeout)
+
+
+def guest_json(machine_id, path, message):
+    if path != "/etc/sandbox-native/services.json":
+        fail("native guest marker path is invalid")
+    result = guest_run(machine_id, ("/usr/bin/cat", path), message)
+    try:
+        value = json.loads(result.stdout or "")
+    except json.JSONDecodeError:
+        fail(message)
+    if not isinstance(value, dict):
+        fail(message)
+    return value
+
+
+def read_execution_request(machine_id, policy_digest, request_digest):
+    request_digest = digest_value(request_digest)
+    uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    path = STAGING_ROOT / f"execute-{uid}-{request_digest}.json"
+    try: descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError: fail("native execution request is unavailable")
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != uid or
+                details.st_mode & 0o077 or not 1 <= details.st_size <= 1024 * 1024):
+            fail("native execution request is invalid")
+        payload = b""
+        while len(payload) <= 1024 * 1024:
+            chunk = os.read(descriptor, 65536)
+            if not chunk: break
+            payload += chunk
+        if len(payload) != details.st_size: fail("native execution request changed")
+    finally:
+        os.close(descriptor)
+    try: request = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError): fail("native execution request is invalid")
+    keys = {"machine_id", "policy_digest", "argv", "environment", "credential_refs", "timeout"}
+    if (not isinstance(request, dict) or set(request) != keys or
+            request.get("machine_id") != machine_id or
+            request.get("policy_digest") != policy_digest or
+            canonical_digest(request) != request_digest):
+        fail("native execution request identity changed")
+    return request
+
+
+def validated_execution_argv(policy, request):
+    argv = request.get("argv")
+    environment = request.get("environment")
+    credential_refs = request.get("credential_refs")
+    timeout = request.get("timeout")
+    if (not isinstance(argv, list) or not argv or len(argv) > 512 or
+            any(not isinstance(item, str) or not item or "\x00" in item for item in argv) or
+            sum(len(item) for item in argv) > 131072 or
+            not isinstance(environment, dict) or
+            any(key not in EXECUTION_ENV_ALLOWLIST or not isinstance(value, str) or "\x00" in value
+                for key, value in environment.items()) or
+            not isinstance(credential_refs, list) or
+            any(ref not in policy["credentials"] for ref in credential_refs) or
+            isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 3600):
+        fail("native execution request is invalid")
+    proxy_keys = {key for key in environment if key in {"HTTP_PROXY", "HTTPS_PROXY"}}
+    host = str(ipaddress.ip_interface(policy["network"]["host_address"]).ip)
+    proxy = f"http://{host}:{BROKER_PORT}"
+    grant_record = installed_grant_record(policy["machine_id"], policy["digest"]) \
+        if policy["network"].get("grant_authority") == GRANT_AUTHORITY else None
+    grants = (grant_record["grants"] if grant_record is not None else
+              policy["network"].get("grants", ()))
+    active_grants = tuple(grant for grant in grants if not grant["revoked"])
+    expected_proxy = ({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy}
+                      if active_grants else {})
+    if {key: environment.get(key) for key in proxy_keys} != expected_proxy:
+        fail("native execution proxy policy changed")
+    try: separator = argv.index("--")
+    except ValueError: fail("native execution boundary is missing")
+    command = argv[separator + 1:]
+    if not command: fail("native execution command is missing")
+    writable = {item["target"] for item in policy["writable_mounts"]} | EXECUTION_WRITABLE_TARGETS
+    expected = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
+                "--unshare-user", "--disable-userns", "--assert-userns-disabled",
+                "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+                "--ro-bind", "/", "/"]
+    for target in sorted(writable): expected.extend(("--bind", target, target))
+    expected.extend(("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                     "--tmpfs", "/run/credentials", "--dir", GUEST_CREDENTIAL_TARGET_ROOT))
+    for ref in sorted(credential_refs):
+        name = ref.rsplit("/", 1)[-1]
+        source = f"{GUEST_CREDENTIAL_SOURCE_ROOT}/{name}"
+        target = f"{GUEST_CREDENTIAL_TARGET_ROOT}/{name}"
+        expected.extend(("--ro-bind", source, target))
+    expected.extend(("--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
+                     "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
+    expected.extend(("--chdir", "/workspace", "--cap-drop", "ALL",
+                     "--uid", "33", "--gid", "33"))
+    for key, value in sorted(environment.items()): expected.extend(("--setenv", key, value))
+    expected.extend(("--", *command))
+    if argv != expected: fail("native execution boundary changed")
+    return tuple(argv), min(timeout, policy["resources"]["runtime_seconds"])
+
+
+def bounded_guest_execution(machine_id, argv, timeout):
+    command = subprocess.Popen(
+        ("machinectl", "shell", "--quiet", machine_id, *argv),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        close_fds=True, start_new_session=True, env=FIXED_ENVIRONMENT,
+    )
+    selector = selectors.DefaultSelector()
+    selector.register(command.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(command.stderr, selectors.EVENT_READ, "stderr")
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout
+    truncated = False
+    timed_out = False
+    while selector.get_map():
+        if time.monotonic() >= deadline and not timed_out:
+            timed_out = True
+            try: os.killpg(command.pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            try: command.wait(timeout=2)
+            except subprocess.TimeoutExpired: os.killpg(command.pid, signal.SIGKILL)
+            truncated = True
+        for key, _mask in selector.select(timeout=0.1):
+            chunk = os.read(key.fileobj.fileno(), 65536)
+            if not chunk:
+                selector.unregister(key.fileobj); continue
+            remaining = 1024 * 1024 - len(output[key.data])
+            output[key.data].extend(chunk[:max(0, remaining)])
+            if len(chunk) > remaining:
+                truncated = True
+                try: os.killpg(command.pid, signal.SIGTERM)
+                except ProcessLookupError: pass
+        if truncated and command.poll() is not None:
+            for key in list(selector.get_map().values()): selector.unregister(key.fileobj)
+    returncode = command.wait()
+    sys.stdout.buffer.write(bytes(output["stdout"])); sys.stdout.buffer.flush()
+    sys.stderr.buffer.write(bytes(output["stderr"])); sys.stderr.buffer.flush()
+    return 124 if timed_out else (125 if truncated else returncode)
+
+
+def execute_request(machine_id, policy_digest, request_digest):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    request = read_execution_request(machine_id, policy_digest, request_digest)
+    argv, timeout = validated_execution_argv(policy, request)
+    return bounded_guest_execution(machine_id, argv, timeout)
+
+
+def fixed_probe_bwrap(policy, command, credential_refs=()):
+    writable = {item["target"] for item in policy["writable_mounts"]} | EXECUTION_WRITABLE_TARGETS
+    argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
+            "--unshare-user", "--disable-userns", "--assert-userns-disabled",
+            "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--ro-bind", "/", "/"]
+    for target in sorted(writable): argv.extend(("--bind", target, target))
+    if any(ref not in policy["credentials"] for ref in credential_refs):
+        fail("native probe credential is not declared")
+    argv.extend(("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                 "--tmpfs", "/run/credentials", "--dir", GUEST_CREDENTIAL_TARGET_ROOT))
+    for ref in sorted(credential_refs):
+        name = ref.rsplit("/", 1)[-1]
+        source = f"{GUEST_CREDENTIAL_SOURCE_ROOT}/{name}"
+        target = f"{GUEST_CREDENTIAL_TARGET_ROOT}/{name}"
+        argv.extend(("--ro-bind", source, target))
+    argv.extend(("--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
+                 "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
+    argv.extend(("--chdir", "/workspace", "--cap-drop", "ALL",
+                 "--uid", "33", "--gid", "33", "--", *command))
+    return tuple(argv)
+
+
+def parse_status_fields(text):
+    values = {}
+    for line in text.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1); values[key] = value.strip()
+    return values
+
+
+def probe_payload_state(machine_id, policy):
+    script = ("printf '---status---\\n'; cat /proc/self/status; "
+              "printf '%s\\n' '---profile---'; cat /proc/self/attr/current; "
+              "printf '%s\\n' '---fds---'; "
+              "for value in /proc/$$/fd/*; do printf '%s\\n' \"${value##*/}\"; done; "
+              "printf '%s\\n' '---controls---'; "
+              "for value in /run/systemd/private /run/dbus/system_bus_socket "
+              "/var/run/docker.sock /run/credentials/sandbox/db-credential "
+              "/run/sandbox-native-credentials /run/host; do "
+              "test ! -e \"$value\" || printf '%s\\n' \"$value\"; done; "
+              "printf '%s\\n' '---env---'; env")
+    result = guest_run(machine_id, fixed_probe_bwrap(
+        policy, ("/bin/sh", "-c", script)), "native payload isolation probe failed")
+    text = result.stdout or ""
+    parts = text.split("---profile---\n", 1)
+    if len(parts) != 2: fail("native payload isolation probe is invalid")
+    status_text = parts[0].split("---status---\n", 1)[-1]
+    profile_parts = parts[1].split("---fds---\n", 1)
+    if len(profile_parts) != 2: fail("native payload isolation probe is invalid")
+    profile = profile_parts[0].strip().removesuffix(" (enforce)")
+    fd_parts = profile_parts[1].split("---controls---\n", 1)
+    if len(fd_parts) != 2: fail("native payload isolation probe is invalid")
+    fds = [int(value) for value in fd_parts[0].split() if value.isdigit()]
+    control_parts = fd_parts[1].split("---env---\n", 1)
+    if len(control_parts) != 2: fail("native payload isolation probe is invalid")
+    controls = [line for line in control_parts[0].splitlines() if line.startswith("/")]
+    environment = [line.split("=", 1)[0] for line in control_parts[1].splitlines() if "=" in line]
+    status = parse_status_fields(status_text)
+    nested = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                           *fixed_probe_bwrap(policy, ("/usr/bin/unshare", "--user",
+                                                       "/usr/bin/true"))))
+    return {"no_new_privileges": status.get("NoNewPrivs") == "1",
+            "capabilities": [] if int(status.get("CapEff", "1"), 16) == 0 else [status.get("CapEff")],
+            "ambient_capabilities": [] if int(status.get("CapAmb", "1"), 16) == 0 else [status.get("CapAmb")],
+            "seccomp": status.get("Seccomp") == "2", "apparmor_profile": profile,
+            "nested_userns": nested.returncode == 0,
+            "leaked_fds": [value for value in fds if value > 2],
+            "leaked_environment": sorted(set(environment) - {"PWD", "SHLVL", "_"}),
+            "control_sockets": controls}
+
+
+def observed_namespaces(leader):
+    result = {}
+    for public, kernel in (("user", "user"), ("mount", "mnt"), ("pid", "pid"),
+                           ("ipc", "ipc"), ("uts", "uts"), ("network", "net")):
+        try:
+            result[public] = os.readlink(f"/proc/{leader}/ns/{kernel}") != \
+                             os.readlink(f"/proc/1/ns/{kernel}")
+        except OSError: result[public] = False
+    return result
+
+
+def observed_mounts(leader, policy):
+    try: rows = Path(f"/proc/{leader}/mountinfo").read_text().splitlines()
+    except OSError: fail("native mount observation failed")
+    mounts = {}
+    canonical_pseudo_mounts = {
+        "/proc": {("proc", "proc", "/")},
+        "/sys": {("sysfs", "sysfs", "/")},
+        "/dev": {("tmpfs", "tmpfs", "/"), ("devtmpfs", "devtmpfs", "/")},
+        "/dev/pts": {("devpts", "devpts", "/")},
+        "/dev/shm": {("tmpfs", "tmpfs", "/")},
+        "/dev/mqueue": {("mqueue", "mqueue", "/")},
+        "/run": {("tmpfs", "tmpfs", "/")},
+        "/sys/fs/cgroup": {("cgroup2", "cgroup2", "/")},
+    }
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 7 or "-" not in fields: continue
+        separator = fields.index("-")
+        if separator + 2 >= len(fields): continue
+        target = fields[4].replace("\\040", " ").replace("\\011", "\t")
+        root = fields[3].replace("\\040", " ").replace("\\011", "\t")
+        mounts[target] = {
+            "options": set(fields[5].split(",")), "root": root,
+            "device": fields[2], "filesystem": fields[separator + 1],
+            "source": fields[separator + 2],
+        }
+    expected = {
+        item["target"]: item
+        for item in (*policy["read_only_mounts"], *policy["writable_mounts"])
+    }
+    unexpected = []
+    identity_matches = set()
+    for target, item in expected.items():
+        observed = mounts.get(target)
+        if observed is None:
+            continue
+        try:
+            source_stat = os.stat(item["source"], follow_symlinks=False)
+            target_path = f"/proc/{leader}/root{target}"
+            target_stat = os.stat(target_path, follow_symlinks=False)
+            matched = (source_stat.st_dev, source_stat.st_ino) == \
+                      (target_stat.st_dev, target_stat.st_ino)
+        except OSError:
+            matched = False
+        if matched:
+            identity_matches.add(target)
+        else:
+            unexpected.append(target)
+    for target, observed in mounts.items():
+        if target in expected or target == "/":
+            continue
+        allowed = canonical_pseudo_mounts.get(target, set())
+        signature = (observed["filesystem"], observed["source"], observed["root"])
+        guest_owned = False
+        if signature in allowed:
+            try:
+                guest_stat = os.stat(f"/proc/{leader}/root{target}", follow_symlinks=False)
+                host_stat = os.stat(target, follow_symlinks=False)
+                guest_owned = (guest_stat.st_dev, guest_stat.st_ino) != \
+                              (host_stat.st_dev, host_stat.st_ino)
+            except OSError:
+                guest_owned = False
+        if not guest_owned:
+            unexpected.append(target)
+    read_only = [item["target"] for item in policy["read_only_mounts"]
+                 if item["target"] in identity_matches
+                 and "ro" in mounts.get(item["target"], {}).get("options", set())]
+    writable = [item["target"] for item in policy["writable_mounts"]
+                if item["target"] in identity_matches
+                and "rw" in mounts.get(item["target"], {}).get("options", set())]
+    return read_only, writable, unexpected
+
+
+def resource_limits_match(machine_id, policy):
+    unit, _profile = machine_names(machine_id)
+    expected = policy["resources"]
+    memory_high = max(1, expected["memory_bytes"] * 9 // 10)
+    properties = {"MemoryMax": str(expected["memory_bytes"]),
+                  "MemoryHigh": str(memory_high), "MemorySwapMax": "0",
+                  "TasksMax": str(expected["pids"]),
+                  "LimitNOFILE": str(expected["fds"]), "IOWeight": str(expected["io_weight"])}
+    for name, wanted in properties.items():
+        result = run_optional(("systemctl", "show", unit, f"--property={name}", "--value"))
+        actual = (result.stdout or "").strip().split(":", 1)[0]
+        if result.returncode != 0 or actual != wanted: return {}
+    def duration_us(value):
+        match = re.fullmatch(r"([0-9]+)(us|ms|s|min|h)", value)
+        if not match: return None
+        factors = {"us": 1, "ms": 1000, "s": 1000000,
+                   "min": 60 * 1000000, "h": 3600 * 1000000}
+        return int(match.group(1)) * factors[match.group(2)]
+    for name, wanted in (("CPUQuotaPerSecUSec", expected["cpu_percent"] * 10000),):
+        result = run_optional(("systemctl", "show", unit, f"--property={name}", "--value"))
+        if result.returncode != 0 or duration_us((result.stdout or "").strip()) != wanted:
+            return {}
+    cron_runtime = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                 "/usr/bin/cat",
+                                 "/usr/local/libexec/sandbox-wordpress-cron"))
+    guest = str(ipaddress.ip_interface(policy["network"]["guest_address"]).ip)
+    compiled_files, _units = compile_service_files(
+        guest, expected["connections"], expected["runtime_seconds"], "nginx",
+        policy["network"]["ingress_port"],
+        tuple(item["target"] for item in policy["writable_mounts"]),
+    )
+    expected_cron = compiled_files["/usr/local/libexec/sandbox-wordpress-cron"]
+    if (cron_runtime.returncode != 0
+            or (cron_runtime.stdout or "") != expected_cron):
+        return {}
+    _instance, image, _mountpoint = image_paths(machine_id)
+    try:
+        details = image.lstat()
+    except OSError:
+        return {}
+    if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
+            details.st_uid != 0 or details.st_size != expected["disk_bytes"]):
+        return {}
+    filesystem = run_optional(("dumpe2fs", "-h", str(image)))
+    if filesystem.returncode != 0:
+        return {}
+    fields = {}
+    for name in ("Block count", "Block size", "Inode count"):
+        matches = re.findall(rf"(?m)^{re.escape(name)}:\s*([0-9]+)\s*$",
+                             filesystem.stdout or "")
+        if len(matches) != 1:
+            return {}
+        fields[name] = int(matches[0])
+    if (fields["Block count"] * fields["Block size"] != expected["disk_bytes"] or
+            fields["Inode count"] != expected["inodes"]):
+        return {}
+    service_files = {}
+    for name, path in (("marker", "/etc/sandbox-native/services.json"),):
+        result = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                               "/usr/bin/cat", path))
+        if result.returncode != 0:
+            return {}
+        service_files[name] = result.stdout or ""
+    expected_php = max(2, min(32, expected["connections"] // 4))
+    database = run_optional((
+        "machinectl", "shell", "--quiet", machine_id,
+        "/usr/bin/mariadb", "--protocol=socket", "--skip-column-names", "--batch",
+        "--socket=/run/mysqld/mysqld.sock", "-e", "SELECT @@GLOBAL.max_connections;",
+    ))
+    php = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                        "/usr/sbin/php-fpm8.3", "-tt"))
+    php_output = (php.stdout or "") + "\n" + (php.stderr or "")
+    php_children = re.findall(r"(?m)^.*pm\.max_children\s*=\s*([0-9]+)\s*$",
+                              php_output)
+    php_listeners = re.findall(r"(?m)^.*listen\s*=\s*(\S+)\s*$", php_output)
+    php_terminate = re.findall(
+        r"(?m)^.*request_terminate_timeout\s*=\s*([0-9]+)s\s*$", php_output,
+    )
+    if (database.returncode != 0 or (database.stdout or "").strip() !=
+            str(expected["connections"]) or php.returncode != 0 or
+            php_children != [str(expected_php)] or
+            php_listeners != ["/run/php/sandbox.sock"] or
+            php_terminate != [str(expected["runtime_seconds"])]):
+        return {}
+    try:
+        marker = json.loads(service_files["marker"])
+    except json.JSONDecodeError:
+        return {}
+    if (not isinstance(marker, dict) or marker.get("machine_id") != machine_id or
+            marker.get("policy_digest") != policy["digest"] or
+            marker.get("web_server") not in {"nginx", "apache"}):
+        return {}
+    if marker["web_server"] == "nginx":
+        effective = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                  "/usr/sbin/nginx", "-T"))
+        output = (effective.stdout or "") + "\n" + (effective.stderr or "")
+        workers = re.findall(r"(?m)^\s*worker_processes\s+([0-9]+);\s*$", output)
+        ceilings = re.findall(r"(?m)^\s*worker_connections\s+([0-9]+);\s*$", output)
+        if (effective.returncode != 0 or workers != ["1"] or
+                ceilings != [str(expected["connections"])]):
+            return {}
+    else:
+        runtime = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                "/usr/sbin/apache2ctl", "-t", "-D", "DUMP_RUN_CFG"))
+        output = (runtime.stdout or "") + "\n" + (runtime.stderr or "")
+        server = re.findall(r"(?mi)^\s*ServerLimit:\s*([0-9]+)\s*$", output)
+        workers = re.findall(r"(?mi)^\s*MaxRequestWorkers:\s*([0-9]+)\s*$", output)
+        keepalive = re.findall(r"(?mi)^\s*KeepAlive:\s*(\S+)\s*$", output)
+        if (runtime.returncode != 0 or "Server MPM: prefork" not in output or
+                server != [str(expected["connections"])] or
+                workers != [str(expected["connections"])] or
+                keepalive != ["Off"]):
+            return {}
+    return {**dict(expected), "memory_high_bytes": memory_high,
+            "memory_swap_bytes": 0}
+
+
+def denied_reachability(machine_id, policy):
+    network = policy["network"]
+    addresses = {
+        "host": str(ipaddress.ip_interface(network["host_address"]).ip),
+        "metadata": "169.254.169.254", "public": "1.1.1.1",
+    }
+    siblings = []
+    for path in NETWORK_STATE_ROOT.glob("sb-*.json"):
+        if path.name == f"{machine_id}.json": continue
+        try:
+            value = json.loads(path.read_text())
+            sibling_policy = checked_policy(POLICY_ROOT / path.name, path.stem, applied=True)[1]
+            siblings.append(str(ipaddress.ip_interface(
+                sibling_policy["network"]["guest_address"]).ip))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError, SystemExit):
+            continue
+    addresses["sibling"] = siblings[0] if siblings else "10.203.255.254"
+    result = {}
+    for boundary, address in addresses.items():
+        if boundary == "host": continue
+        route = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                              *fixed_probe_bwrap(policy, (
+                                  "/usr/sbin/ip", "route", "get", address))))
+        # Any payload route to a forbidden boundary is itself a proof failure;
+        # a closed TCP port must never be mistaken for network isolation.
+        result[boundary] = route.returncode == 0
+    table, _alias = network_names(machine_id)
+    before_state = observed_nft_state(table)
+    before = before_state["counters"]["guest_host_drop"]["packets"] \
+        if before_state else -1
+    host = addresses["host"]
+    probe = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                          *fixed_probe_bwrap(policy, (
+                              "/usr/bin/curl", "--silent", "--show-error",
+                              "--connect-timeout", "1", "--max-time", "2",
+                              f"http://{host}:9/"))))
+    after_state = observed_nft_state(table)
+    after = after_state["counters"]["guest_host_drop"]["packets"] \
+        if after_state else -1
+    result["host"] = not (probe.returncode != 0 and after > before >= 0)
+    return result
+
+
+def isolation_observe(machine_id):
+    path, policy = checked_policy(POLICY_ROOT / f"{machine_id}.json", machine_id, applied=True)
+    read_policy_owner(machine_id, policy)
+    digest = policy["digest"]; leader = machine_leader(machine_id)
+    payload = probe_payload_state(machine_id, policy)
+    read_only, writable, unexpected = observed_mounts(leader, policy)
+    guest = observed_guest_network(machine_id)
+    network = policy["network"]; table, _alias = network_names(machine_id)
+    nft_state = observed_nft_state(table); record = network_state_record(machine_id)
+    grant_record = installed_grant_record(machine_id, digest) \
+        if network.get("grant_authority") == GRANT_AUTHORITY else None
+    grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
+    active = tuple(grant for grant in grants if not grant["revoked"])
+    broker = None
+    if active:
+        config = egress_config_record(machine_id)
+        broker = query_egress_status(config) if config else None
+    devices_result = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                   "/usr/bin/find", "/dev", "-mindepth", "1", "-maxdepth", "1",
+                                   "-type", "c", "-printf", "%f\\n"))
+    devices = sorted(set((devices_result.stdout or "").split())) if devices_result.returncode == 0 else []
+    dangerous = [] if not payload["capabilities"] else list(payload["capabilities"])
+    result = {"machine_id": machine_id, "policy_digest": digest,
+              "private_namespaces": observed_namespaces(leader), **payload,
+              "dangerous_capabilities": dangerous, "devices": devices,
+              "nft_default_drop": bool(record and nft_state and
+                  nft_state_matches_record(nft_state, record)),
+              "default_route": guest["default_route"], "guest_address": guest["guest_address"],
+              "reachability": denied_reachability(machine_id, policy),
+              "cgroup_limits": resource_limits_match(machine_id, policy),
+              "read_only_mounts": read_only, "writable_mounts": writable,
+              "unexpected_host_mounts": unexpected,
+              "egress_broker": ({"ok": True, "policy_digest": digest,
+                  "grant_digest": grant_record["grant_digest"] if grant_record else
+                                  ABSENT_GRANT_DIGEST,
+                  "listener": {"address": str(ipaddress.ip_interface(network["host_address"]).ip),
+                               "port": BROKER_PORT, "interface": network["veth"]},
+                  "grants": sorted(grant["grant_id"] for grant in active),
+                  "counters": broker.get("grants", {}) if broker else {}}
+                  if active and broker else {})}
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+
+
+def service_plan(machine_id, policy_digest, service_digest):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    service_digest = digest_value(service_digest)
+    marker = guest_json(machine_id, "/etc/sandbox-native/services.json",
+                        "native service marker is unavailable")
+    web_server = marker.get("web_server")
+    expected_units = ["mariadb.service", "php8.3-fpm.service",
+                      "nginx.service" if web_server == "nginx" else "apache2.service",
+                      "cron.service"]
+    if (web_server not in {"nginx", "apache"} or
+            marker.get("machine_id") != machine_id or
+            marker.get("policy_digest") != policy["digest"] or
+            marker.get("service_digest") != service_digest or
+            marker.get("units") != expected_units):
+        fail("native service marker changed")
+    return policy, tuple(expected_units)
+
+
+def services_activate(machine_id, policy_digest, service_digest):
+    _policy, units = service_plan(machine_id, policy_digest, service_digest)
+    try:
+        for unit in units:
+            guest_run(machine_id, ("/usr/bin/systemctl", "unmask", unit),
+                      "native service unmask failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "daemon-reload"),
+                  "native guest daemon reload failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "start", *units),
+                  "native service activation failed", timeout=180)
+    except BaseException:
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/systemctl", "stop", *tuple(reversed(units))))
+        for unit in units:
+            run_optional(("machinectl", "shell", "--quiet", machine_id,
+                          "/usr/bin/systemctl", "mask", unit))
+        raise
+
+
+def services_health(machine_id, policy_digest, service_digest):
+    policy, units = service_plan(machine_id, policy_digest, service_digest)
+    guest_run(machine_id, ("/usr/bin/systemctl", "is-active", *units),
+              "native service health failed")
+    guest_run(machine_id, ("/usr/bin/test", "-S", "/run/mysqld/mysqld.sock"),
+              "native database socket health failed")
+    guest_run(machine_id, ("/usr/bin/mariadb-admin", "--protocol=socket",
+                           "--socket=/run/mysqld/mysqld.sock", "ping", "--silent"),
+              "native database health failed")
+    guest = str(ipaddress.ip_interface(policy["network"]["guest_address"]).ip)
+    port = policy["network"]["ingress_port"]
+    guest_run(machine_id, ("/usr/bin/curl", "--silent", "--show-error",
+                           "--output", "/dev/null", "--connect-timeout", "2",
+                           "--max-time", "5", f"http://{guest}:{port}/"),
+              "native private backend health failed")
+
+
+def services_ownership_status(machine_id, policy_digest, service_digest):
+    _policy, units = service_plan(machine_id, policy_digest, service_digest)
+    # Cleanup observation must never make an HTTP request or execute plugin PHP.
+    guest_run(machine_id, ("/usr/bin/systemctl", "is-active", *units),
+              "native service ownership observation failed")
+
+
+def services_stop(machine_id, policy_digest, service_digest):
+    _policy, units = service_plan(machine_id, policy_digest, service_digest)
+    # Preserve MariaDB until the subsequent database-owned cleanup has removed
+    # the exact Sandbox schemas/user.  No project PHP/web/cron execution remains.
+    project_units = tuple(unit for unit in units if unit != "mariadb.service")
+    guest_run(machine_id, ("/usr/bin/systemctl", "stop", *tuple(reversed(project_units))),
+              "native service stop failed", timeout=180)
+    for unit in project_units:
+        guest_run(machine_id, ("/usr/bin/systemctl", "mask", unit),
+                  "native service mask failed")
+
+
+def database_ownership_matches(machine_id):
+    production, tests, user = database_names(machine_id)
+    query = ("SELECT CONCAT('db:',SCHEMA_NAME) FROM information_schema.SCHEMATA "
+             f"WHERE SCHEMA_NAME IN ('{production}','{tests}') UNION ALL "
+             "SELECT CONCAT('user:',User) FROM mysql.user "
+             f"WHERE User='{user}' AND Host='localhost' ORDER BY 1")
+    result = guest_run(machine_id, (
+        "/usr/bin/mariadb", "--protocol=socket", "--socket=/run/mysqld/mysqld.sock",
+        "--batch", "--skip-column-names", "--execute", query,
+    ), "native database ownership observation failed")
+    return sorted((result.stdout or "").splitlines()) == sorted((
+        f"db:{production}", f"db:{tests}", f"user:{user}",
+    ))
+
+
+def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    resource_digest = digest_value(resource_digest)
+    if resource == "services":
+        services_ownership_status(machine_id, policy_digest, resource_digest)
+    elif resource == "database":
+        database_status(machine_id, policy_digest)
+        if not database_ownership_matches(machine_id):
+            fail("native database ownership changed")
+    elif resource == "machine":
+        unit, _profile = machine_names(machine_id)
+        expected = f"Sandbox native {machine_id} policy {policy_digest}"
+        active = run_optional(("systemctl", "is-active", unit))
+        observed = run_optional(("machinectl", "show", machine_id))
+        if (unit_description(unit) != expected or active.returncode != 0 or
+                (active.stdout or "").strip() != "active" or observed.returncode != 0):
+            fail("native machine ownership changed")
+    elif resource == "network":
+        network = policy["network"]
+        table, alias_prefix = network_names(machine_id)
+        record = network_state_record(machine_id)
+        grant_record = installed_grant_record(machine_id, policy_digest) \
+            if network.get("grant_authority") == GRANT_AUTHORITY else None
+        grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
+        grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
+        broker = any(not grant["revoked"] for grant in grants)
+        if (record != desired_network_state(machine_id, policy_digest, network, broker=broker,
+                                             grant_digest=grant_digest)
+                or observed_nft_table(table) is None
+                or observed_nft_table(table).get("comment") != record["marker"]
+                or not nft_state_matches_record(observed_nft_state(table), record)):
+            fail("native network ownership changed")
+        link = observed_link(network["veth"])
+        if link is not None and link.get("ifalias") != alias_prefix:
+            fail("native veth ownership changed")
+    elif resource in {"mount", "image"}:
+        _instance, image, mountpoint = image_paths(machine_id)
+        if (mountpoint.is_symlink() or os.path.ismount(mountpoint) or not image.is_file()
+                or image.is_symlink() or image.stat().st_uid != 0
+                or image.stat().st_mode & 0o077
+                or image.stat().st_size != policy["root_image"]["bytes"]):
+            fail("native image ownership changed")
+    elif resource == "policy":
+        destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
+        expected = compile_apparmor_profile(machine_id, policy_digest).encode()
+        if (not destination.is_file() or destination.is_symlink()
+                or destination.stat().st_uid != 0 or destination.read_bytes() != expected
+                or not apparmor_loaded(machine_id)):
+            fail("native policy ownership changed")
+    else:
+        fail("native cleanup resource is invalid")
+    print(json.dumps({"machine_id": machine_id, "policy_digest": policy_digest,
+                      "resource": resource, "resource_digest": resource_digest},
+                     sort_keys=True, separators=(",", ":")))
+
+
+def credential_install(machine_id, policy_digest, name):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    if not CREDENTIAL_NAME.fullmatch(name):
+        fail("native credential name is invalid")
+    matches = [ref for ref in policy["credentials"] if ref.rsplit("/", 1)[-1] == name]
+    if len(matches) != 1:
+        fail("native credential is not declared by policy")
+    uid = int(os.environ.get("SUDO_UID", os.getuid()))
+    source = INJECTED_ROOT / machine_id / name
+    try:
+        descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        fail("native credential staging file is unavailable")
+    temporary = None
+    try:
+        details = os.fstat(descriptor)
+        if (not stat.S_ISREG(details.st_mode) or details.st_uid != uid or
+                details.st_mode & 0o077 or not 1 <= details.st_size <= 65536):
+            fail("native credential staging file is invalid")
+        payload = b""
+        while len(payload) <= 65536:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            payload += chunk
+        if len(payload) != details.st_size:
+            fail("native credential changed during validation")
+        run_root = RUNTIME_ROOT
+        ensure_root_directory(run_root, 0o700)
+        fd, temporary = tempfile.mkstemp(prefix=f"credential-{machine_id}-", dir=run_root)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(payload); output.flush(); os.fsync(output.fileno())
+        destination = f"{GUEST_CREDENTIAL_SOURCE_ROOT}/{name}"
+        guest_run(machine_id, ("/usr/bin/install", "-d", "-o", "root", "-g", "root",
+                               "-m", "0700", GUEST_CREDENTIAL_SOURCE_ROOT),
+                  "native credential directory installation failed")
+        run_fixed(("machinectl", "copy-to", machine_id, temporary, destination),
+                  "native credential installation failed")
+        guest_run(machine_id, ("/usr/bin/chown", "root:www-data", destination),
+                  "native credential ownership failed")
+        guest_run(machine_id, ("/usr/bin/chmod", "0440", destination),
+                  "native credential mode failed")
+    finally:
+        os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def database_names(machine_id):
+    suffix = hashlib.sha256(machine_id.encode()).hexdigest()[:16]
+    return f"sb_{suffix}", f"sb_{suffix}_tests", f"sbu_{suffix[:12]}"
+
+
+def database_bootstrap(machine_id, policy_digest):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    if f"native/{machine_id}/db-credential" not in policy["credentials"]:
+        fail("native database credential is not declared")
+    production, tests, user = database_names(machine_id)
+    try:
+        guest_run(machine_id, ("/usr/bin/systemctl", "unmask", "mariadb.service"),
+                  "native database service unmask failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "daemon-reload"),
+                  "native guest daemon reload failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "start", "mariadb.service"),
+                  "native database service start failed", timeout=180)
+        guest_run(machine_id, ("/usr/local/libexec/sandbox-db-bootstrap",
+                               production, tests, user),
+                  "native database bootstrap failed", timeout=180)
+    except BaseException:
+        sql = (f"DROP DATABASE IF EXISTS {production}; DROP DATABASE IF EXISTS {tests}; "
+               f"DROP USER IF EXISTS '{user}'@'localhost'; FLUSH PRIVILEGES;")
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/mariadb", "--protocol=socket",
+                      "--socket=/run/mysqld/mysqld.sock", "--execute", sql))
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/systemctl", "stop", "mariadb.service"))
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/systemctl", "mask", "mariadb.service"))
+        raise
+
+
+def database_status(machine_id, policy_digest):
+    applied_policy(machine_id, policy_digest)
+    guest_run(machine_id, ("/usr/bin/test", "-S", "/run/mysqld/mysqld.sock"),
+              "native database socket is unavailable")
+    guest_run(machine_id, ("/usr/bin/mariadb-admin", "--protocol=socket",
+                           "--socket=/run/mysqld/mysqld.sock", "ping", "--silent"),
+              "native database health failed")
+
+
+def wordpress_bootstrap(machine_id, policy_digest):
+    _path, policy = applied_policy(machine_id, policy_digest)
+    production, _tests, user = database_names(machine_id)
+    proxy = str(ipaddress.ip_interface(policy["network"]["host_address"]).ip)
+    guest_run(machine_id, fixed_probe_bwrap(policy, (
+                           "/usr/local/libexec/sandbox-wordpress-bootstrap",
+                           production, user, proxy, str(BROKER_PORT)),
+                           policy["credentials"]),
+              "native WordPress bootstrap failed", timeout=300)
+    # The bootstrap credential is single-use. WordPress retains only its own
+    # instance database setting; plugin/web/CLI payloads never inherit staging.
+    guest_run(machine_id, ("/usr/bin/rm", "-f",
+                           f"{GUEST_CREDENTIAL_SOURCE_ROOT}/db-credential"),
+              "native bootstrap credential cleanup failed")
+
+
+def wordpress_status(machine_id, policy_digest):
+    applied_policy(machine_id, policy_digest)
+    guest_run(machine_id, ("/usr/local/bin/wp", "core", "is-installed",
+                           "--path=/var/www/html", "--quiet"),
+              "native WordPress status failed")
+
+
+def database_remove(machine_id, policy_digest):
+    applied_policy(machine_id, policy_digest)
+    production, tests, user = database_names(machine_id)
+    sql = (f"DROP DATABASE IF EXISTS {production}; DROP DATABASE IF EXISTS {tests}; "
+           f"DROP USER IF EXISTS '{user}'@'localhost'; FLUSH PRIVILEGES;")
+    try:
+        guest_run(machine_id, ("/usr/bin/systemctl", "unmask", "mariadb.service"),
+                  "native database service unmask failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "daemon-reload"),
+                  "native guest daemon reload failed")
+        guest_run(machine_id, ("/usr/bin/systemctl", "start", "mariadb.service"),
+                  "native database service start failed", timeout=180)
+        guest_run(machine_id, ("/usr/bin/mariadb", "--protocol=socket",
+                               "--socket=/run/mysqld/mysqld.sock", "--execute", sql),
+                  "native database cleanup failed")
+    finally:
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/systemctl", "stop", "mariadb.service"))
+        run_optional(("machinectl", "shell", "--quiet", machine_id,
+                      "/usr/bin/systemctl", "mask", "mariadb.service"))
 
 
 def machine_names(machine_id):
@@ -795,7 +2966,6 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
   /sbin/init cx -> guest,
 
   profile guest flags=(attach_disconnected,mediate_deleted) {{
-    #include <abstractions/base>
     capability audit_write,
     capability chown,
     capability dac_override,
@@ -815,36 +2985,127 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     signal,
     dbus,
     /** rwklm,
+    /usr/bin/bwrap cx -> bwrap,
+    /** ix,
+  }}
+
+  # Only root can execute /usr/bin/bwrap in the managed image (0750). This
+  # transition owns the narrowly-scoped namespace/mount setup, then every
+  # command exec transitions irreversibly into the payload profile.
+  profile bwrap flags=(attach_disconnected,mediate_deleted) {{
+    capability chown,
+    capability dac_override,
+    capability fowner,
+    capability setgid,
+    capability setuid,
+    capability sys_admin,
+    capability sys_chroot,
+    userns,
+    mount,
+    remount,
+    umount,
+    pivot_root,
+    network inet stream,
+    network inet6 stream,
+    network unix stream,
+    network unix dgram,
+    signal,
+    /** rwklm,
+    /** cx -> payload,
+  }}
+
+  profile payload flags=(attach_disconnected,mediate_deleted) {{
+    #include <abstractions/base>
+    network inet stream,
+    network inet6 stream,
+    network unix stream,
+    network unix dgram,
+    signal,
+    /** rwklm,
+    /run/credentials/sandbox/* r,
+    deny /run/credentials/** wklmx,
+    deny /run/sandbox-native-credentials/** rwklmx,
+    deny /run/systemd/** rwklmx,
+    deny /run/dbus/** rwklmx,
     /** ix,
   }}
 }}
 """
 
 
-def apparmor_loaded(machine_id):
+def _apparmor_loaded_state(machine_id):
     profile = f"sandbox-native-{machine_id}"
     try:
         names = {line.split(" ", 1)[0]
                  for line in Path("/sys/kernel/security/apparmor/profiles").read_text().splitlines()}
-        return profile in names and profile + "//guest" in names
+        return all(candidate in names for candidate in (
+            profile, profile + "//guest", profile + "//bwrap", profile + "//payload"))
     except OSError:
-        return False
+        return None
+
+
+def apparmor_loaded(machine_id):
+    return _apparmor_loaded_state(machine_id) is True
+
+
+def remove_exact_apparmor_profile(machine_id, digest):
+    destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
+    state = _apparmor_loaded_state(machine_id)
+    if not os.path.lexists(destination):
+        if state is False:
+            return
+        fail("native AppArmor profile file is missing")
+    payload = compile_apparmor_profile(machine_id, digest).encode()
+    exact_privileged_file(destination, payload)
+    if state is None:
+        fail("native AppArmor profile state is unavailable")
+    if state is True:
+        run_fixed(("apparmor_parser", "--remove", "--skip-cache", str(destination)),
+                  "native AppArmor profile removal failed")
+        if _apparmor_loaded_state(machine_id) is not False:
+            fail("native AppArmor profile removal was not observed")
+    destination.unlink()
 
 
 def apparmor_install(machine_id, digest):
     _path, _policy = applied_policy(machine_id, digest)
     destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
     payload = compile_apparmor_profile(machine_id, digest).encode()
+    created = False
     if destination.exists() or destination.is_symlink():
         details = destination.lstat()
         if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
                 details.st_uid != 0 or destination.read_bytes() != payload):
             fail("native AppArmor profile ownership changed")
     else:
-        atomic_install_bytes(payload, destination)
-    run_fixed(("apparmor_parser", "--replace", "--skip-cache", str(destination)),
-              "native AppArmor profile load failed")
-    if not apparmor_loaded(machine_id): fail("native AppArmor profiles were not observed")
+        try:
+            atomic_install_bytes(payload, destination)
+            created = True
+        except BaseException:
+            if os.path.lexists(destination):
+                try:
+                    if exact_privileged_file(destination, payload): destination.unlink()
+                except (OSError, SystemExit):
+                    pass
+            raise
+    try:
+        run_fixed(("apparmor_parser", "--replace", "--skip-cache", str(destination)),
+                  "native AppArmor profile load failed")
+        if not apparmor_loaded(machine_id): fail("native AppArmor profiles were not observed")
+    except BaseException:
+        if created:
+            try:
+                state = _apparmor_loaded_state(machine_id)
+                if state is True:
+                    run_optional((
+                        "apparmor_parser", "--remove", "--skip-cache", str(destination),
+                    ))
+                    state = _apparmor_loaded_state(machine_id)
+                if (state is False and exact_privileged_file(destination, payload)):
+                    destination.unlink()
+            except (OSError, SystemExit):
+                pass
+        raise
 
 
 def apparmor_status(machine_id, digest):
@@ -859,21 +3120,13 @@ def apparmor_remove(machine_id, digest):
     _path, _policy = applied_policy(machine_id, digest)
     unit, _profile = machine_names(machine_id)
     if unit_description(unit): fail("native machine must stop before AppArmor removal")
-    destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
-    if not destination.exists():
-        if apparmor_loaded(machine_id): fail("native AppArmor profile file is missing")
-        return
-    payload = compile_apparmor_profile(machine_id, digest).encode()
-    details = destination.lstat()
-    if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
-            details.st_uid != 0 or destination.read_bytes() != payload):
-        fail("native AppArmor profile ownership changed")
-    run_fixed(("apparmor_parser", "--remove", "--skip-cache", str(destination)),
-              "native AppArmor profile removal failed")
-    destination.unlink()
+    remove_exact_apparmor_profile(machine_id, digest)
 
 
 def unit_description(unit):
+    loaded = run_optional(("systemctl", "show", unit, "--property=LoadState", "--value"))
+    if loaded.returncode != 0 or (loaded.stdout or "").strip() in {"", "not-found"}:
+        return ""
     result = run_optional(("systemctl", "show", unit, "--property=Description", "--value"))
     return (result.stdout or "").strip() if result.returncode == 0 else ""
 
@@ -892,8 +3145,9 @@ def machine_command(policy):
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
         "LockPersonality=yes", "RestrictSUIDSGID=yes", "NoNewPrivileges=yes",
         f"AppArmorProfile={profile}", f"CPUQuota={resources['cpu_percent']}%",
-        f"MemoryMax={resources['memory_bytes']}", "MemorySwapMax=0",
-        f"TasksMax={resources['pids']}", f"RuntimeMaxSec={resources['runtime_seconds']}",
+        f"MemoryMax={resources['memory_bytes']}",
+        f"MemoryHigh={max(1, resources['memory_bytes'] * 9 // 10)}", "MemorySwapMax=0",
+        f"TasksMax={resources['pids']}",
         f"LimitNOFILE={resources['fds']}", f"IOWeight={resources['io_weight']}",
     )
     dropped = ("CAP_AUDIT_CONTROL", "CAP_DAC_READ_SEARCH", "CAP_IPC_OWNER", "CAP_LEASE",
@@ -909,7 +3163,7 @@ def machine_command(policy):
               f"--network-veth-extra={policy['network']['veth']}:host0",
               "--resolv-conf=off", "--link-journal=no-host", "--no-new-privileges=yes",
               "--drop-capability=" + ",".join(dropped),
-              "--system-call-filter=@system-service ~@mount ~@raw-io ~@reboot ~@swap"]
+              "--system-call-filter=@system-service ~@raw-io ~@reboot ~@swap"]
     for mount in policy["read_only_mounts"]:
         nspawn.append(f"--bind-ro={mount['source']}:{mount['target']}:norbind")
     for mount in policy["writable_mounts"]:
@@ -964,6 +3218,427 @@ def machine_stop(machine_id, digest):
     run_fixed(("systemctl", "stop", unit), "native machine stop failed")
 
 
+def installed_helper_ready():
+    try:
+        details = INSTALL_PATH.lstat()
+    except OSError:
+        return False
+    return bool(stat.S_ISREG(details.st_mode) and details.st_uid == 0 and
+                not details.st_mode & 0o022 and os.access(INSTALL_PATH, os.X_OK))
+
+
+def _probe_child_private_network(_token):
+    try:
+        links = sorted(path.name for path in Path("/sys/class/net").iterdir())
+        routes = Path("/proc/net/route").read_text().splitlines()[1:]
+        ipv6_routes = Path("/proc/net/ipv6_route").read_text().splitlines()
+    except OSError:
+        raise SystemExit(69)
+    has_ipv4_default = any(len(row.split()) >= 4 and row.split()[1] == "00000000" and
+                           int(row.split()[3], 16) & 1 for row in routes)
+    has_ipv6_default = any(len(row.split()) >= 2 and row.split()[0] == "0" * 32 and
+                           row.split()[1] == "00" for row in ipv6_routes)
+    if links != ["lo"] or has_ipv4_default or has_ipv6_default:
+        raise SystemExit(69)
+
+
+def _probe_child_nftables(token):
+    table = f"sb_probe_{token}"
+    marker = f"sandbox-native:preflight:{token}"
+    if run_optional(("nft", "-j", "list", "table", "inet", table)).returncode == 0:
+        raise SystemExit(73)
+    if run_optional(("ip", "link", "set", "dev", "lo", "up")).returncode != 0:
+        raise SystemExit(69)
+    created = False
+    script = "\n".join((
+        f'add table inet {table} {{ comment "{marker}"; }}',
+        f"add chain inet {table} probe {{ type filter hook output priority filter; policy accept; }}",
+        f'add rule inet {table} probe oifname "lo" udp dport 9 counter drop comment "{marker}:drop"',
+    )) + "\n"
+    try:
+        applied = run_optional(("nft", "-f", "-"), input_text=script)
+        if applied.returncode != 0:
+            raise SystemExit(69)
+        created = True
+        probe_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            try:
+                probe_socket.sendto(b"sandbox-native-preflight", ("127.0.0.1", 9))
+            except OSError as exc:
+                # A locally generated packet rejected by an nft output verdict
+                # commonly reports EPERM/EACCES to sendto().  That rejection is
+                # the effect being proven; all other socket errors still fail.
+                if exc.errno not in {errno.EPERM, errno.EACCES}:
+                    raise SystemExit(69) from None
+        finally:
+            probe_socket.close()
+        observed = run_optional(("nft", "-j", "list", "table", "inet", table))
+        if observed.returncode != 0:
+            raise SystemExit(69)
+        try:
+            document = json.loads(observed.stdout or "{}")
+        except json.JSONDecodeError:
+            raise SystemExit(69) from None
+        rows = document.get("nftables") if isinstance(document, dict) else None
+        if not isinstance(rows, list):
+            raise SystemExit(69)
+        table_rows = [item["table"] for item in rows if isinstance(item, dict) and
+                      isinstance(item.get("table"), dict)]
+        chain_rows = [item["chain"] for item in rows if isinstance(item, dict) and
+                      isinstance(item.get("chain"), dict)]
+        rule_rows = [item["rule"] for item in rows if isinstance(item, dict) and
+                     isinstance(item.get("rule"), dict)]
+        if (len(table_rows) != 1 or table_rows[0].get("family") != "inet" or
+                table_rows[0].get("name") != table or
+                table_rows[0].get("comment") != marker or
+                len(chain_rows) != 1 or chain_rows[0].get("name") != "probe" or
+                chain_rows[0].get("type") != "filter" or
+                chain_rows[0].get("hook") != "output" or
+                chain_rows[0].get("policy") != "accept" or len(rule_rows) != 1 or
+                rule_rows[0].get("comment") != marker + ":drop"):
+            raise SystemExit(69)
+        expressions = rule_rows[0].get("expr")
+        if (not isinstance(expressions, list) or
+                not any(isinstance(item, dict) and "counter" in item
+                        and isinstance(item["counter"], dict) and
+                        item["counter"].get("packets", 0) >= 1 and
+                        item["counter"].get("bytes", 0) >= 1 for item in expressions) or
+                not any(isinstance(item, dict) and "drop" in item
+                        for item in expressions)):
+            raise SystemExit(69)
+    finally:
+        if created:
+            ownership = run_optional(("nft", "-j", "list", "table", "inet", table))
+            owned = False
+            if ownership.returncode == 0:
+                try:
+                    value = json.loads(ownership.stdout or "{}")
+                    owned = any(isinstance(item, dict) and
+                                isinstance(item.get("table"), dict) and
+                                item["table"].get("comment") == marker
+                                for item in value.get("nftables", ()))
+                except (AttributeError, json.JSONDecodeError):
+                    owned = False
+            if not owned:
+                raise SystemExit(73)
+            if run_optional(("nft", "delete", "table", "inet", table)).returncode != 0:
+                raise SystemExit(69)
+
+
+def _probe_child_cgroup_delegation(token):
+    try:
+        rows = Path("/proc/self/cgroup").read_text().splitlines()
+        if len(rows) != 1 or not rows[0].startswith("0::/"):
+            raise SystemExit(69)
+        raw_relative = rows[0][3:]
+        if not raw_relative.startswith("/"):
+            raise SystemExit(69)
+        relative = PurePosixPath(raw_relative.lstrip("/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise SystemExit(69)
+        base = Path("/sys/fs/cgroup").joinpath(*relative.parts)
+        child = base / f"sb-probe-{token}"
+        if child.exists() or child.is_symlink():
+            raise SystemExit(73)
+        child.mkdir(mode=0o755)
+        details = child.lstat()
+        if not stat.S_ISDIR(details.st_mode):
+            raise SystemExit(69)
+    except OSError:
+        raise SystemExit(69) from None
+    finally:
+        try:
+            if "child" in locals() and child.exists() and not child.is_symlink():
+                child.rmdir()
+        except OSError:
+            raise SystemExit(69) from None
+
+
+def _probe_child_seccomp(_token):
+    try:
+        values = parse_status_fields(Path("/proc/self/status").read_text())
+    except OSError:
+        raise SystemExit(69) from None
+    if values.get("NoNewPrivs") != "1" or values.get("Seccomp") != "2":
+        raise SystemExit(69)
+
+
+def preflight_probe(probe):
+    """Run one bounded kernel-effect probe through the installed helper."""
+    if probe not in {"private-network", "nftables", "cgroup-delegation", "seccomp"}:
+        return {"ok": False, "probe": str(probe)[:32], "state": "invalid"}
+    if not installed_helper_ready():
+        return {"ok": False, "probe": probe, "state": "helper_unavailable"}
+    token = hashlib.sha256(os.urandom(32)).hexdigest()[:16]
+    marker = f"Sandbox native preflight {token}"
+    suffix = "scope" if probe == "cgroup-delegation" else "service"
+    unit = f"sandbox-native-probe-{token}.{suffix}"
+    command = None
+    if probe == "nftables":
+        command = ("unshare", "--net", "--", str(INSTALL_PATH),
+                   "_preflight-child", probe, token)
+    else:
+        existing = run_optional(("systemctl", "show", unit, "--property=LoadState",
+                                 "--value"))
+        if (existing.returncode == 0 and
+                (existing.stdout or "").strip() not in {"", "not-found"}):
+            return {"ok": False, "probe": probe, "state": "collision"}
+        command = ["systemd-run", "--quiet", "--wait", "--collect",
+                   f"--unit={unit}", f"--description={marker}"]
+        if probe == "private-network":
+            command.extend(("--property=PrivateNetwork=yes", "--property=IPAddressDeny=any"))
+        elif probe == "seccomp":
+            command.extend(("--property=NoNewPrivileges=yes",
+                            "--property=SystemCallFilter=@system-service"))
+        else:
+            command.extend(("--scope", "--property=Delegate=yes"))
+        command.extend((str(INSTALL_PATH), "_preflight-child", probe, token))
+        command = tuple(command)
+    state = "failed"
+    try:
+        try:
+            result = run_optional(command)
+            state = "ready" if result.returncode == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            state = "timeout"
+    finally:
+        if probe != "nftables":
+            description = unit_description(unit)
+            if description == marker:
+                run_optional(("systemctl", "stop", unit))
+                run_optional(("systemctl", "reset-failed", unit))
+            elif description:
+                state = "collision"
+    return {"ok": state == "ready", "probe": probe, "state": state}
+
+
+def preflight_child(probe, token):
+    if not PROBE_TOKEN.fullmatch(token):
+        raise SystemExit(64)
+    {"private-network": _probe_child_private_network,
+     "nftables": _probe_child_nftables,
+     "cgroup-delegation": _probe_child_cgroup_delegation,
+     "seccomp": _probe_child_seccomp}[probe](token)
+
+
+def policy_remove(machine_id, digest):
+    path = POLICY_ROOT / f"{machine_id}.json"
+    owner_path = policy_owner_path(machine_id)
+    policy = None
+    if os.path.lexists(path):
+        path, policy = checked_policy(path, machine_id, applied=True)
+        if policy["digest"] != digest: fail("applied policy digest changed")
+        if os.path.lexists(owner_path):
+            read_policy_owner(machine_id, policy)
+        else:
+            project_source_identity(policy, invoking_uid())
+    elif os.path.lexists(owner_path):
+        read_partial_policy_owner(machine_id, digest)
+    else:
+        return
+    unit, _profile = machine_names(machine_id)
+    instance, image, mountpoint = image_paths(machine_id)
+    egress = egress_config_record(machine_id)
+    grants = installed_grant_record(machine_id, digest)
+    network = network_state_record(machine_id)
+    if (unit_description(unit) or os.path.ismount(mountpoint) or image.exists()
+            or network is not None or egress is not None or grants is not None):
+        fail("native policy still owns runtime resources")
+    if os.path.lexists(APPARMOR_ROOT / f"sandbox-native-{machine_id}") \
+            or _apparmor_loaded_state(machine_id) is not False:
+        remove_exact_apparmor_profile(machine_id, digest)
+    if instance.exists():
+        try: instance.rmdir()
+        except OSError: fail("native instance root is not empty")
+    # Owner-first deletion makes an interrupted removal leave a policy-only
+    # state that remains attributable through the policy's scoped source.
+    if os.path.lexists(owner_path):
+        try: owner_path.unlink()
+        except OSError: fail("native policy owner removal failed")
+    if os.path.lexists(path):
+        try: path.unlink()
+        except OSError: fail("native policy removal failed")
+
+
+def _foreign_tree_digest(root):
+    """Hash one fixed config tree without returning file contents or timestamps."""
+    root = Path(root)
+    if not os.path.lexists(root):
+        return {"present": False, "digest": "absent"}
+    digest = hashlib.sha256()
+    paths = (root, *sorted(root.rglob("*"))) \
+        if root.is_dir() and not root.is_symlink() else (root,)
+    count = 0
+    for path in paths:
+        details = path.lstat()
+        relative = str(path.relative_to(root.parent))
+        row = {
+            "path": relative, "type": stat.S_IFMT(details.st_mode),
+            "mode": stat.S_IMODE(details.st_mode), "uid": details.st_uid,
+            "gid": details.st_gid, "size": details.st_size,
+        }
+        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
+        if stat.S_ISLNK(details.st_mode):
+            digest.update(os.readlink(path).encode())
+        elif stat.S_ISREG(details.st_mode):
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+        count += 1
+    return {"present": True, "entries": count, "digest": digest.hexdigest()}
+
+
+def _foreign_mount_identity(path):
+    path = Path(path).resolve(strict=True)
+    selected = None
+    for line in Path("/proc/self/mountinfo").read_text().splitlines():
+        fields = line.split()
+        if "-" not in fields or len(fields) < 10:
+            continue
+        separator = fields.index("-")
+        mountpoint = Path(fields[4].replace("\\040", " "))
+        try:
+            path.relative_to(mountpoint)
+        except ValueError:
+            continue
+        if selected is None or len(mountpoint.parts) > len(selected[0].parts):
+            selected = (mountpoint, fields, separator)
+    if selected is None:
+        fail("foreign data mount identity is unavailable")
+    mountpoint, fields, separator = selected
+    return {
+        "mountpoint": str(mountpoint), "root": fields[3],
+        "options": sorted(fields[5].split(",")), "fstype": fields[separator + 1],
+        "source": fields[separator + 2],
+    }
+
+
+def _foreign_data_identity():
+    root = Path("/var/lib/mysql")
+    if not os.path.lexists(root):
+        return {"present": False, "sentinel": {"present": False}}
+    details = root.lstat()
+    if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        fail("foreign database data root is unsafe")
+    sentinel = {"present": False}
+    if os.path.lexists(FOREIGN_DATA_SENTINEL):
+        item = FOREIGN_DATA_SENTINEL.lstat()
+        if (not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode)
+                or item.st_uid != 0 or item.st_gid != 0
+                or stat.S_IMODE(item.st_mode) != 0o600 or item.st_nlink != 1):
+            fail("foreign database sentinel is unsafe")
+        sentinel = {
+            "present": True, "device": item.st_dev, "inode": item.st_ino,
+            "uid": item.st_uid, "gid": item.st_gid,
+            "mode": stat.S_IMODE(item.st_mode), "size": item.st_size,
+            "sha256": hashlib.sha256(FOREIGN_DATA_SENTINEL.read_bytes()).hexdigest(),
+        }
+    return {
+        "present": True, "device": details.st_dev, "inode": details.st_ino,
+        "uid": details.st_uid, "gid": details.st_gid,
+        "mode": stat.S_IMODE(details.st_mode),
+        "mount": _foreign_mount_identity(root), "sentinel": sentinel,
+    }
+
+
+def _foreign_unit(unit, package):
+    result = run_optional((
+        "systemctl", "show", unit, "--no-pager",
+        "--property=LoadState,ActiveState,SubState,UnitFileState,FragmentPath,MainPID",
+    ))
+    values = {line.split("=", 1)[0]: line.split("=", 1)[1]
+              for line in (result.stdout or "").splitlines() if "=" in line}
+    fragment = values.get("FragmentPath", "")
+    if fragment:
+        try: fragment = str(Path(fragment).resolve(strict=True))
+        except OSError: fragment = "unavailable"
+    pid = int(values.get("MainPID", "0")) if values.get("MainPID", "0").isdigit() else 0
+    process = {"present": False}
+    if pid > 0:
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text().split()
+            executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+            executable_stat = executable.stat()
+            process = {
+                "present": True, "pid": pid, "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                "starttime": fields[21], "exe": str(executable),
+                "exe_device": executable_stat.st_dev, "exe_inode": executable_stat.st_ino,
+            }
+        except (OSError, IndexError):
+            fail("foreign service process identity changed during observation")
+    package_result = run_optional(("dpkg-query", "-W", "-f=${Version}", package))
+    return {
+        "LoadState": values.get("LoadState", "unknown"),
+        "ActiveState": values.get("ActiveState", "unknown"),
+        "SubState": values.get("SubState", "unknown"),
+        "UnitFileState": values.get("UnitFileState", "unknown"),
+        "FragmentPath": fragment, "process": process,
+        "package": package,
+        "package_version": ((package_result.stdout or "").strip()
+                            if package_result.returncode == 0 else "absent"),
+    }
+
+
+def _foreign_listeners():
+    result = run_optional(("ss", "-H", "-ltnpe"))
+    if result.returncode != 0:
+        fail("foreign listener observation failed")
+    rows = []
+    for line in (result.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        local = fields[3]
+        match = re.search(r":([0-9]+)$", local)
+        if not match or int(match.group(1)) not in {80, 443, 3306, 9000}:
+            continue
+        port = int(match.group(1)); address = local[:match.start()]
+        address = address.strip("[]")
+        inode = re.search(r"\bino:([0-9]+)\b", line)
+        pid = re.search(r"\bpid=([0-9]+)\b", line)
+        owner_uid = None
+        if pid:
+            try: owner_uid = Path(f"/proc/{pid.group(1)}").stat().st_uid
+            except OSError: fail("foreign listener owner changed during observation")
+        health_address = "::1" if ":" in address else "127.0.0.1"
+        family = socket.AF_INET6 if ":" in health_address else socket.AF_INET
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        try: healthy = probe.connect_ex((health_address, port)) == 0
+        finally: probe.close()
+        rows.append({
+            "protocol": "tcp", "address": address, "port": port,
+            "inode": int(inode.group(1)) if inode else None,
+            "pid": int(pid.group(1)) if pid else None, "uid": owner_uid,
+            "healthy": healthy,
+        })
+    return sorted(rows, key=lambda row: (row["port"], row["address"], row["inode"] or -1))
+
+
+def host_baseline_observe():
+    """Emit a content-free, stable snapshot of fixed foreign host services."""
+    units = {
+        "nginx.service": _foreign_unit("nginx.service", "nginx"),
+        "apache2.service": _foreign_unit("apache2.service", "apache2"),
+        "mariadb.service": _foreign_unit("mariadb.service", "mariadb-server"),
+        "mysql.service": _foreign_unit("mysql.service", "mysql-server"),
+        "php8.3-fpm.service": _foreign_unit("php8.3-fpm.service", "php8.3-fpm"),
+    }
+    baseline = {
+        "schema": "sandbox.native-host-baseline/v1", "units": units,
+        "listeners": _foreign_listeners(),
+        "config": {root: _foreign_tree_digest(root) for root in (
+            "/etc/nginx", "/etc/apache2", "/etc/mysql", "/etc/php/8.3/fpm",
+        )},
+        "data": _foreign_data_identity(),
+    }
+    digest = hashlib.sha256(json.dumps(
+        baseline, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    print(json.dumps({"ok": True, "digest": digest, "baseline": baseline},
+                     sort_keys=True, separators=(",", ":")))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="sandbox-native-helper")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -971,6 +3646,7 @@ def main(argv=None):
     install = sub.add_parser("install")
     host_apply = sub.add_parser("host-packages-apply")
     host_apply.add_argument("path"); host_apply.add_argument("digest")
+    sub.add_parser("host-baseline-observe")
     bootstrap = sub.add_parser("image-bootstrap")
     bootstrap.add_argument("machine"); bootstrap.add_argument("policy_digest")
     bootstrap.add_argument("plan_path"); bootstrap.add_argument("plan_digest")
@@ -980,26 +3656,90 @@ def main(argv=None):
     configure.add_argument("web_server", choices=("nginx", "apache"))
     configure.add_argument("service_digest")
     apply_policy = sub.add_parser("policy-install"); apply_policy.add_argument("machine"); apply_policy.add_argument("path")
+    grants = sub.add_parser("grant-reconcile")
+    grants.add_argument("machine"); grants.add_argument("base_policy_digest")
+    grants.add_argument("expected_grant_digest"); grants.add_argument("desired_grant_digest")
     status = sub.add_parser("policy-status"); status.add_argument("machine")
+    remove_policy = sub.add_parser("policy-remove")
+    remove_policy.add_argument("machine"); remove_policy.add_argument("digest")
+    execute_parser = sub.add_parser("execute")
+    execute_parser.add_argument("machine"); execute_parser.add_argument("digest")
+    execute_parser.add_argument("request_digest")
+    observe_parser = sub.add_parser("isolation-observe")
+    observe_parser.add_argument("machine")
+    cleanup_parser = sub.add_parser("cleanup-observe")
+    cleanup_parser.add_argument("resource", choices=(
+        "services", "database", "machine", "network", "mount", "image", "policy"))
+    cleanup_parser.add_argument("machine"); cleanup_parser.add_argument("digest")
+    cleanup_parser.add_argument("resource_digest")
+    probe = sub.add_parser("preflight-probe")
+    probe.add_argument("probe", choices=("private-network", "nftables",
+                                         "cgroup-delegation", "seccomp"))
+    probe_child = sub.add_parser("_preflight-child")
+    probe_child.add_argument("probe", choices=("private-network", "nftables",
+                                               "cgroup-delegation", "seccomp"))
+    probe_child.add_argument("token")
     for name in ("image-create", "image-mount", "image-unmount", "image-remove",
-                 "network-apply", "network-status", "network-remove",
+                 "network-apply", "network-grants-apply", "network-status", "network-remove",
+                 "egress-apply", "egress-status", "egress-remove",
                  "machine-start-minimal", "machine-status", "machine-stop",
-                 "apparmor-install", "apparmor-status", "apparmor-remove"):
+                 "apparmor-install", "apparmor-status", "apparmor-remove",
+                 "database-bootstrap", "database-status", "database-remove",
+                 "wordpress-bootstrap", "wordpress-status"):
         action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
+    credential = sub.add_parser("credential-install")
+    credential.add_argument("machine"); credential.add_argument("digest"); credential.add_argument("name")
+    for name in ("services-activate", "services-health", "services-status", "services-stop"):
+        action = sub.add_parser(name); action.add_argument("machine"); action.add_argument("digest")
+        action.add_argument("service_digest")
     args = parser.parse_args(argv)
     if args.verb == "check-policy":
         identity = machine(args.machine); checked_policy(args.path, identity); print("policy-ok")
     elif args.verb == "install":
         require_root()
+        owner_uid = invoking_uid()
         ensure_root_directory(Path("/var/lib/sandbox"), 0o755)
         ensure_root_directory(Path("/var/lib/sandbox/native"), 0o755)
         ensure_root_directory(STAGING_ROOT, 0o1777)
+        ensure_user_directory(INJECTED_ROOT, int(os.environ.get("SUDO_UID", os.getuid())))
         ensure_root_directory(Path("/etc/sandbox"), 0o755)
         ensure_root_directory(POLICY_ROOT, 0o755)
+        ensure_root_directory(POLICY_OWNER_ROOT, 0o755)
+        ensure_root_directory(NETWORK_STATE_ROOT, 0o755)
+        ensure_root_directory(EGRESS_ROOT, 0o755)
+        ensure_root_directory(GRANT_ROOT, 0o755)
+        ensure_root_directory(GRANT_LOCK_ROOT, 0o755)
         atomic_install(Path(__file__).resolve(), INSTALL_PATH)
         os.chmod(INSTALL_PATH, 0o755)
+        broker_source = BROKER_SOURCE if BROKER_SOURCE.is_file() else BROKER_INSTALL_PATH
+        if not broker_source.is_file() or broker_source.is_symlink():
+            fail("native egress broker source is unavailable")
+        atomic_install(broker_source, BROKER_INSTALL_PATH)
+        os.chmod(BROKER_INSTALL_PATH, 0o755)
+        try: login = pwd.getpwuid(owner_uid).pw_name
+        except KeyError: fail("native helper caller account is unavailable")
+        if not LOGIN_NAME.fullmatch(login): fail("native helper caller account is invalid")
+        sudoers = Path(f"/etc/sudoers.d/sandbox-native-{owner_uid}")
+        sudoers_payload = (f"{login} ALL=(root) NOPASSWD: {INSTALL_PATH} *\n").encode()
+        if sudoers.exists() or sudoers.is_symlink():
+            details = sudoers.lstat()
+            if (not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode)
+                    or details.st_uid != 0 or sudoers.read_bytes() != sudoers_payload):
+                fail("native sudo policy ownership changed")
+        else:
+            atomic_install_bytes(sudoers_payload, sudoers)
+            os.chmod(sudoers, 0o440)
+        run_fixed(("visudo", "-cf", str(sudoers)), "native sudo policy validation failed")
     elif args.verb == "host-packages-apply":
         require_root(); host_packages_apply(args.path, args.digest)
+    elif args.verb == "host-baseline-observe":
+        require_root(); host_baseline_observe()
+    elif args.verb == "preflight-probe":
+        require_root(); result = preflight_probe(args.probe)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        if not result["ok"]: raise SystemExit(69)
+    elif args.verb == "_preflight-child":
+        require_root(); preflight_child(args.probe, args.token)
     elif args.verb == "image-bootstrap":
         require_root(); image_bootstrap(machine(args.machine), digest_value(args.policy_digest),
                                         args.plan_path, args.plan_digest, args.web_server)
@@ -1008,26 +3748,61 @@ def main(argv=None):
                                         args.web_server, digest_value(args.service_digest))
     elif args.verb == "policy-install":
         require_root(); identity = machine(args.machine)
-        _source, _value, payload = _read_checked_policy(args.path, identity)
+        _source, value, payload = _read_checked_policy(args.path, identity)
         # Install the exact bytes read from the validated O_NOFOLLOW descriptor;
         # never reopen the user-controlled staging pathname.
-        atomic_install_bytes(payload, POLICY_ROOT / f"{identity}.json")
+        install_policy_pair(identity, value, payload)
     elif args.verb == "policy-status":
         require_root(); identity = machine(args.machine)
         _path, value = checked_policy(POLICY_ROOT / f"{identity}.json", identity, applied=True)
+        read_policy_owner(identity, value)
         print(json.dumps({"machine_id": identity, "digest": value["digest"]}, sort_keys=True))
+    elif args.verb == "grant-reconcile":
+        require_root(); grant_reconcile(
+            machine(args.machine), digest_value(args.base_policy_digest),
+            digest_value(args.expected_grant_digest),
+            digest_value(args.desired_grant_digest))
+    elif args.verb == "policy-remove":
+        require_root(); policy_remove(machine(args.machine), digest_value(args.digest))
+    elif args.verb == "execute":
+        require_root(); raise SystemExit(execute_request(
+            machine(args.machine), digest_value(args.digest), args.request_digest))
+    elif args.verb == "isolation-observe":
+        require_root(); isolation_observe(machine(args.machine))
+    elif args.verb == "cleanup-observe":
+        require_root(); cleanup_observe(args.resource, machine(args.machine),
+                                        digest_value(args.digest), args.resource_digest)
+    elif args.verb == "credential-install":
+        require_root(); credential_install(machine(args.machine), digest_value(args.digest), args.name)
+    elif args.verb in {"services-activate", "services-health", "services-status", "services-stop"}:
+        require_root(); identity = machine(args.machine); policy_digest = digest_value(args.digest)
+        {"services-activate": services_activate,
+         "services-health": services_health,
+         "services-status": services_health,
+         "services-stop": services_stop}[args.verb](
+             identity, policy_digest, digest_value(args.service_digest))
     elif args.verb in {"image-create", "image-mount", "image-unmount", "image-remove",
-                      "network-apply", "network-status", "network-remove",
+                      "network-apply", "network-grants-apply", "network-status", "network-remove",
+                      "egress-apply", "egress-status", "egress-remove",
                       "machine-start-minimal", "machine-status", "machine-stop",
-                      "apparmor-install", "apparmor-status", "apparmor-remove"}:
+                      "apparmor-install", "apparmor-status", "apparmor-remove",
+                      "database-bootstrap", "database-status", "database-remove",
+                      "wordpress-bootstrap", "wordpress-status"}:
         require_root(); identity = machine(args.machine)
         {"image-create": image_create, "image-mount": image_mount,
          "image-unmount": image_unmount, "image-remove": image_remove,
          "network-apply": network_apply, "network-status": network_status,
+         "network-grants-apply": network_grants_apply,
          "network-remove": network_remove, "machine-start-minimal": machine_start_minimal,
+         "egress-apply": egress_apply, "egress-status": egress_status,
+         "egress-remove": egress_remove,
          "machine-status": machine_status, "machine-stop": machine_stop,
          "apparmor-install": apparmor_install, "apparmor-status": apparmor_status,
-         "apparmor-remove": apparmor_remove}[args.verb](
+         "apparmor-remove": apparmor_remove,
+         "database-bootstrap": database_bootstrap,
+         "database-status": database_status, "database-remove": database_remove,
+         "wordpress-bootstrap": wordpress_bootstrap,
+         "wordpress-status": wordpress_status}[args.verb](
              identity, args.digest)
 
 

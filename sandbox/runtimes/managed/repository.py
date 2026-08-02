@@ -15,7 +15,8 @@ from sandbox.isolation.models import canonical_digest
 
 
 VERSION = 1
-SECTIONS = ("selections", "backends", "policies", "packages", "grants", "recovery")
+SECTIONS = ("selections", "backends", "policies", "packages", "grants", "networks",
+            "recovery")
 
 
 def _empty(): return {"version": VERSION, **{name: {} for name in SECTIONS}}
@@ -105,3 +106,98 @@ class NativeRepository:
 
     def put_recovery(self, key, record):
         with self.transaction() as state: state["recovery"][key] = dict(record)
+
+    def remove_recovery(self, key):
+        with self.transaction() as state: state["recovery"].pop(key, None)
+
+    def remove_recovery_if_unchanged(self, key, observed):
+        """Remove one recovery entry only when its persisted record is unchanged.
+
+        Cleanup retries use this to retire an old, resource-specific failure
+        without racing a newer failure record written by another control-plane
+        actor.  A caller that did not observe the exact current record has no
+        authority to discard it.
+        """
+        with self.transaction() as state:
+            record = state["recovery"].get(key)
+            if record is None:
+                return "absent"
+            if canonical_digest(record) != canonical_digest(observed):
+                return "drifted"
+            del state["recovery"][key]
+            return "removed"
+
+    def reserve_network(self, machine_id, *, owner=None, allocator=None):
+        """Atomically reserve a unique point-to-point subnet and veth identity."""
+        from sandbox.isolation.network import SubnetAllocator
+
+        allocator = allocator or SubnetAllocator()
+        with self.transaction() as state:
+            existing = state["networks"].get(machine_id)
+            expected_owner = machine_id if owner is None else owner
+            if existing is not None:
+                if existing.get("owner") != expected_owner:
+                    raise ValueError("foreign native network ownership collision")
+                return copy.deepcopy(existing)
+            used = [record.get("subnet") for record in state["networks"].values()
+                    if isinstance(record, dict) and isinstance(record.get("subnet"), str)]
+            allocation = allocator.allocate(machine_id, used=used)
+            if any(record.get("veth") == allocation["veth"]
+                   for record in state["networks"].values() if isinstance(record, dict)):
+                raise ValueError("native veth ownership collision")
+            record = {"owner": expected_owner, **allocation}
+            record["last_applied"] = canonical_digest(record)
+            state["networks"][machine_id] = record
+            return copy.deepcopy(record)
+
+    def release_network(self, machine_id, observed):
+        value = {key: item for key, item in dict(observed).items()
+                 if key != "last_applied"}
+        return self.remove_if_unchanged("networks", machine_id, value)
+
+    def grant_record(self, machine_id, *, owner=None):
+        """Return one attributed grant record without exposing a mutable view."""
+        with self._lock():
+            record = self._read()["grants"].get(machine_id)
+            if record is None:
+                return None
+            if owner is not None and record.get("owner") != owner:
+                raise ValueError("foreign native grant ownership collision")
+            return copy.deepcopy(record)
+
+    def put_grants_if_expected(self, machine_id, *, owner, policy_digest,
+                               expected_digest, grant_set):
+        """Persist a helper-confirmed grant transition using compare-and-swap.
+
+        The caller runs the privileged reconcile before this method.  We only
+        commit the requested record after it succeeds, and only when the local
+        expectation still names the same capability revision.  This prevents a
+        stale ensure from silently overwriting a newer grant revocation.
+        """
+        from sandbox.isolation.models import EgressGrantSet
+
+        if not isinstance(grant_set, EgressGrantSet):
+            raise ValueError("native grant record is invalid")
+        if (grant_set.machine_id != machine_id or
+                grant_set.base_policy_digest != policy_digest):
+            raise ValueError("native grant binding is invalid")
+        if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+            raise ValueError("native expected grant digest is invalid")
+        record = {
+            "owner": owner, "machine_id": machine_id,
+            "policy_digest": policy_digest, "grant_digest": grant_set.digest,
+            "grant_set": grant_set.to_dict(),
+        }
+        record["last_applied"] = canonical_digest(record)
+        with self.transaction() as state:
+            prior = state["grants"].get(machine_id)
+            if prior is not None:
+                if prior.get("owner") != owner:
+                    raise ValueError("foreign native grant ownership collision")
+                if (prior.get("policy_digest") != policy_digest or
+                        prior.get("grant_digest") != expected_digest):
+                    return "drifted"
+            elif expected_digest != "0" * 64:
+                return "drifted"
+            state["grants"][machine_id] = record
+            return "stored"

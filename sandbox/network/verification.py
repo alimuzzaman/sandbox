@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 from .detection import _answers
 
 
@@ -22,6 +25,26 @@ class DomainVerifier:
         if result.returncode != 0:
             return False
         actual = set(_answers(result.stdout))
-        if not actual.intersection(accepted_addresses):
+        if len(actual) != 1 or not actual.issubset(accepted_addresses):
             return False
-        return bool(self.http.probe(fallback_url, timeout=5))
+        try:
+            parsed = urlsplit(fallback_url)
+            if parsed.scheme != "http" or parsed.username or parsed.password:
+                return False
+            fallback_host = parsed.hostname
+            if fallback_host == "localhost":
+                fallback_address = "127.0.0.1"
+            else:
+                candidate = ipaddress.ip_address(fallback_host or "")
+                if not candidate.is_loopback:
+                    return False
+                fallback_address = str(candidate)
+            fallback_port = parsed.port or 80
+        except (ValueError, TypeError):
+            return False
+        probe_route = getattr(self.http, "probe_route", None)
+        if probe_route is None:
+            return False
+        return bool(probe_route(
+            fallback_address, fallback_port, hostname, timeout=5,
+        ))

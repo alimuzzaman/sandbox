@@ -43,6 +43,8 @@ def run_descriptor(path: str | Path) -> int:
             supervisor_nonce_hash=descriptor["nonce_hash"])
         repository.transition(job_id, Lifecycle.RUNNING)
         output = JobOutputStore(storage, repository, job_id, secrets=descriptor.get("redaction_secrets", ()))
+        if _managed_native_job(descriptor):
+            return _run_managed_native(descriptor, repository, output)
         command = subprocess.Popen(descriptor["argv"], cwd=descriptor["cwd"], env=descriptor.get("environment"),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, close_fds=True)
@@ -173,6 +175,57 @@ def run_descriptor(path: str | Path) -> int:
 def _iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _managed_native_job(descriptor) -> bool:
+    """Do not host-Popen a managed-native durable payload."""
+    runtime = descriptor.get("execution_runtime")
+    if runtime not in {"host", "managed_native"}:
+        raise RuntimeError("durable descriptor runtime selection is missing")
+    return runtime == "managed_native"
+
+
+def _run_managed_native(descriptor, repository, output: JobOutputStore) -> int:
+    """Execute a managed durable payload through the adapter-owned gateway.
+
+    This synchronous boundary is deliberate: the installed helper owns the
+    bounded guest process and deadline.  The host supervisor only persists the
+    already-bounded result and never interprets or host-executes project argv.
+    """
+    from sandbox.application.context import execute_project
+    from sandbox.runtimes.base import ExecutionRequest
+
+    if descriptor.get("artifact_paths"):
+        repository.transition(
+            descriptor["job_id"], Lifecycle.FAILED,
+            termination_reason="adapter_native_artifacts_unavailable",
+            result_json=json.dumps({"error": "managed durable artifacts require an adapter-native transport"}),
+        )
+        return 1
+    result = execute_project({}, ExecutionRequest(
+        descriptor.get("project_root") or descriptor["cwd"],
+        descriptor.get("label", "default"),
+        "durable_job",
+        tuple(descriptor["argv"]),
+        int(descriptor["deadline_seconds"]),
+    ))
+    stdout = result.data.get("stdout", "")
+    stderr = result.data.get("stderr", "")
+    output.append("stdout", stdout.encode() if isinstance(stdout, str) else bytes(stdout))
+    output.append("stderr", stderr.encode() if isinstance(stderr, str) else bytes(stderr))
+    output.finish("stdout")
+    output.finish("stderr")
+    integrity = output.complete()
+    target = Lifecycle.SUCCEEDED if result.ok else Lifecycle.FAILED
+    reason = result.data.get("reason", {})
+    reason_code = reason.get("code") if isinstance(reason, dict) else None
+    repository.transition(
+        descriptor["job_id"], target, exit_code=result.exit_code,
+        termination_reason=None if result.ok else (reason_code or "isolated_payload_failed"),
+        output_completeness="complete", integrity_sha256=integrity,
+        result_json=json.dumps({"state": result.state, "reason": reason}, sort_keys=True),
+    )
+    return 0 if result.ok else 1
 
 
 def _signal_group(process_group_id: int, signal_number: int) -> None:

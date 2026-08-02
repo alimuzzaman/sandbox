@@ -18,6 +18,44 @@ class FakeAdapter:
         return {"ok": True}
 
 
+class UnreadyHelperAdapter(FakeAdapter):
+    def ensure_helper(self, *, interactive):
+        self.calls.append(("ensure_helper", interactive))
+        return {"ok": False, "mutated": False, "error": "install required"}
+
+
+class UnreadyAuthorizationAdapter(FakeAdapter):
+    def ensure_helper(self, *, interactive):
+        return {"ok": True, "mutated": False}
+
+    def ensure_authorized(self, plan, *, interactive):
+        self.calls.append(("ensure_authorized", interactive, plan["owner_digest"]))
+        return {"ok": False, "mutated": False, "error": "authorization required"}
+
+
+class FailingRollbackAdapter(FakeAdapter):
+    def rollback(self, plan):
+        self.calls.append(("rollback", plan))
+        return {"ok": False, "mutated": True}
+
+
+class FailingApplyAdapter(FakeAdapter):
+    def apply(self, plan):
+        self.calls.append(("apply", plan))
+        return {"ok": False, "mutated": False, "error": "apply failed"}
+
+
+class ReceiptAdapter(FakeAdapter):
+    def ensure_helper(self, *, interactive):
+        return {"ok": True, "mutated": False}
+
+    def ensure_authorized(self, plan, *, interactive):
+        return {"ok": True, "mutated": False}
+
+    def release_owner(self, binding, owner_digest):
+        return {"ok": True, "mutated": True}
+
+
 class FakeAuthority:
     def __init__(self):
         self.calls = []
@@ -151,6 +189,7 @@ class TestDomainServiceIntegration(unittest.TestCase):
             verifier=lambda hostname, addresses, fallback: verified,
             consent_decider=lambda owner: interactive_consent,
             identity_persister=lambda *_args: None,
+            platform="linux",
         )
         return service, adapter, authority
 
@@ -184,6 +223,103 @@ class TestDomainServiceIntegration(unittest.TestCase):
         self.assertEqual(result.state, "fallback")
         self.assertEqual([call[0] for call in adapter.calls], ["apply", "rollback"])
         self.assertEqual(authority.calls[-1][0], "remove")
+
+    def test_apply_failure_with_authority_cleanup_failure_retains_recovery(self):
+        service, _adapter, authority = self._service(interactive_consent=True)
+        adapter = FailingApplyAdapter()
+        object.__setattr__(service.adapters.get("resolved"), "adapter", adapter)
+        authority.remove = lambda binding_id: False
+        result = service.apply("/tmp/project", interactive=True)
+        self.assertEqual(result.state, "cleanup_incomplete")
+        self.assertEqual(result.reason["code"], "authority_cleanup_failed")
+        snapshot = service.repository.snapshot()
+        self.assertTrue(snapshot["bindings"])
+        self.assertEqual(
+            next(iter(snapshot["recovery"].values()))["reason_code"],
+            "authority_cleanup_failed",
+        )
+
+    def test_verification_failure_with_authority_cleanup_failure_retains_recovery(self):
+        service, _adapter, authority = self._service(
+            interactive_consent=True, verified=False,
+        )
+        authority.remove = lambda binding_id: False
+        result = service.apply("/tmp/project", interactive=True)
+        self.assertEqual(result.state, "cleanup_incomplete")
+        self.assertEqual(result.reason["code"], "authority_cleanup_failed")
+        snapshot = service.repository.snapshot()
+        self.assertTrue(snapshot["bindings"])
+        self.assertEqual(
+            next(iter(snapshot["recovery"].values()))["reason_code"],
+            "authority_cleanup_failed",
+        )
+
+    def test_failed_verification_with_failed_rollback_retains_authority_and_recovery(self):
+        service, _adapter, authority = self._service(
+            interactive_consent=True, verified=False,
+        )
+        failing = FailingRollbackAdapter()
+        spec = service.adapters.get("resolved")
+        object.__setattr__(spec, "adapter", failing)
+        result = service.apply("/tmp/project", interactive=True)
+        self.assertEqual(result.state, "cleanup_incomplete")
+        self.assertEqual(result.reason["code"], "verification_rollback_failed")
+        self.assertNotIn(("remove",), [call[:1] for call in authority.calls])
+        self.assertTrue(service.repository.snapshot()["recovery"])
+        self.assertTrue(service.repository.snapshot()["bindings"])
+
+    def test_missing_fixed_helper_returns_pending_before_authority_mutation(self):
+        service, _adapter, authority = self._service(interactive_consent=True)
+        unready = UnreadyHelperAdapter()
+        spec = service.adapters.get("resolved")
+        object.__setattr__(spec, "adapter", unready)
+        result = service.apply("/tmp/project", interactive=True)
+        self.assertEqual(result.state, "pending_privilege")
+        self.assertFalse(result.mutated)
+        self.assertEqual(authority.calls, [])
+
+    def test_missing_exact_receipt_returns_pending_before_authority_mutation(self):
+        service, _adapter, authority = self._service(interactive_consent=True)
+        unready = UnreadyAuthorizationAdapter()
+        spec = service.adapters.get("resolved")
+        object.__setattr__(spec, "adapter", unready)
+        result = service.apply("/tmp/project", interactive=True)
+        self.assertEqual(result.state, "pending_privilege")
+        self.assertEqual(result.reason["code"], "resolver_authorization_required")
+        self.assertFalse(result.mutated)
+        self.assertEqual(authority.calls, [])
+        self.assertEqual(len(unready.calls[0][2]), 64)
+
+    def test_shared_binding_join_records_a_separate_applied_owner_receipt(self):
+        service, _adapter, _authority = self._service(interactive_consent=True)
+        adapter = ReceiptAdapter()
+        object.__setattr__(service.adapters.get("resolved"), "adapter", adapter)
+        first = service.apply("/tmp/project", label="default", interactive=True)
+        second = service.apply("/tmp/project", label="preview", interactive=True)
+        self.assertTrue(first.ok); self.assertTrue(second.ok)
+        self.assertEqual([call[0] for call in adapter.calls], ["apply", "apply"])
+        binding = next(iter(service.repository.snapshot()["bindings"].values()))
+        self.assertEqual(len(binding["owners"]), 2)
+
+    def test_authority_cleanup_failure_retains_retry_state_and_is_retryable(self):
+        service, _adapter, authority = self._service(interactive_consent=True)
+        adapter = ReceiptAdapter()
+        object.__setattr__(service.adapters.get("resolved"), "adapter", adapter)
+        service.binding_observer = lambda binding, _adapter: {"route": "ok"}
+        self.assertTrue(service.apply("/tmp/project", interactive=True).ok)
+        authority.remove = lambda binding_id: False
+        failed = service.cleanup("/tmp/project")
+        self.assertEqual(failed.state, "cleanup_incomplete")
+        snapshot = service.repository.snapshot()
+        self.assertTrue(snapshot["bindings"])
+        self.assertEqual(
+            next(iter(snapshot["recovery"].values()))["reason_code"],
+            "authority_cleanup_failed",
+        )
+        authority.remove = lambda binding_id: True
+        retried = service.cleanup("/tmp/project")
+        self.assertTrue(retried.ok)
+        self.assertEqual(service.repository.snapshot()["bindings"], {})
 
 
 if __name__ == "__main__":

@@ -62,6 +62,14 @@ class DomainService:
             "mutated": False,
         }
 
+    def ingress_policy(self, project_dir: str, *, label: str = "default") -> dict[str, Any]:
+        """Return only ingress pin intent/provenance; never inspect or mutate a host."""
+        config = self.config_loader(project_dir, label=label)
+        policy = config["domains"]
+        return {"pin": policy.get("ingress"),
+                "pin_source": policy.get("ingressSource", "default"),
+                "project_root": str(Path(config["root"]).resolve())}
+
     def _context(self, project_dir: str, label: str) -> tuple[dict, dict, str, str]:
         config = self.config_loader(project_dir, label=label)
         root = str(Path(config["root"]).resolve())
@@ -270,18 +278,48 @@ class DomainService:
                 reason_code="wildcard_unsupported",
                 message="The selected resolver does not support a scoped wildcard zone.",
             )
-        address, port = self.endpoints.allocate()
+        authority_status = self.authority.status() if self.authority is not None and hasattr(
+            self.authority, "status"
+        ) else {}
+        if authority_status.get("address") and authority_status.get("port"):
+            address = authority_status["address"]
+            port = int(authority_status["port"])
+            endpoint_existing = True
+        else:
+            address, port = self.endpoints.allocate()
+            endpoint_existing = False
         target = accepted[0]
         suffix = policy["tld"]
         owner = f"{Path(config['root']).resolve()}::{label}"
         kind = "zone" if policy.get("wildcard") else "exact"
         binding_name = f"*.{hostname}" if kind == "zone" else hostname
+        for raw in self.repository.snapshot()["bindings"].values():
+            owned = ResolutionBinding.from_dict(raw)
+            owned_name = owned.name.removeprefix("*.")
+            requested_name = binding_name.removeprefix("*.")
+            overlaps = (
+                owned.name == binding_name
+                or (owned.kind == "zone" and (
+                    requested_name == owned_name or requested_name.endswith("." + owned_name)
+                ))
+                or (kind == "zone" and (
+                    owned_name == requested_name or owned_name.endswith("." + requested_name)
+                ))
+            )
+            if overlaps and (owned.target != target or owned.adapter_id != spec.adapter_id):
+                return None, self._result(
+                    state="foreign_collision", hostname=hostname, policy=policy,
+                    observation=observation, expected=accepted, fallback=fallback,
+                    reason_code="owned_namespace_collision",
+                    message="An existing owned DNS namespace points at another backend.",
+                )
         adapter_plan = (
             spec.adapter.plan(suffix, address, port)
             if hasattr(spec.adapter, "plan") and observation.manager == "resolved"
             else {"kind": kind, "hostname": hostname, "address": target,
                   "suffix": suffix, "port": port}
         )
+        adapter_plan = {**adapter_plan, "owner_digest": canonical_digest(owner)}
         binding = ResolutionBinding.create(
             kind=kind, name=binding_name, target=target,
             adapter_id=spec.adapter_id, owners=(owner,), desired=adapter_plan,
@@ -290,6 +328,7 @@ class DomainService:
             "config": config, "policy": policy, "hostname": hostname,
             "fallback": fallback, "observation": observation, "offer": offer,
             "accepted": accepted, "spec": spec, "address": address, "port": port,
+            "endpoint_existing": endpoint_existing,
             "binding": binding, "adapter_plan": {
                 **adapter_plan, "hostname": hostname, "target": target,
                 "binding_id": binding.binding_id,
@@ -312,6 +351,16 @@ class DomainService:
 
     def apply(self, project_dir: str, *, label: str = "default",
               interactive: bool = False, offer_override=None) -> DomainResult:
+        operation = getattr(self.repository, "operation", None)
+        if operation is None:
+            return self._apply(project_dir, label=label, interactive=interactive,
+                               offer_override=offer_override)
+        with operation():
+            return self._apply(project_dir, label=label, interactive=interactive,
+                               offer_override=offer_override)
+
+    def _apply(self, project_dir: str, *, label: str = "default",
+               interactive: bool = False, offer_override=None) -> DomainResult:
         prepared, result = self._prepare(project_dir, label, offer_override)
         if result is not None:
             return result
@@ -349,9 +398,81 @@ class DomainService:
             )
         existing = self.repository.binding(prepared["binding"].binding_id)
         if existing is not None and existing.last_applied is not None:
+            if self.authority is None:
+                return self._result(
+                    state="fallback", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="authority_unavailable",
+                    message="The scoped answering authority is unavailable.",
+                )
+            if hasattr(prepared["spec"].adapter, "ensure_helper"):
+                helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
+                if not helper.get("ok"):
+                    return self._result(
+                        state="pending_privilege", hostname=prepared["hostname"],
+                        policy=prepared["policy"], observation=current,
+                        expected=prepared["accepted"], fallback=prepared["fallback"],
+                        reason_code="resolver_helper_required",
+                        message=helper.get("error", "The scoped resolver helper is unavailable."),
+                        mutated=bool(helper.get("mutated")),
+                    )
+            if hasattr(prepared["spec"].adapter, "ensure_authorized"):
+                authorized = prepared["spec"].adapter.ensure_authorized(
+                    prepared["adapter_plan"], interactive=interactive,
+                )
+                if not authorized.get("ok"):
+                    return self._result(
+                        state="pending_privilege", hostname=prepared["hostname"],
+                        policy=prepared["policy"], observation=current,
+                        expected=prepared["accepted"], fallback=prepared["fallback"],
+                        reason_code="resolver_authorization_required",
+                        message=authorized.get("error", "Exact resolver authorization is unavailable."),
+                        mutated=bool(authorized.get("mutated")),
+                    )
+            joined_applied = None
+            if hasattr(prepared["spec"].adapter, "release_owner"):
+                joined_applied = prepared["spec"].adapter.apply(
+                    prepared["adapter_plan"],
+                )
+                if not joined_applied.get("ok"):
+                    return self._result(
+                        state="cleanup_incomplete" if joined_applied.get("rollback_failed")
+                        else "fallback",
+                        hostname=prepared["hostname"], policy=prepared["policy"],
+                        observation=current, expected=prepared["accepted"],
+                        fallback=prepared["fallback"],
+                        reason_code="shared_binding_receipt_failed",
+                        message=joined_applied.get(
+                            "error", "Shared resolver ownership could not be recorded.",
+                        ),
+                        mutated=bool(joined_applied.get("mutated")),
+                    )
             if not self.verifier(
                 prepared["hostname"], prepared["accepted"], prepared["fallback"],
             ):
+                if joined_applied is not None:
+                    rollback = prepared["spec"].adapter.rollback({
+                        **prepared["adapter_plan"],
+                        "applied": joined_applied.get("applied") or {},
+                    })
+                    if not rollback.get("ok"):
+                        self.repository.put_binding(prepared["binding"])
+                        self.repository.put_recovery(CleanupRecovery(
+                            prepared["binding"].binding_id,
+                            prepared["binding"].adapter_id,
+                            existing.last_applied_digest, None,
+                            "shared_verification_rollback_failed", None,
+                            "unavailable",
+                        ))
+                        return self._result(
+                            state="cleanup_incomplete", hostname=prepared["hostname"],
+                            policy=prepared["policy"], observation=current,
+                            expected=prepared["accepted"], fallback=prepared["fallback"],
+                            reason_code="shared_verification_rollback_failed",
+                            message="Shared verification failed and owner receipt rollback did not complete.",
+                            mutated=True, ownership="residual",
+                        )
                 return self._result(
                     state="drifted", hostname=prepared["hostname"],
                     policy=prepared["policy"], observation=current,
@@ -382,22 +503,162 @@ class DomainService:
                 reason_code="authority_unavailable",
                 message="The scoped answering authority is unavailable.",
             )
-        self.authority.ensure(
-            (prepared["binding"],), address=prepared["address"], port=prepared["port"],
+        if hasattr(prepared["spec"].adapter, "ensure_helper"):
+            helper = prepared["spec"].adapter.ensure_helper(interactive=interactive)
+            if not helper.get("ok"):
+                return self._result(
+                    state="pending_privilege", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_helper_required",
+                    message=helper.get("error", "The scoped resolver helper is unavailable."),
+                    mutated=bool(helper.get("mutated")),
+                )
+        if hasattr(prepared["spec"].adapter, "ensure_authorized"):
+            authorized = prepared["spec"].adapter.ensure_authorized(
+                prepared["adapter_plan"], interactive=interactive,
+            )
+            if not authorized.get("ok"):
+                return self._result(
+                    state="pending_privilege", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="resolver_authorization_required",
+                    message=authorized.get(
+                        "error", "Exact resolver authorization is unavailable.",
+                    ),
+                    mutated=bool(authorized.get("mutated")),
+                )
+        existing_bindings = tuple(
+            ResolutionBinding.from_dict(value)
+            for value in self.repository.snapshot()["bindings"].values()
         )
+        reservation = None
+        if not prepared["endpoint_existing"] and hasattr(self.endpoints, "reserve"):
+            try:
+                reservation = self.endpoints.reserve(prepared["port"])
+            except (OSError, RuntimeError, ValueError) as exc:
+                if hasattr(prepared["spec"].adapter, "revoke_authorization"):
+                    prepared["spec"].adapter.revoke_authorization(prepared["adapter_plan"])
+                return self._result(
+                    state="foreign_collision", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="authority_endpoint_collision", message=str(exc),
+                )
+        try:
+            self.authority.ensure(
+                (*existing_bindings, prepared["binding"]),
+                address=prepared["address"], port=prepared["port"],
+                reservation=reservation,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            if hasattr(prepared["spec"].adapter, "revoke_authorization"):
+                prepared["spec"].adapter.revoke_authorization(
+                    prepared["adapter_plan"],
+                )
+            return self._result(
+                state="foreign_collision", hostname=prepared["hostname"],
+                policy=prepared["policy"], observation=current,
+                expected=prepared["accepted"], fallback=prepared["fallback"],
+                reason_code="authority_endpoint_changed",
+                message=str(exc), mutated=False,
+            )
+        finally:
+            if reservation is not None:
+                try:
+                    reservation.release()
+                except OSError:
+                    pass
         applied = prepared["spec"].adapter.apply(prepared["adapter_plan"])
         if not applied.get("ok"):
-            self.authority.remove(prepared["binding"].binding_id)
+            rollback_failed = bool(applied.get("rollback_failed"))
+            if rollback_failed:
+                residual = prepared["binding"].with_applied(
+                    applied.get("applied") or prepared["binding"].desired,
+                )
+                self.repository.put_binding(residual)
+                self.repository.put_recovery(CleanupRecovery(
+                    prepared["binding"].binding_id,
+                    prepared["binding"].adapter_id,
+                    residual.last_applied_digest, None,
+                    "resolver_apply_rollback_failed", None, "unavailable",
+                ))
+            else:
+                try:
+                    authority_removed = self.authority.remove(
+                        prepared["binding"].binding_id,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    authority_removed = False
+                if not authority_removed:
+                    rollback_failed = True
+                    residual = prepared["binding"].with_applied(
+                        applied.get("applied") or prepared["binding"].desired,
+                    )
+                    self.repository.put_binding(residual)
+                    self.repository.put_recovery(CleanupRecovery(
+                        residual.binding_id, residual.adapter_id,
+                        residual.last_applied_digest, None,
+                        "authority_cleanup_failed", None, "unavailable",
+                    ))
             return self._result(
-                state="fallback", hostname=prepared["hostname"], policy=prepared["policy"],
+                state="cleanup_incomplete" if rollback_failed else "fallback",
+                hostname=prepared["hostname"], policy=prepared["policy"],
                 observation=current, expected=prepared["accepted"], fallback=prepared["fallback"],
-                reason_code="resolver_apply_failed", message=applied.get("error", "Resolver apply failed."),
-                mutated=bool(applied.get("mutated")),
+                reason_code=(
+                    "authority_cleanup_failed"
+                    if rollback_failed and not applied.get("rollback_failed")
+                    else ("resolver_apply_rollback_failed" if rollback_failed
+                          else "resolver_apply_failed")
+                ),
+                message=applied.get("error", "Resolver apply failed."),
+                mutated=bool(applied.get("mutated")) or rollback_failed,
+                ownership="residual" if rollback_failed else "none",
             )
         plan = {**prepared["adapter_plan"], "applied": applied.get("applied") or {}}
         if not self.verifier(prepared["hostname"], prepared["accepted"], prepared["fallback"]):
-            prepared["spec"].adapter.rollback(plan)
-            self.authority.remove(prepared["binding"].binding_id)
+            rollback = prepared["spec"].adapter.rollback(plan)
+            if not rollback.get("ok"):
+                self.repository.put_binding(
+                    prepared["binding"].with_applied(applied.get("applied") or {}),
+                )
+                self.repository.put_recovery(CleanupRecovery(
+                    prepared["binding"].binding_id,
+                    prepared["binding"].adapter_id,
+                    canonical_digest(prepared["binding"].desired), None,
+                    "verification_rollback_failed", None, "unavailable",
+                ))
+                return self._result(
+                    state="cleanup_incomplete", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="verification_rollback_failed",
+                    message="Verification failed and resolver rollback did not complete; recovery was retained.",
+                    mutated=True, ownership="residual",
+                )
+            try:
+                authority_removed = self.authority.remove(
+                    prepared["binding"].binding_id,
+                )
+            except (OSError, RuntimeError, ValueError):
+                authority_removed = False
+            if not authority_removed:
+                residual = prepared["binding"].with_applied(applied.get("applied") or {})
+                self.repository.put_binding(residual)
+                self.repository.put_recovery(CleanupRecovery(
+                    residual.binding_id, residual.adapter_id,
+                    residual.last_applied_digest, None,
+                    "authority_cleanup_failed", None, "unavailable",
+                ))
+                return self._result(
+                    state="cleanup_incomplete", hostname=prepared["hostname"],
+                    policy=prepared["policy"], observation=current,
+                    expected=prepared["accepted"], fallback=prepared["fallback"],
+                    reason_code="authority_cleanup_failed",
+                    message="Verification failed and authority cleanup did not complete; recovery was retained.",
+                    mutated=True, ownership="residual",
+                )
             return self._result(
                 state="fallback", hostname=prepared["hostname"], policy=prepared["policy"],
                 observation=current, expected=prepared["accepted"], fallback=prepared["fallback"],
@@ -421,6 +682,14 @@ class DomainService:
 
     def cleanup(self, project_dir: str, *, label: str = "default",
                 interactive: bool = False) -> DomainResult:
+        operation = getattr(self.repository, "operation", None)
+        if operation is None:
+            return self._cleanup(project_dir, label=label, interactive=interactive)
+        with operation():
+            return self._cleanup(project_dir, label=label, interactive=interactive)
+
+    def _cleanup(self, project_dir: str, *, label: str = "default",
+                 interactive: bool = False) -> DomainResult:
         try:
             config, policy, hostname, fallback = self._context(project_dir, label)
         except DomainContextError:
@@ -458,10 +727,22 @@ class DomainService:
         incomplete = False
         mutated = False
         for binding in bindings:
-            if len(binding.owners) > 1:
-                if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
-                    mutated = True
+            recovery = self.repository.snapshot()["recovery"].get(binding.binding_id) or {}
+            if recovery.get("reason_code") == "authority_cleanup_failed":
+                try:
+                    removed = self.authority is not None and self.authority.remove(
+                        binding.binding_id,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    removed = False
+                if not removed:
+                    incomplete = True
                     continue
+                self.repository.remove_binding_if_unchanged(
+                    binding.binding_id, binding.last_applied_digest,
+                )
+                mutated = True
+                continue
             spec = self.adapters.get(binding.adapter_id)
             adapter = spec.adapter if spec is not None else None
             observed = (
@@ -483,17 +764,51 @@ class DomainService:
                 )
                 incomplete = True
                 continue
-            result = adapter.cleanup(binding)
-            if not result.get("ok"):
-                self.repository.put_recovery(CleanupRecovery(
-                    binding.binding_id, binding.adapter_id,
-                    binding.last_applied_digest, observed_digest,
-                    "resolver_cleanup_failed", None, "unavailable",
-                ))
-                incomplete = True
-                continue
+            if len(binding.owners) > 1 and not hasattr(adapter, "release_owner"):
+                if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
+                    mutated = True
+                    continue
+            all_bindings = tuple(
+                ResolutionBinding.from_dict(value)
+                for value in self.repository.snapshot()["bindings"].values()
+            )
+            shared_route = any(
+                item.binding_id != binding.binding_id
+                and item.adapter_id == binding.adapter_id
+                and item.desired.get("suffix") == binding.desired.get("suffix")
+                for item in all_bindings
+            )
+            result = None
+            if hasattr(adapter, "release_owner"):
+                result = adapter.release_owner(binding, canonical_digest(owner))
+            elif not shared_route:
+                result = adapter.cleanup(binding)
+            if result is not None:
+                if not result.get("ok"):
+                    self.repository.put_recovery(CleanupRecovery(
+                        binding.binding_id, binding.adapter_id,
+                        binding.last_applied_digest, observed_digest,
+                        "resolver_cleanup_failed", None, "unavailable",
+                    ))
+                    incomplete = True
+                    continue
+            if len(binding.owners) > 1:
+                if self.repository.release_binding_owner(binding.binding_id, owner) == "retained":
+                    mutated = True
+                    continue
             if self.authority is not None:
-                self.authority.remove(binding.binding_id)
+                try:
+                    authority_removed = self.authority.remove(binding.binding_id)
+                except (OSError, RuntimeError, ValueError):
+                    authority_removed = False
+                if not authority_removed:
+                    self.repository.put_recovery(CleanupRecovery(
+                        binding.binding_id, binding.adapter_id,
+                        binding.last_applied_digest, observed_digest,
+                        "authority_cleanup_failed", None, "unavailable",
+                    ))
+                    incomplete = True
+                    continue
             self.repository.remove_binding_if_unchanged(binding.binding_id, observed_digest)
             mutated = True
         if incomplete:

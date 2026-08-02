@@ -1,15 +1,17 @@
 """macOS scoped `/etc/resolver` adapter boundary."""
 
 import hashlib
-import os
 from pathlib import Path
-import tempfile
 
 from sandbox.config.domains import normalize_tld
+from sandbox.network.adapters.resolved import INSTALLED_HELPER
 
 
 class MacosResolverAdapter:
-    def __init__(self, *, helper: str, process, staging_root: str | Path) -> None:
+    def __init__(self, *, helper: str = INSTALLED_HELPER, process,
+                 staging_root: str | Path) -> None:
+        if helper != INSTALLED_HELPER:
+            raise ValueError("macOS resolver mutations require the fixed installed helper")
         self.helper = helper
         self.process = process
         self.staging_root = Path(staging_root).resolve()
@@ -19,41 +21,45 @@ class MacosResolverAdapter:
         suffix = normalize_tld(suffix)
         content = (f"# sandbox-resolver v1 suffix={suffix}\n"
                    f"nameserver {address}\nport {int(port)}\n")
-        candidate = self.authority_root / f"macos-{suffix}.resolver"
         return {"kind": "macos-resolver", "suffix": suffix, "address": address,
                 "port": int(port), "destination": f"/etc/resolver/{suffix}",
-                "candidate": str(candidate), "content": content}
+                "content": content}
 
     def apply(self, plan: dict) -> dict:
-        self.authority_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        candidate = Path(plan["candidate"])
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=candidate.name + ".", dir=self.staging_root,
-        )
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w") as stream:
-                stream.write(plan["content"])
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, candidate)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        digest = hashlib.sha256(plan["content"].encode()).hexdigest()
         result = self.process.run((
-            "sudo", "-n", self.helper, "macos-apply", str(self.staging_root),
-            str(candidate), plan["suffix"], plan["address"], str(plan["port"]),
+            "sudo", "-n", self.helper, "macos-apply",
+            plan["owner_digest"], plan["suffix"], plan["address"],
+            str(plan["port"]), digest,
         ), timeout=30)
         return {"ok": result.returncode == 0,
                 "mutated": result.returncode == 0 and
                            (result.stdout or "").strip() != "unchanged",
                 "applied": {"destination": plan["destination"],
-                            "content_digest": hashlib.sha256(
-                                plan["content"].encode(),
-                            ).hexdigest()},
+                            "content_digest": digest},
                 "error": (result.stderr or "")[:1000]}
 
+    def ensure_authorized(self, plan: dict, *, interactive: bool) -> dict:
+        digest = hashlib.sha256(plan["content"].encode()).hexdigest()
+        args = ("macos", plan["owner_digest"], plan["suffix"],
+                plan["address"], str(plan["port"]), digest)
+        status = self.process.run(
+            ("sudo", "-n", self.helper, "authorization-status", *args), timeout=5,
+        )
+        if status.returncode == 0 and (status.stdout or "").strip() == "authorized":
+            return {"ok": True, "mutated": False, "digest": digest}
+        if not interactive:
+            return {"ok": False, "mutated": False,
+                    "error": "Exact resolver authorization requires interactive approval."}
+        result = self.process.run(("sudo", self.helper, "authorize", *args), timeout=120)
+        return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
+                "digest": digest,
+                "error": (result.stderr or "resolver authorization failed")[:1000]}
+
     def cleanup(self, binding) -> dict:
+        return self.release_owner(binding, dict(binding.desired)["owner_digest"])
+
+    def release_owner(self, binding, owner_digest: str) -> dict:
         desired = dict(binding.desired)
         applied = dict(binding.last_applied or {})
         digest = applied.get("content_digest")
@@ -62,7 +68,8 @@ class MacosResolverAdapter:
                     "error": "macOS resolver ownership digest is unavailable"}
         result = self.process.run((
             "sudo", "-n", self.helper, "macos-remove",
-            desired["suffix"], digest,
+            owner_digest, desired["suffix"], desired["address"],
+            str(desired["port"]), digest,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": (result.stderr or "")[:1000]}
@@ -73,7 +80,18 @@ class MacosResolverAdapter:
             return {"ok": False, "mutated": False,
                     "error": "macOS resolver ownership digest is unavailable"}
         result = self.process.run((
-            "sudo", "-n", self.helper, "macos-remove", plan["suffix"], digest,
+            "sudo", "-n", self.helper, "macos-remove", plan["owner_digest"],
+            plan["suffix"], plan["address"], str(plan["port"]), digest,
+        ), timeout=30)
+        return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
+                "error": (result.stderr or "")[:1000]}
+
+    def revoke_authorization(self, plan: dict) -> dict:
+        digest = hashlib.sha256(plan["content"].encode()).hexdigest()
+        result = self.process.run((
+            "sudo", "-n", self.helper, "revoke-authorization", "macos",
+            plan["owner_digest"],
+            plan["suffix"], plan["address"], str(plan["port"]), digest,
         ), timeout=30)
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": (result.stderr or "")[:1000]}

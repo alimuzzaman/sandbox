@@ -361,7 +361,15 @@ def cmd_test(cfg, args) -> None:
         if getattr(args, "provision_only", False):
             return
     else:
-        tools = _ensure_test_runner_tools()
+        from sandbox.application.context import managed_native_instance_selected
+        if managed_native_instance_selected(inst) is not None:
+            from sandbox.core._tests import (
+                MANAGED_NATIVE_COMPOSER, MANAGED_NATIVE_PHPUNIT,
+            )
+            tools = {"phpunit": MANAGED_NATIVE_PHPUNIT,
+                     "composer": MANAGED_NATIVE_COMPOSER}
+        else:
+            tools = _ensure_test_runner_tools()
         suite = None
         print(f"  instance:   {inst}")
         print(f"  phpunit:    {tools['phpunit']}")

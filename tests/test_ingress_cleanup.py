@@ -42,5 +42,26 @@ class TestIngressCleanup(unittest.TestCase):
         recovery = repository.snapshot()["recovery"][applied["route_id"]]
         self.assertEqual(recovery["reason_code"], "incumbent_replaced")
 
+    def test_foreign_marker_or_property_change_is_never_removed(self):
+        helper, (service, adapter, _runner, repository) = self.fixture()
+        applied = service.apply_route(helper.planned(service), interactive=True)
+        adapter.current = {**repository.route(applied["route_id"]).last_applied,
+                           "ownership_marker": "foreign"}
+        result = service.cleanup_owner("/tmp/project::default")
+        self.assertFalse(result["ok"])
+        self.assertIsNotNone(repository.route(applied["route_id"]))
+        self.assertEqual(repository.snapshot()["recovery"][applied["route_id"]]["status"],
+                         "drifted")
+
+    def test_unavailable_adapter_retains_a_non_secret_residual(self):
+        helper, (service, _adapter, _runner, repository) = self.fixture()
+        applied = service.apply_route(helper.planned(service), interactive=True)
+        service.registry._items.pop("fixture")
+        result = service.cleanup_owner("/tmp/project::default")
+        recovery = repository.snapshot()["recovery"][applied["route_id"]]
+        self.assertEqual(result["state"], "cleanup_incomplete")
+        self.assertEqual(recovery["reason_code"], "incumbent_unavailable")
+        self.assertNotIn("credential", repr(recovery).lower())
+
 
 if __name__ == "__main__": unittest.main()

@@ -1,5 +1,45 @@
 # Cross-platform support — Linux (Ubuntu/Arch/Fedora/etc), macOS, Windows
 
+## Host ingress adoption matrix
+
+Ingress detection is read-only on every platform and uses listener/process evidence only.
+The table below is a support declaration, not permission to mutate a host product; no row is
+advertised as adoptable until its complete live lifecycle evidence is accepted.
+
+| Product family | Linux/macOS | Windows-side product | Initial tier | Route behavior |
+|---|---|---|---|---|
+| system Caddy exact HTTP | Linux | n/a | unit-gated live candidate | requires explicit scoped helper install; live evidence still pending |
+| Sandbox Caddy, Herd/Valet, nginx, Apache, Traefik, Caddy HTTPS/wildcard | declared where detected | n/a | implemented-unproven | no mutation before proof |
+| Nginx Proxy Manager | declared where detected | n/a | credential-pending | returns a redacted pending result |
+| DDEV, Local, XAMPP | detect-only where publicly observable | n/a | detect-only | never reads private control state or mutates |
+| Laragon, WAMP | outside host platform | Windows | outside-platform | never mutates from Linux/macOS |
+| Unknown listener | listener truth only | listener truth only | unidentified | preserves per-port fallback |
+
+An exact loopback listener can coexist with a dedicated Sandbox loopback listener; IPv4/IPv6
+wildcards are conflicts only when their bind scopes overlap. HTTP and HTTPS are never split
+across incumbent products for one hostname. See [host-ingress.md](host-ingress.md) for
+transaction, consent, cleanup, and proof requirements.
+
+## Current native WordPress runtime matrix
+
+This document also covers host portability of the default Compose workflow. The newer
+WordPress native-runtime contract is narrower and evidence-gated:
+
+| Adapter | Host | Isolation | Current rule |
+|---|---|---|---|
+| Compose | supported Docker hosts | container runtime | default and adoptable |
+| Ubuntu nspawn | normally booted Ubuntu 24.04, systemd 255+ | managed container | adoptable only when `native support` carries live evidence |
+| Herd | Linux/macOS where official Herd CLI is available | trusted shared host | explicit opt-in, user database, no route ownership |
+| official Valet | macOS | trusted shared host | explicit opt-in, user database, no route ownership |
+| declared POSIX | Linux/macOS | trusted shared host | explicit user authority/profile only |
+| Local/XAMPP/Laragon/WAMP | product-specific | none | detect-only |
+
+Windows native execution remains unsupported; WSL2 can use the Linux Compose path, but it
+does not satisfy the initial managed Ubuntu proof matrix merely by identifying as Linux.
+Managed-native requires effective cgroup delegation, AppArmor, seccomp, private namespaces,
+default-deny nftables, and a normally booted systemd host. See
+[native-runtime-isolation.md](native-runtime-isolation.md).
+
 Author: drafted 2026-07-09 (design-fidelity-diff session). Status: audited, real gaps
 found and fixed, including a full working Linux implementation of the clean-URL HTTPS
 proxy (§4), live-verified end-to-end. One narrower piece (systemd-resolved/NetworkManager-

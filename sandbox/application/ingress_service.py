@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from sandbox.ingress.models import IngressSelection, ListenerEndpoint
+from datetime import datetime, timezone
+import hashlib
+import ipaddress
+from pathlib import Path
+
+from sandbox.ingress.models import CredentialReference, IngressSelection, ListenerEndpoint
 from sandbox.ingress.models import RouteRecord
 from sandbox.ingress.models import digest
-from datetime import datetime, timezone
 
 
 PROTOCOL_PORTS = {"http": 80, "https": 443}
@@ -14,7 +18,8 @@ PROTOCOL_PORTS = {"http": 80, "https": 443}
 class IngressService:
     def __init__(self, *, detector, registry, bind_address="127.0.0.77",
                  bind_probe=None, repository=None, transaction_runner=None,
-                 consent_decider=None, route_verifier=None, clock=None):
+                 consent_decider=None, route_verifier=None, credential_lookup=None,
+                 clock=None):
         self.detector = detector
         self.registry = registry
         self.bind_address = bind_address
@@ -23,6 +28,10 @@ class IngressService:
         self.transaction_runner = transaction_runner
         self.consent_decider = consent_decider or (lambda _identity: False)
         self.route_verifier = route_verifier or (lambda *_args: False)
+        # The lookup receives a machine-local key, never a credential value.  Keeping
+        # it outside the repository prevents route/recovery state from becoming a
+        # secret store.
+        self.credential_lookup = credential_lookup or (lambda _key: False)
         self.clock = clock
 
     def support(self):
@@ -64,40 +73,115 @@ class IngressService:
                 } for item in observations], "requested_endpoints": requested,
                 "mutated": False}
 
+    @staticmethod
+    def effective_pin(*, pin=None, pin_source=None, project_pin=None,
+                      machine_override=None):
+        """Resolve pins without silently falling back from an explicit choice."""
+        if machine_override is not None:
+            return machine_override, "machine_override"
+        if project_pin is not None:
+            return project_pin, "project"
+        return pin, pin_source
+
     def select(self, *, required_protocols=("http",), required_capabilities=(),
-               pin=None, pin_source=None):
+               pin=None, pin_source=None, project_pin=None, machine_override=None):
+        pin, pin_source = self.effective_pin(
+            pin=pin, pin_source=pin_source, project_pin=project_pin,
+            machine_override=machine_override,
+        )
         protocols = frozenset(required_protocols)
         capabilities = frozenset(required_capabilities) | protocols
+        if pin == "disabled":
+            return IngressSelection(
+                protocols, capabilities, None, (), "ingress_disabled", None,
+                pin, pin_source,
+            )
         observations = self.detector.observe()
         endpoint_owners = {}
+        protocol_owners = {}
         for observation in observations:
             for protocol in protocols:
+                if any(item.port == PROTOCOL_PORTS[protocol]
+                       for item in observation.endpoints):
+                    protocol_owners.setdefault(protocol, set()).add(observation.adapter_id)
                 requested = ListenerEndpoint(
                     self.bind_address, PROTOCOL_PORTS[protocol], "tcp",
                 )
                 if any(item.overlaps(requested) for item in observation.endpoints):
                     endpoint_owners.setdefault(protocol, set()).add(observation.adapter_id)
-        owner_sets = [owners for owners in endpoint_owners.values() if owners]
+        owner_sets = [owners for owners in protocol_owners.values() if owners]
         if len(owner_sets) > 1 and not set.intersection(*owner_sets):
             return IngressSelection(
                 protocols, capabilities, None, (), "split_ingress_owners", None,
                 pin, pin_source,
             )
+        overlapping_owners = set().union(*endpoint_owners.values()) \
+            if endpoint_owners else set()
         candidates = [item for item in self.registry.items()
                       if capabilities.issubset(item.declaration.capabilities)]
         if pin:
             candidates = [item for item in candidates if item.adapter_id == pin]
+        control_unavailable = False
+        foreign_endpoint_owner = False
         for candidate in candidates:
             if not candidate.adoptable:
                 continue
             observation = next((item for item in observations
                                 if item.adapter_id == candidate.adapter_id), None)
-            if observation is None and candidate.adapter_id != "sandbox-caddy":
+            if candidate.adapter_id == "sandbox-caddy":
+                if overlapping_owners.difference({"sandbox-caddy"}):
+                    foreign_endpoint_owner = True
+                    continue
+                if observation is None:
+                    if self.bind_probe is None or any(
+                        self.bind_probe.check(ListenerEndpoint(
+                            self.bind_address, PROTOCOL_PORTS[protocol], "tcp",
+                        )) != "free" for protocol in protocols
+                    ):
+                        foreign_endpoint_owner = True
+                        continue
+            elif observation is None or any(
+                candidate.adapter_id not in protocol_owners.get(protocol, set())
+                for protocol in protocols
+            ):
                 continue
-            accepted = tuple(sorted({endpoint.address for endpoint in
-                                     (observation.endpoints if observation else ())}))
-            if candidate.adapter_id == "sandbox-caddy" and not accepted:
+            if any(
+                endpoint_owners.get(protocol, {candidate.adapter_id})
+                != {candidate.adapter_id}
+                for protocol in protocols
+            ):
+                foreign_endpoint_owner = True
+                continue
+            if candidate.adapter_id == "system-caddy" and any(
+                endpoint.owner_confidence != "proven"
+                or not ipaddress.ip_address(endpoint.address).is_loopback
+                for endpoint in observation.endpoints
+                if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
+            ):
+                control_unavailable = True
+                continue
+            if candidate.adapter_id == "system-caddy":
+                relevant = tuple(
+                    endpoint for endpoint in observation.endpoints
+                    if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
+                )
+                identities = {
+                    (str((endpoint.process or {}).get("pid") or ""),
+                     str((endpoint.process or {}).get("start") or ""),
+                     str((endpoint.process or {}).get("executable") or ""))
+                    for endpoint in relevant
+                }
+                if len(identities) != 1 or any(not endpoint.socket_id for endpoint in relevant):
+                    control_unavailable = True
+                    continue
+            if hasattr(candidate.adapter, "ready") and not candidate.adapter.ready():
+                control_unavailable = True
+                continue
+            accepted = self._accepted_addresses(observation, protocols)
+            if candidate.adapter_id == "sandbox-caddy" and observation is None:
                 accepted = (self.bind_address,)
+            if not accepted:
+                continue
             return IngressSelection(
                 protocols, capabilities, candidate.adapter_id, accepted,
                 "selected", observation.fingerprint if observation else None,
@@ -110,11 +194,41 @@ class IngressService:
             reason = "credential_pending" if tier == "credential_pending" \
                 else "detected_not_adoptable"
         else:
-            reason = "pin_unavailable" if pin else "no_live_proven_ingress"
+            reason = "pin_unavailable" if pin else (
+                "foreign_endpoint_owner" if foreign_endpoint_owner else
+                "ingress_control_unavailable" if control_unavailable else
+                "no_live_proven_ingress"
+            )
         return IngressSelection(
             protocols, capabilities, None, (), reason, None,
             pin, pin_source,
         )
+
+    def _accepted_addresses(self, observation, protocols):
+        """Return concrete addresses served by every requested protocol.
+
+        Wildcard listeners are bind scopes, not DNS answers.  Test a bounded set
+        of concrete local addresses against each required port and intersect the
+        results so B never receives an address observed only on another protocol.
+        """
+        if observation is None:
+            return ()
+        candidates = {self.bind_address, "127.0.0.1", "::1"}
+        candidates = {
+            address for address in candidates
+            if ipaddress.ip_address(address).is_loopback
+        }
+        accepted = None
+        for protocol in protocols:
+            port = PROTOCOL_PORTS[protocol]
+            endpoints = tuple(item for item in observation.endpoints if item.port == port)
+            current = {
+                address for address in candidates
+                if any(endpoint.overlaps(ListenerEndpoint(address, port, "tcp"))
+                       for endpoint in endpoints)
+            }
+            accepted = current if accepted is None else accepted.intersection(current)
+        return tuple(sorted(accepted or ()))
 
     def naming_offer(self, selection, *, fallback_url):
         if selection.adapter_id is None:
@@ -167,7 +281,7 @@ class IngressService:
                 "consent_identity": identity,
                 "reason": {"code": "consent_accepted" if accepted else "consent_declined"}}
 
-    def plan_route(self, selection, naming, backend):
+    def plan_route(self, selection, naming, backend, *, credential_reference=None):
         if selection.adapter_id is None:
             return {"ok": False, "state": "fallback", "mutated": False,
                     "reason": {"code": selection.reason_code}}
@@ -182,16 +296,59 @@ class IngressService:
         ):
             return {"ok": False, "state": "drifted", "mutated": False,
                     "reason": {"code": "ingress_owner_changed"}}
+        if credential_reference is not None:
+            reference = (credential_reference if isinstance(credential_reference, CredentialReference)
+                         else CredentialReference(self.consent_identity(selection), credential_reference))
+            if not self.credential_lookup(reference.key):
+                return {"ok": False, "state": "pending_credentials", "mutated": False,
+                        "credential_reference": reference.key,
+                        "reason": {"code": "credential_required"}}
         try:
+            authority = None
+            if selection.adapter_id == "system-caddy":
+                relevant = tuple(
+                    endpoint for endpoint in observation.endpoints
+                    if endpoint.port in {
+                        PROTOCOL_PORTS[protocol]
+                        for protocol in selection.required_protocols
+                    }
+                )
+                identities = {
+                    (str((endpoint.process or {}).get("pid") or ""),
+                     str((endpoint.process or {}).get("start") or ""),
+                     str((endpoint.process or {}).get("executable") or ""))
+                    for endpoint in relevant
+                }
+                if len(identities) != 1 or any(not item.socket_id for item in relevant):
+                    raise ValueError("selected Caddy socket ownership is not singular")
+                pid, start, executable = identities.pop()
+                executable_path = Path(executable)
+                if not pid.isdigit() or not start.isdigit() or not executable_path.is_absolute():
+                    raise ValueError("selected Caddy process identity is incomplete")
+                executable_digest = hashlib.sha256(executable_path.read_bytes()).hexdigest()
+                authority = {
+                    "pid": int(pid), "start": start,
+                    "executable_digest": executable_digest,
+                    "socket_ids": tuple(sorted(str(item.socket_id) for item in relevant)),
+                    "observation_fingerprint": observation.fingerprint,
+                }
             adapter_plan = spec.adapter.plan_route(
                 {"listen": naming["listen"],
-                 "protocols": selection.required_protocols}, naming, backend,
+                 "protocols": selection.required_protocols,
+                 "authority": authority}, naming, backend,
             )
+            if getattr(spec.adapter, "requires_baseline_samples", False):
+                baseline_urls = tuple(spec.adapter.baseline_urls(adapter_plan))
+                if not baseline_urls:
+                    return {"ok": False, "state": "fallback", "mutated": False,
+                            "reason": {"code": "baseline_samples_unavailable"}}
+                adapter_plan = {**adapter_plan, "_baseline_required": True,
+                                "_baseline_urls": baseline_urls}
             adapter_plan = {
                 **adapter_plan,
                 "_incumbent_fingerprint": selection.observation_fingerprint,
             }
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             return {"ok": False, "state": "foreign_collision", "mutated": False,
                     "reason": {"code": "hostname_claimed", "message": str(exc)}}
         route = RouteRecord.create(
@@ -216,6 +373,12 @@ class IngressService:
         )
         if not authorized["ok"]:
             return authorized
+        privilege = getattr(planned["adapter"], "authorize_plan", None)
+        if privilege is not None:
+            approved = privilege(planned["adapter_plan"], interactive=interactive)
+            if not approved.get("ok"):
+                return {**approved, "fallback_url": fallback_url,
+                        "reason": {"code": approved.get("state", "pending_privilege")}}
         existing = self.repository.route(planned["route"].route_id)
         if existing is not None and existing.last_applied is not None:
             observed = planned["adapter"].observe_route(planned["adapter_plan"])
@@ -249,6 +412,16 @@ class IngressService:
         removed = self.repository.remove_consent(identity) if self.repository else False
         return {"ok": True, "state": "ready", "mutated": removed,
                 "consent_identity": identity}
+
+    def reconcile_owner(self, owner, *, fallback_url=""):
+        """Retry durable route cleanup without requiring live registry identity."""
+        result = self.cleanup_owner(owner, fallback_url=fallback_url)
+        recovery = () if self.repository is None else tuple(
+            value for value in self.repository.snapshot()["recovery"].values()
+            if self.repository.route(value["route_id"]) is not None
+        )
+        return {**result, "operation": "ingress_reconcile",
+                "recovery": {"residual": list(recovery)}}
 
     def cleanup_owner(self, owner, *, fallback_url=""):
         if self.repository is None:

@@ -5,12 +5,53 @@ import shlex
 import subprocess
 from pathlib import Path
 import httpx
-from mcp.server.fastmcp import FastMCP
 import re as _re
 
+from dependencies import ToolDependencies
+
+SANDBOX_ROOT = None
+_compose = _herd_host_env = _host_run = _is_herd = None
+_project_instance = _require_project_capability = _resolve_instance = None
+_safe_json = _wp_root = _wpcli = None
 
 
-from app import (SANDBOX_ROOT, _compose, _herd_host_env, _host_run, _is_herd, _project_instance, _require_project_capability, _resolve_instance, _safe_json, _wp_root, _wpcli, mcp)
+def register(server, dependencies: ToolDependencies) -> None:
+    """Bind WordPress tools to explicit composition-root dependencies."""
+    global SANDBOX_ROOT, _compose, _herd_host_env, _host_run, _is_herd
+    global _project_instance, _require_project_capability, _resolve_instance
+    global _safe_json, _wp_root, _wpcli
+    for name in (
+        "sandbox_root", "compose", "herd_host_env", "host_run", "is_herd",
+        "project_instance", "require_project_capability", "resolve_instance",
+        "safe_json", "wp_root", "wpcli",
+    ):
+        globals()[{"sandbox_root": "SANDBOX_ROOT", "compose": "_compose",
+                    "herd_host_env": "_herd_host_env", "host_run": "_host_run",
+                    "is_herd": "_is_herd", "project_instance": "_project_instance",
+                    "require_project_capability": "_require_project_capability",
+                    "resolve_instance": "_resolve_instance", "safe_json": "_safe_json",
+                    "wp_root": "_wp_root", "wpcli": "_wpcli"}[name]] = dependencies.require(name)
+    for tool in (wp_cli, wp_exec, wp_rest, run_tests, wp_cli_async, wp_cli_job, wp_cli_job_kill):
+        server.tool()(tool)
+
+
+def _managed_execution_unavailable(project_dir: str, label: str | None, entry_path: str,
+                                   argv: tuple[str, ...], timeout: int):
+    """Dispatch managed-native MCP payloads through the isolation gateway."""
+    try:
+        from sandbox.application.context import execute_project, managed_native_project_selected
+        from sandbox.runtimes.base import ExecutionRequest
+        if not managed_native_project_selected(project_dir, label=label or "default"):
+            return None
+        request = ExecutionRequest(str(project_dir), label or "default", entry_path, argv, timeout)
+        execution = execute_project({}, request)
+    except Exception:
+        return {"ok": False, "error": "managed execution request is invalid"}
+    return {"ok": execution.ok, "state": execution.state,
+            "returncode": execution.exit_code,
+            "stdout": execution.data.get("stdout", ""),
+            "stderr": execution.data.get("stderr", ""),
+            "reason": execution.data.get("reason", {"code": "isolated_payload_failed"})}
 
 
 def _remote_job_transport():
@@ -22,7 +63,6 @@ def _remote_job_transport():
         remote_sb_path=_remote.remote_sb_path)
 
 
-@mcp.tool()
 def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | None = None) -> dict:
     """Run any wp-cli command. Pass the args after `wp` (e.g. 'plugin list').
 
@@ -35,12 +75,14 @@ def wp_cli(command: str, timeout: int = 60, *, project_dir: str, label: str | No
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error
+    blocked = _managed_execution_unavailable(project_dir, label, "wordpress_cli",
+                                             ("wp", *shlex.split(command)), timeout)
+    if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
     return _wpcli(shlex.split(command), instance=inst, timeout=timeout)
 
-@mcp.tool()
 def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
             timeout: int = 120, *, project_dir: str, label: str | None = None) -> dict:
     """Run an arbitrary shell command inside a container (default `wp`).
@@ -55,6 +97,9 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     capability_error = _require_project_capability(project_dir, label, "wordpress.exec")
     if capability_error:
         return capability_error
+    blocked = _managed_execution_unavailable(project_dir, label, "exec",
+                                             ("sh", "-c", command), timeout)
+    if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -72,7 +117,6 @@ def wp_exec(command: str, container: str = "wp", workdir: str | None = None,
     args += ["-T", container, "sh", "-c", command]
     return _compose(*args, instance=inst, timeout=timeout)
 
-@mcp.tool()
 def wp_rest(method: str, path: str, body: dict | None = None,
             query: dict | None = None, *, project_dir: str, label: str | None = None) -> dict:
     """Call the WordPress REST API.
@@ -107,7 +151,6 @@ def wp_rest(method: str, path: str, body: dict | None = None,
     except httpx.HTTPError as e:
         return {"ok": False, "error": str(e)}
 
-@mcp.tool()
 def run_tests(project_dir: str, phpunit_args: str = "",
              label: str | None = None, mode: str | None = None,
              local: bool = False,
@@ -185,6 +228,9 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error
+    blocked = _managed_execution_unavailable(project_dir, label, "phpunit",
+                                             ("sb", "test", mode or "auto"), timeout_seconds)
+    if blocked: return {**blocked, "passed": False, "summary": None, "output": "", "mode": mode}
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -214,7 +260,6 @@ def run_tests(project_dir: str, phpunit_args: str = "",
     }
 
 
-@mcp.tool()
 def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) -> dict:
     """Start a wp-cli command as a BACKGROUND job (spec 004). Returns immediately
     with {ok, job_id}; the command keeps running detached. Use for long ops
@@ -226,6 +271,9 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
     capability_error = _require_project_capability(project_dir, label, "wordpress.cli")
     if capability_error:
         return capability_error
+    blocked = _managed_execution_unavailable(project_dir, label, "durable_job",
+                                             ("wp", *shlex.split(command)), 300)
+    if blocked: return blocked
     inst, err = _project_instance(project_dir, label)
     if err:
         return err
@@ -239,7 +287,6 @@ def wp_cli_async(command: str, *, project_dir: str, label: str | None = None) ->
     return {"ok": True, "job_id": m.group(1), "status": "running"}
 
 
-@mcp.tool()
 def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_dir: str, label: str | None = None) -> dict:
     """Poll a background wp-cli job (spec 004): returns {ok, status
     (running|completed|not_found), exit_code?, stdout, bytes_read, truncated}.
@@ -262,7 +309,6 @@ def wp_cli_job(job_id: str, offset: int = 0, limit: int = 1048576, *, project_di
     return {"ok": True, **job_status(inst, job_id, offset=offset, limit=limit)}
 
 
-@mcp.tool()
 def wp_cli_job_kill(job_id: str, *, project_dir: str, label: str | None = None) -> dict:
     """Cancel a running background wp-cli job (spec 004). No-op if already finished.
     """

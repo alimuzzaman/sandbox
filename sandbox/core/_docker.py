@@ -531,6 +531,9 @@ def wpcli(args: list[str], instance: str,
     `wp` container) via `exec -u www-data` — no per-call container. Falls back to the
     one-shot `wpcli` service container if the built-in isn't present yet (e.g. an
     instance not recreated since this landed, or the web container is down)."""
+    gateway = _managed_execution_gate(instance, "wordpress.cli", "wordpress_cli", ("wp", *args))
+    if gateway is not None:
+        return gateway
     if _is_herd_instance(instance):
         # Run wp-cli under the instance's PINNED PHP (php_version), not the
         # phar's default `php` — so plugin code, migrations, and `wp eval`
@@ -550,6 +553,29 @@ def wpcli(args: list[str], instance: str,
                        instance=instance, check=check, capture=capture)
     return compose("run", "--rm", "wpcli", *args,
                    instance=instance, check=check, capture=capture)
+
+
+def _managed_execution_gate(instance: str, capability: str, entry_path: str, argv: tuple[str, ...],
+                            *, timeout: int = 300):
+    """Refuse managed-native legacy execution until its adapter endpoint is wired.
+
+    Compose instances return ``None`` and retain the exact historical path.
+    A managed selection never reaches Docker, Herd, or the host while the
+    adapter-native execution transport is unavailable.
+    """
+    from sandbox.application.context import execute_project, managed_native_instance_selected
+    from sandbox.runtimes.base import ExecutionRequest
+
+    owner = managed_native_instance_selected(instance)
+    if owner is None:
+        return None
+    root, label = owner
+    request = ExecutionRequest(str(root), label, entry_path, tuple(argv), timeout)
+    execution = execute_project(load_config(), request)
+    stdout = str(execution.data.get("stdout", ""))
+    stderr = str(execution.data.get("stderr", ""))
+    return _types.SimpleNamespace(returncode=execution.exit_code, stdout=stdout, stderr=stderr,
+                                  managed_native=True, execution=execution)
 
 
 def write_env_for_compose(cfg: dict) -> None:

@@ -9,6 +9,7 @@ class TestIsolationResources(unittest.TestCase):
                     "disk_bytes", "inodes", "fds", "connections", "io_weight"):
             self.assertGreater(result[key], 0)
         self.assertEqual(result["systemd"]["MemorySwapMax"], 0)
+        self.assertNotIn("RuntimeMaxSec", result["systemd"])
 
     def test_invalid_unbounded_or_boolean_limits_fail(self):
         from sandbox.isolation.resources import ResourcePolicyCompiler

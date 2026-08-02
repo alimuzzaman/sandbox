@@ -10,8 +10,20 @@ class IngressVerifier:
 
     def baseline(self, plan):
         results = []
-        for url in tuple(self.baseline_urls(plan)):
-            results.append({"url": url, "ok": bool(self.http.probe(url, timeout=5))})
+        for target in tuple(self.baseline_urls(plan)):
+            if not isinstance(target, dict):
+                results.append({"target": target, "ok": False})
+                continue
+            safe = {"address": target.get("address"), "port": target.get("port"),
+                    "host": target.get("host", "localhost")}
+            probe = getattr(self.http, "probe_route", None)
+            results.append({"target": safe, "ok": bool(
+                probe(safe["address"], safe["port"], safe["host"], timeout=5)
+                if probe else False
+            )})
+        if plan.get("_baseline_required") and not results:
+            return {"ok": False, "samples": [],
+                    "reason": "baseline_samples_unavailable"}
         return {"ok": all(item["ok"] for item in results), "samples": results}
 
     def route(self, plan, observed):
@@ -31,7 +43,16 @@ class IngressVerifier:
         protocols = tuple(plan.get("protocols") or ("http",))
         samples = []
         for protocol in protocols:
-            url = f"{protocol}://{plan['hostname']}/"
-            samples.append({"url": url, "ok": bool(self.http.probe(url, timeout=5))})
+            if protocol != "http":
+                samples.append({"protocol": protocol, "ok": False})
+                continue
+            listen = dict(plan.get("listen") or {})
+            probe = getattr(self.http, "probe_route", None)
+            sample = {"protocol": protocol, "address": listen.get("address"),
+                      "port": listen.get("port"), "host": plan["hostname"]}
+            samples.append({**sample, "ok": bool(
+                probe(sample["address"], sample["port"], sample["host"], timeout=5)
+                if probe else False
+            )})
         return {"ok": all(item["ok"] for item in samples),
                 "identity_ok": True, "samples": samples}

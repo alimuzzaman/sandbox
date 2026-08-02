@@ -168,16 +168,9 @@ def _finalize(cfg) -> None:
     except Exception as e:
         info(f"  (tools venv will rebuild on next use: {e})")
 
-    # Proxy: regenerate the Caddyfile + proxy compose (now ABSOLUTE mounts under
-    # the base) and recreate the Caddy container so it remounts the moved
-    # certs/Caddyfile — otherwise every .tst URL breaks after the move.
-    try:
-        regen_caddyfile(cfg)
-        if _proxy_container_running():
-            info("  recreating URL proxy (remount certs/Caddyfile under base)…")
-        reload_proxy()
-    except Exception as e:
-        info(f"  (proxy regen skipped: {e})")
+    # Unreceipted aggregate proxy state is never regenerated during migration.
+    # Receipt-owned services reconcile independently; per-port URLs remain the
+    # deterministic fallback until that succeeds.
 
     instances = resolve_instances(cfg)
     failed = []

@@ -1513,9 +1513,8 @@ class TestRemoteDeployMcpWrapper(unittest.TestCase):
     def test_remote_deploy_uses_runtime_aware_mcp_preflight_when_available(self):
         module = self._load_tool_module()
         calls = []
-        app = types.ModuleType("app")
-        app._require_project_deployment_capability = lambda project_dir: calls.append(project_dir)
-        with patch.dict(sys.modules, {"app": app}), \
+        with patch.object(module, "_require_project_deployment_capability",
+                          side_effect=lambda project_dir: calls.append(project_dir)), \
              patch.object(module, "_run_sandbox_json", return_value={
                  "timed_out": False, "returncode": 0, "stdout": "",
                  "stderr": "", "payload": {"ok": True, "remote": "myvps"},

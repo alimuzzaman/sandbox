@@ -47,6 +47,7 @@ class JobService:
     components: Any
     launcher: Any = None
     scheduler: Any = None
+    runtime_selector: Any = None
 
     def submit(self, submission: JobSubmission):
         row, replay = self.repository.accept(submission)
@@ -112,12 +113,24 @@ class JobService:
 
     def _descriptor(self, row: dict, submission: JobSubmission) -> dict:
         nonce = os.urandom(32)
+        # Runtime selection is part of the immutable submission decision.  A
+        # supervisor must never reinterpret a managed job as host-executable
+        # after a config/import/registry failure.
+        execution_runtime = "host"
+        if self.runtime_selector is not None:
+            execution_runtime = (
+                "managed_native" if self.runtime_selector(
+                    row["project_root"], label="default",
+                ) else "host"
+            )
         return {"job_id": row["job_id"], "registry_path": str(self.repository.path),
                 "runtime_dir": str(self.storage.root.parent), "argv": __import__("json").loads(row["command_json"]),
+                "project_root": row["project_root"], "label": "default",
                 "cwd": str(Path(row["project_root"]) / row["cwd_relative"]),
                 "deadline_seconds": row["deadline_seconds"], "cancel_grace_seconds": 20,
                 "stall_seconds": row["stall_seconds"], "cancel_on_stall": bool(row["cancel_on_stall"]),
                 "nonce_hash": hashlib.sha256(nonce).hexdigest(), "environment": None,
+                "execution_runtime": execution_runtime,
                 "artifact_paths": list(submission.artifact_paths)}
 
     def _launch(self, descriptor_path: Path) -> None:

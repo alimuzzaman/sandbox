@@ -1,0 +1,8 @@
+{
+  "name": "sandbox/native-proof",
+  "description": "Managed-native acceptance fixture",
+  "type": "wordpress-plugin",
+  "scripts": {
+    "isolation-proof": "@php native-boundary-proof.php"
+  }
+}

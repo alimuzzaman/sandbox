@@ -16,9 +16,9 @@ the first shippable slice and per-port access preserved throughout.
 **Purpose**: Establish explicit feature packages, registrations, and host fixtures.
 
 - [X] T001 Create ingress and adapter package exports in `sandbox/ingress/__init__.py` and `sandbox/ingress/adapters/__init__.py`
-- [ ] T002 [P] Add free, exact-loopback, dedicated-loopback, IPv4/IPv6 wildcard, split-owner, and product listener fixtures in `tests/host_fixtures/ingress/`
+- [X] T002 [P] Add free, exact-loopback, dedicated-loopback, IPv4/IPv6 wildcard, split-owner, and product listener fixtures in `tests/host_fixtures/ingress/`
 - [X] T003 Register ingress surfaces through the shared domains command/MCP manifests in `sandbox/commands/manifest.py`, `sandbox/commands/domains.py`, and `mcp/wp-server/tools/manifest.py`
-- [ ] T004 Update static command/MCP/modularity inventories for new ingress dependencies in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
+- [X] T004 Update static command/MCP/modularity inventories for new ingress dependencies in `tests/test_command_composition.py`, `tests/test_mcp_composition.py`, and `tests/test_modularity.py`
 
 ---
 
@@ -91,7 +91,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T031 [P] [US2] Write failing persistent Caddy import-fragment, service-identity validation, reload, health, and rollback tests in `tests/test_ingress_caddy.py`
 - [X] T032 [P] [US2] Write failing Traefik file-provider enablement, owned-file, dynamic reload, health, and rollback tests in `tests/test_ingress_traefik.py`
 - [X] T033 [US2] Write failing A→B→A hostname/address/capability handshake and no-route-on-DNS-failure tests in `tests/test_clean_url_service.py`
-- [ ] T034 [US2] Write failing foreign-hostname/wildcard collision, backend update, idempotency, and baseline-route preservation tests in `tests/test_ingress_service.py`
+- [X] T034 [US2] Write failing foreign-hostname/wildcard collision, backend update, idempotency, and baseline-route preservation tests in `tests/test_ingress_service.py`
 
 ### Implementation for User Story 2
 
@@ -101,7 +101,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T038 [US2] Implement Apache owned-fragment adapter with complete config validation and graceful reload in `sandbox/ingress/adapters/apache.py`
 - [X] T039 [US2] Implement persistent system Caddy import-fragment adapter without ephemeral API state in `sandbox/ingress/adapters/caddy.py`
 - [X] T040 [US2] Implement enabled Traefik file-provider adapter with owned dynamic fragment lifecycle in `sandbox/ingress/adapters/traefik.py`
-- [ ] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
+- [X] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
 - [X] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
 - [ ] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py`
 - [ ] T044 [US2] Run live system Caddy add/request/update/request/remove, foreign-route, and rollback conformance and capture evidence in `specs/037-host-ingress-adoption/evidence/system-caddy.md`
@@ -121,8 +121,8 @@ while byte-comparing foreign fragments and incumbent health.
 
 ### Tests for User Story 3
 
-- [ ] T045 [P] [US3] Write failing unchanged, target-drifted, property-drifted, foreign-marker, and unavailable cleanup tests in `tests/test_ingress_cleanup.py`
-- [ ] T046 [P] [US3] Write failing repeated cleanup, residual retry, incumbent replacement, and uninstall aggregation tests in `tests/test_ingress_recovery.py`
+- [X] T045 [P] [US3] Write failing unchanged, target-drifted, property-drifted, foreign-marker, and unavailable cleanup tests in `tests/test_ingress_cleanup.py`
+- [X] T046 [P] [US3] Write failing repeated cleanup, residual retry, incumbent replacement, and uninstall aggregation tests in `tests/test_ingress_recovery.py`
 - [X] T047 [US3] Write failing registry/local deletion-order and route-recovery survival tests in `tests/test_ingress_destroy_ordering.py`
 
 ### Implementation for User Story 3
@@ -130,7 +130,7 @@ while byte-comparing foreign fragments and incumbent health.
 - [X] T048 [US3] Implement observed-versus-last-applied route status and compare-before-change cleanup in `sandbox/application/ingress_service.py`
 - [X] T049 [US3] Persist non-secret incomplete cleanup records and retry transitions in `sandbox/ingress/repository.py`
 - [X] T050 [US3] Persist ingress cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
-- [ ] T051 [US3] Implement `domains ingress cleanup|reconcile` JSON/text contracts in `sandbox/commands/domains.py`
+- [X] T051 [US3] Implement `domains ingress cleanup|reconcile` JSON/text contracts in `sandbox/commands/domains.py`
 - [ ] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md`
 
 **Checkpoint**: Destroy and uninstall are conservative and retryable.
@@ -149,17 +149,17 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 
 - [X] T053 [P] [US4] Write failing accept/decline/reconsider, incumbent identity, and machine-scope consent tests in `tests/test_ingress_consent.py`
 - [X] T054 [P] [US4] Write failing non-TTY pending-consent/pending-credential/no-prompt/no-mutation tests in `tests/test_ingress_noninteractive.py`
-- [ ] T055 [P] [US4] Write failing project-pin/machine-override precedence, unavailable-pin, and pin-source tests in `tests/test_ingress_pins.py`
-- [ ] T056 [P] [US4] Write failing NPM/DDEV/Local/XAMPP/Laragon/WAMP detect-only/outside-platform tests in `tests/test_ingress_detect_only.py`
-- [ ] T057 [US4] Write failing CLI/MCP parity, support matrix, secret-redaction, and fallback-result tests in `tests/test_ingress_cli_mcp.py`
+- [X] T055 [P] [US4] Write failing project-pin/machine-override precedence, unavailable-pin, and pin-source tests in `tests/test_ingress_pins.py`
+- [X] T056 [P] [US4] Write failing NPM/DDEV/Local/XAMPP/Laragon/WAMP detect-only/outside-platform tests in `tests/test_ingress_detect_only.py`
+- [X] T057 [US4] Write failing CLI/MCP parity, support matrix, secret-redaction, and fallback-result tests in `tests/test_ingress_cli_mcp.py`
 
 ### Implementation for User Story 4
 
-- [ ] T058 [US4] Implement TTY-only consent, remembered decline, reconsideration, and pin-source selection in `sandbox/application/ingress_service.py`
-- [ ] T059 [US4] Implement detect-only and outside-platform declarations using public evidence only in `sandbox/ingress/adapters/detect_only.py`
-- [ ] T060 [US4] Implement machine-local credential references and redacted pending results in `sandbox/ingress/models.py` and `sandbox/application/ingress_service.py`
-- [ ] T061 [US4] Complete `domains ingress support|plan|apply|status|cleanup|reconsider` handlers in `sandbox/commands/domains.py`
-- [ ] T062 [US4] Implement import-safe ingress MCP tools using explicit service dependencies in `mcp/wp-server/tools/domains.py`
+- [X] T058 [US4] Implement TTY-only consent, remembered decline, reconsideration, and pin-source selection in `sandbox/application/ingress_service.py`
+- [X] T059 [US4] Implement detect-only and outside-platform declarations using public evidence only in `sandbox/ingress/adapters/detect_only.py`
+- [X] T060 [US4] Implement machine-local credential references and redacted pending results in `sandbox/ingress/models.py` and `sandbox/application/ingress_service.py`
+- [X] T061 [US4] Complete `domains ingress support|plan|apply|status|cleanup|reconsider` handlers in `sandbox/commands/domains.py`
+- [X] T062 [US4] Implement import-safe ingress MCP tools using explicit service dependencies in `mcp/wp-server/tools/domains.py`
 - [ ] T063 [US4] Capture support-tier, consent, pin, credential-pending, and detect-only evidence in `specs/037-host-ingress-adoption/evidence/support-and-consent.md`
 
 **Checkpoint**: “Detected” and “adoptable” are never conflated, and automation never hangs.
@@ -170,9 +170,9 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 
 **Purpose**: Documentation, architecture guards, full regression, and live evidence.
 
-- [ ] T064 [P] Update clean URL, ingress selection/pins, support tiers, consent, status, and fallback guidance in `README.md` and `docs/sandbox-config-reference.md`
-- [ ] T065 [P] Document listener semantics, adapter proof requirements, transaction recovery, and platform matrix in `docs/host-ingress.md` and `docs/cross-platform-support.md`
-- [ ] T066 Add static guards against ingress-state JSON consumers, unregistered adapters, and compatibility-facade imports in `tests/test_architecture_boundaries.py`
+- [X] T064 [P] Update clean URL, ingress selection/pins, support tiers, consent, status, and fallback guidance in `README.md` and `docs/sandbox-config-reference.md`
+- [X] T065 [P] Document listener semantics, adapter proof requirements, transaction recovery, and platform matrix in `docs/host-ingress.md` and `docs/cross-platform-support.md`
+- [X] T066 Add static guards against ingress-state JSON consumers, unregistered adapters, and compatibility-facade imports in `tests/test_architecture_boundaries.py`
 - [ ] T067 Run unit/contract/integration suites, verify 2-second detection/status, 3-second planning, and 30-second transaction bounds, and run `git diff --check`, fixing regressions in `tests/`
 - [ ] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md`
 - [ ] T069 Verify existing Sandbox Caddy/per-port live parity and the corrected conflict diagnosis in `specs/037-host-ingress-adoption/evidence/compatibility.md`

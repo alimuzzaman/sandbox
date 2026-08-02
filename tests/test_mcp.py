@@ -96,6 +96,7 @@ print("HERMES_INSTANCE", json.dumps([instance, instance_calls]))
 import tools.wp as wp_tools
 import tools.data as data_tools
 import app as mcp_app
+wp_tools.SANDBOX_ROOT = mcp_app.SANDBOX_ROOT
 import sys as _sys
 _mcp_root = str(mcp_app.SANDBOX_ROOT)
 _sys.path = [entry for entry in _sys.path if entry != _mcp_root]
@@ -121,6 +122,7 @@ invalid_mode = wp_tools.run_tests("/tmp/project", mode="not-a-mode")
 print("TEST_MODE_INVALID", json.dumps(invalid_mode))
 wp_tools._require_project_capability = lambda *_args: None
 wp_tools._project_instance = lambda *_args: ("fixture", None)
+wp_tools._managed_execution_unavailable = lambda *_args, **_kwargs: None
 class TestRunResult:
     returncode = 0
     stdout = "  mode:       unit\\nOK (1 test, 1 assertion)\\n"
@@ -177,6 +179,9 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("domain_apply", "project_dir"), ("domain_cleanup", "project_dir"),
             ("domain_support", ""), ("ingress_status", ""),
             ("ingress_support", ""),
+            ("ingress_plan", ""), ("ingress_cleanup", "project_dir"),
+            ("ingress_reconcile", "project_dir"),
+            ("ingress_reconsider", "consent_identity"), ("ingress_apply", ""),
             ("instance_status", "project_dir"), ("instance_logs", "project_dir"),
             ("instance_exec", "command,project_dir"),
             ("native_support", ""), ("native_preflight", ""),
@@ -230,7 +235,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 115)
+        self.assertEqual(len(actual), 120)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

@@ -25,6 +25,27 @@ New code must use the bounded service or registration contract. Their consumer s
 are frozen by architecture tests; removal requires parity evidence and separate
 human approval.
 
+## WordPress runtime selection
+
+Compose remains the only automatic/default WordPress runtime. A gitignored machine override
+may explicitly select a supported native adapter; detection never opts a project in. Managed
+Ubuntu execution is advertised only after effective namespace, mount, network, credential,
+resource, and hostile-path proofs pass. Herd, Valet, and declared POSIX profiles are labeled
+`trusted_shared_host` and are intended only for trusted project code.
+
+Inspect support without mutation:
+
+```bash
+./sb native support --json
+./sb native preflight --project-dir . --json
+./sb native install-plan --project-dir . --web-server nginx --json
+```
+
+Native package installation is interactive-only. Instance plugins, CLI, tests, Composer, and
+jobs never fall back to host execution when managed-native isolation is selected. See
+[`docs/native-runtime-isolation.md`](docs/native-runtime-isolation.md) for guarantees,
+limitations, egress grants, evidence, and recovery.
+
 **CLI-first, per-project, and MCP-optional.** Each plugin repo carries its own
 `sandbox.config.json`. You `cd` into a plugin, and a single MCP server boots a
 WordPress instance for that directory on demand and runs the plugin's **real
@@ -506,6 +527,27 @@ defaults:
 ```
 
 There is **no central project catalog** — each plugin self-describes.
+
+### Clean URLs and host ingress
+
+`./sb domains ingress support --json` lists host products and their current proof tier;
+`detect`, `status`, and `plan` are read-only. A product being detected does not mean Sandbox
+may alter it: only an adapter with a documented control surface and accepted live proof can
+become adoptable. A machine-local ingress override, when configured, beats a committed
+project pin; an unavailable explicit pin returns the per-port URL rather than selecting a
+different host service.
+
+Route adoption requires a verified DNS handoff, interactive consent on first use, and an
+owned route record. `cleanup` and `reconcile` remove only unchanged owned routes; drift or
+an unavailable incumbent retains non-secret recovery state. In CI/MCP, pending consent or
+credentials returns immediately and never prompts. See [host ingress adoption](docs/host-ingress.md)
+and the [configuration reference](docs/sandbox-config-reference.md#host-ingress-and-clean-urls).
+
+The current mutation surface is deliberately narrow: Linux system Caddy, exact HTTP
+hostnames, an already-enabled `/etc/caddy/conf.d/*.caddy` import, and an explicitly
+installed owner-scoped helper. HTTPS, wildcard routing, and every other incumbent remain
+unadvertised. The helper installation and pending live-evidence gate are documented in the
+host-ingress guide.
 
 ---
 

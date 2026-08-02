@@ -72,3 +72,4 @@ deploy/install-image/sandbox-latest.tar.gz
 
 # scratch artifacts
 tmp/
+.phpunit.result.cache

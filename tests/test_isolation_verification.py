@@ -19,7 +19,7 @@ def healthy(target):
             "private_namespaces": {name: True for name in
                 ("user", "mount", "pid", "ipc", "uts", "network")},
             "no_new_privileges": True, "capabilities": [], "seccomp": True,
-            "apparmor_profile": f"sandbox-native-{target.machine_id}//guest",
+            "apparmor_profile": f"sandbox-native-{target.machine_id}//payload",
             "nested_userns": False, "ambient_capabilities": [],
             "dangerous_capabilities": [], "devices": ["null", "zero", "urandom"],
             "nft_default_drop": True, "default_route": False,
@@ -51,6 +51,33 @@ class TestIsolationVerification(unittest.TestCase):
                 observed = healthy(target); observed[key] = value
                 result = IsolationVerifier(observe=lambda _id, value=observed: value).verify(target)
                 self.assertFalse(result["ok"]); self.assertEqual(result["state"], "blocked")
+
+    def test_active_grant_cannot_report_ready_before_production_broker_exists(self):
+        from sandbox.isolation.models import EgressGrant, EgressGrantSet
+        from sandbox.isolation.verification import IsolationVerifier
+        target = policy()
+        # Egress is a separate control-plane document and intentionally does
+        # not alter the stable policy digest.
+        target = type("Policy", (), {**target.__dict__, "network": {
+            **dict(target.network), "host_address": "10.203.0.1/30", "veth": "ve-sb-demo",
+        }})()
+        grant = EgressGrant("api", target.machine_id, "public_cidr_tcp",
+                            ("8.8.8.8/32",), (443,), "2999-01-01T00:00:00Z")
+        granted = EgressGrantSet(target.machine_id, target.digest, (grant,))
+        result = IsolationVerifier(observe=lambda _id: healthy(target)).verify(target, grants=granted)
+        self.assertFalse(result["ok"])
+        self.assertIn("egress_broker", result["reason"]["failed_gates"])
+
+        observed = healthy(target)
+        observed["egress_broker"] = {
+            "ok": True, "policy_digest": target.digest, "grant_digest": granted.digest,
+            "listener": {"address": "10.203.0.1", "port": 18443,
+                         "interface": "ve-sb-demo"},
+            "grants": {"api": {"accepted": 0, "rejected": 0, "bytes": 0,
+                                "active": 0}},
+        }
+        ready = IsolationVerifier(observe=lambda _id: observed).verify(target, grants=granted)
+        self.assertTrue(ready["ok"])
 
 
 if __name__ == "__main__": unittest.main()

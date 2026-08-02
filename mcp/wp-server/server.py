@@ -14,7 +14,8 @@ import re as _re
 
 from app import (
     PROXY_TLD, SANDBOX_ROOT, _core, _load_sandbox_yml, _project_instance,
-    _resolve_instance, _safe_json, _site_url, mcp,
+    _resolve_instance, _safe_json, _site_url, _compose, _herd_host_env,
+    _host_run, _is_herd, _require_project_capability, _wp_root, _wpcli, mcp,
 )
 from dependencies import ToolDependencies
 from tools.manifest import DEFAULT_MCP_GROUPS, built_in_tool_registry, project_default_groups
@@ -126,6 +127,13 @@ built_in_tool_registry(_selected_groups).compose(mcp, ToolDependencies({
     "resolve_instance": _resolve_instance,
     "safe_json": _safe_json,
     "site_url": _site_url,
+    "compose": _compose,
+    "herd_host_env": _herd_host_env,
+    "host_run": _host_run,
+    "is_herd": _is_herd,
+    "require_project_capability": _require_project_capability,
+    "wp_root": _wp_root,
+    "wpcli": _wpcli,
     "runtime_service": _runtime_service,
     "domain_service": _domain_service,
     "ingress_service": _ingress_service,

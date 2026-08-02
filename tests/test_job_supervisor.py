@@ -114,6 +114,7 @@ class SupervisorTests(unittest.TestCase):
                 "runtime_dir": str(storage.root.parent), "argv": ["/bin/sh", "-c", "printf retained-output"],
                 "cwd": temp, "deadline_seconds": 20, "cancel_grace_seconds": 1,
                 "nonce_hash": "0" * 64, "environment": None,
+                "execution_runtime": "host",
             }
             descriptor_path = job_dir / "descriptor.json"
             descriptor_path.write_text(json.dumps(descriptor))

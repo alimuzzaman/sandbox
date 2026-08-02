@@ -40,6 +40,34 @@ class TestPortAllocator(unittest.TestCase):
 
 
 class TestHttpProbe(unittest.TestCase):
+    def test_exact_route_probe_bypasses_dns_and_sends_explicit_host(self):
+        seen = []
+
+        class HostEcho(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get("Host"))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), HostEcho)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(UrlHttpProbe().probe_route(
+                "127.0.0.1", server.server_port, "unresolvable.test", timeout=1,
+            ))
+            self.assertEqual(seen, ["unresolvable.test"])
+            self.assertFalse(UrlHttpProbe().probe_route(
+                "169.254.169.254", 80, "metadata", timeout=0.01,
+            ))
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
+
     def test_rejects_non_success_http_status(self):
         class NotFound(BaseHTTPRequestHandler):
             def do_GET(self):

@@ -16,10 +16,40 @@ class TestIngressRegistry(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             registry.register(IngressAdapterSpec(declaration, object(), 10))
 
-    def test_implementation_without_live_evidence_is_not_adoptable(self):
-        from sandbox.ingress.manifest import built_in_ingress_registry
+    def test_system_caddy_requires_invocation_scoped_live_evidence(self):
+        from sandbox.ingress.manifest import (
+            BUILTIN_INGRESS, IngressProofAttestation, built_in_ingress_registry,
+        )
         registry = built_in_ingress_registry({"system-caddy": object()})
         self.assertFalse(registry.get("system-caddy").adoptable)
+        promoted = built_in_ingress_registry(
+            {"system-caddy": object()},
+            proof_attestation=IngressProofAttestation(
+                "system-caddy", "ubuntu-live-http-exact",
+            ),
+        )
+        self.assertTrue(promoted.get("system-caddy").adoptable)
+        self.assertIsNone(registry.get("system-caddy").declaration.evidence_id)
+        self.assertIsNone(next(item for item in BUILTIN_INGRESS
+                               if item.adapter_id == "system-caddy").evidence_id)
+        self.assertEqual(registry.get("system-caddy").declaration.capabilities,
+                         frozenset({"http"}))
+        for adapter_id in ("sandbox-caddy", "herd-valet", "system-nginx",
+                           "system-apache", "traefik"):
+            self.assertFalse(registry.get(adapter_id).adoptable)
+
+    def test_untyped_proof_material_cannot_promote_an_adapter(self):
+        from sandbox.ingress.manifest import built_in_ingress_registry
+
+        for value in (
+            {"system-caddy": "ubuntu-live-http-exact"},
+            "ubuntu-live-http-exact",
+            object(),
+        ):
+            registry = built_in_ingress_registry(
+                {"system-caddy": object()}, proof_attestation=value,
+            )
+            self.assertFalse(registry.get("system-caddy").adoptable)
 
     def test_platform_and_capability_filter_precedes_side_effects(self):
         from sandbox.ingress.manifest import built_in_ingress_registry

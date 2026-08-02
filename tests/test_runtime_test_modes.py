@@ -146,6 +146,70 @@ class TestRuntimeTestModes(unittest.TestCase):
         self.assertNotIn("/wp-phpunit-polyfills", command)
         self.assertEqual(command[-2:], ("--filter", "Example"))
 
+    def test_managed_unit_runner_uses_guest_phpunit_without_host_mount(self):
+        from sandbox.core._tests import (
+            MANAGED_NATIVE_COMPOSER, MANAGED_NATIVE_PHPUNIT, _run_tests_unit,
+        )
+
+        tmp, root = self.project()
+        tools = {"phpunit": MANAGED_NATIVE_PHPUNIT,
+                 "composer": MANAGED_NATIVE_COMPOSER}
+        managed = SimpleNamespace(returncode=0)
+        with tmp, patch("sandbox.core._tests._ensure_project_dependencies_docker") as deps, \
+                patch("sandbox.core._tests._managed_execution_gate",
+                      return_value=managed) as gate, \
+                patch("sandbox.core._tests.compose") as compose:
+            result = _run_tests_unit("fixture", str(root), tools, [])
+
+        self.assertEqual(result, 0)
+        deps.assert_called_once_with("fixture", str(root), MANAGED_NATIVE_COMPOSER)
+        self.assertEqual(gate.call_args.args[3], (
+            "php", "/usr/local/libexec/sandbox-phpunit.phar",
+        ))
+        compose.assert_not_called()
+
+    def test_managed_unit_command_never_downloads_host_test_tools(self):
+        import sandbox.commands.debug as debug
+
+        captured = []
+        args = SimpleNamespace(
+            project_dir="/fixture", label=None, mode="unit",
+            provision_only=False, local=True, remote=None, workspace=None,
+            timeout=60, output_profile="smart", json=False, passthrough=[],
+        )
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"root": "/fixture", "tests": {"suite": "unit"}}
+
+            @staticmethod
+            def registry_get(_root, label=None):
+                return {"instance": "fixture", "label": "default"}
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [{"label": "default"}]
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value={
+                    "target_service": SimpleNamespace(
+                        resolve=lambda _request: SimpleNamespace(kind="local")),
+                }), \
+                patch("sandbox.application.context.managed_native_instance_selected",
+                      return_value=("/fixture", "default")), \
+                patch.object(debug, "_ensure_test_runner_tools") as host_tools, \
+                patch.object(debug, "_run_tests_unit",
+                             side_effect=lambda *_args: captured.append(_args[2]) or 0):
+            debug.cmd_test({}, args)
+
+        host_tools.assert_not_called()
+        self.assertEqual(str(captured[0]["phpunit"]),
+                         "/usr/local/libexec/sandbox-phpunit.phar")
+        self.assertEqual(str(captured[0]["composer"]), "/usr/bin/composer")
+
     def test_provision_only_rejects_unit_before_harness(self):
         import sandbox.commands.debug as debug
 

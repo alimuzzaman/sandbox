@@ -56,5 +56,32 @@ class TestIngressHerdValet(unittest.TestCase):
                 {"address": "10.0.0.2", "port": 8123})
         self.assertEqual(process.calls, [])
 
+    def test_legacy_herd_site_facade_keeps_link_secure_and_cleanup_in_a(self):
+        from sandbox.ingress.adapters.herd_valet import HerdSiteCompatibilityFacade
+
+        process = Process()
+        facade = HerdSiteCompatibilityFacade(executable="herd", process=process)
+        provisioned = facade.provision("demo", secure=True)
+        cleaned = facade.cleanup("demo")
+        self.assertTrue(provisioned["ok"]); self.assertTrue(provisioned["secure"])
+        self.assertTrue(cleaned["ok"])
+        self.assertEqual([call[0] for call in process.calls], [
+            ("herd", "link", "demo"), ("herd", "secure", "demo"),
+            ("herd", "unsecure", "demo"), ("herd", "unlink", "demo"),
+        ])
+
+    def test_legacy_secure_failure_preserves_compatible_http_link(self):
+        from sandbox.ingress.adapters.herd_valet import HerdSiteCompatibilityFacade
+
+        process = Process(((0, ""), (1, "cannot secure")))
+        result = HerdSiteCompatibilityFacade(
+            executable="herd", process=process,
+        ).provision("demo", secure=True)
+        self.assertTrue(result["ok"]); self.assertTrue(result["linked"])
+        self.assertFalse(result["secure"])
+        self.assertEqual([call[0] for call in process.calls], [
+            ("herd", "link", "demo"), ("herd", "secure", "demo"),
+        ])
+
 
 if __name__ == "__main__": unittest.main()

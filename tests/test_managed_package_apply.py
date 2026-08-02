@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 import tempfile
 
@@ -55,16 +56,57 @@ class TestManagedPackageApply(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             stager = PackagePlanStager(directory)
-            result = NativeHostPackageApplier(
+            applier = NativeHostPackageApplier(
                 process=Process(), repository_helper="/repo/native-helper.py",
                 installed_helper="/installed/native-helper", stager=stager,
-            ).apply(plan)
+            )
+            prepared = applier.prepare()
+            result = applier.apply(plan)
             self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertTrue(prepared["ok"])
         self.assertTrue(result["ok"])
         self.assertEqual(calls[0][0], ("sudo", "/repo/native-helper.py", "install"))
         self.assertEqual(calls[1][0][:4],
                          ("sudo", "-n", "/installed/native-helper", "host-packages-apply"))
         self.assertEqual(calls[1][0][-1], plan.simulation_digest)
+
+    def test_helper_is_installed_before_privileged_baseline_and_apply(self):
+        from sandbox.runtimes.managed.packages import ManagedPackageService
+
+        plan = TestManagedPackagePlan().planner().plan(); calls = []
+        baseline = {"ok": True, "digest": "a" * 64, "baseline": {}}
+        service = ManagedPackageService(
+            replanner=lambda: plan,
+            prepare_transaction=lambda: calls.append("prepare") or
+                {"ok": True, "mutated": True},
+            baseline_observer=lambda: calls.append("baseline") or baseline,
+            apply_transaction=lambda _plan: calls.append("apply") or
+                {"ok": True, "state": "ready", "mutated": True},
+            confirmation=lambda _plan: True,
+        )
+        result = service.apply(plan, interactive=True)
+        self.assertEqual(calls, ["prepare", "baseline", "apply", "baseline"])
+        self.assertEqual(result["host_service_baseline_digest"], "a" * 64)
+
+    def test_privileged_baseline_rejects_unbounded_or_invalid_helper_output(self):
+        from sandbox.runtimes.managed.packages import PrivilegedHostServiceBaseline
+
+        class Process:
+            def __init__(self, stdout, returncode=0):
+                self.stdout = stdout; self.returncode = returncode; self.calls = []
+            def run(self, argv, **kwargs):
+                self.calls.append((argv, kwargs))
+                return type("Result", (), {"stdout": self.stdout,
+                                            "returncode": self.returncode})()
+
+        valid = json.dumps({"ok": True, "digest": "b" * 64, "baseline": {}})
+        process = Process(valid)
+        value = PrivilegedHostServiceBaseline(process=process, helper="/fixed/helper").observe()
+        self.assertEqual(value["digest"], "b" * 64)
+        self.assertEqual(process.calls[0][0],
+                         ("sudo", "-n", "/fixed/helper", "host-baseline-observe"))
+        with self.assertRaises(RuntimeError):
+            PrivilegedHostServiceBaseline(process=Process("{}"), helper="/fixed/helper").observe()
 
     def test_foreign_service_config_and_data_baseline_is_content_free_and_stable(self):
         from sandbox.runtimes.managed.packages import HostServiceBaseline

@@ -1,0 +1,7 @@
+{
+  "description": "A listener on a separate loopback address coexists with Sandbox's dedicated address.",
+  "listeners": [
+    {"address": "127.0.0.1", "port": 80, "protocol": "tcp", "process": {"command": "nginx"}},
+    {"address": "127.0.0.77", "port": 443, "protocol": "tcp", "process": {"command": "caddy"}}
+  ]
+}

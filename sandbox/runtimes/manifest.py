@@ -1,5 +1,9 @@
 """Truthful runtime mode declarations; only evidence-backed modes are adoptable."""
 
+from __future__ import annotations
+
+import shutil
+
 RUNTIME_DECLARATIONS = (
     {"adapter_id": "compose", "modes": ("compose",),
      "platforms": ("linux", "darwin", "windows"), "isolation": "compose",
@@ -22,3 +26,18 @@ RUNTIME_DECLARATIONS = (
      "support_tier": "conditional", "evidence_id": None,
      "adoptable": False},
 )
+
+DETECT_ONLY_RUNTIME_DECLARATIONS = (
+    {"adapter_id": "local", "platforms": ("linux", "darwin", "windows"), "executable": None},
+    {"adapter_id": "xampp", "platforms": ("linux", "darwin", "windows"), "executable": None},
+    {"adapter_id": "laragon", "platforms": ("windows",), "executable": None},
+    {"adapter_id": "wamp", "platforms": ("windows",), "executable": None},
+)
+
+
+def detect_only_runtime_declarations(platform, *, which=shutil.which):
+    """Report public executable/platform signals without reading product state."""
+    return tuple({**declaration, "mode": "detect_only", "isolation": "unknown",
+                  "adoptable": False, "available": platform in declaration["platforms"],
+                  "reason": "detection_only_no_private_state_access"}
+                 for declaration in DETECT_ONLY_RUNTIME_DECLARATIONS)

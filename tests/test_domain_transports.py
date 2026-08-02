@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+import argparse
 import io
 import json
 from pathlib import Path
@@ -44,6 +45,14 @@ class Service:
 
 
 class TestDomainTransports(unittest.TestCase):
+    def test_cli_has_no_proof_promotion_input(self):
+        from sandbox.commands import domains
+
+        parser = argparse.ArgumentParser()
+        domains.configure_parser(parser)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["apply", "--proof-evidence", "forged"])
+
     def test_cli_structured_actions_delegate_to_application_service(self):
         from sandbox.commands import domains
         from unittest import mock

@@ -1,0 +1,32 @@
+{
+  "slug": null,
+  "plugins": {
+    "better-payment-pro": "/Users/alim/Sites/plugins-pro/better-payment-pro",
+    "betterdocs-pro": "/Users/alim/Sites/plugins-pro/betterdocs-pro",
+    "betterlinks-pro": "/Users/alim/Sites/plugins-pro/betterlinks-pro",
+    "elementor-pro": "/Users/alim/Sites/plugins-pro/elementor-pro",
+    "embedpress-pro": "/Users/alim/Sites/plugins-pro/embedpress-pro",
+    "essential-addons-elementor": "/Users/alim/Sites/plugins-pro/essential-addons-elementor",
+    "essential-blocks-pro": "/Users/alim/Sites/plugins-pro/essential-blocks-pro",
+    "notificationx-pro": "/Users/alim/Sites/plugins-pro/notificationx-pro",
+    "wp-scheduled-posts-pro": "/Users/alim/Sites/plugins-pro/wp-scheduled-posts-pro"
+  },
+  "themes": [],
+  "mappings": {},
+  "mappings_inactive": {},
+  "phpVersion": null,
+  "wpVersion": null,
+  "multisite": false,
+  "server": "nginx",
+  "tld": "tst",
+  "config": {},
+  "port": null,
+  "tests": {
+    "suite": "auto"
+  },
+  "pluginCheck": {
+    "excludeDirectories": [],
+    "versionFile": null,
+    "baselineFile": "plugin-check-baseline.json"
+  }
+}

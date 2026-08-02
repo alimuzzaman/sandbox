@@ -123,3 +123,28 @@ class TestAbsentArtifactIsNotAnEternalResidual(unittest.TestCase):
         again = service.cleanup_owner("/tmp/project::default")
         self.assertTrue(again["ok"])
         self.assertEqual(again["reason"]["code"], "already_absent")
+
+
+class TestDuplicateSocketsDoNotChangeOwnership(unittest.TestCase):
+    """Adopting a route can make the incumbent open a second socket on the same
+    endpoint; that is the same product, not a replacement."""
+
+    @staticmethod
+    def _observation(endpoints):
+        from sandbox.ingress.models import IngressObservation, ListenerEndpoint
+
+        return IngressObservation(
+            "system-caddy", "Caddy",
+            tuple(ListenerEndpoint(address, port, socket_id=str(index))
+                  for index, (address, port) in enumerate(endpoints)),
+            "implemented_unproven", frozenset({"http"}))
+
+    def test_duplicate_endpoint_is_ignored(self):
+        before = self._observation([("::", 80), ("::", 443)])
+        after = self._observation([("::", 80), ("::", 80), ("::", 443)])
+        self.assertEqual(before.ownership_fingerprint, after.ownership_fingerprint)
+
+    def test_a_new_endpoint_still_changes_ownership(self):
+        before = self._observation([("::", 80)])
+        after = self._observation([("::", 80), ("127.0.0.1", 8080)])
+        self.assertNotEqual(before.ownership_fingerprint, after.ownership_fingerprint)

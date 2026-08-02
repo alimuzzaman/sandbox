@@ -122,8 +122,12 @@ class IngressObservation:
         object.__setattr__(self, "ownership_fingerprint", digest({
             "adapter": self.adapter_id, "product": self.product,
             "tier": self.support_tier, "capabilities": sorted(self.capabilities),
-            "endpoints": sorted((item.address, item.port, item.protocol)
-                                for item in self.endpoints),
+            # A SET: adopting a route can make the incumbent open a second
+            # socket on the same address and port, and that must not read as a
+            # different product -- it made cleanup declare the incumbent
+            # replaced and orphan the route the apply had just created.
+            "endpoints": sorted({(item.address, item.port, item.protocol)
+                                 for item in self.endpoints}),
         }))
 
 

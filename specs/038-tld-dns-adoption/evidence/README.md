@@ -9,16 +9,17 @@ alone never promote support.
 | Default Sandbox-owned resolution | `default-strategy.md` | live (macOS) | Linux run |
 | Persisted `.tst` and Compose fallback | `compatibility.md` | live (macOS) | Linux run |
 | Read-only quickstart baseline | `quickstart-run.md` | partial (macOS) | adoption lifecycle section |
-| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | pending live run | a Linux host running systemd-resolved |
+| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (Ubuntu 24.04) | — |
 | Cleanup, drift, and repeated cleanup | `cleanup.md` | partial (macOS) | an owned binding to clean up |
 | Wildcard and shared-owner lifecycle | `wildcards.md` | pending live run | depends on the systemd-resolved run |
 
 ## What the open items need
 
-`systemd-resolved.md` (T034) is the gate: `ResolverProofAttestation` accepts only the
-`systemd-resolved` adapter, so it is the single adapter that can ever reach `adoptable`
-today, and it exists only on Linux. The cleanup remainder (T050) and the wildcard
-lifecycle (T055) both need a binding Sandbox owns, which requires that run first.
+T034 is captured: exact-name adoption, fresh lookup, HTTP through the ingress, repeat
+apply, and cleanup all pass live on Ubuntu 24.04, and the run found and fixed five
+defects that made adoption impossible on any real host. The remaining items —
+owner-change/drift/unreachable cleanup (T050) and the wildcard zone lifecycle (T055) —
+now have a working adapter to exercise; they need their own fixture runs.
 
 ## Rules for adding evidence here
 

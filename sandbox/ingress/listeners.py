@@ -48,9 +48,19 @@ def parse_helper_listeners(text: str) -> dict:
         address, port, pid, command, executable = columns
         if not port.isdigit():
             continue
-        address = "0.0.0.0" if address in {"*", "0.0.0.0"} else address.strip("[]")
-        if address == "::" or address == "":
-            address = "::"
+        address = address.strip("[]")
+        if address in {"*", ""}:
+            # `ss` prints a dual-stack wildcard as `*`. /proc reports the same
+            # socket as `::`, and an IPv4-only wildcard as `0.0.0.0`, so record
+            # both keys or the attribution never matches the observation.
+            for family in ("::", "0.0.0.0"):
+                found[(family, int(port))] = {
+                    "pid": int(pid) if pid.isdigit() else None,
+                    "command": None if command == "-" else command,
+                    "executable": None if executable == "-" else executable,
+                    "start": None,
+                }
+            continue
         try:
             ipaddress.ip_address(address)
         except ValueError:

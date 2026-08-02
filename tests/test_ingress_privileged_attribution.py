@@ -23,7 +23,8 @@ class Process:
         return SimpleNamespace(stdout=self.stdout, stderr="", returncode=self.returncode)
 
 
-HELPER_OUTPUT = """0.0.0.0 80 4242 caddy /usr/bin/caddy
+# `ss` prints a dual-stack wildcard as `*`; /proc reports `::`.
+HELPER_OUTPUT = """* 80 4242 caddy /usr/bin/caddy
 :: 443 4242 caddy /usr/bin/caddy
 127.0.0.1 9120 771 hermes -
 """
@@ -34,8 +35,9 @@ class TestHelperOutputParsing(unittest.TestCase):
         from sandbox.ingress.listeners import parse_helper_listeners
 
         found = parse_helper_listeners(HELPER_OUTPUT)
-        self.assertEqual(found[("0.0.0.0", 80)]["command"], "caddy")
-        self.assertEqual(found[("0.0.0.0", 80)]["executable"], "/usr/bin/caddy")
+        for wildcard in ("0.0.0.0", "::"):
+            self.assertEqual(found[(wildcard, 80)]["command"], "caddy")
+            self.assertEqual(found[(wildcard, 80)]["executable"], "/usr/bin/caddy")
         self.assertIsNone(found[("127.0.0.1", 9120)]["executable"])
 
     def test_malformed_lines_are_ignored(self):

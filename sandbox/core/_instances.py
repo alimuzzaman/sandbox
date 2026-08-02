@@ -503,6 +503,33 @@ def _auto_heal_wp_url(name: str) -> bool:
     return True
 
 
+def _refresh_registered_url(sc, root: str, label: str, existing: dict,
+                            cfg: dict) -> dict:
+    """Re-record the instance URL from live state on the ready fast path.
+
+    A clean URL can be assigned AFTER an instance was registered — `./sb domains
+    setup` on an existing stack is the normal case. Without this, ensure keeps
+    returning the recorded `http://localhost:<port>` forever, and every caller
+    that trusts it (`.wp-env-port`, MCP, E2E config) stays on the per-port URL
+    while the browser is served the clean one. site_url() returns the per-port
+    URL itself when no routed domain is serving, so this never invents one.
+    """
+    name = existing.get("instance")
+    resolved = resolve_instances(cfg).get(name) if name else None
+    if not resolved:
+        return existing
+    fresh = site_url({k: v for k, v in resolved.items() if k != "url"})
+    if not fresh or fresh == existing.get("url"):
+        return existing
+    token = (_local_yaml().get("instances", {}).get(name, {})
+             .get("autologin_token", ""))
+    return sc.registry_put(
+        root, label=label, instance=name, url=fresh,
+        login_url=f"{fresh}/?sandbox_autologin={token}" if token else "",
+        admin_url=f"{fresh}/wp-admin/",
+    )
+
+
 def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
                     create: bool = False, php_version: str | None = None,
                     wp_version: str | None = None,
@@ -577,7 +604,7 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
             # now the instance must be recreated to apply a changed pin.
             _warn_version_drift(cfg, existing.get("instance"), pconf)
             _auto_heal_wp_url(existing["instance"])
-            return existing
+            return _refresh_registered_url(sc, root, label, existing, cfg)
 
         if not existing and label != "default" and not create:
             known = [e["label"] for e in sc.registry_list_for_root(root)]
@@ -816,7 +843,14 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         # live DB is destructive-adjacent; leave it to an explicit recreate.
         _warn_version_drift(cfg, name, pconf)
 
-        base_url = existing.get("url") or f"http://localhost:{ports['wordpress_port']}"
+        # Re-derive from live state instead of reusing the recorded URL: a
+        # clean URL assigned AFTER this instance was registered (e.g. by a later
+        # `./sb domains setup`) must be picked up here, or ensure keeps handing
+        # callers the stale localhost:<port> for the life of the instance.
+        # site_url() falls back to that per-port URL on its own when no routed
+        # domain is serving.
+        base_url = (site_url(inst_cfg) or existing.get("url")
+                    or f"http://localhost:{ports['wordpress_port']}")
         return sc.registry_put(
             root,
             label=label,

@@ -1172,6 +1172,11 @@ def proxy_setup(cfg, tld=None) -> bool:
     if not reload_proxy():
         info("proxy reload failed (is Docker running?).")
         return False
+    # Re-run the URL pass now that the certs exist and the https routes are
+    # live: the first pass above ran BEFORE minting, so site_url() still
+    # resolved to http and WP was left one scheme behind the route it is
+    # actually served on (browser gets a 308 to https while WP believes http).
+    _assign_domains_to_all(cfg, tld)
     return True
 
 
@@ -1360,28 +1365,49 @@ def secure_generic_instance(instance: str, *, tld=None) -> tuple[bool, str | Non
 
 
 def proxy_up(cfg: dict) -> bool:
-    """Restore composed clean URLs, falling back only after a clean rollback."""
-    instances = tuple(resolve_instances(cfg).values())
-    secure = any(
-        str(item.get("url") or "").startswith("https://")
-        or (item.get("domain") and _cert_paths(item["domain"])[0].exists())
-        for item in instances
-    )
-    lifecycle = clean_url_lifecycle_handoff(
-        cfg, "up", protocols=("https",) if secure else ("http",),
-    )
-    if lifecycle["ok"]:
-        _persist_composed_clean_urls(cfg, lifecycle)
-        return True
-    info("composed clean URL is unavailable; preserved legacy state and per-port fallback")
-    return False
+    """Start the selected clean-URL ingress.
+
+    Default provider: re-render and (re)start the Caddy proxy, recreating the
+    container so a host publish that was lost — e.g. the loopback alias appeared
+    after the container did — is re-established. Adoption mode restores composed
+    routes instead.
+    """
+    if _adoption_selected(cfg):
+        instances = tuple(resolve_instances(cfg).values())
+        secure = any(
+            str(item.get("url") or "").startswith("https://")
+            or (item.get("domain") and _cert_paths(item["domain"])[0].exists())
+            for item in instances
+        )
+        lifecycle = clean_url_lifecycle_handoff(
+            cfg, "up", protocols=("https",) if secure else ("http",),
+        )
+        if lifecycle["ok"]:
+            _persist_composed_clean_urls(cfg, lifecycle)
+            return True
+        info("the selected adopted ingress is unavailable; per-port URLs remain")
+        return False
+    PROXY_COMPOSE.write_text(render_proxy_compose())
+    regen_caddyfile(cfg)
+    res = _proxy_compose_up(force_recreate=True)
+    up, detail = (res.returncode == 0), _run_detail(res)
+    if up:
+        up, detail = proxy_apply()
+    if not up:
+        info(f"clean URL ingress did not start{': ' + detail if detail else '.'}")
+    return up
 
 
 def proxy_down(cfg: dict) -> bool:
-    """Clean receipt-owned routes without mutating unreceipted legacy state."""
-    lifecycle = clean_url_lifecycle_handoff(cfg, "down")
-    return lifecycle["ok"] or lifecycle.get("reason", {}).get("code") == \
-        "no_registered_clean_url_targets"
+    """Stop the selected clean-URL ingress."""
+    if _adoption_selected(cfg):
+        lifecycle = clean_url_lifecycle_handoff(cfg, "down")
+        return lifecycle["ok"] or lifecycle.get("reason", {}).get("code") == \
+            "no_registered_clean_url_targets"
+    res = subprocess.run(["docker", "compose", "-p", PROXY_PROJECT, "-f",
+                          str(PROXY_COMPOSE), "--project-directory", str(ROOT),
+                          "stop"], capture_output=True, text=True)
+    return res.returncode == 0
 
 
 def proxy_teardown(cfg) -> bool:

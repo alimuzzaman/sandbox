@@ -210,35 +210,39 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
         persist.assert_called_once_with({}, lifecycle)
         legacy.assert_not_called()
 
-    def test_up_success_uses_composed_service_without_legacy_proxy(self):
+    def test_selected_adoption_up_uses_composed_service_without_default_proxy(self):
         from sandbox.core import _domains
 
         lifecycle = {"ok": True, "state": "ready", "mutated": False,
                      "results": []}
-        with mock.patch.object(_domains, "resolve_instances", return_value={}), \
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(_domains, "resolve_instances", return_value={}), \
              mock.patch.object(_domains, "clean_url_lifecycle_handoff",
                                return_value=lifecycle), \
              mock.patch.object(_domains, "_persist_composed_clean_urls"), \
              mock.patch.object(_domains, "proxy_available") as availability, \
+             mock.patch.object(_domains, "_proxy_compose_up") as compose_up, \
              mock.patch.object(_domains, "reload_proxy") as reload:
             self.assertTrue(_domains.proxy_up({}))
 
         availability.assert_not_called()
+        compose_up.assert_not_called()
         reload.assert_not_called()
 
-    def test_down_cleans_composed_owners_without_touching_legacy_proxy(self):
+    def test_selected_adoption_down_cleans_composed_owners_only(self):
         from sandbox.core import _domains
 
         events = []
         lifecycle = {"ok": True, "state": "ready", "mutated": True,
                      "reason": {"code": "cleanup_complete"}}
         completed = mock.Mock(returncode=0)
-        with mock.patch.object(
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(
                 _domains, "clean_url_lifecycle_handoff",
                 side_effect=lambda *_args, **_kwargs: events.append("application") or lifecycle,
              ), mock.patch.object(
                 _domains.subprocess, "run",
-                side_effect=lambda *_args, **_kwargs: events.append("legacy") or completed,
+                side_effect=lambda *_args, **_kwargs: events.append("compose") or completed,
              ):
             self.assertTrue(_domains.proxy_down({}))
 
@@ -311,6 +315,34 @@ class TestDefaultCleanUrlProvider(unittest.TestCase):
 
         proxy.assert_called_once()
         handoff.assert_not_called()
+
+    def test_default_up_recreates_the_caddy_proxy(self):
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff") as handoff, \
+             mock.patch.object(_domains, "PROXY_COMPOSE", mock.Mock()), \
+             mock.patch.object(_domains, "render_proxy_compose", return_value=""), \
+             mock.patch.object(_domains, "regen_caddyfile"), \
+             mock.patch.object(_domains, "_proxy_compose_up",
+                               return_value=mock.Mock(returncode=0, stdout="", stderr="")) as compose_up, \
+             mock.patch.object(_domains, "proxy_apply", return_value=(True, "")):
+            self.assertTrue(_domains.proxy_up({}))
+
+        compose_up.assert_called_once_with(force_recreate=True)
+        handoff.assert_not_called()
+
+    def test_default_down_stops_the_caddy_proxy(self):
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff") as handoff, \
+             mock.patch.object(_domains.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)) as run:
+            self.assertTrue(_domains.proxy_down({}))
+
+        handoff.assert_not_called()
+        self.assertIn("stop", run.call_args[0][0])
 
     def test_mode_defaults_to_sandbox_caddy_and_switches_on_demand(self):
         from sandbox.core import _domains

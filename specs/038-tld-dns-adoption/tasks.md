@@ -218,9 +218,10 @@ proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
       `domains.strategy`/`domains.ingress` precedence chain in `sandbox/commands/domains.py`
 - [X] T062 Document the default strategy and the switch in `docs/domain-resolution.md`,
       `docs/clean-url-default.md`, and `docs/sandbox-config-reference.md`
-- [ ] T063 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
+- [~] T063 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
       through the default ingress) and capture evidence in
       `specs/038-tld-dns-adoption/evidence/default-strategy.md`
+      (macOS proven 2026-08-02; Linux still open)
 
 ## Implementation Strategy
 

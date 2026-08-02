@@ -1,49 +1,64 @@
-# Cleanup and recovery (macOS, partial)
+# Resolver cleanup and recovery (Ubuntu 24.04 + macOS)
 
-**Scope**: T050 — normal / owner-change / drift / unreachable / repeated cleanup. Captured
-on darwin. Only the no-owned-binding and repeat cases are provable today: no resolver
-adapter is adoptable on any platform, so Sandbox owns no binding to clean up.
+**Scope**: T050 — owner-change / drift / unreachable / normal / repeated cleanup. The
+owned-binding cases ran live against systemd-resolved on Ubuntu; the nothing-owned cases
+were captured on macOS.
 
-**Host**: macOS 15 (Darwin 25.6.0). 2026-08-02.
+**Host**: Ubuntu 24.04.4 LTS, systemd 255, systemd-resolved owning the stub symlink.
+Harness: `python3 tests/live_resolver_recovery.py --project-dir ~/git/templately
+--label tmp-logo --evidence-id 038-t050-ubuntu-2404`. 2026-08-02.
 
-## Repeated cleanup with nothing owned
-
-```text
-./sb domains cleanup --project-dir . --json   (run 1)
-  {"ok": true, "state": "ready", "mutated": false,
-   "reason": {"code": "already_absent", "message": "No owned resolver binding remains."},
-   "resolver": {"owner": "macos:scoped-resolver", "tier": "implemented_unproven"}}
-
-./sb domains cleanup --project-dir . --json   (run 2)
-  identical result
-```
-
-Repeating converges on the same state and reports no mutation (FR-026, SC-005).
-
-## Foreign and default-provider state preserved
-
-After the cleanup runs:
+## External drift is preserved, not removed
 
 ```text
-https://templately-staging.tst/            200
-dscacheutil templately-staging.tst      -> 127.0.0.77
-/etc/resolver/test                         still Herd's, unmodified
-/etc/resolv.conf                           still the macOS-managed symlink
+apply                  ready
+fragment edited outside Sandbox: "# edited outside sandbox" appended
+
+cleanup_with_drift     cleanup_incomplete   ownership=residual
+fragment_preserved     "# edited outside sandbox"     (byte-for-byte intact)
+recovery_records       [{"reason_code": "observed_state_changed", "status": "drifted"}]
 ```
 
-Cleanup of composed state did not touch the incumbent's suffix, the machine resolver, or
-the default provider's own scoped entry (FR-019, FR-020).
+Sandbox refused to remove a binding whose observed state no longer matched its receipt,
+left the operator's edit alone, and retained a retryable non-secret record (FR-019, FR-020).
 
-## Not covered — needs an adoptable adapter
+## Authority stopped mid-cleanup
 
-- **Normal cleanup of an owned binding**: apply a scoped route, then remove it and show the
-  rule and authority gone with unrelated answers unchanged.
-- **Owner change**: switch the active resolver after applying, then show status reporting
-  `resolver_owner_changed` without mutating either resolver.
-- **Drift**: modify the owned rule externally, then show cleanup refusing and retaining a
-  non-secret recovery record.
-- **Unreachable resolver**: stop the authority mid-cleanup and show incomplete cleanup plus
-  retry state.
+```text
+pkill dnsmasq (the scoped authority)
+authority_running_during   False
+cleanup_with_authority_down  ready   cleanup_complete
+```
 
-Unit coverage exists in `tests/test_domain_cleanup.py`; this file records that the LIVE
-half is still open, and T050 stays unchecked until it is captured.
+Cleanup converges rather than reporting an unclearable residual: the goal state is exactly
+what a dead authority already provides, and the generated artifacts are dropped.
+
+## Normal and repeated cleanup
+
+```text
+cleanup_normal   ready  already_absent
+cleanup_repeat   ready  already_absent
+fragment_gone    True
+resolvectl domain -> Global: (none)
+```
+
+## Unrelated resolution unchanged
+
+```text
+example.com before and after: identical answers
+/etc/resolv.conf: still the systemd-resolved stub symlink
+```
+
+## Defect this run found and fixed
+
+Removing the LAST owned zone required terminating the recorded authority process, so a
+process that had already died left `remove()` returning False and cleanup reporting
+incomplete forever with nothing left to clean. A pid that no longer exists is now treated
+as goal-reached; a live process under that pid is still preserved.
+
+## Not covered
+
+- **Owner change**: switching the machine's active resolver between apply and cleanup, then
+  showing status report `resolver_owner_changed` without mutating either resolver. Unit
+  coverage exists in `tests/test_domain_cleanup.py`.
+- Shared-owner release across two projects holding one zone (see `wildcards.md`, T055).

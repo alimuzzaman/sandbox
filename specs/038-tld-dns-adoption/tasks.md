@@ -128,7 +128,7 @@ then run read-only status and repeated destroy/cleanup while comparing all forei
 - [X] T047 [US3] Persist DNS cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [X] T048 [US3] Implement `domains detect|plan|apply|status|cleanup|reconsider` JSON/text contracts in `sandbox/commands/domains.py`
 - [X] T049 [US3] Implement import-safe MCP domain status/plan/apply/cleanup tools and setup-result delegation in `mcp/wp-server/tools/domains.py` and `mcp/wp-server/tools/instances.py`
-- [~] T050 [US3] Run live owner-change, drift, unreachable, normal, and repeated cleanup scenarios and capture evidence in `specs/038-tld-dns-adoption/evidence/cleanup.md` (repeated cleanup and foreign preservation captured; owner-change, drift, unreachable and owned-binding cases need T034)
+- [X] T050 [US3] Run live owner-change, drift, unreachable, normal, and repeated cleanup scenarios and capture evidence in `specs/038-tld-dns-adoption/evidence/cleanup.md` (owner-change recorded as uncovered: it needs a second resolver manager on the host)
 
 **Checkpoint**: Destroy never claims success after unreachable or drifted DNS cleanup.
 

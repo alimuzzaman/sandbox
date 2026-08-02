@@ -157,7 +157,7 @@ class TestDomainAuthority(unittest.TestCase):
             def run(self, argv, **kwargs):
                 if len(argv) > 1 and argv[1] == "--test":
                     self_case.assertFalse(reservation.released)
-                if len(argv) > 1 and argv[1] == "--conf-file":
+                if len(argv) > 1 and argv[1].startswith("--conf-file="):
                     self_case.assertTrue(reservation.released)
                 return super().run(argv, **kwargs)
 
@@ -239,7 +239,7 @@ class TestDomainAuthority(unittest.TestCase):
             removed = authority.remove(binding.binding_id)
         self.assertEqual(first.config_digest, second.config_digest)
         starts = [call for call, _kwargs in process.calls
-                  if len(call) > 1 and call[1] == "--conf-file"]
+                  if len(call) > 1 and call[1].startswith("--conf-file=")]
         self.assertEqual(len(starts), 1)
         self.assertTrue(removed)
         self.assertTrue(any(call[:2] == ("kill", "-TERM") for call, _kwargs in process.calls))
@@ -267,7 +267,7 @@ class TestDomainAuthority(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "process identity drifted"):
                 authority.ensure((binding,), address="127.0.0.54", port=5300)
         launches = [call for call, _kwargs in process.calls
-                    if len(call) > 1 and call[1] == "--conf-file"]
+                    if len(call) > 1 and call[1].startswith("--conf-file=")]
         self.assertEqual(len(launches), 1)
 
     def test_existing_config_without_receipt_is_never_overwritten(self):
@@ -368,3 +368,37 @@ class TestDomainAuthority(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDnsmasqArgumentForm(unittest.TestCase):
+    """dnsmasq rejects a space-separated long option with "junk found in
+    command line". Using it made every live adoption fail as an endpoint
+    collision, so the equals form is part of the contract."""
+
+    def test_every_dnsmasq_invocation_uses_the_equals_form(self):
+        from sandbox.network.authority import DnsmasqAuthority
+        from sandbox.network.models import ResolutionBinding
+
+        process = RecordingProcess()
+        binding = ResolutionBinding.create(
+            kind="exact", name="one.test", target="127.0.0.77", adapter_id="resolved",
+            owners=("/tmp/one::default",), desired={},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            authority = DnsmasqAuthority(
+                Path(tmp), process=process, binary="/usr/sbin/dnsmasq",
+                pid_reader=lambda _path: (123, "boot:1"),
+                pid_matches=lambda *_args: True,
+                pid_executable=lambda _pid: True,
+                listener_matches=lambda *_args: True,
+            )
+            authority.ensure((binding,), address="127.0.0.54", port=5300)
+
+        dnsmasq_calls = [call for call, _kwargs in process.calls
+                         if call and call[0].endswith("dnsmasq")]
+        self.assertTrue(dnsmasq_calls)
+        for call in dnsmasq_calls:
+            self.assertNotIn("--conf-file", call,
+                             "space-separated form is rejected by dnsmasq")
+            self.assertTrue(any(item.startswith("--conf-file=") for item in call),
+                            f"no --conf-file= argument in {call}")

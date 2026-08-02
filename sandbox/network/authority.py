@@ -224,8 +224,11 @@ class DnsmasqAuthority:
         if owned and not self._process_owned(state, pid, pid_start):
             raise RuntimeError("owned authority process identity drifted")
         self._atomic_write(self.config_path, text)
+        # dnsmasq only accepts the equals form for long options; a separate
+        # argument is rejected with "junk found in command line", which read as
+        # an endpoint collision and blocked every adoption on a real host.
         checked = self.process.run(
-            (self.binary, "--test", "--conf-file", str(self.config_path)), timeout=10,
+            (self.binary, "--test", f"--conf-file={self.config_path}"), timeout=10,
         )
         if checked.returncode != 0:
             if previous_config is None:
@@ -241,7 +244,7 @@ class DnsmasqAuthority:
         if self._process_owned(state, pid, pid_start):
             self.process.run(("kill", "-TERM", str(state["pid"])), timeout=5)
         result = self.process.run(
-            (self.binary, "--conf-file", str(self.config_path)), timeout=10,
+            (self.binary, f"--conf-file={self.config_path}"), timeout=10,
         )
         if result.returncode != 0:
             if previous_config is None:
@@ -249,7 +252,7 @@ class DnsmasqAuthority:
             else:
                 self._atomic_write(self.config_path, previous_config)
                 restored = self.process.run(
-                    (self.binary, "--conf-file", str(self.config_path)), timeout=10,
+                    (self.binary, f"--conf-file={self.config_path}"), timeout=10,
                 )
                 if restored.returncode == 0:
                     restored_pid, restored_start = self.pid_reader(self.pid_file)

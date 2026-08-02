@@ -153,6 +153,13 @@ class ResolverObservation:
     current_answers: tuple[str, ...]
     fingerprint: str
     evidence: tuple[str, ...] = ()
+    # Digest of the OWNERSHIP facts only. `fingerprint` also covers current
+    # answers and raw evidence text, both of which move on their own: a DNS TTL
+    # expiring, an unrelated container adding a veth interface to
+    # `resolvectl status`, or this feature's own successful apply. Comparing the
+    # full fingerprint to decide "did the resolver owner change" therefore
+    # reports a change on an untouched host and breaks repeat-safety.
+    ownership_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         _text(self.owner_id, "resolver owner")
@@ -164,6 +171,14 @@ class ResolverObservation:
         object.__setattr__(self, "extension", _mapping(self.extension, "extension"))
         object.__setattr__(self, "current_answers", tuple(_address(item) for item in self.current_answers))
         object.__setattr__(self, "fingerprint", _digest(self.fingerprint, "fingerprint"))
+        if not self.ownership_fingerprint:
+            object.__setattr__(self, "ownership_fingerprint", canonical_digest({
+                "owner_id": self.owner_id, "manager": self.manager,
+                "mode": self.mode, "support_tier": self.support_tier,
+                "extension": dict(self.extension),
+            }))
+        object.__setattr__(self, "ownership_fingerprint",
+                           _digest(self.ownership_fingerprint, "ownership fingerprint"))
         if not all(isinstance(item, str) for item in self.evidence):
             raise ValueError("resolver evidence must contain strings")
 
@@ -181,6 +196,10 @@ class ResolverObservation:
             support_tier=support_tier, extension=dict(extension or {}),
             current_answers=tuple(current_answers),
             fingerprint=canonical_digest(basis), evidence=tuple(evidence),
+            ownership_fingerprint=canonical_digest({
+                "owner_id": owner_id, "manager": manager, "mode": mode,
+                "support_tier": support_tier, "extension": dict(extension or {}),
+            }),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -188,6 +207,7 @@ class ResolverObservation:
             "owner_id": self.owner_id, "manager": self.manager, "mode": self.mode,
             "support_tier": self.support_tier, "extension": dict(self.extension),
             "current_answers": list(self.current_answers), "fingerprint": self.fingerprint,
+            "ownership_fingerprint": self.ownership_fingerprint,
             "evidence": list(self.evidence),
         }
 

@@ -401,7 +401,7 @@ class DomainService:
                 observation.owner_id, "accepted", decided_at, 1,
             ))
         current = self.observer(prepared["hostname"])
-        if current.fingerprint != observation.fingerprint:
+        if current.ownership_fingerprint != observation.ownership_fingerprint:
             return self._result(
                 state="fallback", hostname=prepared["hostname"],
                 policy=prepared["policy"], observation=current,

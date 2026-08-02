@@ -847,3 +847,35 @@
 - `./sb resources status` accepts `--scope stale` (previously thought to be status-only), and returns complete/payload JSON; this looks like a tolerated/likely no-op filter alias. It does not fail and returns full object.
 - `./sb resources status --json --remote does-not-exist` returns `unknown_remote`.
 - `./sb resources status --json --scope stale --remote scaleway-sandbox` returns large partial payload with status `partial` and non-measured inventory (`host_filesystem`, `docker_storage`, low confidence/large unknown bytes), confirming remote partial-result behavior.
+
+## Continuation pass (2026-08-02): command parser + capability sweep
+
+### help/usage checks for additional command families
+- `./sb pxdiff`, `./sb vrdiff`, `./sb specextract`, `./sb specdiff`, `./sb specgate` all require required positional paths/URLs and only `--json` where explicitly listed.
+- `./sb license` action parser remains strict:
+  - `./sb license` prints masked status
+  - `./sb license bogus` errors with choice list.
+- `./sb host`, `./sb deploy`, `./sb ensure`, `./sb init`, `./sb server`, `./sb global`, `./sb home`, `./sb mcp`, `./sb focus`, `./sb claude`, `./sb native`, `./sb instances`, `./sb test`, `./sb e2e`, `./sb xdebug`, `./sb abilities`, `./sb introspect`, `./sb recovery`, `./sb hermes`, `./sb secure`, `./sb domains`, `./sb dump`, `./sb qm`, `./sb visit`, `./sb wp`, `./sb seed`, `./sb migrate`, `./sb restore`, `./sb setup`, `./sb shell`, `./sb up`, `./sb down`, `./sb logs`, `./sb install`, `./sb update`, `./sb doctor`, `./sb status`
+  all expose stable positional/subcommand surfaces as documented by `--help` and did not regress into parser exceptions during help-only checks.
+
+### behavior changes from command execution checks
+- `./sb home` (no args) prints current `SANDBOX_HOME` and relocation hints.
+- `./sb global` reports when `sb` is already installed globally and points to `~/.local/bin/sb`.
+- `./sb server` without `server_type` is a parser error, and `./sb instance` remains `delete`-only in `--help` coverage.
+- `./sb instances` prints local-instance inventory text, and `./sb instances --json` returns machine-readable structure for all instances.
+- `./sb uninstall` confirms safety gate: non-interactive run exits with `error: refusing to uninstall non-interactively without --yes.` after listing impacted resources.
+- `./sb snapshot` and `./sb restore` show required positional `name`.
+- `./sb async-job` is required to provide `job_id`.
+- `./sb plugin-check` executes a `wp plugin check sandbox` command and in this environment fails with a `wp` subcommand registration error when plugin is absent.
+
+### job command cluster (non-json/non-positional edge)
+- `./sb job-list` prints job entries successfully without `--json` and without job id filter (history dump format begins with workspace-like ids + states).
+- `./sb job-start` errors with `error: usage: ./sb job-start [target options] -- <argv...>` and requires delimiter usage when starting jobs.
+- `./sb job-matrix` similarly requires `--workspace <label>` plus `-- <argv...>` before execution.
+- `./sb job-cleanup`, `./sb job-retry`, `./sb job-metrics`, `./sb job-output`, `./sb job-artifacts`, and `./sb job-artifact-get` are all missing required positional args (`job_id` and `artifact_id` where applicable).
+- `./sb job-reconcile` and `./sb job-retention` accepted no args in this session and returned status summaries (`interrupted=0 released=0` and `cleaned=0 retention_days=7`, respectively) instead of usage failures.
+- `./sb job no-such-id` still validates job ID format at parser level, while some sibling commands still show inconsistent exception paths for bad IDs as previously logged.
+
+### other command outputs worth carrying forward
+- `./sb status` succeeded with focused JSON capability summary and reported `Optional runtime gaps: logs, stop, wordpress.debug, wordpress.server-switch`.
+- `./sb onboard --minimal` auto-runs the onboarding flow and reports successful setup for this project; it did not require interactive confirmation in this run.

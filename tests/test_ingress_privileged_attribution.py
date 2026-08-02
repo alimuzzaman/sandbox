@@ -24,9 +24,9 @@ class Process:
 
 
 # `ss` prints a dual-stack wildcard as `*`; /proc reports `::`.
-HELPER_OUTPUT = """* 80 4242 caddy /usr/bin/caddy
-:: 443 4242 caddy /usr/bin/caddy
-127.0.0.1 9120 771 hermes -
+HELPER_OUTPUT = """* 80 4242 caddy /usr/bin/caddy 99187
+:: 443 4242 caddy /usr/bin/caddy 99187
+127.0.0.1 9120 771 hermes - -
 """
 
 
@@ -39,11 +39,20 @@ class TestHelperOutputParsing(unittest.TestCase):
             self.assertEqual(found[(wildcard, 80)]["command"], "caddy")
             self.assertEqual(found[(wildcard, 80)]["executable"], "/usr/bin/caddy")
         self.assertIsNone(found[("127.0.0.1", 9120)]["executable"])
+        self.assertEqual(found[("0.0.0.0", 80)]["start"], "99187")
+        self.assertIsNone(found[("127.0.0.1", 9120)]["start"])
 
     def test_malformed_lines_are_ignored(self):
         from sandbox.ingress.listeners import parse_helper_listeners
 
         self.assertEqual(parse_helper_listeners("garbage\n1 2 3\n"), {})
+
+    def test_the_older_five_column_form_still_parses(self):
+        from sandbox.ingress.listeners import parse_helper_listeners
+
+        found = parse_helper_listeners("127.0.0.1 80 5 caddy /usr/bin/caddy\n")
+        self.assertEqual(found[("127.0.0.1", 80)]["command"], "caddy")
+        self.assertIsNone(found[("127.0.0.1", 80)]["start"])
 
 
 class TestPrivilegedAttribution(unittest.TestCase):

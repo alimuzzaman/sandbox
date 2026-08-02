@@ -450,12 +450,16 @@ case "$verb" in
             case "$port" in ''|*[!0-9]*) continue ;; esac
             pid=${users#*pid=}; pid=${pid%%,*}
             case "$pid" in ''|*[!0-9]*) pid="" ;; esac
-            command=""; executable=""
+            command=""; executable=""; start=""
             if [ -n "$pid" ] && [ -r "/proc/$pid/comm" ]; then
                 command=$(tr -d "\n" < "/proc/$pid/comm")
                 executable=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+                # Field 22 of /proc/<pid>/stat: start time in clock ticks. Part
+                # of the process identity an adapter must pin, so a pid reused
+                # by another process cannot pass as the same owner.
+                start=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
             fi
-            printf '%s %s %s %s %s\n' "$address" "$port" "${pid:--}" "${command:--}" "${executable:--}"
+            printf '%s %s %s %s %s %s\n' "$address" "$port" "${pid:--}" "${command:--}" "${executable:--}" "${start:--}"
         done ;;
     observe)
         [ "$#" -eq 3 ] || usage; require_root; require_applied_receipt "$@"

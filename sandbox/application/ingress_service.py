@@ -165,9 +165,15 @@ class IngressService:
             ):
                 foreign_endpoint_owner = True
                 continue
+            # A wildcard listener serves loopback too, so require that the
+            # endpoint COVERS loopback rather than that its address literally is
+            # one: the documented conformance host runs system Caddy on `*:80`,
+            # which the stricter reading rejected as an unavailable control
+            # surface.
             if candidate.adapter_id == "system-caddy" and any(
                 endpoint.owner_confidence != "proven"
-                or not ipaddress.ip_address(endpoint.address).is_loopback
+                or not (ipaddress.ip_address(endpoint.address).is_loopback
+                        or ipaddress.ip_address(endpoint.address).is_unspecified)
                 for endpoint in observation.endpoints
                 if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
             ):

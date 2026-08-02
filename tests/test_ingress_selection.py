@@ -147,3 +147,54 @@ class TestIngressSelection(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TestWildcardIncumbentIsSelectable(unittest.TestCase):
+    """037's conformance host runs system Caddy on `*:80`. Requiring the
+    endpoint address to BE loopback rejected it as control-unavailable, even
+    though a wildcard listener serves loopback."""
+
+    @staticmethod
+    def _observation(address):
+        from sandbox.ingress.models import IngressObservation, ListenerEndpoint
+
+        process = {"pid": 4242, "start": "77", "executable": "/usr/bin/caddy",
+                   "command": "caddy"}
+        return (IngressObservation(
+            "system-caddy", "Caddy",
+            (ListenerEndpoint(address, 80, socket_id="1", process=process,
+                              owner_confidence="proven"),),
+            "implemented_unproven", frozenset({"http"})),)
+
+    def _select(self, address):
+        from sandbox.application.ingress_service import IngressService
+        from sandbox.ingress.manifest import (
+            IngressProofAttestation, built_in_ingress_registry,
+        )
+
+        class Adapter:
+            @staticmethod
+            def ready():
+                return True
+
+        registry = built_in_ingress_registry(
+            {"system-caddy": Adapter()},
+            proof_attestation=IngressProofAttestation("system-caddy", "evidence-1"),
+        )
+        return IngressService(
+            detector=Detector(self._observation(address)), registry=registry,
+        ).select(required_protocols=("http",))
+
+    def test_wildcard_listener_is_selected(self):
+        selection = self._select("::")
+        self.assertEqual(selection.adapter_id, "system-caddy")
+        self.assertEqual(selection.reason_code, "selected")
+        self.assertTrue(selection.accepted_addresses)
+
+    def test_exact_loopback_listener_is_still_selected(self):
+        self.assertEqual(self._select("127.0.0.1").adapter_id, "system-caddy")
+
+    def test_routable_public_listener_is_still_refused(self):
+        selection = self._select("212.47.72.49")
+        self.assertIsNone(selection.adapter_id)
+        self.assertEqual(selection.reason_code, "ingress_control_unavailable")

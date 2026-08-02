@@ -905,3 +905,32 @@
 - `./sb job-retry <succeeded-id>` returns a new retry job id (not blocked by terminal state in this check).
 - `./sb job-start -- echo ...` successfully starts a local exec job and prints job metadata.
 - `./sb job-output <id>` returns captured command output when the job is terminal and available (example: `hello-sb`).
+
+## Continuation pass (2026-08-02): remote/Hermes/edge execution delta
+
+### remote command family
+- `./sb remote add`, `provision`, `up`, `down`, `remove`, `set-origin`, and `service` all require required positional `name` when used without `list`.
+- `./sb remote list --json` is supported and returns remotes with fields `name`, `ssh_configured`, `reachable`, and `provisioned`.
+- `./sb remote add testremote foo@host` reports successful registration and next steps (`next: ./sb remote provision testremote`).
+- `./sb remote remove testremote --yes` immediately reported `• no remote named 'testremote' was registered` in this environment, indicating the registration did not persist in a retrievable way.
+- `./sb remote provision no-such-remote --json` returns human error: remote must be registered first.
+- `./sb remote service status`, `diagnostics`, `migrate`, `stop` with missing remote return action usage.
+- `./sb remote service migrate scaleway-sandbox --plan` returns `remote service ...: planned` (non-mutating plan mode).
+- `./sb remote up scaleway-sandbox --json` and `./sb remote down scaleway-sandbox --json` returned `planned` with `requires_confirm: true`.
+- After `./sb home /tmp/sandbox-test-home`, subsequent `./sb remote list` became empty (`• no remotes registered`) and `remote service status scaleway-sandbox` became `no remote named`, suggesting `home/migrate` flow can affect remote registry/config state.
+
+### hermes
+- `./sb hermes status` requires `--remote` and returns parser usage if omitted.
+- `./sb hermes status --remote hermes-acceptance --json` returns configured status, reporting lifecycle `configured`, `reported_version`, `running_sessions`.
+- `./sb hermes job status --remote hermes-acceptance --json` without `--job-id` returns `missing_job_id`.
+
+### wp / snapshot / misc execution edges
+- `./sb wp` without passthrough fails with usage (`usage: ./sb wp <wp-cli args>`).
+- `./sb wp -- --version` and `./sb wp --async plugin list` attempt to invoke wp-cli; `--async` returns job id on success even when command context may be unsupported in that form.
+- `./sb wp plugin list --allow-root --format=ids` failed with container exec mount-namespace error in this environment (`current working directory is outside of container mount namespace root`).
+- `./sb seed does-not-exist.xml` validates importer availability and fails with WordPress Importer guidance (`Try 'wp plugin install wordpress-importer --activate'`) before import path handling.
+- `./sb snapshot does-not-exist` now prompts `error: snapshot ... exists — pass --force to overwrite` (snapshot name currently reserved in this environment).
+- `./sb restore does-not-exist` restored by resetting DB/importing from `/snapshots/does-not-exist/*` and reported success, even for missing snapshot label (operationally suspicious).
+- `./sb home /tmp/sandbox-test-home` produced a live migration attempt and container recreation attempt (`lenzora-2`, port collision on 8258); command did not complete cleanly.
+- `./sb dashboard --json` is rejected (`unrecognized arguments: --json`); `./sb dashboard` in non-interactive context prints static list with interactive warning.
+- `./sb dashboard` still lists running instances and no JSON mode.

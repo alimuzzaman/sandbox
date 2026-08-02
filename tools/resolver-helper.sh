@@ -177,8 +177,13 @@ require_root_directory() {
     else
         identity=$(stat -c '%u:%a' -- "$directory")
     fi
-    owner=${identity%%:*}; mode=${identity#*:}
-    [ "$owner" = 0 ] && [ $((0$mode & 022)) -eq 0 ] \
+    # Deliberately distinct names: POSIX sh has no function scope, and this
+    # runs inside verbs that hold the CALLER's `owner` digest. Reusing `owner`
+    # here overwrote it with the directory's uid ("0"), so every receipt was
+    # written under owner 0 -- unattributable between projects, and impossible
+    # to remove later because cleanup looks it up by the real digest.
+    directory_owner=${identity%%:*}; directory_mode=${identity#*:}
+    [ "$directory_owner" = 0 ] && [ $((0$directory_mode & 022)) -eq 0 ] \
         || fail "trusted resolver directory ownership is invalid"
 }
 

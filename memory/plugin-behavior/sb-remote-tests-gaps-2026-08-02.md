@@ -784,3 +784,66 @@
   - `./sb mcp list` is also rejected (`unrecognized arguments: list`), matching earlier findings and indicating no sibling `mcp` list action in this session.
   - `list_mcp_resources` returns active resource/tool-like surfaces for `codex_apps`, `dataAnalyticsWidgets`, and `codex-security`; no MCP resources were returned for the `sandbox` namespace in this environment.
   - `list_mcp_resource_templates` is empty.
+
+## Continuation pass (2026-08-02): mcp/command parser and tool-namespace follow-up
+
+### MCP command parser findings
+- `./sb mcp` is implemented as a transport bootstrap surface only (help shows `--transport`, `--bind`, `--port`, `--token`, `--public-url`, `--instance`, `--label`).
+- Any positional argument to `./sb mcp` is rejected at parser level:
+  - `./sb mcp status --json` -> `unrecognized arguments: status --json`
+  - `./sb mcp diagnostics --json` -> `unrecognized arguments: diagnostics --json`
+  - `./sb mcp --json` -> `unrecognized arguments: --json`
+- `./sb mcp up --help` and `./sb mcp down --help` both show the same transport-only usage, confirming no direct subcommand actions there.
+- `./sb mcp --help status` still exits successfully with same top-level usage (ignores action-like token).
+
+### `connect`/`mcp-install` parser consistency
+- `./sb mcp-install --json` and `./sb connect --json` both fail with parser-level `unrecognized arguments: --json`.
+- `./sb mcp-install --help` remains a single-surface command with only server/session selection options.
+
+### Focus command behavior
+- `./sb focus --help` confirms `slug` is positional and no `--json` support in usage.
+- `./sb focus does-not-exist --json` is rejected as parser args (`--json` is not a supported flag), while direct positional behavior for unknown slugs is still to route as focus input.
+
+### MCP-tool namespace status
+- Calling MCP tool list endpoints as shell commands (e.g. `functions.list_mcp_resources`) fails because those are tool bindings, not shell binaries.
+- `list_mcp_resources` on `server: dataAnalyticsWidgets` still returns expected widget URIs.
+- `list_mcp_resources` on `server: sandbox` still returns `MCP server 'sandbox' was not ready for this step` in tool mode.
+- `list_mcp_resource_templates` remains empty for `codex_apps`, `dataAnalyticsWidgets`, and `codex-security`.
+
+## Continuation pass (2026-08-02): Additional parser/behavior deltas
+
+### job-family and workspace parser gaps
+- `./sb job no-such-id` now exits with consistent parser validation (`invalid job id (expected 16 hex chars)`) while other job commands still diverge:
+  - `./sb job-status no-such-id` raises a traceback inside `jobs/registry.py`.
+  - `./sb job-cancel no-such-id` raises a similar traceback.
+- `./sb job status no-such-id` is rejected at argparse level (`unrecognized arguments`) because `job` command does not accept subcommands.
+- `./sb jobs --json` remains unsupported (`unrecognized arguments: --json`).
+- `./sb workspace status gap-test` with positional workspace still fails (`unrecognized arguments: gap-test`).
+- `./sb workspace status --workspace gap-test` cleanly returns `workspace_not_found`.
+- `./sb workspace status default --json` fails parser-style (`unrecognized arguments: default`), while `./sb workspace status --json --remote scaleway-sandbox` now reaches runtime with `workspace_not_found`.
+- `./sb workspace create --workspace abc123` creates a named workspace (`ok`) as side effect.
+
+### remote service action syntax
+- `./sb remote service` and `./sb remote service status` without `<name>` still require action+name and report usage: `./sb remote service <status|diagnostics|migrate|stop> <name> [--plan|--confirm]`.
+- `./sb remote service status does-not-exist --json` returns explicit missing-remote error.
+
+### cache command behavior
+- `./sb cache` prints cache inventory and totals.
+- `./sb cache clear` without `--yes` still prompts and throws `EOFError` in non-interactive context.
+- `./sb cache clear unknown-layer` rejects unknown layer with argparse valid choices (`wp-cli, wp-http`).
+- `./sb cache clear wp-cli --json` and `./sb cache clear wp-http --yes --json` are unsupported (`unrecognized arguments: --json`).
+- `./sb cache info wp-cli` is accepted; same output as default `cache`.
+
+### secrets and open
+- `./sb secrets` requires action; help shows only `{migrate-zshrc}`.
+- `./sb secrets list` is invalid choice.
+- `./sb secrets migrate-zshrc --json` fails with shell-expansion error in `/Users/alim/.zshrc.secrets` line 41 in this environment.
+- `./sb open unknown` invalid target with parser choices `admin|site|mail`.
+- `./sb connect` usage and invalid `foo` target already consistent with known targets; `foo` returns `unknown target`.
+
+### resources command nuances
+- `./sb resources plan --json --scope unknown` rejects with argparse choice validation (`cache` or `stale`).
+- `./sb resources cleanup --json --scope stale --remote scaleway-sandbox` returns refusal JSON with `plan_not_found` and `--plan-id is required`.
+- `./sb resources status` accepts `--scope stale` (previously thought to be status-only), and returns complete/payload JSON; this looks like a tolerated/likely no-op filter alias. It does not fail and returns full object.
+- `./sb resources status --json --remote does-not-exist` returns `unknown_remote`.
+- `./sb resources status --json --scope stale --remote scaleway-sandbox` returns large partial payload with status `partial` and non-measured inventory (`host_filesystem`, `docker_storage`, low confidence/large unknown bytes), confirming remote partial-result behavior.

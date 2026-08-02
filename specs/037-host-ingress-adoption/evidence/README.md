@@ -7,7 +7,7 @@ remains open.
 | Evidence | State | Covers | Still required |
 |---|---|---|---|
 | `unit-gate.md` | complete | focused contract and security tests | — |
-| `default-provider.md` | live (macOS) | T075: default Docker/Caddy ingress serves clean URLs with zero adoptable adapters | Linux; provider round trip |
+| `default-provider.md` | live (macOS + Ubuntu) | T075: default ingress serves clean URLs; Linux conflict report and provider round trip | a Linux host with free :80/:443 |
 | `listeners.md` | live (macOS) | T026: free/exact/wildcard/Sandbox-owned/foreign classification, non-mutation | Linux `/proc`+`ss` observer; IPv6 dual-stack |
 | `support-and-consent.md` | live (macOS + Ubuntu) | T063: tiers, pin precedence, full consent lifecycle, credential-pending, detect-only | NPM credential storage |
 | `compatibility.md` | live (macOS) | T069: Sandbox Caddy + per-port parity, corrected conflict diagnosis | Linux parity |
@@ -22,8 +22,6 @@ remains open.
   untouched. It took twelve fixes, all found only by running against a real host.
 - **T052** is captured: drift preserved with a retryable record, incumbent-down reported
   incomplete, normal cleanup complete and repeatable, foreign routes healthy throughout.
-- **T075 (remainder)** — a Linux run of `default-provider.md` plus a
-  `./sb domains use <adapter>` round trip in both directions.
 
 ## Rules for adding evidence here
 

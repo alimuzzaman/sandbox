@@ -55,13 +55,17 @@ domains status 0.25s   detect 0.21s   plan 0.21s   support 0.21s
 
 Inside the 2-second read-only bound.
 
+## Live systemd-resolved path (Ubuntu 24.04)
+
+Captured separately in `systemd-resolved.md`: apply installs a scoped route to the Sandbox
+authority, a fresh lookup returns the ingress address, the hostname serves HTTP 200, a
+second apply joins the existing binding without duplicating state, and cleanup completes
+and repeats safely. Drift and authority-down recovery are in `cleanup.md`; the wildcard
+zone lifecycle is in `wildcards.md`.
+
 ## Not run
 
-- **Live systemd-resolved path** (apply, scoped route to the Sandbox authority, fresh
-  lookup, HTTP service, second apply with no duplicate state). Needs Ubuntu with resolved
-  owning its stub symlink; `ResolverProofAttestation` accepts only that adapter, so this is
-  the gate for the whole adoption path.
-- **Failure and collision fixtures** (foreign authority endpoint, foreign exact/zone rule,
-  changed last-applied rule, unreachable resolver during cleanup). Unit coverage exists in
-  `tests/test_domain_cleanup.py` and `tests/test_domain_incumbent_adapters.py`; the live
-  half is open.
+- **Failure and collision fixtures**: foreign authority endpoint collision, a foreign
+  exact/zone rule already claiming the suffix, and an owner change between apply and
+  cleanup. Unit coverage exists in `tests/test_domain_cleanup.py` and
+  `tests/test_domain_incumbent_adapters.py`; the live half is open.

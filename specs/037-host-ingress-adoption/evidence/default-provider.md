@@ -39,8 +39,33 @@ and connections were refused. Non-privileged ports on the same alias (81, 8099) 
 Stopping Herd cleared it. This is the FR-034 case — a foreign listener owning a required
 endpoint — and `sb doctor` does not yet detect the published-but-not-listening state.
 
+## Linux (Ubuntu 24.04, 2026-08-02)
+
+On the Ubuntu conformance host the default provider is genuinely unavailable, and Sandbox
+says so rather than pretending:
+
+```text
+./sb domains ingress detect
+  requested endpoints: [('127.0.0.77', 80, 'conflict'), ('127.0.0.77', 443, 'conflict')]
+  owner:               system-caddy (Caddy)
+```
+
+System Caddy owns `*:80`/`*:443`, so the Sandbox proxy cannot take those endpoints. This is
+the FR-034 path: report the owner, never steal, and offer adoption. Adoption through that
+incumbent is proven in `system-caddy.md`, and the per-port URL kept working throughout.
+
+## Provider round trip (Ubuntu 24.04)
+
+```text
+./sb domains use --project-dir ~/git/templately   -> sandbox-caddy   (default)
+./sb domains use system-caddy                     -> system-caddy    provider_selected
+./sb domains use sandbox-caddy                    -> sandbox-caddy   provider_selected
+```
+
+Switching in both directions is a machine-local selection change: no reprovisioning, no
+hostname change, and the instance stayed reachable at its per-port URL throughout (FR-032).
+
 ## Not covered
 
-- Linux (systemd-resolved / NetworkManager hosts).
-- Switching to an adopted incumbent and back (`./sb domains use <adapter>` round trip);
-  no ingress adapter is adoptable yet, so the switch cannot be proven end to end.
+- A Linux host where the required endpoints are FREE, which is where the default provider
+  would actually serve; the conformance host deliberately runs an incumbent.

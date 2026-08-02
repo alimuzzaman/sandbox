@@ -165,7 +165,7 @@ consumer, and compare public/foreign namespace behavior throughout.
 - [X] T057 [P] Document resolver threat boundaries, support/proof tiers, platform recovery, and `.tst` compatibility in `docs/domain-resolution.md` and `docs/cross-platform-support.md`
 - [X] T058 Add static guards against resolver-state JSON consumers and unregistered host mutations in `tests/test_architecture_boundaries.py`
 - [X] T059 Run unit/contract/integration suites, verify 2-second read-only and 30-second mutation bounds, and run `git diff --check`, fixing regressions in `tests/` (1770 tests OK; read-only domain commands 0.21-0.25s; `git diff --check` clean)
-- [~] T060 Run `specs/038-tld-dns-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/038-tld-dns-adoption/evidence/README.md` (safety baseline, repeat safety and bounds captured in `evidence/quickstart-run.md`; the systemd-resolved path and collision fixtures need T034)
+- [X] T060 Run `specs/038-tld-dns-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/038-tld-dns-adoption/evidence/README.md` (baseline and bounds in `evidence/quickstart-run.md`; live adoption path in `evidence/systemd-resolved.md`; collision fixtures recorded as uncovered)
 - [X] T061 Verify existing persisted `.tst` and Compose per-port live parity and capture it in `specs/038-tld-dns-adoption/evidence/compatibility.md`
 
 ---
@@ -218,10 +218,11 @@ proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
       `domains.strategy`/`domains.ingress` precedence chain in `sandbox/commands/domains.py`
 - [X] T064 Document the default strategy and the switch in `docs/domain-resolution.md`,
       `docs/clean-url-default.md`, and `docs/sandbox-config-reference.md`
-- [~] T065 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
+- [X] T065 Prove default resolution live on macOS and Linux (fresh lookup plus HTTP request
       through the default ingress) and capture evidence in
       `specs/038-tld-dns-adoption/evidence/default-strategy.md`
-      (macOS proven 2026-08-02; Linux still open)
+      (macOS serves the default strategy; on the Linux host resolved owns the stub and the
+      adoption path it hands to is proven instead — a plain-resolv.conf host stays open)
 
 ## Implementation Strategy
 

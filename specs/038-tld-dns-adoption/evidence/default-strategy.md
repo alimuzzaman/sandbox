@@ -25,8 +25,18 @@ The helper writes `/etc/resolver/tst` plus a Homebrew dnsmasq entry mapping `*.t
 - Unrelated resolution unaffected: internet names continue to resolve through the machine's
   own upstreams; only the `tst` suffix is routed.
 
+## Linux (Ubuntu 24.04, 2026-08-02)
+
+The Ubuntu conformance host runs systemd-resolved with its stub symlink, so the default
+Sandbox-owned bootstrap deliberately declines there — and the ADOPTION path it hands over
+to is proven in `systemd-resolved.md`. The host also runs an incumbent on `:80`/`:443`, so
+the Docker/Caddy half of the default provider cannot bind its endpoints either; that is
+reported as a listener conflict naming the owner, never as a Docker failure
+(`../../037-host-ingress-adoption/evidence/default-provider.md`).
+
 ## Not covered
 
-- Linux (own dnsmasq + plain `/etc/resolv.conf`, and the systemd-resolved decline path).
+- A Linux host with a PLAIN `/etc/resolv.conf` (no resolved), which is where the default
+  bootstrap runs its own dnsmasq.
 - Switching to an adopted resolver and back; no resolver adapter is adoptable yet.
 - Wildcard subdomain multisite under the default strategy.

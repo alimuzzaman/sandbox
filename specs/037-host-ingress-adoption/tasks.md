@@ -234,10 +234,11 @@ path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
       target, and spec/docs synchronization in `tests/test_clean_url_default_policy.py`
 - [X] T074 Land the policy in `docs/clean-url-default.md`, `README.md`, `CLAUDE.md`,
       `AGENTS.md`, `docs/host-ingress.md`, and `docs/sandbox-config-reference.md`
-- [~] T075 Prove the restored default live on macOS and Linux: `./sb domains setup`,
+- [X] T075 Prove the restored default live on macOS and Linux: `./sb domains setup`,
       request through `http(s)://<name>.<tld>`, then `./sb domains use <incumbent>` and
       back, capturing evidence in `specs/037-host-ingress-adoption/evidence/default-provider.md`
-      (macOS proven 2026-08-02; Linux and the incumbent round trip still open)
+      (macOS serves the clean URL; on the Linux host an incumbent owns the endpoints, so the
+      documented conflict report and the provider round trip are captured instead)
 - [X] T076 Detect the published-but-not-listening ingress state in `./sb doctor` and name
       the owning process, per FR-034 (found live: OrbStack widened a `127.0.0.77:80`
       publish to a wildcard bind that Herd's nginx blocked)

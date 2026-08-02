@@ -19,7 +19,7 @@ class IngressService:
     def __init__(self, *, detector, registry, bind_address="127.0.0.77",
                  bind_probe=None, repository=None, transaction_runner=None,
                  consent_decider=None, route_verifier=None, credential_lookup=None,
-                 clock=None):
+                 clock=None, sandbox_owner=None):
         self.detector = detector
         self.registry = registry
         self.bind_address = bind_address
@@ -32,6 +32,12 @@ class IngressService:
         # it outside the repository prevents route/recovery state from becoming a
         # secret store.
         self.credential_lookup = credential_lookup or (lambda _key: False)
+        # True when Sandbox's own ingress already publishes the requested
+        # endpoint. A container runtime publishes on the proxy's behalf, so the
+        # listening process is the runtime's helper, not Caddy -- without this
+        # the service would read its own proxy as a foreign conflict and refuse
+        # to reuse it (037 US1 scenario 3, FR-002).
+        self.sandbox_owner = sandbox_owner or (lambda _endpoint: False)
         self.clock = clock
 
     def support(self):
@@ -56,10 +62,12 @@ class IngressService:
                 for item in observation.endpoints if item.overlaps(endpoint)
             ]
             probe = self.bind_probe.check(endpoint) if self.bind_probe else "unavailable"
+            owned = bool(self.sandbox_owner(endpoint))
             requested.append({
                 "protocol": protocol, "address": self.bind_address, "port": port,
                 "kernel_bind": probe,
-                "state": "free" if probe == "free" else
+                "state": "sandbox_owned" if owned else
+                         "free" if probe == "free" else
                          "conflict" if probe == "conflict" or overlap else "unknown",
                 "overlaps": overlap,
             })
@@ -129,10 +137,15 @@ class IngressService:
             observation = next((item for item in observations
                                 if item.adapter_id == candidate.adapter_id), None)
             if candidate.adapter_id == "sandbox-caddy":
-                if overlapping_owners.difference({"sandbox-caddy"}):
+                owned_endpoints = all(
+                    self.sandbox_owner(ListenerEndpoint(
+                        self.bind_address, PROTOCOL_PORTS[protocol], "tcp",
+                    )) for protocol in protocols
+                )
+                if overlapping_owners.difference({"sandbox-caddy"}) and not owned_endpoints:
                     foreign_endpoint_owner = True
                     continue
-                if observation is None:
+                if observation is None and not owned_endpoints:
                     if self.bind_probe is None or any(
                         self.bind_probe.check(ListenerEndpoint(
                             self.bind_address, PROTOCOL_PORTS[protocol], "tcp",

@@ -521,12 +521,20 @@ def _refresh_registered_url(sc, root: str, label: str, existing: dict,
     fresh = site_url({k: v for k, v in resolved.items() if k != "url"})
     if not fresh or fresh == existing.get("url"):
         return existing
-    token = (_local_yaml().get("instances", {}).get(name, {})
-             .get("autologin_token", ""))
+    block = _local_yaml().get("instances", {}).get(name, {})
+    token = block.get("autologin_token", "")
+    extra = {}
+    # Record the clean hostname alongside the URL: consumers (domain status,
+    # MCP, doctor) read the registry, and a URL alone leaves them re-deriving
+    # or inventing an identity the instance is not actually serving.
+    if block.get("domain"):
+        extra["domain"] = block["domain"]
+        if block.get("tld"):
+            extra["tld"] = block["tld"]
     return sc.registry_put(
         root, label=label, instance=name, url=fresh,
         login_url=f"{fresh}/?sandbox_autologin={token}" if token else "",
-        admin_url=f"{fresh}/wp-admin/",
+        admin_url=f"{fresh}/wp-admin/", **extra,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -81,6 +82,18 @@ class DomainService:
                 "Run `./sb ensure --project-dir <project>` first.",
             )
         hostname = policy.get("hostname")
+        if not hostname and not record.get("domain"):
+            # Older records carry only the served URL. Its host is the persisted
+            # identity whenever it is not the per-port fallback.
+            host = urlparse(str(record.get("url") or "")).hostname or ""
+            if host and host not in {"localhost", "127.0.0.1", "::1"}:
+                record = {**record, "domain": host}
+        if not hostname and record.get("domain"):
+            # A persisted identity outranks a synthesized default: the instance
+            # is already serving `<name>.tst` and WordPress stores absolute URLs,
+            # so status/plan must speak about THAT hostname rather than inventing
+            # a `.test` twin nobody serves (038 FR-011, FR-024).
+            hostname = normalize_hostname(str(record["domain"]))
         if not hostname:
             stem = record.get("instance") or config.get("slug") or Path(root).name
             safe_stem = "".join(

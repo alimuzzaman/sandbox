@@ -342,6 +342,25 @@ def proxy_health_checks(cfg: dict) -> list[dict]:
     return checks
 
 
+def proxy_endpoint_owned(address: str, port: int) -> bool:
+    """True when the running Sandbox proxy publishes `address:port` itself.
+
+    Listener evidence alone cannot tell: Docker publishes the port, so the
+    process holding it is the container runtime's helper, not Caddy. The
+    authoritative signal is the proxy project's own port mapping, so read that.
+    """
+    if str(address) != PROXY_BIND_IP or int(port) not in (80, 443):
+        return False
+    if not _proxy_container_running():
+        return False
+    res = subprocess.run(
+        ["docker", "compose", "-p", PROXY_PROJECT, "-f", str(PROXY_COMPOSE),
+         "--project-directory", str(ROOT), "port", "proxy", str(int(port))],
+        capture_output=True, text=True)
+    published = (res.stdout or "").strip()
+    return res.returncode == 0 and published.endswith(f":{int(port)}")
+
+
 def _published_listener_check(*, connector=None, listeners=None) -> dict:
     """Assert the proxy's published endpoints actually accept connections.
 

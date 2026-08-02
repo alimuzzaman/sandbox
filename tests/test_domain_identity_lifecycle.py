@@ -115,3 +115,58 @@ class TestDomainIdentityLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPersistedIdentityWins(unittest.TestCase):
+    """038 FR-011/FR-024: status must speak about the hostname the instance is
+    actually serving, not a synthesized `.test` twin."""
+
+    def _service(self, record):
+        from sandbox.application.domain_service import DomainService
+
+        class Registry:
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return record
+
+        config = {"root": "/projects/demo", "slug": "demo",
+                  "domains": {"tld": "test", "hostname": None,
+                              "hostnameSource": "default", "strategySource": "default",
+                              "enabled": False, "wildcard": False, "strategy": None,
+                              "ingress": None, "suffixClass": "test",
+                              "tldSource": "default", "ingressSource": "default",
+                              "enabledSource": "default", "wildcardSource": "default",
+                              "explicit": False, "migrationState": "none"}}
+        return DomainService(
+            config_loader=lambda _dir, label="default": config,
+            project_registry=Registry(), adapters=None, repository=None,
+            process=None, http=None, endpoints=None,
+        )
+
+    def test_registered_domain_is_preferred_over_the_default_suffix(self):
+        service = self._service({"instance": "demo", "domain": "demo.tst",
+                                 "url": "https://demo.tst"})
+        _config, _policy, hostname, fallback = service._context("/projects/demo", "default")
+        self.assertEqual(hostname, "demo.tst")
+        self.assertEqual(fallback, "https://demo.tst")
+
+    def test_recorded_url_host_is_used_when_no_domain_field_exists(self):
+        service = self._service({"instance": "demo", "url": "https://demo.tst"})
+        _config, _policy, hostname, _fallback = service._context("/projects/demo", "default")
+        self.assertEqual(hostname, "demo.tst")
+
+    def test_per_port_url_does_not_become_an_identity(self):
+        service = self._service({"instance": "demo", "url": "http://localhost:8188"})
+        _config, _policy, hostname, _fallback = service._context("/projects/demo", "default")
+        self.assertEqual(hostname, "demo.test")
+
+    def test_explicit_hostname_still_outranks_the_registry(self):
+        service = self._service({"instance": "demo", "domain": "demo.tst"})
+        service.config_loader = lambda _dir, label="default": {
+            "root": "/projects/demo", "slug": "demo",
+            "domains": {"tld": "test", "hostname": "chosen.test",
+                        "hostnameSource": "project", "strategySource": "default",
+                        "strategy": None, "suffixClass": "test"},
+        }
+        _config, _policy, hostname, _fallback = service._context("/projects/demo", "default")
+        self.assertEqual(hostname, "chosen.test")

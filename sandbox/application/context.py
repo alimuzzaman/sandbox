@@ -211,12 +211,30 @@ def ingress_service(cfg, **overrides):
         ).strip().lower()
         return answer in {"y", "yes"}
 
+    bind_address = overrides.pop("bind_address", "127.0.0.77")
+
+    def sandbox_owns(endpoint) -> bool:
+        """True when Sandbox's own proxy already serves this endpoint.
+
+        Docker publishes the proxy's ports, so the listening process belongs to
+        the container runtime and looks foreign to listener evidence alone. Ask
+        the default provider whether the endpoint is its own before calling it a
+        conflict (037 US1 scenario 3).
+        """
+        from sandbox.core._domains import proxy_endpoint_owned
+
+        try:
+            return proxy_endpoint_owned(endpoint.address, endpoint.port)
+        except Exception:
+            return False
+
     return IngressService(
         detector=detector, registry=registry, repository=repository,
         transaction_runner=transaction_runner,
-        bind_address=overrides.pop("bind_address", "127.0.0.77"),
+        bind_address=bind_address,
         bind_probe=overrides.pop("bind_probe", SocketBindProbe()),
         consent_decider=overrides.pop("consent_decider", interactive_consent),
+        sandbox_owner=overrides.pop("sandbox_owner", sandbox_owns),
         clock=overrides.pop("clock", None), **overrides,
     )
 

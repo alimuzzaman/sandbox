@@ -67,7 +67,7 @@ comparing all process/listener state before and after.
 - [X] T023 [US1] Implement capability-aware one-ingress selection and explicit split-owner refusal in `sandbox/application/ingress_service.py`
 - [X] T024 [US1] Replace binary-only proxy availability and misleading Docker errors with structured listener results in `sandbox/core/_domains.py`
 - [X] T025 [US1] Expose read-only `domains ingress detect|support|status` JSON/text contracts in `sandbox/commands/domains.py`
-- [ ] T026 [US1] Run live free/exact/wildcard/owned/foreign detection and capture non-mutating listener evidence in `specs/037-host-ingress-adoption/evidence/listeners.md`
+- [X] T026 [US1] Run live free/exact/wildcard/owned/foreign detection and capture non-mutating listener evidence in `specs/037-host-ingress-adoption/evidence/listeners.md` (macOS; Linux observer path noted as uncovered)
 
 **Checkpoint**: Detection is independently useful and safe even before any adopter is
 advertised.
@@ -131,7 +131,7 @@ while byte-comparing foreign fragments and incumbent health.
 - [X] T049 [US3] Persist non-secret incomplete cleanup records and retry transitions in `sandbox/ingress/repository.py`
 - [X] T050 [US3] Persist ingress cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [X] T051 [US3] Implement `domains ingress cleanup|reconcile` JSON/text contracts in `sandbox/commands/domains.py`
-- [ ] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md`
+- [~] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md` (repeated/foreign-preservation captured; owned-route, drift, and unavailable-incumbent cases need an adoptable adapter)
 
 **Checkpoint**: Destroy and uninstall are conservative and retryable.
 
@@ -160,7 +160,7 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 - [X] T060 [US4] Implement machine-local credential references and redacted pending results in `sandbox/ingress/models.py` and `sandbox/application/ingress_service.py`
 - [X] T061 [US4] Complete `domains ingress support|plan|apply|status|cleanup|reconsider` handlers in `sandbox/commands/domains.py`
 - [X] T062 [US4] Implement import-safe ingress MCP tools using explicit service dependencies in `mcp/wp-server/tools/domains.py`
-- [ ] T063 [US4] Capture support-tier, consent, pin, credential-pending, and detect-only evidence in `specs/037-host-ingress-adoption/evidence/support-and-consent.md`
+- [X] T063 [US4] Capture support-tier, consent, pin, credential-pending, and detect-only evidence in `specs/037-host-ingress-adoption/evidence/support-and-consent.md` (accepted-consent and reconsider paths need an adoptable adapter; recorded as uncovered)
 
 **Checkpoint**: “Detected” and “adoptable” are never conflated, and automation never hangs.
 
@@ -173,9 +173,9 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 - [X] T064 [P] Update clean URL, ingress selection/pins, support tiers, consent, status, and fallback guidance in `README.md` and `docs/sandbox-config-reference.md`
 - [X] T065 [P] Document listener semantics, adapter proof requirements, transaction recovery, and platform matrix in `docs/host-ingress.md` and `docs/cross-platform-support.md`
 - [X] T066 Add static guards against ingress-state JSON consumers, unregistered adapters, and compatibility-facade imports in `tests/test_architecture_boundaries.py`
-- [ ] T067 Run unit/contract/integration suites, verify 2-second detection/status, 3-second planning, and 30-second transaction bounds, and run `git diff --check`, fixing regressions in `tests/`
+- [X] T067 Run unit/contract/integration suites, verify 2-second detection/status, 3-second planning, and 30-second transaction bounds, and run `git diff --check`, fixing regressions in `tests/` (1770 tests OK in 30s; detect/status/plan all <=0.27s; `git diff --check` clean)
 - [ ] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md`
-- [ ] T069 Verify existing Sandbox Caddy/per-port live parity and the corrected conflict diagnosis in `specs/037-host-ingress-adoption/evidence/compatibility.md`
+- [X] T069 Verify existing Sandbox Caddy/per-port live parity and the corrected conflict diagnosis in `specs/037-host-ingress-adoption/evidence/compatibility.md`
 
 ---
 

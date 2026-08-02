@@ -100,10 +100,29 @@ def _use_provider(args) -> dict:
     from sandbox.core import _domains as core_domains
     from sandbox.core._config import _local_yaml, _write_local_yaml
 
+    def effective() -> str:
+        """The provider this project would use, project layer included.
+
+        The project pin is read through the composed domain service, which owns
+        project-config loading; the CLI never reaches for the compatibility
+        facade itself (module boundaries).
+        """
+        project = {}
+        try:
+            from sandbox.application.context import domain_service
+
+            policy = domain_service(None).ingress_policy(
+                args.project_dir or ".", label=args.label)
+            if policy.get("pin"):
+                project = {"domains": {"ingress": policy["pin"]}}
+        except Exception:
+            project = {}
+        return core_domains.clean_url_mode(project)
+
     requested = (args.tld or args.resolver or "").strip().lower()
     if not requested:
         return {"ok": True, "operation": "domains_use", "state": "ready",
-                "mutated": False, "provider": core_domains.clean_url_mode(),
+                "mutated": False, "provider": effective(),
                 "default": DEFAULT_PROVIDER,
                 "reason": {"code": "provider_reported",
                            "message": "pass a provider id to switch, e.g. "
@@ -117,7 +136,7 @@ def _use_provider(args) -> dict:
         pass
     if requested not in known:
         return {"ok": False, "operation": "domains_use", "state": "invalid",
-                "mutated": False, "provider": core_domains.clean_url_mode(),
+                "mutated": False, "provider": effective(),
                 "reason": {"code": "unknown_provider",
                            "message": f"unknown provider {requested!r}; known: "
                                       + ", ".join(sorted(known))}}
@@ -131,7 +150,7 @@ def _use_provider(args) -> dict:
         block["ingress"] = requested
     _write_local_yaml(local)
     return {"ok": True, "operation": "domains_use", "state": "ready",
-            "mutated": True, "provider": core_domains.clean_url_mode(),
+            "mutated": True, "provider": effective(),
             "default": DEFAULT_PROVIDER,
             "reason": {"code": "provider_selected",
                        "message": "run `./sb domains setup` (or `./sb ensure`) "

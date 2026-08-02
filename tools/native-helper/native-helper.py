@@ -3227,6 +3227,24 @@ def installed_helper_ready():
                 not details.st_mode & 0o022 and os.access(INSTALL_PATH, os.X_OK))
 
 
+def ipv6_default_route(row):
+    """True only for a usable IPv6 default route in /proc/net/ipv6_route.
+
+    A fresh network namespace always carries kernel-installed UNREACHABLE ::/0
+    entries on lo. They are the ABSENCE of IPv6 connectivity, and counting them
+    as a default route failed the private-network isolation gate on every modern
+    kernel, which blocked the managed runtime outright.
+    """
+    columns = row.split()
+    if len(columns) < 9 or columns[0] != "0" * 32 or columns[1] != "00":
+        return False
+    try:
+        flags = int(columns[8], 16)
+    except ValueError:
+        return False
+    return bool(flags & 0x1) and not flags & 0x0200
+
+
 def _probe_child_private_network(_token):
     try:
         links = sorted(path.name for path in Path("/sys/class/net").iterdir())
@@ -3236,8 +3254,7 @@ def _probe_child_private_network(_token):
         raise SystemExit(69)
     has_ipv4_default = any(len(row.split()) >= 4 and row.split()[1] == "00000000" and
                            int(row.split()[3], 16) & 1 for row in routes)
-    has_ipv6_default = any(len(row.split()) >= 2 and row.split()[0] == "0" * 32 and
-                           row.split()[1] == "00" for row in ipv6_routes)
+    has_ipv6_default = any(ipv6_default_route(row) for row in ipv6_routes)
     if links != ["lo"] or has_ipv4_default or has_ipv6_default:
         raise SystemExit(69)
 

@@ -124,12 +124,20 @@ class IngressSelection:
     observation_fingerprint: str | None
     pin: str | None = None
     pin_source: str | None = None
+    # The incumbent's OWN socket addresses for the required ports. Distinct from
+    # accepted_addresses, which are the concrete addresses DNS may answer with:
+    # an owned route must bind the socket the incumbent already listens on, or
+    # the config names an endpoint that product does not serve.
+    listen_addresses: tuple[str, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "required_protocols", frozenset(self.required_protocols))
         object.__setattr__(self, "required_capabilities", frozenset(self.required_capabilities))
         object.__setattr__(self, "accepted_addresses", tuple(
             str(ipaddress.ip_address(item)) for item in self.accepted_addresses
+        ))
+        object.__setattr__(self, "listen_addresses", tuple(
+            str(ipaddress.ip_address(item)) for item in self.listen_addresses
         ))
 
 

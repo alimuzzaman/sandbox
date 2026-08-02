@@ -30,6 +30,7 @@ class Ingress:
         self.selection_kwargs = kwargs
         self.events.append("select")
         return SimpleNamespace(adapter_id="fixture", accepted_addresses=("127.0.0.1",),
+            listen_addresses=("127.0.0.1",),
             reason_code="selected", required_protocols=frozenset({"http"}),
             required_capabilities=frozenset({"http"}))
     def naming_offer(self, selection, **kwargs): self.events.append("offer"); return {"accepted_addresses": selection.accepted_addresses}

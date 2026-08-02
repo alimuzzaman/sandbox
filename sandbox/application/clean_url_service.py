@@ -44,7 +44,11 @@ class CleanUrlService:
             return {"ok": False, "state": "fallback", "mutated": naming.mutated,
                     "fallback_url": fallback_url,
                     "reason": {"code": "naming_address_mismatch"}}
-        listen = {"address": selection.accepted_addresses[0],
+        # Bind the socket the incumbent already listens on. Its accepted
+        # addresses are DNS answers, not listener addresses: planning a route on
+        # a loopback address while the product listens on a wildcard names an
+        # endpoint it does not serve, and the privileged helper rightly refuses.
+        listen = {"address": (selection.listen_addresses or selection.accepted_addresses)[0],
                   "port": 443 if "https" in protocols else 80}
         planned = self.ingress.plan_route(selection, {
             "hostname": naming.hostname,

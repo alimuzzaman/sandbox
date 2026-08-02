@@ -205,6 +205,10 @@ class IngressService:
                 protocols, capabilities, candidate.adapter_id, accepted,
                 "selected", observation.fingerprint if observation else None,
                 pin, pin_source,
+                tuple(sorted({
+                    endpoint.address for endpoint in (observation.endpoints if observation else ())
+                    if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
+                })),
             )
         pinned = self.registry.get(pin) if pin else None
         pinned_observed = pin and any(item.adapter_id == pin for item in observations)

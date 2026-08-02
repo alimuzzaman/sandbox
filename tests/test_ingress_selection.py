@@ -198,3 +198,38 @@ class TestWildcardIncumbentIsSelectable(unittest.TestCase):
         selection = self._select("212.47.72.49")
         self.assertIsNone(selection.adapter_id)
         self.assertEqual(selection.reason_code, "ingress_control_unavailable")
+
+
+class TestSelectionCarriesIncumbentListenAddresses(unittest.TestCase):
+    """An owned route must bind the socket the incumbent already listens on;
+    accepted addresses are DNS answers, not listener addresses."""
+
+    def test_wildcard_socket_is_reported_as_the_listen_address(self):
+        from sandbox.application.ingress_service import IngressService
+        from sandbox.ingress.manifest import (
+            IngressProofAttestation, built_in_ingress_registry,
+        )
+        from sandbox.ingress.models import IngressObservation, ListenerEndpoint
+
+        class Adapter:
+            @staticmethod
+            def ready():
+                return True
+
+        observation = (IngressObservation(
+            "system-caddy", "Caddy",
+            (ListenerEndpoint("::", 80, socket_id="1", owner_confidence="proven",
+                              process={"pid": 4242, "start": "77",
+                                       "executable": "/usr/bin/caddy"}),),
+            "implemented_unproven", frozenset({"http"})),)
+        selection = IngressService(
+            detector=Detector(observation),
+            registry=built_in_ingress_registry(
+                {"system-caddy": Adapter()},
+                proof_attestation=IngressProofAttestation("system-caddy", "evidence-1"),
+            ),
+        ).select(required_protocols=("http",))
+
+        self.assertEqual(selection.listen_addresses, ("::",))
+        self.assertIn("127.0.0.1", selection.accepted_addresses)
+        self.assertNotIn("::", selection.accepted_addresses)

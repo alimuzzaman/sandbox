@@ -160,7 +160,7 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 - [X] T060 [US4] Implement machine-local credential references and redacted pending results in `sandbox/ingress/models.py` and `sandbox/application/ingress_service.py`
 - [X] T061 [US4] Complete `domains ingress support|plan|apply|status|cleanup|reconsider` handlers in `sandbox/commands/domains.py`
 - [X] T062 [US4] Implement import-safe ingress MCP tools using explicit service dependencies in `mcp/wp-server/tools/domains.py`
-- [X] T063 [US4] Capture support-tier, consent, pin, credential-pending, and detect-only evidence in `specs/037-host-ingress-adoption/evidence/support-and-consent.md` (accepted-consent and reconsider paths need an adoptable adapter; recorded as uncovered)
+- [X] T063 [US4] Capture support-tier, consent, pin, credential-pending, and detect-only evidence in `specs/037-host-ingress-adoption/evidence/support-and-consent.md` (consent decline/remember/reconsider/accept captured live on Ubuntu; only NPM credential storage is uncovered)
 
 **Checkpoint**: “Detected” and “adoptable” are never conflated, and automation never hangs.
 

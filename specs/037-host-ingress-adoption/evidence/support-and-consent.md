@@ -66,9 +66,25 @@ Both returned immediately, without a prompt and without mutation (FR-019, FR-020
 activation refuses to proceed from the low-level transport at all: it requires B's verified
 naming result first (FR-008).
 
+## Consent lifecycle (Ubuntu 24.04, live)
+
+Captured against the proven system Caddy adapter on the Ubuntu host:
+
+```text
+non-interactive, no consent   ok=False  pending_consent   consent_required   mutated=False
+interactive decline           ok=False  fallback          consent_declined
+  recorded: {"decision": "declined", "policy_version": 1}
+authorize again               ok=False  fallback          consent_declined   prompted 0 times
+reconsider <identity>         ready
+authorize after reconsider    ok=True   ready             prompted 1 time
+  recorded: {"decision": "accepted", "policy_version": 1}
+```
+
+A remembered decline suppresses the offer entirely — the decider was never called again —
+until an explicit `reconsider` clears it (FR-019, FR-021, FR-022). The non-interactive
+caller returned immediately with no prompt and no mutation (FR-020).
+
 ## Not covered
 
-- An accepted interactive consent record, and a remembered decline followed by
-  `reconsider --resolver ID`: both require an adoptable adapter, which no platform has yet.
 - Credential storage for Nginx Proxy Manager (`credential_pending` was observed, but no
   credential was supplied).

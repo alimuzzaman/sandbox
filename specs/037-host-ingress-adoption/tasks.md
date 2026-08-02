@@ -104,7 +104,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
 - [X] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
 - [X] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py` (provider selection moved to `sandbox/application/clean_url_provider.py`; setup/up/down/teardown/secure-at-create all branch on that one seam)
-- [ ] T044 [US2] Run live system Caddy add/request/update/request/remove, foreign-route, and rollback conformance and capture evidence in `specs/037-host-ingress-adoption/evidence/system-caddy.md`
+- [X] T044 [US2] Run live system Caddy add/request/update/request/remove, foreign-route, and rollback conformance and capture evidence in `specs/037-host-ingress-adoption/evidence/system-caddy.md`
 
 **Checkpoint**: The current host's proven Caddy can serve a clean URL without a Sandbox
 proxy; other adapters remain unadvertised until individually proven.

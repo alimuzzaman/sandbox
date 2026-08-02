@@ -76,16 +76,29 @@ class SocketDnsEndpointReservation(AbstractContextManager["SocketDnsEndpointRese
         self.release()
 
 
+# systemd-resolved owns these two loopback addresses for its own stub and
+# DNS-proxy listeners. It silently refuses to use either as an UPSTREAM server
+# (it would be routing to itself), so a scoped authority placed there is
+# accepted as configuration and then never queried: the routing domain appears
+# in `resolvectl status`, the DNS server does not, and every lookup NXDOMAINs.
+RESOLVED_STUB_ADDRESSES = frozenset({"127.0.0.53", "127.0.0.54"})
+
+
 class SocketDnsEndpointAllocator:
     """Atomically reserve one loopback endpoint for both DNS transports."""
 
-    def __init__(self, address: str = "127.0.0.54", *, attempts: int = 32) -> None:
+    def __init__(self, address: str = "127.0.0.55", *, attempts: int = 32) -> None:
         try:
             parsed = ipaddress.ip_address(address)
         except ValueError as exc:
             raise ValueError("DNS endpoint address must be loopback") from exc
         if not parsed.is_loopback:
             raise ValueError("DNS endpoint address must be loopback")
+        if str(parsed) in RESOLVED_STUB_ADDRESSES:
+            raise ValueError(
+                f"DNS endpoint address {parsed} belongs to systemd-resolved's own "
+                "stub listeners; a scoped authority there is never queried",
+            )
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
             raise ValueError("DNS endpoint attempts must be positive")
         self.address = str(parsed)

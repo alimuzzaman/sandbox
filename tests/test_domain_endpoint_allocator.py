@@ -41,3 +41,29 @@ class TestDomainEndpointAllocator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResolvedStubAddressesAreRefused(unittest.TestCase):
+    """systemd-resolved will not use its own stub listeners as an upstream, so
+    an authority placed there is configured and then never queried."""
+
+    def test_default_address_is_not_a_resolved_stub(self):
+        from sandbox.services.ports import (
+            RESOLVED_STUB_ADDRESSES, SocketDnsEndpointAllocator,
+        )
+
+        self.assertNotIn(SocketDnsEndpointAllocator().address, RESOLVED_STUB_ADDRESSES)
+
+    def test_explicit_stub_address_is_refused_with_the_reason(self):
+        from sandbox.services.ports import SocketDnsEndpointAllocator
+
+        for address in ("127.0.0.53", "127.0.0.54"):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError) as caught:
+                    SocketDnsEndpointAllocator(address)
+                self.assertIn("systemd-resolved", str(caught.exception))
+
+    def test_other_loopback_addresses_are_still_accepted(self):
+        from sandbox.services.ports import SocketDnsEndpointAllocator
+
+        self.assertEqual(SocketDnsEndpointAllocator("127.0.0.55").address, "127.0.0.55")

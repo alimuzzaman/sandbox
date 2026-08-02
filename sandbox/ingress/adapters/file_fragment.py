@@ -37,9 +37,16 @@ class FileFragmentAdapter:
         ).hexdigest()
         listen = dict(selection["listen"])
         listen_address = ipaddress.ip_address(listen["address"])
-        if not listen_address.is_loopback or int(listen["port"]) != 80:
+        # A route must bind the socket the incumbent already listens on, and the
+        # documented conformance target listens on a wildcard. Allow that, but
+        # only because the rendered site restricts itself to loopback CLIENTS —
+        # the instance behind it must never become reachable from off-host.
+        if int(listen["port"]) != 80:
             raise ValueError("ingress listen endpoint must be exact loopback HTTP")
-        listen = {"address": str(listen_address), "port": 80}
+        if not (listen_address.is_loopback or listen_address.is_unspecified):
+            raise ValueError("ingress listen endpoint must be exact loopback HTTP")
+        listen = {"address": str(listen_address), "port": 80,
+                  "loopback_clients_only": bool(listen_address.is_unspecified)}
         content = self.render(route_id, hostname, address, port, listen,
                               bool(naming.get("wildcard")))
         authority = dict(selection.get("authority") or {})

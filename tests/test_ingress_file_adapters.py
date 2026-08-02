@@ -123,3 +123,57 @@ class TestIngressFileAdapters(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TestCleanupUsesTheAdapterRouteId(unittest.TestCase):
+    """Privileged receipts are keyed by the adapter's route id from the plan;
+    the repository record carries a different identity digest."""
+
+    def test_cleanup_passes_the_plan_route_id(self):
+        from types import SimpleNamespace
+
+        from sandbox.ingress.adapters.file_fragment import FileFragmentAdapter
+
+        calls = []
+
+        class Process:
+            @staticmethod
+            def run(argv, **_kwargs):
+                calls.append(tuple(argv))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        adapter = FileFragmentAdapter(
+            process=Process(), helper="/usr/local/libexec/sandbox-ingress-helper",
+            network_root="/tmp", render=lambda *args, **kwargs: "",
+        )
+        route = SimpleNamespace(
+            route_id="record-identity-digest",
+            desired={"route_id": "adapter-plan-route-id"},
+            last_applied={"route_id": "adapter-plan-route-id",
+                          "content_digest": "abc"},
+        )
+        adapter.cleanup(route)
+
+        self.assertIn("adapter-plan-route-id", calls[0])
+        self.assertNotIn("record-identity-digest", calls[0])
+
+    def test_record_id_is_the_last_resort(self):
+        from types import SimpleNamespace
+
+        from sandbox.ingress.adapters.file_fragment import FileFragmentAdapter
+
+        calls = []
+
+        class Process:
+            @staticmethod
+            def run(argv, **_kwargs):
+                calls.append(tuple(argv))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        adapter = FileFragmentAdapter(
+            process=Process(), helper="/usr/local/libexec/sandbox-ingress-helper",
+            network_root="/tmp", render=lambda *args, **kwargs: "",
+        )
+        route = SimpleNamespace(route_id="only-identity", desired={}, last_applied={})
+        adapter.cleanup(route)
+        self.assertIn("only-identity", calls[0])

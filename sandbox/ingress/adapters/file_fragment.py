@@ -150,7 +150,13 @@ class FileFragmentAdapter:
 
     def cleanup(self, route):
         applied = dict(route.last_applied or {})
+        # The privileged receipts are keyed by the ADAPTER's route id (the one
+        # in the plan), while the repository record has its own identity digest.
+        # Passing the record id looked for a receipt that never existed, so
+        # cleanup of a healthy owned route always failed as unauthorized.
+        route_id = (applied.get("route_id") or dict(route.desired).get("route_id")
+                    or route.route_id)
         result = self._run("cleanup", self.network_root, self.adapter_id,
-                           route.route_id, applied.get("content_digest", ""))
+                           route_id, applied.get("content_digest", ""))
         return {"ok": result.returncode == 0, "mutated": result.returncode == 0,
                 "error": _diagnostic(result.stderr)}

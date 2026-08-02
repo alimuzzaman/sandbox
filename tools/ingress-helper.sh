@@ -31,6 +31,24 @@ valid_port() {
     printf '%s\n' "$1" | grep -Eq '^[0-9]{1,5}$' || fail "invalid port"
     [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || fail "invalid port"
 }
+valid_listen_address() {
+    # The listen endpoint is the incumbent's OWN socket, which may be a
+    # wildcard; the rendered fragment restricts such a site to loopback
+    # clients. Anything routable is still refused.
+    python3 - "$1" <<'LISTEN_PY' || exit 65
+import ipaddress
+import sys
+try:
+    value = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    print("ingress-helper: invalid address", file=sys.stderr)
+    raise SystemExit(1)
+if not (value.is_loopback or value.is_unspecified):
+    print("ingress-helper: listen address is neither loopback nor the incumbent wildcard",
+          file=sys.stderr)
+    raise SystemExit(1)
+LISTEN_PY
+}
 valid_loopback() {
     python3 - "$1" <<'PY' || exit 65
 import ipaddress
@@ -177,7 +195,7 @@ validate_plan() {
     pid=${11}; start=${12}; executable_digest=${13}; socket_ids=${14}; observation=${15}
     valid_adapter "$adapter"; valid_route "$route"; valid_owner "$owner"; valid_hostname "$hostname"
     valid_loopback "$backend"; valid_port "$backend_port"
-    valid_loopback "$listen"; [ "$listen_port" -eq 80 ] || fail "only exact loopback HTTP is proven"
+    valid_listen_address "$listen"; [ "$listen_port" -eq 80 ] || fail "only exact loopback HTTP is proven"
     valid_digest "$expected"
     valid_digest "$observation"
     verify_caddy_authority "$pid" "$start" "$executable_digest" "$socket_ids" "$listen" "$listen_port"

@@ -151,3 +151,40 @@ class TestCaddyfileImportPolicy(unittest.TestCase):
                      "import /etc/caddy/conf.d/*.caddy extra"):
             with self.subTest(line=line):
                 self.assertFalse(self._matches(line))
+
+
+class TestListenAddressValidator(unittest.TestCase):
+    """The listen endpoint is the incumbent's own socket, which may be a
+    wildcard. A routable address is still refused."""
+
+    @staticmethod
+    def _validate(address: str) -> int:
+        import subprocess
+
+        script = (
+            "import ipaddress, sys\n"
+            "try:\n"
+            "    value = ipaddress.ip_address(sys.argv[1])\n"
+            "except ValueError:\n"
+            "    raise SystemExit(1)\n"
+            "raise SystemExit(0 if (value.is_loopback or value.is_unspecified) else 1)\n"
+        )
+        return subprocess.run(("python3", "-c", script, address), timeout=10).returncode
+
+    def test_helper_uses_the_dedicated_validator(self):
+        from pathlib import Path
+
+        helper = (Path(__file__).resolve().parents[1] / "tools"
+                  / "ingress-helper.sh").read_text()
+        self.assertIn("valid_listen_address()", helper)
+        self.assertIn('valid_listen_address "$listen"', helper)
+
+    def test_loopback_and_wildcard_are_accepted(self):
+        for address in ("127.0.0.1", "127.0.0.77", "::1", "0.0.0.0", "::"):
+            with self.subTest(address=address):
+                self.assertEqual(self._validate(address), 0)
+
+    def test_routable_and_invalid_addresses_are_refused(self):
+        for address in ("203.0.113.5", "10.0.0.4", "2001:db8::1", "nonsense"):
+            with self.subTest(address=address):
+                self.assertEqual(self._validate(address), 1)

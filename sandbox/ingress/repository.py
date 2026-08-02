@@ -113,6 +113,18 @@ class IngressRepository:
             value["recovery"].pop(route_id, None)
             return "removed"
 
+    def remove_absent_route(self, route_id):
+        """Drop a record whose owned artifact no longer exists.
+
+        Distinct from remove_route_if_unchanged, which compares content: there
+        is nothing to compare and nothing foreign to preserve, so keeping the
+        record would report a residual that no operation can ever clear.
+        """
+        with self.transaction() as value:
+            existed = value["routes"].pop(route_id, None) is not None
+            value["recovery"].pop(route_id, None)
+            return "removed" if existed else "absent"
+
     def put_recovery(self, route_id, recovery):
         with self.transaction() as value:
             value["recovery"][route_id] = dict(recovery)

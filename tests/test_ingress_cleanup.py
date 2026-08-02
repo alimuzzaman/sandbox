@@ -97,3 +97,29 @@ class TestIncumbentReloadDoesNotOrphanOwnedRoutes(unittest.TestCase):
             "implemented_unproven", frozenset({"http"}))
         self.assertNotEqual(self._observation(100).ownership_fingerprint,
                             moved.ownership_fingerprint)
+
+
+class TestAbsentArtifactIsNotAnEternalResidual(unittest.TestCase):
+    """A route whose fragment is already gone has no foreign state to preserve;
+    keeping the record reports a residual that nothing can ever clear."""
+
+    def test_absent_artifact_drops_the_record(self):
+        helper, (service, adapter, _runner, repository) = TestIngressCleanup.fixture(self)
+        applied = service.apply_route(helper.planned(service), interactive=True)
+        adapter.current = {"route_id": applied["route_id"], "content_digest": ""}
+
+        result = service.cleanup_owner("/tmp/project::default")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cleanup"]["residual"], [])
+        self.assertIsNone(repository.route(applied["route_id"]))
+        self.assertNotIn(applied["route_id"], repository.snapshot()["recovery"])
+
+    def test_repeating_it_is_safe(self):
+        helper, (service, adapter, _runner, repository) = TestIngressCleanup.fixture(self)
+        service.apply_route(helper.planned(service), interactive=True)
+        adapter.current = {"route_id": "gone", "content_digest": ""}
+        service.cleanup_owner("/tmp/project::default")
+        again = service.cleanup_owner("/tmp/project::default")
+        self.assertTrue(again["ok"])
+        self.assertEqual(again["reason"]["code"], "already_absent")

@@ -491,6 +491,16 @@ class IngressService:
                     })
                     residual.append(route.route_id); continue
             observed = adapter.observe_route(dict(route.desired))
+            if not observed or observed.get("present") is False or (
+                "content_digest" in observed and not observed["content_digest"]
+            ):
+                # The artifact is already gone -- removed by an operator, a
+                # package upgrade, or a previous partial cleanup. There is no
+                # foreign state to preserve, so drop the record instead of
+                # reporting an eternal residual nothing can clear.
+                self.repository.remove_absent_route(route.route_id)
+                mutated = True
+                continue
             if digest(observed) != digest(route.last_applied or {}):
                 self.repository.remove_route_if_unchanged(route.route_id, observed)
                 residual.append(route.route_id); continue

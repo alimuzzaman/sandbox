@@ -6,17 +6,23 @@
 
 ## Summary
 
-Replace the legacy DNS-takeover branch with a resolver service that observes the active
-owner, selects a manifest-registered adapter, plans an attributable exact-name or zone
-binding, applies it transactionally after interactive consent, and verifies a fresh lookup
-against an ingress-supplied address. Routed resolvers use a Sandbox-owned, non-forwarding
-dnsmasq authority on a collision-checked unprivileged loopback endpoint. Existing `.tst`
-identities remain unchanged; new unpinned identities use `.test`; `.local` is rejected.
+Add a resolver service ALONGSIDE the existing DNS path: it observes the active owner,
+selects a manifest-registered adapter, plans an attributable exact-name or zone binding,
+applies it transactionally after interactive consent, and verifies a fresh lookup against an
+ingress-supplied address. Routed resolvers use a Sandbox-owned, non-forwarding dnsmasq
+authority on a collision-checked unprivileged loopback endpoint. Existing `.tst` identities
+remain unchanged; new unpinned identities use `.test`; `.local` is rejected.
 
-The existing `_domains.py` entry points remain as compatibility facades while lifecycle
-callers move to the new application service. An adapter is advertised as adoptable only
-when its manifest entry has the required live evidence; otherwise detection reports the
-implemented-but-unproven or detect-only tier and preserves the per-port URL.
+Sandbox's own scoped resolution bootstrap — the mechanism serving today's Docker/Caddy clean
+URLs — is the DEFAULT strategy on every platform and for every runtime. Adoption of a
+host-owned resolver is opt-in, selectable at setup and switchable on demand at project or
+machine-local scope. The existing `_domains.py` entry points remain working compatibility
+facades, not disabled stubs, while lifecycle callers move to the new application service.
+
+An adapter is advertised as adoptable only when its manifest entry has the required live
+evidence; otherwise detection reports the implemented-but-unproven or detect-only tier. That
+gate scopes adoption only: with no proven adapter the default strategy still resolves the
+hostname, and the per-port URL is reported only when the default itself is unavailable.
 
 ## Technical Context
 
@@ -68,8 +74,9 @@ shared local zones, one authority process per machine, one resolver owner active
 - **V — Idempotency/docs**: Plan/apply/status/cleanup compare desired, last-applied, and
   observed state; README and config reference changes are in scope.
 - **VI — Parity before removal**: `_domains.py`, current commands, and the current Caddy
-  path remain compatibility facades until live parity is recorded. No legacy removal is
-  planned here.
+  path remain the working default behind compatibility facades until live parity is recorded
+  and removal is explicitly approved. No legacy removal is planned here, and disabling the
+  legacy privileged bootstrap in place counts as removal under this gate.
 
 Post-design re-check: **PASS**. The only privileged component is a narrow validated helper;
 all policy and ownership decisions remain in the unprivileged service and all failure paths

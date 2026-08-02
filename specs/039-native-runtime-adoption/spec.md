@@ -10,6 +10,13 @@
 
 ## Clarifications
 
+### Session 2026-08-02
+
+- Q: Does native runtime adoption change the default clean-URL stack? → A: No. Docker Compose
+  stays the default runtime and Sandbox's own Caddy ingress plus Sandbox-owned resolution
+  stay the default clean-URL path for every runtime; native runtimes and incumbent ingress
+  are opt-in and switchable on demand.
+
 ### Session 2026-08-01
 
 - Q: Must managed-native add a bespoke kernel socket-count controller beyond Docker-class resource controls? → A: Standard Docker-class controls. Descriptor ceilings include sockets, while service and firewall connection ceilings independently bound network use; all must be proved effective or startup fails closed.
@@ -270,6 +277,12 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
   MUST be absent from output, logs, recovery records, and tracked files.
 - **FR-040**: Each runtime advertised as adoptable MUST have captured live evidence for the
   entire required operation set and its declared isolation level.
+- **FR-041**: Docker Compose MUST remain the default runtime, and the default clean-URL path
+  for every runtime MUST remain Sandbox's own Caddy ingress with Sandbox-owned resolution as
+  specified in features 037 and 038, independent of any native runtime selection.
+- **FR-042**: Selecting Herd, Valet, or another incumbent whose own server owns the required
+  endpoints MUST be treated as an explicit opt-in that hands ingress to that product; C MUST
+  NOT cause that handover implicitly for a project that did not select it.
 
 ### Key Entities
 

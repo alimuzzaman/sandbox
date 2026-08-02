@@ -8,6 +8,22 @@
 
 **Input**: Ready product requirements from `specs/038-tld-dns-adoption/prd.md`
 
+## Clarifications
+
+### Session 2026-08-02
+
+- Q: Which resolution path is the product default once this feature ships? → A: Sandbox's own
+  DNS bootstrap for its own suffix — the same mechanism that serves the current Docker/Caddy
+  clean URLs — on every supported platform and for every runtime.
+- Q: Is that default gated by resolver adapter support/live-proof tiers? → A: No. Proof tiers
+  gate adoption of a host-owned resolver only; the default path stays available when no
+  adapter is proven.
+- Q: How does a user get incumbent-resolver adoption instead? → A: Explicit opt-in,
+  selectable during setup and switchable on demand afterwards, per project or per machine.
+- Q: Does this feature replace the legacy DNS path? → A: No. It is an additional selectable
+  strategy. Removal of the existing path requires live parity plus explicit human approval
+  per constitution principle VI.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Resolve Through the Active Host Manager (Priority: P1)
@@ -128,6 +144,10 @@ then remove one and the last consumer of the wildcard namespace.
   Sandbox consumes that answer but creates no local override.
 - The system changes network interface or VPN state and transient routing-domain state is
   lost; status measures current behavior rather than trusting persisted intent.
+- An adoptable resolver is present and proven but no adoption was selected; the default
+  Sandbox-owned strategy is used and adoption is offered, not applied.
+- No resolver adapter has recorded live proof on this platform; the default strategy still
+  resolves the hostname and only adoption is reported unavailable.
 
 ## Requirements *(mandatory)*
 
@@ -187,6 +207,21 @@ then remove one and the last consumer of the wildcard namespace.
   followed by a request through the selected ingress.
 - **FR-028**: Unrelated local, internet, search-domain, and VPN resolution MUST remain
   unchanged across adoption and cleanup.
+- **FR-029**: Sandbox's own scoped resolution bootstrap MUST be the default strategy on every
+  supported platform and for every runtime, and MUST NOT depend on any incumbent resolver
+  adapter reaching an adoptable support tier.
+- **FR-030**: Adoption of a host-owned resolver MUST be opt-in. With no explicit selection,
+  the system MUST use the default Sandbox-owned strategy even when an adoptable incumbent is
+  detected and proven.
+- **FR-031**: A user MUST be able to select the resolution strategy during setup and switch it
+  on demand afterwards, at project and machine-local scope, without destroying or
+  reprovisioning the instance and without changing the persisted hostname.
+- **FR-032**: The existing clean-URL resolution path, including the privileged bootstrap it
+  requires, MUST keep working unchanged while this feature ships. Disabling, bypassing, or
+  removing it requires recorded live parity of the replacement plus explicit human approval.
+- **FR-033**: The system MUST report a per-port fallback only when both the default strategy
+  and any selected adoption strategy are genuinely unavailable, and MUST name which
+  precondition failed.
 
 ### Key Entities
 
@@ -227,6 +262,11 @@ then remove one and the last consumer of the wildcard namespace.
 - **SC-009**: Public-FQDN scenarios create zero local override records.
 - **SC-010**: Cleanup removes 100% of unchanged reachable owned records and truthfully
   reports 100% of unreachable or drifted residuals rather than claiming completion.
+- **SC-011**: On a host with zero adoptable resolver adapters, 100% of new and existing
+  instances still resolve their clean hostname through the default Sandbox-owned strategy,
+  with no result that reports only a per-port fallback.
+- **SC-012**: Switching between default and adopted resolution, in both directions, preserves
+  the persisted hostname byte-for-byte and requires no reprovisioning.
 
 ## Assumptions
 
@@ -234,7 +274,8 @@ then remove one and the last consumer of the wildcard namespace.
   by existing hosting features.
 - Spec A can provide one or more local listener addresses before hostname activation.
 - Supported resolver managers expose a stable scoped extension point or can be left
-  untouched in favor of exact-name/per-port fallback.
+  untouched in favor of the default Sandbox-owned strategy, with the per-port URL used only
+  when that default is also unavailable.
 - A publicly delegated name is externally managed and is never synthesized locally by
   this feature.
 - Existing `.tst` identities remain supported indefinitely unless the user invokes a

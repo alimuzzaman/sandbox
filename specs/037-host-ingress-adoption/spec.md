@@ -8,6 +8,22 @@
 
 **Input**: Ready product requirements from `specs/037-host-ingress-adoption/prd.md`
 
+## Clarifications
+
+### Session 2026-08-02
+
+- Q: Which ingress is the product default once this feature ships? → A: Sandbox's own
+  Docker/Caddy proxy, on every supported platform and for every runtime, unchanged from its
+  pre-adoption behavior.
+- Q: Is the default Sandbox Caddy path gated by the adapter support/live-proof tiers used
+  for incumbent adoption? → A: No. Proof tiers gate incumbent adoption only; the default
+  path stays available even when no adapter is proven.
+- Q: How does a user get incumbent adoption instead? → A: Explicit opt-in, selectable during
+  setup and switchable on demand afterwards, per project or per machine.
+- Q: Does this feature replace or remove the existing clean-URL path? → A: No. The existing
+  path, including its privileged bootstrap, remains the working default; removal requires
+  live parity plus explicit human approval per constitution principle VI.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Detect Real Port Ownership Before Acting (Priority: P1)
@@ -44,11 +60,12 @@ listener/process state before and after detection.
 
 ### User Story 2 - Adopt a Supported Incumbent Safely (Priority: P1)
 
-A developer whose machine already runs a supported web ingress can add a Sandbox hostname
-through that incumbent while all pre-existing routes remain healthy.
+A developer whose machine already runs a supported web ingress can opt in to adding a
+Sandbox hostname through that incumbent while all pre-existing routes remain healthy.
 
-**Why this priority**: This is the primary user value: clean URLs coexist with the host's
-established routing layer.
+**Why this priority**: This is the primary value of the opt-in mode: clean URLs coexist with
+the host's established routing layer when the developer chooses it or when a foreign
+listener owns the endpoints the default Sandbox Caddy ingress needs.
 
 **Independent Test**: For each advertised adoptable product, add and update one route,
 make a live request through it, validate incumbent routes before and after, then remove the
@@ -138,6 +155,10 @@ decline, call from a non-interactive process, and pin conflicting project/machin
   unhealthy and offers only currently valid recovery paths.
 - An incumbent supports HTTP but not requested TLS or wildcard hostnames; status reports
   the exact missing capability and never returns a broken URL.
+- An adoptable incumbent is present and proven but no adoption was selected; the default
+  Sandbox Caddy ingress is used and adoption is offered, not applied.
+- No incumbent adapter has recorded live proof on this platform; the default Sandbox Caddy
+  ingress still serves clean URLs and only adoption is reported unavailable.
 
 ## Requirements *(mandatory)*
 
@@ -155,8 +176,10 @@ decline, call from a non-interactive process, and pin conflicting project/machin
   advertises for it; the system MUST NOT split one hostname across different products.
 - **FR-006**: A foreign listener on an unrequested protocol MUST be preserved and reported
   but MUST NOT justify taking or rewriting it.
-- **FR-007**: With no conflicting incumbent on required endpoints, Sandbox's own Caddy MUST
-  remain the fallback ingress.
+- **FR-007**: Sandbox's own Caddy proxy MUST be the default ingress on every supported
+  platform and for every runtime, taking the required HTTP and HTTPS endpoints whenever they
+  are free or already Sandbox-owned. This default MUST NOT depend on any incumbent adapter
+  reaching an adoptable support tier.
 - **FR-008**: Before route activation, A MUST supply B with acceptable listener addresses
   and hostname/TLS capabilities; A MUST activate only a hostname B has resolved to an
   accepted address.
@@ -205,6 +228,19 @@ decline, call from a non-interactive process, and pin conflicting project/machin
   unavailable.
 - **FR-030**: A user MUST be able to list the products this build can detect/adopt, their
   tiers, required capabilities, consent, and credential prerequisites.
+- **FR-031**: Incumbent adoption MUST be opt-in. With no explicit selection, the system MUST
+  use the default Sandbox Caddy ingress even when an adoptable incumbent is detected and
+  proven.
+- **FR-032**: A user MUST be able to select the ingress mode during setup and switch it on
+  demand afterwards, at project and machine-local scope, without destroying or reprovisioning
+  the instance.
+- **FR-033**: The existing Sandbox Caddy clean-URL path, including the privileged bootstrap
+  it needs to serve `http(s)://<hostname>` without a port, MUST keep working unchanged while
+  this feature ships. Disabling, bypassing, or removing it requires recorded live parity of
+  the replacement plus explicit human approval.
+- **FR-034**: When the default ingress cannot take a required endpoint because a foreign
+  listener owns it, the system MUST report the owner, MUST NOT steal the endpoint, and MUST
+  offer the opt-in adoption or per-port fallback rather than silently degrading.
 
 ### Key Entities
 
@@ -246,6 +282,11 @@ decline, call from a non-interactive process, and pin conflicting project/machin
   unavailable/drifted residuals without claiming complete removal.
 - **SC-010**: Existing persisted hostnames continue to serve through the selected ingress;
   new unpinned names supplied by B also serve without changing the C backend identity.
+- **SC-011**: On a host with free required endpoints and zero adoptable incumbent adapters,
+  100% of new and existing instances still serve their clean URL through Sandbox Caddy, with
+  no result that reports only a per-port fallback.
+- **SC-012**: Switching between default and adopted ingress, in both directions, preserves
+  the instance hostname, data, and per-port URL and requires no reprovisioning.
 
 ## Assumptions
 

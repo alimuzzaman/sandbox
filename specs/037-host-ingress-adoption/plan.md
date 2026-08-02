@@ -9,14 +9,18 @@
 Introduce a manifest-driven ingress service that observes kernel TCP listeners and
 product evidence before any proxy action, selects one ingress capable of every promised
 protocol, gives spec B its acceptable listener addresses, and transactionally adds an
-attributable route only after B returns verified naming state. Sandbox Caddy remains the
-fallback only when its exact bind endpoints are free or already Sandbox-owned.
+attributable route only after B returns verified naming state. Sandbox Caddy is the DEFAULT
+ingress on every platform and for every runtime: the service selects it whenever its exact
+bind endpoints are free or already Sandbox-owned, without requiring any adapter to reach an
+adoptable tier. Incumbent adoption is an opt-in alternative, selectable at setup and
+switchable on demand at project or machine-local scope.
 
 Initial mutation adapters cover Herd/Valet, system nginx, Apache, system Caddy, and a
 Traefik file provider. Nginx Proxy Manager, DDEV router, Local, XAMPP, Laragon/WAMP, and
-unidentified owners are classified without private-state mutation. All adapters are live-
-proof gated. The current `_domains.py`/proxy facade remains until the new path has live
-parity and rollback approval.
+unidentified owners are classified without private-state mutation. Live-proof gating applies
+to incumbent adoption only; it MUST NOT gate the default Sandbox Caddy path. The existing
+`_domains.py`/proxy path keeps working unchanged and is not disabled, bypassed, or removed
+until the new path has live parity and explicit removal approval.
 
 ## Technical Context
 
@@ -64,13 +68,17 @@ candidate products but an explicit pin has precedence
 - **III — Modular package**: New adapters and configuration register through explicit
   manifests/contracts under `sandbox/ingress/`; the application service owns sequencing.
   No new consumer reads registry/state JSON or imports compatibility facades directly.
-- **IV — Live proof**: Every advertised adapter requires a live add/request/update/remove
-  evidence pack with incumbent-route preservation. The current host's active system Caddy
-  is the first conformance target.
+- **IV — Live proof**: Every advertised adoption adapter requires a live
+  add/request/update/remove evidence pack with incumbent-route preservation. The current
+  host's active system Caddy is the first conformance target. Proof gating scopes adoption
+  only; the default Sandbox Caddy ingress stays selectable and serving while adapters are
+  unproven.
 - **V — Idempotency/docs**: Desired/last-applied/observed comparison drives route updates
   and cleanup. README/config/support documentation lands with code.
-- **VI — Parity before removal**: Existing Sandbox Caddy and Valet behavior remain behind
-  compatibility facades until live parity evidence and explicit removal approval.
+- **VI — Parity before removal**: Existing Sandbox Caddy and Valet behavior remain the
+  working default; compatibility facades stay live and functional, including the privileged
+  clean-URL bootstrap, until live parity evidence and explicit removal approval. Disabling
+  the legacy path in place counts as removal and is not permitted under this gate.
 
 Post-design re-check: **PASS**. Privilege is isolated in a fixed helper and adapters never
 reload before complete current/candidate validation and a rollback snapshot.

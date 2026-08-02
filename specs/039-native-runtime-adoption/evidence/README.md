@@ -6,6 +6,7 @@ commands and do not make an adapter adoptable by themselves.
 | Evidence | Host | Status | Promotion effect |
 |---|---|---|---|
 | `pre-live-gate.md` | Ubuntu 24.04 | complete | managed runtime remains blocked |
+| `isolation-prerequisites.md` | Ubuntu 24.04 | complete | none: 19/19 gates pass; promotion still needs T047 |
 | `capability-parity.md` | macOS + contract suite | complete | none |
 | `bounds-and-suites.md` | macOS Compose | complete | none (T076 suites + timing bounds) |
 | `compose-regression.md` | macOS Compose | complete | preserves existing Compose adoption |

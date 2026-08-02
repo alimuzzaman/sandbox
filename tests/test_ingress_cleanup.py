@@ -65,3 +65,35 @@ class TestIngressCleanup(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TestIncumbentReloadDoesNotOrphanOwnedRoutes(unittest.TestCase):
+    """Activating a route reloads the incumbent, which changes its pid. Judging
+    "is this still the same incumbent" on the full fingerprint therefore
+    orphaned every route this feature had just created."""
+
+    @staticmethod
+    def _observation(pid):
+        from sandbox.ingress.models import IngressObservation, ListenerEndpoint
+
+        return IngressObservation(
+            "system-caddy", "Caddy",
+            (ListenerEndpoint("::", 80, socket_id="1", owner_confidence="proven",
+                              process={"pid": pid, "start": str(pid),
+                                       "executable": "/usr/bin/caddy"}),),
+            "implemented_unproven", frozenset({"http"}))
+
+    def test_reload_changes_the_fingerprint_but_not_ownership(self):
+        before, after = self._observation(100), self._observation(200)
+        self.assertNotEqual(before.fingerprint, after.fingerprint)
+        self.assertEqual(before.ownership_fingerprint, after.ownership_fingerprint)
+
+    def test_a_different_endpoint_set_does_change_ownership(self):
+        from sandbox.ingress.models import IngressObservation, ListenerEndpoint
+
+        moved = IngressObservation(
+            "system-caddy", "Caddy",
+            (ListenerEndpoint("127.0.0.1", 8080, socket_id="1"),),
+            "implemented_unproven", frozenset({"http"}))
+        self.assertNotEqual(self._observation(100).ownership_fingerprint,
+                            moved.ownership_fingerprint)

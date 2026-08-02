@@ -209,6 +209,7 @@ class IngressService:
                     endpoint.address for endpoint in (observation.endpoints if observation else ())
                     if endpoint.port in {PROTOCOL_PORTS[protocol] for protocol in protocols}
                 })),
+                observation.ownership_fingerprint if observation else None,
             )
         pinned = self.registry.get(pin) if pin else None
         pinned_observed = pin and any(item.adapter_id == pin for item in observations)
@@ -370,6 +371,7 @@ class IngressService:
             adapter_plan = {
                 **adapter_plan,
                 "_incumbent_fingerprint": selection.observation_fingerprint,
+                "_incumbent_ownership": selection.observation_ownership,
             }
         except (OSError, ValueError) as exc:
             return {"ok": False, "state": "foreign_collision", "mutated": False,
@@ -470,11 +472,18 @@ class IngressService:
                     "status": "unavailable",
                 })
                 residual.append(route.route_id); continue
+            # Compare the product/endpoint identity, not the process identity:
+            # activating a route reloads the incumbent, which changes its pid.
+            expected_ownership = dict(route.desired).get("_incumbent_ownership")
             expected_fingerprint = dict(route.desired).get("_incumbent_fingerprint")
-            if expected_fingerprint:
+            if expected_ownership or expected_fingerprint:
                 current = next((item for item in self.detector.observe()
                                 if item.adapter_id == route.adapter_id), None)
-                if current is None or current.fingerprint != expected_fingerprint:
+                if current is None or (
+                    current.ownership_fingerprint != expected_ownership
+                    if expected_ownership else
+                    current.fingerprint != expected_fingerprint
+                ):
                     self.repository.put_recovery(route.route_id, {
                         "route_id": route.route_id, "adapter_id": route.adapter_id,
                         "expected_digest": digest(route.last_applied or {}),

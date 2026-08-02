@@ -97,6 +97,7 @@ class IngressObservation:
     product_identity: Mapping[str, Any] = field(default_factory=dict)
     control: Mapping[str, Any] | None = None
     fingerprint: str = ""
+    ownership_fingerprint: str = ""
 
     def __post_init__(self):
         if self.support_tier not in TIERS:
@@ -112,6 +113,18 @@ class IngressObservation:
         if self.fingerprint and self.fingerprint != expected:
             raise ValueError("ingress observation fingerprint is invalid")
         object.__setattr__(self, "fingerprint", expected)
+        # Identity of the PRODUCT and the endpoints it owns, without the
+        # volatile process identity carried in each endpoint. Reloading a
+        # service changes its pid and start time, so comparing the full
+        # fingerprint later would read the incumbent as replaced -- including
+        # after the reload this feature itself performs to activate a route,
+        # which then orphaned every owned route it had just created.
+        object.__setattr__(self, "ownership_fingerprint", digest({
+            "adapter": self.adapter_id, "product": self.product,
+            "tier": self.support_tier, "capabilities": sorted(self.capabilities),
+            "endpoints": sorted((item.address, item.port, item.protocol)
+                                for item in self.endpoints),
+        }))
 
 
 @dataclass(frozen=True)
@@ -129,6 +142,10 @@ class IngressSelection:
     # an owned route must bind the socket the incumbent already listens on, or
     # the config names an endpoint that product does not serve.
     listen_addresses: tuple[str, ...] = ()
+    # Stable product/endpoint identity of the same observation; see
+    # IngressObservation.ownership_fingerprint. Declared last so existing
+    # positional construction keeps binding pin/pin_source correctly.
+    observation_ownership: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "required_protocols", frozenset(self.required_protocols))

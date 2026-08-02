@@ -879,3 +879,29 @@
 ### other command outputs worth carrying forward
 - `./sb status` succeeded with focused JSON capability summary and reported `Optional runtime gaps: logs, stop, wordpress.debug, wordpress.server-switch`.
 - `./sb onboard --minimal` auto-runs the onboarding flow and reports successful setup for this project; it did not require interactive confirmation in this run.
+
+## Continuation pass (2026-08-02): runtime behavior deltas (continued)
+
+### execution-path behavior
+- `./sb test` executes immediately and defaults to unit mode; in this project, `./sb test --json` and `./sb test auto` both run PHPUnit and fail with usage/exit code 2 when required tests aren’t discoverable.
+- `./sb e2e --json` still performs runtime validation and exits with:
+  - `error: no playwright config found under ...` when no discoverable config exists.
+- `./sb exec -- echo hello_exec` fails with:
+  - `error: project kind 'wordpress' does not support 'exec'`.
+
+### domains/native runtime checks
+- `./sb native support` returns JSON when `--json` is present and includes support tiers by adapter.
+- `./sb native support --json` worked without requiring project-specific extra flags.
+- `./sb native status --json` returns optional capability matrix and reports native capability gaps (`logs`, `stop`, `wordpress.debug`, `wordpress.server-switch` unsupported in this environment).
+- `./sb domains status --json` currently returns `ok: false` with `reason: resolver_not_selected` (fallback strategy in use).
+
+### instance / job edge behavior
+- `./sb instance` and `./sb instance delete` both enforce required positional arguments:
+  - `sandbox instance: error: the following arguments are required: action, name`
+  - `sandbox instance: error: the following arguments are required: name`
+- `./sb job-list --json` is accepted (contrary to earlier expectation) and returns full job records with `ok: true`.
+- `./sb job-status <id>` returns concise terminal summary with lifecycle/state and workspace metadata.
+- `./sb job-cancel <id> --json` on a succeeded job returns `already_terminal`.
+- `./sb job-retry <succeeded-id>` returns a new retry job id (not blocked by terminal state in this check).
+- `./sb job-start -- echo ...` successfully starts a local exec job and prints job metadata.
+- `./sb job-output <id>` returns captured command output when the job is terminal and available (example: `hello-sb`).

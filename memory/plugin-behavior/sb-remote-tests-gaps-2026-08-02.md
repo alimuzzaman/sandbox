@@ -934,3 +934,34 @@
 - `./sb home /tmp/sandbox-test-home` produced a live migration attempt and container recreation attempt (`lenzora-2`, port collision on 8258); command did not complete cleanly.
 - `./sb dashboard --json` is rejected (`unrecognized arguments: --json`); `./sb dashboard` in non-interactive context prints static list with interactive warning.
 - `./sb dashboard` still lists running instances and no JSON mode.
+
+## Continuation pass (2026-08-02): command/parser follow-up
+
+### Command/parser findings
+- `./sb apply --help` exposes options `--no-pick`, `--project-dir`, `--json`, `--label`, `--instance`.
+- `./sb connect --help` shows targets `fb`, `fluentboards`, `gh`, `github`, optional `-n/--non-interactive`, and target-specific env requirements.
+- `./sb connect --version` is rejected by argparse as unrecognized arguments.
+- `./sb connect` with no target prints usage and target list.
+- `./sb connect gh` is interactive and prompts for GitHub org/user selection via numbered menu.
+- `./sb connect gh --non-interactive` fails with `--non-interactive requires GITHUB_ORG to be set in the environment.`
+- `./sb connect fluentboards` prompts for site URL/email/app password in non-TTY and throws `EOFError: EOF when reading a line` when stdin is absent.
+- `./sb connect fluentboards --non-interactive` fails with `--non-interactive requires FLUENTBOARDS_URL and FLUENTBOARDS_APP_PASSWORD to be set in the environment.`
+- `./sb connect cloudflare --non-interactive` currently throws `sandbox.core._secrets.SecretError: shell expansion is not allowed in /Users/alim/.zshrc.secrets line 41` (secret file parsing hard failure).
+
+### Command surface strictness
+- `./sb dump --help` accepts only `--follow`, `--clear`, `--instance`, `--label` and rejects `--json`.
+- `./sb install` and `./sb update` expose only `--instance`/`--label` and no json mode.
+- `./sb install --json` and `./sb update --json` are rejected at top-level with `unrecognized arguments: --json`.
+- `./sb abilities` requires an explicit `{on,off,status,connect}` state/action.
+- `./sb abilities`, `./sb xdebug`, and `./sb claude` all show positional/passthrough-driven subcommand behavior; missing action/subcommand is a parser-level error (`the following arguments are required`).
+- `./sb mcp --json`, `./sb mcp status --json`, and `./sb mcp list` are all rejected by parser (`unrecognized arguments`).
+- `./sb xdebug --help` requires positional state; `./sb xdebug` without state errors as expected.
+- `./sb abilities` and `./sb logs` outside a registered project return `error: no sandbox instance for this directory...`.
+
+### Runtime behavior notes
+- `./sb logs` requires a registered instance in this directory (`--local`, `--json`, plain) and exits with no-op guidance if missing.
+- `./sb status` similarly exits with `no sandbox instance for this directory` when run from this root without registration.
+- `./sb mcp-install --help` is command-only with only `--instance`/`--label`.
+- `./sb selftest --help` exposes only `--instance`, `--label`.
+- `./sb selftest` (with no args) launches a long-lived `python -m unittest discover -s tests -v` run, currently long enough that Ctrl-C may be required for interrupt in this session.
+- `./sb claude` with no action just shows passthrough help, indicating passthrough args are forwarded to the Claude command.

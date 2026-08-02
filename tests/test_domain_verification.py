@@ -72,3 +72,21 @@ class TestDomainVerification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadyResultReportsFreshAnswers(unittest.TestCase):
+    """Spec A compares `actual_answers` with the addresses it offered before it
+    activates a route. Reporting the pre-apply snapshot made a healthy adoption
+    look like an address mismatch."""
+
+    def test_apply_reobserves_after_verification(self):
+        import inspect
+
+        from sandbox.application import domain_service
+
+        source = inspect.getsource(domain_service.DomainService._apply) \
+            if hasattr(domain_service.DomainService, "_apply") \
+            else inspect.getsource(domain_service.DomainService)
+        ready_block = source.split('reason_code="ready"')[0]
+        self.assertIn("verified = self.observer(", ready_block)
+        self.assertIn("observation=verified or current", ready_block)

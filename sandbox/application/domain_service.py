@@ -686,9 +686,16 @@ class DomainService:
                 prepared["config"]["root"], label, prepared["hostname"],
                 prepared["policy"]["hostnameSource"],
             )
+        # Report the answers as they are NOW, not as they were before the route
+        # existed. Callers compare `actual_answers` against the addresses they
+        # offered -- spec A does exactly that before activating a route -- and a
+        # pre-apply snapshot is empty, so a healthy adoption looked like an
+        # address mismatch and was rolled back.
+        verified = self.observer(prepared["hostname"]) if self.observer else None
         return self._result(
             state="ready", hostname=prepared["hostname"], policy=prepared["policy"],
-            observation=current, expected=prepared["accepted"], fallback=prepared["fallback"],
+            observation=verified or current, expected=prepared["accepted"],
+            fallback=prepared["fallback"],
             reason_code="ready", message="Hostname resolution is verified.", ok=True,
             mutated=True, health="healthy", ownership="owned",
         )

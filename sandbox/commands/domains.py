@@ -14,7 +14,12 @@ LEGACY_ACTIONS = frozenset({"setup", "up", "down", "teardown", "repair-ca", "lis
 DOMAIN_ACTIONS = (
     "setup", "up", "down", "teardown", "repair-ca", "list",
     "detect", "support", "plan", "apply", "status", "cleanup", "reconsider", "ingress",
+    "use",
 )
+# The default clean-URL provider: Sandbox's own Docker/Caddy proxy plus
+# Sandbox-owned DNS (specs 037 FR-007/FR-031, 038 FR-029/FR-030). Every other
+# value opts in to host-incumbent adoption.
+DEFAULT_PROVIDER = "sandbox-caddy"
 INGRESS_ACTIONS = frozenset({
     "detect", "support", "status", "plan", "apply", "cleanup", "reconcile", "reconsider",
 })
@@ -86,6 +91,53 @@ def _ingress_owner(args) -> str:
     return f"{Path(args.project_dir or '.').expanduser().resolve()}::{args.label}"
 
 
+def _use_provider(args) -> dict:
+    """Switch the clean-URL provider on demand (037 FR-032, 038 FR-031).
+
+    Writes the machine-local `domains.ingress` selection; no reprovisioning, no
+    hostname change. `./sb domains use` with no value reports the current one.
+    """
+    from sandbox.core import _domains as core_domains
+    from sandbox.core._config import _local_yaml, _write_local_yaml
+
+    requested = (args.tld or args.resolver or "").strip().lower()
+    if not requested:
+        return {"ok": True, "operation": "domains_use", "state": "ready",
+                "mutated": False, "provider": core_domains.clean_url_mode(),
+                "default": DEFAULT_PROVIDER,
+                "reason": {"code": "provider_reported",
+                           "message": "pass a provider id to switch, e.g. "
+                                      f"`./sb domains use {DEFAULT_PROVIDER}`"}}
+    known = {DEFAULT_PROVIDER, "default", "disabled"} | {
+        item.adapter_id for item in BUILTIN_RESOLVER_ADAPTERS}
+    try:
+        from sandbox.ingress.manifest import BUILTIN_INGRESS
+        known |= {item.adapter_id for item in BUILTIN_INGRESS}
+    except ImportError:
+        pass
+    if requested not in known:
+        return {"ok": False, "operation": "domains_use", "state": "invalid",
+                "mutated": False, "provider": core_domains.clean_url_mode(),
+                "reason": {"code": "unknown_provider",
+                           "message": f"unknown provider {requested!r}; known: "
+                                      + ", ".join(sorted(known))}}
+    local = _local_yaml()
+    block = local.setdefault("domains", {})
+    if requested in (DEFAULT_PROVIDER, "default"):
+        block.pop("ingress", None)
+        if not block:
+            local.pop("domains", None)
+    else:
+        block["ingress"] = requested
+    _write_local_yaml(local)
+    return {"ok": True, "operation": "domains_use", "state": "ready",
+            "mutated": True, "provider": core_domains.clean_url_mode(),
+            "default": DEFAULT_PROVIDER,
+            "reason": {"code": "provider_selected",
+                       "message": "run `./sb domains setup` (or `./sb ensure`) "
+                                  "to apply the selection"}}
+
+
 def cmd_domains(cfg, args) -> None:
     if args.action in LEGACY_ACTIONS:
         from sandbox.commands.net import cmd_domains as legacy_domains
@@ -93,6 +145,10 @@ def cmd_domains(cfg, args) -> None:
         return
     if args.action == "support":
         _emit(_support(), bool(args.json))
+        return
+
+    if args.action == "use":
+        _emit(_use_provider(args), bool(args.json))
         return
 
     if args.action == "ingress":

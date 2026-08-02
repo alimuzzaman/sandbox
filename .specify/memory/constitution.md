@@ -65,6 +65,13 @@ may be deleted until the per-project replacement for that feature is proven on t
 stack. Removals MUST be staged behind verified parity. Rationale: this is critical,
 shared tooling; a half-removed feature bricks every developer who pulls it.
 
+Disabling a working path in place — stubbing a function to return failure, replacing a
+helper with a refusal, or gating it behind a tier nothing can reach — counts as removal
+under this principle and needs the same parity evidence plus explicit human approval.
+The Docker/Caddy clean-URL provider is the standing example: it is the DEFAULT on every
+platform and runtime, host adoption and native runtimes are opt-in, and the contract
+lives in `docs/clean-url-default.md`.
+
 ## Additional Constraints
 
 - **Boundaries:** `runtime/wp*/` core files and `vendor/` are off-limits (clobbered on

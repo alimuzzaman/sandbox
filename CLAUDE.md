@@ -28,6 +28,14 @@
 
 **CLI over raw docker.** Use `./sb <cmd>`. Raw `docker compose` only when `sb` doesn't cover it.
 
+**Clean URLs default to Docker/Caddy.** The Sandbox Caddy proxy plus Sandbox-owned DNS is
+the DEFAULT provider on every platform and runtime; host-incumbent ingress, scoped resolver
+adoption, and native runtimes are opt-in (`./sb domains use <provider>`). Adapter proof
+tiers gate adoption only — never the default path. Do not disable, stub, or bypass
+`_ensure_url_proxy` / `tools/proxy-helper.sh`: that counts as removal under principle VI and
+needs parity evidence plus explicit approval. Read `docs/clean-url-default.md` before
+touching specs 037/038/039 or their code.
+
 **Docs with code.** Code change + matching `README.md` / `CLAUDE.md` / `SKILL.md` / `WORKFLOW.md` land together. Non-obvious runtime findings → `memory/plugin-behavior/`.
 
 **Specs via spec-kit.** For material or ambiguous features, use `speckit-refine` → independent Sol High PRD review → `speckit-specify` → `speckit-clarify` → `speckit-plan` → `speckit-tasks` → `speckit-analyze` → `speckit-implement`. Prefer Terra Medium for PRD drafting, Sol Medium for specification, Terra High for implementation, and Sol Medium for judgment-heavy implementation. `speckit-refine` owns only `prd.md`; never hand-author `specs/<n>/spec.md`.

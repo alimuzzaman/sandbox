@@ -68,12 +68,13 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
         self.assertEqual(kwargs["backend"], {"address": "127.0.0.1", "port": 8123})
         self.assertEqual(kwargs["protocols"], ("http",))
 
-    def test_composed_secure_success_skips_aggregate_proxy_and_certificate_helpers(self):
+    def test_selected_adoption_secure_success_skips_aggregate_proxy_and_certificate_helpers(self):
         from sandbox.core import _domains
 
         local = {"instances": {}}
         cfg = {"instances": {"demo": {"wordpress_port": 8123}}}
-        with mock.patch.object(_domains, "resolve_instances", return_value=cfg["instances"]), \
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(_domains, "resolve_instances", return_value=cfg["instances"]), \
              mock.patch.object(_domains, "clean_url_compatibility_handoff", return_value={
                  "ok": True, "hostname": "demo.test", "url": "https://demo.test"}), \
              mock.patch.object(_domains, "_local_yaml", return_value=local), \
@@ -94,12 +95,13 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
         proxy.assert_not_called(); mint.assert_not_called()
         regenerate.assert_not_called(); reload.assert_not_called()
 
-    def test_composed_fallback_never_enters_legacy_secure_path(self):
+    def test_selected_adoption_fallback_never_enters_default_secure_path(self):
         from sandbox.core import _domains
 
         local = {"instances": {}}
         cfg = {"instances": {"demo": {"wordpress_port": 8123, "tld": "tst"}}}
-        with mock.patch.object(_domains, "resolve_instances", side_effect=lambda _cfg: cfg["instances"]), \
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(_domains, "resolve_instances", side_effect=lambda _cfg: cfg["instances"]), \
              mock.patch.object(_domains, "clean_url_compatibility_handoff", return_value={
                  "ok": False, "state": "fallback"}), \
              mock.patch.object(_domains.shutil, "which", return_value="/usr/bin/mkcert"), \
@@ -184,13 +186,14 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
         self.assertEqual(result["state"], "rollback_incomplete")
         self.assertFalse(result["safe_to_fallback"])
 
-    def test_http_setup_success_skips_legacy_proxy_path(self):
+    def test_selected_adoption_http_setup_skips_default_proxy_path(self):
         from sandbox.core import _domains
 
         lifecycle = {"ok": True, "state": "ready", "mutated": True,
                      "results": [{"instance": "demo", "hostname": "demo.test",
                                   "protocols": ("http",)}]}
-        with mock.patch.object(_domains, "clean_url_lifecycle_handoff",
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff",
                                return_value=lifecycle) as handoff, \
              mock.patch.object(_domains, "_persist_composed_clean_urls",
                                return_value={"refreshed": True}) as persist, \
@@ -254,6 +257,72 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
             self.assertFalse(_domains.proxy_teardown({}))
 
         legacy.assert_not_called()
+
+
+class TestDefaultCleanUrlProvider(unittest.TestCase):
+    """The Docker/Caddy stack is the default provider (037 FR-007/FR-031,
+    038 FR-029/FR-030). These guard against it being stubbed out again."""
+
+    def test_default_setup_uses_docker_caddy_and_not_adoption(self):
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff") as handoff, \
+             mock.patch.object(_domains, "_ensure_url_proxy",
+                               return_value=(True, {"refreshed": True})) as proxy:
+            result = _domains.clean_url_setup({}, interactive=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "sandbox-caddy")
+        proxy.assert_called_once()
+        handoff.assert_not_called()
+
+    def test_default_setup_failure_keeps_per_port_url_available(self):
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "_ensure_url_proxy", return_value=(False, {})):
+            result = _domains.clean_url_setup({}, interactive=False)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["safe_to_fallback"])
+        self.assertEqual(result["reason"]["code"], "sandbox_caddy_unavailable")
+
+    def test_default_secure_at_create_uses_certificate_path(self):
+        from sandbox.core import _domains
+
+        cfg = {"instances": {"demo": {"wordpress_port": 8123, "tld": "tst"}}}
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "resolve_instances",
+                               side_effect=lambda _cfg: cfg["instances"]), \
+             mock.patch.object(_domains, "clean_url_compatibility_handoff") as handoff, \
+             mock.patch.object(_domains.shutil, "which", return_value="/usr/bin/mkcert"), \
+             mock.patch.object(_domains, "_ca_trusted_macos", return_value=True), \
+             mock.patch.object(_domains, "_local_yaml", return_value={"instances": {}}), \
+             mock.patch.object(_domains, "_write_local_yaml"), \
+             mock.patch.object(_domains, "load_config", return_value=cfg), \
+             mock.patch.object(_domains, "_ensure_url_proxy",
+                               return_value=(True, cfg)) as proxy, \
+             mock.patch.object(_domains, "_mint_cert", return_value=True), \
+             mock.patch.object(_domains, "regen_caddyfile"), \
+             mock.patch.object(_domains, "reload_proxy", return_value=True), \
+             mock.patch.object(_domains, "registry_find_instance", return_value=None):
+            self.assertTrue(_domains._secure_at_create(cfg, "demo"))
+
+        proxy.assert_called_once()
+        handoff.assert_not_called()
+
+    def test_mode_defaults_to_sandbox_caddy_and_switches_on_demand(self):
+        from sandbox.core import _domains
+
+        with mock.patch.object(_domains, "_machine_domains_block", return_value={}), \
+             mock.patch.dict(_domains.os.environ, {}, clear=False):
+            _domains.os.environ.pop("SANDBOX_CLEAN_URL_MODE", None)
+            self.assertEqual(_domains.clean_url_mode({}), "sandbox-caddy")
+            self.assertFalse(_domains._adoption_selected({}))
+            selected = {"domains": {"ingress": "system-nginx"}}
+            self.assertEqual(_domains.clean_url_mode(selected), "system-nginx")
+            self.assertTrue(_domains._adoption_selected(selected))
 
 
 if __name__ == "__main__":

@@ -215,6 +215,29 @@ T031 system Caddy tests
 T032 Traefik tests
 ```
 
+## Default-Provider Amendment (2026-08-02)
+
+The Docker/Caddy provider is the DEFAULT, adoption is opt-in, and disabling the legacy
+path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
+
+- [X] T050 Restore the default clean-URL bootstrap and select it whenever no adoption is
+      chosen in `sandbox/core/_domains.py` (`_ensure_url_proxy`, `clean_url_setup`,
+      `proxy_setup`, `_secure_at_create`)
+- [X] T051 Restore `tools/proxy-helper.sh` with the privileged target moved out of the
+      checkout: root-owned `/usr/local/libexec/sandbox-proxy-helper` plus a scoped
+      `/etc/sudoers.d/sandbox-proxy-<uid>` rule, and refuse privileged verbs from any
+      other path
+- [X] T052 Add the on-demand switch surface `./sb domains use <provider>` backed by
+      `domains.ingress` precedence (env, machine-local, project, default) in
+      `sandbox/commands/domains.py` and `sandbox/core/_domains.py`
+- [X] T053 Add policy guard tests for the default provider, helper integrity, sudoers
+      target, and spec/docs synchronization in `tests/test_clean_url_default_policy.py`
+- [X] T054 Land the policy in `docs/clean-url-default.md`, `README.md`, `CLAUDE.md`,
+      `AGENTS.md`, `docs/host-ingress.md`, and `docs/sandbox-config-reference.md`
+- [ ] T055 Prove the restored default live on macOS and Linux: `./sb domains setup`,
+      request through `http(s)://<name>.<tld>`, then `./sb domains use <incumbent>` and
+      back, capturing evidence in `specs/037-host-ingress-adoption/evidence/default-provider.md`
+
 ## Implementation Strategy
 
 ### Listener-Truth MVP

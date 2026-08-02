@@ -45,9 +45,13 @@ cannot be renamed silently because WordPress stores absolute URLs and integratio
 depend on them, but new unpinned projects should not create another private pseudo-TLD by
 default.
 
-The product need is therefore adoption, not DNS takeover: identify the active resolver
-owner, use its supported extension point when one exists, preserve foreign configuration,
-and report exact limitations when safe registration is unavailable.
+The product need is therefore adoption AS AN ADDITION, not a replacement of the working
+path and not a DNS takeover: keep Sandbox's own scoped bootstrap as the default provider,
+and additionally identify the active resolver owner, use its supported extension point when
+the user opts in, preserve foreign configuration, and report exact limitations when safe
+registration is unavailable. (2026-08-02 decision: the Docker/Caddy stack and its DNS remain
+the default on every platform and runtime; adoption is selectable at setup and switchable on
+demand.)
 
 ## Users and Desired Outcomes
 
@@ -68,6 +72,10 @@ and report exact limitations when safe registration is unavailable.
 
 ## Goals
 
+- Keep Sandbox's own scoped resolution bootstrap as the default provider, ungated by
+  adapter proof tiers, so clean URLs work with zero adoptable adapters.
+- Let a user select the resolution provider at setup and switch it on demand, per project
+  or per machine, without reprovisioning or renaming.
 - Detect the active local name-resolution mode and its owner before mutation.
 - Resolve every Sandbox hostname to an address accepted by the ingress selected under
   spec A.
@@ -285,8 +293,8 @@ and report exact limitations when safe registration is unavailable.
 
 | Resolver environment | Initial tier | Boundary |
 |----------------------|--------------|----------|
-| Sandbox-managed macOS resolver + dnsmasq | Adoptable fallback | Preserve existing compatible behavior, with `.test` for new unpinned projects. |
-| Sandbox-managed Linux dnsmasq with plain resolv.conf | Adoptable fallback | Only when no incumbent manages resolv.conf or port 53. |
+| Sandbox-managed macOS resolver + dnsmasq | DEFAULT provider | Preserve existing behavior unchanged, with `.test` for new unpinned projects. Not gated by adapter proof tiers. |
+| Sandbox-managed Linux dnsmasq with plain resolv.conf | DEFAULT provider | Preserve existing behavior unchanged. Declines only when an incumbent manages resolv.conf or port 53, and then reports the selectable adoption options. |
 | systemd-resolved | Adoptable with Sandbox authority | Route only the owned namespace to a scoped Sandbox answerer; do not replace its resolv.conf symlink. |
 | NetworkManager with systemd-resolved | Adoptable with Sandbox authority | Preserve NetworkManager's mode and use the resolved route/authority path. |
 | NetworkManager with dnsmasq | Adoptable through incumbent | Add only an owned rule through the active dnsmasq extension and scoped DNS reload; do not start another port-53 listener or switch global mode. |

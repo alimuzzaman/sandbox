@@ -929,42 +929,168 @@ def _ensure_proxy_up(cfg: dict) -> None:
 
 
 def _proxy_sudoers_installed() -> bool:
-    """The repository-path legacy sudo rule is never trusted or invoked."""
-    return False
+    """True when the root-owned helper + its scoped NOPASSWD rule are ready.
+
+    Only the installed copy at PROXY_HELPER_INSTALLED is ever trusted; the old
+    rule pointing at the writable checkout is revoked, never probed.
+    """
+    if not PROXY_HELPER_INSTALLED.exists():
+        return False
+    res = subprocess.run(["sudo", "-n", str(PROXY_HELPER_INSTALLED),
+                          "installed-status"], capture_output=True, text=True)
+    return res.returncode == 0 and (res.stdout or "").strip() == "ready"
+
+
+def clean_url_mode(cfg: dict | None = None) -> str:
+    """Which clean-URL provider this machine/project uses.
+
+    `sandbox-caddy` (the DEFAULT) is the Docker/Caddy proxy plus Sandbox-owned
+    DNS — the stack that has always served `http(s)://<name>.<tld>`. Any other
+    value opts in to host-incumbent adoption through the composed ingress and
+    resolver services (specs 037/038). Precedence: env override, machine-local
+    `domains.ingress`, project `domains.ingress`, default.
+    """
+    env = (os.environ.get("SANDBOX_CLEAN_URL_MODE") or "").strip().lower()
+    if env:
+        return env
+    for source in (_machine_domains_block(), cfg or {}):
+        block = source.get("domains") if "domains" in source else source
+        if isinstance(block, dict):
+            selected = block.get("ingress") or block.get("strategy")
+            if isinstance(selected, str) and selected.strip():
+                return selected.strip().lower()
+    return "sandbox-caddy"
+
+
+def _machine_domains_block() -> dict:
+    """`domains:` from sandbox.local.yml, without forcing the PyYAML bootstrap."""
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        return {}
+    block = (_local_yaml() or {}).get("domains")
+    return block if isinstance(block, dict) else {}
+
+
+def _adoption_selected(cfg: dict | None = None) -> bool:
+    """True only when the user explicitly opted out of the default provider."""
+    return clean_url_mode(cfg) not in ("sandbox-caddy", "default", "")
 
 
 def clean_url_setup(cfg: dict, *, tld=None, interactive: bool = False) -> dict:
-    """Use only the composed HTTP service for new clean-URL authority."""
-    revoked, detail = revoke_legacy_sudoers(interactive=interactive)
-    if not revoked:
-        return {"ok": False, "state": "pending_privilege", "mutated": False,
-                "mode": "application", "cfg": cfg, "safe_to_fallback": False,
-                "reason": {"code": "legacy_authority_revocation_required",
-                           "message": detail}}
-    lifecycle = clean_url_lifecycle_handoff(
-        cfg, "setup", interactive=interactive, protocols=("http",),
-    )
-    if lifecycle["ok"]:
-        refreshed = _persist_composed_clean_urls(cfg, lifecycle)
-        return {**lifecycle, "mode": "application", "cfg": refreshed}
-    return {**lifecycle, "mode": "application", "cfg": cfg,
-            "safe_to_fallback": False,
-            "reason": lifecycle.get("reason") or {
-                "code": "composed_clean_url_unavailable"}}
+    """Set up clean URLs with the selected provider.
 
-
-def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None):
-    """Legacy privileged bootstrap is retired; composed A/B owns new setup.
-
-    The old flow installed a NOPASSWD rule pointing at a user-writable checkout
-    helper.  Never recreate or invoke that authority.  An already-running
-    legacy proxy remains a rollback control, but missing DNS/alias state must be
-    reconciled by the scoped ingress and resolver services.
+    Default is the Docker/Caddy stack (`_ensure_url_proxy`). Host-incumbent
+    adoption runs only when the user selected it (specs 037 FR-031, 038 FR-030).
     """
-    if not quiet:
-        info("legacy clean-URL privilege bootstrap is disabled; using the "
-             "composed ingress/resolver service or localhost:<port> fallback")
-    return False, cfg
+    if _adoption_selected(cfg):
+        lifecycle = clean_url_lifecycle_handoff(
+            cfg, "setup", interactive=interactive, protocols=("http",),
+        )
+        if lifecycle["ok"]:
+            refreshed = _persist_composed_clean_urls(cfg, lifecycle)
+            return {**lifecycle, "mode": "application", "cfg": refreshed}
+        return {**lifecycle, "mode": "application", "cfg": cfg,
+                "safe_to_fallback": True,
+                "reason": lifecycle.get("reason") or {
+                    "code": "composed_clean_url_unavailable"}}
+    up, refreshed = _ensure_url_proxy(cfg, tld=tld, interactive=interactive)
+    if up:
+        return {"ok": True, "state": "ready", "mutated": True,
+                "mode": "sandbox-caddy", "cfg": refreshed,
+                "safe_to_fallback": True,
+                "reason": {"code": "sandbox_caddy_ready"}}
+    return {"ok": False, "state": "fallback", "mutated": False,
+            "mode": "sandbox-caddy", "cfg": refreshed,
+            "safe_to_fallback": True,
+            "reason": {"code": "sandbox_caddy_unavailable",
+                       "message": "the default Docker/Caddy clean-URL stack "
+                                  "could not be provisioned; the per-port URL "
+                                  "remains available"}}
+
+
+def _ensure_url_proxy(cfg, *, quiet: bool = False, tld=None,
+                      interactive: bool | None = None):
+    """Ensure the DEFAULT clean-URL stack is up: the scoped NOPASSWD rule for
+    the root-owned helper, the lo0 alias, dnsmasq/resolver for each configured
+    TLD, the boot LaunchDaemon, and the running Caddy container. Plain
+    `http://<name>.<tld>`, no certificates. One interactive sudo the first time
+    (helper install); password-free after that. Returns (ok, cfg).
+
+    This is the product default (specs 037 FR-007/FR-033, 038 FR-029/FR-032).
+    Do not stub it out: incumbent adoption is the opt-in alternative, and
+    disabling this path counts as removal under constitution principle VI.
+    """
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if shutil.which("docker") is None:
+        if not quiet:
+            info("Docker not found — clean URLs need it. Using localhost:<port>.")
+        return False, cfg
+
+    # 1. Root-owned helper + scoped NOPASSWD rule. One interactive sudo, once.
+    #    The rule names /usr/local/libexec/sandbox-proxy-helper only, so the
+    #    writable checkout is never a privileged target.
+    if not _proxy_sudoers_installed():
+        if not interactive:
+            if not quiet:
+                info("clean URLs need a one-time setup (a password) — run "
+                     "`./sb domains setup` in your terminal. Using localhost.")
+            return False, cfg
+        revoke_legacy_sudoers(interactive=True)
+        info("One-time setup for clean http://<name>.<tld> URLs — your password "
+             "ONCE (no certificate, no browser warning).")
+        installed = subprocess.run(["sudo", str(PROXY_HELPER), "install"],
+                                   capture_output=True, text=True)
+        if installed.returncode != 0 or not _proxy_sudoers_installed():
+            info("clean-URL helper installation failed: "
+                 f"{(installed.stderr or installed.stdout or '').strip()[:200]}")
+            return False, cfg
+        ok("clean-URL host actions are now password-free.")
+
+    # 2. lo0 alias + dnsmasq/resolver per TLD. Only sudo for what is MISSING:
+    #    alias and resolver persist, so ordinary ensure needs no prompt — that
+    #    is what lets secure-at-create work from the MCP server's subprocess.
+    ok_all = True
+    if not _lo0_alias_present():
+        ok_all = subprocess.run(
+            ["sudo", "-n", str(PROXY_HELPER_INSTALLED), "alias-up"],
+            capture_output=True, text=True).returncode == 0
+    tlds = _distinct_tlds(cfg) | ({tld} if tld else set())
+    for t in tlds:
+        if not _resolver_present(t):
+            r = subprocess.run(
+                ["sudo", "-n", str(PROXY_HELPER_INSTALLED), "dns-up", t],
+                capture_output=True, text=True)
+            ok_all = ok_all and r.returncode == 0
+    if not ok_all:
+        info(f"could not set up *.{'/'.join(sorted(tlds))} "
+             "resolution — using localhost for now.")
+        return False, cfg
+    PROXY_CERTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 3. Boot-time alias restore + start the proxy with current routes.
+    _install_alias_launchd()
+    PROXY_COMPOSE.write_text(render_proxy_compose())
+    regen_caddyfile(cfg)
+    up, detail = proxy_apply()
+    if not up:
+        if _proxy_container_running():
+            info(f"proxy is running but the config reload failed: "
+                 f"{detail or 'no output'}")
+        else:
+            availability = proxy_availability(running=False)
+            if availability["reason_code"] == "listener_conflict":
+                info(f"proxy container did not start: {availability['message']} "
+                     "The localhost:<port> URL remains available. Select an "
+                     "adopted ingress with `./sb domains use <adapter>` if the "
+                     "owner is another dev tool.")
+            else:
+                info(f"proxy startup failed"
+                     f"{': ' + detail if detail else '.'} "
+                     "The localhost:<port> URL remains available.")
+        return False, cfg
+    return True, cfg
 
 
 def proxy_setup(cfg, tld=None) -> bool:
@@ -974,24 +1100,18 @@ def proxy_setup(cfg, tld=None) -> bool:
     per proxy instance, switching them to https. Interactive (password once for the
     CA). `tld` overrides the per-project default for newly-assigned domains.
     The DEFAULT install path does NOT call this — plain http needs no cert."""
-    revoked, detail = revoke_legacy_sudoers(interactive=sys.stdin.isatty())
-    if not revoked:
-        info(detail)
-        return False
-    lifecycle = clean_url_lifecycle_handoff(
-        cfg, "setup", interactive=sys.stdin.isatty(), protocols=("https",),
-    )
-    if lifecycle["ok"]:
-        _persist_composed_clean_urls(cfg, lifecycle)
-        return True
-    info("proof-scoped HTTPS adoption is unavailable; preserved the existing "
-         "route and per-port fallback without invoking legacy helpers")
-    return False
-    if not lifecycle.get("safe_to_fallback"):
-        info("composed clean-URL rollback is incomplete; legacy proxy setup was not started")
+    if _adoption_selected(cfg):
+        lifecycle = clean_url_lifecycle_handoff(
+            cfg, "setup", interactive=sys.stdin.isatty(), protocols=("https",),
+        )
+        if lifecycle["ok"]:
+            _persist_composed_clean_urls(cfg, lifecycle)
+            return True
+        info("the selected adopted ingress could not provide HTTPS; preserved "
+             "the existing route and per-port fallback")
         return False
 
-    # 1. Ensure the base HTTP proxy infra (sudoers, alias, dnsmasq, container).
+    # 1. Ensure the base HTTP proxy infra (helper, alias, dnsmasq, container).
     up, cfg = _ensure_url_proxy(cfg, tld=tld)
     if not up:
         return False
@@ -1071,23 +1191,25 @@ def _secure_at_create(cfg: dict, name: str) -> bool:
     ic = resolve_instances(cfg).get(name, {})
     if ic.get("server") == "herd":
         return False
-    handoff = clean_url_compatibility_handoff(cfg, name, protocols=("https",))
-    hostname = handoff.get("hostname") if handoff.get("ok") else None
-    if isinstance(hostname, str) and hostname:
-        verified_url = handoff.get("url") or f"https://{hostname}"
-        local = _local_yaml()
-        block = local.setdefault("instances", {}).setdefault(name, {})
-        block.update({"domain": hostname, "tld": hostname.rsplit(".", 1)[-1],
-                      "url": verified_url})
-        _write_local_yaml(local)
-        owner = registry_find_instance(name) or {}
-        if owner.get("root"):
-            registry_put(owner["root"], label=owner.get("label", "default"),
-                         domain=hostname, url=verified_url)
-        return True
-    # No receipt-owned composed route was created.  Preserve localhost rather
-    # than entering the retired aggregate proxy/certificate mutation path.
-    return False
+    if _adoption_selected(cfg):
+        handoff = clean_url_compatibility_handoff(cfg, name, protocols=("https",))
+        hostname = handoff.get("hostname") if handoff.get("ok") else None
+        if isinstance(hostname, str) and hostname:
+            verified_url = handoff.get("url") or f"https://{hostname}"
+            local = _local_yaml()
+            block = local.setdefault("instances", {}).setdefault(name, {})
+            block.update({"domain": hostname, "tld": hostname.rsplit(".", 1)[-1],
+                          "url": verified_url})
+            _write_local_yaml(local)
+            owner = registry_find_instance(name) or {}
+            if owner.get("root"):
+                registry_put(owner["root"], label=owner.get("label", "default"),
+                             domain=hostname, url=verified_url)
+            return True
+        # The selected adopted ingress created no owned route: keep localhost
+        # rather than silently falling back to the default provider the user
+        # opted out of.
+        return False
     ca_ok = _ca_trusted_macos() if sys.platform == "darwin" else True
     if not (shutil.which("mkcert") and ca_ok):
         return False

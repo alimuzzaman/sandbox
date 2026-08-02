@@ -329,12 +329,38 @@ class TestProxyHealthChecks(unittest.TestCase):
 
 
 class TestSecureAtCreateRollback(unittest.TestCase):
-    def test_failed_composed_adoption_never_enters_legacy_mutation_path(self):
+    def test_default_provider_failure_rolls_the_domain_back_to_localhost(self):
+        """The default Docker/Caddy path runs, and a failure must undo the
+        half-applied identity instead of leaving an orphaned route."""
+        local = {"instances": {"a": {"domain": "a.tst", "tld": "tst"}}}
+
+        with mock.patch.object(domains_core, "_adoption_selected", return_value=False), \
+             mock.patch.object(domains_core, "resolve_instances",
+                               return_value={"a": {"tld": "tst"}}), \
+             mock.patch.object(domains_core.shutil, "which", return_value="/x/mkcert"), \
+             mock.patch.object(domains_core, "_ca_trusted_macos", return_value=True), \
+             mock.patch.object(domains_core, "_local_yaml", side_effect=lambda: local), \
+             mock.patch.object(domains_core, "_write_local_yaml"), \
+             mock.patch.object(domains_core, "load_config", return_value={}), \
+             mock.patch.object(domains_core, "_ensure_url_proxy",
+                               return_value=(False, {})) as proxy, \
+             mock.patch.object(domains_core, "regen_caddyfile") as regen:
+            self.assertFalse(domains_core._secure_at_create({}, "a"))
+
+        proxy.assert_called_once()
+        self.assertNotIn("domain", local["instances"]["a"])
+        self.assertNotIn("tld", local["instances"]["a"])
+        regen.assert_called_once()
+
+    def test_selected_adoption_failure_never_enters_default_mutation_path(self):
         local = {"instances": {"a": {"domain": "a.tst", "tld": "tst"}}}
         written = {}
 
-        with mock.patch.object(domains_core, "resolve_instances",
+        with mock.patch.object(domains_core, "_adoption_selected", return_value=True), \
+             mock.patch.object(domains_core, "resolve_instances",
                                return_value={"a": {"tld": "tst"}}), \
+             mock.patch.object(domains_core, "clean_url_compatibility_handoff",
+                               return_value={"ok": False, "state": "fallback"}), \
              mock.patch.object(domains_core.shutil, "which", return_value="/x/mkcert"), \
              mock.patch.object(domains_core, "_ca_trusted_macos", return_value=True), \
              mock.patch.object(domains_core, "_local_yaml", side_effect=lambda: local), \
@@ -342,10 +368,11 @@ class TestSecureAtCreateRollback(unittest.TestCase):
                                side_effect=lambda d: written.update(d)), \
              mock.patch.object(domains_core, "load_config", return_value={}), \
              mock.patch.object(domains_core, "_ensure_url_proxy",
-                               return_value=(False, {})), \
+                               return_value=(False, {})) as proxy, \
              mock.patch.object(domains_core, "regen_caddyfile") as regen:
             self.assertFalse(domains_core._secure_at_create({}, "a"))
 
+        proxy.assert_not_called()
         self.assertEqual(written, {})
         regen.assert_not_called()
 

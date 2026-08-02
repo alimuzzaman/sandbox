@@ -83,8 +83,9 @@ Valet is an existing exception, and a listener that does not overlap
   it as a known ingress product where the operating system exposes enough evidence.
 - Register and unregister Sandbox instance hostnames through a detected incumbent,
   so instances are reachable at clean URLs without Sandbox binding :80/:443.
-- Keep the existing Sandbox Caddy proxy as the behavior when no incumbent is
-  present, with no change to that path.
+- Keep the existing Sandbox Caddy proxy as the DEFAULT provider on every platform
+  and for every runtime, with no change to that path, and make incumbent adoption an
+  opt-in alternative selectable at setup and switchable on demand.
 - Make every route Sandbox adds attributable to Sandbox and individually removable,
   so adoption is fully reversible.
 - Replace the misleading port-conflict failure with an accurate report naming the
@@ -294,10 +295,12 @@ Valet is an existing exception, and a listener that does not overlap
   credential-pending, detect-only, outside-platform, and unidentified states.
   Detection is read-only and never changes machine state.
 
-- **Adoption in preference to binding.** When a recognized adoptable incumbent holds
-  the ports, Sandbox registers through it and does not start its own proxy. When the
-  ports are free, Sandbox uses its own proxy. Sandbox never binds a port it found
-  held, and never stops an incumbent to take a port.
+- **Default provider, adoption on request.** Sandbox's own Caddy proxy is the default:
+  when the required endpoints are free or already Sandbox-owned it serves the clean URL,
+  regardless of whether an adoptable incumbent is also present. When the user selects an
+  incumbent, or when a foreign listener holds an endpoint Sandbox needs, Sandbox registers
+  through the selected incumbent instead. Sandbox never binds a port it found held, and
+  never stops an incumbent to take a port.
 
 - **Uniform route lifecycle.** Whatever the incumbent, the product-visible lifecycle
   is the same: a route is added when an instance gains a clean URL, updated when the
@@ -408,8 +411,10 @@ Valet is an existing exception, and a listener that does not overlap
   the capability.
 - **Module boundaries (CLAUDE.md).** Ingress support registers through an explicit
   manifest/contract; capability checks precede side effects.
-- **Backward compatibility.** Machines with no incumbent keep Sandbox's own Caddy ingress,
-  and existing persisted hostnames remain unchanged. Spec B may choose a standards-safe
+- **Backward compatibility.** Every machine keeps Sandbox's own Caddy ingress as the
+  default — including machines that also run an adoptable incumbent — and existing
+  persisted hostnames remain unchanged. Disabling that path in place counts as removal
+  under constitution VI. Spec B may choose a standards-safe
   default for new unpinned projects. The existing Valet integration must keep working or
   be superseded by an equivalent that is verified before the old path is removed
   (constitution VI).
@@ -440,7 +445,9 @@ surface and passes the same live-stack ownership, collision, update, and cleanup
 |----------|--------|-----------|--------------|
 | Breadth of incumbent coverage | Every named ingress is classified and reported; only products with a supported, live-proven control path are called adoptable | Detect-only and outside-platform products must not be advertised as adopted, while still eliminating misleading bind failures | User scope; repository safety policy |
 | Feature split | Ingress adoption is its own feature, separate from TLD/DNS adoption and native runtimes | Port ownership and name resolution fail independently; a machine can have Apache on :80 and systemd-resolved on DNS | User |
-| Behavior with no incumbent | Sandbox's own Caddy remains the ingress; hostname selection comes from spec B | Preserves the fallback without duplicating or contradicting DNS/TLD policy | User (input); A/B boundary |
+| Default provider | Sandbox's own Caddy remains the ingress on every platform and runtime, incumbent present or not; hostname selection comes from spec B | Preserves the working default without duplicating or contradicting DNS/TLD policy | User (2026-08-02 decision); A/B boundary |
+| Adoption trigger | Explicit selection at setup or `./sb domains use <provider>` on demand, or a foreign listener holding a required endpoint | Presence of an incumbent is not consent to route through it | User (2026-08-02 decision) |
+| Proof-tier scope | Live-proof gating applies to incumbent adoption only, never to the default provider | An unproven adapter must not be able to downgrade every instance to a per-port URL | User (2026-08-02 decision) |
 | Port stealing | Never; Sandbox does not bind a port it found held, and never stops an incumbent | Taking a port would break services the user depends on | User (input) |
 | Reversibility | Every Sandbox-created route is attributable and individually removable | Adoption writes into services the user owns; it must be undoable | User (input) |
 | Failure posture | Degrade to per-port URL, never block instance creation | Matches the existing clean-URL posture, which is an opt-in upgrade over a working per-port URL | Existing policy (`sandbox/core/_domains.py:770-773`) |

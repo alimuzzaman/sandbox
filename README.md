@@ -469,10 +469,19 @@ without re-importing content:
 ./sb server <name> apache       # → back to apache
 ```
 
-### Clean URLs — scoped `.test` resolution
+### Clean URLs — Docker/Caddy by default
 
-By default instances serve at `http://localhost:<port>`. Upgrade to a trusted,
-no-port HTTPS URL with one optional setup:
+The default provider is Sandbox's own Caddy proxy plus Sandbox-owned DNS, on every
+platform and for every runtime. One optional setup upgrades every instance to a
+trusted, no-port URL:
+
+```bash
+./sb domains setup            # default provider: Caddy proxy + *.tst resolution
+./sb domains use              # show the active provider
+./sb domains use herd-valet   # opt in to a host incumbent instead (switchable anytime)
+```
+
+Host-incumbent adoption is opt-in and has its own read-only planning surface:
 
 ```bash
 ./sb domains plan --project-dir .
@@ -480,8 +489,10 @@ no-port HTTPS URL with one optional setup:
 ./sb domains cleanup --project-dir . # compare-before-remove; safe to retry
 ```
 
-If adoption is unsupported, unproven, declined, or unhealthy, the instance stays
-usable at `http://localhost:<port>`. See [domain resolution](docs/domain-resolution.md).
+Adapter proof tiers gate adoption only, never the default path. The instance stays
+usable at `http://localhost:<port>` when the selected provider is unavailable. See
+[the clean-URL default](docs/clean-url-default.md) and
+[domain resolution](docs/domain-resolution.md).
 
 ---
 
@@ -529,6 +540,9 @@ defaults:
 There is **no central project catalog** — each plugin self-describes.
 
 ### Clean URLs and host ingress
+
+Host ingress adoption is the opt-in alternative to the default Docker/Caddy provider
+(`./sb domains use <provider>`); see [the clean-URL default](docs/clean-url-default.md).
 
 `./sb domains ingress support --json` lists host products and their current proof tier;
 `detect`, `status`, and `plan` are read-only. A product being detected does not mean Sandbox

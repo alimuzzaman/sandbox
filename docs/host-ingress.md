@@ -1,5 +1,10 @@
 # Host ingress adoption
 
+Adoption is OPT-IN. The default ingress is Sandbox's own Caddy proxy on every platform
+and for every runtime; switch with `./sb domains use <provider>` and see
+[the clean-URL default](clean-url-default.md). Proof tiers below gate adoption only —
+with zero adoptable adapters the default provider still serves clean URLs.
+
 Sandbox treats listener ownership as a host-safety boundary. Detection reads kernel listener
 evidence and best-effort public process identity; it never binds a candidate socket, reloads
 an incumbent, reads a product's private state, or changes DNS.

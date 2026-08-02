@@ -1,5 +1,11 @@
 # Scoped domain resolution
 
+The DEFAULT resolution provider is Sandbox's own scoped bootstrap that serves the
+Docker/Caddy clean URLs (`./sb domains setup`); everything on this page describes the
+OPT-IN adoption of a host-owned resolver, selected with `./sb domains use <provider>`.
+Adapter proof tiers gate that adoption only — never the default path. See
+[the clean-URL default](clean-url-default.md).
+
 Sandbox treats a clean hostname as optional project identity, not as permission to
 replace machine DNS. New omitted identities use `.test`; persisted identities such as
 `.tst` remain byte-for-byte stable. New `.local` names are rejected because that suffix

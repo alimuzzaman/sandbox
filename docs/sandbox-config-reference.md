@@ -183,10 +183,15 @@ file path.
   // Scoped local hostname policy. Omission defaults new identity to .test;
   // persisted .tst identities remain unchanged. .local is rejected for new
   // names and public suffixes are verify-only (never locally shadowed).
+  // `ingress`/`strategy` omitted => the DEFAULT provider: Sandbox's own
+  // Docker/Caddy proxy + Sandbox-owned DNS. Naming an adapter opts in to host
+  // adoption; switch anytime with `./sb domains use <provider>`.
+  // See docs/clean-url-default.md.
   "domains": {
     "enabled": false,
     "tld": "test",
     "hostname": null,
+    "ingress": null,
     "strategy": null,
     "wildcard": false
   },
@@ -536,6 +541,13 @@ are dropped, not merged. `--add-drop-table` alone only drops tables present in
 the dump, so without the pre-reset those newer tables would survive.
 
 ## Host ingress and clean URLs
+
+Omitting `domains.ingress` selects the default provider, `sandbox-caddy` — Sandbox's own
+Docker/Caddy proxy plus Sandbox-owned DNS — on every platform and for every runtime.
+Naming any other adapter opts in to host adoption. `./sb domains use <provider>` writes the
+machine-local selection and `./sb domains use` reports the active one; switching never
+reprovisions and never changes the persisted hostname. `SANDBOX_CLEAN_URL_MODE` overrides
+both for one shell. See [the clean-URL default](clean-url-default.md).
 
 Host ingress is separate from the project resolver policy. The committed project pin, when
 supported by the project schema, is an intent only; a gitignored machine-local override is

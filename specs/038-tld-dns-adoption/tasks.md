@@ -151,7 +151,7 @@ consumer, and compare public/foreign namespace behavior throughout.
 
 - [X] T053 [US4] Implement safe local-zone classification, exact-first planning, and wildcard capability refusal in `sandbox/application/domain_service.py`
 - [X] T054 [US4] Implement wildcard-zone authority records with attributable shared owners in `sandbox/network/authority.py`
-- [ ] T055 [US4] Run live unseen-subdomain, shared-owner, final-owner, and public-refusal proof and capture evidence in `specs/038-tld-dns-adoption/evidence/wildcards.md`
+- [X] T055 [US4] Run live unseen-subdomain, shared-owner, final-owner, and public-refusal proof and capture evidence in `specs/038-tld-dns-adoption/evidence/wildcards.md`
 
 **Checkpoint**: Multisite receives truthful wildcard readiness without broad shadowing.
 

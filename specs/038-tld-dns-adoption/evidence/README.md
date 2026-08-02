@@ -11,7 +11,7 @@ alone never promote support.
 | Read-only quickstart baseline | `quickstart-run.md` | partial (macOS) | adoption lifecycle section |
 | Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (Ubuntu 24.04) | — |
 | Cleanup, drift, and repeated cleanup | `cleanup.md` | live (Ubuntu 24.04) | owner change (needs a second resolver manager) |
-| Wildcard and shared-owner lifecycle | `wildcards.md` | pending live run | depends on the systemd-resolved run |
+| Wildcard and shared-owner lifecycle | `wildcards.md` | live (Ubuntu 24.04) | the two-project shared-owner run |
 
 ## What the open items need
 

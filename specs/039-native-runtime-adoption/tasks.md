@@ -203,7 +203,7 @@ normal and repeated destroy; compare every path/database/image/unit/network/rout
 - [X] T073 [P] Update runtime selection, isolation guarantees/limits, package preview, capabilities, and examples in `README.md` and `docs/sandbox-config-reference.md`
 - [X] T074 [P] Document Ubuntu matrix, threat model, incident/recovery, and live evidence requirements in `docs/native-runtime-isolation.md` and `docs/cross-platform-support.md`
 - [X] T075 Audit production code for direct host execution of project/PHP argv and add a static boundary guard in `tests/test_architecture_boundaries.py`
-- [ ] T076 Run unit/contract/integration suites, verify 3-second preflight/status and 20-second warm-start bounds, and run `git diff --check`, fixing regressions in `tests/`
+- [X] T076 Run unit/contract/integration suites, verify 3-second preflight/status and 20-second warm-start bounds, and run `git diff --check`, fixing regressions in `tests/`
 - [ ] T077 Run `specs/039-native-runtime-adoption/quickstart.md` end to end on a normally booted Ubuntu 24.04 host and complete the evidence index in `specs/039-native-runtime-adoption/evidence/README.md`
 - [X] T078 Verify Compose live-stack parity with `./sb ensure`, `./sb status`, `./sb wp`, and `./sb test` from a real registered project and record it in `specs/039-native-runtime-adoption/evidence/compose-regression.md`
 

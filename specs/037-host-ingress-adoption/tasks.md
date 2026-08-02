@@ -174,7 +174,7 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 - [X] T065 [P] Document listener semantics, adapter proof requirements, transaction recovery, and platform matrix in `docs/host-ingress.md` and `docs/cross-platform-support.md`
 - [X] T066 Add static guards against ingress-state JSON consumers, unregistered adapters, and compatibility-facade imports in `tests/test_architecture_boundaries.py`
 - [X] T067 Run unit/contract/integration suites, verify 2-second detection/status, 3-second planning, and 30-second transaction bounds, and run `git diff --check`, fixing regressions in `tests/` (1770 tests OK in 30s; detect/status/plan all <=0.27s; `git diff --check` clean)
-- [ ] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md`
+- [~] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md` (baseline, bind-scope, clean-URL, repeat-safety and bounds captured in `evidence/quickstart-run.md`; the live incumbent lifecycle section needs T044)
 - [X] T069 Verify existing Sandbox Caddy/per-port live parity and the corrected conflict diagnosis in `specs/037-host-ingress-adoption/evidence/compatibility.md`
 
 ---

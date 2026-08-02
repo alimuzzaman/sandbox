@@ -7,6 +7,7 @@ commands and do not make an adapter adoptable by themselves.
 |---|---|---|---|
 | `pre-live-gate.md` | Ubuntu 24.04 | complete | managed runtime remains blocked |
 | `capability-parity.md` | macOS + contract suite | complete | none |
+| `bounds-and-suites.md` | macOS Compose | complete | none (T076 suites + timing bounds) |
 | `compose-regression.md` | macOS Compose | complete | preserves existing Compose adoption |
 | `incumbents.md` | macOS Herd/POSIX; Valet absent | complete for available hosts | incumbents remain unadoptable |
 | `ubuntu-nginx.md` | Ubuntu 24.04 | pending | required for managed promotion |

@@ -128,7 +128,7 @@ then run read-only status and repeated destroy/cleanup while comparing all forei
 - [X] T047 [US3] Persist DNS cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [X] T048 [US3] Implement `domains detect|plan|apply|status|cleanup|reconsider` JSON/text contracts in `sandbox/commands/domains.py`
 - [X] T049 [US3] Implement import-safe MCP domain status/plan/apply/cleanup tools and setup-result delegation in `mcp/wp-server/tools/domains.py` and `mcp/wp-server/tools/instances.py`
-- [ ] T050 [US3] Run live owner-change, drift, unreachable, normal, and repeated cleanup scenarios and capture evidence in `specs/038-tld-dns-adoption/evidence/cleanup.md`
+- [~] T050 [US3] Run live owner-change, drift, unreachable, normal, and repeated cleanup scenarios and capture evidence in `specs/038-tld-dns-adoption/evidence/cleanup.md` (repeated cleanup and foreign preservation captured; owner-change, drift, unreachable and owned-binding cases need T034)
 
 **Checkpoint**: Destroy never claims success after unreachable or drifted DNS cleanup.
 
@@ -165,7 +165,7 @@ consumer, and compare public/foreign namespace behavior throughout.
 - [X] T057 [P] Document resolver threat boundaries, support/proof tiers, platform recovery, and `.tst` compatibility in `docs/domain-resolution.md` and `docs/cross-platform-support.md`
 - [X] T058 Add static guards against resolver-state JSON consumers and unregistered host mutations in `tests/test_architecture_boundaries.py`
 - [X] T059 Run unit/contract/integration suites, verify 2-second read-only and 30-second mutation bounds, and run `git diff --check`, fixing regressions in `tests/` (1770 tests OK; read-only domain commands 0.21-0.25s; `git diff --check` clean)
-- [ ] T060 Run `specs/038-tld-dns-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/038-tld-dns-adoption/evidence/README.md`
+- [~] T060 Run `specs/038-tld-dns-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/038-tld-dns-adoption/evidence/README.md` (safety baseline, repeat safety and bounds captured in `evidence/quickstart-run.md`; the systemd-resolved path and collision fixtures need T034)
 - [X] T061 Verify existing persisted `.tst` and Compose per-port live parity and capture it in `specs/038-tld-dns-adoption/evidence/compatibility.md`
 
 ---

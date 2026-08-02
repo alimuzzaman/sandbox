@@ -72,3 +72,13 @@ class TestHelperSyntax(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMalformedNeighbourReceipts(unittest.TestCase):
+    """One unparseable receipt must not make removal impossible."""
+
+    def test_scan_skips_instead_of_failing(self):
+        body = HELPER.read_text()
+        scan = body.split("other_applied_exists()", 1)[1].split("\n)", 1)[0]
+        self.assertIn("|| continue", scan)
+        self.assertNotIn("valid_digest \"$candidate_owner\"", scan)

@@ -310,7 +310,11 @@ other_applied_exists() (
         remainder=${base#"$candidate_uid-$adapter-$suffix-"}
         candidate_owner=${remainder%.receipt}
         case "$candidate_uid" in ''|*[!0-9]*) continue ;; esac
-        valid_digest "$candidate_owner"
+        # SKIP an unparseable neighbour rather than failing the verb. A single
+        # malformed or legacy receipt used to abort removal entirely, which left
+        # the owned fragment and the authority running with no way to clean up.
+        # An unreadable name cannot match this payload, so skipping is safe.
+        printf '%s\n' "$candidate_owner" | grep -Eq '^[a-f0-9]{64}$' || continue
         payload=$(applied_payload "$candidate_uid" "$adapter" "$candidate_owner" "$suffix" "$address" "$port" "$expected")
         if receipt_matches "$candidate" "$payload"; then return 0; fi
     done

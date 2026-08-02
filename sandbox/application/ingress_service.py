@@ -473,17 +473,16 @@ class IngressService:
                 })
                 residual.append(route.route_id); continue
             # Compare the product/endpoint identity, not the process identity:
-            # activating a route reloads the incumbent, which changes its pid.
+            # activating a route reloads the incumbent, which changes its pid,
+            # so a full-fingerprint comparison declared the product replaced and
+            # orphaned the route this apply had just created. Records written
+            # before that fix carry only the volatile fingerprint; treat those
+            # as unverifiable rather than as proof of replacement.
             expected_ownership = dict(route.desired).get("_incumbent_ownership")
-            expected_fingerprint = dict(route.desired).get("_incumbent_fingerprint")
-            if expected_ownership or expected_fingerprint:
+            if expected_ownership:
                 current = next((item for item in self.detector.observe()
                                 if item.adapter_id == route.adapter_id), None)
-                if current is None or (
-                    current.ownership_fingerprint != expected_ownership
-                    if expected_ownership else
-                    current.fingerprint != expected_fingerprint
-                ):
+                if current is None or current.ownership_fingerprint != expected_ownership:
                     self.repository.put_recovery(route.route_id, {
                         "route_id": route.route_id, "adapter_id": route.adapter_id,
                         "expected_digest": digest(route.last_applied or {}),

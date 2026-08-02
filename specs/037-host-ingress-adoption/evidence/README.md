@@ -11,8 +11,8 @@ remains open.
 | `listeners.md` | live (macOS) | T026: free/exact/wildcard/Sandbox-owned/foreign classification, non-mutation | Linux `/proc`+`ss` observer; IPv6 dual-stack |
 | `support-and-consent.md` | live (macOS) | T063: tiers, pin precedence, non-interactive consent, credential-pending, detect-only | accepted consent + remembered decline (needs an adoptable adapter) |
 | `compatibility.md` | live (macOS) | T069: Sandbox Caddy + per-port parity, corrected conflict diagnosis | Linux parity |
-| `quickstart-run.md` | partial (macOS) | T068: read-only baseline, clean-URL serve, repeat-safety | the live incumbent lifecycle section |
-| `cleanup.md` | partial (macOS) | T052: repeated cleanup, foreign preservation | owned-route, drift, unavailable-incumbent cleanup |
+| `quickstart-run.md` | live (macOS + Ubuntu) | T068: read-only baseline, clean-URL serve, repeat-safety; lifecycle in `system-caddy.md` | the live transaction-failure matrix |
+| `cleanup.md` | live (Ubuntu + macOS) | T052: normal, repeated, drift, incumbent-unavailable cleanup with foreign routes healthy | incumbent replaced by another product |
 | `system-caddy.md` | live (Ubuntu 24.04) | T044: add/request/update/remove through a real incumbent, incumbent routes preserved | HTTPS/wildcard; the live transaction-failure matrix |
 
 ## What each open item needs
@@ -20,12 +20,12 @@ remains open.
 - **T044** is captured on Ubuntu 24.04: adoption serves HTTP 200 through the incumbent,
   repeats safely, and cleans up completely with the incumbent's 16 pre-existing routes
   untouched. It took twelve fixes, all found only by running against a real host.
-- **T052 (remainder)** and the consent half of **T063** now have a working adapter to
-  exercise; they still need their own fixture runs (external drift, incumbent stopped).
-- **T068 (remainder)** — the quickstart's live incumbent lifecycle section, which depends
-  on T044.
-- **T075 (remainder)** — a Linux run of `default-provider.md`, plus a
-  `./sb domains use <adapter>` round trip, which again depends on T044.
+- **T052** is captured: drift preserved with a retryable record, incumbent-down reported
+  incomplete, normal cleanup complete and repeatable, foreign routes healthy throughout.
+- **T063 (consent half)** — an accepted interactive consent record and a remembered
+  decline followed by `reconsider`, now possible with a proven adapter.
+- **T075 (remainder)** — a Linux run of `default-provider.md` plus a
+  `./sb domains use <adapter>` round trip in both directions.
 
 ## Rules for adding evidence here
 

@@ -131,7 +131,7 @@ while byte-comparing foreign fragments and incumbent health.
 - [X] T049 [US3] Persist non-secret incomplete cleanup records and retry transitions in `sandbox/ingress/repository.py`
 - [X] T050 [US3] Persist ingress cleanup outcome before registry/local identity deletion and expose independent retry in `sandbox/commands/instances_cmd.py`
 - [X] T051 [US3] Implement `domains ingress cleanup|reconcile` JSON/text contracts in `sandbox/commands/domains.py`
-- [~] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md` (repeated/foreign-preservation captured; owned-route, drift, and unavailable-incumbent cases need an adoptable adapter)
+- [X] T052 [US3] Run live normal/repeated/drift/unavailable cleanup and capture foreign-route health evidence in `specs/037-host-ingress-adoption/evidence/cleanup.md`
 
 **Checkpoint**: Destroy and uninstall are conservative and retryable.
 
@@ -174,7 +174,7 @@ TTY or credentials, and conflict project/machine pins across every declared prod
 - [X] T065 [P] Document listener semantics, adapter proof requirements, transaction recovery, and platform matrix in `docs/host-ingress.md` and `docs/cross-platform-support.md`
 - [X] T066 Add static guards against ingress-state JSON consumers, unregistered adapters, and compatibility-facade imports in `tests/test_architecture_boundaries.py`
 - [X] T067 Run unit/contract/integration suites, verify 2-second detection/status, 3-second planning, and 30-second transaction bounds, and run `git diff --check`, fixing regressions in `tests/` (1770 tests OK in 30s; detect/status/plan all <=0.27s; `git diff --check` clean)
-- [~] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md` (baseline, bind-scope, clean-URL, repeat-safety and bounds captured in `evidence/quickstart-run.md`; the live incumbent lifecycle section needs T044)
+- [X] T068 Run `specs/037-host-ingress-adoption/quickstart.md` end to end through `./sb` and complete the evidence index in `specs/037-host-ingress-adoption/evidence/README.md` (baseline/bind-scope/clean-URL in `evidence/quickstart-run.md`; live incumbent lifecycle in `evidence/system-caddy.md`; transaction-failure matrix recorded as uncovered)
 - [X] T069 Verify existing Sandbox Caddy/per-port live parity and the corrected conflict diagnosis in `specs/037-host-ingress-adoption/evidence/compatibility.md`
 
 ---

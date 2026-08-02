@@ -1,56 +1,83 @@
-# Cleanup and recovery (macOS, partial)
+# Cleanup and recovery (Ubuntu 24.04 + macOS)
 
 **Scope**: T052 — normal / repeated / drift / unavailable cleanup with foreign-route
-health. Captured on darwin. Two of the four scenarios are provable today; the two that
-need an actually-owned adopted route are not, because no ingress adapter is adoptable on
-any platform yet.
+health. The owned-route cases ran live against system Caddy on Ubuntu; the
+nothing-owned cases were captured on macOS.
 
-**Host**: macOS 15 (Darwin 25.6.0). 2026-08-02.
+**Host**: Ubuntu 24.04.4 LTS, Caddy 2 under systemd with 16 pre-existing fragments.
+Harness: `python3 tests/live_ingress_recovery.py --project-dir ~/git/templately
+--label tmp-logo --evidence-id 037-t052-ubuntu-2404`. 2026-08-02.
 
-## Repeated cleanup with nothing owned
-
-```text
-domains ingress cleanup --json   (run 1)
-  {"ok": true, "state": "ready", "mutated": false,
-   "reason": {"code": "already_absent"}, "cleanup": {"complete": true, "residual": []}}
-
-domains ingress cleanup --json   (run 2)
-  identical result
-```
-
-Repeating the operation produces the same final state and reports no mutation (FR-015,
-SC-006).
-
-## Reconcile with nothing owned
+## External drift is preserved, not removed
 
 ```text
-domains ingress reconcile --json
-  {"ok": true, "state": "ready", "reason": {"code": "already_absent"},
-   "recovery": {"residual": []}, "mutated": false}
+apply                    ok=True  ready
+fragment edited outside Sandbox:  "# edited outside sandbox" appended
+
+cleanup_with_drift       ok=False cleanup_incomplete  residual=[<route>]
+fragment_preserved       "# edited outside sandbox"      (byte-for-byte intact)
+recovery_records         [{"reason_code": "route_drifted", "status": "drifted"}]
 ```
 
-## Foreign state preserved
+Sandbox refused to remove a route it could no longer prove it owned, left the file exactly
+as the operator edited it, and retained a non-secret retryable record (FR-014, FR-028).
 
-The default provider was serving throughout. After the cleanup and reconcile sequence:
+## Incumbent unavailable during cleanup
 
 ```text
-https://templately-staging.tst/   200
-dscacheutil templately-staging.tst -> 127.0.0.77
+systemctl stop caddy
+incumbent_state_during        inactive
+cleanup_with_incumbent_down   ok=False cleanup_incomplete residual=[<route>]
+systemctl start caddy
+incumbent_state_restored      active
+baseline_after_restart        200
 ```
 
-No foreign listener, route, or resolver entry changed, and the default provider's own
-routes were not treated as cleanup targets (FR-027: only attributable owned routes are
-removed).
+Cleanup reported incomplete rather than claiming success, and nothing was left in a
+half-removed state (FR-028).
 
-## Not covered — needs an adoptable adapter
+## Normal and repeated cleanup
 
-- **Normal cleanup of an owned route**: add a route through a proven incumbent, remove it,
-  and show the incumbent's pre-existing routes still healthy.
-- **Drift**: edit an owned route externally, then show ensure/destroy leaves it untouched
-  and reports drift with a retained recovery record.
-- **Unavailable incumbent**: stop the incumbent mid-cleanup and show incomplete cleanup
-  plus a non-secret retry record.
+```text
+cleanup_normal    ok=True  ready  cleanup_complete
+fragment_gone     True
+domain_cleanup    cleanup_complete
+baseline_after    200
+```
 
-Unit coverage for all three exists (`tests/test_ingress_cleanup.py`,
-`tests/test_ingress_recovery.py`); this file records that the LIVE half is still open, and
-T052 stays unchecked until it is captured.
+From the T044 run, repeating cleanup is safe:
+
+```text
+ingress_cleanup_first   ok=True  cleanup_complete   mutated=True
+ingress_cleanup_second  ok=True  already_absent     mutated=False
+```
+
+And with nothing owned at all (macOS):
+
+```text
+domains ingress cleanup   x2  -> ok already_absent mutated=false, identical both runs
+domains ingress reconcile     -> ok already_absent residual=[]
+```
+
+## Foreign routes stay healthy
+
+The incumbent's pre-existing baseline route answered `200` before adoption, while the owned
+route was live, during the drift refusal, after the incumbent restart, and after final
+cleanup. `caddy validate` reported `Valid configuration` throughout, and the fragment count
+returned to its original 16.
+
+## Defect this run found and fixed
+
+Adopting a route makes Caddy open a second socket on the same address and port for the new
+site's server. The incumbent ownership digest listed endpoints, so that duplicate read as a
+different product and cleanup declared the incumbent replaced — orphaning the route the
+apply had just created, with `incumbent_replaced` recorded instead of `route_drifted`. The
+digest now covers the endpoint SET; a genuinely new address or port still counts as a
+replacement.
+
+## Not covered
+
+- An incumbent that is replaced by a DIFFERENT product between apply and cleanup (unit
+  coverage only: `tests/test_ingress_cleanup.py`).
+- Cleanup during a failed reload, where the fragment is removed but the service refuses to
+  reload.

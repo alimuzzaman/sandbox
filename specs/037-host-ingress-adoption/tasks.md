@@ -103,7 +103,7 @@ with foreign route health baselines and inject validation, reload, and health fa
 - [X] T040 [US2] Implement enabled Traefik file-provider adapter with owned dynamic fragment lifecycle in `sandbox/ingress/adapters/traefik.py`
 - [X] T041 [US2] Implement foreign route collision checks, transaction orchestration, baseline probes, and route verification in `sandbox/application/ingress_service.py` and `sandbox/ingress/verification.py`
 - [X] T042 [US2] Implement C-backend → A-capabilities → B-resolution → A-activation sequencing in `sandbox/application/clean_url_service.py`
-- [ ] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py`
+- [X] T043 [US2] Delegate legacy clean-URL and proxy entry points through the composed service while preserving rollback paths in `sandbox/core/_domains.py` (provider selection moved to `sandbox/application/clean_url_provider.py`; setup/up/down/teardown/secure-at-create all branch on that one seam)
 - [ ] T044 [US2] Run live system Caddy add/request/update/request/remove, foreign-route, and rollback conformance and capture evidence in `specs/037-host-ingress-adoption/evidence/system-caddy.md`
 
 **Checkpoint**: The current host's proven Caddy can serve a clean URL without a Sandbox
@@ -238,7 +238,7 @@ path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
       request through `http(s)://<name>.<tld>`, then `./sb domains use <incumbent>` and
       back, capturing evidence in `specs/037-host-ingress-adoption/evidence/default-provider.md`
       (macOS proven 2026-08-02; Linux and the incumbent round trip still open)
-- [ ] T076 Detect the published-but-not-listening ingress state in `./sb doctor` and name
+- [X] T076 Detect the published-but-not-listening ingress state in `./sb doctor` and name
       the owning process, per FR-034 (found live: OrbStack widened a `127.0.0.77:80`
       publish to a wildcard bind that Herd's nginx blocked)
 

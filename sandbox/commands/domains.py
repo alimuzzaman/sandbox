@@ -6,6 +6,10 @@ import json
 import sys
 from pathlib import Path
 
+# The default clean-URL provider is owned by the composed application seam
+# (specs 037 FR-007/FR-031, 038 FR-029/FR-030); imported so the CLI and the core
+# facade cannot drift apart on what "default" means.
+from sandbox.application.clean_url_provider import DEFAULT_PROVIDER
 from sandbox.network.manifest import BUILTIN_RESOLVER_ADAPTERS
 from sandbox.registry import CommandSpec, register_specs
 
@@ -16,10 +20,6 @@ DOMAIN_ACTIONS = (
     "detect", "support", "plan", "apply", "status", "cleanup", "reconsider", "ingress",
     "use",
 )
-# The default clean-URL provider: Sandbox's own Docker/Caddy proxy plus
-# Sandbox-owned DNS (specs 037 FR-007/FR-031, 038 FR-029/FR-030). Every other
-# value opts in to host-incumbent adoption.
-DEFAULT_PROVIDER = "sandbox-caddy"
 INGRESS_ACTIONS = frozenset({
     "detect", "support", "status", "plan", "apply", "cleanup", "reconcile", "reconsider",
 })

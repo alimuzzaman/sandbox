@@ -63,6 +63,52 @@ class TestDefaultProviderWiring(unittest.TestCase):
         self.assertEqual(domains_cmd.DEFAULT_PROVIDER, "sandbox-caddy")
 
 
+class TestPublishedListenerCheck(unittest.TestCase):
+    """037 T076 / FR-034: a published-but-not-listening endpoint must be named,
+    not left to surface as a bare connection refusal."""
+
+    def test_healthy_endpoints_report_ok(self):
+        from sandbox.core import _domains
+
+        check = _domains._published_listener_check(connector=lambda *_: True)
+        self.assertTrue(check["ok"])
+        self.assertIn(_domains.PROXY_BIND_IP, check["label"])
+
+    def test_dead_endpoint_names_the_owner_and_the_recovery(self):
+        from sandbox.core import _domains
+
+        check = _domains._published_listener_check(
+            connector=lambda *_: False,
+            listeners={80: "nginx (127.0.0.1:80)", 443: "nginx (127.0.0.1:443)"},
+        )
+        self.assertFalse(check["ok"])
+        self.assertIn("nginx", check["label"])
+        self.assertIn("domains use", check["hint"])
+
+    def test_unidentifiable_owner_still_reports_the_failure(self):
+        from sandbox.core import _domains
+
+        check = _domains._published_listener_check(
+            connector=lambda *_: False, listeners={},
+        )
+        self.assertFalse(check["ok"])
+        self.assertIn("no other listener identified", check["label"])
+
+    def test_check_is_wired_into_doctor_when_the_proxy_runs(self):
+        from unittest import mock
+
+        from sandbox.core import _domains
+
+        sentinel = {"label": "sentinel", "ok": False, "hint": ""}
+        with mock.patch.object(_domains, "_proxy_container_running", return_value=True), \
+             mock.patch.object(_domains, "_caddyfile_readable_in_container", return_value=True), \
+             mock.patch.object(_domains, "resolve_instances", return_value={}), \
+             mock.patch.object(_domains, "_published_listener_check", return_value=sentinel):
+            checks = _domains.proxy_health_checks({})
+
+        self.assertIn(sentinel, checks)
+
+
 class TestPolicyStaysDocumented(unittest.TestCase):
     """Spec, docs, and code must move together (constitution principle V)."""
 

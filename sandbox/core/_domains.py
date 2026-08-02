@@ -337,7 +337,68 @@ def proxy_health_checks(cfg: dict) -> list[dict]:
             "ok": in_sync == total,
             "hint": "./sb domains setup   (regenerates + reloads the routes)",
         })
+    if running:
+        checks.append(_published_listener_check())
     return checks
+
+
+def _published_listener_check(*, connector=None, listeners=None) -> dict:
+    """Assert the proxy's published endpoints actually accept connections.
+
+    Docker reporting `127.0.0.77:80->80/tcp` is not proof that anything listens:
+    a container runtime can widen a published loopback-alias bind to a wildcard
+    one, which then loses to whatever already owns that port (observed live:
+    OrbStack with `docker.expose_ports_to_lan` versus Herd's nginx on
+    `127.0.0.1:80`). The clean URL then fails with a bare connection refusal
+    while every other view looks healthy. Name the owner instead (037 FR-034).
+    """
+    import socket
+
+    def _connect(address: str, port: int) -> bool:
+        try:
+            with socket.create_connection((address, port), timeout=1.5):
+                return True
+        except OSError:
+            return False
+
+    probe = connector or _connect
+    dead = [port for port in (80, 443) if not probe(PROXY_BIND_IP, port)]
+    if not dead:
+        return {"label": f"proxy endpoints accepting on {PROXY_BIND_IP}:80,443",
+                "ok": True, "hint": ""}
+    owners = _port_owners(dead) if listeners is None else listeners
+    detail = "; ".join(f"{port} held by {owner}" for port, owner in sorted(owners.items())) \
+        or "no other listener identified"
+    return {
+        "label": (f"proxy published on {PROXY_BIND_IP}:{','.join(map(str, dead))} "
+                  f"but nothing accepts there ({detail})"),
+        "ok": False,
+        "hint": ("free the port (stop the owning service), or select an adopted "
+                 "ingress with `./sb domains use <provider>`; per-port URLs keep "
+                 "working meanwhile"),
+    }
+
+
+def _port_owners(ports: list[int]) -> dict:
+    """Best-effort {port: 'process (address)'} for host listeners on `ports`."""
+    owners: dict[int, str] = {}
+    try:
+        res = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return owners
+    for line in (res.stdout or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 9:
+            continue
+        endpoint = fields[8]
+        _, _, port_text = endpoint.rpartition(":")
+        if not port_text.isdigit():
+            continue
+        port = int(port_text)
+        if port in ports and port not in owners:
+            owners[port] = f"{fields[0]} ({endpoint})"
+    return owners
 
 
 def _cert_paths(domain: str) -> tuple[Path, Path]:
@@ -941,25 +1002,22 @@ def _proxy_sudoers_installed() -> bool:
     return res.returncode == 0 and (res.stdout or "").strip() == "ready"
 
 
-def clean_url_mode(cfg: dict | None = None) -> str:
-    """Which clean-URL provider this machine/project uses.
+def clean_url_selection(cfg: dict | None = None):
+    """Effective clean-URL provider, delegated to the composed application seam.
 
-    `sandbox-caddy` (the DEFAULT) is the Docker/Caddy proxy plus Sandbox-owned
-    DNS — the stack that has always served `http(s)://<name>.<tld>`. Any other
-    value opts in to host-incumbent adoption through the composed ingress and
-    resolver services (specs 037/038). Precedence: env override, machine-local
-    `domains.ingress`, project `domains.ingress`, default.
+    This facade only gathers the configuration layers; the decision itself lives
+    in `sandbox.application.clean_url_provider` (037 T043, 038 T033). Keeping the
+    facade means the default provider stays a working rollback control.
     """
-    env = (os.environ.get("SANDBOX_CLEAN_URL_MODE") or "").strip().lower()
-    if env:
-        return env
-    for source in (_machine_domains_block(), cfg or {}):
-        block = source.get("domains") if "domains" in source else source
-        if isinstance(block, dict):
-            selected = block.get("ingress") or block.get("strategy")
-            if isinstance(selected, str) and selected.strip():
-                return selected.strip().lower()
-    return "sandbox-caddy"
+    from sandbox.application.clean_url_provider import resolve_provider
+
+    return resolve_provider(env=os.environ, machine=_machine_domains_block(),
+                            project=cfg or {})
+
+
+def clean_url_mode(cfg: dict | None = None) -> str:
+    """The effective provider id — `sandbox-caddy` unless adoption was selected."""
+    return clean_url_selection(cfg).provider
 
 
 def _machine_domains_block() -> dict:
@@ -974,7 +1032,7 @@ def _machine_domains_block() -> dict:
 
 def _adoption_selected(cfg: dict | None = None) -> bool:
     """True only when the user explicitly opted out of the default provider."""
-    return clean_url_mode(cfg) not in ("sandbox-caddy", "default", "")
+    return clean_url_selection(cfg).adoption
 
 
 def clean_url_setup(cfg: dict, *, tld=None, interactive: bool = False) -> dict:
@@ -1411,17 +1469,47 @@ def proxy_down(cfg: dict) -> bool:
 
 
 def proxy_teardown(cfg) -> bool:
-    """Reverse proxy_setup: stop the proxy, untrust the CA, remove dnsmasq/
-    resolver + the lo0 alias + the LaunchDaemon + the sudoers rule. Each step is
-    best-effort so a partial state still cleans up."""
-    lifecycle = clean_url_lifecycle_handoff(cfg, "teardown")
-    if not lifecycle["ok"] and not lifecycle.get("safe_to_fallback"):
-        info("composed clean-URL cleanup is incomplete; legacy DNS teardown was not attempted")
-        return False
-    revoked, detail = revoke_legacy_sudoers(interactive=sys.stdin.isatty())
-    if not revoked:
-        info(detail)
-        return False
-    ok("receipt-owned clean URLs removed; unreceipted legacy routes and certs "
-       "were preserved for manual recovery")
+    """Reverse the selected provider's setup.
+
+    Adoption mode removes receipt-owned composed state only. Default mode stops
+    the proxy, removes the resolver/dnsmasq entries and the loopback alias
+    through the installed helper, untrusts the CA, and drops the boot item and
+    the scoped sudoers rule. Every step is best-effort so a partial state still
+    cleans up, and certificates are left on disk for manual recovery.
+    """
+    if _adoption_selected(cfg):
+        lifecycle = clean_url_lifecycle_handoff(cfg, "teardown")
+        if not lifecycle["ok"] and not lifecycle.get("safe_to_fallback"):
+            info("adopted clean-URL cleanup is incomplete; nothing else was removed")
+            return False
+        revoke_legacy_sudoers(interactive=sys.stdin.isatty())
+        ok("receipt-owned clean URLs removed; unreceipted routes and certs "
+           "were preserved for manual recovery")
+        return True
+
+    subprocess.run(["docker", "compose", "-p", PROXY_PROJECT, "-f",
+                    str(PROXY_COMPOSE), "--project-directory", str(ROOT),
+                    "down"], capture_output=True, text=True)
+    if _proxy_sudoers_installed():
+        for tld in _distinct_tlds(cfg):
+            subprocess.run(["sudo", "-n", str(PROXY_HELPER_INSTALLED),
+                            "dns-down", tld], capture_output=True, text=True)
+        subprocess.run(["sudo", "-n", str(PROXY_HELPER_INSTALLED), "alias-down"],
+                       capture_output=True, text=True)
+    if shutil.which("mkcert"):
+        subprocess.run(["mkcert", "-uninstall"], capture_output=True, text=True)
+    _UNINSTALL_REASON = (
+        "Sandbox is cleaning up its clean-URL setup — removing the startup item "
+        "and the local DNS rule it added. Your Mac password confirms this final "
+        "step.")
+    if sys.platform == "darwin":
+        # launchctl does not exist on Linux, and the boot item is only ever
+        # installed on macOS (see _install_alias_launchd).
+        _sudo(["launchctl", "unload", "-w", str(LAUNCHD_PLIST)],
+              reason=_UNINSTALL_REASON, capture_output=True, text=True)
+    _sudo(["rm", "-f", str(LAUNCHD_PLIST), str(PROXY_SUDOERS),
+           str(proxy_sudoers_scoped()), str(PROXY_HELPER_INSTALLED)],
+          reason=_UNINSTALL_REASON, capture_output=True, text=True)
+    ok("clean-URL provider torn down (certs left in runtime/proxy/certs — "
+       "delete manually if desired).")
     return True

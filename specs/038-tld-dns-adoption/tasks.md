@@ -74,7 +74,7 @@ unrelated answers before/after, resolve the instance name freshly, and request i
 - [X] T030 [US1] Implement Herd/Valet scoped integration plus detect-only external-manager results in `sandbox/network/adapters/incumbent.py` and `sandbox/network/adapters/external.py`
 - [X] T031 [US1] Implement fresh uncached DNS verification followed by ingress HTTP verification in `sandbox/network/verification.py`
 - [X] T032 [US1] Implement plan/apply/status sequencing, TTY-only consent, rollback, and per-port fallback in `sandbox/application/domain_service.py`
-- [ ] T033 [US1] Delegate legacy domain entry points to the application service while retaining rollback compatibility in `sandbox/core/_domains.py`
+- [X] T033 [US1] Delegate legacy domain entry points to the application service while retaining rollback compatibility in `sandbox/core/_domains.py` (strategy selection resolved by `sandbox/application/clean_url_provider.py`; the default bootstrap stays as the rollback control)
 - [ ] T034 [US1] Run live systemd-resolved exact-name adoption and capture ownership, unrelated-answer, fresh-lookup, HTTP, rollback, and cleanup evidence in `specs/038-tld-dns-adoption/evidence/systemd-resolved.md`
 
 **Checkpoint**: Exact local names work on live-proven managers; unsupported paths remain

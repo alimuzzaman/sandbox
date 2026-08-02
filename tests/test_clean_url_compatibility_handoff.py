@@ -248,19 +248,22 @@ class TestCleanUrlCompatibilityHandoff(unittest.TestCase):
 
         self.assertEqual(events, ["application"])
 
-    def test_teardown_refuses_legacy_dns_removal_after_incomplete_cleanup(self):
+    def test_selected_adoption_teardown_refuses_after_incomplete_cleanup(self):
         from sandbox.core import _domains
 
         lifecycle = {"ok": False, "state": "cleanup_incomplete", "mutated": False,
                      "safe_to_fallback": False,
                      "reason": {"code": "cleanup_incomplete"}}
-        with mock.patch.object(_domains, "clean_url_lifecycle_handoff",
+        with mock.patch.object(_domains, "_adoption_selected", return_value=True), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff",
                                return_value=lifecycle), \
-             mock.patch.object(_domains.subprocess, "run") as legacy, \
+             mock.patch.object(_domains.subprocess, "run") as host, \
+             mock.patch.object(_domains, "_sudo") as privileged, \
              mock.patch.object(_domains, "info"):
             self.assertFalse(_domains.proxy_teardown({}))
 
-        legacy.assert_not_called()
+        host.assert_not_called()
+        privileged.assert_not_called()
 
 
 class TestDefaultCleanUrlProvider(unittest.TestCase):
@@ -343,6 +346,28 @@ class TestDefaultCleanUrlProvider(unittest.TestCase):
 
         handoff.assert_not_called()
         self.assertIn("stop", run.call_args[0][0])
+
+    def test_default_teardown_removes_the_provider_and_its_host_state(self):
+        from sandbox.core import _domains
+
+        calls = []
+        with mock.patch.object(_domains, "_adoption_selected", return_value=False), \
+             mock.patch.object(_domains, "clean_url_lifecycle_handoff") as handoff, \
+             mock.patch.object(_domains, "_proxy_sudoers_installed", return_value=True), \
+             mock.patch.object(_domains, "_distinct_tlds", return_value={"tst"}), \
+             mock.patch.object(_domains.shutil, "which", return_value=None), \
+             mock.patch.object(
+                 _domains.subprocess, "run",
+                 side_effect=lambda cmd, **_kw: calls.append(cmd) or mock.Mock(returncode=0)), \
+             mock.patch.object(_domains, "_sudo") as privileged, \
+             mock.patch.object(_domains, "ok"):
+            self.assertTrue(_domains.proxy_teardown({}))
+
+        handoff.assert_not_called()
+        self.assertTrue(any("down" in cmd for cmd in calls))
+        self.assertTrue(any("dns-down" in cmd for cmd in calls))
+        self.assertTrue(any("alias-down" in cmd for cmd in calls))
+        privileged.assert_called()
 
     def test_mode_defaults_to_sandbox_caddy_and_switches_on_demand(self):
         from sandbox.core import _domains

@@ -183,8 +183,12 @@ requested = (str(ipaddress.ip_address(requested_address)), int(requested_port))
 if requested not in set(found.values()):
     print("ingress-helper: authorized listen endpoint is not the selected Caddy socket", file=sys.stderr)
     raise SystemExit(1)
-if any(not ipaddress.ip_address(address).is_loopback or port != 80 for address, port in found.values()):
-    print("ingress-helper: selected Caddy socket is not exact loopback HTTP", file=sys.stderr)
+# The incumbent may listen on a wildcard; the rendered fragment restricts
+# such a site to loopback clients. A routable-only socket is still refused.
+if any(not (ipaddress.ip_address(address).is_loopback
+            or ipaddress.ip_address(address).is_unspecified) or port != 80
+       for address, port in found.values()):
+    print("ingress-helper: selected Caddy socket is not loopback or wildcard HTTP", file=sys.stderr)
     raise SystemExit(1)
 PY
 }

@@ -24,86 +24,43 @@ isolation verification     not reached
 hostile probe suite        not reached
 ```
 
-**The open blocker (2026-08-03)**: bwrap sets `no_new_privs` before exec'ing the
-payload, and the kernel refuses an AppArmor domain transition under NNP:
+**The open blocker (2026-08-03)**: the payload cannot enter its own profile.
+Every transition form was tried on the live host and the kernel refused each one,
+for a different reason:
 
 ```text
-apparmor="DENIED" operation="exec" info="no new privs" error=-1
-  profile="sandbox-native-<id>//bwrap" name="/bin/true" comm="bwrap"
+/** cx -> payload                 apparmor="DENIED" info="profile transition not found"
+                                  `cx` names a child of the CURRENT profile, so the
+                                  kernel looked for `bwrap//payload`
+
+/** px -> <full>//payload         apparmor="DENIED" info="no new privs"
+                                  bwrap sets no_new_privs before exec, and the kernel
+                                  refuses an AppArmor domain transition under NNP
+
+/** px -> <full>//&payload        apparmor="DENIED" info="profile transition not found"
 ```
 
-This is the same conflict already resolved once at the machine level (FR-043), now
-recurring one level down at the payload boundary. The NNP-safe form is a STACKED
-transition (`px -> <profile>//&payload`), whose effective confinement is the
-intersection of both profiles and therefore no weaker than the payload profile alone.
-A stacked rule loads and produces no denial, but the run that would confirm the
-payload's effective profile has not produced a trustworthy reading yet, so the choice
-is recorded rather than declared proven. Deciding it belongs with FR-001/FR-044 and
-the "Managed Isolation Policy" entry in `data-model.md`, not in passing.
+The committed rule keeps the correctly-named `px -> <full>//payload`: the name is
+right, and NNP is what blocks it. That is the more honest failure to leave in the
+tree than a wrongly-named rule that fails for a second reason.
 
-## The policy decision, now made
+An intermediate reading suggested the stacked form worked. It did not: it was measured
+through `machinectl shell` sessions that were failing silently at the time, and it does
+not survive a clean run. Any future attempt here needs a trustworthy channel first —
+see the reliability note below.
 
-Two controls the spec asks for could not both apply, and the resolution is recorded in the
-spec as clarifications plus FR-043 and FR-044:
+**Likely resolution, deliberately not taken in passing**: enter the payload profile
+with `aa_change_onexec` BEFORE exec'ing bwrap, while NNP is not yet set, instead of
+transitioning after it. That changes WHICH layer applies the payload confinement, so it
+belongs with FR-001/FR-044 and the "Managed Isolation Policy" entry in `data-model.md`.
 
-- **NoNewPrivileges** moved from the machine to the guest's own service units (web server,
-  PHP-FPM, database, cron) and every transient exec payload. On the machine it makes the
-  kernel refuse the AppArmor domain transition, so the guest could never enter its
-  confining profile — the stronger control.
-- **CAP_SYS_ADMIN and the mount syscalls** stay inside the machine's private user
-  namespace, where they cannot act on the host, because systemd as PID 1 cannot mount its
-  API filesystems without them. The guest profile gets no general mount primitive (only
-  typed, target-scoped API mounts) and the payload profile still denies mount, userns and
-  sys_admin outright.
-
-With those in place the guest init execs and enters `//guest`.
-
-## The remaining blocker
-
-```text
-systemd-nspawn: Failed to mount tmpfs (type tmpfs) on /run/lock
-  (MS_NOSUID|MS_NODEV|MS_NOEXEC "mode=1777,size=5242880"): Operation not permitted
-```
-
-EPERM, with no AppArmor denial in the audit log, so the refusal is the kernel's. The
-machine runs with `--private-users=<base>:<count> --private-users-ownership=map`, i.e. an
-idmapped mount of the owned ext4 image. The open question is why a tmpfs child mount inside
-that namespace is refused: a locked parent-mount flag and idmapped-mount interaction are the
-two candidates.
-
-The decisive experiment is to boot the same image with `--private-users=no` and then
-re-introduce the user namespace: that separates "userns/idmap" from "capability or seccomp",
-both of which have now been eliminated by direct test (`@mount` is in the filter,
-CAP_SYS_ADMIN is retained, and no AppArmor rule denies it).
-
-`--private-users-ownership=chown` was tried as an alternative and is strictly worse on this
-host: it fails earlier with "Failed to adjust UID/GID shift of OS tree: Operation not
-permitted".
-
-```text
-apparmor="DENIED" operation="exec" info="no new privs" error=-1
-  profile="sandbox-native-<machine>" name="/usr/lib/systemd/systemd"
-  comm="systemd-nspawn" target="sandbox-native-<machine>//guest"
-```
-
-The machine passes `--no-new-privileges=yes` for the payload, and the AppArmor policy moves
-the guest into a tighter `//guest` subprofile with a `cx ->` transition. The kernel refuses
-that combination: under NoNewPrivileges an AppArmor domain transition counts as gaining
-privileges, so the guest init can never exec.
-
-Two controls the spec asks for are in direct conflict, and the resolution is a deliberate
-choice about which boundary carries the isolation guarantee:
-
-1. keep `--no-new-privileges=yes` and confine the guest with the OUTER profile (`ix` instead
-   of `cx -> guest`), losing the tighter guest subprofile; or
-2. keep the `//guest` transition and drop the payload's NoNewPrivileges, relying on the
-   guest profile plus dropped capabilities and the seccomp filter; or
-3. restructure the policy as an AppArmor stack (`//&`), which is NNP-safe, if the guest
-   profile can be expressed as a stacked subset.
-
-This needs the spec's isolation contract to say which one it wants (`data-model.md`
-"Managed Isolation Policy" and FR-001/FR-003 all bear on it), so it is recorded here rather
-than decided in passing.
+**Observation reliability**: `machinectl shell` goes through systemd-logind, and the
+guest profile denied logind's per-session namespace mounts. Sessions then failed
+intermittently and returned empty output, which reads as a broken probe rather than a
+denied mount. Three separate debugging cycles chased that phantom. With the logind
+rules in place, three consecutive observations returned the guest profile with zero
+denials. Anything measured through a guest session before those rules should be
+treated as unreliable.
 
 ## Defects found and fixed to get this far
 

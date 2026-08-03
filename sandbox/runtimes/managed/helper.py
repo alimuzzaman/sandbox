@@ -50,7 +50,10 @@ class ManagedIsolationObserver:
         result = self.process.run(("sudo", "-n", self.helper, "isolation-observe",
                                    machine_id), timeout=20)
         if result.returncode != 0 or len((result.stdout or "").encode()) > 1024 * 1024:
-            raise RuntimeError("managed isolation observation failed")
+            detail = ((result.stderr or "").strip() or "no output")
+            raise RuntimeError(
+                "managed isolation observation failed: "
+                + (detail if len(detail) <= 400 else "…" + detail[-399:]))
         try: value = json.loads(result.stdout or "")
         except (TypeError, json.JSONDecodeError) as exc:
             raise RuntimeError("managed isolation observation is invalid") from exc

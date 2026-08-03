@@ -3175,6 +3175,10 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # the kernel checks both directions. Without this the setup fails only when
     # a fresh procfs is mounted, which made it look like a mount problem.
     ptrace (read, readby) peer={profile}//bwrap,
+    # `--disable-userns` writes the nested-userns ceiling inside its own user
+    # namespace; without this bwrap stops with "cannot open
+    # /proc/sys/user/max_user_namespaces: Permission denied".
+    /proc/sys/user/max_user_namespaces rw,
     # `/**` matches paths BELOW the root, never the root directory entry, so
     # bwrap was denied `open /` while binding it as the sandbox root and every
     # payload died before it started. Read access to the entry is not access to

@@ -132,10 +132,16 @@ class ManagedNetwork:
     def apply(self, plan):
         stopped = self._run("egress-remove", plan)
         if stopped.returncode != 0:
-            raise RuntimeError("managed egress could not be closed before reconcile")
+            detail = ((stopped.stderr or stopped.stdout or "").strip() or "no output")
+            raise RuntimeError(
+                "managed egress could not be closed before reconcile: "
+                + (detail if len(detail) <= 600 else "…" + detail[-599:]))
         baseline = self._run("network-apply", plan)
         if baseline.returncode != 0:
-            raise RuntimeError("managed default-deny network apply failed")
+            detail = ((baseline.stderr or baseline.stdout or "").strip() or "no output")
+            raise RuntimeError(
+                "managed default-deny network apply failed: "
+                + (detail if len(detail) <= 600 else "…" + detail[-599:]))
         return {"ok": True, "mutated": True}
 
     def status(self, plan):

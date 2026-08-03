@@ -348,7 +348,7 @@ class ManagedProvisioner:
         if callable(remove):
             remove(f"provision:{plan['machine_id']}:{step}")
 
-    def _persist_incomplete_plan(self, plan, rollback):
+    def _persist_incomplete_plan(self, plan, rollback, *, untouched=()):
         policy = plan["policy"]
         record = {
             "owner": self._rollback_owner(plan),
@@ -357,10 +357,16 @@ class ManagedProvisioner:
         }
         record["last_applied"] = canonical_digest(record)
         self.repository.put_owned("policies", plan["machine_id"], record)
-        removed = tuple(
-            item["step"] for item in rollback
-            if item.get("ok") and item.get("step") in ManagedNativeCleanup.ORDER
-        )
+        # A resource the provisioning never reached has nothing to remove, and
+        # saying so is what lets cleanup get past it. Without this, cleanup
+        # stopped at the first never-created resource, reported it as a residual
+        # forever, and the surviving policy record then failed every later
+        # provisioning at its first step.
+        removed = tuple(dict.fromkeys(
+            [item["step"] for item in rollback
+             if item.get("ok") and item.get("step") in ManagedNativeCleanup.ORDER]
+            + [name for name in ManagedNativeCleanup.ORDER if name in set(untouched)]
+        ))
         self.repository.put_recovery(f"cleanup-progress:{plan['machine_id']}", {
             "owner": self._rollback_owner(plan),
             "object_type": "cleanup_progress",
@@ -490,7 +496,11 @@ class ManagedProvisioner:
                 # `cleanup_plan_unavailable` and the next ensure refused with
                 # drifted owned state, so the operator had to delete host
                 # objects by hand.
-                self._persist_incomplete_plan(plan, [])
+                self._persist_incomplete_plan(
+                    plan, [],
+                    untouched=[name for name in ManagedNativeCleanup.ORDER
+                               if name not in set(completed)],
+                )
                 return {"ok": False, "state": "blocked", "mutated": True,
                         "machine_id": plan.get("machine_id"),
                         "completed": tuple(completed),

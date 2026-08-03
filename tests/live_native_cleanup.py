@@ -89,6 +89,7 @@ def main(argv=None):
         print(line)
         record["steps"].append({"label": label, "ok": payload.get("ok"),
                                 "state": payload.get("state"),
+                                "completed": list(payload.get("completed") or []),
                                 "reason": (payload.get("reason") or {}).get("code"),
                                 "residual": list((payload.get("cleanup") or {}).get("residual") or [])})
         return payload
@@ -99,6 +100,8 @@ def main(argv=None):
     # 1. Provision. The payload boundary is a separate open item, so this is
     #    expected to stop at isolation verification with its machine retained.
     provisioned = step("provision", _invoke("ensure", project))
+    print("  provisioned steps:", list(provisioned.get("completed") or []))
+    print("  reason:", str(provisioned.get("reason"))[:200])
     machine_id = provisioned.get("machine_id") or (_machines() or [None])[0]
     record["machine_id"] = machine_id
     record["host_state"]["provisioned"] = _state()

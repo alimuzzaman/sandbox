@@ -91,6 +91,7 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # and every observation through them returns empty output, which reads as a
     # broken probe rather than a denied mount.
     mount fstype=proc -> /run/systemd/namespace-*/,
+    mount fstype=proc -> /run/systemd/mount-rootfs/**,
     mount options=(rw,rbind) -> /run/systemd/namespace-*/,
     umount /run/systemd/mount-rootfs/**,
     umount /run/systemd/namespace-*/,
@@ -161,14 +162,21 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # profile's `/ r,`; it was fixed there and missed here.)
     / r,
     /** rwklm,
-    # Stacked, and named in full. Two separate kernel refusals shaped this
-    # rule: `cx` would look for `bwrap//payload`, which does not exist, and a
-    # plain transition is refused outright because bwrap sets no_new_privs
-    # before exec ("apparmor DENIED ... info=no new privs"). A STACK is the
-    # NNP-safe form: the effective confinement is the intersection of both
-    # profiles, so the payload can do no more than the payload profile allows,
-    # and mount, userns and sys_admin stay denied (FR-044).
-    /** px -> {profile}//&payload,
+    # The payload transition is the open blocker. Three forms, three kernel
+    # verdicts on Ubuntu 24.04 / AppArmor 4, all from audit records:
+    #   `cx -> payload`              -> "profile transition not found"
+    #                                   (`cx` names a child of THIS profile)
+    #   `px -> <full>//payload`      -> "no new privs": bwrap sets NNP before
+    #                                   exec and the kernel refuses the domain
+    #                                   transition (this rule)
+    #   `px -> <full>//&payload`     -> "profile transition not found"
+    # The name is correct here; NNP is what blocks it. The likely resolution is
+    # to enter the payload profile with aa_change_onexec BEFORE exec'ing bwrap,
+    # while NNP is not yet set, rather than transitioning after it. That moves
+    # which layer applies the confinement, so it belongs in the isolation
+    # contract (FR-001/FR-044, data-model "Managed Isolation Policy"), not in
+    # a passing edit. See evidence/managed-provisioning.md.
+    /** px -> {profile}//payload,
   }}
 
   profile payload flags=(attach_disconnected,mediate_deleted) {{

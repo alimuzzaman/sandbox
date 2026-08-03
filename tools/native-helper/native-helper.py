@@ -3193,7 +3193,11 @@ def machine_command(policy):
               "--private-users-ownership=map",
               "--private-network",
               f"--network-veth-extra={policy['network']['veth']}:host0",
-              "--resolv-conf=off", "--link-journal=no-host", "--no-new-privileges=yes",
+              "--resolv-conf=off",
+              # systemd-nspawn accepts no|host|try-host|guest|try-guest|auto.
+              # "no-host" is not one of them, so every machine failed to start
+              # with "Failed to parse link journal mode no-host".
+              "--link-journal=no", "--no-new-privileges=yes",
               "--drop-capability=" + ",".join(dropped),
               "--system-call-filter=@system-service ~@raw-io ~@reboot ~@swap"]
     for mount in policy["read_only_mounts"]:

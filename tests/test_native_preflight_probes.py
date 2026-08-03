@@ -213,3 +213,15 @@ class TestWebConfigTestRunsInANamespace(unittest.TestCase):
         self.assertIn('_namespaced_config_test(mountpoint, "/usr/sbin/nginx", "-t")', source)
         self.assertIn('_namespaced_config_test(mountpoint, "/usr/sbin/apache2ctl", "configtest")',
                       source)
+
+
+class TestMachineUnitArguments(unittest.TestCase):
+    """systemd-nspawn rejected the machine unit outright on an invalid flag."""
+
+    def test_link_journal_uses_a_valid_mode(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        self.assertIn('"--link-journal=no"', source)
+        self.assertNotIn("--link-journal=no-host", source)

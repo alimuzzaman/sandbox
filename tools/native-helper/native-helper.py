@@ -3040,6 +3040,10 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix dgram,
     signal,
     dbus,
+    # Read-only ptrace confined to this machine's own processes (systemd's
+    # generators read sibling /proc entries). A blanket `ptrace,` would reach
+    # outside the machine and is deliberately absent.
+    ptrace (read) peer=@{profile},
     # The guest's PID 1 mounts its own API filesystems inside the machine's
     # mount namespace; without them it dies with "Failed to mount tmpfs ...
     # Permission denied" before any service starts. These are enumerated by
@@ -3057,6 +3061,9 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount options=(rw,rprivate),
     mount options=(rw,rshared),
     mount options=(rw,runbindable),
+    # Remounting an existing bind read-only only ever removes access.
+    mount options=(ro,remount,bind),
+    mount options=(ro,remount,bind,nosuid,nodev,noexec),
     umount /run/lock/,
     umount /dev/shm/,
     umount /tmp/,

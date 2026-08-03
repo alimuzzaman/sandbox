@@ -25,7 +25,10 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertNotIn("\n    mount,\n", guest)
         self.assertNotIn("\n    remount,\n", guest)
         self.assertIn("mount fstype=tmpfs -> /run/lock/,", guest)
-        self.assertNotIn("ptrace,", guest)
+        # A blanket ptrace would reach outside the machine; a read-only,
+        # same-profile peer rule cannot.
+        self.assertNotIn("\n    ptrace,\n", guest)
+        self.assertIn("ptrace (read) peer=@", guest)
         self.assertNotIn("network netlink", guest)
         self.assertNotIn("network packet", guest)
         # The guest's PID 1 needs sys_admin for its typed API mounts; every

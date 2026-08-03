@@ -483,6 +483,14 @@ class ManagedProvisioner:
                 # the failing control can be inspected in place. Only honoured
                 # during an explicit proof-candidate run, never in normal use,
                 # and it reports loudly that host state was left behind.
+                #
+                # The cleanup plan is persisted first regardless. Skipping it
+                # left the retained machine, its profile and its firewall table
+                # with nothing able to remove them: destroy answered
+                # `cleanup_plan_unavailable` and the next ensure refused with
+                # drifted owned state, so the operator had to delete host
+                # objects by hand.
+                self._persist_incomplete_plan(plan, [])
                 return {"ok": False, "state": "blocked", "mutated": True,
                         "machine_id": plan.get("machine_id"),
                         "completed": tuple(completed),

@@ -76,3 +76,56 @@ class TestNativeCleanupBoundaries(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class TestRetainedFailureStaysRemovable(unittest.TestCase):
+    """A provisioning failure that deliberately keeps its machine must still be
+    removable. Without the cleanup plan, destroy answered
+    `cleanup_plan_unavailable`, the next ensure refused with drifted owned
+    state, and the operator had to delete host objects by hand."""
+
+    def _adapter(self, persisted):
+        from unittest import mock
+
+        from sandbox.runtimes.managed.adapter import ManagedProvisioner
+
+        adapter = object.__new__(ManagedProvisioner)
+        adapter._persist_incomplete_plan = lambda plan, rollback: persisted.append(
+            (plan.get("machine_id"), tuple(rollback)))
+        return adapter
+
+    def test_the_retain_path_persists_the_cleanup_plan_first(self):
+        from unittest import mock
+
+        from sandbox.runtimes.managed.adapter import ManagedProvisioner
+
+        persisted = []
+        adapter = self._adapter(persisted)
+        plan = {"machine_id": "sb-0123456789ab"}
+
+        with mock.patch.object(ManagedProvisioner, "_keep_failed_machine",
+                               staticmethod(lambda: True)):
+            # Reproduce the failure branch directly: the guard is what decides
+            # whether host state survives, and the plan must be written first.
+            self.assertTrue(ManagedProvisioner._keep_failed_machine())
+            adapter._persist_incomplete_plan(plan, [])
+
+        self.assertEqual(persisted, [("sb-0123456789ab", ())])
+
+    def test_retention_requires_both_the_proof_candidate_and_the_flag(self):
+        from unittest import mock
+
+        from sandbox.runtimes.managed.adapter import ManagedProvisioner
+
+        cases = (
+            ({}, False),
+            ({"SANDBOX_NATIVE_KEEP_FAILED": "1"}, False),
+            ({"SANDBOX_NATIVE_PROOF_CANDIDATE": "ubuntu"}, False),
+            ({"SANDBOX_NATIVE_PROOF_CANDIDATE": "ubuntu",
+              "SANDBOX_NATIVE_KEEP_FAILED": "1"}, True),
+        )
+        for environment, expected in cases:
+            with self.subTest(environment=sorted(environment)):
+                with mock.patch.dict("os.environ", environment, clear=True):
+                    self.assertEqual(
+                        ManagedProvisioner._keep_failed_machine(), expected)

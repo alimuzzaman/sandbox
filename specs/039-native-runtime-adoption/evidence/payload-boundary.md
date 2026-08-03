@@ -77,7 +77,9 @@ With the real execution flags, bwrap stops before any of the above:
 ```text
 --unshare-user                                    OK
 --unshare-user --disable-userns                   cannot open /proc/sys/user/max_user_namespaces:
-                                                  Permission denied   (fixed: profile rule added)
+                                                  Permission denied   (a profile rule was added,
+                                                  but /proc/sys is read-only in nspawn, so the
+                                                  write cannot succeed from inside at all)
 --unshare-pid                                     OK
 --unshare-user --unshare-pid                      Can't mount proc on /newroot/proc:
                                                   Operation not permitted   — NO AppArmor denial
@@ -90,24 +92,56 @@ procfs in the current mount namespace. systemd-nspawn deliberately masks paths u
 fully visible and the nested mount is refused.
 
 The execution boundary as specified — new user namespace *and* new PID namespace *and* a
-fresh `/proc` — cannot be satisfied inside an nspawn machine that masks `/proc`. One of
-those three has to give:
+fresh `/proc` — cannot hold inside an nspawn machine. Two independent walls, both measured:
 
-1. **Drop `--unshare-user`** for the payload. It already runs as an unprivileged uid with
-   all capabilities dropped, a seccomp filter, and the stacked payload profile; the userns
-   was defence in depth, not the primary boundary. Nested userns stays blocked by
-   `--disable-userns`.
-2. **Drop `--unshare-pid`**, keeping the userns. The payload then sees the machine's PIDs,
-   which weakens process isolation between payloads in the same machine.
-3. **Unmask the machine's `/proc`**, which weakens the machine boundary itself to
-   strengthen the payload one. This is the worst trade of the three.
+```text
+--unshare-pid + --proc          Can't mount proc: Operation not permitted   (no audit record)
+                                a fresh procfs needs a fully visible /proc, and nspawn masks it.
+                                Reproduced with and without --unshare-user, and as uid 33.
 
-Option 1 looks right and is the smallest loss, but it changes what the isolation contract
-promises about the payload's namespaces, so it belongs in FR-001/FR-044 and the
-"Managed Isolation Policy" entry of `data-model.md` — not in a passing edit.
+--disable-userns                cannot open /proc/sys/user/max_user_namespaces: Permission denied
+                                nspawn mounts /proc/sys read-only, so the nested-userns ceiling
+                                cannot be written from inside the machine at all.
+```
+
+## The configuration that does work, and what it still lacks
+
+```text
+--unshare-user --unshare-ipc --unshare-uts --unshare-cgroup --ro-bind / /
+--proc /proc --dev /dev --tmpfs /tmp --cap-drop ALL --uid 33 --gid 33
++ ix/change_profile stack of the payload profile
+```
+
+Measured end to end on the live machine:
+
+| Property | Result |
+|---|---|
+| payload runs | `payload-ran` |
+| effective profile | `//bwrap//&//payload (enforce)` |
+| uid | 33 |
+| mount tmpfs | denied — audit names `//payload` |
+| `/run/systemd/private` | Permission denied |
+| own PID namespace | **no** — shares the machine's |
+| nested user namespace | **CREATED — not blocked** |
+
+Two guarantees are therefore still unmet, and neither is an AppArmor-policy question:
+
+1. **PID isolation between payloads in one machine.** Blocked by the masked-`/proc` rule
+   above. Either payloads share the machine's PID namespace, or they run without a fresh
+   `/proc`.
+2. **No nested user namespace.** `deny userns,` in the payload profile does NOT stop it:
+   the payload already runs inside bwrap's user namespace, and the stack still permitted
+   creation. A different mechanism is needed — writing the machine's userns ceiling from
+   the HOST side at start (root can enter the machine's userns; the machine itself cannot,
+   because `/proc/sys` is read-only), or a seccomp filter rejecting `clone`/`unshare` with
+   `CLONE_NEWUSER`.
+
+Both are isolation-contract decisions with real trade-offs, not implementation details, so
+they belong with FR-001/FR-044 and the "Managed Isolation Policy" entry in `data-model.md`.
 
 ## Not covered
 
 - The hostile probe matrix, sibling exhaustion, and cleanup (T047 remainder, T072).
-- Whether option 1 changes any result in the table above (it should not: the stack is
-  applied at exec, independent of the namespace flags).
+- The two unmet guarantees above, each of which needs a mechanism decision first.
+- Whether the host-side ceiling write or a seccomp filter is the better answer for nested
+  user namespaces; both were identified, neither was tried.

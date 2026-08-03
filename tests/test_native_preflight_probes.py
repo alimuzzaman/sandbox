@@ -408,8 +408,8 @@ class TestGuestServicesStripSysAdmin(unittest.TestCase):
 
 
 class TestMachineStartWaitsForUsability(unittest.TestCase):
-    """Every probe after start goes through `machinectl shell`, which needs the
-    guest's system bus; returning as soon as the unit existed raced the boot."""
+    """Every probe after start runs a transient unit inside the guest, which
+    needs its system bus; returning as soon as the unit existed raced the boot."""
 
     def _source(self) -> str:
         from pathlib import Path
@@ -420,7 +420,7 @@ class TestMachineStartWaitsForUsability(unittest.TestCase):
     def test_start_waits_for_the_system_bus(self):
         block = self._source().split('run_fixed(command, "native machine start failed")', 1)[1]
         block = block.split("def machine_status", 1)[0]
-        self.assertIn('"machinectl", "shell", "--quiet", machine_id', block)
+        self.assertIn("guest_command(machine_id", block)
         self.assertIn("system bus", block)
 
     def test_it_fails_closed_if_the_machine_exits(self):

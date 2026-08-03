@@ -2199,10 +2199,21 @@ def network_remove(machine_id, digest):
         except OSError: fail("native grant record removal failed")
 
 
+def guest_command(machine_id, argv):
+    """Argv that runs `argv` inside the machine and returns its real result.
+
+    `machinectl shell` allocates a PTY through logind and does NOT propagate the
+    command's exit status; measured on a live host it also dropped output
+    intermittently, so a failing probe was indistinguishable from a silent one.
+    `systemd-run --pipe --wait` returns the command's own status and output.
+    """
+    return ("systemd-run", f"--machine={machine_id}", "--pipe", "--wait",
+            "--quiet", "--collect", *tuple(argv))
+
+
 def guest_run(machine_id, argv, message, *, timeout=120):
     machine(machine_id)
-    return run_fixed(("machinectl", "shell", "--quiet", machine_id, *tuple(argv)),
-                     message, timeout=timeout)
+    return run_fixed(guest_command(machine_id, argv), message, timeout=timeout)
 
 
 def guest_json(machine_id, path, message):
@@ -2304,7 +2315,7 @@ def validated_execution_argv(policy, request):
 
 def bounded_guest_execution(machine_id, argv, timeout):
     command = subprocess.Popen(
-        ("machinectl", "shell", "--quiet", machine_id, *argv),
+        (*guest_command(machine_id, ()), *argv),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         close_fds=True, start_new_session=True, env=FIXED_ENVIRONMENT,
     )
@@ -2403,9 +2414,9 @@ def probe_payload_state(machine_id, policy):
         seen = (text.strip() or (result.stderr or "").strip()
                 or "no output on stdout or stderr")
         seen = seen if len(seen) <= 400 else "…" + seen[-399:]
-        confinement = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        confinement = run_optional((*guest_command(machine_id, ()),
                                     "/usr/bin/cat", "/proc/self/attr/current"))
-        minimal = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        minimal = run_optional((*guest_command(machine_id, ()),
                                 "/usr/bin/bwrap", "--ro-bind", "/", "/",
                                 "--proc", "/proc", "--", "/bin/true"))
 
@@ -2436,7 +2447,7 @@ def probe_payload_state(machine_id, policy):
     controls = [line for line in control_parts[0].splitlines() if line.startswith("/")]
     environment = [line.split("=", 1)[0] for line in control_parts[1].splitlines() if "=" in line]
     status = parse_status_fields(status_text)
-    nested = run_optional(("machinectl", "shell", "--quiet", machine_id,
+    nested = run_optional((*guest_command(machine_id, ()),
                            *fixed_probe_bwrap(policy, ("/usr/bin/unshare", "--user",
                                                        "/usr/bin/true"))))
     return {"no_new_privileges": status.get("NoNewPrivs") == "1",
@@ -2555,7 +2566,7 @@ def resource_limits_match(machine_id, policy):
         result = run_optional(("systemctl", "show", unit, f"--property={name}", "--value"))
         if result.returncode != 0 or duration_us((result.stdout or "").strip()) != wanted:
             return {}
-    cron_runtime = run_optional(("machinectl", "shell", "--quiet", machine_id,
+    cron_runtime = run_optional((*guest_command(machine_id, ()),
                                  "/usr/bin/cat",
                                  "/usr/local/libexec/sandbox-wordpress-cron"))
     guest = str(ipaddress.ip_interface(policy["network"]["guest_address"]).ip)
@@ -2591,18 +2602,18 @@ def resource_limits_match(machine_id, policy):
         return {}
     service_files = {}
     for name, path in (("marker", "/etc/sandbox-native/services.json"),):
-        result = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        result = run_optional((*guest_command(machine_id, ()),
                                "/usr/bin/cat", path))
         if result.returncode != 0:
             return {}
         service_files[name] = result.stdout or ""
     expected_php = max(2, min(32, expected["connections"] // 4))
     database = run_optional((
-        "machinectl", "shell", "--quiet", machine_id,
+        *guest_command(machine_id, ()),
         "/usr/bin/mariadb", "--protocol=socket", "--skip-column-names", "--batch",
         "--socket=/run/mysqld/mysqld.sock", "-e", "SELECT @@GLOBAL.max_connections;",
     ))
-    php = run_optional(("machinectl", "shell", "--quiet", machine_id,
+    php = run_optional((*guest_command(machine_id, ()),
                         "/usr/sbin/php-fpm8.3", "-tt"))
     php_output = (php.stdout or "") + "\n" + (php.stderr or "")
     php_children = re.findall(r"(?m)^.*pm\.max_children\s*=\s*([0-9]+)\s*$",
@@ -2626,7 +2637,7 @@ def resource_limits_match(machine_id, policy):
             marker.get("web_server") not in {"nginx", "apache"}):
         return {}
     if marker["web_server"] == "nginx":
-        effective = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        effective = run_optional((*guest_command(machine_id, ()),
                                   "/usr/sbin/nginx", "-T"))
         output = (effective.stdout or "") + "\n" + (effective.stderr or "")
         workers = re.findall(r"(?m)^\s*worker_processes\s+([0-9]+);\s*$", output)
@@ -2635,7 +2646,7 @@ def resource_limits_match(machine_id, policy):
                 ceilings != [str(expected["connections"])]):
             return {}
     else:
-        runtime = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        runtime = run_optional((*guest_command(machine_id, ()),
                                 "/usr/sbin/apache2ctl", "-t", "-D", "DUMP_RUN_CFG"))
         output = (runtime.stdout or "") + "\n" + (runtime.stderr or "")
         server = re.findall(r"(?mi)^\s*ServerLimit:\s*([0-9]+)\s*$", output)
@@ -2670,7 +2681,7 @@ def denied_reachability(machine_id, policy):
     result = {}
     for boundary, address in addresses.items():
         if boundary == "host": continue
-        route = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        route = run_optional((*guest_command(machine_id, ()),
                               *fixed_probe_bwrap(policy, (
                                   "/usr/sbin/ip", "route", "get", address))))
         # Any payload route to a forbidden boundary is itself a proof failure;
@@ -2681,7 +2692,7 @@ def denied_reachability(machine_id, policy):
     before = before_state["counters"]["guest_host_drop"]["packets"] \
         if before_state else -1
     host = addresses["host"]
-    probe = run_optional(("machinectl", "shell", "--quiet", machine_id,
+    probe = run_optional((*guest_command(machine_id, ()),
                           *fixed_probe_bwrap(policy, (
                               "/usr/bin/curl", "--silent", "--show-error",
                               "--connect-timeout", "1", "--max-time", "2",
@@ -2710,7 +2721,7 @@ def isolation_observe(machine_id):
     if active:
         config = egress_config_record(machine_id)
         broker = query_egress_status(config) if config else None
-    devices_result = run_optional(("machinectl", "shell", "--quiet", machine_id,
+    devices_result = run_optional((*guest_command(machine_id, ()),
                                    "/usr/bin/find", "/dev", "-mindepth", "1", "-maxdepth", "1",
                                    "-type", "c", "-printf", "%f\\n"))
     devices = sorted(set((devices_result.stdout or "").split())) if devices_result.returncode == 0 else []
@@ -2765,10 +2776,10 @@ def services_activate(machine_id, policy_digest, service_digest):
         guest_run(machine_id, ("/usr/bin/systemctl", "start", *units),
                   "native service activation failed", timeout=180)
     except BaseException:
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/systemctl", "stop", *tuple(reversed(units))))
         for unit in units:
-            run_optional(("machinectl", "shell", "--quiet", machine_id,
+            run_optional((*guest_command(machine_id, ()),
                           "/usr/bin/systemctl", "mask", unit))
         raise
 
@@ -2955,12 +2966,12 @@ def database_bootstrap(machine_id, policy_digest):
     except BaseException:
         sql = (f"DROP DATABASE IF EXISTS {production}; DROP DATABASE IF EXISTS {tests}; "
                f"DROP USER IF EXISTS '{user}'@'localhost'; FLUSH PRIVILEGES;")
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/mariadb", "--protocol=socket",
                       "--socket=/run/mysqld/mysqld.sock", "--execute", sql))
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/systemctl", "stop", "mariadb.service"))
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/systemctl", "mask", "mariadb.service"))
         raise
 
@@ -3013,9 +3024,9 @@ def database_remove(machine_id, policy_digest):
                                "--socket=/run/mysqld/mysqld.sock", "--execute", sql),
                   "native database cleanup failed")
     finally:
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/systemctl", "stop", "mariadb.service"))
-        run_optional(("machinectl", "shell", "--quiet", machine_id,
+        run_optional((*guest_command(machine_id, ()),
                       "/usr/bin/systemctl", "mask", "mariadb.service"))
 
 
@@ -3418,12 +3429,12 @@ def machine_start_minimal(machine_id, digest):
         time.sleep(0.1)
     else:
         fail("native machine did not expose its owned unit and veth")
-    # "Started" must mean "usable": every later probe runs through
-    # `machinectl shell`, which needs the guest's system bus. Without this wait
+    # "Started" must mean "usable": every later probe runs a transient unit
+    # inside the guest, which needs the guest's system bus. Without this wait
     # provisioning raced the guest's boot and failed with "There is no system
     # bus in container ...".
     for _attempt in range(300):
-        probe = run_optional(("machinectl", "shell", "--quiet", machine_id,
+        probe = run_optional((*guest_command(machine_id, ()),
                               "/bin/true"))
         if probe.returncode == 0:
             return

@@ -1229,11 +1229,13 @@ class TestNativeHelper(unittest.TestCase):
             self.assertNotEqual(copy[-2], str(source))
             self.assertFalse(Path(copy[-2]).exists())
             self.assertNotIn("opaque-secret", repr(calls))
-            self.assertFalse(any(argv[:3] == ("machinectl", "shell", "--quiet") and
-                                 str(source) in argv for argv in calls))
-            install_dir = next(argv for argv in calls if argv[:4] == (
-                "machinectl", "shell", "--quiet", "sb-0123456789ab") and
-                "/usr/bin/install" in argv)
+            guest = ("systemd-run", "--machine=sb-0123456789ab", "--pipe",
+                     "--wait", "--quiet", "--collect")
+            self.assertFalse(any(argv[:len(guest)] == guest and str(source) in argv
+                                 for argv in calls))
+            install_dir = next(argv for argv in calls
+                               if argv[:len(guest)] == guest
+                               and "/usr/bin/install" in argv)
             self.assertEqual(install_dir[-8:], (
                 "-d", "-o", "root", "-g", "root", "-m", "0700",
             ) + ("/run/sandbox-native-credentials",))

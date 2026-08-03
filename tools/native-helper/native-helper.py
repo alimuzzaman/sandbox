@@ -3240,7 +3240,12 @@ def machine_command(policy):
               # stronger control — would have to be abandoned to keep the flag.
               "--link-journal=no",
               "--drop-capability=" + ",".join(dropped),
-              "--system-call-filter=@system-service ~@raw-io ~@reboot ~@swap"]
+              # @system-service does not include the mount syscalls, and the
+              # machine's init must mount its API filesystems inside its own
+              # namespace (FR-044). AppArmor still denies mount to the guest and
+              # payload profiles, so this widens the syscall set without giving
+              # untrusted code a mount primitive.
+              "--system-call-filter=@system-service @mount ~@raw-io ~@reboot ~@swap"]
     for mount in policy["read_only_mounts"]:
         nspawn.append(f"--bind-ro={mount['source']}:{mount['target']}:norbind")
     for mount in policy["writable_mounts"]:

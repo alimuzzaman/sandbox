@@ -1006,6 +1006,9 @@ class TestNativeHelper(unittest.TestCase):
         system_filter = next(value for value in command
                              if value.startswith("--system-call-filter="))
         self.assertNotIn("~@mount", system_filter)
+        # The machine's init mounts its API filesystems inside its own namespace;
+        # @system-service alone does not contain those syscalls.
+        self.assertIn("@mount", system_filter)
         self.assertIn("~@raw-io", system_filter)
         # CAP_SYS_ADMIN stays inside the machine's private user namespace so its
         # init can mount API filesystems; untrusted payloads never hold it

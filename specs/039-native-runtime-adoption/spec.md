@@ -308,8 +308,10 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
 - **FR-044**: The machine's own init MAY hold CAP_SYS_ADMIN and the enumerated API-filesystem
   mounts INSIDE its private user namespace, because it cannot boot without them and a
   namespaced capability cannot act on the host. Untrusted execution paths MUST NOT hold
-  either: the payload profile MUST deny mount, userns, and sys_admin, and no general mount
-  primitive may reach the guest profile.
+  either. Concretely: no general mount primitive may reach the guest profile, every guest
+  service that runs project code MUST strip CAP_SYS_ADMIN through its own unit
+  (`CapabilityBoundingSet`) and restrict namespaces, and the payload profile MUST deny
+  mount, userns, and sys_admin outright.
 
 ### Key Entities
 

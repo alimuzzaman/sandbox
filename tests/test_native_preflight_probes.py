@@ -370,3 +370,29 @@ class TestPayloadsNeverHoldSysAdmin(unittest.TestCase):
         machine = source.split("nspawn = [", 1)[1].split("\n    for mount in", 1)[0]
         self.assertIn("--private-users=", machine)
         self.assertIn("--private-users-ownership=", machine)
+
+
+class TestGuestServicesStripSysAdmin(unittest.TestCase):
+    """The guest profile grants sys_admin so PID 1 can mount; no service that
+    runs project code may keep it."""
+
+    def _files(self):
+        from sandbox.runtimes.managed.services import compile_service_files
+
+        return compile_service_files("10.1.2.3", 64, 60, web_server="nginx",
+                                     backend_port=8080)
+
+    def test_every_service_drops_it(self):
+        files, units = self._files()
+        for unit in units:
+            path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
+            with self.subTest(unit=unit):
+                body = files[path]
+                self.assertIn("CapabilityBoundingSet=~CAP_SYS_ADMIN", body)
+                self.assertIn("RestrictNamespaces=yes", body)
+
+    def test_payload_profile_still_denies_it(self):
+        from sandbox.isolation.apparmor import compile_apparmor_profile
+
+        payload = compile_apparmor_profile("sb-test", "d" * 64).split("profile payload", 1)[1]
+        self.assertNotIn("capability sys_admin", payload)

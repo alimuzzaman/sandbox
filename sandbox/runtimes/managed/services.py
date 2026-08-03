@@ -108,6 +108,11 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
     for unit in units:
         files[f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"] = (
             "[Service]\nNoNewPrivileges=yes\n"
+            # The guest profile grants sys_admin so PID 1 can mount its API
+            # filesystems; no service that runs project code may keep it.
+            "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_MODULE "
+            "CAP_SYS_RAWIO CAP_SYS_BOOT CAP_MKNOD\n"
+            "RestrictNamespaces=yes\nProtectKernelTunables=yes\n"
         )
     if web_server == "nginx":
         files["/etc/nginx/nginx.conf"] = nginx

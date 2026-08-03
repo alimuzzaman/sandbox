@@ -44,6 +44,12 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     capability setpcap,
     capability setuid,
     capability sys_chroot,
+    # The machine's PID 1 needs sys_admin for the typed API-filesystem mounts
+    # enumerated below, and nothing else in this profile grants a mount
+    # primitive. Every service that runs untrusted code strips the capability
+    # in its own unit (CapabilityBoundingSet), and exec payloads transition into
+    # the payload profile, which denies it outright (FR-044).
+    capability sys_admin,
     network inet stream,
     network inet6 stream,
     network unix stream,

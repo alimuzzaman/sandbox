@@ -28,7 +28,10 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertNotIn("ptrace,", guest)
         self.assertNotIn("network netlink", guest)
         self.assertNotIn("network packet", guest)
-        self.assertNotIn("capability sys_admin", guest)
+        # The guest's PID 1 needs sys_admin for its typed API mounts; every
+        # service that runs project code strips it in its own unit, and the
+        # payload profile below denies it outright.
+        self.assertIn("capability sys_admin", guest)
         self.assertIn("userns,", bwrap)
         self.assertIn("mount,", bwrap)
         self.assertIn("capability sys_admin", bwrap)

@@ -21,6 +21,12 @@
   profile, and every untrusted execution path still runs with NoNewPrivileges. This
   matches the session-2026-08-01 answer that managed-native uses standard Docker-class
   controls.
+- Q: The same conflict recurs for CAP_SYS_ADMIN and mount: systemd as PID 1 cannot mount
+  its API filesystems without them, but they are escape primitives. Where do they live?
+  → A: Inside the machine's private user namespace only. The machine keeps CAP_SYS_ADMIN
+  and an enumerated set of typed API-filesystem mounts (/run/lock, /dev/shm, /tmp,
+  /sys/fs/cgroup, /dev/mqueue); the guest profile gets no general mount primitive, and the
+  payload profile denies mount, userns, and sys_admin outright.
 
 ### Session 2026-08-02
 
@@ -299,6 +305,11 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
   instance — the web server, PHP-FPM, the database, cron, and each transient exec payload —
   and MUST NOT be applied to the machine itself, where it would prevent the guest from
   entering its confining AppArmor profile.
+- **FR-044**: The machine's own init MAY hold CAP_SYS_ADMIN and the enumerated API-filesystem
+  mounts INSIDE its private user namespace, because it cannot boot without them and a
+  namespaced capability cannot act on the host. Untrusted execution paths MUST NOT hold
+  either: the payload profile MUST deny mount, userns, and sys_admin, and no general mount
+  primitive may reach the guest profile.
 
 ### Key Entities
 

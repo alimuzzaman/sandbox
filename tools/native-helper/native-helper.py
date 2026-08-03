@@ -3213,9 +3213,14 @@ def machine_command(policy):
         f"TasksMax={resources['pids']}",
         f"LimitNOFILE={resources['fds']}", f"IOWeight={resources['io_weight']}",
     )
+    # CAP_SYS_ADMIN stays INSIDE the machine's private user namespace: systemd as
+    # PID 1 needs it to mount its API filesystems, and namespaced it cannot act
+    # on the host. Untrusted code still never holds it -- the AppArmor payload
+    # profile denies mount/userns/sys_admin, and every transient exec payload
+    # runs with NoNewPrivileges and ProtectSystem=strict (FR-043).
     dropped = ("CAP_AUDIT_CONTROL", "CAP_DAC_READ_SEARCH", "CAP_IPC_OWNER", "CAP_LEASE",
                "CAP_LINUX_IMMUTABLE", "CAP_MKNOD", "CAP_NET_ADMIN", "CAP_NET_BROADCAST",
-               "CAP_NET_RAW", "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_NICE",
+               "CAP_NET_RAW", "CAP_SYS_BOOT", "CAP_SYS_NICE",
                "CAP_SYS_PTRACE", "CAP_SYS_RESOURCE", "CAP_SYS_TTY_CONFIG")
     nspawn = ["/usr/bin/systemd-nspawn", "--quiet", "--boot", "--keep-unit",
               "--register=yes", "--settings=no", f"--machine={machine_id}",

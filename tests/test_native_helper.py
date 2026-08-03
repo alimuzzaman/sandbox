@@ -1007,8 +1007,15 @@ class TestNativeHelper(unittest.TestCase):
                              if value.startswith("--system-call-filter="))
         self.assertNotIn("~@mount", system_filter)
         self.assertIn("~@raw-io", system_filter)
-        self.assertTrue(any(value.startswith("--drop-capability=") and "CAP_SYS_ADMIN" in value
-                            for value in command))
+        # CAP_SYS_ADMIN stays inside the machine's private user namespace so its
+        # init can mount API filesystems; untrusted payloads never hold it
+        # (AppArmor payload profile plus the transient exec restrictions).
+        dropped = next(value for value in command
+                       if value.startswith("--drop-capability="))
+        self.assertNotIn("CAP_SYS_ADMIN", dropped)
+        for capability in ("CAP_SYS_PTRACE", "CAP_NET_ADMIN", "CAP_MKNOD", "CAP_SYS_BOOT"):
+            self.assertIn(capability, dropped)
+        self.assertIn("--private-users=", " ".join(command))
         self.assertFalse(any("private-users-delegate" in value for value in command))
         self.assertFalse(any(value.startswith("--restrict-address-families=")
                              for value in command))

@@ -346,3 +346,27 @@ class TestGuestProfileAllowsItsOwnApiMounts(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertEqual(module.compile_apparmor_profile("sb-test", "d" * 64),
                          self._profile())
+
+
+class TestPayloadsNeverHoldSysAdmin(unittest.TestCase):
+    """CAP_SYS_ADMIN is namespaced to the machine so its init can boot; the code
+    that runs project payloads must still be unable to use it."""
+
+    def _profile(self) -> str:
+        from sandbox.isolation.apparmor import compile_apparmor_profile
+
+        return compile_apparmor_profile("sb-test", "d" * 64)
+
+    def test_payload_profile_denies_the_escape_primitives(self):
+        payload = self._profile().split("profile payload", 1)[1]
+        for rule in ("userns,", "mount,", "capability sys_admin"):
+            self.assertNotIn(f"\n    {rule}", payload)
+
+    def test_machine_runs_in_a_private_user_namespace(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        machine = source.split("nspawn = [", 1)[1].split("\n    for mount in", 1)[0]
+        self.assertIn("--private-users=", machine)
+        self.assertIn("--private-users-ownership=map", machine)

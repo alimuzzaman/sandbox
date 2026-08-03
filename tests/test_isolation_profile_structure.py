@@ -84,7 +84,7 @@ class TestProfileNamesResolve(unittest.TestCase):
                 match = TRANSITION.search(rule)
                 if not match:
                     continue
-                target = match.group("target")
+                target = match.group("target").replace("//&", "//")
                 mode = rule.split("->")[0].split()[-1]
                 resolved = f"{name}//{target}" if mode.endswith("cx") else target
                 self.assertIn(
@@ -162,7 +162,7 @@ class TestGuardCatchesTheHistoricalMistakes(unittest.TestCase):
                 if not match:
                     continue
                 mode = rule.split("->")[0].split()[-1]
-                target = match.group("target")
+                target = match.group("target").replace("//&", "//")
                 resolved = f"{name}//{target}" if mode.endswith("cx") else target
                 if resolved not in self.bodies:
                     unresolved.append(resolved)

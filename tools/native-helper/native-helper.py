@@ -3181,10 +3181,14 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # profile's `/ r,`; it was fixed there and missed here.)
     / r,
     /** rwklm,
-    # Named in full for the same reason as the guest profile's bwrap rule:
-    # `cx` would look for `bwrap//payload`, which does not exist, so every
-    # payload exec was refused with "profile transition not found".
-    /** px -> {profile}//payload,
+    # Stacked, and named in full. Two separate kernel refusals shaped this
+    # rule: `cx` would look for `bwrap//payload`, which does not exist, and a
+    # plain transition is refused outright because bwrap sets no_new_privs
+    # before exec ("apparmor DENIED ... info=no new privs"). A STACK is the
+    # NNP-safe form: the effective confinement is the intersection of both
+    # profiles, so the payload can do no more than the payload profile allows,
+    # and mount, userns and sys_admin stay denied (FR-044).
+    /** px -> {profile}//&payload,
   }}
 
   profile payload flags=(attach_disconnected,mediate_deleted) {{

@@ -67,6 +67,12 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount fstype=cgroup2 -> /sys/fs/cgroup/,
     mount fstype=mqueue -> /dev/mqueue/,
     mount options=(rw,remount) -> /run/lock/,
+    # Propagation changes only: no filesystem is attached, and the machine's
+    # own init needs them during early boot (`(sd-gens)` makes / rslave).
+    mount options=(rw,rslave),
+    mount options=(rw,rprivate),
+    mount options=(rw,rshared),
+    mount options=(rw,runbindable),
     umount /run/lock/,
     umount /dev/shm/,
     umount /tmp/,

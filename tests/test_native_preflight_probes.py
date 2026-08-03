@@ -335,6 +335,15 @@ class TestGuestProfileAllowsItsOwnApiMounts(unittest.TestCase):
         self.assertNotIn("\n    mount,\n", guest)
         self.assertNotIn("\n    remount,\n", guest)
 
+    def test_guest_may_change_propagation_but_not_attach_filesystems(self):
+        guest = self._profile().split("profile guest", 1)[1].split("profile bwrap", 1)[0]
+        self.assertIn("mount options=(rw,rslave),", guest)
+        # Every filesystem mount stays typed and target-scoped.
+        for line in guest.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("mount fstype="):
+                self.assertIn(" -> /", stripped)
+
     def test_helper_and_control_plane_agree(self):
         import importlib.util
         from pathlib import Path

@@ -6,9 +6,16 @@ machine on an Ubuntu proof host, through the public runtime service only. It
 never invokes machinectl, nft or apparmor_parser directly: the point is to prove
 the PRODUCT removes what it owns and refuses what it does not.
 
-Run on a disposable Ubuntu 24.04 proof host:
+Run on a disposable Ubuntu 24.04 proof host, as the ordinary sudo-capable user:
 
-    sudo -E python3 tests/live_native_cleanup.py --project-dir ~/native-proof/primary
+    python3 tests/live_native_cleanup.py --project-dir ~/native-proof/primary
+
+NOT under sudo. Every privileged action goes through the helper, which requires
+an authenticated non-root caller so a privileged change stays attributable to a
+real person. Running the product as root sets `SUDO_UID=0` for the helper, which
+then refuses every call -- and because a refused observation is indistinguishable
+from an unavailable one, the run reports resources as unobservable rather than
+saying the caller was wrong. The host-state probes below take sudo individually.
 """
 
 from __future__ import annotations
@@ -41,7 +48,8 @@ def _invoke(operation, project_root, **arguments):
 
 
 def _host(*argv, check=False):
-    return subprocess.run(argv, capture_output=True, text=True, check=check)
+    """Read host state as root without running the product itself as root."""
+    return subprocess.run(("sudo", "-n", *argv), capture_output=True, text=True, check=check)
 
 
 def _machines():
@@ -54,13 +62,17 @@ def _nft_tables():
     return [line for line in (listed.stdout or "").splitlines() if " sb_" in line]
 
 
-def _profiles():
-    root = Path("/etc/apparmor.d")
-    return sorted(str(item.name) for item in root.glob("sandbox-native-*")) if root.is_dir() else []
+def _listing(directory, pattern):
+    listed = _host("sh", "-c", f"ls -1 {directory} 2>/dev/null || true")
+    return sorted(name for name in (listed.stdout or "").split() if name.startswith(pattern))
 
 
 def _state():
-    return {"machines": _machines(), "nft_tables": _nft_tables(), "profiles": _profiles()}
+    return {"machines": _machines(), "nft_tables": _nft_tables(),
+            "profiles": _listing("/etc/apparmor.d", "sandbox-native-"),
+            "images": _listing("/var/lib/sandbox/native/instances", "sb-"),
+            "networks": _listing("/etc/sandbox/native/networks", "sb-"),
+            "policies": _listing("/etc/sandbox/native/policies", "sb-")}
 
 
 def _summary(label, payload):
@@ -77,8 +89,12 @@ def main(argv=None):
     parser.add_argument("--evidence-out", default=None)
     args = parser.parse_args(argv)
     project = str(Path(args.project_dir).expanduser().resolve(strict=True))
-    if os.geteuid() != 0:
-        parser.error("cleanup observation reads host state; run under sudo -E")
+    if os.geteuid() == 0:
+        parser.error("run as the ordinary sudo-capable user, not under sudo: the "
+                     "helper refuses a root caller so privileged changes stay "
+                     "attributable, and every observation would fail")
+    if _host("true").returncode != 0:
+        parser.error("passwordless sudo is required for the host-state probes")
     if not os.environ.get("SANDBOX_NATIVE_PROOF_CANDIDATE"):
         parser.error("SANDBOX_NATIVE_PROOF_CANDIDATE must be set for a proof run")
 
@@ -124,7 +140,7 @@ def main(argv=None):
     leaked = {
         key: sorted(set(record["host_state"]["after"][key])
                     - set(record["host_state"]["before"][key]))
-        for key in ("machines", "nft_tables", "profiles")
+        for key in record["host_state"]["after"]
     }
     record["leaked"] = leaked
     print("leaked host objects:", json.dumps(leaked))

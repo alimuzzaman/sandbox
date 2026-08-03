@@ -397,6 +397,14 @@ class ManagedProvisioner:
                 item["recovery_persisted"] = False
         return item
 
+    @staticmethod
+    def _keep_failed_machine() -> bool:
+        """True only when a proof run explicitly asked to retain a failure."""
+        import os
+
+        return bool(os.environ.get("SANDBOX_NATIVE_PROOF_CANDIDATE")
+                    and os.environ.get("SANDBOX_NATIVE_KEEP_FAILED") == "1")
+
     def ensure(self, plan):
         completed = []
         try:
@@ -470,6 +478,18 @@ class ManagedProvisioner:
             return {"ok": True, "state": "ready", "mutated": True,
                     "backend": plan["services"]["backend"], "health": health}
         except Exception as exc:
+            if self._keep_failed_machine():
+                # Live-proof escape hatch: keep the half-provisioned machine so
+                # the failing control can be inspected in place. Only honoured
+                # during an explicit proof-candidate run, never in normal use,
+                # and it reports loudly that host state was left behind.
+                return {"ok": False, "state": "blocked", "mutated": True,
+                        "machine_id": plan.get("machine_id"),
+                        "completed": tuple(completed),
+                        "reason": {"code": "managed_ensure_failed_machine_retained",
+                                   "message": f"{exc}; machine {plan.get('machine_id')} "
+                                              "was left running for inspection — "
+                                              "run `./sb native cleanup` when done"}}
             rollback = []
             if "services" in completed:
                 self._rollback_step(

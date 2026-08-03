@@ -16,10 +16,30 @@ image bootstrap            SUCCEEDS                 debootstrap noble into the o
 image configure            SUCCEEDS                 PHP-FPM, nginx and Apache config tests pass
 machine unit start         SUCCEEDS                 nspawn sets up the namespaces
 guest init exec            SUCCEEDS                 enters the //guest AppArmor profile
-guest API filesystems      FAILS                    EPERM mounting tmpfs on /run/lock
+guest API filesystems      SUCCEEDS                 typed mounts + logind session namespaces
+guest session observation  SUCCEEDS                 3/3 with zero denials after the logind rules
+bwrap sandbox setup        SUCCEEDS                 binds /, mounts proc, drops its bounding set
+payload exec               BLOCKED                  AppArmor refuses the transition under NNP
 isolation verification     not reached
 hostile probe suite        not reached
 ```
+
+**The open blocker (2026-08-03)**: bwrap sets `no_new_privs` before exec'ing the
+payload, and the kernel refuses an AppArmor domain transition under NNP:
+
+```text
+apparmor="DENIED" operation="exec" info="no new privs" error=-1
+  profile="sandbox-native-<id>//bwrap" name="/bin/true" comm="bwrap"
+```
+
+This is the same conflict already resolved once at the machine level (FR-043), now
+recurring one level down at the payload boundary. The NNP-safe form is a STACKED
+transition (`px -> <profile>//&payload`), whose effective confinement is the
+intersection of both profiles and therefore no weaker than the payload profile alone.
+A stacked rule loads and produces no denial, but the run that would confirm the
+payload's effective profile has not produced a trustworthy reading yet, so the choice
+is recorded rather than declared proven. Deciding it belongs with FR-001/FR-044 and
+the "Managed Isolation Policy" entry in `data-model.md`, not in passing.
 
 ## The policy decision, now made
 
@@ -124,9 +144,38 @@ Two diagnosability fixes were needed to see any of this: the helper's fixed-comm
 discarded the failing command's output, and `./sb ensure` crashed with `KeyError: 'instance'`
 whenever a runtime returned a typed refusal instead of an instance record.
 
+## Defects found and fixed after the first write-up
+
+Each was found only by running against a real host, and each surfaced as something
+misleading two or three layers away:
+
+14. **`ptrace (read) peer=@{profile}`** emitted `@sandbox-native-<id>` — an AppArmor
+    VARIABLE reference to a variable that does not exist — named the parent instead of
+    the child profile, and granted only `read` where the kernel checks `read` on the
+    reader and `readby` on the target. systemd's session bookkeeping broke and
+    `machinectl shell` exited 0 with no output.
+15. **`/usr/bin/bwrap cx -> bwrap`**: `cx` names a child of the CURRENT profile, so the
+    kernel looked for `guest//bwrap` and refused every exec of bwrap.
+16. **`/run/mysqld` did not exist** before mariadb started, so bwrap could not bind a
+    declared writable target. A tmpfiles.d entry now creates the declared `/run` targets
+    at boot.
+17. **bwrap was denied `setpcap` and `sys_ptrace`**, which it uses to drop its own
+    bounding set and read its child's /proc entry. It failed part-way through and
+    reported an unrelated "Can't mount proc: Operation not permitted".
+18. **`/ r,` was missing from the bwrap and payload profiles** — `/**` matches paths
+    below the root, never the root directory entry. The same defect had already been
+    fixed once in the supervisor profile and missed in the two inner ones.
+19. **`/** cx -> payload`** looked for `bwrap//payload`, refusing every payload exec.
+20. **logind's per-session namespace mounts were denied**, so `machinectl shell`
+    sessions failed intermittently and observations returned empty output.
+
+Six of these are one root cause: a rule naming a profile the kernel cannot resolve.
+`tests/test_isolation_profile_structure.py` now reads the generated policy the way the
+kernel does, so an unresolvable transition or peer fails in a unit test instead.
+
 ## Not covered
 
-- The NoNewPrivileges / AppArmor-transition decision above (the current blocker).
+- The payload NNP / stacked-transition decision above (the current blocker).
 - The hostile probe suite across every untrusted execution path, sibling resource
   exhaustion, and the cleanup matrix (T047 remainder, T072).
 - The quickstart end-to-end run (T077).

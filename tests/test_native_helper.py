@@ -1048,7 +1048,9 @@ class TestNativeHelper(unittest.TestCase):
                       profile)
         self.assertIn("profile bwrap", profile)
         self.assertIn("userns,", profile)
-        self.assertIn("/** cx -> payload", profile)
+        # Full name again: `cx` would look for a `bwrap//payload` that does
+        # not exist, and every payload exec is refused.
+        self.assertIn("/** px -> sandbox-native-sb-0123456789ab//payload", profile)
         self.assertIn("profile payload", profile)
         self.assertIn("deny /run/systemd/**", profile)
         self.assertIn("deny /run/sandbox-native-credentials/**", profile)

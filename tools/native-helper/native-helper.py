@@ -3162,6 +3162,10 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix stream,
     network unix dgram,
     signal,
+    # bwrap reads its own child's /proc entry while wiring the sandbox up, and
+    # the kernel checks both directions. Without this the setup fails only when
+    # a fresh procfs is mounted, which made it look like a mount problem.
+    ptrace (read, readby) peer={profile}//bwrap,
     # `/**` matches paths BELOW the root, never the root directory entry, so
     # bwrap was denied `open /` while binding it as the sandbox root and every
     # payload died before it started. Read access to the entry is not access to
@@ -3169,7 +3173,10 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # profile's `/ r,`; it was fixed there and missed here.)
     / r,
     /** rwklm,
-    /** cx -> payload,
+    # Named in full for the same reason as the guest profile's bwrap rule:
+    # `cx` would look for `bwrap//payload`, which does not exist, so every
+    # payload exec was refused with "profile transition not found".
+    /** px -> {profile}//payload,
   }}
 
   profile payload flags=(attach_disconnected,mediate_deleted) {{

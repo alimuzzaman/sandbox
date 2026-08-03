@@ -43,7 +43,10 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertIn("userns,", bwrap)
         self.assertIn("mount,", bwrap)
         self.assertIn("capability sys_admin", bwrap)
-        self.assertIn("/** cx -> payload", bwrap)
+        # Full profile name: `cx` resolves to a child of the CURRENT profile
+        # (`bwrap//payload`), which does not exist, so every payload exec is
+        # refused with "profile transition not found".
+        self.assertIn("/** px -> sandbox-native-sb-0123456789ab//payload", bwrap)
         self.assertNotIn("userns,", payload)
         self.assertNotIn("mount,", payload)
         self.assertNotIn("capability sys_admin", payload)

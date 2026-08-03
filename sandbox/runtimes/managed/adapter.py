@@ -218,14 +218,22 @@ class ManagedNativeCleanup:
         if "machine" in proven_removed:
             proven_removed.update(("services", "machine"))
         prior_removed = tuple(name for name in self.ORDER if name in proven_removed)
-        removed, residual, mutated = list(prior_removed), [], False
+        removed, residual, mutated = [], [], False
         for name in self.ORDER:
-            if name in prior_removed:
-                self._clear_resource_recovery(machine_id, owner, name)
-                continue
+            # Progress exists so a lost response cannot strand cleanup behind an
+            # unreachable observer. It is not authority over the host, so a
+            # resource it calls removed is still observed first: if the observer
+            # answers and the resource is there, the record was wrong and the
+            # resource is removed anyway. Only an unanswerable observation falls
+            # back on what progress claims.
+            trusted = name in prior_removed
             entry = entries.get(name)
             component, verb = components[name]
             if not isinstance(entry, dict) or not isinstance(entry.get("expected"), dict):
+                if trusted:
+                    removed.append(name)
+                    self._clear_resource_recovery(machine_id, owner, name)
+                    continue
                 residual.append(name)
                 self._retain(machine_id, owner, name, "cleanup_observation_unavailable")
                 break
@@ -236,6 +244,10 @@ class ManagedNativeCleanup:
             except (OSError, RuntimeError, TypeError, ValueError):
                 observed = None
             if not isinstance(observed, dict):
+                if trusted:
+                    removed.append(name)
+                    self._clear_resource_recovery(machine_id, owner, name)
+                    continue
                 residual.append(name)
                 self._retain(machine_id, owner, name, "runtime_unavailable",
                              expected=expected_digest)

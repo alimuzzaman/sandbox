@@ -34,7 +34,12 @@ class TestNativeRecovery(unittest.TestCase):
         result = cleaner.cleanup(helper.request(), helper.plan())
         self.assertFalse(result["ok"])
         self.assertEqual(result["cleanup"]["residual"], ("network",))
-        self.assertEqual(observed, ["network"])
+        # Every resource is asked about, including the ones progress calls
+        # removed: progress only decides what to do when the observer cannot
+        # answer, which is the case here. It stops at the true residual either
+        # way, and a progress record that turned out to be wrong cannot make
+        # cleanup skip a resource the host still has.
+        self.assertEqual(observed, ["services", "database", "machine", "network"])
 
     def test_drift_retains_residual_without_calling_remove_and_retry_converges(self):
         from tests.test_native_destroy import TestNativeDestroy
@@ -142,6 +147,30 @@ class TestNativeRecovery(unittest.TestCase):
 
         progress = helper.repository.snapshot()["recovery"][f"cleanup-progress:{machine_id}"]
         self.assertEqual(tuple(progress["removed"]), ())
+
+    def test_a_wrong_progress_record_cannot_strand_a_resource_the_host_still_has(self):
+        # The exact record a released bug left on the proof host: six steps
+        # claimed removed while an 8.5 GB image and a network record were still
+        # there. Cleanup must believe the host, not the claim.
+        helper = self._destroy_helper()
+        for section in ("backends", "policies", "networks"):
+            helper.put_owned(section)
+        machine_id = helper.policy.machine_id
+        helper.repository.put_recovery(f"cleanup-progress:{machine_id}", {
+            "owner": helper.owner, "object_type": "cleanup_progress",
+            "identity": machine_id, "reason_code": "cleanup_in_progress",
+            "retry_state": "pending",
+            "removed": ("services", "database", "machine", "network", "mount", "image"),
+        })
+
+        result = helper.cleaner().cleanup(helper.request(), helper.plan())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([(name, action) for name, action, _ in helper.calls], [
+            ("services", "stop"), ("database", "remove"), ("machine", "stop"),
+            ("network", "remove"), ("image", "unmount"), ("image", "remove"),
+            ("policy", "remove"),
+        ])
 
     def test_early_absent_cleanup_retires_only_matching_stale_entries(self):
         from tests.test_native_destroy import TestNativeDestroy

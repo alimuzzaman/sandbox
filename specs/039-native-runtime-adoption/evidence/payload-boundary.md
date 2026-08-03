@@ -15,9 +15,22 @@ Several conclusions drawn through it were wrong, including an earlier claim that
 transition worked.
 
 `systemd-run --machine=<id> --pipe --wait --quiet` answered correctly 3/3 in the same
-conditions and is the channel used for everything below. **The helper's `guest_run` still
-uses `machinectl shell`**; that is a live-proof correctness issue in its own right and is
-recorded as such.
+conditions and is the channel used for everything below. The helper has since been moved
+onto it (all 23 call sites share one `guest_command`), and the difference is visible in
+the product's own output: the same provisioning failure that used to report
+
+```text
+native payload isolation probe is invalid: no profile section
+```
+
+now reports what actually happened:
+
+```text
+native payload isolation probe failed: bwrap: Can't mount proc on /newroot/proc:
+Operation not permitted
+```
+
+Any live-proof result captured through the old transport should be treated as unreliable.
 
 ## Exec transitions: three forms, three refusals
 

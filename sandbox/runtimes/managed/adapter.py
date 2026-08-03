@@ -418,7 +418,13 @@ class ManagedProvisioner:
             completed.append("machine"); self.machine.start_minimal(plan)
             completed.append("network"); self.network.apply(plan["network"])
             verified = self.verifier.verify(plan["policy"])
-            if not verified.get("ok"): raise RuntimeError("effective isolation verification failed")
+            if not verified.get("ok"):
+                # Name the failing checks. "verification failed" alone gave the
+                # operator nothing to act on, and the verifier already knows
+                # exactly which effective control did not hold.
+                failed = [name for name, value in (verified.get("checks") or {}).items()
+                          if value is False] or verified.get("reason") or "no detail"
+                raise RuntimeError(f"effective isolation verification failed: {failed}")
             completed.append("credentials")
             installed = self.credentials.install(
                 machine_id=plan["machine_id"],

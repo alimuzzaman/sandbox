@@ -2415,10 +2415,12 @@ def probe_payload_state(machine_id, policy):
             detail = detail if len(detail) <= 200 else "…" + detail[-199:]
             return f"{name}: rc={outcome.returncode} {detail}"
 
+        # Order matters: callers truncate long messages, so the two answers go
+        # before the probe's own (longer) output.
         fail(f"native payload isolation probe is invalid: no {marker} section; "
-             f"probe produced: {seen}; "
+             f"{summary('minimal bwrap', minimal)}; "
              f"{summary('guest confinement', confinement)}; "
-             f"{summary('minimal bwrap', minimal)}")
+             f"probe produced: {seen}")
 
     parts = text.split("---profile---\n", 1)
     if len(parts) != 2: invalid("profile")

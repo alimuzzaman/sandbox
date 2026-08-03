@@ -84,6 +84,7 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # private mounts, and the credential generator needs a ramfs for secrets
     # that must never reach disk. Both stay inside the machine's namespace.
     mount options=(rw,rbind) -> /run/systemd/mount-rootfs/,
+    mount options=(rw,rbind) -> /run/systemd/mount-rootfs/**,
     mount fstype=ramfs -> /dev/shm/,
     mount options=(rw,remount) -> /run/lock/,
     # Propagation changes only: no filesystem is attached, and the machine's
@@ -124,6 +125,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     capability setuid,
     capability sys_admin,
     capability sys_chroot,
+    # bwrap drops the bounding set itself (setpcap) and reads its child's
+    # /proc entry while wiring the sandbox up (sys_ptrace). Without them it
+    # fails part-way through, and the symptom surfaces as an unrelated
+    # "Can't mount proc on /newroot/proc: Operation not permitted". This is
+    # the trusted root-only setup step; the payload profile below denies both.
+    capability setpcap,
+    capability sys_ptrace,
     userns,
     mount,
     remount,

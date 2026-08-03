@@ -424,7 +424,16 @@ def wordpress_runtime_dependencies(cfg, *, core=None, registry=None, **overrides
     if registry is None:
         import sandbox_core as sc
         registry = sc
-    allowed_roots = overrides.pop("allowed_roots", (core.ROOT, core.BASE))
+    # Projects live in the developer's own directories, so the runtime must
+    # accept the same roots the rest of the product does (home plus any
+    # SANDBOX_PROJECT_ROOTS entries) alongside the checkout and the state base.
+    # Limiting it to the latter two rejected every real project outright.
+    default_roots = [core.ROOT, core.BASE]
+    try:
+        default_roots.extend(registry._allowed_roots())
+    except (AttributeError, OSError, RuntimeError):
+        pass
+    allowed_roots = overrides.pop("allowed_roots", tuple(dict.fromkeys(default_roots)))
     return runtime_neutral_dependencies(
         registry=registry,
         allowed_roots=allowed_roots,

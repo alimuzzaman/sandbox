@@ -68,3 +68,29 @@ class TestScopeProbeCommandShape(unittest.TestCase):
                   / "native-helper.py").read_text()
         block = source.split("if probe == \"private-network\":", 1)[1].split("else:", 1)[0]
         self.assertIn("--wait", block)
+
+
+class TestManagedRuntimeAcceptsRealProjectRoots(unittest.TestCase):
+    """Projects live in the developer's own directories; restricting the runtime
+    to the checkout and the state base rejected every real project."""
+
+    def test_home_is_among_the_default_roots(self):
+        from pathlib import Path
+
+        import sandbox.core as core
+        from sandbox.application.context import wordpress_runtime_dependencies
+
+        dependencies = wordpress_runtime_dependencies(None)
+        roots = set(dependencies.paths.roots)
+        self.assertIn(Path.home().resolve(), roots)
+        self.assertIn(Path(core.ROOT).resolve(), roots)
+
+    def test_an_explicit_override_still_wins(self):
+        from pathlib import Path
+        import tempfile
+
+        from sandbox.application.context import wordpress_runtime_dependencies
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dependencies = wordpress_runtime_dependencies(None, allowed_roots=(tmp,))
+            self.assertEqual(set(dependencies.paths.roots), {Path(tmp).resolve()})

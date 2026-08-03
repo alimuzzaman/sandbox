@@ -2921,16 +2921,25 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
         link = observed_link(network["veth"])
         if record is None and observed_table is None and link is None:
             state = "absent"
+        elif record is None:
+            # A table or interface with no ownership record of ours cannot be
+            # proven ours, so it is never touched.
+            fail("native network ownership changed")
         else:
             grant_record = installed_grant_record(machine_id, policy_digest) \
                 if network.get("grant_authority") == GRANT_AUTHORITY else None
             grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
             grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
             broker = any(not grant["revoked"] for grant in grants)
-            if (record != desired_network_state(machine_id, policy_digest, network,
-                                                broker=broker, grant_digest=grant_digest)
-                    or observed_table is None
-                    or observed_table.get("comment") != record["marker"]
+            if record != desired_network_state(machine_id, policy_digest, network,
+                                               broker=broker, grant_digest=grant_digest):
+                fail("native network ownership changed")
+            # Verify each piece that exists. An interrupted removal leaves the
+            # record behind after the table is gone; that is a network still
+            # half-ours to finish removing, not a changed one, and `network-remove`
+            # already removes exactly what remains.
+            if observed_table is not None and (
+                    observed_table.get("comment") != record["marker"]
                     or not nft_state_matches_record(observed_nft_state(table), record)):
                 fail("native network ownership changed")
             if link is not None and link.get("ifalias") != alias_prefix:
@@ -2946,10 +2955,13 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
                 or image.stat().st_size != policy["root_image"]["bytes"]):
             fail("native image ownership changed")
     elif resource == "policy":
+        # `policy` never reports absent: `applied_policy` above already proved the
+        # applied record exists, and `policy-remove` removes that record and the
+        # instance root as well as the profile. An absent profile alone is a
+        # partially removed policy, so only a profile that is actually there --
+        # or a profile state that cannot be read -- is checked for drift.
         destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
-        if not os.path.lexists(destination) and _apparmor_loaded_state(machine_id) is False:
-            state = "absent"
-        else:
+        if os.path.lexists(destination) or _apparmor_loaded_state(machine_id) is not False:
             expected = compile_apparmor_profile(machine_id, policy_digest).encode()
             if (not destination.is_file() or destination.is_symlink()
                     or destination.stat().st_uid != 0 or destination.read_bytes() != expected

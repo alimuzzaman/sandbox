@@ -118,33 +118,83 @@ class TestCleanupObserveReportsState(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.observe("image")
 
-    def test_a_missing_profile_is_absent_and_a_changed_one_still_fails(self):
-        destination = self.root / "sandbox-native-sb-0123456789ab"
-        patches = (
+    def _policy_patches(self):
+        return (
             self._policy(16),
             mock.patch.object(self.helper, "APPARMOR_ROOT", self.root),
             mock.patch.object(self.helper, "compile_apparmor_profile", return_value="profile"),
             mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value),
         )
-        with patches[0], patches[1], patches[2], patches[3]:
-            with mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=False):
-                self.assertEqual(self.observe("policy")["state"], "absent")
-            destination.write_text("something else")
-            with mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=True), \
-                    self.assertRaises(SystemExit):
-                self.observe("policy")
 
-    def test_an_unreadable_apparmor_state_is_never_reported_absent(self):
-        patches = (
-            self._policy(16),
-            mock.patch.object(self.helper, "APPARMOR_ROOT", self.root),
-            mock.patch.object(self.helper, "compile_apparmor_profile", return_value="profile"),
-            mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value),
-            mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=None),
-        )
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
-            with self.assertRaises(SystemExit):
-                self.observe("policy")
+    def test_a_removed_profile_leaves_the_policy_present_so_its_record_is_removed(self):
+        # `policy-remove` also removes the applied record and the instance root,
+        # so an absent profile alone is a half-removed policy. Calling it absent
+        # would skip the removal and strand both on the host.
+        policy, root, compile_profile, digest = self._policy_patches()
+        with policy, root, compile_profile, digest, \
+                mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=False):
+            self.assertEqual(self.observe("policy")["state"], "present")
+
+    def test_a_changed_profile_still_fails(self):
+        policy, root, compile_profile, digest = self._policy_patches()
+        (self.root / "sandbox-native-sb-0123456789ab").write_text("something else")
+        with policy, root, compile_profile, digest, \
+                mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=True), \
+                self.assertRaises(SystemExit):
+            self.observe("policy")
+
+    def test_an_unreadable_apparmor_state_is_never_treated_as_a_removed_profile(self):
+        policy, root, compile_profile, digest = self._policy_patches()
+        with policy, root, compile_profile, digest, \
+                mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=None), \
+                self.assertRaises(SystemExit):
+            self.observe("policy")
+
+    def test_a_record_left_after_its_nft_table_is_a_network_still_to_finish_removing(self):
+        network = {"veth": "sb-veth0", "host_address": "10.0.0.1/30"}
+        record = {"marker": "sandbox-native-sb-0123456789ab"}
+        policy = mock.patch.object(
+            self.helper, "applied_policy",
+            return_value=(self.root / "policy.json", {"network": network}))
+        with policy, \
+                mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value), \
+                mock.patch.object(self.helper, "network_names",
+                                  return_value=("sb_0123456789ab", "sandbox-native")), \
+                mock.patch.object(self.helper, "network_state_record", return_value=record), \
+                mock.patch.object(self.helper, "observed_nft_table", return_value=None), \
+                mock.patch.object(self.helper, "observed_link", return_value=None), \
+                mock.patch.object(self.helper, "desired_network_state", return_value=record):
+            self.assertEqual(self.observe("network")["state"], "present")
+
+    def test_a_table_with_no_ownership_record_is_never_touched(self):
+        network = {"veth": "sb-veth0", "host_address": "10.0.0.1/30"}
+        policy = mock.patch.object(
+            self.helper, "applied_policy",
+            return_value=(self.root / "policy.json", {"network": network}))
+        with policy, \
+                mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value), \
+                mock.patch.object(self.helper, "network_names",
+                                  return_value=("sb_0123456789ab", "sandbox-native")), \
+                mock.patch.object(self.helper, "network_state_record", return_value=None), \
+                mock.patch.object(self.helper, "observed_nft_table",
+                                  return_value={"comment": "someone else"}), \
+                mock.patch.object(self.helper, "observed_link", return_value=None), \
+                self.assertRaises(SystemExit):
+            self.observe("network")
+
+    def test_a_fully_removed_network_is_absent(self):
+        network = {"veth": "sb-veth0", "host_address": "10.0.0.1/30"}
+        policy = mock.patch.object(
+            self.helper, "applied_policy",
+            return_value=(self.root / "policy.json", {"network": network}))
+        with policy, \
+                mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value), \
+                mock.patch.object(self.helper, "network_names",
+                                  return_value=("sb_0123456789ab", "sandbox-native")), \
+                mock.patch.object(self.helper, "network_state_record", return_value=None), \
+                mock.patch.object(self.helper, "observed_nft_table", return_value=None), \
+                mock.patch.object(self.helper, "observed_link", return_value=None):
+            self.assertEqual(self.observe("network")["state"], "absent")
 
 
 class TestObserverAcceptsState(unittest.TestCase):

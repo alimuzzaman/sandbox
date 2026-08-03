@@ -3189,7 +3189,10 @@ def machine_command(policy):
         "DeviceAllow=/dev/urandom r", "DeviceAllow=/dev/loop-control rw",
         "DeviceAllow=block-loop rwm",
         "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
-        "LockPersonality=yes", "RestrictSUIDSGID=yes", "NoNewPrivileges=yes",
+        # NoNewPrivileges is applied by the guest's own service units (FR-043):
+        # on the machine unit it makes the kernel refuse the AppArmor transition
+        # into the tighter //guest profile, so the guest init cannot exec.
+        "LockPersonality=yes", "RestrictSUIDSGID=yes",
         f"AppArmorProfile={profile}", f"CPUQuota={resources['cpu_percent']}%",
         f"MemoryMax={resources['memory_bytes']}",
         f"MemoryHigh={max(1, resources['memory_bytes'] * 9 // 10)}", "MemorySwapMax=0",

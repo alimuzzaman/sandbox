@@ -2386,17 +2386,28 @@ def probe_payload_state(machine_id, policy):
     result = guest_run(machine_id, fixed_probe_bwrap(
         policy, ("/bin/sh", "-c", script)), "native payload isolation probe failed")
     text = result.stdout or ""
+
+    def invalid(marker):
+        # Name the missing section and show what the probe actually produced.
+        # A fixed sentence made a denied exec, a truncated read, and a genuinely
+        # malformed section indistinguishable, which cost a whole debug cycle.
+        seen = (text.strip() or (result.stderr or "").strip()
+                or "no output on stdout or stderr")
+        seen = seen if len(seen) <= 600 else "…" + seen[-599:]
+        fail(f"native payload isolation probe is invalid: no {marker} section; "
+             f"probe produced: {seen}")
+
     parts = text.split("---profile---\n", 1)
-    if len(parts) != 2: fail("native payload isolation probe is invalid")
+    if len(parts) != 2: invalid("profile")
     status_text = parts[0].split("---status---\n", 1)[-1]
     profile_parts = parts[1].split("---fds---\n", 1)
-    if len(profile_parts) != 2: fail("native payload isolation probe is invalid")
+    if len(profile_parts) != 2: invalid("fds")
     profile = profile_parts[0].strip().removesuffix(" (enforce)")
     fd_parts = profile_parts[1].split("---controls---\n", 1)
-    if len(fd_parts) != 2: fail("native payload isolation probe is invalid")
+    if len(fd_parts) != 2: invalid("controls")
     fds = [int(value) for value in fd_parts[0].split() if value.isdigit()]
     control_parts = fd_parts[1].split("---env---\n", 1)
-    if len(control_parts) != 2: fail("native payload isolation probe is invalid")
+    if len(control_parts) != 2: invalid("env")
     controls = [line for line in control_parts[0].splitlines() if line.startswith("/")]
     environment = [line.split("=", 1)[0] for line in control_parts[1].splitlines() if "=" in line]
     status = parse_status_fields(status_text)

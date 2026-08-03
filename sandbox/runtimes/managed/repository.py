@@ -40,7 +40,18 @@ class NativeRepository:
 
     def _read(self):
         if not self.path.exists(): return _empty()
-        value = json.loads(self.path.read_text())
+        try:
+            payload = self.path.read_text()
+        except OSError as exc:
+            # Never fall back to empty state: this file is the only record of
+            # which host resources are ours, and forgetting it orphans every one
+            # of them. A run under sudo leaves it root-owned, which is how a
+            # later ordinary run finds it unreadable.
+            raise ValueError(
+                f"native state at {self.path} cannot be read ({exc.strerror}); "
+                "check its ownership -- running the product under sudo leaves it "
+                "owned by root") from exc
+        value = json.loads(payload)
         if not isinstance(value, dict) or value.get("version") not in {0, VERSION}:
             raise ValueError("unsupported native state version")
         result = _empty()

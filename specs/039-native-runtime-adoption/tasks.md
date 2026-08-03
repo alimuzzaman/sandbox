@@ -190,7 +190,7 @@ normal and repeated destroy; compare every path/database/image/unit/network/rout
 - [X] T069 [US5] Implement incumbent owned-database/backend cleanup and drift preservation in `sandbox/runtimes/incumbent/herd.py`, `sandbox/runtimes/incumbent/valet.py`, and `sandbox/runtimes/incumbent/posix.py`
 - [X] T070 [US5] Persist incomplete cleanup before registry/local identity removal and hand A route cleanup separately in `sandbox/commands/instances_cmd.py`
 - [X] T071 [US5] Add recovery inspection/retry to `native status|cleanup` without package uninstall in `sandbox/commands/native.py`
-- [ ] T072 [US5] Run live normal/repeated/drift/unavailable cleanup proof and capture evidence in `specs/039-native-runtime-adoption/evidence/cleanup.md`
+- [~] T072 [US5] (drift/repeat/unavailable proven live and three defects fixed; the normal case needs a machine that starts — see evidence/cleanup.md) Run live normal/repeated/drift/unavailable cleanup proof and capture evidence in `specs/039-native-runtime-adoption/evidence/cleanup.md`
 
 **Checkpoint**: Native destroy is conservative, repeat-safe, and independently recoverable.
 

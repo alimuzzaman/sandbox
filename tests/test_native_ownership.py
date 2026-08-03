@@ -10,6 +10,24 @@ class TestNativeOwnership(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         return NativeRepository(Path(temporary.name) / "state.json")
 
+    def test_unreadable_state_is_an_explained_error_not_empty_state(self):
+        # This file is the only record of which host resources are ours, so
+        # treating an unreadable one as "nothing owned" would orphan all of them.
+        # A run under sudo leaves it root-owned, which is how it becomes
+        # unreadable in the first place, so the message names that cause.
+        import os
+
+        repository = self.repository()
+        repository.put_owned("backends", "sb-demo", {"owner": "o", "last_applied": "a" * 64})
+        os.chmod(repository.path, 0o000)
+        self.addCleanup(os.chmod, repository.path, 0o600)
+        if os.access(repository.path, os.R_OK):
+            self.skipTest("running as root; the mode cannot make the file unreadable")
+
+        with self.assertRaises(ValueError) as raised:
+            repository.snapshot()
+        self.assertIn("sudo", str(raised.exception))
+
     def test_atomic_locked_updates_do_not_lose_instances(self):
         repository = self.repository()
         threads = [threading.Thread(target=repository.put_owned,

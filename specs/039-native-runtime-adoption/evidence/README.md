@@ -15,7 +15,8 @@ commands and do not make an adapter adoptable by themselves.
 | `ubuntu-nginx.md` | Ubuntu 24.04 | pending | required for managed promotion |
 | `ubuntu-apache.md` | Ubuntu 24.04 | pending | required for managed promotion |
 | `ubuntu-package-coexistence.md` | Ubuntu 24.04 | pending | required for managed promotion |
-| `cleanup.md` | Ubuntu 24.04 | pending | required for managed promotion |
+| `cleanup.md` | Ubuntu 24.04 | partial | drift/repeat/unavailable proven live; normal case blocked by the payload boundary |
+| `payload-boundary.md` | Ubuntu 24.04 | partial | two isolation-contract decisions open (T047) |
 
 ## Current gate
 

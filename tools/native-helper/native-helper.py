@@ -768,6 +768,20 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
     return files, units
 
 
+def _namespaced_config_test(mountpoint, *command):
+    """Run a web-server config test in a private netns holding every local address.
+
+    The machine's veth address exists only once the machine runs, but nginx and
+    Apache bind their listen sockets during a config test. `ip_nonlocal_bind`
+    inside a throwaway namespace lets the test bind any address without touching
+    the host's networking.
+    """
+    script = ("ip link set dev lo up; sysctl -q -w net.ipv4.ip_nonlocal_bind=1; "
+              "sysctl -q -w net.ipv6.ip_nonlocal_bind=1; "
+              + " ".join(("exec", "chroot", str(mountpoint), *command)))
+    return ("unshare", "--net", "--", "/bin/sh", "-c", script)
+
+
 def image_configure(machine_id, policy_digest, web_server, service_digest):
     _policy_path, policy = applied_policy(machine_id, policy_digest)
     if web_server not in {"nginx", "apache"}: fail("native web server is invalid")
@@ -823,7 +837,12 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
               "native PHP-FPM configuration failed")
     if web_server == "nginx":
         remove_rootfs_entry(mountpoint, "/etc/nginx/sites-enabled/default")
-        run_fixed(("chroot", str(mountpoint), "/usr/sbin/nginx", "-t"),
+        # `nginx -t` binds its listen sockets, and the machine's address does
+        # not exist in the host namespace at image-configure time, so the test
+        # failed with "Cannot assign requested address" on every provision.
+        # Validate inside a throwaway network namespace that owns the address,
+        # which is exactly the context the service will run in.
+        run_fixed(_namespaced_config_test(mountpoint, "/usr/sbin/nginx", "-t"),
                   "native nginx configuration failed")
     else:
         remove_rootfs_entry(mountpoint, "/etc/apache2/sites-enabled/000-default.conf")
@@ -834,7 +853,7 @@ def image_configure(machine_id, policy_digest, web_server, service_digest):
         run_fixed(("chroot", str(mountpoint), "/usr/sbin/a2enmod",
                    "proxy", "proxy_fcgi", "rewrite", "setenvif"),
                   "native Apache module configuration failed")
-        run_fixed(("chroot", str(mountpoint), "/usr/sbin/apache2ctl", "configtest"),
+        run_fixed(_namespaced_config_test(mountpoint, "/usr/sbin/apache2ctl", "configtest"),
                   "native Apache configuration failed")
     write_rootfs(mountpoint, "/etc/sandbox-native/services.json",
                  json.dumps(marker_value, sort_keys=True) + "\n", 0o600)

@@ -185,3 +185,31 @@ class TestImageMountAllowsDeviceNodes(unittest.TestCase):
 
     def test_nosuid_is_still_enforced(self):
         self.assertIn("nosuid", self._mount_line())
+
+
+class TestWebConfigTestRunsInANamespace(unittest.TestCase):
+    """nginx and Apache bind their listen sockets during a config test, and the
+    machine's address does not exist yet at image-configure time."""
+
+    def _source(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                / "native-helper.py").read_text()
+
+    def test_config_test_is_wrapped_in_a_private_namespace(self):
+        source = self._source()
+        self.assertIn("def _namespaced_config_test", source)
+        self.assertIn('"unshare", "--net"', source)
+
+    def test_it_enables_nonlocal_bind_only_inside_that_namespace(self):
+        source = self._source()
+        block = source.split("def _namespaced_config_test", 1)[1].split("\n\n\n", 1)[0]
+        self.assertIn("ip_nonlocal_bind=1", block)
+        self.assertIn("unshare", block)
+
+    def test_the_web_servers_use_it(self):
+        source = self._source()
+        self.assertIn('_namespaced_config_test(mountpoint, "/usr/sbin/nginx", "-t")', source)
+        self.assertIn('_namespaced_config_test(mountpoint, "/usr/sbin/apache2ctl", "configtest")',
+                      source)

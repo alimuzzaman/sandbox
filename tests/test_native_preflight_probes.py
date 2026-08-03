@@ -405,3 +405,25 @@ class TestGuestServicesStripSysAdmin(unittest.TestCase):
 
         payload = compile_apparmor_profile("sb-test", "d" * 64).split("profile payload", 1)[1]
         self.assertNotIn("capability sys_admin", payload)
+
+
+class TestMachineStartWaitsForUsability(unittest.TestCase):
+    """Every probe after start goes through `machinectl shell`, which needs the
+    guest's system bus; returning as soon as the unit existed raced the boot."""
+
+    def _source(self) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                / "native-helper.py").read_text()
+
+    def test_start_waits_for_the_system_bus(self):
+        block = self._source().split('run_fixed(command, "native machine start failed")', 1)[1]
+        block = block.split("def machine_status", 1)[0]
+        self.assertIn('"machinectl", "shell", "--quiet", machine_id', block)
+        self.assertIn("system bus", block)
+
+    def test_it_fails_closed_if_the_machine_exits(self):
+        block = self._source().split('run_fixed(command, "native machine start failed")', 1)[1]
+        block = block.split("def machine_status", 1)[0]
+        self.assertIn("exited before its system bus", block)

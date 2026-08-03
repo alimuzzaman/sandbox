@@ -3300,9 +3300,23 @@ def machine_start_minimal(machine_id, digest):
     run_fixed(command, "native machine start failed")
     for _attempt in range(100):
         if unit_description(unit) == description and observed_link(policy["network"]["veth"]):
-            return
+            break
         time.sleep(0.1)
-    fail("native machine did not expose its owned unit and veth")
+    else:
+        fail("native machine did not expose its owned unit and veth")
+    # "Started" must mean "usable": every later probe runs through
+    # `machinectl shell`, which needs the guest's system bus. Without this wait
+    # provisioning raced the guest's boot and failed with "There is no system
+    # bus in container ...".
+    for _attempt in range(300):
+        probe = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                              "/bin/true"))
+        if probe.returncode == 0:
+            return
+        if unit_description(unit) != description:
+            fail("native machine exited before its system bus was available")
+        time.sleep(0.2)
+    fail("native machine did not expose a system bus")
 
 
 def machine_status(machine_id, digest):

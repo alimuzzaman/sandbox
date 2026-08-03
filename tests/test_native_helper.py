@@ -1042,7 +1042,10 @@ class TestNativeHelper(unittest.TestCase):
 
     def test_apparmor_has_root_only_setup_and_irreversible_payload_profiles(self):
         profile = module().compile_apparmor_profile("sb-0123456789ab", "a" * 64)
-        self.assertIn("/usr/bin/bwrap cx -> bwrap", profile)
+        # Addressed by full name: `cx` would look for `guest//bwrap`, which
+        # does not exist, and the kernel refuses the exec outright.
+        self.assertIn("/usr/bin/bwrap px -> sandbox-native-sb-0123456789ab//bwrap",
+                      profile)
         self.assertIn("profile bwrap", profile)
         self.assertIn("userns,", profile)
         self.assertIn("/** cx -> payload", profile)

@@ -80,6 +80,11 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount fstype=tmpfs -> /tmp/,
     mount fstype=cgroup2 -> /sys/fs/cgroup/,
     mount fstype=mqueue -> /dev/mqueue/,
+    # systemd-logind binds the machine's own root aside while it sets up its
+    # private mounts, and the credential generator needs a ramfs for secrets
+    # that must never reach disk. Both stay inside the machine's namespace.
+    mount options=(rw,rbind) -> /run/systemd/mount-rootfs/,
+    mount fstype=ramfs -> /dev/shm/,
     mount options=(rw,remount) -> /run/lock/,
     # Propagation changes only: no filesystem is attached, and the machine's
     # own init needs them during early boot (`(sd-gens)` makes / rslave).
@@ -100,7 +105,11 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     umount /tmp/,
     / r,
     /** rwklm,
-    /usr/bin/bwrap cx -> bwrap,
+    # `cx` names a child of the CURRENT profile, so the kernel looked for
+    # `guest//bwrap` and refused the exec with "profile transition not found".
+    # The bwrap profile is a sibling child of the top-level profile, so it has
+    # to be addressed by its full name.
+    /usr/bin/bwrap px -> {profile}//bwrap,
     /** ix,
   }}
 

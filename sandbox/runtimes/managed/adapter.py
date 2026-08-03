@@ -240,28 +240,37 @@ class ManagedNativeCleanup:
                 self._retain(machine_id, owner, name, "runtime_unavailable",
                              expected=expected_digest)
                 break
-            observed_digest = canonical_digest(observed)
+            # An observation says both which resource it is and whether the host
+            # still has it. Absence is a positive read, never an inference from a
+            # failed one: an unreachable observer is still `runtime_unavailable`
+            # above. Distinguishing the two is what lets cleanup converge past a
+            # resource provisioning never created, without ever assuming that an
+            # earlier attempt's leftovers are gone.
+            present = observed.get("state", "present") != "absent"
+            observed_digest = canonical_digest(
+                {key: value for key, value in observed.items() if key != "state"})
             if observed_digest != expected_digest:
                 residual.append(name)
                 self._retain(machine_id, owner, name, "owned_state_drifted",
                              expected=expected_digest, observed=observed_digest)
                 break
             action = getattr(component, verb, None)
-            if not callable(action):
+            if present and not callable(action):
                 residual.append(name)
                 self._retain(machine_id, owner, name, "cleanup_unsupported",
                              expected=expected_digest, observed=observed_digest)
                 break
-            try:
-                ok, changed = self._outcome(action(entry["plan"]))
-            except (OSError, RuntimeError, TypeError, ValueError):
-                ok, changed = False, False
-            mutated = mutated or changed
-            if not ok:
-                residual.append(name)
-                self._retain(machine_id, owner, name, "cleanup_failed",
-                             expected=expected_digest, observed=observed_digest)
-                break
+            if present:
+                try:
+                    ok, changed = self._outcome(action(entry["plan"]))
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    ok, changed = False, False
+                mutated = mutated or changed
+                if not ok:
+                    residual.append(name)
+                    self._retain(machine_id, owner, name, "cleanup_failed",
+                                 expected=expected_digest, observed=observed_digest)
+                    break
             removed.append(name)
             self._clear_resource_recovery(machine_id, owner, name)
             self.repository.put_recovery(progress_key, {
@@ -348,7 +357,7 @@ class ManagedProvisioner:
         if callable(remove):
             remove(f"provision:{plan['machine_id']}:{step}")
 
-    def _persist_incomplete_plan(self, plan, rollback, *, untouched=()):
+    def _persist_incomplete_plan(self, plan, rollback):
         policy = plan["policy"]
         record = {
             "owner": self._rollback_owner(plan),
@@ -357,15 +366,14 @@ class ManagedProvisioner:
         }
         record["last_applied"] = canonical_digest(record)
         self.repository.put_owned("policies", plan["machine_id"], record)
-        # A resource the provisioning never reached has nothing to remove, and
-        # saying so is what lets cleanup get past it. Without this, cleanup
-        # stopped at the first never-created resource, reported it as a residual
-        # forever, and the surviving policy record then failed every later
-        # provisioning at its first step.
+        # Only a removal this run actually performed is recorded as progress.
+        # Whether a resource the provisioning never reached still exists is a
+        # question for the host, not for this attempt's bookkeeping: an earlier
+        # attempt shares the machine id, so its leftovers are real and cleanup
+        # must observe them rather than be told in advance they are gone.
         removed = tuple(dict.fromkeys(
-            [item["step"] for item in rollback
-             if item.get("ok") and item.get("step") in ManagedNativeCleanup.ORDER]
-            + [name for name in ManagedNativeCleanup.ORDER if name in set(untouched)]
+            item["step"] for item in rollback
+            if item.get("ok") and item.get("step") in ManagedNativeCleanup.ORDER
         ))
         self.repository.put_recovery(f"cleanup-progress:{plan['machine_id']}", {
             "owner": self._rollback_owner(plan),
@@ -496,11 +504,7 @@ class ManagedProvisioner:
                 # `cleanup_plan_unavailable` and the next ensure refused with
                 # drifted owned state, so the operator had to delete host
                 # objects by hand.
-                self._persist_incomplete_plan(
-                    plan, [],
-                    untouched=[name for name in ManagedNativeCleanup.ORDER
-                               if name not in set(completed)],
-                )
+                self._persist_incomplete_plan(plan, [])
                 return {"ok": False, "state": "blocked", "mutated": True,
                         "machine_id": plan.get("machine_id"),
                         "completed": tuple(completed),

@@ -91,6 +91,14 @@ class ManagedCleanupObserver:
             raise RuntimeError("managed cleanup observation is invalid") from exc
         expected = {"machine_id": machine_id, "policy_digest": policy_digest,
                     "resource": resource, "resource_digest": resource_digest}
-        if value != expected:
+        if not isinstance(value, dict):
             raise RuntimeError("managed cleanup observation is invalid")
-        return value
+        # `state` reports whether the host still has the resource. Anything other
+        # than the two known verdicts is a malformed observation, not a hint to
+        # be interpreted: cleanup must never guess what an unknown state means.
+        state = value.get("state", "present")
+        if state not in {"present", "absent"}:
+            raise RuntimeError("managed cleanup observation is invalid")
+        if {key: item for key, item in value.items() if key != "state"} != expected:
+            raise RuntimeError("managed cleanup observation is invalid")
+        return {**expected, "state": state}

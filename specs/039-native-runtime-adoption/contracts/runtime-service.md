@@ -75,6 +75,25 @@ Successful C preflight/ensure returns only:
 The clean-URL orchestration then invokes A/B. Destroy asks A to clean its route separately;
 C removes only unchanged C-owned backend/runtime state.
 
+## Cleanup observation
+
+Each resource is observed before it is removed, and every observation answers two
+questions: which resource this is, and whether the host still has it. There are
+exactly three outcomes, and conflating any two of them breaks cleanup:
+
+| Outcome | Meaning | Cleanup |
+|---|---|---|
+| `present`, identity matches | the resource exists and is still ours | remove it |
+| `present`, identity differs | it exists but changed | stop; retain `owned_state_drifted` |
+| `absent` | a successful read found nothing to remove | count as removed, continue |
+| observation failed | the question went unanswered | stop; retain `runtime_unavailable` |
+
+`absent` is always a positive read — a registry that listed no such machine, a
+profile file that does not exist while the profile list was readable without it.
+It is never inferred from a failed read, and never from provisioning bookkeeping:
+machine identities are reused across attempts, so a resource this attempt did not
+create may still exist from an earlier one and must be observed, not assumed gone.
+
 ## Mode immutability
 
 If a registry/runtime record with data exists and requested mode/adapter differs, every

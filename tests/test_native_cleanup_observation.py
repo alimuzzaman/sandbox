@@ -1,0 +1,181 @@
+"""Cleanup observation must tell absence and drift apart (039 T072).
+
+A resource that provisioning never created, or that an earlier cleanup already
+removed, has nothing left to remove; reporting it as changed ownership stopped
+cleanup there permanently. Absence is only ever a successful read that found
+nothing — a read that could not be made stays a residual.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+
+def _helper():
+    path = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+            / "native-helper.py")
+    spec = importlib.util.spec_from_file_location("native_helper_cleanup", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _result(returncode=0, stdout=""):
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+
+class TestAbsenceIsRead(unittest.TestCase):
+    def setUp(self):
+        self.helper = _helper()
+
+    def test_an_unanswered_unit_query_is_not_absence(self):
+        with mock.patch.object(self.helper, "run_optional",
+                               return_value=_result(returncode=1)):
+            self.assertFalse(self.helper.unit_absent("sandbox-native-sb-1.service"))
+
+    def test_only_a_not_found_load_state_proves_the_unit_absent(self):
+        for value, expected in (("not-found", True), ("loaded", False), ("", False)):
+            with self.subTest(load_state=value):
+                with mock.patch.object(self.helper, "run_optional",
+                                       return_value=_result(stdout=value + "\n")):
+                    self.assertIs(self.helper.unit_absent("unit"), expected)
+
+    def test_an_unlistable_registry_is_not_an_absent_machine(self):
+        with mock.patch.object(self.helper, "run_optional",
+                               return_value=_result(returncode=1)):
+            self.assertFalse(self.helper.machine_absent("sb-0123456789ab"))
+
+    def test_a_registered_machine_is_present_even_with_no_unit(self):
+        def run_optional(argv, **_kwargs):
+            if argv[:2] == ("machinectl", "list"):
+                return _result(stdout="sb-0123456789ab container systemd-nspawn\n")
+            return _result(stdout="not-found\n")
+
+        with mock.patch.object(self.helper, "run_optional", run_optional):
+            self.assertFalse(self.helper.machine_absent("sb-0123456789ab"))
+
+    def test_a_machine_missing_from_both_reads_is_absent(self):
+        def run_optional(argv, **_kwargs):
+            if argv[:2] == ("machinectl", "list"):
+                return _result(stdout="other-machine container systemd-nspawn\n")
+            return _result(stdout="not-found\n")
+
+        with mock.patch.object(self.helper, "run_optional", run_optional):
+            self.assertTrue(self.helper.machine_absent("sb-0123456789ab"))
+
+    def test_guest_units_are_absent_only_when_the_guest_answered_for_each(self):
+        cases = (
+            (_result(returncode=1), False),           # the guest never answered
+            (_result(stdout="not-found\n"), False),   # one answer for two units
+            (_result(stdout="not-found\nloaded\n"), False),
+            (_result(stdout="not-found\nnot-found\n"), True),
+        )
+        for outcome, expected in cases:
+            with self.subTest(stdout=outcome.stdout, returncode=outcome.returncode):
+                with mock.patch.object(self.helper, "run_optional", return_value=outcome):
+                    self.assertIs(
+                        self.helper.guest_units_absent(
+                            "sb-0123456789ab", ("nginx.service", "php-fpm.service")),
+                        expected)
+
+
+class TestCleanupObserveReportsState(unittest.TestCase):
+    def setUp(self):
+        self.helper = _helper()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def observe(self, resource):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            self.helper.cleanup_observe(resource, "sb-0123456789ab", "d" * 64, "d" * 64)
+        return json.loads(stream.getvalue())
+
+    def _policy(self, size):
+        return mock.patch.object(
+            self.helper, "applied_policy",
+            return_value=(self.root / "policy.json", {"root_image": {"bytes": size}}))
+
+    def test_a_missing_image_is_absent_and_a_wrong_one_still_fails(self):
+        image = self.root / "root.img"
+        mountpoint = self.root / "mount"
+        paths = mock.patch.object(self.helper, "image_paths",
+                                  return_value=(self.root, image, mountpoint))
+        with self._policy(16), paths, mock.patch.object(self.helper, "digest_value",
+                                                        side_effect=lambda value: value):
+            self.assertEqual(self.observe("image")["state"], "absent")
+            image.write_bytes(b"x" * 8)
+            image.chmod(0o600)
+            with self.assertRaises(SystemExit):
+                self.observe("image")
+
+    def test_a_missing_profile_is_absent_and_a_changed_one_still_fails(self):
+        destination = self.root / "sandbox-native-sb-0123456789ab"
+        patches = (
+            self._policy(16),
+            mock.patch.object(self.helper, "APPARMOR_ROOT", self.root),
+            mock.patch.object(self.helper, "compile_apparmor_profile", return_value="profile"),
+            mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value),
+        )
+        with patches[0], patches[1], patches[2], patches[3]:
+            with mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=False):
+                self.assertEqual(self.observe("policy")["state"], "absent")
+            destination.write_text("something else")
+            with mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=True), \
+                    self.assertRaises(SystemExit):
+                self.observe("policy")
+
+    def test_an_unreadable_apparmor_state_is_never_reported_absent(self):
+        patches = (
+            self._policy(16),
+            mock.patch.object(self.helper, "APPARMOR_ROOT", self.root),
+            mock.patch.object(self.helper, "compile_apparmor_profile", return_value="profile"),
+            mock.patch.object(self.helper, "digest_value", side_effect=lambda value: value),
+            mock.patch.object(self.helper, "_apparmor_loaded_state", return_value=None),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            with self.assertRaises(SystemExit):
+                self.observe("policy")
+
+
+class TestObserverAcceptsState(unittest.TestCase):
+    def observer(self, payload):
+        from sandbox.runtimes.managed.helper import ManagedCleanupObserver
+
+        class Process:
+            def run(self, _argv, **_kwargs):
+                return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+        return ManagedCleanupObserver(process=Process(), helper="/helper")
+
+    def identity(self, **extra):
+        return {"machine_id": "sb-1", "policy_digest": "d", "resource": "image",
+                "resource_digest": "d", **extra}
+
+    def test_a_stateless_observation_is_still_read_as_present(self):
+        observed = self.observer(self.identity())("image", {"machine_id": "sb-1",
+                                                            "policy_digest": "d"})
+        self.assertEqual(observed["state"], "present")
+
+    def test_absence_is_carried_through_to_the_coordinator(self):
+        observed = self.observer(self.identity(state="absent"))(
+            "image", {"machine_id": "sb-1", "policy_digest": "d"})
+        self.assertEqual(observed["state"], "absent")
+
+    def test_a_mismatched_identity_is_still_rejected(self):
+        with self.assertRaises(RuntimeError):
+            self.observer(self.identity(machine_id="sb-other", state="absent"))(
+                "image", {"machine_id": "sb-1", "policy_digest": "d"})
+
+
+if __name__ == "__main__":
+    unittest.main()

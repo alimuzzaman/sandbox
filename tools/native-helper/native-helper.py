@@ -2820,7 +2820,8 @@ def services_stop(machine_id, policy_digest, service_digest):
                   "native service mask failed")
 
 
-def database_ownership_matches(machine_id):
+def database_objects(machine_id):
+    """The Sandbox-owned schemas and user that the guest database actually has."""
     production, tests, user = database_names(machine_id)
     query = ("SELECT CONCAT('db:',SCHEMA_NAME) FROM information_schema.SCHEMATA "
              f"WHERE SCHEMA_NAME IN ('{production}','{tests}') UNION ALL "
@@ -2830,64 +2831,135 @@ def database_ownership_matches(machine_id):
         "/usr/bin/mariadb", "--protocol=socket", "--socket=/run/mysqld/mysqld.sock",
         "--batch", "--skip-column-names", "--execute", query,
     ), "native database ownership observation failed")
-    return sorted((result.stdout or "").splitlines()) == sorted((
+    return sorted(line for line in (result.stdout or "").splitlines() if line.strip())
+
+
+def database_ownership_matches(machine_id):
+    production, tests, user = database_names(machine_id)
+    return database_objects(machine_id) == sorted((
         f"db:{production}", f"db:{tests}", f"user:{user}",
     ))
 
 
+def unit_absent(unit):
+    """True only when systemd answered and said it has no such unit.
+
+    A read that could not be made is never absence.  `run_optional` returning
+    non-zero means the question went unanswered, and cleanup must retry rather
+    than conclude there is nothing to remove.
+    """
+    loaded = run_optional(("systemctl", "show", unit, "--property=LoadState", "--value"))
+    return loaded.returncode == 0 and (loaded.stdout or "").strip() == "not-found"
+
+
+def machine_absent(machine_id):
+    """True when the registry lists no such machine and its unit does not exist."""
+    listed = run_optional(("machinectl", "list", "--no-legend"))
+    if listed.returncode != 0:
+        return False
+    registered = {line.split()[0] for line in (listed.stdout or "").splitlines() if line.split()}
+    unit, _profile = machine_names(machine_id)
+    return machine_id not in registered and unit_absent(unit)
+
+
+def guest_units_absent(machine_id, units):
+    """True when the guest answered and knows none of the named units."""
+    units = tuple(units)
+    result = run_optional(guest_command(machine_id, (
+        "/usr/bin/systemctl", "show", *units, "--property=LoadState", "--value")))
+    if result.returncode != 0:
+        return False
+    states = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    return len(states) == len(units) and set(states) == {"not-found"}
+
+
 def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
+    """Report which resource this is and whether the host still has it.
+
+    Absence and drift are different answers.  A resource provisioning never
+    created, or that an earlier cleanup already removed, has nothing left to
+    remove and must not stall the run; a resource that exists but no longer
+    matches is drift and must.  Every absence below is a successful read that
+    found nothing, never a failed read: an unreachable observer still raises.
+    """
     _path, policy = applied_policy(machine_id, policy_digest)
     resource_digest = digest_value(resource_digest)
+    state = "present"
     if resource == "services":
-        services_ownership_status(machine_id, policy_digest, resource_digest)
+        _policy, units = service_plan(machine_id, policy_digest, resource_digest)
+        if machine_absent(machine_id) or guest_units_absent(machine_id, units):
+            state = "absent"
+        else:
+            services_ownership_status(machine_id, policy_digest, resource_digest)
     elif resource == "database":
-        database_status(machine_id, policy_digest)
-        if not database_ownership_matches(machine_id):
-            fail("native database ownership changed")
+        if machine_absent(machine_id) or guest_units_absent(machine_id, ("mariadb.service",)):
+            state = "absent"
+        else:
+            database_status(machine_id, policy_digest)
+            production, tests, user = database_names(machine_id)
+            objects = database_objects(machine_id)
+            if not objects:
+                state = "absent"
+            elif objects != sorted((f"db:{production}", f"db:{tests}", f"user:{user}")):
+                fail("native database ownership changed")
     elif resource == "machine":
         unit, _profile = machine_names(machine_id)
-        expected = f"Sandbox native {machine_id} policy {policy_digest}"
-        active = run_optional(("systemctl", "is-active", unit))
-        observed = run_optional(("machinectl", "show", machine_id))
-        if (unit_description(unit) != expected or active.returncode != 0 or
-                (active.stdout or "").strip() != "active" or observed.returncode != 0):
-            fail("native machine ownership changed")
+        if machine_absent(machine_id):
+            state = "absent"
+        else:
+            expected = f"Sandbox native {machine_id} policy {policy_digest}"
+            active = run_optional(("systemctl", "is-active", unit))
+            observed = run_optional(("machinectl", "show", machine_id))
+            if (unit_description(unit) != expected or active.returncode != 0 or
+                    (active.stdout or "").strip() != "active" or observed.returncode != 0):
+                fail("native machine ownership changed")
     elif resource == "network":
         network = policy["network"]
         table, alias_prefix = network_names(machine_id)
         record = network_state_record(machine_id)
-        grant_record = installed_grant_record(machine_id, policy_digest) \
-            if network.get("grant_authority") == GRANT_AUTHORITY else None
-        grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
-        grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
-        broker = any(not grant["revoked"] for grant in grants)
-        if (record != desired_network_state(machine_id, policy_digest, network, broker=broker,
-                                             grant_digest=grant_digest)
-                or observed_nft_table(table) is None
-                or observed_nft_table(table).get("comment") != record["marker"]
-                or not nft_state_matches_record(observed_nft_state(table), record)):
-            fail("native network ownership changed")
+        observed_table = observed_nft_table(table)
         link = observed_link(network["veth"])
-        if link is not None and link.get("ifalias") != alias_prefix:
-            fail("native veth ownership changed")
+        if record is None and observed_table is None and link is None:
+            state = "absent"
+        else:
+            grant_record = installed_grant_record(machine_id, policy_digest) \
+                if network.get("grant_authority") == GRANT_AUTHORITY else None
+            grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
+            grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
+            broker = any(not grant["revoked"] for grant in grants)
+            if (record != desired_network_state(machine_id, policy_digest, network,
+                                                broker=broker, grant_digest=grant_digest)
+                    or observed_table is None
+                    or observed_table.get("comment") != record["marker"]
+                    or not nft_state_matches_record(observed_nft_state(table), record)):
+                fail("native network ownership changed")
+            if link is not None and link.get("ifalias") != alias_prefix:
+                fail("native veth ownership changed")
     elif resource in {"mount", "image"}:
         _instance, image, mountpoint = image_paths(machine_id)
-        if (mountpoint.is_symlink() or os.path.ismount(mountpoint) or not image.is_file()
+        if (not os.path.lexists(image) and not mountpoint.is_symlink()
+                and not os.path.ismount(mountpoint)):
+            state = "absent"
+        elif (mountpoint.is_symlink() or os.path.ismount(mountpoint) or not image.is_file()
                 or image.is_symlink() or image.stat().st_uid != 0
                 or image.stat().st_mode & 0o077
                 or image.stat().st_size != policy["root_image"]["bytes"]):
             fail("native image ownership changed")
     elif resource == "policy":
         destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
-        expected = compile_apparmor_profile(machine_id, policy_digest).encode()
-        if (not destination.is_file() or destination.is_symlink()
-                or destination.stat().st_uid != 0 or destination.read_bytes() != expected
-                or not apparmor_loaded(machine_id)):
-            fail("native policy ownership changed")
+        if not os.path.lexists(destination) and _apparmor_loaded_state(machine_id) is False:
+            state = "absent"
+        else:
+            expected = compile_apparmor_profile(machine_id, policy_digest).encode()
+            if (not destination.is_file() or destination.is_symlink()
+                    or destination.stat().st_uid != 0 or destination.read_bytes() != expected
+                    or not apparmor_loaded(machine_id)):
+                fail("native policy ownership changed")
     else:
         fail("native cleanup resource is invalid")
     print(json.dumps({"machine_id": machine_id, "policy_digest": policy_digest,
-                      "resource": resource, "resource_digest": resource_digest},
+                      "resource": resource, "resource_digest": resource_digest,
+                      "state": state},
                      sort_keys=True, separators=(",", ":")))
 
 

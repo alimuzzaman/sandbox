@@ -269,3 +269,46 @@ class TestImageShipsAnInit(unittest.TestCase):
 
         self.assertNotIn("nginx", IMAGE_COMMON)
         self.assertNotIn("apache2", IMAGE_COMMON)
+
+
+class TestNoNewPrivilegesLivesOnTheGuestUnits(unittest.TestCase):
+    """Under NoNewPrivileges the kernel refuses an AppArmor domain transition,
+    so the flag on the MACHINE blocked the guest init from entering the tighter
+    //guest profile. It belongs on the guest's own service units, which are
+    every untrusted execution path inside the machine."""
+
+    def _files(self):
+        from sandbox.runtimes.managed.services import compile_service_files
+
+        files, units = compile_service_files(
+            "10.1.2.3", 64, 60, web_server="nginx", backend_port=8080)
+        return files, units
+
+    def test_machine_command_no_longer_sets_it(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        machine_block = source.split("nspawn = [", 1)[1].split("]", 1)[0]
+        self.assertNotIn("--no-new-privileges", machine_block)
+
+    def test_every_guest_service_unit_sets_it(self):
+        files, units = self._files()
+        for unit in units:
+            path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
+            with self.subTest(unit=unit):
+                self.assertIn(path, files)
+                self.assertIn("NoNewPrivileges=yes", files[path])
+
+    def test_the_php_pool_unit_keeps_it_too(self):
+        files, _units = self._files()
+        self.assertIn(
+            "NoNewPrivileges=yes",
+            files["/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf"])
+
+    def test_transient_exec_payloads_keep_it(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        self.assertIn('"--property=NoNewPrivileges=yes"', source)

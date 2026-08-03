@@ -98,9 +98,17 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              "/usr/local/libexec/sandbox-wordpress-cron":
              _persistent_payload(cron_command, writable_targets),
         "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
-             "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o www-data -g www-data -m 0770 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
+             "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o www-data -g www-data -m 0770 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
              "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n"}
+    # NoNewPrivileges lives on the guest's own units, not on the machine: on the
+    # machine it blocks the AppArmor transition into the tighter `//guest`
+    # profile, and the guest init can never exec. Every untrusted execution path
+    # inside the guest is one of these services, so the flag still covers them.
+    for unit in units:
+        files[f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"] = (
+            "[Service]\nNoNewPrivileges=yes\n"
+        )
     if web_server == "nginx":
         files["/etc/nginx/nginx.conf"] = nginx
     else:

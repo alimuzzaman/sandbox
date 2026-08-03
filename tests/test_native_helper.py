@@ -999,7 +999,10 @@ class TestNativeHelper(unittest.TestCase):
         self.assertIn("--settings=no", command)
         self.assertIn("--private-network", command)
         self.assertIn("--network-veth-extra=ve-sb-demo:host0", command)
-        self.assertIn("--no-new-privileges=yes", command)
+        # NoNewPrivileges is applied by the guest's own service units instead:
+        # on the machine it makes the kernel refuse the AppArmor transition into
+        # the tighter //guest profile, so the guest init could never exec.
+        self.assertNotIn("--no-new-privileges=yes", command)
         system_filter = next(value for value in command
                              if value.startswith("--system-call-filter="))
         self.assertNotIn("~@mount", system_filter)

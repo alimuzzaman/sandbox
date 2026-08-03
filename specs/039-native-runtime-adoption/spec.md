@@ -10,6 +10,18 @@
 
 ## Clarifications
 
+### Session 2026-08-03
+
+- Q: NoNewPrivileges on the machine and the AppArmor `//guest` transition cannot both
+  apply — under NNP the kernel refuses a domain transition, so the guest init never
+  execs. Which control carries the boundary? → A: Keep the tighter `//guest` AppArmor
+  profile on the machine, and apply NoNewPrivileges to the guest's own service units
+  (web server, PHP-FPM, database, cron) and to every transient exec payload. Both
+  controls then hold where they matter: the machine is confined by the stricter
+  profile, and every untrusted execution path still runs with NoNewPrivileges. This
+  matches the session-2026-08-01 answer that managed-native uses standard Docker-class
+  controls.
+
 ### Session 2026-08-02
 
 - Q: Does native runtime adoption change the default clean-URL stack? → A: No. Docker Compose
@@ -283,6 +295,10 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
 - **FR-042**: Selecting Herd, Valet, or another incumbent whose own server owns the required
   endpoints MUST be treated as an explicit opt-in that hands ingress to that product; C MUST
   NOT cause that handover implicitly for a project that did not select it.
+- **FR-043**: NoNewPrivileges MUST apply to every untrusted execution path inside a managed
+  instance — the web server, PHP-FPM, the database, cron, and each transient exec payload —
+  and MUST NOT be applied to the machine itself, where it would prevent the guest from
+  entering its confining AppArmor profile.
 
 ### Key Entities
 

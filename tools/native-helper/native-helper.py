@@ -2395,14 +2395,30 @@ def probe_payload_state(machine_id, policy):
     text = result.stdout or ""
 
     def invalid(marker):
-        # Name the missing section and show what the probe actually produced.
-        # A fixed sentence made a denied exec, a truncated read, and a genuinely
-        # malformed section indistinguishable, which cost a whole debug cycle.
+        # Name the missing section, show what the probe produced, and answer the
+        # first two questions any failure here raises: which profile confines a
+        # plain guest command, and whether a MINIMAL bwrap can set up at all.
+        # Without those, an AppArmor transition failure and a kernel namespace
+        # restriction produce the same opaque message.
         seen = (text.strip() or (result.stderr or "").strip()
                 or "no output on stdout or stderr")
-        seen = seen if len(seen) <= 600 else "…" + seen[-599:]
+        seen = seen if len(seen) <= 400 else "…" + seen[-399:]
+        confinement = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                    "/usr/bin/cat", "/proc/self/attr/current"))
+        minimal = run_optional(("machinectl", "shell", "--quiet", machine_id,
+                                "/usr/bin/bwrap", "--ro-bind", "/", "/",
+                                "--proc", "/proc", "--", "/bin/true"))
+
+        def summary(name, outcome):
+            detail = ((outcome.stdout or "").strip()
+                      or (outcome.stderr or "").strip() or "no output")
+            detail = detail if len(detail) <= 200 else "…" + detail[-199:]
+            return f"{name}: rc={outcome.returncode} {detail}"
+
         fail(f"native payload isolation probe is invalid: no {marker} section; "
-             f"probe produced: {seen}")
+             f"probe produced: {seen}; "
+             f"{summary('guest confinement', confinement)}; "
+             f"{summary('minimal bwrap', minimal)}")
 
     parts = text.split("---profile---\n", 1)
     if len(parts) != 2: invalid("profile")

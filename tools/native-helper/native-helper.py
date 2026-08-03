@@ -504,7 +504,15 @@ def run_fixed(argv, message, *, input_text=None, timeout=120, environment=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             input=input_text, text=True, timeout=timeout, check=False,
                             close_fds=True, env=environment or FIXED_ENVIRONMENT)
-    if result.returncode != 0: fail(message)
+    if result.returncode != 0:
+        # Include the tail of the command's own output. A fixed sentence alone
+        # made a missing package, a network refusal, and a policy rejection
+        # indistinguishable to the operator.
+        detail = ((result.stderr or "").strip() or (result.stdout or "").strip())
+        if detail:
+            detail = detail if len(detail) <= 600 else "…" + detail[-599:]
+            fail(f"{message}: {detail}")
+        fail(message)
     return result
 
 

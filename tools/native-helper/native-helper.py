@@ -1053,7 +1053,12 @@ def image_mount(machine_id, digest):
         fail("native mountpoint is foreign")
     mountpoint.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.path.ismount(mountpoint): fail("native image is already mounted")
-    run_fixed(("mount", "-o", "loop,nodev,nosuid,noatime", str(image), str(mountpoint)),
+    # `nodev` blocks the device nodes debootstrap creates while populating the
+    # rootfs (its very first step is a /dev/null probe), so bootstrap failed on
+    # every host with "cannot create .../test-dev-null: Permission denied". The
+    # guest's device access is governed by the machine's cgroup DeviceAllow
+    # policy and nspawn, not by this mount flag; `nosuid` still stands.
+    run_fixed(("mount", "-o", "loop,nosuid,noatime", str(image), str(mountpoint)),
               "native image mount failed")
     if not os.path.ismount(mountpoint): fail("native image mount was not observed")
 

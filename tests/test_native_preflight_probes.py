@@ -165,3 +165,23 @@ class TestManagedFailuresAreLegible(unittest.TestCase):
         guard = source.split("entry = dict(result.data)", 1)[1].split("if getattr(args", 1)[0]
         self.assertIn('"instance" not in entry', guard)
         self.assertIn("instance is not ready", guard)
+
+
+class TestImageMountAllowsDeviceNodes(unittest.TestCase):
+    """debootstrap's first act is a /dev/null probe inside the new rootfs, so a
+    `nodev` mount made bootstrap impossible on every host. Device access for the
+    running guest is governed by cgroup DeviceAllow and nspawn, not this flag."""
+
+    def _mount_line(self) -> str:
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                  / "native-helper.py").read_text()
+        return next(line for line in source.splitlines()
+                    if '"mount", "-o"' in line)
+
+    def test_nodev_is_not_used_for_the_owned_image(self):
+        self.assertNotIn("nodev", self._mount_line())
+
+    def test_nosuid_is_still_enforced(self):
+        self.assertIn("nosuid", self._mount_line())

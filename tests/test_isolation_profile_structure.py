@@ -102,7 +102,10 @@ class TestProfileNamesResolve(unittest.TestCase):
 
     def test_the_payload_profile_keeps_its_escape_denials(self):
         payload = self.bodies[f"{ROOT_PROFILE}//payload"]
-        self.assertNotIn("userns,", payload)
+        # `deny userns,` is a denial, not a grant: assert the payload has no
+        # GRANT while requiring the explicit denial.
+        self.assertNotIn("\n    userns,", payload)
+        self.assertIn("deny userns,", payload)
         self.assertNotIn("mount,", payload)
         self.assertNotIn("capability sys_admin,", payload)
         for denial in ("deny /run/systemd/** rwklmx,", "deny /run/dbus/** rwklmx,"):

@@ -47,7 +47,10 @@ class TestIsolationAppArmor(unittest.TestCase):
         # (`bwrap//payload`), which does not exist, so every payload exec is
         # refused with "profile transition not found".
         self.assertIn("/** px -> sandbox-native-sb-0123456789ab//payload", bwrap)
-        self.assertNotIn("userns,", payload)
+        # `deny userns,` is a denial, not a grant: assert the payload has no
+        # GRANT while requiring the explicit denial.
+        self.assertNotIn("\n    userns,", payload)
+        self.assertIn("deny userns,", payload)
         self.assertNotIn("mount,", payload)
         self.assertNotIn("capability sys_admin", payload)
 

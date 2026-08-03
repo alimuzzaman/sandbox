@@ -225,3 +225,30 @@ class TestMachineUnitArguments(unittest.TestCase):
                   / "native-helper.py").read_text()
         self.assertIn('"--link-journal=no"', source)
         self.assertNotIn("--link-journal=no-host", source)
+
+
+class TestApparmorProfileAllowsTheRootDirectory(unittest.TestCase):
+    """`/**` matches paths BELOW the root, never the root directory entry, so
+    systemd-nspawn was denied `open /` while pinning the outer mount namespace
+    and no managed machine could start."""
+
+    def _profile(self) -> str:
+        import importlib.util
+        from pathlib import Path
+
+        path = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                / "native-helper.py")
+        spec = importlib.util.spec_from_file_location("native_helper_profile", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.compile_apparmor_profile("sb-test", "d" * 64)
+
+    def test_root_directory_is_readable(self):
+        self.assertIn("\n  / r,\n", self._profile())
+
+    def test_guest_profile_also_allows_it(self):
+        self.assertIn("\n    / r,\n", self._profile())
+
+    def test_the_broad_rule_is_still_present(self):
+        profile = self._profile()
+        self.assertIn("/** rwklm,", profile)

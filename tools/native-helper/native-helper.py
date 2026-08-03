@@ -2991,6 +2991,11 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
   signal,
   dbus,
   userns,
+  # `/**` matches paths BELOW the root, never the root directory itself, so
+  # systemd-nspawn was denied `open /` while pinning the outer mount namespace
+  # and every machine failed to start. Read access to the directory entry is
+  # not access to its contents, which `/**` already governs.
+  / r,
   /** rwklm,
   /** ix,
   /usr/lib/systemd/systemd cx -> guest,
@@ -3016,6 +3021,7 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix dgram,
     signal,
     dbus,
+    / r,
     /** rwklm,
     /usr/bin/bwrap cx -> bwrap,
     /** ix,

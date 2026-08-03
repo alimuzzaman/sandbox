@@ -3162,6 +3162,12 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix stream,
     network unix dgram,
     signal,
+    # `/**` matches paths BELOW the root, never the root directory entry, so
+    # bwrap was denied `open /` while binding it as the sandbox root and every
+    # payload died before it started. Read access to the entry is not access to
+    # its contents, which `/**` already governs. (Same defect as the supervisor
+    # profile's `/ r,`; it was fixed there and missed here.)
+    / r,
     /** rwklm,
     /** cx -> payload,
   }}
@@ -3173,6 +3179,9 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix stream,
     network unix dgram,
     signal,
+    # The root directory entry, for the same reason as the bwrap profile. The
+    # payload's access to everything below it is governed by the rules here.
+    / r,
     /** rwklm,
     /run/credentials/sandbox/* r,
     deny /run/credentials/** wklmx,

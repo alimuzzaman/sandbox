@@ -54,6 +54,31 @@ class _KVAction(argparse.Action):
 
 
 
+
+def _implied_project_dir(instance: str | None, label: str | None):
+    """The project root a bare `apply` clearly meant, and where it came from.
+
+    A named instance is the strongest signal — the registry knows which project
+    owns it. Otherwise, standing inside a registered project means that project.
+    Returns (root, source) or (None, None) when neither applies, which keeps the
+    historical whole-sandbox behaviour for `./sb apply` run outside any project.
+    """
+    sc = _core()
+    if instance:
+        entry = sc.registry_find_instance(instance) or {}
+        root = entry.get("root")
+        if root and Path(root).is_dir():
+            return str(root), f"registered root of instance '{instance}'"
+        return None, None
+    try:
+        root = sc.find_project_root(Path.cwd())
+    except Exception:
+        return None, None
+    if root and sc.registry_get(str(root), label=label):
+        return str(root), "current working directory"
+    return None, None
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="sandbox",
@@ -739,6 +764,17 @@ Per-project (each plugin carries its own sandbox.config.json):
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
     PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
+    # `apply` reconciles a PROJECT. Without --project-dir it used to fall
+    # through to the sandbox.yml setup alias even when the caller had named an
+    # instance or was standing inside a project — so `apply --instance X`
+    # silently re-applied the whole sandbox instead of reconciling X. Infer the
+    # project the caller clearly meant, and say which one was chosen.
+    if args.cmd == "apply" and not getattr(args, "project_dir", None):
+        implied, source = _implied_project_dir(explicit, cwd_label)
+        if implied:
+            args.project_dir = implied
+            info(f"apply: reconciling the project at {implied} ({source}). "
+                 "Run `./sb setup` for the whole sandbox instead.")
     # `apply --project-dir` is project-routed (reconcile); bare `apply` is the
     # sandbox.yml setup alias.
     if args.cmd == "apply" and getattr(args, "project_dir", None):

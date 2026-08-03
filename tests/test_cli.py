@@ -259,3 +259,65 @@ class TestResolutionGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestApplyProjectInference(unittest.TestCase):
+    """`apply` reconciles a PROJECT. Without --project-dir it used to fall
+    through to the whole-sandbox setup alias, so `apply --instance X` quietly
+    re-applied everything instead of reconciling X."""
+
+    def _cli(self):
+        from sandbox import cli
+        return cli
+
+    def test_named_instance_resolves_its_registered_root(self):
+        from unittest import mock
+
+        cli = self._cli()
+        core = mock.Mock()
+        core.registry_find_instance.return_value = {"root": "/projects/demo"}
+        with mock.patch.object(cli, "_core", return_value=core), \
+             mock.patch.object(cli.Path, "is_dir", return_value=True):
+            root, source = cli._implied_project_dir("demo", None)
+        self.assertEqual(root, "/projects/demo")
+        self.assertIn("demo", source)
+
+    def test_unknown_instance_keeps_the_whole_sandbox_behaviour(self):
+        from unittest import mock
+
+        cli = self._cli()
+        core = mock.Mock()
+        core.registry_find_instance.return_value = None
+        with mock.patch.object(cli, "_core", return_value=core):
+            self.assertEqual(cli._implied_project_dir("missing", None), (None, None))
+
+    def test_registered_cwd_project_is_used_when_no_instance_is_named(self):
+        from unittest import mock
+
+        cli = self._cli()
+        core = mock.Mock()
+        core.find_project_root.return_value = "/projects/demo"
+        core.registry_get.return_value = {"instance": "demo"}
+        with mock.patch.object(cli, "_core", return_value=core):
+            root, source = cli._implied_project_dir(None, None)
+        self.assertEqual(root, "/projects/demo")
+        self.assertEqual(source, "current working directory")
+
+    def test_unregistered_cwd_falls_back_to_the_setup_alias(self):
+        from unittest import mock
+
+        cli = self._cli()
+        core = mock.Mock()
+        core.find_project_root.return_value = "/somewhere"
+        core.registry_get.return_value = None
+        with mock.patch.object(cli, "_core", return_value=core):
+            self.assertEqual(cli._implied_project_dir(None, None), (None, None))
+
+    def test_a_cwd_outside_any_project_falls_back(self):
+        from unittest import mock
+
+        cli = self._cli()
+        core = mock.Mock()
+        core.find_project_root.side_effect = ValueError("not a project")
+        with mock.patch.object(cli, "_core", return_value=core):
+            self.assertEqual(cli._implied_project_dir(None, None), (None, None))

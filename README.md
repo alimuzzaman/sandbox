@@ -501,6 +501,7 @@ usable at `http://localhost:<port>` when the selected provider is unavailable. S
 ```bash
 sandbox init              # in a plugin dir: config + instance + test harness
 sandbox ensure            # boot/refresh this project's instance
+sandbox apply             # reconcile THIS project in place (cwd or --instance)
 sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit args after --)
 ./sb focus <plugin>       # mark which plugin is focused (for Claude)
 ./sb open [admin|site|mail]  # open in browser (default: admin)

@@ -110,7 +110,7 @@ foreign baselines remain unchanged.
 - [X] T044 [US2] Implement Noble rootfs bootstrap and exact PHP 8.3/MariaDB 10.11/nginx-or-Apache image configuration in `sandbox/runtimes/managed/image.py`
 - [X] T045 [US2] Implement Apache 2.4 managed service configuration and veth backend parity in `sandbox/runtimes/managed/services.py`
 - [X] T046 [US2] Implement `native support|preflight|install-plan|install` CLI JSON/text contracts in `sandbox/commands/native.py`
-- [~] T047 [US2] Run live install, full hostile/exhaustion, and lifecycle proof for nginx and Apache with foreign host services and capture evidence in `specs/039-native-runtime-adoption/evidence/ubuntu-nginx.md`, `specs/039-native-runtime-adoption/evidence/ubuntu-package-coexistence.md`, and `specs/039-native-runtime-adoption/evidence/ubuntu-apache.md`
+- [~] T047 [US2] (prerequisites + bootstrap + configure proven live; machine start blocked in nspawn mount setup — see evidence/managed-provisioning.md) Run live install, full hostile/exhaustion, and lifecycle proof for nginx and Apache with foreign host services and capture evidence in `specs/039-native-runtime-adoption/evidence/ubuntu-nginx.md`, `specs/039-native-runtime-adoption/evidence/ubuntu-package-coexistence.md`, and `specs/039-native-runtime-adoption/evidence/ubuntu-apache.md`
 
 **Checkpoint**: Both managed web variants install and operate without starting a WordPress
 container or altering host service baselines.

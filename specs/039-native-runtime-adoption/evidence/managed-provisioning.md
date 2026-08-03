@@ -15,12 +15,50 @@ package transaction        planned and applied      host packages already presen
 image bootstrap            SUCCEEDS                 debootstrap noble into the owned image
 image configure            SUCCEEDS                 PHP-FPM, nginx and Apache config tests pass
 machine unit start         SUCCEEDS                 nspawn sets up the namespaces
-guest init exec            FAILS                    AppArmor denies the profile transition
+guest init exec            SUCCEEDS                 enters the //guest AppArmor profile
+guest API filesystems      FAILS                    EPERM mounting tmpfs on /run/lock
 isolation verification     not reached
 hostile probe suite        not reached
 ```
 
-## The remaining blocker is a policy decision, not a bug
+## The policy decision, now made
+
+Two controls the spec asks for could not both apply, and the resolution is recorded in the
+spec as clarifications plus FR-043 and FR-044:
+
+- **NoNewPrivileges** moved from the machine to the guest's own service units (web server,
+  PHP-FPM, database, cron) and every transient exec payload. On the machine it makes the
+  kernel refuse the AppArmor domain transition, so the guest could never enter its
+  confining profile — the stronger control.
+- **CAP_SYS_ADMIN and the mount syscalls** stay inside the machine's private user
+  namespace, where they cannot act on the host, because systemd as PID 1 cannot mount its
+  API filesystems without them. The guest profile gets no general mount primitive (only
+  typed, target-scoped API mounts) and the payload profile still denies mount, userns and
+  sys_admin outright.
+
+With those in place the guest init execs and enters `//guest`.
+
+## The remaining blocker
+
+```text
+systemd-nspawn: Failed to mount tmpfs (type tmpfs) on /run/lock
+  (MS_NOSUID|MS_NODEV|MS_NOEXEC "mode=1777,size=5242880"): Operation not permitted
+```
+
+EPERM, with no AppArmor denial in the audit log, so the refusal is the kernel's. The
+machine runs with `--private-users=<base>:<count> --private-users-ownership=map`, i.e. an
+idmapped mount of the owned ext4 image. The open question is why a tmpfs child mount inside
+that namespace is refused: a locked parent-mount flag and idmapped-mount interaction are the
+two candidates.
+
+The decisive experiment is to boot the same image with `--private-users=no` and then
+re-introduce the user namespace: that separates "userns/idmap" from "capability or seccomp",
+both of which have now been eliminated by direct test (`@mount` is in the filter,
+CAP_SYS_ADMIN is retained, and no AppArmor rule denies it).
+
+`--private-users-ownership=chown` was tried as an alternative and is strictly worse on this
+host: it fails earlier with "Failed to adjust UID/GID shift of OS tree: Operation not
+permitted".
 
 ```text
 apparmor="DENIED" operation="exec" info="no new privs" error=-1
@@ -72,6 +110,15 @@ Each of these blocked provisioning on ANY host, and none were visible from unit 
 9. **The image shipped no init.** It is booted with `--boot`, but debootstrap's minbase
    variant contains no systemd, so the machine died instantly on exec. systemd,
    systemd-sysv, and dbus are now part of the image package set.
+10. **NoNewPrivileges on the machine** blocked the AppArmor transition into `//guest`
+    (FR-043).
+11. **The guest profile had no mount rule at all**, so its init could not mount its API
+    filesystems; typed, target-scoped rules were added without granting a general mount
+    primitive (FR-044).
+12. **CAP_SYS_ADMIN was dropped at the machine level**, which PID 1 needs inside its own
+    user namespace (FR-044).
+13. **`@system-service` does not include the mount syscalls**, so the seccomp filter
+    refused them even once the capability and AppArmor rules allowed them.
 
 Two diagnosability fixes were needed to see any of this: the helper's fixed-command runner
 discarded the failing command's output, and `./sb ensure` crashed with `KeyError: 'instance'`

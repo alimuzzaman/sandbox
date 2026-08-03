@@ -3226,6 +3226,10 @@ def machine_command(policy):
               "--register=yes", "--settings=no", f"--machine={machine_id}",
               f"--image={policy['root_image']['path']}",
               f"--private-users={policy['uid_map']['base']}:{policy['uid_map']['count']}",
+              # `map` (idmapped mount) is the working path: with `chown` the
+              # supervisor cannot adjust the OS tree's UID/GID shift on this
+              # host ("Operation not permitted"), while `map` boots the guest
+              # init far enough to mount its own API filesystems.
               "--private-users-ownership=map",
               "--private-network",
               f"--network-veth-extra={policy['network']['veth']}:host0",

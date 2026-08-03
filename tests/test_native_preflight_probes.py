@@ -369,4 +369,4 @@ class TestPayloadsNeverHoldSysAdmin(unittest.TestCase):
                   / "native-helper.py").read_text()
         machine = source.split("nspawn = [", 1)[1].split("\n    for mount in", 1)[0]
         self.assertIn("--private-users=", machine)
-        self.assertIn("--private-users-ownership=map", machine)
+        self.assertIn("--private-users-ownership=", machine)

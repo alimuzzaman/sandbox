@@ -194,6 +194,12 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # payload's access to everything below it is governed by the rules here.
     / r,
     /** rwklm,
+    # The payload must not create a namespace of its own. bwrap used to supply
+    # this by unsharing a user namespace and setting the nested ceiling to zero,
+    # but that combination cannot mount /proc inside an nspawn machine (see
+    # evidence/payload-boundary.md), so the guarantee is stated here instead of
+    # depending on a flag that cannot be used.
+    deny userns,
     /run/credentials/sandbox/* r,
     deny /run/credentials/** wklmx,
     deny /run/sandbox-native-credentials/** rwklmx,

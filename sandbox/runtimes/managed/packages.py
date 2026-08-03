@@ -18,6 +18,11 @@ IMAGE_COMMON = (
     "mariadb-server", "mariadb-client", "cron", "ca-certificates", "curl", "unzip",
     "git", "composer",
     "bubblewrap", "iproute2", "util-linux",
+    # The image is booted with `systemd-nspawn --boot`, and debootstrap's
+    # minbase variant ships no init: without these the machine started and
+    # immediately died with "execv(/usr/lib/systemd/systemd, /lib/systemd/systemd,
+    # /sbin/init) failed: No such file or directory".
+    "systemd", "systemd-sysv", "dbus",
 )
 EXPECTED_PREFIXES = {"php8.3-fpm": "8.3", "php8.3-cli": "8.3",
                      "mariadb-server": "1:10.11", "nginx": "1.24", "apache2": "2.4"}

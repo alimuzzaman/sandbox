@@ -252,3 +252,20 @@ class TestApparmorProfileAllowsTheRootDirectory(unittest.TestCase):
     def test_the_broad_rule_is_still_present(self):
         profile = self._profile()
         self.assertIn("/** rwklm,", profile)
+
+
+class TestImageShipsAnInit(unittest.TestCase):
+    """The image is booted with `systemd-nspawn --boot`, and debootstrap's
+    minbase variant ships no init, so the machine died immediately."""
+
+    def test_systemd_is_in_the_image_package_set(self):
+        from sandbox.runtimes.managed.packages import IMAGE_COMMON
+
+        for package in ("systemd", "systemd-sysv"):
+            self.assertIn(package, IMAGE_COMMON)
+
+    def test_the_web_server_is_still_chosen_per_instance(self):
+        from sandbox.runtimes.managed.packages import IMAGE_COMMON
+
+        self.assertNotIn("nginx", IMAGE_COMMON)
+        self.assertNotIn("apache2", IMAGE_COMMON)

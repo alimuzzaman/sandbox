@@ -3029,6 +3029,20 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     network unix dgram,
     signal,
     dbus,
+    # The guest's PID 1 mounts its own API filesystems inside the machine's
+    # mount namespace; without them it dies with "Failed to mount tmpfs ...
+    # Permission denied" before any service starts. These are enumerated by
+    # type and target on purpose: the guest must not hold a general mount
+    # primitive, which stays with the bwrap profile.
+    mount fstype=tmpfs -> /run/lock/,
+    mount fstype=tmpfs -> /dev/shm/,
+    mount fstype=tmpfs -> /tmp/,
+    mount fstype=cgroup2 -> /sys/fs/cgroup/,
+    mount fstype=mqueue -> /dev/mqueue/,
+    mount options=(rw,remount) -> /run/lock/,
+    umount /run/lock/,
+    umount /dev/shm/,
+    umount /tmp/,
     / r,
     /** rwklm,
     /usr/bin/bwrap cx -> bwrap,

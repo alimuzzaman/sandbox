@@ -312,3 +312,37 @@ class TestNoNewPrivilegesLivesOnTheGuestUnits(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
                   / "native-helper.py").read_text()
         self.assertIn('"--property=NoNewPrivileges=yes"', source)
+
+
+class TestGuestProfileAllowsItsOwnApiMounts(unittest.TestCase):
+    """The guest's PID 1 mounts /run/lock and friends inside the machine's own
+    mount namespace; without a mount rule it died before any service started."""
+
+    def _profile(self) -> str:
+        from sandbox.isolation.apparmor import compile_apparmor_profile
+
+        return compile_apparmor_profile("sb-test", "d" * 64)
+
+    def test_guest_may_mount_only_the_api_filesystems(self):
+        guest = self._profile().split("profile guest", 1)[1].split("profile bwrap", 1)[0]
+        for rule in ("mount fstype=tmpfs -> /run/lock/,",
+                     "mount fstype=cgroup2 -> /sys/fs/cgroup/,",
+                     "mount fstype=tmpfs -> /dev/shm/,"):
+            self.assertIn(rule, guest)
+
+    def test_guest_has_no_blanket_mount_primitive(self):
+        guest = self._profile().split("profile guest", 1)[1].split("profile bwrap", 1)[0]
+        self.assertNotIn("\n    mount,\n", guest)
+        self.assertNotIn("\n    remount,\n", guest)
+
+    def test_helper_and_control_plane_agree(self):
+        import importlib.util
+        from pathlib import Path
+
+        path = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                / "native-helper.py")
+        spec = importlib.util.spec_from_file_location("native_helper_profile2", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.compile_apparmor_profile("sb-test", "d" * 64),
+                         self._profile())

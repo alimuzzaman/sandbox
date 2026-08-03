@@ -20,7 +20,11 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertIn("userns,", supervisor)
         self.assertIn("cx -> guest", supervisor)
         self.assertNotIn("userns,", guest)
-        self.assertNotIn("mount,", guest)
+        # No BLANKET mount primitive. The guest may mount only the enumerated
+        # API filesystems its own init needs inside the machine's namespace.
+        self.assertNotIn("\n    mount,\n", guest)
+        self.assertNotIn("\n    remount,\n", guest)
+        self.assertIn("mount fstype=tmpfs -> /run/lock/,", guest)
         self.assertNotIn("ptrace,", guest)
         self.assertNotIn("network netlink", guest)
         self.assertNotIn("network packet", guest)

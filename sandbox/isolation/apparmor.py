@@ -86,6 +86,14 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount options=(rw,rbind) -> /run/systemd/mount-rootfs/,
     mount options=(rw,rbind) -> /run/systemd/mount-rootfs/**,
     mount fstype=ramfs -> /dev/shm/,
+    # systemd-logind sets up a private namespace per session, and machinectl
+    # shell goes through logind: without these its sessions fail intermittently
+    # and every observation through them returns empty output, which reads as a
+    # broken probe rather than a denied mount.
+    mount fstype=proc -> /run/systemd/namespace-*/,
+    mount options=(rw,rbind) -> /run/systemd/namespace-*/,
+    umount /run/systemd/mount-rootfs/**,
+    umount /run/systemd/namespace-*/,
     mount options=(rw,remount) -> /run/lock/,
     # Propagation changes only: no filesystem is attached, and the machine's
     # own init needs them during early boot (`(sd-gens)` makes / rslave).

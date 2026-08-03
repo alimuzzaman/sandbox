@@ -26,9 +26,14 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertNotIn("\n    remount,\n", guest)
         self.assertIn("mount fstype=tmpfs -> /run/lock/,", guest)
         # A blanket ptrace would reach outside the machine; a read-only,
-        # same-profile peer rule cannot.
+        # same-profile peer rule cannot. The peer must name the CHILD profile
+        # and grant both directions: the kernel checks `read` on the reader and
+        # `readby` on the target, and an unresolvable `@variable` peer matches
+        # nothing at all.
         self.assertNotIn("\n    ptrace,\n", guest)
-        self.assertIn("ptrace (read) peer=@", guest)
+        self.assertIn("ptrace (read, readby) peer=sandbox-native-sb-0123456789ab//guest,",
+                      guest)
+        self.assertNotIn("peer=@", guest)
         self.assertNotIn("network netlink", guest)
         self.assertNotIn("network packet", guest)
         # The guest's PID 1 needs sys_admin for its typed API mounts; every

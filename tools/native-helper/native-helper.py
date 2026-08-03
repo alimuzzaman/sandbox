@@ -3052,9 +3052,19 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     signal,
     dbus,
     # Read-only ptrace confined to this machine's own processes (systemd's
-    # generators read sibling /proc entries). A blanket `ptrace,` would reach
-    # outside the machine and is deliberately absent.
-    ptrace (read) peer=@{profile},
+    # generators read sibling /proc entries, and PID 1 reads its children's).
+    # Three things were wrong here and each one alone breaks the guest:
+    #   * the emitted peer was `@sandbox-native-<id>` -- an AppArmor variable
+    #     reference to a variable that does not exist, so it matched nothing;
+    #   * the peer must name the CHILD profile, which is what confined
+    #     processes actually run under;
+    #   * the kernel checks `read` on the reader and `readby` on the target,
+    #     so granting only `read` still denies half of every pair.
+    # A denial here breaks systemd's session bookkeeping, and `machinectl
+    # shell` then exits 0 with no output at all. A blanket `ptrace,` would
+    # reach outside the machine and is deliberately absent.
+    ptrace (read, readby) peer={profile}//guest,
+    ptrace (read, readby) peer={profile},
     # The guest's PID 1 mounts its own API filesystems inside the machine's
     # mount namespace; without them it dies with "Failed to mount tmpfs ...
     # Permission denied" before any service starts. These are enumerated by
@@ -3072,8 +3082,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount options=(rw,rprivate),
     mount options=(rw,rshared),
     mount options=(rw,runbindable),
-    # Remounting an existing bind read-only only ever removes access.
+    # Remounting an existing bind read-only only ever removes access. Flag
+    # sets are matched exactly, so every combination the guest's generators
+    # actually use is listed: /dev/pts/ arrives without `nodev`, and / arrives
+    # with `nodev` but without `nosuid,noexec`.
     mount options=(ro,remount,bind),
+    mount options=(ro,remount,bind,nodev),
+    mount options=(ro,remount,bind,nosuid,noexec),
     mount options=(ro,remount,bind,nosuid,nodev,noexec),
     umount /run/lock/,
     umount /dev/shm/,

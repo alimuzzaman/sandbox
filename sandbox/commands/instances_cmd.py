@@ -102,6 +102,14 @@ def cmd_ensure(cfg, args) -> None:
     if isinstance(result, OperationError):
         die(result.message)
     entry = dict(result.data)
+    if not isinstance(entry, dict) or "instance" not in entry:
+        # A runtime that refuses returns its own typed result, not an instance
+        # record; crashing on the missing key hid the actual reason from the
+        # operator and printed a traceback instead.
+        reason = (entry or {}).get("reason") if isinstance(entry, dict) else None
+        detail = (entry or {}).get("error") if isinstance(entry, dict) else None
+        code = reason.get("code") if isinstance(reason, dict) else reason
+        die(f"instance is not ready: {code or detail or 'no reason reported'}")
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
         # parse it past any boot/progress output above.

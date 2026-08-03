@@ -73,5 +73,12 @@ class ManagedRootfs:
                                            plan["web_server"], services["digest"]), timeout=300)
         finally:
             path.unlink(missing_ok=True)
-        if result.returncode != 0: raise RuntimeError("managed Noble rootfs configuration failed")
+        if result.returncode != 0:
+            # Carry the helper's own words. Without them a failed bootstrap was
+            # indistinguishable from any other, and the operator had no way to
+            # tell a missing package from a policy refusal.
+            detail = ((result.stderr or result.stdout or "").strip() or "no output")
+            raise RuntimeError(
+                "managed Noble rootfs configuration failed: "
+                + (detail if len(detail) <= 800 else "…" + detail[-799:]))
         return {"ok": True, "mutated": True}

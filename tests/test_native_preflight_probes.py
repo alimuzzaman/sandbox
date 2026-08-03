@@ -121,3 +121,47 @@ class TestManagedAdapterRootsInTheRuntimeService(unittest.TestCase):
 
         self.assertIn("roots", captured)
         self.assertIn(Path.home().resolve(), {Path(r).resolve() for r in captured["roots"]})
+
+
+class TestManagedFailuresAreLegible(unittest.TestCase):
+    """A failing bootstrap and a refusing runtime must say why."""
+
+    def test_rootfs_failure_carries_the_helper_output(self):
+        from types import SimpleNamespace
+
+        from sandbox.runtimes.managed.image import ManagedRootfs
+
+        class Process:
+            @staticmethod
+            def run(argv, **_kwargs):
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr="native-helper: package plan digest mismatch")
+
+        class Stager:
+            @staticmethod
+            def stage(_plan):
+                import tempfile
+                from pathlib import Path
+
+                handle = tempfile.NamedTemporaryFile(delete=False)
+                handle.close()
+                return Path(handle.name)
+
+        rootfs = ManagedRootfs(process=Process(), helper="/usr/local/libexec/x",
+                               stager=Stager())
+        plan = {"package_plan": SimpleNamespace(simulation_digest="d"),
+                "machine_id": "m", "policy_digest": "p", "web_server": "nginx",
+                "services": {"digest": "s"}}
+        with self.assertRaises(RuntimeError) as caught:
+            rootfs.configure(plan)
+        self.assertIn("package plan digest mismatch", str(caught.exception))
+
+    def test_ensure_guards_against_a_missing_instance_record(self):
+        """Source-level guard: a refusing runtime must not crash the CLI."""
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "sandbox" / "commands"
+                  / "instances_cmd.py").read_text()
+        guard = source.split("entry = dict(result.data)", 1)[1].split("if getattr(args", 1)[0]
+        self.assertIn('"instance" not in entry', guard)
+        self.assertIn("instance is not ready", guard)

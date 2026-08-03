@@ -625,8 +625,17 @@ def runtime_service(cfg):
     native_repository = NativeRepository(
         sc.sandbox_base() / "runtime" / "native" / "state.json",
     )
+    # Same roots the rest of the product accepts: the checkout, the state base,
+    # and the developer's own project directories. Restricting the managed
+    # runtime to the first two made every real project fail ensure with
+    # "path is outside allowed roots".
+    managed_roots = [core.ROOT, core.BASE]
+    try:
+        managed_roots.extend(sc._allowed_roots())
+    except (AttributeError, OSError, RuntimeError):
+        pass
     managed_dependencies = managed_native_dependencies(
-        cfg, registry=sc, allowed_roots=(core.ROOT, core.BASE),
+        cfg, registry=sc, allowed_roots=tuple(dict.fromkeys(managed_roots)),
         native_repository=native_repository,
     )
     managed_declaration = next(

@@ -94,3 +94,30 @@ class TestManagedRuntimeAcceptsRealProjectRoots(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dependencies = wordpress_runtime_dependencies(None, allowed_roots=(tmp,))
             self.assertEqual(set(dependencies.paths.roots), {Path(tmp).resolve()})
+
+
+class TestManagedAdapterRootsInTheRuntimeService(unittest.TestCase):
+    """The composed runtime service must accept project directories too."""
+
+    def test_managed_dependencies_include_home(self):
+        from pathlib import Path
+
+        from sandbox.application import context
+
+        captured = {}
+        original = context.managed_native_dependencies
+
+        def spy(cfg, **kwargs):
+            captured["roots"] = kwargs.get("allowed_roots")
+            return original(cfg, **kwargs)
+
+        context.managed_native_dependencies = spy
+        try:
+            context.runtime_service(None)
+        except Exception:
+            pass
+        finally:
+            context.managed_native_dependencies = original
+
+        self.assertIn("roots", captured)
+        self.assertIn(Path.home().resolve(), {Path(r).resolve() for r in captured["roots"]})

@@ -100,7 +100,14 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
         "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
              "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o www-data -g www-data -m 0770 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
-             "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n"}
+             "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n",
+             # Declared writable targets under /run must exist from boot, not
+             # from the moment their service happens to start. /run is a tmpfs,
+             # so without this the isolation probe -- and any command run before
+             # the database is up -- dies in bwrap with "Can't find source path
+             # /run/mysqld".
+             "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
+             "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"}
     # NoNewPrivileges lives on the guest's own units, not on the machine: on the
     # machine it blocks the AppArmor transition into the tighter `//guest`
     # profile, and the guest init can never exec. Every untrusted execution path

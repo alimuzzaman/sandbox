@@ -678,8 +678,7 @@ def remove_rootfs_entry(root, relative):
 
 def _persistent_payload(command, writable_targets):
     argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
-            "--unshare-user", "--disable-userns", "--assert-userns-disabled",
-            "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
             "--ro-bind", "/", "/"]
     for target in sorted(PERSISTENT_WRITABLE_TARGETS | set(writable_targets)):
         argv.extend(("--bind", target, target))
@@ -2290,10 +2289,15 @@ def validated_execution_argv(policy, request):
     except ValueError: fail("native execution boundary is missing")
     command = argv[separator + 1:]
     if not command: fail("native execution command is missing")
+    # The privileged side requires the payload profile stack; it never takes the
+    # caller's word for it. Without this check a caller could simply omit the
+    # wrapper and run under the weaker bwrap profile.
+    prefix = payload_stack_prefix(policy["machine_id"])
+    if tuple(command[:len(prefix)]) != prefix or len(command) <= len(prefix):
+        fail("native payload profile stack is missing")
     writable = {item["target"] for item in policy["writable_mounts"]} | EXECUTION_WRITABLE_TARGETS
     expected = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
-                "--unshare-user", "--disable-userns", "--assert-userns-disabled",
-                "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+                "--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
                 "--ro-bind", "/", "/"]
     for target in sorted(writable): expected.extend(("--bind", target, target))
     expected.extend(("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
@@ -2359,11 +2363,33 @@ def execute_request(machine_id, policy_digest, request_digest):
     return bounded_guest_execution(machine_id, argv, timeout)
 
 
+def payload_stack_prefix(machine_id):
+    """The exec wrapper that stacks the payload profile onto the final exec.
+
+    A domain transition cannot be used: bubblewrap sets NoNewPrivileges before
+    exec, under which the kernel refuses one, and with any `px` rule present
+    every exec inside bubblewrap is refused before the payload runs at all.
+    Stacking yields the intersection of the bwrap and payload profiles, and is
+    irreversible because the payload profile grants no change_profile.
+
+    A failed write exits instead of continuing, because continuing would run the
+    payload under the weaker bwrap profile -- the one outcome this prevents.
+    `sh -c SCRIPT NAME ARG...` puts NAME in $0 and the payload in $@.
+    """
+    profile = f"sandbox-native-{machine_id}//payload"
+    script = (f"printf %s 'stack {profile}' > /proc/self/attr/apparmor/exec "
+              "|| exit 126\nexec \"$@\"\n")
+    return ("/bin/sh", "-c", script, "sandbox-payload")
+
+
+def stacked_payload_command(machine_id, command):
+    return (*payload_stack_prefix(machine_id), *tuple(command))
+
+
 def fixed_probe_bwrap(policy, command, credential_refs=()):
     writable = {item["target"] for item in policy["writable_mounts"]} | EXECUTION_WRITABLE_TARGETS
     argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
-            "--unshare-user", "--disable-userns", "--assert-userns-disabled",
-            "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
             "--ro-bind", "/", "/"]
     for target in sorted(writable): argv.extend(("--bind", target, target))
     if any(ref not in policy["credentials"] for ref in credential_refs):
@@ -2377,8 +2403,8 @@ def fixed_probe_bwrap(policy, command, credential_refs=()):
         argv.extend(("--ro-bind", source, target))
     argv.extend(("--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
                  "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
-    argv.extend(("--chdir", "/workspace", "--cap-drop", "ALL",
-                 "--uid", "33", "--gid", "33", "--", *command))
+    argv.extend(("--chdir", "/workspace", "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                 "--", *stacked_payload_command(policy["machine_id"], command)))
     return tuple(argv)
 
 
@@ -3270,10 +3296,15 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # the kernel checks both directions. Without this the setup fails only when
     # a fresh procfs is mounted, which made it look like a mount problem.
     ptrace (read, readby) peer={profile}//bwrap,
-    # `--disable-userns` writes the nested-userns ceiling inside its own user
-    # namespace; without this bwrap stops with "cannot open
-    # /proc/sys/user/max_user_namespaces: Permission denied".
-    /proc/sys/user/max_user_namespaces rw,
+    # Entering the payload profile is a STACK at the final exec, not a domain
+    # transition, so this profile must be allowed to stack onto itself. AppArmor
+    # 4 rejects every scoped form of the rule (`change_profile -> &<target>` does
+    # not load), so it is unqualified. That is an accepted trade, not an
+    # oversight: bwrap is the trusted root-only setup step (mode 0750) that
+    # already holds sys_admin, mount and userns, so the rule reaches nothing an
+    # attacker could not already reach here, and under NoNewPrivileges a change
+    # can only narrow. Recorded in contracts/managed-isolation.md (FR-047).
+    change_profile,
     # `/**` matches paths BELOW the root, never the root directory entry, so
     # bwrap was denied `open /` while binding it as the sandbox root and every
     # payload died before it started. Read access to the entry is not access to
@@ -3281,21 +3312,20 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # profile's `/ r,`; it was fixed there and missed here.)
     / r,
     /** rwklm,
-    # The payload transition is the open blocker. Three forms, three kernel
-    # verdicts on Ubuntu 24.04 / AppArmor 4, all from audit records:
+    # Inherit, do not transition. Three transition forms were tried on Ubuntu
+    # 24.04 / AppArmor 4 and all three were refused, from audit records:
     #   `cx -> payload`              -> "profile transition not found"
     #                                   (`cx` names a child of THIS profile)
     #   `px -> <full>//payload`      -> "no new privs": bwrap sets NNP before
     #                                   exec and the kernel refuses the domain
-    #                                   transition (this rule)
+    #                                   transition
     #   `px -> <full>//&payload`     -> "profile transition not found"
-    # The name is correct here; NNP is what blocks it. The likely resolution is
-    # to enter the payload profile with aa_change_onexec BEFORE exec'ing bwrap,
-    # while NNP is not yet set, rather than transitioning after it. That moves
-    # which layer applies the confinement, so it belongs in the isolation
-    # contract (FR-001/FR-044, data-model "Managed Isolation Policy"), not in
-    # a passing edit. See evidence/managed-provisioning.md.
-    /** px -> {profile}//payload,
+    # Worse, with ANY `px` rule present every exec inside bwrap is refused under
+    # NNP -- including /bin/sh, before the payload can run at all. The payload
+    # therefore inherits this profile and stacks its own at the final exec
+    # (FR-047), which yields the intersection of both and cannot be unstacked
+    # because the payload profile grants no change_profile.
+    /** ix,
   }}
 
   profile payload flags=(attach_disconnected,mediate_deleted) {{
@@ -3309,11 +3339,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # payload's access to everything below it is governed by the rules here.
     / r,
     /** rwklm,
-    # The payload must not create a namespace of its own. bwrap used to supply
-    # this by unsharing a user namespace and setting the nested ceiling to zero,
-    # but that combination cannot mount /proc inside an nspawn machine (see
-    # evidence/payload-boundary.md), so the guarantee is stated here instead of
-    # depending on a flag that cannot be used.
+    # The payload must not create a user namespace of its own. bwrap's own
+    # mechanism for this (`--disable-userns`) writes /proc/sys, which nspawn
+    # mounts read-only, so it can never succeed inside a machine. Ubuntu 24.04
+    # mediates unprivileged userns creation through AppArmor, so the rule is
+    # stated here; FR-046 requires it to be measured effective and a seccomp
+    # filter added if it is not.
+    deny userns create,
     deny userns,
     /run/credentials/sandbox/* r,
     deny /run/credentials/** wklmx,

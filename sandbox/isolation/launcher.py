@@ -54,6 +54,9 @@ class IsolationLauncher:
             credential_names=tuple(ref.rsplit("/", 1)[-1]
                                    for ref in context["credential_refs"]),
             command=tuple(command),
+            # The payload profile is entered by stacking at the final exec; the
+            # helper refuses an argv that does not carry the wrapper (FR-047).
+            payload_profile=f"sandbox-native-{policy.machine_id}//payload",
         )
         result = self.machine_exec(
             policy.machine_id, argv, context=context, timeout=timeout,

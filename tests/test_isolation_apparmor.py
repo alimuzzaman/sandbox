@@ -43,14 +43,25 @@ class TestIsolationAppArmor(unittest.TestCase):
         self.assertIn("userns,", bwrap)
         self.assertIn("mount,", bwrap)
         self.assertIn("capability sys_admin", bwrap)
-        # Full profile name: `cx` resolves to a child of the CURRENT profile
-        # (`bwrap//payload`), which does not exist, so every payload exec is
-        # refused with "profile transition not found".
-        self.assertIn("/** px -> sandbox-native-sb-0123456789ab//payload", bwrap)
+        # The payload profile is entered by stacking at the final exec, not by a
+        # domain transition. Every transition form was refused on Ubuntu 24.04,
+        # and with ANY `px` rule present bubblewrap sets NoNewPrivileges and then
+        # every exec inside it is refused -- including /bin/sh, before the
+        # payload runs at all (FR-047).
+        rules = [line for line in bwrap.splitlines() if not line.lstrip().startswith("#")]
+        self.assertFalse([line for line in rules if "px ->" in line])
+        self.assertIn("/** ix,", bwrap)
+        self.assertIn("change_profile,", bwrap)
+        # `--disable-userns` cannot work inside a machine, so the profile no
+        # longer carries the rule that only existed to let it write the ceiling.
+        self.assertNotIn("max_user_namespaces", bwrap)
         # `deny userns,` is a denial, not a grant: assert the payload has no
         # GRANT while requiring the explicit denial.
         self.assertNotIn("\n    userns,", payload)
+        self.assertIn("deny userns create,", payload)
         self.assertIn("deny userns,", payload)
+        # Stacking is irreversible only while the payload cannot change profile.
+        self.assertNotIn("change_profile", payload)
         self.assertNotIn("mount,", payload)
         self.assertNotIn("capability sys_admin", payload)
 

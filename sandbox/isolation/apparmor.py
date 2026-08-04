@@ -155,10 +155,15 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # the kernel checks both directions. Without this the setup fails only when
     # a fresh procfs is mounted, which made it look like a mount problem.
     ptrace (read, readby) peer={profile}//bwrap,
-    # `--disable-userns` writes the nested-userns ceiling inside its own user
-    # namespace; without this bwrap stops with "cannot open
-    # /proc/sys/user/max_user_namespaces: Permission denied".
-    /proc/sys/user/max_user_namespaces rw,
+    # Entering the payload profile is a STACK at the final exec, not a domain
+    # transition, so this profile must be allowed to stack onto itself. AppArmor
+    # 4 rejects every scoped form of the rule (`change_profile -> &<target>` does
+    # not load), so it is unqualified. That is an accepted trade, not an
+    # oversight: bwrap is the trusted root-only setup step (mode 0750) that
+    # already holds sys_admin, mount and userns, so the rule reaches nothing an
+    # attacker could not already reach here, and under NoNewPrivileges a change
+    # can only narrow. Recorded in contracts/managed-isolation.md (FR-047).
+    change_profile,
     # `/**` matches paths BELOW the root, never the root directory entry, so
     # bwrap was denied `open /` while binding it as the sandbox root and every
     # payload died before it started. Read access to the entry is not access to
@@ -166,21 +171,20 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # profile's `/ r,`; it was fixed there and missed here.)
     / r,
     /** rwklm,
-    # The payload transition is the open blocker. Three forms, three kernel
-    # verdicts on Ubuntu 24.04 / AppArmor 4, all from audit records:
+    # Inherit, do not transition. Three transition forms were tried on Ubuntu
+    # 24.04 / AppArmor 4 and all three were refused, from audit records:
     #   `cx -> payload`              -> "profile transition not found"
     #                                   (`cx` names a child of THIS profile)
     #   `px -> <full>//payload`      -> "no new privs": bwrap sets NNP before
     #                                   exec and the kernel refuses the domain
-    #                                   transition (this rule)
+    #                                   transition
     #   `px -> <full>//&payload`     -> "profile transition not found"
-    # The name is correct here; NNP is what blocks it. The likely resolution is
-    # to enter the payload profile with aa_change_onexec BEFORE exec'ing bwrap,
-    # while NNP is not yet set, rather than transitioning after it. That moves
-    # which layer applies the confinement, so it belongs in the isolation
-    # contract (FR-001/FR-044, data-model "Managed Isolation Policy"), not in
-    # a passing edit. See evidence/managed-provisioning.md.
-    /** px -> {profile}//payload,
+    # Worse, with ANY `px` rule present every exec inside bwrap is refused under
+    # NNP -- including /bin/sh, before the payload can run at all. The payload
+    # therefore inherits this profile and stacks its own at the final exec
+    # (FR-047), which yields the intersection of both and cannot be unstacked
+    # because the payload profile grants no change_profile.
+    /** ix,
   }}
 
   profile payload flags=(attach_disconnected,mediate_deleted) {{
@@ -194,11 +198,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # payload's access to everything below it is governed by the rules here.
     / r,
     /** rwklm,
-    # The payload must not create a namespace of its own. bwrap used to supply
-    # this by unsharing a user namespace and setting the nested ceiling to zero,
-    # but that combination cannot mount /proc inside an nspawn machine (see
-    # evidence/payload-boundary.md), so the guarantee is stated here instead of
-    # depending on a flag that cannot be used.
+    # The payload must not create a user namespace of its own. bwrap's own
+    # mechanism for this (`--disable-userns`) writes /proc/sys, which nspawn
+    # mounts read-only, so it can never succeed inside a machine. Ubuntu 24.04
+    # mediates unprivileged userns creation through AppArmor, so the rule is
+    # stated here; FR-046 requires it to be measured effective and a seccomp
+    # filter added if it is not.
+    deny userns create,
     deny userns,
     /run/credentials/sandbox/* r,
     deny /run/credentials/** wklmx,

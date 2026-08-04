@@ -329,6 +329,7 @@ class TestNativeHelper(unittest.TestCase):
                 argv = BubblewrapCompiler("/usr/bin/bwrap").argv(
                     environment=environment, writable_targets=writable,
                     command=command,
+                    payload_profile=f"sandbox-native-{policy['machine_id']}//payload",
                 )
                 return {"argv": list(argv), "environment": environment,
                         "credential_refs": [], "timeout": 30}
@@ -355,6 +356,31 @@ class TestNativeHelper(unittest.TestCase):
                 self.assertEqual(argv[-len(command):], command)
                 with self.assertRaises(SystemExit):
                     helper.validated_execution_argv(policy, request({}))
+
+    def test_execution_without_the_payload_profile_stack_is_refused(self):
+        # The privileged side enforces the stack rather than trusting the caller.
+        # Without this a caller could simply omit the wrapper and run the payload
+        # under the weaker bwrap profile, which is what the stack exists to
+        # prevent (FR-047).
+        from sandbox.isolation.bubblewrap import BubblewrapCompiler
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); helper, path = self.policy(root)
+            policy = json.loads(path.read_text())
+            policy["network"].pop("grants", None)
+            command = ("/usr/bin/php", "-r", "echo 1;")
+            writable = tuple({
+                *(item["target"] for item in policy["writable_mounts"]),
+                *helper.EXECUTION_WRITABLE_TARGETS,
+            })
+            unstacked = BubblewrapCompiler("/usr/bin/bwrap").argv(
+                environment={}, writable_targets=writable, command=command,
+            )
+            request = {"argv": list(unstacked), "environment": {},
+                       "credential_refs": [], "timeout": 30}
+            with mock.patch.object(helper, "installed_grant_record", return_value=None), \
+                    self.assertRaises(SystemExit):
+                helper.validated_execution_argv(policy, request)
 
     def test_policy_path_symlink_mode_owner_and_fixed_root_are_enforced(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1048,9 +1074,11 @@ class TestNativeHelper(unittest.TestCase):
                       profile)
         self.assertIn("profile bwrap", profile)
         self.assertIn("userns,", profile)
-        # Full name again: `cx` would look for a `bwrap//payload` that does
-        # not exist, and every payload exec is refused.
-        self.assertIn("/** px -> sandbox-native-sb-0123456789ab//payload", profile)
+        # The payload is entered by stacking at the final exec, not by a domain
+        # transition: bubblewrap sets NoNewPrivileges before exec, and with any
+        # `px` rule present the kernel then refuses every exec inside it.
+        self.assertNotIn("px -> sandbox-native-sb-0123456789ab//payload", profile)
+        self.assertIn("change_profile,", profile)
         self.assertIn("profile payload", profile)
         self.assertIn("deny /run/systemd/**", profile)
         self.assertIn("deny /run/sandbox-native-credentials/**", profile)
@@ -1250,12 +1278,14 @@ class TestNativeHelper(unittest.TestCase):
         from sandbox.isolation.bubblewrap import BubblewrapCompiler
         helper = module()
         reference = "native/sb-0123456789ab/db-credential"
-        policy = {"writable_mounts": (), "credentials": [reference]}
+        policy = {"writable_mounts": (), "credentials": [reference],
+                  "machine_id": "sb-0123456789ab"}
         command = ("/usr/local/bin/wp", "core", "is-installed")
         observed = helper.fixed_probe_bwrap(policy, command, (reference,))
         expected = BubblewrapCompiler("/usr/bin/bwrap").argv(
             writable_targets=helper.EXECUTION_WRITABLE_TARGETS,
             credential_names=("db-credential",), command=command,
+            payload_profile="sandbox-native-sb-0123456789ab//payload",
         )
         self.assertEqual(observed, expected)
         source = observed.index("/run/sandbox-native-credentials/db-credential")

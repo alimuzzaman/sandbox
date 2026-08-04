@@ -18,8 +18,7 @@ PERSISTENT_WRITABLE_TARGETS = frozenset({
 
 def _persistent_payload(command, writable_targets):
     argv = ["/usr/bin/bwrap", "--die-with-parent", "--new-session", "--clearenv",
-            "--unshare-user", "--disable-userns", "--assert-userns-disabled",
-            "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+            "--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
             "--ro-bind", "/", "/"]
     for target in sorted(PERSISTENT_WRITABLE_TARGETS | frozenset(writable_targets)):
         argv.extend(("--bind", target, target))

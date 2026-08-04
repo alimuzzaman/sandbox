@@ -36,7 +36,14 @@ class TestManagedServices(unittest.TestCase):
         cron = result["files"]["/usr/local/libexec/sandbox-wordpress-cron"]
         for launcher in (php, cron):
             self.assertIn("/usr/bin/bwrap", launcher)
-            self.assertIn("--unshare-user --disable-userns --assert-userns-disabled", launcher)
+            # `--disable-userns` and `--unshare-pid` are deliberately absent: both
+            # fail inside a machine, the first because it writes read-only
+            # /proc/sys and the second because a fresh procfs needs a fully
+            # visible /proc that nspawn masks (FR-045, FR-046).
+            self.assertIn("--unshare-user --unshare-ipc --unshare-uts --unshare-cgroup",
+                          launcher)
+            self.assertNotIn("--disable-userns", launcher)
+            self.assertNotIn("--unshare-pid", launcher)
             self.assertIn("--tmpfs /run/systemd", launcher)
             self.assertIn("--tmpfs /run/sandbox-native-credentials", launcher)
             self.assertIn("--cap-drop ALL --uid 33 --gid 33", launcher)

@@ -2962,7 +2962,10 @@ def resource_limits_match(machine_id, policy):
     php_output = (php.stdout or "") + "\n" + (php.stderr or "")
     php_children = re.findall(r"(?m)^.*pm\.max_children\s*=\s*([0-9]+)\s*$",
                               php_output)
-    php_listeners = re.findall(r"(?m)^.*listen\s*=\s*(\S+)\s*$", php_output)
+    # `\s` before `listen` on purpose: php-fpm -tt also prints
+    # "pm.status_listen = undefined", which `.*listen` matched as a second
+    # listener, so this comparison could never succeed against real output.
+    php_listeners = re.findall(r"(?m)^.*\slisten\s*=\s*(\S+)\s*$", php_output)
     php_terminate = re.findall(
         r"(?m)^.*request_terminate_timeout\s*=\s*([0-9]+)s\s*$", php_output,
     )

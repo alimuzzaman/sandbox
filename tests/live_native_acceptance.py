@@ -40,6 +40,12 @@ MAX_EVENTS = 384
 PREFLIGHT_LIMIT_SECONDS = 3.0
 STATUS_LIMIT_SECONDS = 3.0
 WARM_START_LIMIT_SECONDS = 20.0
+# A cold provision builds a fixed-size image, debootstraps a root filesystem and
+# installs the web/PHP/database packages inside it. That is minutes of work and is
+# not what the 20-second bound measures -- that bound is for a WARM ensure against an
+# instance that already exists. The flat 180-second child deadline had never been
+# exercised against a real cold build and killed every one of them.
+COLD_PROVISION_DEADLINE_SECONDS = 2400
 PROOF_CANDIDATE = "ubuntu-24.04-systemd-255"
 TERMINAL_JOBS = {"succeeded", "failed", "timed_out", "cancelled", "interrupted"}
 ENTRY_PATHS = (
@@ -333,7 +339,7 @@ def _native(
 def _ensure(runner: SbRunner, project: Project, *, operation: str) -> dict[str, Any]:
     return runner.call(
         project, "ensure", *_project_args(project), "--json",
-        timeout=180, operation=operation,
+        timeout=COLD_PROVISION_DEADLINE_SECONDS, operation=operation,
     )
 
 
@@ -935,6 +941,12 @@ def main(argv: list[str] | None = None) -> int:
         # Every hostile entry path begins from the canonical empty grant set.
         primary_config.set([])
         sibling_config.set([])
+        # One untimed call first. The bound is on how long a preflight takes, not on
+        # how long the interpreter takes to start: the very first `./sb` of a run pays
+        # for Python and the virtualenv, which put the cold call over three seconds and
+        # made the measurement about process startup rather than the check.
+        runner.call(None, "native", "support", "--json",
+                    timeout=COLD_PROVISION_DEADLINE_SECONDS, operation="warm_up")
         preflight_before = runner.call(None, "native", "preflight", "--project-dir", str(primary.root), "--json",
                                        timeout=3, operation="preflight_before")
         sibling_preflight = runner.call(None, "native", "preflight", "--project-dir", str(sibling.root), "--json",

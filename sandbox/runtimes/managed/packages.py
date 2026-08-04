@@ -6,6 +6,7 @@ from sandbox.runtimes.managed.models import PackageTransactionPlan
 import hashlib
 import json
 import os
+import tempfile
 import re
 from pathlib import Path
 import stat
@@ -190,15 +191,27 @@ class PackagePlanStager:
         self.root = Path(root)
 
     def stage(self, plan):
+        """Write the plan atomically, replacing a leftover from a killed run.
+
+        The name is derived from the invoking uid and the plan digest, so a run
+        that died before its cleanup left a file that every later run collided
+        with: `File exists: .../install-1000-<digest>.json`, permanently. It was
+        opened with O_EXCL to stop anyone pre-creating the path and redirecting
+        the write, which is worth keeping -- so the exclusive create happens on a
+        temporary name and the result is renamed into place. A rename replaces
+        whatever is at the target without following it, including a symlink.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / f"install-{os.getuid()}-{plan.simulation_digest}.json"
         payload = (json.dumps(plan.to_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode()
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+        descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=self.root)
         try:
+            os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as output:
                 output.write(payload); output.flush(); os.fsync(output.fileno())
+            os.replace(temporary, path)
         except BaseException:
-            path.unlink(missing_ok=True)
+            os.unlink(temporary) if os.path.exists(temporary) else None
             raise
         return path
 

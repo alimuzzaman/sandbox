@@ -382,6 +382,28 @@ class TestNativeHelper(unittest.TestCase):
                     self.assertRaises(SystemExit):
                 helper.validated_execution_argv(policy, request)
 
+    def test_a_leftover_staging_plan_from_a_killed_run_is_replaced(self):
+        # The name is derived from the uid and plan digest, so a run that died
+        # before its cleanup left a file every later run collided with -- and the
+        # collision was permanent: "File exists: .../install-1000-<digest>.json".
+        from sandbox.runtimes.managed.packages import PackagePlanStager
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            stager = PackagePlanStager(root=directory)
+            plan = SimpleNamespace(simulation_digest="d" * 64,
+                                   to_dict=lambda: {"packages": []})
+            first = stager.stage(plan)
+            self.assertTrue(first.exists())
+            # Left behind, exactly as a killed run leaves it.
+            second = stager.stage(plan)
+            self.assertEqual(first, second)
+            self.assertEqual(json.loads(second.read_text()), {"packages": []})
+            self.assertEqual(second.stat().st_mode & 0o777, 0o600)
+            # No temporary files survive.
+            self.assertEqual([item.name for item in Path(directory).iterdir()],
+                             [first.name])
+
     def test_policy_path_symlink_mode_owner_and_fixed_root_are_enforced(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); helper, path = self.policy(root)

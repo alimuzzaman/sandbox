@@ -439,8 +439,14 @@ class TestGuestServicesStripSysAdmin(unittest.TestCase):
             path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
             with self.subTest(unit=unit):
                 body = files[path]
+                # The capability is stripped from every unit without exception.
                 self.assertIn("CapabilityBoundingSet=~CAP_SYS_ADMIN", body)
-                self.assertIn("RestrictNamespaces=yes", body)
+                # The namespace restriction cannot go on a unit that launches
+                # bubblewrap, which has to unshare namespaces to build the
+                # sandbox; the payload inside it still gets no capabilities.
+                launchers = {"php8.3-fpm.service", "cron.service"}
+                if unit not in launchers:
+                    self.assertIn("RestrictNamespaces=yes", body)
 
     def test_payload_profile_still_denies_it(self):
         from sandbox.isolation.apparmor import compile_apparmor_profile

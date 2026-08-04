@@ -7,7 +7,7 @@ from __future__ import annotations
 # different version is one this product wrote under an earlier release, not a
 # tampered file: it is still ours to remove, but its bytes are not expected to
 # equal what we would write today.
-APPARMOR_PROFILE_VERSION = 6
+APPARMOR_PROFILE_VERSION = 7
 
 
 def compile_apparmor_profile(machine_id, policy_digest):
@@ -134,6 +134,10 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # Propagation changes only: no filesystem is attached, and the machine's
     # own init needs them during early boot (`(sd-gens)` makes / rslave).
     mount options=(rw,rslave),
+    # Non-recursive slave on systemd's incoming directory, which is how a unit
+    # stops its own mounts propagating back out to the machine. Scoped, because
+    # unlike the recursive forms above this one is only ever used there.
+    mount options=(rw,slave) -> /run/systemd/incoming/,
     mount options=(rw,rprivate),
     mount options=(rw,rshared),
     mount options=(rw,runbindable),

@@ -7,7 +7,7 @@ from __future__ import annotations
 # different version is one this product wrote under an earlier release, not a
 # tampered file: it is still ours to remove, but its bytes are not expected to
 # equal what we would write today.
-APPARMOR_PROFILE_VERSION = 5
+APPARMOR_PROFILE_VERSION = 6
 
 
 def compile_apparmor_profile(machine_id, policy_digest):
@@ -118,6 +118,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # only put a root the guest already assembled where the unit expects it.
     mount options=(rw,move) /run/systemd/mount-rootfs/ -> /,
     pivot_root oldroot=/run/systemd/mount-rootfs/ /run/systemd/mount-rootfs/,
+    # pivot_root's tail: once the unit is inside its new root, systemd moves the
+    # old root aside and unmounts it. Both act on the unit's OWN root inside the
+    # namespace it just pivoted into -- the paths read as "/" because that is
+    # what / means after the pivot -- and neither can reach the machine's root,
+    # let alone the host's.
+    mount options=(rw,move) / -> /,
+    umount /,
     # Read-WRITE remounts that ADD nosuid, nodev and noexec. They tighten the
     # mount rather than loosen it, and are scoped to the staging area.
     mount options=(rw,remount,bind,nosuid,nodev,noexec) -> /run/systemd/mount-rootfs/**,

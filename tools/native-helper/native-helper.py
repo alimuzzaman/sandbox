@@ -2564,6 +2564,49 @@ def userns_filtered_argv(argv):
             "sandbox-userns-filter", *tuple(argv))
 
 
+# systemd-nspawn's own container hardening, measured on Ubuntu 24.04 / systemd
+# 255. Every one of these is a mount the machine is SUPPOSED to have: read-only
+# re-binds over sensitive procfs and sysfs subtrees, tmpfs masks over /proc/kmsg
+# and the host boot id, and the /run/host interface. They are not the host
+# leaking in, and counting them as unexpected failed isolation verification on
+# every machine. Each entry names the filesystem nspawn uses and whether it makes
+# the mount read-only; one that should be read-only and is not is still reported.
+NSPAWN_BASELINE_MOUNTS = {
+    "/proc/acpi": ("proc", True), "/proc/bus": ("proc", True),
+    "/proc/fs": ("proc", True), "/proc/irq": ("proc", True),
+    "/proc/scsi": ("proc", True), "/proc/sys": ("proc", True),
+    "/sys/block": ("sysfs", True), "/sys/bus": ("sysfs", True),
+    "/sys/class": ("sysfs", True), "/sys/dev": ("sysfs", True),
+    "/sys/devices": ("sysfs", True), "/sys/kernel": ("sysfs", True),
+    "/sys": ("tmpfs", True),
+    # nspawn's host interface. os-release is a read-only bind of the host's own
+    # file and `incoming` is the propagate directory `machinectl bind` uses; both
+    # are read-only from inside, and the payload never sees either because bwrap
+    # covers /run/host with a tmpfs of its own.
+    "/run/host": ("tmpfs", True), "/run/host/os-release": (None, True),
+    "/run/host/incoming": ("tmpfs", True),
+    "/proc/kmsg": ("tmpfs", False),
+    "/proc/sys/kernel/random/boot_id": ("tmpfs", False),
+    # Writable on purpose: /proc/sys/net is namespaced to the machine's own
+    # network namespace, /dev/net/tun is nspawn's default and is confined to that
+    # same namespace (and absent from the payload's own /dev), and /tmp,
+    # /run/lock and the delegated cgroup are the machine's own runtime state.
+    "/proc/sys/net": ("proc", False), "/dev/net/tun": ("devtmpfs", False),
+    "/tmp": ("tmpfs", False), "/run/lock": ("tmpfs", False),
+    "/sys/fs/cgroup": ("cgroup2", False),
+}
+
+
+def _nspawn_baseline_mount(target, observed):
+    """Whether this is one of nspawn's own hardening mounts, as nspawn makes it."""
+    if target not in NSPAWN_BASELINE_MOUNTS:
+        return False
+    filesystem, read_only = NSPAWN_BASELINE_MOUNTS[target]
+    if filesystem is not None and observed["filesystem"] != filesystem:
+        return False
+    return not read_only or "ro" in observed["options"]
+
+
 def payload_stack_prefix(machine_id):
     """The exec wrapper that stacks the payload profile onto the final exec.
 
@@ -2769,7 +2812,7 @@ def observed_mounts(leader, policy):
                               (host_stat.st_dev, host_stat.st_ino)
             except OSError:
                 guest_owned = False
-        if not guest_owned:
+        if not guest_owned and not _nspawn_baseline_mount(target, observed):
             unexpected.append(target)
     read_only = [item["target"] for item in policy["read_only_mounts"]
                  if item["target"] in identity_matches

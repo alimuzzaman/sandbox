@@ -189,9 +189,23 @@ integration can be built against a stable contract rather than a moving target.
   Site creation requires `write:servers`, not `write:sites`.
 - **Rate limit**: 60 authenticated requests per minute, with limit headers on
   every response. Status polling must live within this.
-- **Response envelope**: `{success, message, data}`, with `meta` pagination on
-  lists. `202 Accepted` indicates an asynchronous operation, so completion must be
-  observed rather than assumed.
+- **Response envelope**: `{success, message, data}`. `202 Accepted` indicates an
+  asynchronous operation, so completion must be observed rather than assumed.
+- **The committed schema does not match the deployed API.** Verified against the
+  live API with the user's token on 2026-08-05:
+  - Lists: the schema documents `data.data[]` with `data.meta`
+    (`current_page`, `last_page`, `per_page`, `total`); the API actually returns
+    `data.items[]` with `data.pagination` (`total`, `per_page`, `current_page`,
+    `last_page`). Code generated from the committed schema cannot parse a single
+    list response.
+  - Rate-limit headers are documented as present on every response; no
+    `X-RateLimit-*` header was returned on any observed call.
+  Treat the committed schema as indicative, and confirm each response shape
+  against the live API before relying on it.
+- **The account has no servers and no sites.** `GET /servers` and `GET /sites`
+  both returned zero items. Site creation is server-scoped
+  (`POST /servers/{uuid}/sites/wordpress`), so with no server there is nothing to
+  link, deploy to, pull from, or create against.
 - **Repository policy**: credentials must not appear in `sandbox.config.json`,
   runtime ownership state, or committed overrides.
 - **Repository policy**: the runtime manifest is the promotion authority; a new
@@ -209,21 +223,23 @@ integration can be built against a stable contract rather than a moving target.
 |----------|--------|-----------|--------------|
 | Scope breadth | All four candidate scopes are in | User: "we will take all of them" | User, 2026-08-05 |
 | API contract source | Published OpenAPI, committed to the repo | User chose public docs; standing rule forbids probing a live API for schema | User, 2026-08-05 |
-| Credential availability | The user's own xCloud API token is supplied for this work | User provided a token for Sandbox to use against the API | User, 2026-08-05 |
+| Credential availability | The user's own xCloud API token is supplied for this work | User provided a token for Sandbox to use against the API; verified working against `GET /user` | User, 2026-08-05 |
+| Schema authority | The committed schema is indicative; live response shapes win | The schema is already provably wrong about list pagination and rate-limit headers | Evidence, 2026-08-05 |
 | Server lifecycle | Out of scope; sites only | Server provisioning is billing-bearing and has no Sandbox workflow behind it | Existing policy |
 | Credential storage | Existing secret locations only | Repository policy already forbids credentials in project config | Existing policy |
 | Adapter promotion | Enters unproven and non-adoptable | The runtime manifest is the promotion authority | Existing policy |
 
 ## Open Questions
 
-1. **May Sandbox create and destroy state on the live xCloud account?**
-   (BLOCKING) A token has been supplied, which settles read access. Constitution IV
-   still requires live-stack verification, and proving deploy, pull-down and site
-   lifecycle requires creating real sites. xCloud publishes no dev tenant; the API
-   does offer `mode: demo` site creation, which may be an acceptable proving
-   ground. Needed: explicit approval to create and destroy `demo` sites on the
-   user's account, or a nominated throwaway site. Without it the feature can be
-   specified and read-verified but never proven, and the adapter cannot leave
+1. **What does this feature operate on?** (BLOCKING) A token has been supplied and
+   authenticates correctly, but the account holds zero servers and zero sites, so
+   there is currently nothing for any of the four scopes to act upon. Site
+   creation requires an existing server, and server provisioning is a
+   billing-bearing operation this feature excludes. Needed: either a server the
+   user provisions through the dashboard on which Sandbox may create and destroy
+   `mode: demo` sites, or a nominated existing throwaway site, or an explicit
+   decision that server provisioning comes back into scope. Until then the feature
+   cannot be proven, and Constitution IV keeps the adapter at
    `implemented_unproven`.
 
 2. **Does the xCloud runtime adapter publish a reduced required-capability set,
@@ -269,6 +285,10 @@ integration can be built against a stable contract rather than a moving target.
 - **Risk**: The API prose advertises database management, but no database endpoint
   exists in the path set. Any requirement resting on the prose rather than the
   paths will not survive implementation.
+- **Risk**: The published schema is already wrong about the list envelope and the
+  rate-limit headers, both confirmed live. Its other unverified shapes are
+  therefore not trustworthy either, and every response this feature depends on
+  needs live confirmation before it is relied upon.
 - **Risk**: The API is labelled Beta. Endpoints may change; the committed schema
   is a snapshot, and drift will be discovered at runtime.
 - **Risk**: Two transports double the failure surface. An operation that

@@ -369,6 +369,22 @@ class ManagedProvisioner:
         if callable(remove):
             remove(f"provision:{plan['machine_id']}:{step}")
 
+    def _release_network_reservation(self, plan):
+        """Release this machine's subnet/veth reservation by comparison.
+
+        A reservation that is absent, or that another actor has since changed,
+        is not this rollback's to discard: `drifted` is retained for a human,
+        exactly as an owned-state drift is anywhere else.
+        """
+        release = getattr(self.repository, "release_network", None)
+        if not callable(release):
+            return {"ok": True, "mutated": False}
+        record = self.repository.snapshot()["networks"].get(plan["machine_id"])
+        if not isinstance(record, dict):
+            return {"ok": True, "mutated": False}
+        status = release(plan["machine_id"], record)
+        return {"ok": status in {"removed", "absent"}, "mutated": status == "removed"}
+
     def _persist_incomplete_plan(self, plan, rollback):
         policy = plan["policy"]
         record = {
@@ -592,6 +608,17 @@ class ManagedProvisioner:
                     rollback, plan, "apparmor",
                     lambda: self.apparmor.remove(plan["apparmor"]),
                 )
+            # The subnet/veth reservation is written when the plan is built, not
+            # when the network step runs, so `completed` never mentions it. Every
+            # rolled-back provisioning therefore stranded a reservation that no
+            # code path released -- `release_network` had no caller at all -- and
+            # once the policy record was removed below, destroy could no longer
+            # build a plan for it and refused forever. Release it here, by
+            # comparison, before the policy record that authorizes the removal.
+            self._rollback_step(
+                rollback, plan, "network_reservation",
+                lambda: self._release_network_reservation(plan),
+            )
             if "policy" in completed:
                 self._rollback_step(
                     rollback, plan, "policy",
@@ -911,6 +938,34 @@ class ManagedNativeAdapter:
                    for section in ("backends", "policies", "networks")):
             return {"ok": True, "state": "ready", "mutated": False,
                     "cleanup": {"complete": True, "removed": (), "residual": ()},
+                    "reason": {"code": "cleanup_complete"}}
+        # A rolled-back provisioning can leave the local subnet/veth reservation
+        # with no policy record to plan from. The reservation is bookkeeping, not
+        # a host resource -- the helper's own record governs the runtime side and
+        # its removal is gated by the policy record that is already gone -- so
+        # releasing it by comparison converges instead of refusing forever, and
+        # returns the subnet to the allocator.
+        if policy is None and policy_record is None:
+            released, residual = [], []
+            for section in ("backends", "networks"):
+                for identity, record in tuple(state[section].items()):
+                    if not self._same_owner(record.get("owner"), owner):
+                        continue
+                    observed = {key: value for key, value in record.items()
+                                if key != "last_applied"}
+                    if self.repository.remove_if_unchanged(section, identity, observed) == "drifted":
+                        residual.append(section)
+                    else:
+                        released.append(section)
+            if residual:
+                return {"ok": False, "state": "cleanup_incomplete", "mutated": bool(released),
+                        "recovery": self._recovery(owner, self.repository.snapshot()),
+                        "cleanup": {"complete": False, "removed": tuple(released),
+                                    "residual": tuple(residual)},
+                        "reason": {"code": "owned_state_drifted"}}
+            return {"ok": True, "state": "ready", "mutated": bool(released),
+                    "cleanup": {"complete": True,
+                                "removed": tuple((*released, "state")), "residual": ()},
                     "reason": {"code": "cleanup_complete"}}
         if policy is not None:
             grant_cleanup = self._cleanup_grants(owner, policy, state)

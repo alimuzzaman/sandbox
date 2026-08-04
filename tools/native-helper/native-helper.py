@@ -3132,10 +3132,8 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
         # or a profile state that cannot be read -- is checked for drift.
         destination = APPARMOR_ROOT / f"sandbox-native-{machine_id}"
         if os.path.lexists(destination) or _apparmor_loaded_state(machine_id) is not False:
-            expected = compile_apparmor_profile(machine_id, policy_digest).encode()
-            if (not destination.is_file() or destination.is_symlink()
-                    or destination.stat().st_uid != 0 or destination.read_bytes() != expected
-                    or not apparmor_loaded(machine_id)):
+            if not installed_profile_is_ours(destination, machine_id, policy_digest) \
+                    or not apparmor_loaded(machine_id):
                 fail("native policy ownership changed")
     else:
         fail("native cleanup resource is invalid")
@@ -3288,11 +3286,59 @@ def machine_names(machine_id):
     return f"sandbox-native-{machine_id}.service", f"sandbox-native-{machine_id}"
 
 
+# Bumped whenever the profile text changes. An installed profile that declares a
+# different version is one this product wrote under an earlier release, not a
+# tampered file: it is still ours to remove, but its bytes are not expected to
+# equal what we would write today.
+APPARMOR_PROFILE_VERSION = 2
+
+
+def installed_profile_version(payload):
+    """The profile-version an installed profile declares, or None."""
+    for line in payload.decode("utf-8", "replace").splitlines()[:8]:
+        marker = "# Sandbox policy "
+        if line.startswith(marker) and " profile-version " in line:
+            try:
+                return int(line.rsplit(" profile-version ", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def installed_profile_is_ours(destination, machine_id, policy_digest):
+    """Whether the installed profile is this machine's, allowing an older release.
+
+    Exact bytes are required only from a profile that declares the version we
+    write today. One written by an earlier release declares a different version
+    (or none at all), and refusing it would strand the machine: cleanup would
+    call its own profile changed ownership and never remove it. Such a profile is
+    still identified as ours by its name, root ownership, exclusive link and safe
+    mode -- and only root can write /etc/apparmor.d in the first place, so the
+    byte comparison was never what kept another user out.
+    """
+    if not destination.is_file() or destination.is_symlink():
+        return False
+    try:
+        details = destination.lstat()
+        payload = destination.read_bytes()
+    except OSError:
+        return False
+    # Effective uid, matching `exact_privileged_file`: the helper runs as root,
+    # and this is the same 'written by us, not writable by others' test.
+    if (details.st_uid != os.geteuid() or details.st_nlink != 1
+            or details.st_mode & 0o022):
+        return False
+    if installed_profile_version(payload) != APPARMOR_PROFILE_VERSION:
+        return payload.startswith(f"#include <tunables/global>\n\n# Sandbox policy "
+                                  f"{policy_digest}".encode())
+    return payload == compile_apparmor_profile(machine_id, policy_digest).encode()
+
+
 def compile_apparmor_profile(machine_id, policy_digest):
     profile = f"sandbox-native-{machine_id}"
     return f"""#include <tunables/global>
 
-# Sandbox policy {policy_digest}
+# Sandbox policy {policy_digest} profile-version {APPARMOR_PROFILE_VERSION}
 profile {profile} flags=(attach_disconnected,mediate_deleted) {{
   #include <abstractions/base>
   capability,
@@ -3524,8 +3570,11 @@ def remove_exact_apparmor_profile(machine_id, digest):
         if state is False:
             return
         fail("native AppArmor profile file is missing")
-    payload = compile_apparmor_profile(machine_id, digest).encode()
-    exact_privileged_file(destination, payload)
+    # Same rule as the observation: a profile this product wrote under an earlier
+    # release is still ours to remove. Requiring today's exact bytes made cleanup
+    # refuse to remove the profile it had installed itself.
+    if not installed_profile_is_ours(destination, machine_id, digest):
+        fail("native privileged ownership collision")
     if state is None:
         fail("native AppArmor profile state is unavailable")
     if state is True:
@@ -3542,10 +3591,14 @@ def apparmor_install(machine_id, digest):
     payload = compile_apparmor_profile(machine_id, digest).encode()
     created = False
     if destination.exists() or destination.is_symlink():
-        details = destination.lstat()
-        if (stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode) or
-                details.st_uid != 0 or destination.read_bytes() != payload):
+        if not installed_profile_is_ours(destination, machine_id, digest):
             fail("native AppArmor profile ownership changed")
+        if installed_profile_version(destination.read_bytes()) \
+                != APPARMOR_PROFILE_VERSION:
+            # An upgrade: the profile is ours but was written by an earlier
+            # release, so the file has to carry the new text before
+            # `apparmor_parser --replace` can load it.
+            atomic_install_bytes(payload, destination)
     else:
         try:
             atomic_install_bytes(payload, destination)

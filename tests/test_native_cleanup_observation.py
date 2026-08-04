@@ -444,5 +444,56 @@ class TestObservedNftStateShape(unittest.TestCase):
         self.assertFalse(self.helper.nft_state_matches_record(observed, record))
 
 
+
+class TestInstalledProfileVersioning(unittest.TestCase):
+    """A profile written by an earlier release is still ours to remove."""
+
+    def setUp(self):
+        self.helper = _helper()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.machine = "sb-0123456789ab"
+        self.digest = "d" * 64
+        self.path = self.root / f"sandbox-native-{self.machine}"
+
+    def write(self, payload):
+        self.path.write_bytes(payload)
+        self.path.chmod(0o644)
+
+    def ours(self):
+        return self.helper.installed_profile_is_ours(self.path, self.machine, self.digest)
+
+    def test_the_current_version_must_match_byte_for_byte(self):
+        self.write(self.helper.compile_apparmor_profile(self.machine, self.digest).encode())
+        self.assertTrue(self.ours())
+        self.write(self.helper.compile_apparmor_profile(
+            self.machine, self.digest).replace("deny userns,", "userns,").encode())
+        self.assertFalse(self.ours())
+
+    def test_an_earlier_release_is_recognised_and_not_required_to_match(self):
+        legacy = (f"#include <tunables/global>\n\n# Sandbox policy {self.digest}\n"
+                  f"profile sandbox-native-{self.machine} {{\n  /** ix,\n}}\n")
+        self.write(legacy.encode())
+        self.assertIsNone(self.helper.installed_profile_version(legacy.encode()))
+        self.assertTrue(self.ours())
+
+    def test_a_profile_for_another_policy_is_refused_at_any_version(self):
+        foreign = (f"#include <tunables/global>\n\n# Sandbox policy {'e' * 64}\n"
+                   f"profile sandbox-native-{self.machine} {{\n}}\n")
+        self.write(foreign.encode())
+        self.assertFalse(self.ours())
+
+    def test_a_group_or_world_writable_profile_is_refused(self):
+        self.write(self.helper.compile_apparmor_profile(self.machine, self.digest).encode())
+        self.path.chmod(0o666)
+        self.assertFalse(self.ours())
+
+    def test_the_version_marker_is_read_from_the_header(self):
+        payload = self.helper.compile_apparmor_profile(self.machine, self.digest).encode()
+        self.assertEqual(self.helper.installed_profile_version(payload),
+                         self.helper.APPARMOR_PROFILE_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

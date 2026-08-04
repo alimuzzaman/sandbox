@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 
+# Bumped whenever the profile text changes. An installed profile that declares a
+# different version is one this product wrote under an earlier release, not a
+# tampered file: it is still ours to remove, but its bytes are not expected to
+# equal what we would write today.
+APPARMOR_PROFILE_VERSION = 2
+
+
 def compile_apparmor_profile(machine_id, policy_digest):
     profile = f"sandbox-native-{machine_id}"
     return f"""#include <tunables/global>
 
-# Sandbox policy {policy_digest}
+# Sandbox policy {policy_digest} profile-version {APPARMOR_PROFILE_VERSION}
 profile {profile} flags=(attach_disconnected,mediate_deleted) {{
   #include <abstractions/base>
   capability,

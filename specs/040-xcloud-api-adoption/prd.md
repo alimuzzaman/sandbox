@@ -14,10 +14,13 @@ runtime adapter.
 **Drafting Model**: `claude-opus-5[1m]` — the preferred `gpt-5.6-terra` Medium
 configuration was not the active root model and this skill cannot switch it
 
-**Final Validation**: `NOT RUN` — `gpt-5.6-sol` High was not available in this
-session and no fallback reviewer was substituted for it
+**Final Validation**: `PASS` by the drafting agent (`claude-opus-5[1m]`) acting as
+reviewer at the user's explicit direction. The skill's required independent
+`gpt-5.6-sol` High review **did not run** — Sol was not available in this session,
+and a self-review by the drafting model is not an independent review. Re-run a Sol
+High validation before treating this PRD as externally assured.
 
-**Validated On**: N/A
+**Validated On**: 2026-08-05
 
 **Artifact Owner**: `speckit-refine`
 
@@ -43,9 +46,6 @@ integration can be built against a stable contract rather than a moving target.
 
 ## Users and Desired Outcomes
 
-- **Plugin developer**: Reproduce a bug that only appears on a hosted site by
-  pulling that site into a local Sandbox instance, without hand-copying files or
-  databases.
 - **Plugin developer**: Publish verified local work to the hosted site it belongs
   to, through one command that reports what it changed.
 - **Release manager**: See the real state of a hosted site — version, health,
@@ -76,10 +76,8 @@ deliberate later phase, not an omission.
   site and observe the deployment result.
 - Sandbox can render a deployment-shaped compose artifact from the same instance
   definition it runs locally, without the developer hand-writing one.
-- A developer can create a local Sandbox instance from an existing xCloud site
-  that is faithful enough to reproduce a bug.
-- A developer can read hosted-site state — health, domains, SSL, backups,
-  vulnerabilities, WordPress inventory — through Sandbox.
+- A developer can read hosted-site state — health, domains, SSL, deployment
+  history, vulnerabilities — through Sandbox.
 - Every operation Sandbox cannot perform on an xCloud site reports a typed,
   actionable limitation instead of appearing to succeed.
 - No xCloud credential is ever written to a committed file or printed to output.
@@ -130,13 +128,15 @@ deliberate later phase, not an omission.
   transferred, and reports the deployment outcome including failure detail. It
   does not touch the site's database or uploads unless explicitly asked.
 
-### Scenario 4 — Reproduce a hosted bug locally
+### Scenario 4 — Ask for something the API cannot do
 
-- **Starting state**: A linked project and a hosted site exhibiting a bug.
-- **User action**: Asks Sandbox to create a local instance from the xCloud site.
-- **Expected outcome**: Sandbox produces a local instance containing the site's
-  code, database and uploads, reports exactly what it copied and what it did not,
-  and rewrites the local site URL so the copy is usable offline.
+- **Starting state**: A linked project whose hosted site exhibits a bug.
+- **User action**: Asks Sandbox to copy the hosted site down locally, or to run
+  WP-CLI against it.
+- **Expected outcome**: Sandbox refuses immediately with a typed limitation
+  naming the capability and why it is unavailable on this runtime, and points at
+  what the developer can do instead. It never partially copies, and never
+  silently targets a different instance.
 
 ### Scenario 5 — An operation the runtime cannot perform
 
@@ -173,12 +173,11 @@ deliberate later phase, not an omission.
 
 ## Proposed Product Behavior
 
-- **Two transports, stated openly.** The xCloud API is a control plane: it can
-  create a site, read its state, trigger backups and deployments, and manage SSL.
-  It cannot execute commands, move files, or touch a database. Any workflow
-  needing those rides SSH, whose connection details the API itself supplies. The
-  product presents this as one coherent feature while reporting truthfully, per
-  operation, which transport was used and what was therefore possible.
+- **One transport, and honest limits.** Only the xCloud API is used. It can read
+  site state, configure and trigger deployments, and manage SSL, domains, cron
+  and cache. It cannot execute commands, move files, or touch a database, and
+  nothing in this feature works around that. Operations outside the API's reach
+  are declared unsupported up front rather than emulated.
 - **Read-only by default.** Registering an account and reading site state require
   only read scopes. Every mutating operation is explicit.
 - **Refusal over inference.** When a required scope, SSH route, or capability is
@@ -206,7 +205,8 @@ deliberate later phase, not an omission.
   - Backups can be triggered and listed, but not downloaded or restored.
   - Deployment is Git-based only (`POST /servers/{uuid}/sites/git`,
     `POST /sites/{uuid}/git/deploy`).
-  - `GET /sites/{uuid}/ssh` supplies SSH/SFTP connection configuration.
+  - `GET /sites/{uuid}/ssh` exposes SSH/SFTP connection configuration, but SSH is
+    out of scope by decision, so this closes no gap here.
 - **Scopes**: `read:servers`, `write:servers`, `read:sites`, `write:sites`, `*`.
   Site creation requires `write:servers`, not `write:sites`.
 - **Rate limit**: 60 authenticated requests per minute, with limit headers on
@@ -247,9 +247,9 @@ deliberate later phase, not an omission.
 - **Constitution IV**: live-stack verification is the only proof of done, which
   collides with the standing rule against leaving state on live services (see
   Open Questions).
-- **Existing building blocks**: Sandbox already performs SSH-based remote deploy
-  and remote job execution (specs 029, 032), and already models ingress providers
-  and per-project instance ownership.
+- **Existing building blocks**: Sandbox already renders exactly one compose file
+  per instance, and already models ingress providers, runtime adapters and
+  per-project instance ownership.
 
 ## Decisions
 
@@ -259,6 +259,10 @@ deliberate later phase, not an omission.
 | Target path | xCloud **Docker** sites via docker-compose, not the managed WordPress stack | Sandbox runs WordPress on Docker primarily and already renders one compose file per instance; the Docker stack refuses the WordPress path | User, 2026-08-05 |
 | Managed WordPress stack | Deferred to a later phase | User: "we will later add support for xcloud wordpress setup also" | User, 2026-08-05 |
 | Site creation | Dashboard-created, Sandbox-adopted | No API endpoint creates a Docker site | Evidence, 2026-08-05 |
+| Transport | API only; SSH is not used | User: "only what api supports", and "if needed then don't do anything" about SSH | User, 2026-08-05 |
+| Deploy artifact | Sandbox renders a separate deployment profile from the same instance definition | The dev compose file carries host bind-mounts, published db/mailpit ports, dev-only tiers and fixed dev credentials, none of which belong on a hosted site | User, 2026-08-05 |
+| `exec` / `wordpress_cli` / `test` | Declared unsupported; the adapter publishes a reduced required set | The API has no command-execution endpoint and SSH is excluded | User, 2026-08-05 |
+| Pulling a site down | Removed from scope | The API offers no file, database or restorable-backup endpoint, and Docker sites report `is_backup_supported: false`, so it would require SSH | User, 2026-08-05 |
 | API contract source | Published OpenAPI, committed to the repo | User chose public docs; standing rule forbids probing a live API for schema | User, 2026-08-05 |
 | Credential availability | The user's own xCloud API token is supplied for this work | User provided a token for Sandbox to use against the API; verified working against `GET /user` | User, 2026-08-05 |
 | Schema authority | The committed schema is indicative; live response shapes win | The schema is already provably wrong about list pagination and rate-limit headers | Evidence, 2026-08-05 |
@@ -268,36 +272,29 @@ deliberate later phase, not an omission.
 
 ## Open Questions
 
-1. **An xCloud Docker site must exist before any of this can be proven.**
-   (BLOCKING) No API endpoint creates one, so it is a one-time dashboard action.
-   Until a site exists on the provisioned server, `site-scripts`, git settings and
-   deployment behaviour cannot be observed, and Constitution IV keeps the work
-   `implemented_unproven`.
+None blocking. The remaining dependency is operational rather than a product
+decision: an xCloud Docker site must be created once in the dashboard before the
+feature can be exercised or proven, because no API endpoint creates one.
 
-2. **What exactly does Sandbox deploy?** (BLOCKING) The local compose file is
-   dev-shaped: host bind-mounts at absolute paths, published ports for db,
-   mailpit and nginx, dev-only tiers (mailpit, wpcli, memcached, Xdebug), and
-   fixed dev credentials. A hosted Docker site needs one HTTP port for xCloud's
-   proxy, no host-path assumptions, no dev tiers, and real secrets. Needed: a
-   decision that Sandbox renders a separate deployment profile from the same
-   instance definition, and what that profile includes.
+### Resolved during refinement
 
-3. **Does the xCloud runtime adapter publish a reduced required-capability set,
-   or does SSH fill the gap?** (BLOCKING) The API alone cannot serve `exec`,
-   `wordpress_cli` or `test`. Either the adapter declares a smaller required set —
-   honest, but `sb wp`, `install` and `doctor` then refuse on xCloud projects — or
-   SSH backs those capabilities so the full contract is met, at the cost of a
-   second transport with its own failure modes and credential handling. The Docker
-   direction sharpens this: `docker exec` over SSH into the site's own containers
-   is the natural way to serve them, which makes SSH load-bearing rather than
-   optional.
 
-4. **Does "pull down" include the database and uploads?** A code-only copy is
-   cheap and needs no destructive local action; a full copy reproduces far more
-   bugs but requires a database dump over SSH and can be large. Docker sites have
-   no backup API at all (`is_backup_supported: false`), so there is no
-   platform-side alternative to falling back on. Which is the default, and is the
-   other opt-in?
+
+1. **A site must exist before proving** — unchanged, but operational rather than
+   a product decision. Recorded above.
+
+2. **Deploy artifact** — resolved: Sandbox renders a separate deployment profile
+   from the same instance definition. One HTTP port for xCloud's proxy, no host
+   bind-mounts, no dev-only tiers, injected secrets. The dev compose file is
+   unchanged.
+
+3. **Capabilities** — resolved: the adapter declares `exec`, `wordpress_cli` and
+   `test` unsupported and publishes a reduced required set. `sb wp`, `install`,
+   `doctor` and `test` return typed unsupported-capability errors on xCloud
+   projects.
+
+4. **Pulling a site down** — resolved: removed from scope. It cannot be done
+   through the API, and SSH is excluded.
 
 ## Acceptance Outcomes
 
@@ -308,8 +305,9 @@ deliberate later phase, not an omission.
   before any remote mutation occurs.
 - A deploy reports what it transferred and the platform's own outcome for that
   deployment, including failure detail when it fails.
-- A local instance created from a hosted site serves that site's content locally
-  and reports exactly which components were and were not copied.
+- The deployment profile Sandbox renders contains no host-path bind mount, no
+  published port other than the one HTTP port xCloud proxies, no development-only
+  service, and no credential carried over from the local development defaults.
 - Every runtime operation unsupported on an xCloud site returns a typed limitation
   naming the capability, and no such operation partially applies.
 - Sustained operation stays within the published rate limit, and a rate-limit
@@ -334,12 +332,9 @@ deliberate later phase, not an omission.
   this feature does not apply, with no API signal until a call is refused.
 - **Risk**: The API is labelled Beta. Endpoints may change; the committed schema
   is a snapshot, and drift will be discovered at runtime.
-- **Risk**: Two transports double the failure surface. An operation that
-  half-succeeds — API accepted, SSH failed — must not leave the hosted site in a
-  state the developer cannot see or undo.
-- **Risk**: Pulling a production site down brings production data, including
-  personal data, onto a developer machine. This needs an explicit position before
-  the capability ships.
+- **Risk**: An API-only runtime is read-mostly. A developer used to `sb wp` and
+  `sb exec` working everywhere will meet refusals on xCloud projects, so the
+  limitation must be visible at adoption time, not discovered mid-task.
 - **Risk**: 60 requests per minute is low for a chatty status view; a naive
   implementation will throttle itself during ordinary use.
 - **Risk**: A live token plus mutating operations means a defect in this feature
@@ -350,8 +345,8 @@ deliberate later phase, not an omission.
   considerable effort escaping.
 - **Assumption**: The user's xCloud sites are WordPress sites on xCloud-managed
   servers, so site-scoped endpoints apply.
-- **Assumption**: SSH access to those sites is available to the same person who
-  holds the API token.
+- **Assumption**: The project is a Git repository xCloud can reach, since Docker
+  sites deploy from Git and no other transport is in scope.
 - **Assumption**: The committed schema matches the deployed API at specification
   time.
 
@@ -361,12 +356,13 @@ deliberate later phase, not an omission.
 - [x] Goals and non-goals bound the product scope.
 - [x] Primary and negative scenarios are covered.
 - [x] Material constraints, dependencies, and risks are recorded.
-- [ ] Consequential choices are confirmed rather than inferred.
+- [x] Consequential choices are confirmed rather than inferred.
 - [x] Acceptance outcomes are measurable and implementation-independent.
-- [ ] No blocking open questions remain.
+- [x] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest independent Sol High validation verdict is `PASS`.
+- [ ] The latest **independent** Sol High validation verdict is `PASS` — not met;
+      waived by the user for this session and recorded in the metadata above.
 
-**Readiness**: `NOT READY`
+**Readiness**: `READY FOR SPECKIT`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

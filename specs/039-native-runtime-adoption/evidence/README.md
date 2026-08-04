@@ -7,16 +7,16 @@ commands and do not make an adapter adoptable by themselves.
 |---|---|---|---|
 | `pre-live-gate.md` | Ubuntu 24.04 | complete | managed runtime remains blocked |
 | `isolation-prerequisites.md` | Ubuntu 24.04 | complete | none: 19/19 gates pass; promotion still needs T047 |
-| `managed-provisioning.md` | Ubuntu 24.04 | partial | bootstrap and configure succeed; machine start blocked in nspawn mount setup |
+| `managed-provisioning.md` | Ubuntu 24.04 | superseded | provisioning now completes end to end; see `ubuntu-nginx.md` |
 | `capability-parity.md` | macOS + contract suite | complete | none |
 | `bounds-and-suites.md` | macOS Compose | complete | none (T076 suites + timing bounds) |
 | `compose-regression.md` | macOS Compose | complete | preserves existing Compose adoption |
 | `incumbents.md` | macOS Herd/POSIX; Valet absent | complete for available hosts | incumbents remain unadoptable |
-| `ubuntu-nginx.md` | Ubuntu 24.04 | pending | required for managed promotion |
+| `ubuntu-nginx.md` | Ubuntu 24.04 | partial | provisioning, isolation and lifecycle proven; hostile matrix and exhaustion open |
 | `ubuntu-apache.md` | Ubuntu 24.04 | pending | required for managed promotion |
 | `ubuntu-package-coexistence.md` | Ubuntu 24.04 | pending | required for managed promotion |
-| `cleanup.md` | Ubuntu 24.04 | partial | drift/repeat/unavailable proven live; normal case blocked by the payload boundary |
-| `payload-boundary.md` | Ubuntu 24.04 | partial | two isolation-contract decisions open (T047) |
+| `cleanup.md` | Ubuntu 24.04 | complete | all four cases proven live |
+| `payload-boundary.md` | Ubuntu 24.04 | complete | both contract decisions settled and measured |
 
 ## Current gate
 

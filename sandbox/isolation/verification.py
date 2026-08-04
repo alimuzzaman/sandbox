@@ -66,7 +66,18 @@ class IsolationVerifier:
                 "memory_high_bytes": memory_high_bytes(expected_resources["memory_bytes"]),
                 "memory_swap_bytes": 0,
             })
-        if observed.get("cgroup_limits") != expected_resources: failures.append("cgroup_limits")
+        # Naming only the gate leaves an operator with no way to tell which
+        # ceiling drifted, so record the differing keys with both sides. These
+        # are policy numbers, not secrets.
+        observed_resources = observed.get("cgroup_limits")
+        resource_differences = {}
+        if observed_resources != expected_resources:
+            failures.append("cgroup_limits")
+            mapping = observed_resources if isinstance(observed_resources, dict) else {}
+            for key in sorted(set(expected_resources) | set(mapping)):
+                want, got = expected_resources.get(key), mapping.get(key)
+                if want != got:
+                    resource_differences[key] = {"expected": want, "observed": got}
         expected_ro = {item["target"] for item in policy.read_only_mounts}
         expected_rw = {item["target"] for item in policy.writable_mounts}
         if set(observed.get("read_only_mounts", ())) != expected_ro: failures.append("read_only_mounts")
@@ -75,8 +86,11 @@ class IsolationVerifier:
             failures.append("unexpected_host_mounts")
         for field in ("leaked_fds", "leaked_environment", "control_sockets"):
             if observed.get(field) not in ((), []): failures.append("credential_or_control_leak")
+        reason = {"code": "ready" if not failures else "isolation_drift",
+                  "failed_gates": failures}
+        if resource_differences:
+            reason["cgroup_limit_differences"] = resource_differences
         return {"ok": not failures, "state": "ready" if not failures else "blocked",
                 "mutated": False, "machine_id": policy.machine_id,
                 "policy_digest": policy.digest,
-                "reason": {"code": "ready" if not failures else "isolation_drift",
-                           "failed_gates": failures}}
+                "reason": reason}

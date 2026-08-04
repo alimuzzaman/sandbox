@@ -122,7 +122,21 @@ def cmd_ensure(cfg, args) -> None:
                          if backend.get("address") else entry.get("state", "ready"))
                 ok(f"Instance ready: {where}")
             return
-        die(f"instance is not ready: {code or detail or 'no reason reported'}")
+        # A failure is the one result an operator most needs the detail of. The
+        # runtime already reports which step it failed after and why; printing
+        # the code alone made a 34-minute provisioning failure indistinguishable
+        # from any other, so emit the whole payload under --json and the
+        # message plus the completed steps otherwise.
+        if getattr(args, "json", False):
+            print(json.dumps(entry, separators=(",", ":"), default=str))
+        message = reason.get("message") if isinstance(reason, dict) else None
+        failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
+        summary = f"instance is not ready: {code or detail or 'no reason reported'}"
+        if message and message != code:
+            summary += f": {message}"
+        if failed_after:
+            summary += f" (completed: {', '.join(str(step) for step in failed_after)})"
+        die(summary)
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
         # parse it past any boot/progress output above.

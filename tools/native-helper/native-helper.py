@@ -2988,7 +2988,11 @@ def resource_limits_match(machine_id, policy):
                                   "/usr/sbin/nginx", "-T"))
         output = (effective.stdout or "") + "\n" + (effective.stderr or "")
         workers = re.findall(r"(?m)^\s*worker_processes\s+([0-9]+);\s*$", output)
-        ceilings = re.findall(r"(?m)^\s*worker_connections\s+([0-9]+);\s*$", output)
+        # Not anchored to its own line: the generated config writes the whole
+        # events block inline as `events { worker_connections N; }`, so a pattern
+        # demanding the directive start and end a line never matched the file this
+        # product itself writes.
+        ceilings = re.findall(r"worker_connections\s+([0-9]+);", output)
         if (effective.returncode != 0 or workers != ["1"] or
                 ceilings != [str(expected["connections"])]):
             return {}

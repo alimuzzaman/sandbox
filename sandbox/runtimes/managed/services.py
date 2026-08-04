@@ -44,7 +44,13 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
     php_children = max(2, min(32, connections // 4))
     common_php = (
         "[sandbox]\nuser = www-data\ngroup = www-data\n"
-        "listen = /run/php/sandbox.sock\nlisten.owner = www-data\nlisten.group = www-data\n"
+        # The socket is created through bubblewrap, which maps the machine's
+        # root to 33 inside, so FPM cannot chown it to www-data without
+        # CAP_CHOWN -- which the payload deliberately does not have. The
+        # mode lets the web server connect instead; the socket lives in the
+        # machine's private /run, which only the machine's own processes
+        # can reach.
+        "listen = /run/php/sandbox.sock\nlisten.mode = 0666\n"
         f"pm = dynamic\npm.max_children = {php_children}\npm.start_servers = 2\n"
         "pm.min_spare_servers = 1\npm.max_spare_servers = 4\nclear_env = yes\n"
         "security.limit_extensions = .php\ncatch_workers_output = yes\n"
@@ -113,7 +119,7 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              "/usr/local/libexec/sandbox-wordpress-cron":
              _persistent_payload(cron_command, writable_targets),
         "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
-             "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o www-data -g www-data -m 0770 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
+             "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
              "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n",
              # Declared writable targets under /run must exist from boot, not
@@ -134,7 +140,7 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              "/etc/sandbox-native/userns-filter.bpf":
              compile_userns_filter(guest_machine).hex(),
              "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
-             "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"
+             "d /run/mysqld 0755 mysql mysql -\nd /run/php 0755 root root -\n"
              # Every payload and persistent service reaches the document
              # root through bubblewrap, which maps the machine's root uid to
              # 33 inside the sandbox. Writes are therefore checked against

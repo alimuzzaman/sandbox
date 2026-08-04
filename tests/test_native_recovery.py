@@ -172,6 +172,32 @@ class TestNativeRecovery(unittest.TestCase):
             ("policy", "remove"),
         ])
 
+    def test_destroying_an_already_destroyed_instance_converges(self):
+        # Repeating a completed destroy must be a no-op, not an error. With every
+        # record gone there is no cleanup plan to load, and that was reported as
+        # `cleanup_plan_unavailable` with ok=false.
+        from sandbox.runtimes.base import OperationRequest
+        from sandbox.runtimes.managed.adapter import ManagedNativeAdapter
+        from sandbox.runtimes.managed.repository import NativeRepository
+        from pathlib import Path as _Path
+        import tempfile
+        from types import SimpleNamespace
+
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        repository = NativeRepository(_Path(temporary.name) / "state.json")
+        adapter = ManagedNativeAdapter(
+            preflight=SimpleNamespace(inspect=lambda: {"ok": True}),
+            repository=repository,
+            dependencies=SimpleNamespace(cleanup=lambda *a, **k: {"ok": False},
+                                         verifier=None),
+        )
+        result = adapter.invoke(OperationRequest(
+            "/tmp/never-provisioned", "destroy", arguments={"confirm": True}))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["reason"]["code"], "cleanup_complete")
+        self.assertFalse(result.data["mutated"])
+
     def test_early_absent_cleanup_retires_only_matching_stale_entries(self):
         from tests.test_native_destroy import TestNativeDestroy
 

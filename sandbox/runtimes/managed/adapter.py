@@ -893,6 +893,16 @@ class ManagedNativeAdapter:
                     "reason": {"code": "runtime_cleanup_unavailable"}}
         policy_record = next((value for value in state["policies"].values()
                               if self._same_owner(value.get("owner"), owner)), None)
+        # Nothing of this owner's is recorded anywhere, so there is nothing to
+        # remove and nothing to plan a removal from. Destroying an already
+        # destroyed instance converges; it was reporting a missing cleanup plan
+        # as a failure, which is the one thing a repeat must never do.
+        if not any(any(self._same_owner(value.get("owner"), owner)
+                       for value in state[section].values())
+                   for section in ("backends", "policies", "networks")):
+            return {"ok": True, "state": "ready", "mutated": False,
+                    "cleanup": {"complete": True, "removed": (), "residual": ()},
+                    "reason": {"code": "cleanup_complete"}}
         if policy is not None:
             grant_cleanup = self._cleanup_grants(owner, policy, state)
             if not grant_cleanup.get("ok"):

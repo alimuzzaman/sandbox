@@ -109,6 +109,19 @@ def cmd_ensure(cfg, args) -> None:
         reason = (entry or {}).get("reason") if isinstance(entry, dict) else None
         detail = (entry or {}).get("error") if isinstance(entry, dict) else None
         code = reason.get("code") if isinstance(reason, dict) else reason
+        # A runtime that succeeds without an instance record is not a failure.
+        # Managed-native reports a backend and health instead of the Compose
+        # instance entry, and printing "instance is not ready: ready" for a
+        # working instance is worse than useless.
+        if isinstance(entry, dict) and entry.get("ok"):
+            if getattr(args, "json", False):
+                print(json.dumps(entry, separators=(",", ":"), default=str))
+            else:
+                backend = entry.get("backend") or {}
+                where = (f"{backend.get('address')}:{backend.get('port')}"
+                         if backend.get("address") else entry.get("state", "ready"))
+                ok(f"Instance ready: {where}")
+            return
         die(f"instance is not ready: {code or detail or 'no reason reported'}")
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can

@@ -1314,7 +1314,13 @@ def observed_nft_state(table):
                 "expr": normalize_nft_value(expressions),
             })))
     if table_row is None: fail("native nft observation is invalid")
-    return {"table": table_row, "chains": chains, "rules": rules, "counters": counters}
+    # A tuple, because every consumer compares this against the tuple that
+    # `expected_network_rules` and `record_rule_tuple` return, and a list never
+    # equals a tuple however identical the contents. That comparison could not
+    # succeed on any real host: the rules matched exactly and cleanup still
+    # refused the network as changed ownership.
+    return {"table": table_row, "chains": chains, "rules": tuple(rules),
+            "counters": counters}
 
 
 def _sorted_set_items(items):

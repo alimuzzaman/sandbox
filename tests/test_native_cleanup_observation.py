@@ -404,5 +404,45 @@ class TestNetworkRecordVersioning(unittest.TestCase):
         self.assertFalse(self.helper.network_record_matches(None, self.desired()))
 
 
+
+class TestObservedNftStateShape(unittest.TestCase):
+    """The observed rules must be comparable to the expected ones."""
+
+    def setUp(self):
+        self.helper = _helper()
+
+    def observe(self, rules):
+        document = {"nftables": [{"table": {"family": "inet", "name": "sb_demo",
+                                            "comment": "marker"}}] + rules}
+        with mock.patch.object(self.helper, "run_optional",
+                               return_value=_result(stdout=json.dumps(document))):
+            return self.helper.observed_nft_state("sb_demo")
+
+    def rule(self, comment):
+        return {"rule": {"family": "inet", "table": "sb_demo", "chain": "input",
+                         "comment": comment,
+                         "expr": [{"match": {"op": "==",
+                                             "left": {"meta": {"key": "iifname"}},
+                                             "right": "ve-demo"}},
+                                  {"counter": {"packets": 0, "bytes": 0}},
+                                  {"drop": None}]}}
+
+    def test_observed_rules_compare_equal_to_the_expected_tuple(self):
+        # A list never equals a tuple however identical the contents, so this
+        # comparison could not succeed on any real host: rules matched exactly
+        # and cleanup still refused the network as changed ownership.
+        observed = self.observe([self.rule("guest_host_drop")])
+        self.assertIsInstance(observed["rules"], tuple)
+        record = {"chains": observed["chains"],
+                  "rules": [list(item) for item in observed["rules"]]}
+        self.assertTrue(self.helper.nft_state_matches_record(observed, record))
+
+    def test_a_changed_rule_is_still_refused(self):
+        observed = self.observe([self.rule("guest_host_drop")])
+        record = {"chains": observed["chains"],
+                  "rules": [["guest_host_drop", "0" * 64]]}
+        self.assertFalse(self.helper.nft_state_matches_record(observed, record))
+
+
 if __name__ == "__main__":
     unittest.main()

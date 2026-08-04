@@ -609,9 +609,18 @@ class ManagedProvisioner:
                         "step": "state", "ok": False, "mutated": False,
                         "error": "incomplete cleanup plan could not be persisted",
                     })
+            # Always carry a reason. Callers read `reason.code` first and fall back
+            # to `error`, so a rollback that reported only `error` -- and an
+            # exception whose str() is empty reports nothing at all -- surfaced to
+            # the operator as "instance is not ready: no reason reported" after
+            # minutes of provisioning.
+            detail = str(exc).strip() or exc.__class__.__name__
             return {"ok": False, "state": "rollback_complete"
                     if complete else "rollback_incomplete",
-                    "mutated": bool(completed), "error": str(exc), "completed": completed,
+                    "mutated": bool(completed), "error": detail, "completed": completed,
+                    "reason": {"code": "managed_provision_failed",
+                               "message": detail[:400],
+                               "failed_after": tuple(completed)},
                     "rollback": rollback}
 
 

@@ -3493,7 +3493,7 @@ def machine_names(machine_id):
 # different version is one this product wrote under an earlier release, not a
 # tampered file: it is still ours to remove, but its bytes are not expected to
 # equal what we would write today.
-APPARMOR_PROFILE_VERSION = 3
+APPARMOR_PROFILE_VERSION = 4
 
 
 def installed_profile_version(payload):
@@ -3634,6 +3634,11 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount fstype=proc -> /run/systemd/namespace-*/,
     mount fstype=proc -> /run/systemd/mount-rootfs/**,
     mount options=(rw,rbind) -> /run/systemd/namespace-*/,
+    # logind assembles a session's namespace under /run/systemd/namespace-* and
+    # then MOVES the finished mount into the unit's root. A move attaches no new
+    # filesystem -- it relocates one the guest already had -- and both ends stay
+    # inside the machine.
+    mount options=(rw,move) -> /run/systemd/mount-rootfs/**,
     umount /run/systemd/mount-rootfs/**,
     umount /run/systemd/namespace-*/,
     mount options=(rw,remount) -> /run/lock/,
@@ -3650,6 +3655,7 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     mount options=(ro,remount,bind),
     mount options=(ro,remount,bind,nodev),
     mount options=(ro,remount,bind,nosuid),
+    mount options=(ro,remount,bind,nosuid,nodev),
     mount options=(ro,remount,bind,nosuid,noexec),
     mount options=(ro,remount,bind,nosuid,nodev,noexec),
     umount /run/lock/,

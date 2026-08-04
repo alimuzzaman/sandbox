@@ -96,7 +96,17 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
     cron_command = ("/usr/bin/timeout", "--signal=TERM", "--kill-after=5s",
                     f"{runtime_seconds}s", "/usr/local/bin/wp", "cron", "event", "run", "--due-now",
                     "--path=/var/www/html")
+    # php-fpm opens its global error log before anything else, and the distro
+    # default (/var/log/php8.3-fpm.log) is read-only inside the sandbox, so FPM
+    # died with "failed to open error_log ... Read-only file system" before it
+    # ever served a request. The log goes to the writable directory the payload
+    # already declares; --force-stderr sends it to the journal as well.
+    fpm_global = ("[global]\n"
+                  "error_log = /var/log/sandbox/php-fpm.log\n"
+                  "daemonize = no\n"
+                  "include = /etc/php/8.3/fpm/pool.d/*.conf\n")
     files = {web_path: web, "/etc/php/8.3/fpm/pool.d/sandbox.conf": common_php,
+             "/etc/php/8.3/fpm/php-fpm.conf": fpm_global,
              "/etc/mysql/mariadb.conf.d/90-sandbox.cnf": database,
              "/usr/local/libexec/sandbox-php-fpm":
              _persistent_payload(php_command, writable_targets),

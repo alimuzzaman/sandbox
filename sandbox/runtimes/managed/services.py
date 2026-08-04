@@ -105,8 +105,15 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              # so without this the isolation probe -- and any command run before
              # the database is up -- dies in bwrap with "Can't find source path
              # /run/mysqld".
+             # The credential source root is masked with a tmpfs on every
+             # payload, and bwrap cannot create the mountpoint because the
+             # sandbox root is read-only: "Can't mkdir
+             # /run/sandbox-native-credentials: Read-only file system".
+             # It has to exist whether or not a credential was ever staged,
+             # or the mask silently depends on that having happened.
              "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
-             "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"}
+             "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"
+             "d /run/sandbox-native-credentials 0700 root root -\n"}
     # NoNewPrivileges lives on the guest's own units, not on the machine: on the
     # machine it blocks the AppArmor transition into the tighter `//guest`
     # profile, and the guest init can never exec. Every untrusted execution path

@@ -3493,7 +3493,7 @@ def machine_names(machine_id):
 # different version is one this product wrote under an earlier release, not a
 # tampered file: it is still ours to remove, but its bytes are not expected to
 # equal what we would write today.
-APPARMOR_PROFILE_VERSION = 4
+APPARMOR_PROFILE_VERSION = 5
 
 
 def installed_profile_version(payload):
@@ -3639,6 +3639,15 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # filesystem -- it relocates one the guest already had -- and both ends stay
     # inside the machine.
     mount options=(rw,move) -> /run/systemd/mount-rootfs/**,
+    # The last two steps of the same sequence: the assembled root is moved onto
+    # / and then pivoted into. Both are scoped to systemd's own staging
+    # directory as the source, so this is not a general move or pivot -- it can
+    # only put a root the guest already assembled where the unit expects it.
+    mount options=(rw,move) /run/systemd/mount-rootfs/ -> /,
+    pivot_root oldroot=/run/systemd/mount-rootfs/ /run/systemd/mount-rootfs/,
+    # Read-WRITE remounts that ADD nosuid, nodev and noexec. They tighten the
+    # mount rather than loosen it, and are scoped to the staging area.
+    mount options=(rw,remount,bind,nosuid,nodev,noexec) -> /run/systemd/mount-rootfs/**,
     umount /run/systemd/mount-rootfs/**,
     umount /run/systemd/namespace-*/,
     mount options=(rw,remount) -> /run/lock/,

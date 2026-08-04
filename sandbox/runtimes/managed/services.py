@@ -125,6 +125,15 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              compile_userns_filter(guest_machine).hex(),
              "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
              "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"
+             # Every payload and persistent service reaches the document
+             # root through bubblewrap, which maps the machine's root uid to
+             # 33 inside the sandbox. Writes are therefore checked against
+             # root, not www-data, so a docroot owned by www-data is one the
+             # sandbox cannot write: WordPress could not create wp-config.php.
+             # Root ownership makes it writable, and the files still read back
+             # as www-data inside the sandbox because that is what the mapping
+             # says. The web server only reads, which 0755 allows.
+             "d /var/www/html 0755 root root -\n"
              "d /run/sandbox-native-credentials 0700 root root -\n"}
     # NoNewPrivileges lives on the guest's own units, not on the machine: on the
     # machine it blocks the AppArmor transition into the tighter `//guest`

@@ -71,6 +71,22 @@ class TestAbsenceIsRead(unittest.TestCase):
         with mock.patch.object(self.helper, "run_optional", run_optional):
             self.assertTrue(self.helper.machine_absent("sb-0123456789ab"))
 
+    def test_an_installed_but_stopped_service_is_owned_not_changed(self):
+        # Ownership comes from the marker, not from the unit running. Requiring
+        # `is-active` made cleanup refuse to stop and mask units that were
+        # installed but never started.
+        units = ("mariadb.service", "nginx.service")
+        with mock.patch.object(self.helper, "service_plan", return_value=({}, units)), \
+                mock.patch.object(self.helper, "guest_run",
+                                  return_value=_result(stdout="loaded\nloaded\n")):
+            self.helper.services_ownership_status("sb-0123456789ab", "d" * 64, "e" * 64)
+
+        with mock.patch.object(self.helper, "service_plan", return_value=({}, units)), \
+                mock.patch.object(self.helper, "guest_run",
+                                  return_value=_result(stdout="loaded\nnot-found\n")), \
+                self.assertRaises(SystemExit):
+            self.helper.services_ownership_status("sb-0123456789ab", "d" * 64, "e" * 64)
+
     def test_a_missing_service_marker_is_absence_not_a_changed_marker(self):
         cases = (
             (_result(returncode=1, stdout="absent\n"), False),  # the guest never answered

@@ -2828,10 +2828,22 @@ def services_health(machine_id, policy_digest, service_digest):
 
 
 def services_ownership_status(machine_id, policy_digest, service_digest):
+    """Prove the units are ours, which is not the same as proving they run.
+
+    This asks whether the guest knows each unit, not whether it is active. The
+    check used to require `is-active`, so a machine whose units were installed
+    but never started answered "inactive" and cleanup refused to stop and mask
+    them -- treating an already-stopped service as changed ownership. Ownership
+    is established by the marker `service_plan` verifies; state is irrelevant to
+    it. Cleanup observation must never make an HTTP request or execute plugin PHP.
+    """
     _policy, units = service_plan(machine_id, policy_digest, service_digest)
-    # Cleanup observation must never make an HTTP request or execute plugin PHP.
-    guest_run(machine_id, ("/usr/bin/systemctl", "is-active", *units),
-              "native service ownership observation failed")
+    result = guest_run(machine_id, ("/usr/bin/systemctl", "show", *units,
+                                    "--property=LoadState", "--value"),
+                       "native service ownership observation failed")
+    states = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(states) != len(units) or set(states) != {"loaded"}:
+        fail("native service ownership changed")
 
 
 def services_stop(machine_id, policy_digest, service_digest):

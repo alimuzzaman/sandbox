@@ -2902,6 +2902,25 @@ def machine_absent(machine_id):
     return machine_id not in registered and unit_absent(unit)
 
 
+GUEST_ABSENCE_PATHS = {
+    "marker": ("-e", "/etc/sandbox-native/services.json"),
+    "database-socket": ("-S", "/run/mysqld/mysqld.sock"),
+}
+
+
+def guest_path_absent(machine_id, name):
+    """True when the guest answered and the named fixed path is not there.
+
+    Only the enumerated paths can be asked about, so nothing caller-controlled
+    reaches the guest shell. A non-zero result means the question went
+    unanswered, which is never absence.
+    """
+    flag, path = GUEST_ABSENCE_PATHS[name]
+    result = run_optional(guest_command(machine_id, (
+        "/bin/sh", "-c", f"test {flag} {path} && echo present || echo absent")))
+    return result.returncode == 0 and (result.stdout or "").strip() == "absent"
+
+
 def guest_marker_absent(machine_id):
     """True when the guest answered and has no service marker at all.
 
@@ -2909,10 +2928,7 @@ def guest_marker_absent(machine_id):
     never got that far has none. Reading that as a changed marker made cleanup
     stop at `services` and never reach anything after it.
     """
-    result = run_optional(guest_command(machine_id, (
-        "/bin/sh", "-c", "test -e /etc/sandbox-native/services.json "
-                         "&& echo present || echo absent")))
-    return result.returncode == 0 and (result.stdout or "").strip() == "absent"
+    return guest_path_absent(machine_id, "marker")
 
 
 def guest_unit_load_states(machine_id, units):
@@ -2969,7 +2985,13 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
             else:
                 services_ownership_status(machine_id, policy_digest, resource_digest)
     elif resource == "database":
-        if machine_absent(machine_id) or guest_units_absent(machine_id, ("mariadb.service",)):
+        # No socket means no database process, so there are no owned schemas or
+        # users to drop: the data itself lives in the machine's image and goes
+        # with it. A machine that never reached database bootstrap answers this
+        # way, and reading it as an unavailable runtime stalled cleanup here.
+        if (machine_absent(machine_id)
+                or guest_units_absent(machine_id, ("mariadb.service",))
+                or guest_path_absent(machine_id, "database-socket")):
             state = "absent"
         else:
             database_status(machine_id, policy_digest)

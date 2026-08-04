@@ -111,16 +111,25 @@ class TestAbsenceIsRead(unittest.TestCase):
                                return_value=_result(returncode=1)):
             self.assertIsNone(self.helper.guest_unit_load_states("sb-0123456789ab", units))
 
-    def test_a_missing_service_marker_is_absence_not_a_changed_marker(self):
+    def test_a_missing_fixed_guest_path_is_absence_only_when_answered(self):
         cases = (
             (_result(returncode=1, stdout="absent\n"), False),  # the guest never answered
             (_result(stdout="present\n"), False),
             (_result(stdout="absent\n"), True),
         )
-        for outcome, expected in cases:
-            with self.subTest(stdout=outcome.stdout, returncode=outcome.returncode):
-                with mock.patch.object(self.helper, "run_optional", return_value=outcome):
-                    self.assertIs(self.helper.guest_marker_absent("sb-0123456789ab"), expected)
+        for name in ("marker", "database-socket"):
+            for outcome, expected in cases:
+                with self.subTest(path=name, stdout=outcome.stdout,
+                                  returncode=outcome.returncode):
+                    with mock.patch.object(self.helper, "run_optional",
+                                           return_value=outcome):
+                        self.assertIs(
+                            self.helper.guest_path_absent("sb-0123456789ab", name), expected)
+
+    def test_only_enumerated_guest_paths_can_be_probed(self):
+        # Nothing caller-controlled reaches the guest shell.
+        with self.assertRaises(KeyError):
+            self.helper.guest_path_absent("sb-0123456789ab", "/etc/shadow; rm -rf /")
 
     def _show(self, *pairs):
         return _result(stdout="\n\n".join(f"Id={unit}\nLoadState={state}"

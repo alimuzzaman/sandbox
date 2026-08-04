@@ -3493,7 +3493,7 @@ def machine_names(machine_id):
 # different version is one this product wrote under an earlier release, not a
 # tampered file: it is still ours to remove, but its bytes are not expected to
 # equal what we would write today.
-APPARMOR_PROFILE_VERSION = 2
+APPARMOR_PROFILE_VERSION = 3
 
 
 def installed_profile_version(payload):
@@ -3619,6 +3619,13 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # that must never reach disk. Both stay inside the machine's namespace.
     mount options=(rw,rbind) -> /run/systemd/mount-rootfs/,
     mount options=(rw,rbind) -> /run/systemd/mount-rootfs/**,
+    # systemd propagates a unit's own mounts through /run/systemd/propagate/<unit>
+    # into the unit's namespace, with a plain bind rather than an rbind. Without
+    # this every service that sandboxes itself -- MariaDB does, with
+    # ProtectSystem and ProtectHome -- fails to start with status 226,
+    # EXIT_NAMESPACE, which surfaces only as "the control process exited with
+    # error code".
+    mount options=(rw,bind) -> /run/systemd/mount-rootfs/**,
     mount fstype=ramfs -> /dev/shm/,
     # systemd-logind sets up a private namespace per session, and machinectl
     # shell goes through logind: without these its sessions fail intermittently
@@ -3642,6 +3649,7 @@ profile {profile} flags=(attach_disconnected,mediate_deleted) {{
     # with `nodev` but without `nosuid,noexec`.
     mount options=(ro,remount,bind),
     mount options=(ro,remount,bind,nodev),
+    mount options=(ro,remount,bind,nosuid),
     mount options=(ro,remount,bind,nosuid,noexec),
     mount options=(ro,remount,bind,nosuid,nodev,noexec),
     umount /run/lock/,

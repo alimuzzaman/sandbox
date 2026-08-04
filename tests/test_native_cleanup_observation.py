@@ -131,10 +131,6 @@ class TestAbsenceIsRead(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.helper.guest_path_absent("sb-0123456789ab", "/etc/shadow; rm -rf /")
 
-    def _show(self, *pairs):
-        return _result(stdout="\n\n".join(f"Id={unit}\nLoadState={state}"
-                                          for unit, state in pairs) + "\n")
-
     def test_guest_units_are_absent_only_when_the_guest_answered_for_each(self):
         units = ("nginx.service", "php-fpm.service")
         cases = (
@@ -290,6 +286,87 @@ class TestObserverAcceptsState(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.observer(self.identity(machine_id="sb-other", state="absent"))(
                 "image", {"machine_id": "sb-1", "policy_digest": "d"})
+
+
+
+class TestNftRuleCanonicalisation(unittest.TestCase):
+    """A set we build and the same set nft echoes back must digest identically."""
+
+    def setUp(self):
+        self.helper = _helper()
+
+    def match(self, right):
+        return {"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": right}}
+
+    def test_a_built_set_and_an_echoed_list_are_the_same_rule(self):
+        built = self.helper.normalize_nft_value(
+            [self.match({"set": ["new", "established"]})])
+        echoed = self.helper.normalize_nft_value(
+            [self.match(["established", "new"])])
+        self.assertEqual(built, echoed)
+
+    def test_equality_against_a_set_is_the_membership_test_nft_renders(self):
+        built = self.helper.normalize_nft_value([{"match": {
+            "op": "==", "left": {"ct": {"key": "state"}},
+            "right": {"set": ["new", "established"]}}}])
+        echoed = self.helper.normalize_nft_value([{"match": {
+            "op": "in", "left": {"ct": {"key": "state"}},
+            "right": ["established", "new"]}}])
+        self.assertEqual(built, echoed)
+
+    def test_inequality_is_never_folded_into_membership(self):
+        negated = self.helper.normalize_nft_value([{"match": {
+            "op": "!=", "left": {"ct": {"key": "state"}},
+            "right": {"set": ["new"]}}}])
+        self.assertEqual(negated[0]["match"]["op"], "!=")
+
+    def test_set_membership_still_distinguishes_different_sets(self):
+        one = self.helper.normalize_nft_value([self.match(["established", "new"])])
+        other = self.helper.normalize_nft_value([self.match(["established", "related"])])
+        self.assertNotEqual(one, other)
+
+    def test_a_scalar_right_operand_is_untouched(self):
+        value = self.helper.normalize_nft_value([self.match("new")])
+        self.assertEqual(value, [self.match("new")])
+
+    def test_the_two_ct_state_rules_match_what_nft_echoes_back(self):
+        # The exact failure seen live: rules identical to the policy, refused as
+        # changed ownership because only these two carry a set.
+        network = {"guest_address": "10.203.118.246/30", "veth": "ve-db081dbdcb",
+                   "host_address": "10.203.118.245/30", "ingress_port": 8080}
+        expected = dict(self.helper.expected_network_rules(network))
+        echoed = {
+            "guest_host_established": ("input", [
+                {"match": {"op": "==", "left": {"meta": {"key": "iifname"}},
+                           "right": "ve-db081dbdcb"}},
+                {"match": {"op": "==",
+                           "left": {"payload": {"protocol": "ip", "field": "saddr"}},
+                           "right": "10.203.118.246"}},
+                {"match": {"op": "in", "left": {"ct": {"key": "state"}},
+                           "right": ["established", "related"]}},
+                {"counter": {"packets": 0, "bytes": 0}}, {"accept": None},
+            ]),
+            "ingress": ("output", [
+                {"match": {"op": "==", "left": {"meta": {"key": "oifname"}},
+                           "right": "ve-db081dbdcb"}},
+                {"match": {"op": "==",
+                           "left": {"payload": {"protocol": "ip", "field": "daddr"}},
+                           "right": "10.203.118.246"}},
+                {"match": {"op": "==",
+                           "left": {"payload": {"protocol": "tcp", "field": "dport"}},
+                           "right": 8080}},
+                {"match": {"op": "in", "left": {"ct": {"key": "state"}},
+                           "right": ["established", "new"]}},
+                {"counter": {"packets": 3, "bytes": 180}}, {"accept": None},
+            ]),
+        }
+        for name, (chain, expressions) in echoed.items():
+            with self.subTest(rule=name):
+                observed = self.helper.canonical_digest({
+                    "chain": chain,
+                    "expr": self.helper.normalize_nft_value(expressions),
+                })
+                self.assertEqual(observed, expected[name])
 
 
 if __name__ == "__main__":

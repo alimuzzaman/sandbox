@@ -1290,6 +1290,29 @@ def observed_nft_state(table):
     return {"table": table_row, "chains": chains, "rules": rules, "counters": counters}
 
 
+def _sorted_set_items(items):
+    return sorted((normalize_nft_value(item) for item in items),
+                  key=lambda item: json.dumps(item, sort_keys=True))
+
+
+def _canonical_match_right(value):
+    """Render a match's right operand the same way whoever produced it did.
+
+    We build an anonymous set as `{"set": [...]}`; nft echoes the same set back
+    as a bare list. Both denote one membership test, so they must digest
+    identically -- otherwise an untouched host reports drift on exactly the rules
+    that use a set. On the proof host that was `guest_host_established` and
+    `ingress`, the only two rules matching on a ct-state set: their rules were
+    byte-for-byte what the policy asked for, and cleanup refused them as changed
+    ownership anyway. Order is not meaningful in a set, so both forms sort.
+    """
+    if isinstance(value, dict) and set(value) == {"set"} and isinstance(value["set"], list):
+        return {"set": _sorted_set_items(value["set"])}
+    if isinstance(value, list):
+        return {"set": _sorted_set_items(value)}
+    return normalize_nft_value(value)
+
+
 def normalize_nft_value(value):
     """Canonicalize nft JSON while retaining all authorization semantics."""
     if isinstance(value, list):
@@ -1298,6 +1321,17 @@ def normalize_nft_value(value):
         return value
     if set(value) == {"counter"} and isinstance(value["counter"], dict):
         return {"counter": {}}
+    if set(value) == {"match"} and isinstance(value["match"], dict):
+        match = {key: normalize_nft_value(item) for key, item in value["match"].items()}
+        if "right" in value["match"]:
+            match["right"] = _canonical_match_right(value["match"]["right"])
+            # nft renders equality against an anonymous set as `in`, and the two
+            # are the same membership test. Only `==` is rewritten; `!=` keeps
+            # its own meaning and must never be folded into this.
+            if isinstance(match["right"], dict) and set(match["right"]) == {"set"} \
+                    and match.get("op") == "==":
+                match["op"] = "in"
+        return {"match": match}
     result = {key: normalize_nft_value(item) for key, item in value.items()}
     if set(result) == {"set"} and isinstance(result["set"], list):
         result["set"] = sorted(result["set"], key=lambda item: json.dumps(item, sort_keys=True))

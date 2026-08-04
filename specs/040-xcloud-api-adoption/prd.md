@@ -202,10 +202,22 @@ integration can be built against a stable contract rather than a moving target.
     `X-RateLimit-*` header was returned on any observed call.
   Treat the committed schema as indicative, and confirm each response shape
   against the live API before relying on it.
-- **The account has no servers and no sites.** `GET /servers` and `GET /sites`
-  both returned zero items. Site creation is server-scoped
-  (`POST /servers/{uuid}/sites/wordpress`), so with no server there is nothing to
-  link, deploy to, pull from, or create against.
+- **The server's stack is chosen outside this feature and limits it.** Verified
+  live on 2026-08-05 against a provisioned server with `stack: docker_nginx`:
+  `POST /servers/{uuid}/sites/wordpress` returns
+  `422 {"message": "WordPress is not supported on Docker servers"}`. The schema
+  documents no stack constraint on that endpoint at all. Because server
+  provisioning is dashboard-only and out of this feature's scope, the feature
+  inherits whatever stack the operator picked, and on a Docker stack the primary
+  WordPress path is simply unavailable. `POST /servers/{uuid}/sites/git` does
+  accept `site_type: wordpress`, but requires a repository and a real domain, so
+  it cannot serve a disposable proving site.
+- **Blueprints cannot be referenced.** `GET /blueprints` returns three entries
+  (Elementor, Gutenberg, WooCommerce) whose `uuid` is `null`, while
+  `CreateWordPressSiteRequest.blueprint_uuid` expects a UUID.
+- **Integrations are read-only.** `GET /integrations/cloudflare` returns an empty
+  list and there is no endpoint to create an integration, so the `cloudflare`
+  flag on site creation depends on dashboard-side setup.
 - **Repository policy**: credentials must not appear in `sandbox.config.json`,
   runtime ownership state, or committed overrides.
 - **Repository policy**: the runtime manifest is the promotion authority; a new
@@ -231,15 +243,14 @@ integration can be built against a stable contract rather than a moving target.
 
 ## Open Questions
 
-1. **What does this feature operate on?** (BLOCKING) A token has been supplied and
-   authenticates correctly, but the account holds zero servers and zero sites, so
-   there is currently nothing for any of the four scopes to act upon. Site
-   creation requires an existing server, and server provisioning is a
-   billing-bearing operation this feature excludes. Needed: either a server the
-   user provisions through the dashboard on which Sandbox may create and destroy
-   `mode: demo` sites, or a nominated existing throwaway site, or an explicit
-   decision that server provisioning comes back into scope. Until then the feature
-   cannot be proven, and Constitution IV keeps the adapter at
+1. **Which server stack does this feature target?** (BLOCKING) A server now exists
+   and is provisioned, so there is something to act on, but it was built with the
+   `docker_nginx` stack and that stack refuses WordPress site creation outright.
+   Sandbox is a WordPress tool, so on this server the feature's primary path
+   cannot run at all. Needed: a decision to rebuild or add a server on a
+   WordPress-capable stack, or an explicit narrowing of this feature to the
+   Git-deploy path with a real repository and domain. Until one of those, the
+   WordPress scopes cannot be proven and Constitution IV keeps the adapter at
    `implemented_unproven`.
 
 2. **Does the xCloud runtime adapter publish a reduced required-capability set,
@@ -285,10 +296,15 @@ integration can be built against a stable contract rather than a moving target.
 - **Risk**: The API prose advertises database management, but no database endpoint
   exists in the path set. Any requirement resting on the prose rather than the
   paths will not survive implementation.
-- **Risk**: The published schema is already wrong about the list envelope and the
-  rate-limit headers, both confirmed live. Its other unverified shapes are
-  therefore not trustworthy either, and every response this feature depends on
-  needs live confirmation before it is relied upon.
+- **Risk**: The published schema is already wrong or silent on four counts, all
+  confirmed live — the list envelope, the rate-limit headers, the stack
+  restriction on WordPress site creation, and blueprint UUIDs. Its other
+  unverified shapes are therefore not trustworthy either, and every response this
+  feature depends on needs live confirmation before it is relied upon.
+- **Risk**: Capabilities depend on decisions made outside the feature. The server
+  stack is chosen in the dashboard at provisioning time and cannot be changed
+  through the API, so an operator can put a server into a state where most of
+  this feature does not apply, with no API signal until a call is refused.
 - **Risk**: The API is labelled Beta. Endpoints may change; the committed schema
   is a snapshot, and drift will be discovered at runtime.
 - **Risk**: Two transports double the failure surface. An operation that

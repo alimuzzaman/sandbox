@@ -2888,6 +2888,19 @@ def machine_absent(machine_id):
     return machine_id not in registered and unit_absent(unit)
 
 
+def guest_marker_absent(machine_id):
+    """True when the guest answered and has no service marker at all.
+
+    Provisioning writes the marker when it activates services, so a machine that
+    never got that far has none. Reading that as a changed marker made cleanup
+    stop at `services` and never reach anything after it.
+    """
+    result = run_optional(guest_command(machine_id, (
+        "/bin/sh", "-c", "test -e /etc/sandbox-native/services.json "
+                         "&& echo present || echo absent")))
+    return result.returncode == 0 and (result.stdout or "").strip() == "absent"
+
+
 def guest_units_absent(machine_id, units):
     """True when the guest answered and knows none of the named units."""
     units = tuple(units)
@@ -2912,11 +2925,17 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
     resource_digest = digest_value(resource_digest)
     state = "present"
     if resource == "services":
-        _policy, units = service_plan(machine_id, policy_digest, resource_digest)
-        if machine_absent(machine_id) or guest_units_absent(machine_id, units):
+        # The marker check comes before `service_plan`, which reads the marker
+        # and fails when it is missing: a machine whose services were never
+        # activated has none, and that is absence, not a changed marker.
+        if machine_absent(machine_id) or guest_marker_absent(machine_id):
             state = "absent"
         else:
-            services_ownership_status(machine_id, policy_digest, resource_digest)
+            _policy, units = service_plan(machine_id, policy_digest, resource_digest)
+            if guest_units_absent(machine_id, units):
+                state = "absent"
+            else:
+                services_ownership_status(machine_id, policy_digest, resource_digest)
     elif resource == "database":
         if machine_absent(machine_id) or guest_units_absent(machine_id, ("mariadb.service",)):
             state = "absent"

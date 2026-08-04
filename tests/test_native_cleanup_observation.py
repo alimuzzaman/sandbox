@@ -71,6 +71,17 @@ class TestAbsenceIsRead(unittest.TestCase):
         with mock.patch.object(self.helper, "run_optional", run_optional):
             self.assertTrue(self.helper.machine_absent("sb-0123456789ab"))
 
+    def test_a_missing_service_marker_is_absence_not_a_changed_marker(self):
+        cases = (
+            (_result(returncode=1, stdout="absent\n"), False),  # the guest never answered
+            (_result(stdout="present\n"), False),
+            (_result(stdout="absent\n"), True),
+        )
+        for outcome, expected in cases:
+            with self.subTest(stdout=outcome.stdout, returncode=outcome.returncode):
+                with mock.patch.object(self.helper, "run_optional", return_value=outcome):
+                    self.assertIs(self.helper.guest_marker_absent("sb-0123456789ab"), expected)
+
     def test_guest_units_are_absent_only_when_the_guest_answered_for_each(self):
         cases = (
             (_result(returncode=1), False),           # the guest never answered

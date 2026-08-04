@@ -498,7 +498,11 @@ class TestNativeHelper(unittest.TestCase):
                     return mock.Mock(returncode=0, stdout=properties[name] + "\n")
                 if argv[0] == "dumpe2fs":
                     return mock.Mock(returncode=0, stdout=(
-                        "Inode count:              500000\n"
+                        # mke2fs rounds the request up to a whole block
+                        # group, so the real filesystem never reports the
+                        # number that was asked for.
+                        "Inode count:              500736\n"
+                        "Inodes per group:         2048\n"
                         "Block count:              2097152\n"
                         "Block size:               4096\n"))
                 if argv[-1] == "SELECT @@GLOBAL.max_connections;":

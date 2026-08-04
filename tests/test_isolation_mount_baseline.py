@@ -63,3 +63,30 @@ class TestNspawnBaselineMounts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestImageInodeGeometry(unittest.TestCase):
+    """mke2fs rounds an inode request up to a whole block group."""
+
+    def setUp(self):
+        self.helper = _helper()
+
+    def source(self):
+        path = (Path(__file__).resolve().parents[1] / "tools" / "native-helper"
+                / "native-helper.py").read_text()
+        return path.split("def resource_limits_match", 1)[1].split("\ndef ", 1)[0]
+
+    def test_the_inode_count_is_a_floor_not_an_equality(self):
+        # Asking for 500000 produced 500736 on the proof host, so an exact
+        # comparison could never pass and every machine failed the gate.
+        body = self.source()
+        self.assertNotIn('fields["Inode count"] != expected["inodes"]', body)
+        self.assertIn("Inodes per group", body)
+        self.assertIn("surplus", body)
+
+    def test_the_surplus_is_bounded_by_one_block_group(self):
+        # A floor alone would accept any oversized filesystem; the bound is what
+        # keeps this an assertion about the geometry that was asked for.
+        body = self.source()
+        self.assertIn('surplus >= fields["Inodes per group"]', body)
+        self.assertIn("surplus < 0", body)

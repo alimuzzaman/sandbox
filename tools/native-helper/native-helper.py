@@ -2870,14 +2870,20 @@ def resource_limits_match(machine_id, policy):
     if filesystem.returncode != 0:
         return {}
     fields = {}
-    for name in ("Block count", "Block size", "Inode count"):
+    for name in ("Block count", "Block size", "Inode count", "Inodes per group"):
         matches = re.findall(rf"(?m)^{re.escape(name)}:\s*([0-9]+)\s*$",
                              filesystem.stdout or "")
         if len(matches) != 1:
             return {}
         fields[name] = int(matches[0])
+    # mke2fs cannot deliver an arbitrary inode count: it rounds the request up to
+    # a whole block group, so asking for 500000 produced 500736 and an exact
+    # comparison could never pass. What the policy asks for is a floor, so the
+    # check is that the filesystem has at least that many and was rounded up by
+    # less than one group -- which is exactly what mke2fs does and nothing else.
+    surplus = fields["Inode count"] - expected["inodes"]
     if (fields["Block count"] * fields["Block size"] != expected["disk_bytes"] or
-            fields["Inode count"] != expected["inodes"]):
+            surplus < 0 or surplus >= fields["Inodes per group"]):
         return {}
     service_files = {}
     for name, path in (("marker", "/etc/sandbox-native/services.json"),):

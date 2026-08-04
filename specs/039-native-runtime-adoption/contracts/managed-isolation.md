@@ -63,3 +63,34 @@ use bubblewrap with cleared environment, private temp, read-only source, capabil
 nested-user-namespace disablement, and bounded output/time. The launcher rejects unexpected
 open descriptors before `exec` and never executes fallback argv on the host.
 
+Nested-user-namespace disablement is enforced by a seccomp filter rejecting `clone`,
+`clone3` and `unshare` with `CLONE_NEWUSER`, installed for the payload after bwrap's own
+namespace is set up, and startup fails closed if it cannot be installed. It is not enforced
+by `--disable-userns`, `--assert-userns-disabled`, or any write to
+`/proc/sys/user/max_user_namespaces` — `/proc/sys` is read-only inside a machine, so those
+can never succeed — nor by `deny userns` in the payload profile, which does not prevent
+creation from inside an existing user namespace and stands only as defence in depth.
+
+The payload enters its profile by inherited exec plus a stack at the final exec, giving
+`<profile>//bwrap//&<profile>//payload (enforce)` — the intersection of both profiles, which
+cannot be unstacked because the payload profile grants no `change_profile`. A domain
+transition is not used: bubblewrap sets NoNewPrivileges before exec, under which the kernel
+refuses one, and with any `px` rule present every exec inside bubblewrap is refused before
+the payload starts.
+
+**Accepted trade**: this requires an unqualified `change_profile,` in the bwrap profile,
+because AppArmor 4 will not load any scoped form. bwrap is the trusted root-only setup step
+that already holds `sys_admin`, `mount` and `userns`, so the rule does not widen a boundary
+an attacker could otherwise reach, and under NoNewPrivileges a transition can only narrow.
+Revisit if AppArmor gains a scoped form, or if bwrap stops being root-only.
+
+The payload's namespaces are enumerated, not blanket: **user, IPC, UTS and cgroup are
+private; PID is not**. Inside a machine the two cannot both hold — a fresh procfs in a
+non-initial user namespace requires a fully visible `/proc`, and nspawn masks parts of it —
+and a correct `/proc` is the more valuable half, because the separation a payload PID
+namespace would add is already carried by the machine's own PID and user namespaces and by
+the payload profile granting ptrace only within its own profile. The accepted consequence:
+a payload can signal the service processes of its own instance, which share its uid. That
+is a denial of service confined to one project's own sandbox; it crosses no instance or
+host boundary.
+

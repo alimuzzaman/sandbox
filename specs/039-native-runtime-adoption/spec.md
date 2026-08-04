@@ -10,6 +10,40 @@
 
 ## Clarifications
 
+### Session 2026-08-04
+
+- Q: A one-shot payload cannot have both its own PID namespace and a correct `/proc`:
+  mounting a fresh procfs inside a non-initial user namespace requires a fully visible
+  procfs, and nspawn masks parts of `/proc`. Which does the payload get? → A: A correct
+  `/proc`, without a private PID namespace. Measured on the live host, the isolation a
+  payload PID namespace would add is already provided elsewhere: the machine has its own
+  PID and user namespaces, so cross-instance and host separation is carried by the machine,
+  and the payload profile grants only same-profile ptrace, so a payload cannot ptrace the
+  instance's own services regardless of PID namespace. The remaining difference is that a
+  payload can signal its own instance's service processes, which share its uid — a
+  self-inflicted denial of service inside one project's sandbox, not a boundary breach.
+  Dropping `/proc` instead would leave `/proc/$$` referring to the wrong process and break
+  ordinary tooling (Composer, PHPUnit, npm, WP-CLI) in ways that look like project bugs.
+- Q: Neither shipped mechanism for preventing nested user namespaces works: `--disable-userns`
+  writes `/proc/sys/user/max_user_namespaces`, which is read-only inside the machine, and
+  `deny userns,` does not stop creation because the payload already runs inside bwrap's user
+  namespace. What enforces it? → A: A seccomp filter rejecting `clone`, `clone3`, and
+  `unshare` with `CLONE_NEWUSER`, installed for the payload after bwrap has set up its own
+  namespace. It states exactly the intended rule, is enforced by the kernel against the
+  payload itself, and needs nothing writable that nspawn masks. Writing the machine's
+  `max_user_namespaces` ceiling from the host was rejected: the ceiling is a subtree budget
+  and cannot distinguish bwrap's own namespace from a nested one, so any value low enough to
+  block the payload also blocks bwrap, and any value high enough for concurrent payloads
+  permits nesting.
+- Q: Entering the payload profile needs a domain transition, and every scoped form is refused
+  — `cx`, `px` under NoNewPrivileges, and `px -> ...//&...` — while AppArmor 4 will not load a
+  scoped `change_profile -> &<target>`. The working form needs an unqualified
+  `change_profile,` in the bwrap profile. Accept it? → A: Yes, recorded as a deliberate trade.
+  bwrap is the trusted root-only setup step that already holds `sys_admin`, `mount` and
+  `userns`, so the rule does not widen a boundary an attacker could otherwise reach, and under
+  NoNewPrivileges a transition can only narrow. It is revisited if AppArmor gains a scoped
+  form, or if bwrap ever stops being root-only.
+
 ### Session 2026-08-03
 
 - Q: NoNewPrivileges on the machine and the AppArmor `//guest` transition cannot both
@@ -311,7 +345,29 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
   either. Concretely: no general mount primitive may reach the guest profile, every guest
   service that runs project code MUST strip CAP_SYS_ADMIN through its own unit
   (`CapabilityBoundingSet`) and restrict namespaces, and the payload profile MUST deny
-  mount, userns, and sys_admin outright.
+  mount, userns, and sys_admin outright. The payload profile's `deny userns` is a defence in
+  depth only: it does not prevent a nested user namespace, because the payload already runs
+  inside one, so FR-046 carries that guarantee.
+- **FR-045**: A one-shot payload MUST run in its own user, IPC, UTS, and cgroup namespaces
+  and MUST have a correct `/proc` for its own PID namespace. It MUST NOT be given a private
+  PID namespace: inside a machine the two are mutually exclusive, and the separation a
+  payload PID namespace would add is already carried by the machine's own PID and user
+  namespaces and by the payload profile's same-profile-only ptrace grant. The accepted
+  consequence, which MUST be stated in the isolation contract rather than implied, is that
+  a payload can signal the service processes of its own instance, which share its uid.
+- **FR-046**: A payload MUST NOT be able to create a nested user namespace, and this MUST be
+  enforced by a seccomp filter rejecting `clone`, `clone3`, and `unshare` carrying
+  `CLONE_NEWUSER`, installed after the payload's own namespace is set up. The system MUST NOT
+  depend on `--disable-userns`, `--assert-userns-disabled`, or any write to
+  `/proc/sys/user/max_user_namespaces`: `/proc/sys` is read-only inside a machine, so those
+  can never succeed. Startup MUST fail closed if the filter cannot be installed.
+- **FR-047**: The payload MUST enter its profile by inheriting exec (`ix`) in the bwrap
+  profile and stacking the payload profile at the final exec, producing an intersection of
+  both profiles that cannot be unstacked. A domain transition MUST NOT be used: bubblewrap
+  sets NoNewPrivileges before exec, under which the kernel refuses one, and with any `px`
+  rule present every exec inside bubblewrap is refused before the payload starts. This
+  requires an unqualified `change_profile,` in the bwrap profile, which is an accepted trade
+  recorded in the isolation contract, not an implementation detail.
 
 ### Key Entities
 

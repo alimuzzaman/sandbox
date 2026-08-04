@@ -158,3 +158,61 @@ they belong with FR-001/FR-044 and the "Managed Isolation Policy" entry in `data
 - The two unmet guarantees above, each of which needs a mechanism decision first.
 - Whether the host-side ceiling write or a seccomp filter is the better answer for nested
   user namespaces; both were identified, neither was tried.
+
+
+---
+
+## Resolved, 2026-08-04
+
+Everything above was measured before the payload could run at all. With the exec
+transition replaced by a stack, the payload runs and every open question above has a
+measured answer.
+
+**The stack holds.** Effective label on a live payload:
+
+```text
+sandbox-native-<id>//bwrap//&sandbox-native-<id>//payload
+```
+
+**`deny userns` does NOT hold, and this time the measurement is trustworthy.** Through the
+reliable transport, with `deny userns create` and `deny userns` both in the payload profile:
+
+```text
+nested_userns: True
+```
+
+The reason is now clear rather than assumed: Ubuntu mediates *unprivileged* user-namespace
+creation, and the payload is already inside bubblewrap's user namespace holding
+CAP_SYS_ADMIN over it, so the creation is not unprivileged and the rule does not apply.
+The AppArmor rules stay as defence in depth; they are not the control.
+
+**A seccomp filter does hold.** With a compiled cBPF filter refusing `clone` and `unshare`
+carrying `CLONE_NEWUSER`, and answering `clone3` with ENOSYS so libc falls back to `clone`:
+
+```text
+nested_userns: False
+```
+
+`clone3` cannot be filtered on its flags — they arrive in a struct behind a pointer and
+seccomp cannot dereference — which is why the container runtimes answer it the same way.
+
+**The two walls above are unchanged, and the contract now matches them.** The payload keeps
+private user, IPC, UTS and cgroup namespaces and a correct `/proc`; it does not get a
+private PID namespace, because inside a machine the two are mutually exclusive and the
+separation it would add is already carried by the machine's own namespaces and by the
+payload profile granting ptrace only within its own profile (FR-045).
+
+**Full gate state on a provisioned instance:**
+
+```text
+apparmor_profile         //bwrap//&//payload
+nested_userns            False
+seccomp                  True
+no_new_privileges        True
+capabilities             []
+ambient_capabilities     []
+control_sockets          []
+unexpected_host_mounts   []
+reachability             host/sibling/metadata/public all false
+cgroup_limits            match policy
+```

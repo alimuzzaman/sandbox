@@ -947,7 +947,14 @@ fi
 /usr/local/bin/wp config set WP_PROXY_HOST "$3" --path=/var/www/html --quiet
 /usr/local/bin/wp config set WP_PROXY_PORT "$4" --path=/var/www/html --raw --quiet
 /usr/local/bin/wp config set WP_PROXY_BYPASS_HOSTS 'localhost,127.0.0.1' --path=/var/www/html --quiet
-/usr/local/bin/wp plugin activate sandbox-project --path=/var/www/html --quiet
+# The project directory is linked in as a plugin, but a project need not be
+# one -- it may be a theme, a site, or plain content. Activate it only when
+# WordPress recognises it, rather than failing provisioning of an otherwise
+# working site with "No plugins activated".
+if /usr/local/bin/wp plugin list --path=/var/www/html --field=name 2>/dev/null \
+     | grep -qx sandbox-project; then
+  /usr/local/bin/wp plugin activate sandbox-project --path=/var/www/html --quiet
+fi
 """
     write_rootfs(mountpoint, "/usr/local/libexec/sandbox-wordpress-bootstrap",
                  wordpress_script, 0o755)

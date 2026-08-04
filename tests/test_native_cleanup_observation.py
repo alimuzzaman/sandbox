@@ -400,6 +400,14 @@ class TestNetworkRecordVersioning(unittest.TestCase):
         foreign_machine = {**legacy, "machine_id": "sb-ffffffffffff"}
         self.assertFalse(self.helper.network_record_matches(foreign_machine, desired))
 
+    def test_every_version_ever_written_stays_readable(self):
+        # Bumping the writer's version without the reader's made the record
+        # unreadable, so cleanup could not read its own record and refused to
+        # remove the network it owned.
+        self.assertIn(self.helper.NETWORK_RECORD_VERSION,
+                      self.helper.KNOWN_NETWORK_RECORD_VERSIONS)
+        self.assertIn(1, self.helper.KNOWN_NETWORK_RECORD_VERSIONS)
+
     def test_a_missing_record_is_never_a_match(self):
         self.assertFalse(self.helper.network_record_matches(None, self.desired()))
 

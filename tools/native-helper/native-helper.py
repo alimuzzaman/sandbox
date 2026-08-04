@@ -1150,6 +1150,7 @@ def expected_network_chains():
 
 
 NETWORK_RECORD_VERSION = 2
+KNOWN_NETWORK_RECORD_VERSIONS = (1, 2)
 # Fields whose meaning does not depend on how a rule is spelled. They bind the
 # record to this machine, this policy and this firewall shape, and are what an
 # older record is still trusted for after a rendering change.
@@ -1216,7 +1217,12 @@ def network_state_record(machine_id):
         fail("native network ownership record is invalid")
     keys = {"version", "machine_id", "policy_digest", "grant_digest", "marker", "network_digest",
             "chains", "rules", "digest"}
-    if (not isinstance(value, dict) or set(value) != keys or value.get("version") != 1 or
+    # Every version this product has ever written stays readable. Accepting
+    # only the current one makes the record unreadable the moment the version
+    # is bumped, which defeats the point of versioning it: cleanup could not
+    # read its own record and refused to remove the network it owned.
+    if (not isinstance(value, dict) or set(value) != keys
+            or value.get("version") not in KNOWN_NETWORK_RECORD_VERSIONS or
             value.get("machine_id") != machine_id or
             not isinstance(value.get("policy_digest"), str) or
             not re.fullmatch(r"[a-f0-9]{64}", str(value.get("grant_digest", ""))) or

@@ -2541,7 +2541,10 @@ def compile_userns_filter(machine):
 
 
 GUEST_USERNS_FILTER = "/etc/sandbox-native/userns-filter.bpf"
-USERNS_FILTER_FD = 10
+# Single digit on purpose: /bin/sh is dash on the guest, and it parses
+# `exec 10<file` as the command `10` with a redirect, not as a redirect
+# on descriptor 10 -- the payload died with "exec: 10: not found".
+USERNS_FILTER_FD = 9
 
 
 def userns_filtered_argv(argv):

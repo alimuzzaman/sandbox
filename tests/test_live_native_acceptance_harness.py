@@ -29,7 +29,10 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
             "cpu", "memory", "pids", "runtime", "disk", "inodes", "fds",
             "connections", "io",
         })
-        self.assertEqual(live.PREFLIGHT_LIMIT_SECONDS, 3.0)
+        # Measured on a host where preflight actually probes. The former 3.0 came
+        # from macOS, where the managed runtime is unsupported and the command
+        # short-circuits, so it timed a check that never ran.
+        self.assertEqual(live.PREFLIGHT_LIMIT_SECONDS, 6.0)
         self.assertEqual(live.STATUS_LIMIT_SECONDS, 3.0)
         self.assertEqual(live.WARM_START_LIMIT_SECONDS, 20.0)
 

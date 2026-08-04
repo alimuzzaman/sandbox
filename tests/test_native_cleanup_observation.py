@@ -369,5 +369,40 @@ class TestNftRuleCanonicalisation(unittest.TestCase):
                 self.assertEqual(observed, expected[name])
 
 
+
+class TestNetworkRecordVersioning(unittest.TestCase):
+    """A rendering change must not strand a network the product still owns."""
+
+    def setUp(self):
+        self.helper = _helper()
+        self.network = {"guest_address": "10.203.118.246/30", "veth": "ve-db081dbdcb",
+                        "host_address": "10.203.118.245/30", "ingress_port": 8080}
+
+    def desired(self):
+        return self.helper.desired_network_state("sb-0123456789ab", "d" * 64, self.network)
+
+    def test_a_current_record_must_match_exactly(self):
+        desired = self.desired()
+        self.assertTrue(self.helper.network_record_matches(dict(desired), desired))
+        changed = {**desired, "marker": "someone-else"}
+        self.assertFalse(self.helper.network_record_matches(changed, desired))
+
+    def test_an_older_record_is_trusted_for_identity_but_not_for_rule_spelling(self):
+        desired = self.desired()
+        legacy = {**desired, "version": 1,
+                  "rules": [["guest_host_established", "0" * 64]],
+                  "digest": "0" * 64}
+        self.assertTrue(self.helper.network_record_matches(legacy, desired))
+        # Identity still has to bind: a record for another policy is refused
+        # however it spells its rules.
+        foreign = {**legacy, "policy_digest": "e" * 64}
+        self.assertFalse(self.helper.network_record_matches(foreign, desired))
+        foreign_machine = {**legacy, "machine_id": "sb-ffffffffffff"}
+        self.assertFalse(self.helper.network_record_matches(foreign_machine, desired))
+
+    def test_a_missing_record_is_never_a_match(self):
+        self.assertFalse(self.helper.network_record_matches(None, self.desired()))
+
+
 if __name__ == "__main__":
     unittest.main()

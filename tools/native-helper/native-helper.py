@@ -1142,9 +1142,36 @@ def expected_network_chains():
             for name in ("input", "output", "forward")}
 
 
+NETWORK_RECORD_VERSION = 2
+# Fields whose meaning does not depend on how a rule is spelled. They bind the
+# record to this machine, this policy and this firewall shape, and are what an
+# older record is still trusted for after a rendering change.
+NETWORK_RECORD_IDENTITY = ("machine_id", "policy_digest", "grant_digest",
+                           "marker", "network_digest", "chains")
+
+
+def network_record_matches(record, desired):
+    """Whether an ownership record still describes the desired network.
+
+    Rule digests are a rendering of the rules, and a rendering can change: the
+    ct-state canonicalisation changed exactly once and would otherwise have
+    stranded every network written before it, with cleanup refusing to remove
+    resources it still owned. A record from an older version is compared on the
+    fields that do not depend on rendering, and the host is then compared
+    against the rules the policy asks for rather than the ones the record
+    happens to spell.
+    """
+    if not isinstance(record, dict):
+        return False
+    if record.get("version") == desired.get("version"):
+        return record == desired
+    return all(record.get(key) == desired.get(key) for key in NETWORK_RECORD_IDENTITY)
+
+
 def desired_network_state(machine_id, policy_digest, network, *, broker=False,
                           grant_digest=ABSENT_GRANT_DIGEST):
-    basis = {"version": 1, "machine_id": machine_id, "policy_digest": policy_digest,
+    basis = {"version": NETWORK_RECORD_VERSION,
+             "machine_id": machine_id, "policy_digest": policy_digest,
              "grant_digest": grant_digest,
              "marker": network_marker(machine_id, policy_digest),
              "network_digest": canonical_digest(network),
@@ -2174,8 +2201,9 @@ def network_status(machine_id, digest):
     egress_unit, _egress_runtime, _egress_control = egress_names(machine_id)
     expected_rule_names = {name for name, _digest in expected_network_rules(
         network, broker=broker)}
-    ok = bool(record == desired_network_state(machine_id, digest, network, broker=broker,
-                                               grant_digest=grant_digest) and
+    ok = bool(network_record_matches(record, desired_network_state(
+                  machine_id, digest, network, broker=broker,
+                  grant_digest=grant_digest)) and
               link and link.get("ifalias") == alias_prefix and nft_state and
               nft_state["table"].get("comment") == network_marker(machine_id, digest) and
               nft_state["chains"] == expected_chains and
@@ -2208,9 +2236,9 @@ def network_remove(machine_id, digest):
     grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
     if grant_record and any(not grant["revoked"] for grant in grant_record["grants"]):
         fail("native active grants must be revoked before network removal")
-    desired_values = (desired_network_state(machine_id, digest, network,
-                                            grant_digest=grant_digest),)
-    if record is not None and record not in desired_values:
+    desired = desired_network_state(machine_id, digest, network,
+                                    grant_digest=grant_digest)
+    if record is not None and not network_record_matches(record, desired):
         fail("native network ownership record changed")
     nft_table = observed_nft_table(table)
     if nft_table is not None:
@@ -3064,16 +3092,19 @@ def cleanup_observe(resource, machine_id, policy_digest, resource_digest):
             grants = grant_record["grants"] if grant_record else list(network.get("grants", ()))
             grant_digest = grant_record["grant_digest"] if grant_record else ABSENT_GRANT_DIGEST
             broker = any(not grant["revoked"] for grant in grants)
-            if record != desired_network_state(machine_id, policy_digest, network,
-                                               broker=broker, grant_digest=grant_digest):
+            desired = desired_network_state(machine_id, policy_digest, network,
+                                            broker=broker, grant_digest=grant_digest)
+            if not network_record_matches(record, desired):
                 fail("native network ownership changed")
             # Verify each piece that exists. An interrupted removal leaves the
             # record behind after the table is gone; that is a network still
             # half-ours to finish removing, not a changed one, and `network-remove`
-            # already removes exactly what remains.
+            # already removes exactly what remains. The host is compared against
+            # the rules the policy asks for, so an older record's spelling cannot
+            # make an untouched host look drifted.
             if observed_table is not None and (
                     observed_table.get("comment") != record["marker"]
-                    or not nft_state_matches_record(observed_nft_state(table), record)):
+                    or not nft_state_matches_record(observed_nft_state(table), desired)):
                 fail("native network ownership changed")
             if link is not None and link.get("ifalias") != alias_prefix:
                 fail("native veth ownership changed")

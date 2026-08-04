@@ -2892,6 +2892,18 @@ def resource_limits_match(machine_id, policy):
         if result.returncode != 0:
             return {}
         service_files[name] = result.stdout or ""
+    # Isolation is verified before any service is activated, on purpose: web,
+    # PHP, database and cron stay masked so project files cannot execute before
+    # the boundary is proven. The service-level ceilings below therefore cannot
+    # be read yet, and demanding them made every machine fail the resource gate
+    # on a correctly built stack. They are checked here once the services are
+    # actually running, which is when they mean anything.
+    units = ("mariadb.service", "php8.3-fpm.service",
+             "nginx.service" if "nginx" in service_files["marker"] else "apache2.service")
+    states = guest_unit_load_states(machine_id, units) or {}
+    if any(states.get(unit) != "loaded" for unit in units):
+        return {**dict(expected), "memory_high_bytes": memory_high,
+                "memory_swap_bytes": 0}
     expected_php = max(2, min(32, expected["connections"] // 4))
     database = run_optional((
         *guest_command(machine_id, ()),

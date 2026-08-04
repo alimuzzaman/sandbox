@@ -21,6 +21,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -652,6 +653,11 @@ def rootfs_path(root, relative, *, allow_final_symlink=False):
 
 def write_rootfs(root, relative, payload, mode=0o644):
     destination = rootfs_path(root, relative)
+    # A `.bpf` file is carried through the file map as hex so the map stays
+    # text and its digest compares equal on both sides; the guest needs the
+    # bytes, because bubblewrap reads a compiled cBPF program.
+    if isinstance(payload, str) and relative.endswith(".bpf"):
+        payload = bytes.fromhex(payload)
     atomic_install_bytes(payload.encode() if isinstance(payload, str) else payload, destination)
     os.chmod(destination, mode)
 
@@ -686,15 +692,18 @@ def _persistent_payload(command, writable_targets):
                  "--tmpfs", "/run/credentials", "--dir", "/run/credentials/sandbox",
                  "--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
                  "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                 "--tmpfs", "/run/host",
                  "--chdir", "/workspace", "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                 "--seccomp", str(USERNS_FILTER_FD),
                  "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                  "--setenv", "HOME", "/var/www", "--setenv", "USER", "www-data",
                  "--setenv", "LOGNAME", "www-data", "--", *command))
-    return "#!/bin/sh\nset -eu\nexec " + shlex.join(argv) + "\n"
+    return "#!/bin/sh\nset -eu\nexec " + shlex.join(userns_filtered_argv(argv)) + "\n"
 
 
 def compile_service_files(guest, connections, runtime_seconds, web_server, backend_port,
-                          writable_targets=()):
+                          writable_targets=(), guest_machine=None):
+    guest_machine = guest_machine or os.uname().machine
     php_children = max(2, min(32, connections // 4))
     common_php = (
         "[sandbox]\nuser = www-data\ngroup = www-data\n"
@@ -771,6 +780,12 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
              # /run/sandbox-native-credentials: Read-only file system".
              # It has to exist whether or not a credential was ever staged,
              # or the mask silently depends on that having happened.
+             # The payload's seccomp filter, shipped as a file because bwrap
+             # takes it as a file descriptor and the payload launcher has
+             # to open it before exec. It is part of the service digest, so
+             # a changed filter is a changed configuration.
+             "/etc/sandbox-native/userns-filter.bpf":
+             compile_userns_filter(guest_machine).hex(),
              "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
              "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"
              "d /run/sandbox-native-credentials 0700 root root -\n"}
@@ -2389,12 +2404,17 @@ def validated_execution_argv(policy, request):
         target = f"{GUEST_CREDENTIAL_TARGET_ROOT}/{name}"
         expected.extend(("--ro-bind", source, target))
     expected.extend(("--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
-                     "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
+                     "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                 "--tmpfs", "/run/host"))
     expected.extend(("--chdir", "/workspace", "--cap-drop", "ALL",
-                     "--uid", "33", "--gid", "33"))
+                     "--uid", "33", "--gid", "33",
+                     "--seccomp", str(USERNS_FILTER_FD)))
     for key, value in sorted(environment.items()): expected.extend(("--setenv", key, value))
     expected.extend(("--", *command))
-    if argv != expected: fail("native execution boundary changed")
+    # The caller sends the whole invocation, including the wrapper that opens
+    # the seccomp filter, so the comparison is against the wrapped form.
+    if tuple(argv) != userns_filtered_argv(expected):
+        fail("native execution boundary changed")
     return tuple(argv), min(timeout, policy["resources"]["runtime_seconds"])
 
 
@@ -2444,6 +2464,103 @@ def execute_request(machine_id, policy_digest, request_digest):
     return bounded_guest_execution(machine_id, argv, timeout)
 
 
+# Linux/seccomp constants. Spelled out rather than imported so the compiled
+# filter is readable next to the kernel documentation it implements.
+BPF_LD, BPF_W, BPF_ABS, BPF_JMP, BPF_JEQ, BPF_JSET, BPF_K, BPF_RET = (
+    0x00, 0x00, 0x20, 0x05, 0x10, 0x40, 0x00, 0x06)
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_ERRNO = 0x00050000
+EPERM, ENOSYS = 1, 38
+CLONE_NEWUSER = 0x10000000
+
+# Offsets into `struct seccomp_data`: nr, arch, instruction_pointer, args[6].
+OFFSET_NR, OFFSET_ARCH, OFFSET_ARG0 = 0, 4, 16
+
+AUDIT_ARCH_X86_64 = 0xC000003E
+AUDIT_ARCH_AARCH64 = 0xC00000B7
+
+# (audit arch, clone, unshare, clone3)
+ARCHITECTURES = {
+    "x86_64": (AUDIT_ARCH_X86_64, 56, 272, 435),
+    "aarch64": (AUDIT_ARCH_AARCH64, 220, 97, 435),
+}
+
+# The guest is always a Linux image, but the name may be read on a host that
+# spells the same architecture differently -- macOS reports `arm64` where Linux
+# reports `aarch64`, and the compiled filter must not depend on which machine
+# happened to render the configuration.
+ARCHITECTURE_ALIASES = {"arm64": "aarch64", "amd64": "x86_64", "x86-64": "x86_64"}
+
+
+def _instruction(code, jt, jf, k):
+    return struct.pack("=HBBI", code, jt, jf, k)
+
+
+def compile_userns_filter(machine):
+    """cBPF refusing `clone`/`unshare` with CLONE_NEWUSER, and `clone3` outright.
+
+    The program is written for one architecture and checks that it is running on
+    it. A filter compiled for the wrong architecture would read another ABI's
+    syscall numbers, so a mismatch refuses rather than falls through to allow.
+    """
+    machine = ARCHITECTURE_ALIASES.get(machine, machine)
+    if machine not in ARCHITECTURES:
+        raise ValueError(f"unsupported architecture for the userns filter: {machine}")
+    arch, clone, unshare, clone3 = ARCHITECTURES[machine]
+
+    # Written as an explicit instruction list because every jump is an offset to
+    # the instructions after it, and those offsets must move together.
+    #
+    #  0  load arch
+    #  1  arch == expected ? continue : -> deny            (jf = 8, index 10)
+    #  2  load nr
+    #  3  nr == clone3 ? -> enosys (index 9)
+    #  4  nr == clone   ? -> flags (index 7)
+    #  5  nr == unshare ? -> flags (index 7)
+    #  6  -> allow (index 11)
+    #  7  load args[0]        (flags is the first argument of both clone and unshare)
+    #  8  flags & CLONE_NEWUSER ? -> deny (index 10) : -> allow (index 11)
+    #  9  return ENOSYS
+    # 10  return EPERM
+    # 11  return ALLOW
+    program = [
+        _instruction(BPF_LD | BPF_W | BPF_ABS, 0, 0, OFFSET_ARCH),
+        _instruction(BPF_JMP | BPF_JEQ | BPF_K, 0, 8, arch),
+        _instruction(BPF_LD | BPF_W | BPF_ABS, 0, 0, OFFSET_NR),
+        _instruction(BPF_JMP | BPF_JEQ | BPF_K, 5, 0, clone3),
+        _instruction(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, clone),
+        _instruction(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, unshare),
+        _instruction(BPF_JMP | 0x00 | BPF_K, 0, 0, 4),
+        _instruction(BPF_LD | BPF_W | BPF_ABS, 0, 0, OFFSET_ARG0),
+        _instruction(BPF_JMP | BPF_JSET | BPF_K, 1, 2, CLONE_NEWUSER),
+        _instruction(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | ENOSYS),
+        _instruction(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM),
+        _instruction(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW),
+    ]
+    return b"".join(program)
+
+
+GUEST_USERNS_FILTER = "/etc/sandbox-native/userns-filter.bpf"
+USERNS_FILTER_FD = 10
+
+
+def userns_filtered_argv(argv):
+    """Open the userns seccomp filter on a fixed fd, then exec bubblewrap.
+
+    bubblewrap takes the filter as a file descriptor and applies it to the
+    sandboxed process after its own setup, which is the only point where it can
+    hold: bubblewrap itself has to create a user namespace, so a filter applied
+    any earlier would block bubblewrap instead of the payload.
+
+    The redirect fails closed. Without `set -e` a missing filter would leave the
+    fd unopened and bubblewrap would refuse anyway, but an explicit failure says
+    which file was missing instead of reporting an unrelated bubblewrap error.
+    """
+    return ("/bin/sh", "-c",
+            f"exec {USERNS_FILTER_FD}<{GUEST_USERNS_FILTER} || exit 126\nexec \"$@\"\n",
+            "sandbox-userns-filter", *tuple(argv))
+
+
 def payload_stack_prefix(machine_id):
     """The exec wrapper that stacks the payload profile onto the final exec.
 
@@ -2483,10 +2600,12 @@ def fixed_probe_bwrap(policy, command, credential_refs=()):
         target = f"{GUEST_CREDENTIAL_TARGET_ROOT}/{name}"
         argv.extend(("--ro-bind", source, target))
     argv.extend(("--tmpfs", GUEST_CREDENTIAL_SOURCE_ROOT,
-                 "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
+                 "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                 "--tmpfs", "/run/host"))
     argv.extend(("--chdir", "/workspace", "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                 "--seccomp", str(USERNS_FILTER_FD),
                  "--", *stacked_payload_command(policy["machine_id"], command)))
-    return tuple(argv)
+    return userns_filtered_argv(argv)
 
 
 def parse_status_fields(text):
@@ -2506,7 +2625,14 @@ def probe_payload_state(machine_id, policy):
               "for value in /run/systemd/private /run/dbus/system_bus_socket "
               "/var/run/docker.sock /run/credentials/sandbox/db-credential "
               "/run/sandbox-native-credentials /run/host; do "
-              "test ! -e \"$value\" || printf '%s\\n' \"$value\"; done; "
+              # A masked path exists as an empty tmpfs -- bwrap cannot
+              # unlink a mountpoint, only cover it -- so existence alone is
+              # not a leak. What matters is that nothing is reachable
+              # through it, so a directory counts only when it has entries.
+              "test -e \"$value\" || continue; "
+              "if test -d \"$value\"; then "
+              "test -n \"$(ls -A \"$value\" 2>/dev/null)\" && printf '%s\\n' \"$value\"; "
+              "else printf '%s\\n' \"$value\"; fi; done; "
               "printf '%s\\n' '---env---'; env")
     result = guest_run(machine_id, fixed_probe_bwrap(
         policy, ("/bin/sh", "-c", script)), "native payload isolation probe failed")

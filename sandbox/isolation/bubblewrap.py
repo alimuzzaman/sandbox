@@ -7,6 +7,25 @@ from pathlib import PurePosixPath
 
 CREDENTIAL_SOURCE_ROOT = "/run/sandbox-native-credentials"
 CREDENTIAL_TARGET_ROOT = "/run/credentials/sandbox"
+GUEST_USERNS_FILTER = "/etc/sandbox-native/userns-filter.bpf"
+USERNS_FILTER_FD = 10
+
+
+def userns_filtered_argv(argv):
+    """Open the userns seccomp filter on a fixed fd, then exec bubblewrap.
+
+    bubblewrap takes the filter as a file descriptor and applies it to the
+    sandboxed process after its own setup, which is the only point where it can
+    hold: bubblewrap itself has to create a user namespace, so a filter applied
+    any earlier would block bubblewrap instead of the payload.
+
+    The redirect fails closed. Without `set -e` a missing filter would leave the
+    fd unopened and bubblewrap would refuse anyway, but an explicit failure says
+    which file was missing instead of reporting an unrelated bubblewrap error.
+    """
+    return ("/bin/sh", "-c",
+            f"exec {USERNS_FILTER_FD}<{GUEST_USERNS_FILTER} || exit 126\nexec \"$@\"\n",
+            "sandbox-userns-filter", *tuple(argv))
 
 
 def stacked_command(payload_profile, command):
@@ -75,11 +94,21 @@ class BubblewrapCompiler:
             target = f"{CREDENTIAL_TARGET_ROOT}/{name}"
             args.extend(("--ro-bind", source, target))
         args.extend(("--tmpfs", CREDENTIAL_SOURCE_ROOT,
-                     "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus"))
+                     "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                     # nspawn exposes the host os-release and an incoming
+                     # bind point under /run/host; the payload has no use
+                     # for either.
+                     "--tmpfs", "/run/host"))
         args.extend(("--chdir", working_dir,
-                     "--cap-drop", "ALL", "--uid", "33", "--gid", "33"))
+                     "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                     # AppArmor cannot carry this: the payload is already inside
+                     # bubblewrap's user namespace, so creating another is not an
+                     # unprivileged creation and `deny userns create` does not
+                     # apply -- measured live as `nested_userns: True` with the
+                     # rule in place (FR-046).
+                     "--seccomp", str(USERNS_FILTER_FD)))
         for key, value in sorted((environment or {}).items()):
             args.extend(("--setenv", key, str(value)))
         if payload_profile:
             command = stacked_command(payload_profile, command)
-        return tuple((*args, "--", *command))
+        return userns_filtered_argv((*args, "--", *command))

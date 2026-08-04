@@ -24,7 +24,12 @@ class IsolationVerifier:
             if namespaces.get(name) is not True: failures.append(f"namespace:{name}")
         if observed.get("no_new_privileges") is not True: failures.append("no_new_privileges")
         if observed.get("capabilities") not in ((), []): failures.append("capabilities")
-        expected_profile = f"sandbox-native-{policy.machine_id}//payload"
+        # The payload profile is entered by stacking it onto the bwrap profile at
+        # the final exec, not by a domain transition, so the effective label is
+        # the intersection of both and names both (FR-047). A bare `//payload`
+        # would mean the transition happened, which NoNewPrivileges forbids.
+        base = f"sandbox-native-{policy.machine_id}"
+        expected_profile = f"{base}//bwrap//&{base}//payload"
         if observed.get("apparmor_profile") != expected_profile: failures.append("apparmor_profile")
         if observed.get("nested_userns") is not False: failures.append("nested_userns")
         if observed.get("ambient_capabilities") not in ((), []): failures.append("ambient_capabilities")

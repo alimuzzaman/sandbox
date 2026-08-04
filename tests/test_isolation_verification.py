@@ -19,7 +19,12 @@ def healthy(target):
             "private_namespaces": {name: True for name in
                 ("user", "mount", "pid", "ipc", "uts", "network")},
             "no_new_privileges": True, "capabilities": [], "seccomp": True,
-            "apparmor_profile": f"sandbox-native-{target.machine_id}//payload",
+            # The effective label is the stack, not a transition: bubblewrap
+            # sets NoNewPrivileges before exec, under which the kernel refuses
+            # a domain transition, so the payload profile is stacked onto the
+            # bwrap profile and the label names both (FR-047).
+            "apparmor_profile": (f"sandbox-native-{target.machine_id}//bwrap"
+                                 f"//&sandbox-native-{target.machine_id}//payload"),
             "nested_userns": False, "ambient_capabilities": [],
             "dangerous_capabilities": [], "devices": ["null", "zero", "urandom"],
             "nft_default_drop": True, "default_route": False,

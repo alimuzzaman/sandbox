@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import os
 import re
 import shlex
 from collections.abc import Mapping
 
 from sandbox.isolation.models import canonical_digest
+from sandbox.isolation.bubblewrap import USERNS_FILTER_FD, userns_filtered_argv
+from sandbox.isolation.seccomp import compile_userns_filter
 
 
 PERSISTENT_WRITABLE_TARGETS = frozenset({
@@ -26,15 +29,18 @@ def _persistent_payload(command, writable_targets):
                  "--tmpfs", "/run/credentials", "--dir", "/run/credentials/sandbox",
                  "--tmpfs", "/run/sandbox-native-credentials",
                  "--tmpfs", "/run/systemd", "--tmpfs", "/run/dbus",
+                 "--tmpfs", "/run/host",
                  "--chdir", "/workspace", "--cap-drop", "ALL", "--uid", "33", "--gid", "33",
+                 "--seccomp", str(USERNS_FILTER_FD),
                  "--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                  "--setenv", "HOME", "/var/www", "--setenv", "USER", "www-data",
                  "--setenv", "LOGNAME", "www-data", "--", *command))
-    return "#!/bin/sh\nset -eu\nexec " + shlex.join(argv) + "\n"
+    return "#!/bin/sh\nset -eu\nexec " + shlex.join(userns_filtered_argv(argv)) + "\n"
 
 
 def compile_service_files(guest, connections, runtime_seconds, *, web_server, backend_port,
-                          writable_targets=()):
+                          writable_targets=(), guest_machine=None):
+    guest_machine = guest_machine or os.uname().machine
     php_children = max(2, min(32, connections // 4))
     common_php = (
         "[sandbox]\nuser = www-data\ngroup = www-data\n"
@@ -111,6 +117,12 @@ def compile_service_files(guest, connections, runtime_seconds, *, web_server, ba
              # /run/sandbox-native-credentials: Read-only file system".
              # It has to exist whether or not a credential was ever staged,
              # or the mask silently depends on that having happened.
+             # The payload's seccomp filter, shipped as a file because bwrap
+             # takes it as a file descriptor and the payload launcher has
+             # to open it before exec. It is part of the service digest, so
+             # a changed filter is a changed configuration.
+             "/etc/sandbox-native/userns-filter.bpf":
+             compile_userns_filter(guest_machine).hex(),
              "/etc/tmpfiles.d/sandbox-runtime-dirs.conf":
              "d /run/mysqld 0755 mysql mysql -\nd /run/php 0770 www-data www-data -\n"
              "d /run/sandbox-native-credentials 0700 root root -\n"}

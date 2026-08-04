@@ -336,9 +336,14 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
   endpoints MUST be treated as an explicit opt-in that hands ingress to that product; C MUST
   NOT cause that handover implicitly for a project that did not select it.
 - **FR-043**: NoNewPrivileges MUST apply to every untrusted execution path inside a managed
-  instance — the web server, PHP-FPM, the database, cron, and each transient exec payload —
-  and MUST NOT be applied to the machine itself, where it would prevent the guest from
-  entering its confining AppArmor profile.
+  instance — the web server, PHP-FPM, the database, cron, and each transient exec payload.
+  It MUST NOT be applied to any process that must first enter a tighter AppArmor profile,
+  because the kernel refuses a domain transition under it. That exempts the machine itself,
+  whose init enters the `//guest` profile, and equally any guest unit that launches
+  bubblewrap — PHP-FPM and cron — which enter the `//bwrap` profile. The exemption costs
+  nothing: bubblewrap applies NoNewPrivileges itself before executing the payload, so the
+  untrusted code still runs under it, and the exempted units MUST still strip the escape
+  capabilities through `CapabilityBoundingSet`.
 - **FR-044**: The machine's own init MAY hold CAP_SYS_ADMIN and the enumerated API-filesystem
   mounts INSIDE its private user namespace, because it cannot boot without them and a
   namespaced capability cannot act on the host. Untrusted execution paths MUST NOT hold

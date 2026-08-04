@@ -56,7 +56,7 @@ class TestManagedServices(unittest.TestCase):
                       result["files"]["/etc/cron.d/sandbox-wordpress"])
         self.assertEqual(
             result["files"]["/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf"],
-            "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
+            "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
         )
 
     def test_apache_variant_uses_same_php_database_and_backend_contract(self):

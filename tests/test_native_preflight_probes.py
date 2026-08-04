@@ -292,19 +292,46 @@ class TestNoNewPrivilegesLivesOnTheGuestUnits(unittest.TestCase):
         machine_block = source.split("nspawn = [", 1)[1].split("]", 1)[0]
         self.assertNotIn("--no-new-privileges", machine_block)
 
-    def test_every_guest_service_unit_sets_it(self):
+    # The same kernel rule applies one layer down. A unit that launches
+    # bubblewrap cannot carry the flag either: entering the tighter bwrap profile
+    # is a domain transition, and php-fpm died with "exec /usr/bin/bwrap:
+    # Operation not permitted". Bubblewrap sets NoNewPrivileges itself before
+    # exec'ing the payload, so the untrusted code still runs under it.
+    LAUNCHERS = {"php8.3-fpm.service", "cron.service"}
+
+    def test_every_guest_service_unit_that_can_carry_it_sets_it(self):
         files, units = self._files()
         for unit in units:
             path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
             with self.subTest(unit=unit):
                 self.assertIn(path, files)
-                self.assertIn("NoNewPrivileges=yes", files[path])
+                if unit in self.LAUNCHERS:
+                    self.assertNotIn("NoNewPrivileges", files[path])
+                else:
+                    self.assertIn("NoNewPrivileges=yes", files[path])
 
-    def test_the_php_pool_unit_keeps_it_too(self):
+    def test_every_unit_still_strips_the_escape_capabilities(self):
+        # Dropping the flag from a launcher must not drop the rest with it.
+        files, units = self._files()
+        for unit in units:
+            path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
+            with self.subTest(unit=unit):
+                self.assertIn("CapabilityBoundingSet=~CAP_SYS_ADMIN", files[path])
+
+    def test_the_payload_launcher_still_applies_it_itself(self):
+        # What makes dropping it safe: bubblewrap sets NNP for the payload.
         files, _units = self._files()
-        self.assertIn(
-            "NoNewPrivileges=yes",
-            files["/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf"])
+        launcher = files["/usr/local/libexec/sandbox-php-fpm"]
+        self.assertIn("/usr/bin/bwrap", launcher)
+        self.assertIn("--cap-drop ALL", launcher)
+
+    def test_the_php_pool_unit_drops_it_for_the_same_reason(self):
+        # php-fpm's own drop-in launches bubblewrap directly, so it is subject to
+        # exactly the same kernel rule as the unit above.
+        files, _units = self._files()
+        isolation = files["/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf"]
+        self.assertNotIn("NoNewPrivileges", isolation)
+        self.assertIn("/usr/local/libexec/sandbox-php-fpm", isolation)
 
     def test_transient_exec_payloads_keep_it(self):
         from pathlib import Path

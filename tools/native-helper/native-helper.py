@@ -782,7 +782,7 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
              "/usr/local/libexec/sandbox-wordpress-cron":
              _persistent_payload(cron_command, writable_targets),
              "/etc/systemd/system/php8.3-fpm.service.d/sandbox-isolation.conf":
-             "[Service]\nType=simple\nNoNewPrivileges=yes\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
+             "[Service]\nType=simple\nExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/php\nExecStart=\nExecStart=/usr/local/libexec/sandbox-php-fpm\n",
              "/etc/cron.d/sandbox-wordpress":
              "*/5 * * * * root /usr/local/libexec/sandbox-wordpress-cron >/dev/null 2>&1\n",
              # Declared writable targets under /run must exist from boot, not
@@ -818,12 +818,21 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
     # machine it blocks the AppArmor transition into the tighter `//guest`
     # profile, and the guest init can never exec. Every untrusted execution path
     # inside the guest is one of these services, so the flag still covers them.
+    # NoNewPrivileges cannot go on a unit that launches bubblewrap: entering
+    # the tighter bwrap profile is an AppArmor domain transition, and the
+    # kernel refuses one under NNP -- php-fpm died with "exec /usr/bin/bwrap:
+    # Operation not permitted". This is the same carve-out FR-043 already
+    # makes for the machine, one layer down, and it costs nothing: bubblewrap
+    # sets NNP itself before exec'ing the payload, so the untrusted code still
+    # runs under it. Units that never launch bubblewrap keep the flag.
+    launchers = {"php8.3-fpm.service", "cron.service"}
     for unit in units:
         files[f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"] = (
-            "[Service]\nNoNewPrivileges=yes\n"
+            "[Service]\n"
+            + ("" if unit in launchers else "NoNewPrivileges=yes\n")
             # The guest profile grants sys_admin so PID 1 can mount its API
             # filesystems; no service that runs project code may keep it.
-            "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_MODULE "
+            + "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_MODULE "
             "CAP_SYS_RAWIO CAP_SYS_BOOT CAP_MKNOD\n"
             "RestrictNamespaces=yes\nProtectKernelTunables=yes\n"
         )

@@ -8,10 +8,9 @@ to remove a managed resource — that is the property under test.
 **Host**: Ubuntu 24.04.4 LTS, systemd 255, AppArmor 4. Machine `sb-d71dfb0667143794`,
 left behind by the provisioning attempts in `managed-provisioning.md`. 2026-08-03.
 
-**Status**: partial. The drifted, repeated and unavailable cases are proven on a real
-half-provisioned machine. The normal case — cleanup of a fully provisioned, running
-machine — cannot be run until the payload boundary in `payload-boundary.md` is resolved,
-because provisioning does not currently reach a running machine.
+**Status**: complete. All four cases are proven live, including the normal case against a
+fully provisioned machine with every service running — which became possible once the
+payload boundary in `payload-boundary.md` was resolved.
 
 ## Starting host state
 
@@ -148,10 +147,38 @@ through observation, past a progress record that claimed they were already gone.
 | repeated | converges — an owner with no records returns `cleanup_complete`, unmutated |
 | unavailable (observer refuses) | residual retained, nothing removed, no false claim |
 | foreign identity | refused before any removal (contract suite; not re-run live here) |
-| normal (fully provisioned machine) | **not run** — blocked by the payload boundary |
+| normal (fully provisioned machine) | removed in 10.3 s; host left with no machine, table, profile, image or record |
 
 ## Not covered
 
 - The normal case above. It needs a machine that starts, which `payload-boundary.md`
   shows requires an isolation-contract decision first.
 - Timing bounds for cleanup of a full instance, for the same reason.
+
+## The normal case
+
+Run against an instance provisioned end to end, with MariaDB, PHP-FPM, nginx and cron all
+`active` and the backend answering on its veth address:
+
+```text
+host before   machines: 1   nft tables: 1   profiles: 1   images: 1
+destroy       ok=true  cleanup_complete  10.3 s
+              removed: services, database, machine, network, mount, image, policy, state
+              residual: none
+host after    machines: 0   nft tables: 0   profiles: 0   images: 0
+              networks: 0   policies: 0
+              native state.json: every section empty, including recovery
+```
+
+Repeating it converges rather than erroring:
+
+```text
+run 1  ok=true  cleanup_complete  mutated=false
+run 2  ok=true  cleanup_complete  mutated=false
+```
+
+That repeat was itself a defect this run found: with every record gone there is no cleanup
+plan to load, and the missing plan was reported as `cleanup_plan_unavailable` with
+`ok=false`. A repeat converging is what makes destroy safe to retry, so nothing owned
+recorded anywhere now returns `cleanup_complete`. The missing-plan failure still stands
+when there IS owned state and no plan for it.

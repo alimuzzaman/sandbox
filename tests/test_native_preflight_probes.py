@@ -310,6 +310,21 @@ class TestNoNewPrivilegesLivesOnTheGuestUnits(unittest.TestCase):
                 else:
                     self.assertIn("NoNewPrivileges=yes", files[path])
 
+    def test_a_launcher_may_create_the_namespaces_bubblewrap_needs(self):
+        # A blanket namespace restriction blocks the very namespaces bubblewrap
+        # builds the sandbox from, so php-fpm could not start with it. The payload
+        # gains nothing: bubblewrap drops every capability and the seccomp filter
+        # refuses a nested user namespace.
+        files, units = self._files()
+        for unit in units:
+            path = f"/etc/systemd/system/{unit}.d/sandbox-no-new-privileges.conf"
+            with self.subTest(unit=unit):
+                if unit in self.LAUNCHERS:
+                    self.assertNotIn("RestrictNamespaces", files[path])
+                else:
+                    self.assertIn("RestrictNamespaces=yes", files[path])
+                self.assertIn("ProtectKernelTunables=yes", files[path])
+
     def test_every_unit_still_strips_the_escape_capabilities(self):
         # Dropping the flag from a launcher must not drop the rest with it.
         files, units = self._files()

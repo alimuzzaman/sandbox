@@ -834,7 +834,13 @@ def compile_service_files(guest, connections, runtime_seconds, web_server, backe
             # filesystems; no service that runs project code may keep it.
             + "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SYS_MODULE "
             "CAP_SYS_RAWIO CAP_SYS_BOOT CAP_MKNOD\n"
-            "RestrictNamespaces=yes\nProtectKernelTunables=yes\n"
+            # A launcher must be able to create the namespaces bubblewrap builds
+            # the sandbox from, so it cannot carry a blanket namespace
+            # restriction -- php-fpm failed to start with it. The payload gets no
+            # namespace privilege from this: bubblewrap drops every capability and
+            # the seccomp filter refuses a nested user namespace (FR-046).
+            + ("" if unit in launchers else "RestrictNamespaces=yes\n")
+            + "ProtectKernelTunables=yes\n"
         )
     if web_server == "nginx":
         files["/etc/nginx/nginx.conf"] = nginx

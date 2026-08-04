@@ -44,7 +44,9 @@ MAX_EVENTS = 384
 # real host probing, consistently 3.0-3.4s, so the old bound could never pass
 # on the only host where the number means anything.
 PREFLIGHT_LIMIT_SECONDS = 6.0
-STATUS_LIMIT_SECONDS = 6.0
+# Status is unchanged: measured at 0.52s and 0.55s on the same host, well inside
+# its bound. Only preflight does the host probing that made the old number wrong.
+STATUS_LIMIT_SECONDS = 3.0
 WARM_START_LIMIT_SECONDS = 20.0
 # A cold provision builds a fixed-size image, debootstraps a root filesystem and
 # installs the web/PHP/database packages inside it. That is minutes of work and is

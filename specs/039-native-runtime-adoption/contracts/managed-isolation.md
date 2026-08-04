@@ -63,13 +63,22 @@ use bubblewrap with cleared environment, private temp, read-only source, capabil
 nested-user-namespace disablement, and bounded output/time. The launcher rejects unexpected
 open descriptors before `exec` and never executes fallback argv on the host.
 
-Nested-user-namespace disablement is enforced by a seccomp filter rejecting `clone`,
-`clone3` and `unshare` with `CLONE_NEWUSER`, installed for the payload after bwrap's own
-namespace is set up, and startup fails closed if it cannot be installed. It is not enforced
-by `--disable-userns`, `--assert-userns-disabled`, or any write to
-`/proc/sys/user/max_user_namespaces` — `/proc/sys` is read-only inside a machine, so those
-can never succeed — nor by `deny userns` in the payload profile, which does not prevent
-creation from inside an existing user namespace and stands only as defence in depth.
+Nested-user-namespace disablement is **not** enforced by `--disable-userns`,
+`--assert-userns-disabled`, or any write to `/proc/sys/user/max_user_namespaces`: `/proc/sys`
+is read-only inside a machine, so those can never succeed.
+
+Ubuntu 24.04 mediates unprivileged user-namespace creation through AppArmor, so
+`deny userns create` in the payload profile is the stated mechanism, pending a live
+measurement on a machine that can run a payload. The earlier observation that it does not
+hold was taken through `machinectl shell`, a transport since found to drop output and
+misreport results, so it does not stand as evidence either way.
+
+If it is measured ineffective, the fallback is a seccomp filter rejecting `unshare` and
+`clone` carrying `CLONE_NEWUSER` by inspecting their flags argument, and returning `ENOSYS`
+for `clone3` so callers fall back to `clone`. Seccomp cannot inspect `clone3`'s flags —
+they are passed by pointer, and seccomp cannot dereference — which is why the container
+runtimes handle `clone3` the same way. Startup fails closed if the chosen mechanism cannot
+be established.
 
 The payload enters its profile by inherited exec plus a stack at the final exec, giving
 `<profile>//bwrap//&<profile>//payload (enforce)` — the intersection of both profiles, which

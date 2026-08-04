@@ -74,9 +74,49 @@ ordinary run raised an unhandled `PermissionError`. That now reports which file 
 and never falls back to empty state — doing so would forget which host resources are ours
 and orphan every one of them.
 
+## Four more, found only by running cleanup to completion
+
+Each of these was reached only after the previous one was fixed, and every one of them
+alone was enough to stop cleanup permanently.
+
+**4. A service was owned only while it was running.** Ownership was proved with
+`systemctl is-active`, so units installed but never started answered `inactive`, and units
+this cleanup's own stop step had already masked answered `masked`. Both were reported as
+changed ownership. Ownership comes from the guest marker that binds the units to this
+machine and policy; whether a unit happens to be running says nothing about whose it is.
+
+**5. Unit states were read positionally.** `systemctl show --property=LoadState --value`
+for several units emits bare values with nothing saying which unit each belongs to, and an
+empty value silently shifts every later unit's state onto the wrong unit. States are now
+read from `Id`/`LoadState` pairs.
+
+**6. Two firewall rules were reported drifted on an untouched host.** The rules were
+byte-for-byte what the policy asked for. The two affected were the only two matching on a
+ct-state set, and the difference was entirely in spelling:
+
+```text
+built   {"op": "==", "right": {"set": ["new", "established"]}}
+echoed  {"op": "in", "right": ["established", "new"]}
+```
+
+nft renders an anonymous set as a bare list and equality against it as `in`.
+
+**7. The observed rules were a list; everything comparing them produced a tuple.** A list
+never equals a tuple however identical the contents, so `nft_state_matches_record` could
+not return true on any real host, and `network_status` could never report `ok`. Nothing had
+reached that comparison against a live table before, and the tests covering it built both
+sides the same way, so it was invisible.
+
+Fixing 6 and 7 exposed a further class: a record or profile written by an earlier release
+is refused by a later one. The network ownership record and the AppArmor profile now carry
+a version, and an older one is recognised as ours by the fields whose meaning does not
+depend on rendering. Without that, every change to a rule's rendering or the profile text
+would strand every machine provisioned before it — cleanup refusing to remove resources it
+had installed itself.
+
 ## Result
 
-With all three fixed, one `destroy` as the ordinary user, against the poisoned progress
+With all seven fixed, one `destroy` as the ordinary user, against the poisoned progress
 record still in place:
 
 ```json

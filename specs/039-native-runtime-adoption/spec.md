@@ -355,12 +355,18 @@ unavailable runtimes, normal destroy, and repeated destroy while comparing host 
   namespaces and by the payload profile's same-profile-only ptrace grant. The accepted
   consequence, which MUST be stated in the isolation contract rather than implied, is that
   a payload can signal the service processes of its own instance, which share its uid.
-- **FR-046**: A payload MUST NOT be able to create a nested user namespace, and this MUST be
-  enforced by a seccomp filter rejecting `clone`, `clone3`, and `unshare` carrying
-  `CLONE_NEWUSER`, installed after the payload's own namespace is set up. The system MUST NOT
-  depend on `--disable-userns`, `--assert-userns-disabled`, or any write to
+- **FR-046**: A payload MUST NOT be able to create a nested user namespace. The system MUST
+  NOT depend on `--disable-userns`, `--assert-userns-disabled`, or any write to
   `/proc/sys/user/max_user_namespaces`: `/proc/sys` is read-only inside a machine, so those
-  can never succeed. Startup MUST fail closed if the filter cannot be installed.
+  can never succeed. Ubuntu 24.04 mediates unprivileged user-namespace creation through
+  AppArmor, so `deny userns create` in the payload profile MUST be measured against a live
+  machine first; the earlier observation that it does not hold was taken through a transport
+  since found unreliable and does not stand as evidence. If it is measured ineffective, a
+  seccomp filter MUST be installed instead, rejecting `unshare` and `clone` carrying
+  `CLONE_NEWUSER` by inspecting their flags argument, and returning `ENOSYS` for `clone3` so
+  callers fall back to `clone` — seccomp cannot inspect `clone3`'s flags, which are passed by
+  pointer, and this is how the container runtimes handle the same limitation. Startup MUST
+  fail closed if the chosen mechanism cannot be established.
 - **FR-047**: The payload MUST enter its profile by inheriting exec (`ix`) in the bwrap
   profile and stacking the payload profile at the final exec, producing an intersection of
   both profiles that cannot be unstacked. A domain transition MUST NOT be used: bubblewrap

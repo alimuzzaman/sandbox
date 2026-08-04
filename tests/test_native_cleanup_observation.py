@@ -71,21 +71,45 @@ class TestAbsenceIsRead(unittest.TestCase):
         with mock.patch.object(self.helper, "run_optional", run_optional):
             self.assertTrue(self.helper.machine_absent("sb-0123456789ab"))
 
-    def test_an_installed_but_stopped_service_is_owned_not_changed(self):
+    def _show(self, *pairs):
+        return _result(stdout="\n\n".join(f"Id={unit}\nLoadState={state}"
+                                          for unit, state in pairs) + "\n")
+
+    def test_a_stopped_or_already_masked_service_is_owned_not_changed(self):
         # Ownership comes from the marker, not from the unit running. Requiring
-        # `is-active` made cleanup refuse to stop and mask units that were
-        # installed but never started.
+        # `is-active` refused units installed but never started, and `masked` is
+        # what this cleanup's own stop step leaves, so a rerun must accept it.
         units = ("mariadb.service", "nginx.service")
-        with mock.patch.object(self.helper, "service_plan", return_value=({}, units)), \
-                mock.patch.object(self.helper, "guest_run",
-                                  return_value=_result(stdout="loaded\nloaded\n")):
-            self.helper.services_ownership_status("sb-0123456789ab", "d" * 64, "e" * 64)
+        for states in (("loaded", "loaded"), ("masked", "masked"), ("loaded", "masked")):
+            with self.subTest(states=states):
+                with mock.patch.object(self.helper, "service_plan",
+                                       return_value=({}, units)), \
+                        mock.patch.object(self.helper, "run_optional",
+                                          return_value=self._show(*zip(units, states))):
+                    self.helper.services_ownership_status(
+                        "sb-0123456789ab", "d" * 64, "e" * 64)
 
         with mock.patch.object(self.helper, "service_plan", return_value=({}, units)), \
-                mock.patch.object(self.helper, "guest_run",
-                                  return_value=_result(stdout="loaded\nnot-found\n")), \
+                mock.patch.object(self.helper, "run_optional",
+                                  return_value=self._show(("mariadb.service", "loaded"),
+                                                          ("nginx.service", "not-found"))), \
                 self.assertRaises(SystemExit):
             self.helper.services_ownership_status("sb-0123456789ab", "d" * 64, "e" * 64)
+
+    def test_unit_states_are_mapped_by_name_not_by_output_position(self):
+        # A blank value with `--value` shifted every later unit's state onto the
+        # wrong unit, so a masked unit could read as a missing one.
+        units = ("mariadb.service", "nginx.service", "cron.service")
+        with mock.patch.object(self.helper, "run_optional",
+                               return_value=self._show(("mariadb.service", "masked"),
+                                                       ("nginx.service", ""),
+                                                       ("cron.service", "not-found"))):
+            states = self.helper.guest_unit_load_states("sb-0123456789ab", units)
+        self.assertEqual(states, {"mariadb.service": "masked", "nginx.service": "",
+                                  "cron.service": "not-found"})
+        with mock.patch.object(self.helper, "run_optional",
+                               return_value=_result(returncode=1)):
+            self.assertIsNone(self.helper.guest_unit_load_states("sb-0123456789ab", units))
 
     def test_a_missing_service_marker_is_absence_not_a_changed_marker(self):
         cases = (
@@ -98,20 +122,25 @@ class TestAbsenceIsRead(unittest.TestCase):
                 with mock.patch.object(self.helper, "run_optional", return_value=outcome):
                     self.assertIs(self.helper.guest_marker_absent("sb-0123456789ab"), expected)
 
+    def _show(self, *pairs):
+        return _result(stdout="\n\n".join(f"Id={unit}\nLoadState={state}"
+                                          for unit, state in pairs) + "\n")
+
     def test_guest_units_are_absent_only_when_the_guest_answered_for_each(self):
+        units = ("nginx.service", "php-fpm.service")
         cases = (
-            (_result(returncode=1), False),           # the guest never answered
-            (_result(stdout="not-found\n"), False),   # one answer for two units
-            (_result(stdout="not-found\nloaded\n"), False),
-            (_result(stdout="not-found\nnot-found\n"), True),
+            (_result(returncode=1), False),                        # never answered
+            (self._show(("nginx.service", "not-found")), False),   # one answer for two units
+            (self._show(("nginx.service", "not-found"),
+                        ("php-fpm.service", "loaded")), False),
+            (self._show(("nginx.service", "not-found"),
+                        ("php-fpm.service", "not-found")), True),
         )
         for outcome, expected in cases:
             with self.subTest(stdout=outcome.stdout, returncode=outcome.returncode):
                 with mock.patch.object(self.helper, "run_optional", return_value=outcome):
                     self.assertIs(
-                        self.helper.guest_units_absent(
-                            "sb-0123456789ab", ("nginx.service", "php-fpm.service")),
-                        expected)
+                        self.helper.guest_units_absent("sb-0123456789ab", units), expected)
 
 
 class TestCleanupObserveReportsState(unittest.TestCase):

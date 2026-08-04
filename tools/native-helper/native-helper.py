@@ -2838,11 +2838,13 @@ def services_ownership_status(machine_id, policy_digest, service_digest):
     it. Cleanup observation must never make an HTTP request or execute plugin PHP.
     """
     _policy, units = service_plan(machine_id, policy_digest, service_digest)
-    result = guest_run(machine_id, ("/usr/bin/systemctl", "show", *units,
-                                    "--property=LoadState", "--value"),
-                       "native service ownership observation failed")
-    states = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    if len(states) != len(units) or set(states) != {"loaded"}:
+    states = guest_unit_load_states(machine_id, units)
+    if states is None:
+        fail("native service ownership observation failed")
+    # `masked` is what this cleanup's own stop step leaves behind, so a rerun
+    # must accept it: refusing it made cleanup treat its own completed work as
+    # changed ownership and stall.
+    if any(states.get(unit) not in {"loaded", "masked"} for unit in units):
         fail("native service ownership changed")
 
 
@@ -2913,15 +2915,33 @@ def guest_marker_absent(machine_id):
     return result.returncode == 0 and (result.stdout or "").strip() == "absent"
 
 
+def guest_unit_load_states(machine_id, units):
+    """Map each named unit to its LoadState, or None when the guest did not answer.
+
+    `--value` with several units emits bare values with no way to tell which unit
+    each belongs to, and an empty value silently shifts the whole list, so one
+    unit's state could be read as another's. Asking for Id alongside LoadState
+    and parsing per unit block keeps the mapping explicit.
+    """
+    result = run_optional(guest_command(machine_id, (
+        "/usr/bin/systemctl", "show", *tuple(units),
+        "--property=Id", "--property=LoadState")))
+    if result.returncode != 0:
+        return None
+    states = {}
+    for block in (result.stdout or "").split("\n\n"):
+        fields = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if fields.get("Id"):
+            states[fields["Id"].strip()] = fields.get("LoadState", "").strip()
+    return states
+
+
 def guest_units_absent(machine_id, units):
     """True when the guest answered and knows none of the named units."""
-    units = tuple(units)
-    result = run_optional(guest_command(machine_id, (
-        "/usr/bin/systemctl", "show", *units, "--property=LoadState", "--value")))
-    if result.returncode != 0:
+    states = guest_unit_load_states(machine_id, units)
+    if states is None:
         return False
-    states = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    return len(states) == len(units) and set(states) == {"not-found"}
+    return all(states.get(unit) == "not-found" for unit in tuple(units))
 
 
 def cleanup_observe(resource, machine_id, policy_digest, resource_digest):

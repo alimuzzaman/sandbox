@@ -13,8 +13,8 @@ commands and do not make an adapter adoptable by themselves.
 | `compose-regression.md` | macOS Compose | complete | preserves existing Compose adoption |
 | `incumbents.md` | macOS Herd/POSIX; Valet absent | complete for available hosts | incumbents remain unadoptable |
 | `ubuntu-nginx.md` | Ubuntu 24.04 | partial | provisioning, isolation and lifecycle proven; hostile matrix and exhaustion open |
-| `ubuntu-apache.md` | Ubuntu 24.04 | pending | required for managed promotion |
-| `ubuntu-package-coexistence.md` | Ubuntu 24.04 | pending | required for managed promotion |
+| `ubuntu-apache.md` | Ubuntu 24.04 | partial | provisions alongside nginx; hostile matrix, grants and exhaustion open |
+| `ubuntu-package-coexistence.md` | Ubuntu 24.04 | partial | foreign services and host ingress untouched across provision and destroy |
 | `cleanup.md` | Ubuntu 24.04 | complete | all four cases proven live |
 | `payload-boundary.md` | Ubuntu 24.04 | complete | both contract decisions settled and measured |
 

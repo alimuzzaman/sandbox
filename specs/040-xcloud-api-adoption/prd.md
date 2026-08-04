@@ -54,12 +54,28 @@ integration can be built against a stable contract rather than a moving target.
   every other Sandbox instance, and receive a truthful refusal when an operation
   is unavailable on that runtime rather than a silent no-op.
 
+## Direction: Docker-first
+
+xCloud routes Docker-stack servers down a docker-compose deployment path rather
+than its managed WordPress path — stated in the `422` description of
+`POST /servers/{uuid}/sites/git` ("a Docker server (use docker-compose
+deployment)"), and corroborated by the `docker-compose` member of
+`SiteScript.script_type`. Sandbox already runs WordPress as Docker Compose and
+already renders exactly one compose file per instance, so the fit is with
+xCloud's Docker sites, not with its managed WordPress product.
+
+This feature therefore targets **making a Sandbox Compose instance deployable as
+an xCloud Docker site**. Driving xCloud's own managed WordPress setup is a
+deliberate later phase, not an omission.
+
 ## Goals
 
 - A developer registers an xCloud account with Sandbox once, and afterwards
   addresses their xCloud sites by project rather than by UUID.
-- A developer can push a local project's application code to its xCloud site and
-  observe the deployment result.
+- A developer can deploy a local Sandbox Compose instance to its xCloud Docker
+  site and observe the deployment result.
+- Sandbox can render a deployment-shaped compose artifact from the same instance
+  definition it runs locally, without the developer hand-writing one.
 - A developer can create a local Sandbox instance from an existing xCloud site
   that is faithful enough to reproduce a bug.
 - A developer can read hosted-site state — health, domains, SSL, backups,
@@ -70,7 +86,13 @@ integration can be built against a stable contract rather than a moving target.
 
 ## Non-Goals
 
-- Provisioning or destroying xCloud **servers**. Site lifecycle only.
+- Provisioning or destroying xCloud **servers**, and choosing their stack. Both
+  are dashboard-only and this feature inherits whatever exists.
+- Creating the xCloud site itself. No API endpoint creates a Docker site, so the
+  site is created once in the dashboard and Sandbox adopts it thereafter.
+- Driving xCloud's managed WordPress stack (`POST /servers/{uuid}/sites/wordpress`
+  and the WordPress Actions endpoints). Deferred to a later phase by decision,
+  once the Docker path is proven.
 - Becoming a general xCloud administration console. Endpoints that serve no
   Sandbox workflow — fail2ban, sudo users, supervisor processes, firewall rules,
   PHP-version management — are out of scope.
@@ -234,6 +256,9 @@ integration can be built against a stable contract rather than a moving target.
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
 | Scope breadth | All four candidate scopes are in | User: "we will take all of them" | User, 2026-08-05 |
+| Target path | xCloud **Docker** sites via docker-compose, not the managed WordPress stack | Sandbox runs WordPress on Docker primarily and already renders one compose file per instance; the Docker stack refuses the WordPress path | User, 2026-08-05 |
+| Managed WordPress stack | Deferred to a later phase | User: "we will later add support for xcloud wordpress setup also" | User, 2026-08-05 |
+| Site creation | Dashboard-created, Sandbox-adopted | No API endpoint creates a Docker site | Evidence, 2026-08-05 |
 | API contract source | Published OpenAPI, committed to the repo | User chose public docs; standing rule forbids probing a live API for schema | User, 2026-08-05 |
 | Credential availability | The user's own xCloud API token is supplied for this work | User provided a token for Sandbox to use against the API; verified working against `GET /user` | User, 2026-08-05 |
 | Schema authority | The committed schema is indicative; live response shapes win | The schema is already provably wrong about list pagination and rate-limit headers | Evidence, 2026-08-05 |
@@ -243,34 +268,36 @@ integration can be built against a stable contract rather than a moving target.
 
 ## Open Questions
 
-1. **Which server stack does this feature target?** (BLOCKING) A server now exists
-   and is provisioned, so there is something to act on, but it was built with the
-   `docker_nginx` stack and that stack refuses WordPress site creation outright.
-   Sandbox is a WordPress tool, so on this server the feature's primary path
-   cannot run at all. Needed: a decision to rebuild or add a server on a
-   WordPress-capable stack, or an explicit narrowing of this feature to the
-   Git-deploy path with a real repository and domain. Until one of those, the
-   WordPress scopes cannot be proven and Constitution IV keeps the adapter at
+1. **An xCloud Docker site must exist before any of this can be proven.**
+   (BLOCKING) No API endpoint creates one, so it is a one-time dashboard action.
+   Until a site exists on the provisioned server, `site-scripts`, git settings and
+   deployment behaviour cannot be observed, and Constitution IV keeps the work
    `implemented_unproven`.
 
-2. **Does the xCloud runtime adapter publish a reduced required-capability set,
+2. **What exactly does Sandbox deploy?** (BLOCKING) The local compose file is
+   dev-shaped: host bind-mounts at absolute paths, published ports for db,
+   mailpit and nginx, dev-only tiers (mailpit, wpcli, memcached, Xdebug), and
+   fixed dev credentials. A hosted Docker site needs one HTTP port for xCloud's
+   proxy, no host-path assumptions, no dev tiers, and real secrets. Needed: a
+   decision that Sandbox renders a separate deployment profile from the same
+   instance definition, and what that profile includes.
+
+3. **Does the xCloud runtime adapter publish a reduced required-capability set,
    or does SSH fill the gap?** (BLOCKING) The API alone cannot serve `exec`,
    `wordpress_cli` or `test`. Either the adapter declares a smaller required set —
    honest, but `sb wp`, `install` and `doctor` then refuse on xCloud projects — or
    SSH backs those capabilities so the full contract is met, at the cost of a
-   second transport with its own failure modes and credential handling.
-
-3. **What does "deploy" transfer?** (BLOCKING) The API deploys from Git only.
-   Either Sandbox pushes a Git ref and triggers xCloud's own deployment — matching
-   the platform and producing its deployment logs, but requiring the project to be
-   a Git repository with a remote xCloud can reach — or Sandbox transfers the
-   working tree over SFTP, matching how its existing remote deploy behaves but
-   bypassing the platform's deployment pipeline.
+   second transport with its own failure modes and credential handling. The Docker
+   direction sharpens this: `docker exec` over SSH into the site's own containers
+   is the natural way to serve them, which makes SSH load-bearing rather than
+   optional.
 
 4. **Does "pull down" include the database and uploads?** A code-only copy is
    cheap and needs no destructive local action; a full copy reproduces far more
-   bugs but requires a database dump over SSH and can be large. Which is the
-   default, and is the other opt-in?
+   bugs but requires a database dump over SSH and can be large. Docker sites have
+   no backup API at all (`is_backup_supported: false`), so there is no
+   platform-side alternative to falling back on. Which is the default, and is the
+   other opt-in?
 
 ## Acceptance Outcomes
 

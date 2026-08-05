@@ -14,17 +14,15 @@ runtime adapter.
 **Drafting Model**: `claude-opus-5[1m]` — the preferred `gpt-5.6-terra` Medium
 configuration was not the active root model and this skill cannot switch it
 
-**Final Validation**: `PASS` by the drafting agent (`claude-opus-5[1m]`) acting as
-reviewer at the user's explicit direction. The skill's required independent
-`gpt-5.6-sol` High review **did not run** — Sol was not available in this session,
-and a self-review by the drafting model is not an independent review. Re-run a Sol
-High validation before treating this PRD as externally assured.
+**Final Validation**: `REOPEN` — independent `gpt-5.6-sol` High review found
+consequential product and contract blockers that require user decisions before
+specification.
 
 **Validated On**: 2026-08-05
 
 **Artifact Owner**: `speckit-refine`
 
-**Next Stage**: `speckit-specify`
+**Next Stage**: `speckit.prd.refine`
 
 > This document captures product intent before formal specification. It must
 > not contain implementation plans, task breakdowns, contracts, or source-code
@@ -40,9 +38,11 @@ it on the xCloud site it belongs to, and no supported way to reproduce an xCloud
 site locally. That work is done by hand through the xCloud dashboard, which
 leaves no evidence, is not repeatable, and cannot be driven from an agent session.
 
-Why now: the xCloud Public API reached a documented, versioned state
-(OpenAPI 3.0.3, committed at `docs/external/xcloud-public-api.v1.yaml`), so the
-integration can be built against a stable contract rather than a moving target.
+Why now: the xCloud Public API has a documented, versioned snapshot (OpenAPI
+3.0.3, committed at `docs/external/xcloud-public-api.v1.yaml`). Live evidence
+already proves that snapshot is incomplete or inaccurate in material places, so
+it is a starting contract and drift detector rather than an authoritative record
+of deployed behavior.
 
 ## Users and Desired Outcomes
 
@@ -54,7 +54,7 @@ integration can be built against a stable contract rather than a moving target.
   every other Sandbox instance, and receive a truthful refusal when an operation
   is unavailable on that runtime rather than a silent no-op.
 
-## Direction: Docker-first
+## Direction Under Review: Docker-first
 
 xCloud routes Docker-stack servers down a docker-compose deployment path rather
 than its managed WordPress path — stated in the `422` description of
@@ -64,9 +64,13 @@ deployment)"), and corroborated by the `docker-compose` member of
 already renders exactly one compose file per instance, so the fit is with
 xCloud's Docker sites, not with its managed WordPress product.
 
-This feature therefore targets **making a Sandbox Compose instance deployable as
-an xCloud Docker site**. Driving xCloud's own managed WordPress setup is a
-deliberate later phase, not an omission.
+The original direction targeted **making a Sandbox Compose instance deployable as
+an xCloud Docker site**. Independent review of the committed contract found no
+API operation that creates or updates an xCloud Docker Compose site: the Git-site
+creation endpoint rejects Docker servers, the Compose-related site-script endpoint
+is read-only metadata, and the deploy endpoint only pulls an already configured
+Git site. The target direction is therefore reopened below. Driving xCloud's own
+managed WordPress setup remains a deliberate later phase.
 
 ## Goals
 
@@ -255,8 +259,8 @@ deliberate later phase, not an omission.
 
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
-| Scope breadth | All four candidate scopes are in | User: "we will take all of them" | User, 2026-08-05 |
-| Target path | xCloud **Docker** sites via docker-compose, not the managed WordPress stack | Sandbox runs WordPress on Docker primarily and already renders one compose file per instance; the Docker stack refuses the WordPress path | User, 2026-08-05 |
+| Scope breadth | Reopened: pull-down is excluded, local ingress is constrained by the Docker/Caddy default, and Docker deployment is unsupported by the API contract | The prior "all four" choice no longer matches the refined scope or verified API boundary | Independent review, 2026-08-05 |
+| Target path | Reopened: the API-only Docker deployment path described by this draft is not exposed by the published contract | Git-site creation rejects Docker servers; Compose script content is not writable; Git deploy only pulls an already configured Git site | Independent review, 2026-08-05 |
 | Managed WordPress stack | Deferred to a later phase | User: "we will later add support for xcloud wordpress setup also" | User, 2026-08-05 |
 | Site creation | Dashboard-created, Sandbox-adopted | No API endpoint creates a Docker site | Evidence, 2026-08-05 |
 | Transport | API only; SSH is not used | User: "only what api supports", and "if needed then don't do anything" about SSH | User, 2026-08-05 |
@@ -265,16 +269,33 @@ deliberate later phase, not an omission.
 | Pulling a site down | Removed from scope | The API offers no file, database or restorable-backup endpoint, and Docker sites report `is_backup_supported: false`, so it would require SSH | User, 2026-08-05 |
 | API contract source | Published OpenAPI, committed to the repo | User chose public docs; standing rule forbids probing a live API for schema | User, 2026-08-05 |
 | Credential availability | The user's own xCloud API token is supplied for this work | User provided a token for Sandbox to use against the API; verified working against `GET /user` | User, 2026-08-05 |
-| Schema authority | The committed schema is indicative; live response shapes win | The schema is already provably wrong about list pagination and rate-limit headers | Evidence, 2026-08-05 |
+| Schema authority | The committed schema plus explicitly evidenced variants are accepted; unknown required shapes fail closed with a typed contract-drift result and no follow-on mutation | The schema is already provably wrong about list pagination and rate-limit headers | Evidence and independent review, 2026-08-05 |
+| Local ingress | xCloud is not a replacement for Sandbox's default local Docker/Caddy clean-URL provider | Repository policy keeps Docker/Caddy as the default on every local platform and runtime | Constitution and `docs/clean-url-default.md` |
 | Server lifecycle | Out of scope; sites only | Server provisioning is billing-bearing and has no Sandbox workflow behind it | Existing policy |
 | Credential storage | Existing secret locations only | Repository policy already forbids credentials in project config | Existing policy |
 | Adapter promotion | Enters unproven and non-adoptable | The runtime manifest is the promotion authority | Existing policy |
 
 ## Open Questions
 
-None blocking. The remaining dependency is operational rather than a product
-decision: an xCloud Docker site must be created once in the dashboard before the
-feature can be exercised or proven, because no API endpoint creates one.
+The following consequential choices block specification:
+
+1. **Supported product path** — choose whether this phase (a) adopts and inspects
+   existing sites without deployment, (b) targets an existing non-Docker Git site
+   that the API can deploy, or (c) permits a non-API transport for Docker sites.
+   The current combination of Docker-first and API-only cannot deliver deployment.
+2. **Project identity** — choose whether xCloud is a deployment-target binding on
+   a project that keeps its local Sandbox instance, the project's sole runtime, or
+   a separately linked hosted project. The draft currently describes both the
+   first and second models, while the constitution permits one owned instance per
+   project and the feature excludes runtime migration.
+3. **Token-scope truth** — choose whether mutating support requires a wildcard
+   token, accepts user-declared scopes as unverified, or treats the platform's
+   authorization response as authoritative. The API can identify the user but a
+   least-privilege token cannot introspect its own abilities.
+4. **Mutation boundary** — if deployment remains, define the exact initial
+   mutation allowlist, the selected remote branch/revision, whether Sandbox may
+   push to Git, the required explicit authorization, and the refusal behavior for
+   dirty or unpublished local work. The API itself only triggers a remote Git pull.
 
 ### Resolved during refinement
 
@@ -347,22 +368,25 @@ feature can be exercised or proven, because no API endpoint creates one.
   servers, so site-scoped endpoints apply.
 - **Assumption**: The project is a Git repository xCloud can reach, since Docker
   sites deploy from Git and no other transport is in scope.
-- **Assumption**: The committed schema matches the deployed API at specification
-  time.
+- **Assumption**: A separately authorized non-production proving target will be
+  available before any adapter can advance beyond unproven and non-adoptable.
 
 ## Readiness for Specification
 
 - [x] Problem, affected users, and desired outcomes are explicit.
-- [x] Goals and non-goals bound the product scope.
-- [x] Primary and negative scenarios are covered.
+- [ ] Goals and non-goals bound the product scope — target deployment and retained
+      scope are reopened.
+- [ ] Primary and negative scenarios are covered — the primary Docker deployment
+      scenario is not supported by the selected transport.
 - [x] Material constraints, dependencies, and risks are recorded.
-- [x] Consequential choices are confirmed rather than inferred.
-- [x] Acceptance outcomes are measurable and implementation-independent.
-- [x] No blocking open questions remain.
+- [ ] Consequential choices are confirmed rather than inferred.
+- [ ] Acceptance outcomes are measurable and implementation-independent — current
+      transfer outcomes assume an unavailable API operation.
+- [ ] No blocking open questions remain.
 - [x] No implementation plan, task list, contracts, or code changes are included.
-- [ ] The latest **independent** Sol High validation verdict is `PASS` — not met;
-      waived by the user for this session and recorded in the metadata above.
+- [ ] The latest independent Sol High validation verdict is `PASS` — the latest
+      independent verdict is `REOPEN`.
 
-**Readiness**: `READY FOR SPECKIT`
+**Readiness**: `NOT READY`
 
 <!-- Set to READY FOR SPECKIT only when every readiness item passes. -->

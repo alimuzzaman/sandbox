@@ -367,6 +367,17 @@ def cmd_install(cfg, args) -> None:
     ], instance=inst)
     wpcli(["rewrite", "structure", "/%postname%/"], instance=inst)
 
+    # Every sandbox instance is a disposable dev/staging site — several are
+    # publicly resolvable once exposed (`sb preview create`, `sb deploy
+    # --expose`), and a preview URL usually carries an autologin token. Search
+    # engines must never index one. blog_public=0 makes WordPress serve a
+    # `Disallow: /` robots.txt AND emit `noindex,nofollow` on every page; the
+    # meta tag is the part that matters, since a robots.txt disallow alone still
+    # permits URL-only indexing from inbound links. Caddy denies /robots.txt at
+    # the exposed edge too (`_remote._caddy_proxy_command`) — this is the
+    # in-application half of the same guarantee.
+    wpcli(["option", "update", "blog_public", "0"], instance=inst, check=False)
+
     # Core download repairs the document root as www-data, which also resets
     # the bind-mounted mu-plugin directory. Reapply its narrowly scoped shared
     # write mode before generating the autologin, snapshot, and mail plugins.

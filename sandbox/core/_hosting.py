@@ -26,6 +26,20 @@ _BASIC_AUTH_BYPASS_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PAT
 _BASIC_AUTH_ROUTE_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]+$")
 _BASIC_AUTH_ROUTE_PARAMETER_RE = re.compile(r"\{[A-Za-z][A-Za-z0-9_]*\}$")
 _STATE_FILE = RUNTIME_DIR / "hosts.json"
+# Served verbatim to crawlers on a route that must never be indexed. `handle`
+# (not a bare matcher + respond) so the block is mutually exclusive with the
+# proxy handler and no Caddy directive-ordering subtlety can let /robots.txt
+# fall through to the origin.
+#
+# The body is a Caddyfile quoted string spanning real newlines: `respond` emits
+# a `\n` escape literally, so the two-line policy has to BE two lines.
+ROBOTS_DENY_BODY = "User-agent: *\nDisallow: /\n"
+_ROBOTS_DENY_BLOCK = (
+    "    handle /robots.txt {\n"
+    "        header Content-Type \"text/plain; charset=utf-8\"\n"
+    f"        respond \"{ROBOTS_DENY_BODY}\" 200\n"
+    "    }\n"
+)
 _PORT_START = 18000
 _PORT_COUNT = 1000
 _CLOUDFLARE_PROXY_CIDRS = (
@@ -326,10 +340,18 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     cf = env.get("cloudflare") or {}
     if cf.get("proxied") is not True or cf.get("tls") != "origin-ca" or cf.get("ssl_mode") != "strict":
         raise HostingError("cloudflare must require proxied Origin CA with strict SSL")
+    # `robots: deny` makes Caddy answer /robots.txt with `Disallow: /` for every
+    # served hostname of this environment — for a staging environment that is
+    # publicly resolvable but must never be indexed. Default `allow` leaves the
+    # application's own robots.txt in charge.
+    robots = env.get("robots", "allow")
+    if robots not in {"allow", "deny"}:
+        raise HostingError("robots must be allow or deny")
     return {"project_root": str(root), "project": project, "environment": env_name,
             "compose": compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env),
-            "autologin": _autologin(env), "basic_auth": _basic_auth(env)}
+            "autologin": _autologin(env), "basic_auth": _basic_auth(env),
+            "robots": robots}
 
 
 def state_key(remote_name: str, validated: dict) -> str:
@@ -527,7 +549,15 @@ def apply_with_rollback(apply, rollback) -> None:
 def caddyfile(validated: dict, port: int, cert_path: str | None = None,
               key_path: str | None = None, basic_auth_hash: str | None = None,
               *, redact_basic_auth: bool = False) -> str:
+    """Render the served + redirect site blocks.
+
+    `robots: "deny"` in the host config prepends a `/robots.txt` handler that
+    answers `Disallow: /` for every served hostname, ahead of the proxy. It is
+    opt-in here because permanent hosting fronts real production sites that
+    want to be indexed; ephemeral preview routes deny by default instead (see
+    `_remote._caddy_proxy_command`)."""
     served = [r["hostname"] for r in validated["routes"] if r["mode"] == "serve"]
+    robots = _ROBOTS_DENY_BLOCK if validated.get("robots") == "deny" else ""
     tls = f"    tls {cert_path} {key_path}\n" if cert_path and key_path else ""
     basic = ""
     auth = validated.get("basic_auth")
@@ -584,7 +614,16 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
                 basic = ("    basicauth {\n"
                          f"        {auth['username']} {basic_auth_hash}\n"
                          "    }\n")
-    blocks = [f"{', '.join(served)} {{\n{basic}{tls}    reverse_proxy 127.0.0.1:{int(port)}\n}}\n"]
+    proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+    if robots:
+        # Everything but the site-level `tls` moves inside a catch-all handle,
+        # so the robots handler and the rest are mutually exclusive routes
+        # rather than two candidates for the same request.
+        body = "".join(f"    {line}\n" if line else "\n"
+                       for line in (basic + proxy).splitlines())
+        blocks = [f"{', '.join(served)} {{\n{tls}{robots}    handle {{\n{body}    }}\n}}\n"]
+    else:
+        blocks = [f"{', '.join(served)} {{\n{basic}{tls}{proxy}}}\n"]
     for route in validated["routes"]:
         if route["mode"] == "redirect":
             blocks.append(f"{route['hostname']} {{\n    redir {route['target']}{{uri}} 308\n}}\n")

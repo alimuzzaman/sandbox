@@ -668,12 +668,27 @@ def _caddy_proxy_command(
     conf_prefix: str,
     *,
     reject_managed_host: bool = False,
+    robots: str = "deny",
 ) -> str:
-    site_q = shlex.quote(
-        f"{hostname} {{\n"
-        f"    reverse_proxy 127.0.0.1:{int(port)}\n"
-        f"}}\n"
+    # Preview and control routes are publicly resolvable (a real DNS record on a
+    # real zone) but are throwaway staging surfaces, often carrying an autologin
+    # URL — nothing here should ever reach a search index. So /robots.txt is
+    # answered by Caddy with a blanket Disallow ahead of the proxy, in a
+    # `handle` so the two are mutually exclusive routes. Callers with a genuinely
+    # public route pass robots="allow".
+    # The body is a Caddyfile quoted string spanning real newlines: `respond`
+    # emits a `\n` escape literally, so the two-line policy has to BE two lines.
+    robots_block = (
+        "    handle /robots.txt {\n"
+        "        header Content-Type \"text/plain; charset=utf-8\"\n"
+        "        respond \"User-agent: *\nDisallow: /\n\" 200\n"
+        "    }\n"
+        if robots == "deny" else ""
     )
+    proxy = f"    reverse_proxy 127.0.0.1:{int(port)}\n"
+    body = (f"{robots_block}    handle {{\n    {proxy}    }}\n"
+            if robots_block else proxy)
+    site_q = shlex.quote(f"{hostname} {{\n{body}}}\n")
     file_q = shlex.quote(f"/etc/caddy/conf.d/{conf_prefix}-{hostname}.caddy")
     managed_host_guard = ""
     if reject_managed_host:

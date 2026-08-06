@@ -88,6 +88,33 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("redir https://আমারসোনার.বাংলা{uri} 308", rendered)
         self.assertIn("tls /cert.pem /key.pem", rendered)
 
+    def test_robots_defaults_to_allow_and_leaves_the_render_untouched(self):
+        with self._write(_manifest()) as directory:
+            result = hosting.validate_manifest(directory)
+        self.assertEqual(result["robots"], "allow")
+        self.assertNotIn("robots.txt", hosting.caddyfile(result, 18001, "/c.pem", "/k.pem"))
+
+    def test_robots_deny_answers_robots_txt_ahead_of_the_proxy(self):
+        manifest = _manifest().replace("    cloudflare:\n", "    robots: deny\n    cloudflare:\n")
+        with self._write(manifest) as directory:
+            result = hosting.validate_manifest(directory)
+        rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem")
+        self.assertIn("handle /robots.txt {", rendered)
+        self.assertIn("Disallow: /", rendered)
+        # The proxy must sit in its own handle, or /robots.txt has two
+        # candidate routes and can fall through to the origin.
+        self.assertLess(rendered.index("handle /robots.txt"),
+                        rendered.index("reverse_proxy 127.0.0.1:18001"))
+        self.assertIn("    handle {\n        reverse_proxy 127.0.0.1:18001", rendered)
+        # Redirect-only aliases stay plain redirects.
+        self.assertIn("redir https://আমারসোনার.বাংলা{uri} 308", rendered)
+
+    def test_rejects_an_unknown_robots_mode(self):
+        manifest = _manifest().replace("    cloudflare:\n", "    robots: sometimes\n    cloudflare:\n")
+        with self._write(manifest) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "robots must be allow or deny"):
+                hosting.validate_manifest(directory)
+
     def test_renders_declared_basic_auth_without_plaintext_password(self):
         manifest = _manifest().replace(
             "    cloudflare:\n",

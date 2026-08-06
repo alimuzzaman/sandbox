@@ -221,6 +221,35 @@ basic_auth:
       methods: [GET, POST]
 ```
 
+## Keeping a public route out of search results
+
+An environment may declare `robots: deny` beside `cloudflare:`:
+
+```yaml
+robots: deny   # default: allow
+```
+
+Caddy then answers `/robots.txt` with `User-agent: * / Disallow: /` for every served
+hostname of that environment, ahead of the proxy (the proxy moves inside its own
+`handle` so the two are mutually exclusive routes). The default `allow` leaves the
+application's own `robots.txt` in charge — permanent hosting fronts real production
+sites that want to be indexed.
+
+Ephemeral routes are the other way round: `sb preview create` and the remote control
+proxy deny by default (`_remote._caddy_proxy_command`), because a preview hostname is a
+real public DNS record usually handed out with an autologin token in the URL. Fresh WP
+instances also install with `blog_public=0`, which emits `noindex,nofollow` on every
+page — the part that actually prevents indexing, since a `robots.txt` disallow alone
+still permits URL-only listings from inbound links.
+
+**Cloudflare can override all of this.** A zone with Cloudflare's managed
+`robots.txt` / content-signals transform enabled has its own `User-agent: *` group with
+`Allow: /` prepended to whatever the origin returns; on an equal-length path match the
+least restrictive rule wins, so the managed `Allow: /` beats the origin's `Disallow: /`.
+Verify what the edge actually serves (`curl https://<host>/robots.txt`), not just the
+origin (`curl --resolve <host>:443:<origin-ip> …`). Turning the managed transform off is
+a dashboard/API change in the Rulesets scope — a DNS/SSL-scoped API token cannot do it.
+
 Set the referenced secret with `./sb host secrets --set MY_SITE_BASIC_AUTH_PASSWORD`.
 On confirmed apply, Sandbox hashes the password on the remote and renders Caddy's
 `basicauth` directive. Passwords and hashes are never committed, printed, passed in

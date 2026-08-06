@@ -988,6 +988,27 @@ class TestConfigureHttpsProxy(unittest.TestCase):
         )
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_public_routes_deny_crawlers_by_default(self, mock_ssh_run):
+        # A preview host is a real public DNS record, usually handed out with an
+        # autologin token in the URL — it must never reach a search index.
+        mock_ssh_run.return_value = _completed(returncode=0)
+        sr.configure_instance_https_route(
+            {"ssh": "ubuntu@1.2.3.4"}, "default-demo.sandbox.asb.bd", 8188
+        )
+        cmd = mock_ssh_run.call_args[0][1]
+        self.assertIn("handle /robots.txt {", cmd)
+        self.assertIn("Disallow: /", cmd)
+        # The proxy sits inside its own handle so /robots.txt cannot also match it.
+        self.assertLess(cmd.index("handle /robots.txt"),
+                        cmd.index("reverse_proxy 127.0.0.1:8188"))
+
+    def test_robots_allow_renders_a_bare_proxy(self):
+        cmd = sr._caddy_proxy_command("demo.example.com", 8188, "sandbox-instance",
+                                      robots="allow")
+        self.assertNotIn("robots.txt", cmd)
+        self.assertIn("reverse_proxy 127.0.0.1:8188", cmd)
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_instance_route_reports_permanent_host_ownership(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
             returncode=65,

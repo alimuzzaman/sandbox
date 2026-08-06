@@ -265,21 +265,61 @@ def _cwd_instance(label: str | None = None) -> str | None:
     return entry.get("instance") if entry else None
 
 
+def _git_branch(root: str) -> str | None:
+    """Current branch of `root`, or None when it isn't a git checkout, HEAD is
+    detached, or git isn't installed. Used only to flavour derived names, so
+    every failure mode degrades to the plain basename."""
+    # symbolic-ref, not `rev-parse --abbrev-ref`: it resolves the branch on a
+    # fresh checkout with no commits yet (rev-parse fails there, and a just-
+    # cloned/inited project is exactly when the first instance is minted), and
+    # it exits non-zero on detached HEAD instead of printing literal "HEAD".
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+    return (res.stdout or "").strip() or None
+
+
+def _fit_stem(base: str, branch: str, budget: int) -> str:
+    """`<basename>-<branch>` squeezed into `budget` chars without letting either
+    half disappear. The branch is capped at half the budget so a long branch
+    can't swallow the repo identity, and the basename side is re-truncated to
+    whatever remains (dash-stripped, so a cut landing on a hyphen doesn't leave
+    a double dash)."""
+    if not branch or branch == base:
+        return base[:budget]
+    branch = branch[:max(budget // 2, 1)].strip("-")
+    keep = max(budget - len(branch) - 1, 3)
+    return f"{base[:keep].strip('-')}-{branch}"[:budget]
+
+
 def _derive_instance_name(root: str, taken: set, label: str = "default") -> str:
-    """A valid, unique instance name from a project dir basename. The default
-    label reuses today's plain basename. A non-default label is APPENDED
-    AFTER truncating the basename (reserving room for the `-<label>` suffix),
-    not folded in before truncation — otherwise a basename that already fills
-    the 24-char budget (common with long plugin-repo names) eats the whole
-    suffix, two labels of the same root collide on the same truncated name,
-    and the label silently disappears into an anonymous `-2` (multi-instance-
-    per-root)."""
-    base_norm = re.sub(r"[^a-z0-9]+", "-", Path(root).name.lower()).strip("-") or "proj"
+    """A valid, unique instance name from a project dir basename plus its git
+    branch (`<basename>-<branch>`), so two worktrees/branches of one repo read
+    apart at a glance. Non-git roots, detached HEAD, or a branch equal to the
+    basename fall back to the plain basename. The default label reuses that
+    stem. A non-default label is APPENDED AFTER truncating the stem (reserving
+    room for the `-<label>` suffix), not folded in before truncation —
+    otherwise a basename that already fills the 24-char budget (common with
+    long plugin-repo names) eats the whole suffix, two labels of the same root
+    collide on the same truncated name, and the label silently disappears into
+    an anonymous `-2` (multi-instance-per-root).
+
+    Existing instances keep their recorded name: ensure_instance reuses the
+    registry record for a (root, label) and only calls this for a brand-new
+    one, so switching branches in place never renames a live stack."""
+    norm = lambda s: re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    base_norm = norm(Path(root).name) or "proj"
+    branch_norm = norm(_git_branch(root))
     if label == "default":
-        seed = base_norm[:24]
+        seed = _fit_stem(base_norm, branch_norm, 24)
     else:
-        suffix = f"-{re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')}"
-        seed = base_norm[:max(24 - len(suffix), 1)] + suffix
+        suffix = f"-{norm(label)}"
+        seed = _fit_stem(base_norm, branch_norm, max(24 - len(suffix), 1)) + suffix
     # Truncate to 24 first, THEN strip dashes, so a cut that lands on a hyphen
     # (e.g. "templately-nav-menu-url-replace"[:24] → "templately-nav-menu-url-")
     # doesn't leave an invalid trailing hyphen in the instance name / domain.

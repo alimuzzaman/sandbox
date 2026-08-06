@@ -27,6 +27,10 @@ If the user hasn't clearly said it's good, ask — don't run.
    (Free by default, `--pro` for the Pro field), chosen by the card's tier label.
 3. **Build** the dist zip: `npm run dist-archive` (xspeed) or a `.distignore`-aware
    `rsync`+`zip` (embedpress, betterdocs). Version comes from the plugin header.
+   `./sb zip --project-dir <repo>` does the same job for any project with a
+   `.distignore` and needs no per-project build script — plus branch-tagged
+   naming and a build-number version, which is what a card attachment wants so
+   the tester's WordPress treats it as an upgrade (see `docs/plugin-zip.md`).
 4. **Attach** the zip + post **one** close-out comment ("✅ Closed. Build attached …").
 
 ## Usage

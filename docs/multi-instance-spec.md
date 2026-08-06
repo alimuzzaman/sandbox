@@ -218,8 +218,13 @@ Two identifiers, cleanly separated:
 - **`instance` name** — the globally-unique physical id (compose project, wp-dir, ports).
   Derived, never user-typed directly.
 
-**Derivation rule** (extends `_derive_instance_name`): default label → `<project-basename>`
-(today's output, unchanged). Non-default label → seed with `<basename>-<label>`, then run
+**Derivation rule** (extends `_derive_instance_name`): default label →
+`<project-basename>-<git-branch>` (a non-git root, a detached HEAD, or a branch echoing
+the basename falls back to the bare basename; the branch is capped at half the 24-char
+budget so it can never swallow the repo identity). Existing instances are unaffected —
+`ensure_instance` reuses the registry record for a (root, label) and only derives a name
+for a brand-new one, so switching branches in place never renames a live stack.
+Non-default label → seed with `<basename>-<branch>-<label>`, then run
 the *existing* global collision-avoidance loop (`_instances.py:273-276`) so a cross-project
 clash still appends `-2`. Example: root `xspeed`, label `php81` → instance `xspeed-php81`;
 if that's taken, `xspeed-php81-2`. This reuses the truncate-then-strip-hyphen safety

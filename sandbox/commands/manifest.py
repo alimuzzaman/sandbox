@@ -35,6 +35,7 @@ BUILTIN_COMMAND_MODULES = (
     "sandbox.commands.e2e",
     "sandbox.commands.ci",
     "sandbox.commands.plugin_check",
+    "sandbox.commands.zip",
     "sandbox.commands.remote",
     "sandbox.commands.deploy",
     "sandbox.commands.hosting",
@@ -72,7 +73,8 @@ LEGACY_BRIDGE_COMMANDS = {
     "dashboard": "ui_dash", "ui": "ui_dash", "web": "ui_dash", "cache": "cache",
     "resources": "resources",
     "license": "license", "migrate": "migrate", "home": "migrate", "uninstall": "uninstall",
-    "e2e": "e2e", "ci": "ci", "plugin-check": "plugin_check", "remote": "remote",
+    "e2e": "e2e", "ci": "ci", "plugin-check": "plugin_check", "zip": "zip",
+    "remote": "remote",
     "deploy": "deploy", "host": "hosting", "preview": "preview", "secrets": "secrets",
     "hermes": "hermes", "recovery": "recovery",
 }

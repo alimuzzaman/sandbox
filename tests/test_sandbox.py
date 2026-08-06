@@ -405,6 +405,43 @@ class TestNamingAndLiterals(unittest.TestCase):
         self.assertEqual(core._derive_instance_name("/a/foo", {"foo"}), "foo-2")
         self.assertEqual(core._derive_instance_name("/a/foo", {"foo", "foo-2"}), "foo-3")
 
+    def test_derive_instance_name_uses_git_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "myplugin"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "feature/nav-menu", str(root)],
+                           check=True, capture_output=True)
+            self.assertEqual(core._derive_instance_name(str(root), set()),
+                             "myplugin-feature-nav")
+
+    def test_derive_instance_name_non_git_falls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "myplugin"
+            root.mkdir()
+            self.assertEqual(core._derive_instance_name(str(root), set()), "myplugin")
+
+    def test_fit_stem_keeps_both_halves(self):
+        # Long basename must still leave the branch readable, and no double dash
+        # where the basename cut lands on a hyphen.
+        out = core._fit_stem("templately-nav-menu-url-replace", "latest", 24)
+        self.assertEqual(out, "templately-nav-me-latest")
+        out = core._fit_stem("templately-nav-menu", "feature-really-long-branch", 24)
+        self.assertEqual(out, "templately-feature-real")
+        self.assertNotIn("--", out)
+        # No branch, or a branch echoing the basename, stays a plain basename.
+        self.assertEqual(core._fit_stem("myplugin", "", 24), "myplugin")
+        self.assertEqual(core._fit_stem("myplugin", "myplugin", 24), "myplugin")
+
+    def test_derive_instance_name_label_survives_branch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "templately-nav-menu-url-replace"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "latest", str(root)],
+                           check=True, capture_output=True)
+            out = core._derive_instance_name(str(root), set(), label="php81")
+            self.assertTrue(out.endswith("-php81"), out)
+            self.assertLessEqual(len(out), 24)
+
     def test_php_literal(self):
         self.assertEqual(core._php_literal(True), "true")
         self.assertEqual(core._php_literal(False), "false")

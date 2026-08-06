@@ -510,6 +510,7 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb restore <name>       # restore a saved snapshot
 ./sb update               # git pull the project repo this instance tracks
 ./sb xdebug on|off        # toggle step-debug (port 9003, host trigger)
+./sb zip [--dev|--clean]  # build the distributable plugin zip (see docs/plugin-zip.md)
 ./sb doctor               # audit the stack
 ./sb status               # which containers + project + focus are active
 ./sb down                 # stop containers (state preserved)

@@ -407,6 +407,22 @@ Per-project (each plugin carries its own sandbox.config.json):
     pcheck.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
+    zp = sub.add_parser("zip",
+        help="Build a distributable plugin zip from .distignore, with guards and a "
+             "git build stamp — a wp dist-archive alternative (see docs/plugin-zip.md)")
+    zp.add_argument("--project-dir", dest="project_dir", default=None,
+        help="project to package (default: current directory)")
+    zp.add_argument("--dev", action="store_true",
+        help="keep the files .distignore marks development-only (source maps, dev tooling)")
+    zp.add_argument("--clean", action="store_true",
+        help="ship the declared version verbatim: no branch tag, no build number")
+    zp.add_argument("--hash", action="store_true",
+        help="append the short commit sha to the stamped version too")
+    zp.add_argument("--out", dest="out", default=None,
+        help="output directory (default: the dir shared by every worktree of this repo)")
+    zp.add_argument("--json", action="store_true",
+        help="print the result as JSON (for the MCP server)")
+
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")

@@ -143,10 +143,38 @@ def _cmd_host_secrets(validated: dict, args) -> None:
         print("  missing: " + (", ".join(result["missing"]) or "none"))
 
 
+# Markers that identify the line a remote command actually failed on. Compose
+# writes build progress to stderr, so the head of the stream is noise; without
+# this the reported error is a list of "Image ... Building" lines.
+_FAILURE_MARKERS = (
+    "failed to solve", "ERROR:", "error:", "error during connect",
+    "no such file or directory", "permission denied", "not found",
+)
+
+# BuildKit's snapshotter metadata can retain an active snapshot entry whose
+# on-disk directory is gone. Every cache-reusing build then fails to stat it,
+# with the same snapshot id every run. `docker builder prune` does not clear
+# this -- it lives in containerd-overlayfs/metadata_v2.db, not cache.db.
+_STALE_SNAPSHOT_MARKER = "failed to stat active key during commit"
+
+
+def _remote_failure_message(text: str, limit: int = 2000) -> str:
+    """Report the decisive failure line rather than the head of the stream."""
+    lines = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return "remote command failed"
+    decisive = [line for line in lines if any(marker in line for marker in _FAILURE_MARKERS)]
+    message = "\n".join(decisive[-6:] if decisive else lines)
+    if len(message) > limit:
+        # Truncate the head: the cause lands at the tail of a build log.
+        message = "... " + message[-(limit - 4):]
+    return message
+
+
 def _remote_checked(entry: dict, command: str, timeout: int = 180) -> str:
     result = remote.ssh_run(entry, command, timeout=timeout)
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "remote command failed").strip()[:2000])
+        raise RuntimeError(_remote_failure_message(result.stderr or result.stdout))
     return result.stdout or ""
 
 
@@ -246,6 +274,25 @@ def _origin_certificate(entry: dict, validated: dict, runtime: dict, state_entry
     return cert_path, key_path, {"id": issued.get("id"), "hostnames": runtime["certificate_hostnames"]}
 
 
+def _build_checked(entry: dict, prefix: str, command: str, service_args: str,
+                   timeout: int = 900) -> str:
+    """Run a building compose command, recovering from a stale BuildKit snapshot.
+
+    A single `--no-cache` build regenerates the affected layer as a valid
+    committed snapshot; cache-reusing builds hit the good one afterwards. This
+    is preferred over clearing the snapshotter metadata, which needs dockerd
+    stopped and so takes every container on the host down with it.
+    """
+    try:
+        return _remote_checked(entry, command, timeout=timeout)
+    except RuntimeError as error:
+        if _STALE_SNAPSHOT_MARKER not in str(error):
+            raise
+        info("stale BuildKit snapshot on the remote; rebuilding without cache")
+        _remote_checked(entry, f"{prefix} build --no-cache {service_args}", timeout=timeout * 2)
+        return _remote_checked(entry, command, timeout=timeout)
+
+
 def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str,
                  runtime: dict) -> None:
     override = f"{runtime_dir}/compose.override.yml"
@@ -261,12 +308,15 @@ def _run_compose(entry: dict, validated: dict, source_dir: str, runtime_dir: str
     # Replace the image's anonymous application volume on each deployment so
     # code/config changes are not shadowed by a previous container. Persistent
     # data must be declared as named volumes (for WordPress: database/uploads).
-    _remote_checked(entry, f"{prefix} up -d --build --force-recreate --renew-anon-volumes --remove-orphans {service_args}", timeout=900)
+    _build_checked(entry, prefix,
+                   f"{prefix} up -d --build --force-recreate --renew-anon-volumes --remove-orphans {service_args}",
+                   service_args, timeout=900)
     for init_service in validated["compose"].get("init_services", []):
         # `compose up --build <web>` does not build a distinct image tagged for
         # a one-shot job service. Build it explicitly so an updated initializer
         # is never run from a previous deployment's image.
-        _remote_checked(entry, f"{prefix} build {shlex.quote(init_service)}", timeout=900)
+        _build_checked(entry, prefix, f"{prefix} build {shlex.quote(init_service)}",
+                       shlex.quote(init_service), timeout=900)
         _remote_checked(entry, f"{prefix} --profile jobs run --rm {shlex.quote(init_service)}", timeout=900)
     _remote_checked(entry, f"{prefix} up -d {service_args}", timeout=300)
 

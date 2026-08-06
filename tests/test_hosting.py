@@ -376,6 +376,52 @@ class TestHostingManifest(unittest.TestCase):
         self.assertEqual(ssh_run.call_count, 2)
         _sleep.assert_called_once_with(2)
 
+    @patch("sandbox.commands.hosting.remote.ssh_run")
+    def test_remote_failure_reports_the_cause_not_the_build_progress(self, ssh_run):
+        # Compose writes build progress to stderr, so the cause is at the tail.
+        stderr = "\n".join(
+            [f" Image sandbox-host-example-service-{index} Building " for index in range(400)]
+            + ["target worker: failed to solve: could not resolve base image"]
+        )
+        ssh_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=stderr,
+        )
+        with self.assertRaises(RuntimeError) as raised:
+            hosting_cmd._remote_checked({}, "docker compose up")
+        message = str(raised.exception)
+        self.assertIn("failed to solve: could not resolve base image", message)
+        self.assertNotIn("Building", message)
+
+    def test_remote_failure_keeps_the_tail_when_no_marker_matches(self):
+        text = "\n".join(f"line {index}" for index in range(2000))
+        message = hosting_cmd._remote_failure_message(text)
+        self.assertTrue(message.startswith("... "))
+        self.assertTrue(message.endswith("line 1999"))
+        self.assertLessEqual(len(message), 2000)
+
+    def test_remote_failure_falls_back_when_output_is_empty(self):
+        self.assertEqual(hosting_cmd._remote_failure_message(""), "remote command failed")
+
+    @patch("sandbox.commands.hosting.info")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_stale_buildkit_snapshot_recovers_with_a_no_cache_rebuild(self, remote_checked, _info):
+        stale = RuntimeError(
+            "target worker: failed to solve: failed to commit abc to def during finalize: "
+            "failed to stat active key during commit: snapshot abc does not exist: not found"
+        )
+        remote_checked.side_effect = [stale, "", ""]
+        hosting_cmd._build_checked({}, "compose", "compose up -d --build web", "web")
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertEqual(commands[1], "compose build --no-cache web")
+        self.assertEqual(commands[2], "compose up -d --build web")
+
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_unrelated_build_failure_is_not_retried(self, remote_checked):
+        remote_checked.side_effect = RuntimeError("failed to solve: dockerfile parse error")
+        with self.assertRaisesRegex(RuntimeError, "dockerfile parse error"):
+            hosting_cmd._build_checked({}, "compose", "compose up -d --build web", "web")
+        self.assertEqual(remote_checked.call_count, 1)
+
     @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
     @patch("sandbox.commands.hosting._remote_checked", return_value="web | ready\nworker | polling\n")
     def test_reads_bounded_logs_for_all_declared_host_services(self, remote_checked, _resolve_home):

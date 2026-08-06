@@ -375,7 +375,44 @@ Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtua
 environments before stopping a proven legacy process, so a runtime refresh cannot leave
 the replacement service without its interpreter dependencies.
 
-## 9. Known limitation / next step
+## 9. Troubleshooting a failed `host apply`
+
+**Read the error, not the exit code of a pipe.** `sb host apply` exits non-zero on
+every failure, including a branch-gate refusal. Piping it to `tail`/`head` replaces
+that status with the pager's, which reads as success — use `set -o pipefail`, check
+`${PIPESTATUS[0]}`, or redirect to a file instead.
+
+**Branch gates fire before any remote work.** `allowed_branches` is enforced per
+environment, so a checkout on the wrong branch fails instantly with
+`branch 'X' is not allowed for <environment>`. Deploy from the checkout whose branch
+the environment allows.
+
+**`failed to stat active key during commit: snapshot <id> does not exist`.**
+BuildKit's snapshotter metadata is holding an active snapshot entry whose on-disk
+directory is gone, so every cache-reusing build fails to stat it. `sb host apply`
+now detects this and recovers on its own with a single `--no-cache` rebuild, which
+regenerates the layer as a valid committed snapshot; later cached builds hit the
+good one.
+
+Diagnosing it by hand, if the automatic recovery is ever bypassed:
+
+- The snapshot ids are **identical across runs**. Stable ids mean persisted
+  metadata; a genuine in-flight race produces fresh random ids each run. This one
+  comparison separates the two cases.
+- `docker builder prune` does **not** clear it. The entry lives in
+  `/var/lib/docker/buildkit/containerd-overlayfs/metadata_v2.db`, not `cache.db`.
+- Ignore the accompanying `session healthcheck failed fatally: only one connection
+  allowed` storm and `failed to read oom_kill event` warnings. Both are fallout from
+  many build targets failing at once, not causes.
+- Concurrency is not involved: a single-target build with no concurrency fails
+  identically, and `COMPOSE_PARALLEL_LIMIT` does not serialize BuildKit's internal
+  DAG.
+
+Clearing the stale entry outright means stopping dockerd and wiping
+`/var/lib/docker/buildkit`, which takes down every container on the host. The
+`--no-cache` recovery is preferred precisely because it needs no downtime.
+
+## 10. Known limitation / next step
 
 **Live-verified against a fresh Ubuntu 24.04 VPS.** A real run against
 `alim@212.47.72.49` installed Docker CE + compose, Caddy, the staged sandbox runtime, the

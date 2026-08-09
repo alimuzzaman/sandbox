@@ -822,6 +822,61 @@ def _active_project_name(instance: str) -> str | None:
     return apf.read_text().strip() if apf.exists() else None
 
 
+def _plugin_activation_order(pdir: Path, slugs: list[str]) -> list[str]:
+    """Order configured plugins so declared WordPress dependencies activate first.
+
+    WordPress stores ``Requires Plugins`` as comma-separated directory slugs in
+    the plugin entry-file header.  Read only the configured plugin directories
+    and retain config order for unrelated plugins and malformed/cyclic graphs.
+    """
+    wanted = list(dict.fromkeys(slugs))
+    wanted_set = set(wanted)
+    dependencies: dict[str, list[str]] = {slug: [] for slug in wanted}
+    header_re = re.compile(
+        r"^[ \t/*#@]*Requires Plugins\s*:\s*(.*?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    for slug in wanted:
+        plugin = pdir / slug
+        candidates = ([plugin] if plugin.is_file()
+                      else sorted(plugin.glob("*.php")) if plugin.is_dir()
+                      else [])
+        for candidate in candidates:
+            try:
+                header = candidate.read_text(errors="ignore")[:8192]
+            except OSError:
+                continue
+            match = header_re.search(header)
+            if match:
+                dependencies[slug] = [
+                    dep.strip()
+                    for dep in match.group(1).split(",")
+                    if dep.strip() in wanted_set and dep.strip() != slug
+                ]
+                break
+
+    ordered: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(slug: str) -> None:
+        if slug in visited:
+            return
+        if slug in visiting:
+            return
+        visiting.add(slug)
+        for dependency in dependencies[slug]:
+            visit(dependency)
+        visiting.remove(slug)
+        visited.add(slug)
+        ordered.append(slug)
+
+    for slug in wanted:
+        visit(slug)
+    return ordered
+
+
 def _relax_perms_for_uid_switch(inst: str) -> None:
     """Make the instance's WP files readable+writable across web-server uids.
 
@@ -920,6 +975,8 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             else:
                 (zip_install_active if e.get("active")
                  else zip_install_inactive).append(src["value"])
+                if e.get("active"):
+                    activate.append(slug)
         else:  # org
             if (pdir / slug).exists():
                 if e.get("active"):
@@ -927,6 +984,8 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             else:
                 (org_install_active if e.get("active") else org_install_inactive).append(
                     slug)
+                if e.get("active"):
+                    activate.append(slug)
 
     # Legacy NON-plugin mappings (wp-paths that aren't wp-content/plugins/<slug>):
     # symlink as before. Plugin-path mappings were folded into plugins_resolved.
@@ -944,17 +1003,23 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
                 _force_symlink(dest, src_p)
 
     if org_install_active:
-        wpcli(["plugin", "install", *org_install_active, "--activate"],
+        wpcli(["plugin", "install", *org_install_active],
               instance=name, check=False)
     if org_install_inactive:
         wpcli(["plugin", "install", *org_install_inactive], instance=name, check=False)
     if zip_install_active:
-        wpcli(["plugin", "install", *zip_install_active, "--activate"],
+        wpcli(["plugin", "install", *zip_install_active],
               instance=name, check=False)
     if zip_install_inactive:
         wpcli(["plugin", "install", *zip_install_inactive], instance=name, check=False)
     if activate:
-        wpcli(["plugin", "activate", *activate], instance=name, check=False)
+        # Install every source before activation, then honor Requires Plugins.
+        # Skipping already-active plugins prevents their wp_loaded onboarding
+        # redirects from polluting or aborting this non-interactive WP-CLI run;
+        # WP-CLI still loads each explicit target for its activation hook.
+        activation_order = _plugin_activation_order(pdir, activate)
+        wpcli(["plugin", "activate", *activation_order, "--skip-plugins"],
+              instance=name, check=False)
 
     _write_local_sources(name, local_sources)
 

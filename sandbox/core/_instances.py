@@ -284,6 +284,39 @@ def _git_branch(root: str) -> str | None:
     return (res.stdout or "").strip() or None
 
 
+def _git_repo_basename(root: str) -> str | None:
+    """Canonical repository basename, including from a linked worktree.
+
+    Generated worktree directories (for example ``t3code-360e3021``) are
+    transport details, not project identity. The common Git directory remains
+    under the primary checkout, so its parent supplies the stable repo name.
+    """
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+    common = Path((res.stdout or "").strip())
+    if not common.name:
+        return None
+    return common.parent.name if common.name == ".git" else common.name
+
+
+def _meaningful_branch(root: str, branch: str | None) -> str | None:
+    """Drop a generated-worktree namespace from its matching branch name."""
+    if not branch:
+        return None
+    worktree = Path(root).name.lower()
+    match = re.fullmatch(r"([a-z0-9]+)-[0-9a-f]{6,}", worktree)
+    if match and branch.lower().startswith(f"{match.group(1)}/"):
+        return branch.split("/", 1)[1]
+    return branch
+
+
 def _fit_stem(base: str, branch: str, budget: int) -> str:
     """`<basename>-<branch>` squeezed into `budget` chars without letting either
     half disappear. The branch is capped at half the budget so a long branch
@@ -313,8 +346,8 @@ def _derive_instance_name(root: str, taken: set, label: str = "default") -> str:
     registry record for a (root, label) and only calls this for a brand-new
     one, so switching branches in place never renames a live stack."""
     norm = lambda s: re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
-    base_norm = norm(Path(root).name) or "proj"
-    branch_norm = norm(_git_branch(root))
+    base_norm = norm(_git_repo_basename(root) or Path(root).name) or "proj"
+    branch_norm = norm(_meaningful_branch(root, _git_branch(root)))
     if label == "default":
         seed = _fit_stem(base_norm, branch_norm, 24)
     else:

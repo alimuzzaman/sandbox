@@ -219,9 +219,11 @@ Two identifiers, cleanly separated:
   Derived, never user-typed directly.
 
 **Derivation rule** (extends `_derive_instance_name`): default label →
-`<project-basename>-<git-branch>` (a non-git root, a detached HEAD, or a branch echoing
-the basename falls back to the bare basename; the branch is capped at half the 24-char
-budget so it can never swallow the repo identity). Existing instances are unaffected —
+`<project-basename>-<git-branch>` (linked/generated worktrees use the primary repository
+basename rather than the generated directory name; a matching generated namespace such
+as `t3code/` is removed from the branch). A non-git root, a detached HEAD, or a branch
+echoing the basename falls back to the bare basename; the branch is capped at half the
+24-char budget so it can never swallow the repo identity. Existing instances are unaffected —
 `ensure_instance` reuses the registry record for a (root, label) and only derives a name
 for a brand-new one, so switching branches in place never renames a live stack.
 Non-default label → seed with `<basename>-<branch>-<label>`, then run

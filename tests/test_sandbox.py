@@ -414,6 +414,16 @@ class TestNamingAndLiterals(unittest.TestCase):
             self.assertEqual(core._derive_instance_name(str(root), set()),
                              "myplugin-feature-nav")
 
+    def test_derive_instance_name_ignores_t3_worktree_transport_identity(self):
+        from sandbox.core import _instances
+
+        root = "/tmp/t3code-360e3021"
+        with mock.patch.object(_instances, "_git_repo_basename", return_value="templately"), \
+             mock.patch.object(_instances, "_git_branch",
+                               return_value="t3code/theme-builder-el-gb-parity-plan"):
+            self.assertEqual(core._derive_instance_name(root, set()),
+                             "templately-theme-builde")
+
     def test_derive_instance_name_non_git_falls_back(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "myplugin"

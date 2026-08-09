@@ -1058,7 +1058,8 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
         if entry.startswith("http") and entry.endswith(".zip"):
             if (tdir / _pkg_slug(entry)).exists():
                 continue  # already present (bundled / prior provision) — skip noisy reinstall
-            wpcli(["theme", "install", entry], instance=name, check=False)
+            wpcli(["theme", "install", entry, "--skip-plugins"],
+                  instance=name, check=False)
         elif "/" in entry or entry.startswith((".", "~")):
             src = Path(entry).expanduser()
             if not src.is_absolute():
@@ -1071,6 +1072,9 @@ def _wire_project_themes(name: str, root: str, pconf: dict) -> None:
             # already exists" + "Error: No themes installed." noise — skip it.
             continue
         else:
-            wpcli(["theme", "install", entry], instance=name, check=False)
-    wpcli(["theme", "activate", _pkg_slug(themes[0])],
+            wpcli(["theme", "install", entry, "--skip-plugins"],
+                  instance=name, check=False)
+    # Theme provisioning does not need project plugins. Keep them unloaded so
+    # activation-time onboarding hooks cannot redirect this WP-CLI process.
+    wpcli(["theme", "activate", _pkg_slug(themes[0]), "--skip-plugins"],
           instance=name, check=False)

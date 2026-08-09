@@ -81,5 +81,27 @@ class PluginActivationOrderTests(unittest.TestCase):
             )
 
 
+class ThemeProvisioningTests(unittest.TestCase):
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.wpcli")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_install_and_activation_skip_project_plugins(self, wp_dir, wpcli, _gate):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "wp-content" / "themes").mkdir(parents=True)
+            wp_dir.return_value = root
+
+            provision._wire_project_themes("fixture", str(root), {
+                "themes": ["https://example.test/fixture-theme.1.0.zip"],
+            })
+
+            calls = [call.args[0] for call in wpcli.call_args_list]
+            self.assertEqual(calls, [
+                ["theme", "install", "https://example.test/fixture-theme.1.0.zip",
+                 "--skip-plugins"],
+                ["theme", "activate", "fixture-theme", "--skip-plugins"],
+            ])
+
+
 if __name__ == "__main__":
     unittest.main()

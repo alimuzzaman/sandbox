@@ -62,9 +62,10 @@ HTTPS. It does not activate a plugin or run WordPress URL updates.
 
 During provisioning, Sandbox installs every configured plugin before activating
 any of them. Active plugins are then ordered by their WordPress `Requires Plugins`
-headers, and unrelated active plugins are skipped while WP-CLI runs activation.
-This keeps dependency activation deterministic and prevents onboarding redirects
-from interfering with non-interactive startup.
+headers. Unrelated active plugins are skipped during plugin activation and all
+subsequent theme provisioning commands. This keeps dependency activation
+deterministic and prevents onboarding redirects from interfering with
+non-interactive startup.
 
 `sb init --type astro` is a convenience preset: it reads `package.json` and
 the lockfile/configuration without executing project code, then writes an

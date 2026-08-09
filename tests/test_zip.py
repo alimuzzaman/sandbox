@@ -6,6 +6,7 @@ temporary fixture repo. Run from the repo root:
 
     .cli-venv/bin/python -m unittest discover -s tests -v
 """
+import os
 import subprocess
 import sys
 import tempfile
@@ -172,6 +173,24 @@ class TestGuards(unittest.TestCase):
             self.assertEqual(len(violations), 1)
             self.assertIn("dangerous binary format", violations[0]["reason"])
 
+    def test_all_macho_magic_variants_are_flagged_as_dangerous(self):
+        variants = {
+            "macho-big-32.dat": b"\xfe\xed\xfa\xce",
+            "macho-big-64.dat": b"\xfe\xed\xfa\xcf",
+            "macho-fat-32.dat": b"\xca\xfe\xba\xbe",
+            "macho-fat-32-swapped.dat": b"\xbe\xba\xfe\xca",
+            "macho-fat-64.dat": b"\xca\xfe\xba\xbf",
+            "macho-fat-64-swapped.dat": b"\xbf\xba\xfe\xca",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for filename, magic in variants.items():
+                with self.subTest(filename=filename):
+                    (root / filename).write_bytes(magic + b"payload")
+                    violations = z._check_mime_mismatches([filename], root)
+                    self.assertEqual(len(violations), 1)
+                    self.assertIn("dangerous binary format", violations[0]["reason"])
+
     def test_extension_mismatch_is_flagged(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -290,6 +309,82 @@ class TestEndToEnd(unittest.TestCase):
             with zipfile.ZipFile(result["zip_path"]) as zf:
                 self.assertIn("Version: 2.3.1\n",
                               zf.read("myplugin/myplugin.php").decode())
+
+    def test_repeat_build_excludes_an_output_directory_inside_the_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fixture(Path(td))
+            out = root / "dist"
+
+            first = self._run(root, out)
+            second = self._run(root, out)
+
+            self.assertEqual(second["files"], first["files"])
+            with zipfile.ZipFile(second["zip_path"]) as zf:
+                self.assertFalse(
+                    [name for name in zf.namelist()
+                     if name.startswith("myplugin/dist/")]
+                )
+
+    def test_rejects_project_root_as_output_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fixture(Path(td))
+
+            import contextlib
+            import io
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                self._run(root, root)
+
+            self.assertIn("project root", stderr.getvalue().lower())
+            self.assertFalse(list(root.glob("myplugin*.zip")))
+
+    def test_rejects_a_file_symlink_that_escapes_the_project_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fixture(Path(td))
+            outside = Path(td) / "outside-secret.txt"
+            outside.write_text("outside-secret-marker\n")
+            (root / "assets" / "linked-secret.txt").symlink_to(outside)
+            out = Path(td) / "out"
+
+            import contextlib
+            import io
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                self._run(root, out)
+
+            message = stderr.getvalue().lower()
+            self.assertIn("symlink", message)
+            self.assertIn("outside", message)
+            self.assertFalse(out.exists() and any(out.iterdir()))
+
+    def test_rejects_a_file_symlink_to_an_in_project_fifo(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fixture(Path(td))
+            fifo = root / "assets" / "blocking-fifo"
+            os.mkfifo(fifo)
+            (root / "assets" / "fifo-link").symlink_to(fifo)
+            out = Path(td) / "out"
+
+            import contextlib
+            import io
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                self._run(root, out)
+
+            message = stderr.getvalue().lower()
+            self.assertIn("regular file", message)
+            self.assertFalse(out.exists() and any(out.iterdir()))
+
+    def test_regular_file_inside_the_project_still_archives(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = _fixture(Path(td))
+            (root / "assets" / "safe.txt").write_text("safe\n")
+            out = Path(td) / "out"
+
+            result = self._run(root, out)
+
+            with zipfile.ZipFile(result["zip_path"]) as zf:
+                self.assertEqual(zf.read("myplugin/assets/safe.txt"), b"safe\n")
 
     def test_executable_aborts_the_build(self):
         with tempfile.TemporaryDirectory() as td:

@@ -29,7 +29,7 @@ the floor, not the ceiling:
 |---|---|---|
 | `.distignore` | yes | yes, plus a **dev block** (`--dev`) |
 | Build stamp | no | branch-tagged name + commit-count version, in-archive only |
-| Guards | no | root dotfiles, MIME/extension mismatch, executables |
+| Guards | no | root dotfiles, unsafe symlinks, MIME/extension mismatch, executables |
 | Duplicate assets | no | reported (non-blocking) |
 | Dependencies | WP-CLI package | none |
 
@@ -91,15 +91,19 @@ webpack.config.js
 
 ## Guards
 
-Two abort the build (exit 1), one only reports:
+Three abort the build (exit 1), one only reports:
 
 1. **Root-level dotfiles** that slipped past `.distignore`. Only the first path
    segment is checked — dotfiles inside third-party vendor packages are not ours
    to control.
-2. **MIME/extension mismatches**, by magic bytes: a PNG named `.jpg`, a PHP
-   opening tag in a `.txt`, and any PE/ELF/Mach-O executable (which must never
-   reach a plugin zip, whatever its extension says).
-3. **Duplicate assets** — byte-identical files under `assets/`, reported and not
+2. **Unsafe file entries**, including special files and symlinks whose target is
+   missing, non-regular, or resolves outside the project root. In-root symlinks
+   to regular files remain packageable; external or blocking special-file
+   content is never followed into an archive.
+3. **MIME/extension mismatches**, by magic bytes: a PNG named `.jpg`, a PHP
+   opening tag in a `.txt`, and any PE/ELF/Mach-O executable, including universal
+   Mach-O binaries (which must never reach a plugin zip, whatever its extension says).
+4. **Duplicate assets** — byte-identical files under `assets/`, reported and not
    fatal. Webpack content-hashed names (`app.a1b2c3d4.js`) are skipped.
 
 ## Where the zip lands
@@ -112,6 +116,12 @@ up side by side instead of scattering into throwaway agent worktrees:
 3. for a relocated git store (`git init --separate-git-dir`), a worktree beside
    the store, else the parent most worktrees share;
 4. the parent of the current worktree.
+
+When an explicit output directory is inside the project, that directory is
+excluded from discovery. The project root itself is rejected as an output
+directory because changing stamped names would otherwise make prior archives
+eligible for discovery. Repeated builds therefore replace the archive without
+embedding an earlier archive or unrelated output artifacts inside the next one.
 
 ## Configuration (`sandbox.config.json`)
 

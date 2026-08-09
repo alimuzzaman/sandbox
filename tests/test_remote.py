@@ -134,14 +134,64 @@ class TestFeature022FinalRemoteRegression(unittest.TestCase):
             "ok": True,
             "remotes": [
                 {"name": "alpha", "ssh_configured": True, "reachable": True,
-                 "provisioned": False},
+                 "provisioned": False, "provider": "unknown"},
                 {"name": "zeta", "ssh_configured": True, "reachable": False,
-                 "provisioned": True},
+                 "provisioned": True, "provider": "unknown"},
             ],
             "error": None,
         })
         self.assertNotIn("private.example", output.getvalue())
         self.assertNotIn("other.example", output.getvalue())
+
+    def test_machine_scoped_list_exposes_only_safe_provider_labels(self):
+        remotes = {
+            "safe": {"ssh": "user@safe.example", "provider": "hetzner"},
+            "missing": {"ssh": "user@missing.example"},
+            "blank": {"ssh": "user@blank.example", "provider": " \t "},
+            "nonstring": {"ssh": "user@number.example", "provider": 42},
+            "uppercase": {"ssh": "user@uppercase.example", "provider": "DigitalOcean"},
+            "space": {"ssh": "user@space.example", "provider": "digital ocean"},
+            "control": {"ssh": "user@control.example", "provider": "trusted\nprovider"},
+            "secret": {"ssh": "user@secret.example", "provider": "vultr",
+                       "bearer_token": "remote-list-secret"},
+        }
+        output = StringIO()
+        with patch.object(sr, "list_remotes", return_value=remotes), \
+             patch.object(sr, "check_reachable", return_value=False), \
+             redirect_stdout(output):
+            remote_cmd._cmd_list(types.SimpleNamespace(), True)
+
+        payload = json.loads(output.getvalue())
+        providers = {row["name"]: row.get("provider") for row in payload["remotes"]}
+        self.assertEqual(providers, {
+            "blank": "unknown",
+            "control": "unknown",
+            "missing": "unknown",
+            "nonstring": "unknown",
+            "safe": "hetzner",
+            "secret": "vultr",
+            "space": "unknown",
+            "uppercase": "unknown",
+        })
+        for value in ("safe.example", "missing.example", "blank.example", "number.example",
+                      "uppercase.example", "space.example", "control.example", "secret.example",
+                      "remote-list-secret"):
+            self.assertNotIn(value, output.getvalue())
+
+    def test_machine_scoped_list_human_output_includes_provider_without_secrets(self):
+        remotes = {
+            "myvps": {"ssh": "user@private.example", "provider": "digitalocean",
+                      "bearer_token": "remote-list-secret"},
+        }
+        output = StringIO()
+        with patch.object(sr, "list_remotes", return_value=remotes), \
+             patch.object(sr, "check_reachable", return_value=True), \
+             redirect_stdout(output):
+            remote_cmd._cmd_list(types.SimpleNamespace(), False)
+
+        self.assertIn("digitalocean", output.getvalue())
+        self.assertNotIn("private.example", output.getvalue())
+        self.assertNotIn("remote-list-secret", output.getvalue())
 
 
 class TestValidateRemoteName(unittest.TestCase):

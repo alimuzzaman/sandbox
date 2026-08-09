@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timezone
+import inspect
 import math
 import secrets
 
-from .attribution import apply_cleanup_guidance
+from .attribution import CoverageObservation, apply_cleanup_guidance
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
     CleanupPlan,
     CleanupRun,
+    ResourceRequest,
     StorageScan,
     redact,
     utc_now,
@@ -69,26 +72,149 @@ class ResourceService:
             )
         return float(value)
 
+    @staticmethod
+    def _supports_keyword(function, keyword: str) -> bool:
+        """Do not require cancellation support from compatible providers."""
+        try:
+            parameters = inspect.signature(function).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == keyword
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    @staticmethod
+    def _deep_scope_matches_capacity(
+        deep_attribution, capacity: dict, capacity_scope_id: str | None,
+        deep_scope_id: str | None,
+    ) -> bool:
+        if (capacity_scope_id is None) != (deep_scope_id is None):
+            return False
+        if capacity_scope_id is not None and capacity_scope_id != deep_scope_id:
+            return False
+        if capacity_scope_id is None:
+            selected_scopes = {
+                item.capacity_scope_id or item.filesystem_id
+                for item in deep_attribution.filesystems
+                if item.selected
+            }
+            if len(selected_scopes) > 1:
+                return False
+        return (
+            deep_attribution.reconciliation.used_bytes
+            == int(capacity.get("used_bytes") or 0)
+        )
+
+    @staticmethod
+    def _with_scope_mismatch(deep_attribution):
+        coverage = CoverageObservation(
+            category="reconciliation",
+            boundary_id=None,
+            status="partial",
+            duration_ms=0,
+            confidence="low",
+            privilege_sufficient=False,
+            reason="capacity_scope_mismatch",
+        )
+        return replace(
+            deep_attribution,
+            status="partial",
+            coverage=(*deep_attribution.coverage, coverage),
+        )
+
+    @staticmethod
+    def _terminal_status(request: ResourceRequest, outcomes, deep_attribution) -> str | None:
+        states = {
+            item.get("status")
+            for item in outcomes
+            if isinstance(item, dict) and isinstance(item.get("status"), str)
+        }
+        if deep_attribution is not None:
+            states.update(item.status for item in deep_attribution.coverage)
+        if request.is_cancelled() or "cancelled" in states:
+            return "cancelled"
+        if "disconnected" in states:
+            return "disconnected"
+        return None
+
     def _scan(
         self, *, thorough: bool, budget_seconds: float, progress=None,
-        focus: str | None = None, deep: bool = False,
+        focus: str | None = None, deep: bool = False, cancelled=False,
     ) -> StorageScan:
         budget = self._budget(budget_seconds)
+        request = ResourceRequest(budget, cancelled)
         started = self.clock().astimezone(timezone.utc)
-        snapshot = self.adapter.observe(
-            thorough=bool(thorough or deep),
-            budget_seconds=budget,
-            progress=progress,
-            focus=focus,
-            deep=bool(deep),
-        )
+        observe = self.adapter.observe
+        supports_cancellation = self._supports_keyword(observe, "cancelled")
+        if request.is_cancelled() and not supports_cancellation:
+            raise ResourceError(
+                "resource measurement was cancelled before provider execution",
+                "request_cancelled",
+            )
+        observe_kwargs = {
+            "thorough": bool(thorough or deep),
+            "budget_seconds": budget,
+            "progress": progress,
+            "focus": focus,
+            "deep": bool(deep),
+        }
+        if supports_cancellation:
+            observe_kwargs["cancelled"] = cancelled
+        snapshot = observe(**observe_kwargs)
         target = self.adapter.target()
         if snapshot.target != target:
             raise ResourceError(
                 "target identity changed during measurement",
                 "target_identity_changed",
             )
+        category_outcomes = tuple(snapshot.category_outcomes)
+        deep_attribution = snapshot.deep_attribution
+        if snapshot.capacity is None and self._terminal_status(
+            request, category_outcomes, deep_attribution,
+        ) == "cancelled":
+            completed = self.clock().astimezone(timezone.utc)
+            if deep_attribution is not None:
+                deep_attribution = apply_cleanup_guidance(
+                    deep_attribution, snapshot.resources,
+                )
+            ordered = tuple(sorted(
+                snapshot.resources,
+                key=lambda item: (
+                    item.size_bytes is not None,
+                    item.size_bytes or -1,
+                    item.resource_id,
+                ),
+                reverse=True,
+            ))
+            return StorageScan(
+                scan_id=secrets.token_hex(16),
+                target=target,
+                mode="deep" if deep else "thorough" if thorough else "fast",
+                started_at=started,
+                completed_at=completed,
+                budget_seconds=budget,
+                status="cancelled",
+                capacity=None,
+                resources=ordered,
+                attributed_bytes=0,
+                unknown_bytes=0,
+                reclaimable_bytes=sum(
+                    item.reclaimable_bytes for item in snapshot.resources
+                ),
+                confidence="low",
+                category_outcomes=category_outcomes,
+                drift=snapshot.drift,
+                deep_attribution=deep_attribution,
+                capacity_scope_id=getattr(snapshot, "capacity_scope_id", None),
+            )
         if snapshot.capacity is None:
+            if request.is_cancelled():
+                raise ResourceError(
+                    "resource measurement was cancelled",
+                    "request_cancelled",
+                )
             raise ResourceError(
                 "host capacity could not be measured",
                 "measurement_unavailable",
@@ -105,30 +231,54 @@ class ResourceService:
         accounting_items = explicitly_accounted or measured
         raw_attributed = sum(item.size_bytes or 0 for item in accounting_items)
         used = int((snapshot.capacity or {}).get("used_bytes") or 0)
-        deep_attribution = snapshot.deep_attribution
+        capacity_scope_id = getattr(snapshot, "capacity_scope_id", None)
+        deep_scope_id = getattr(deep_attribution, "capacity_scope_id", None)
         if deep_attribution is not None:
             deep_attribution = apply_cleanup_guidance(
                 deep_attribution, snapshot.resources,
             )
-        if deep and deep_attribution is not None:
+        scope_mismatch = bool(
+            deep and deep_attribution is not None
+            and not self._deep_scope_matches_capacity(
+                deep_attribution, snapshot.capacity,
+                capacity_scope_id, deep_scope_id,
+            )
+        )
+        if scope_mismatch:
+            deep_attribution = self._with_scope_mismatch(deep_attribution)
+            category_outcomes += ({
+                "category": "reconciliation",
+                "status": "partial",
+                "reason": "capacity_scope_mismatch",
+            },)
+        if deep and deep_attribution is not None and not scope_mismatch:
             reconciliation = deep_attribution.reconciliation
             attributed = reconciliation.accounted_bytes
             unknown = reconciliation.residual_unexplained_bytes
+        elif scope_mismatch:
+            # Do not combine managed-resource totals with a deep result that
+            # explicitly describes a different capacity boundary.
+            attributed = 0
+            unknown = used
         else:
             attributed = min(raw_attributed, used)
             unknown = max(used - attributed, 0)
         reclaimable = sum(item.reclaimable_bytes for item in snapshot.resources)
         incomplete = any(
-            item.get("status") not in {"complete", "observed"}
-            for item in snapshot.category_outcomes
+            not isinstance(item, dict)
+            or item.get("status") not in {"complete", "observed"}
+            for item in category_outcomes
         )
         if deep and (
             deep_attribution is None
             or deep_attribution.status != "complete"
         ):
             incomplete = True
-        status = "partial" if incomplete else "complete"
-        confidence = "low" if incomplete else (
+        terminal_status = self._terminal_status(
+            request, category_outcomes, deep_attribution,
+        )
+        status = terminal_status or ("partial" if incomplete else "complete")
+        confidence = "low" if status != "complete" else (
             "high" if thorough else "medium"
         )
         ordered = tuple(sorted(
@@ -141,6 +291,23 @@ class ResourceService:
             reverse=True,
         ))
         drift = snapshot.drift
+        if deep_attribution is not None:
+            reconciliation = deep_attribution.reconciliation
+            drift = {
+                **(drift or {}),
+                "capacity_drift_bytes": reconciliation.capacity_drift_bytes,
+                "attributed_drift_bytes": reconciliation.attributed_drift_bytes,
+                "capacity_drift_material": (
+                    reconciliation.capacity_drift_material
+                ),
+                "attributed_drift_material": (
+                    reconciliation.attributed_drift_material
+                ),
+                "capacity_drift_threshold_bytes": max(
+                    int(reconciliation.used_bytes * 0.01),
+                    64 * 1024 * 1024,
+                ),
+            }
         if raw_attributed > used:
             drift = {
                 **(drift or {}),
@@ -161,14 +328,15 @@ class ResourceService:
             unknown_bytes=unknown,
             reclaimable_bytes=reclaimable,
             confidence=confidence,
-            category_outcomes=snapshot.category_outcomes,
+            category_outcomes=category_outcomes,
             drift=drift,
             deep_attribution=deep_attribution,
+            capacity_scope_id=capacity_scope_id,
         )
 
     def status(
         self, *, thorough: bool = False, budget_seconds: float = 15,
-        progress=None, deep: bool = False,
+        progress=None, deep: bool = False, cancelled=False,
     ) -> dict:
         try:
             scan = self._scan(
@@ -177,6 +345,7 @@ class ResourceService:
                 progress=progress,
                 focus=None,
                 deep=deep,
+                cancelled=cancelled,
             )
             return result(
                 True, "status", status=scan.status, target=scan.target,
@@ -187,7 +356,17 @@ class ResourceService:
                 "resource measurement failed", "measurement_unavailable",
                 retryable=True,
             )
-            return result(False, "status", status="failed", error=error)
+            terminal_status = (
+                "cancelled" if error.code == "request_cancelled"
+                else "disconnected" if error.code in {
+                    "remote_disconnected", "measurement_disconnected",
+                }
+                else "unavailable" if error.code in {
+                    "measurement_unavailable", "remote_unreachable",
+                }
+                else "failed"
+            )
+            return result(False, "status", status=terminal_status, error=error)
 
     def plan(
         self,

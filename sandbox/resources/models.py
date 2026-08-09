@@ -69,6 +69,28 @@ def _non_negative(value: int | None, name: str, *, optional: bool = False) -> No
 
 
 @dataclass(frozen=True)
+class ResourceRequest:
+    """Per-call measurement controls; cancellation is never persisted."""
+
+    budget_seconds: float
+    cancellation: Any = False
+
+    def is_cancelled(self) -> bool:
+        signal = self.cancellation
+        if isinstance(signal, bool):
+            return signal
+        probe = getattr(signal, "is_set", None)
+        if not callable(probe) and callable(signal):
+            probe = signal
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+
+
+@dataclass(frozen=True)
 class StorageTarget:
     kind: str
     name: str
@@ -380,6 +402,7 @@ class StorageScan:
     category_outcomes: tuple[dict, ...] = ()
     drift: dict | None = None
     deep_attribution: Any | None = None
+    capacity_scope_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.capacity is not None:
@@ -401,6 +424,11 @@ class StorageScan:
             "attributed_bytes", "unknown_bytes", "reclaimable_bytes",
         ):
             _non_negative(getattr(self, name), name)
+        if self.capacity_scope_id is not None and (
+            not isinstance(self.capacity_scope_id, str)
+            or not self.capacity_scope_id
+        ):
+            raise ValueError("capacity_scope_id must be a non-empty string or null")
 
     def to_dict(self) -> dict:
         def aggregate(group):
@@ -443,6 +471,7 @@ class StorageScan:
             "budget_seconds": self.budget_seconds,
             "completeness": self.status,
             "capacity": self.capacity,
+            "capacity_scope_id": self.capacity_scope_id,
             "summary": {
                 "attributed_bytes": self.attributed_bytes,
                 "unknown_bytes": self.unknown_bytes,

@@ -5,9 +5,14 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 import os
+from types import SimpleNamespace
 
 from sandbox.resources.adapters import ProviderSnapshot
-from sandbox.resources.attribution import DeepAttribution, reconcile_attribution
+from sandbox.resources.attribution import (
+    DeepAttribution,
+    FilesystemObservation,
+    reconcile_attribution,
+)
 from sandbox.resources.models import (
     CleanupItemOutcome,
     ResourceObservation,
@@ -18,7 +23,10 @@ from tests.resource_fixtures import NOW, observation, target
 
 
 class FakeAdapter:
-    def __init__(self, resources=(), *, partial=False, deep_attribution=None):
+    def __init__(
+        self, resources=(), *, partial=False, deep_attribution=None,
+        capacity_scope_id=None,
+    ):
         self._target = target()
         self.resources = tuple(resources)
         self.partial = partial
@@ -26,6 +34,7 @@ class FakeAdapter:
         self.revalidate_map = {item.resource_id: item for item in self.resources}
         self.removed = []
         self.deep_attribution = deep_attribution
+        self.capacity_scope_id = capacity_scope_id
 
     def target(self):
         return self._target
@@ -49,6 +58,7 @@ class FakeAdapter:
             ({"category": "slow", "status": "timed_out"},) if self.partial else (),
             None,
             self.deep_attribution,
+            self.capacity_scope_id,
         )
 
     def revalidate(self, candidate):
@@ -64,6 +74,35 @@ class FakeAdapter:
             candidate.expected_size_bytes,
             False,
             NOW,
+        )
+
+
+class CancellationAwareAdapter(FakeAdapter):
+    def __init__(self, *args, category_outcomes=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cancelled_calls = []
+        self.category_outcomes = tuple(category_outcomes)
+
+    def observe(
+        self, *, thorough, budget_seconds, progress=None, focus=None,
+        deep=False, cancelled=False,
+    ):
+        self.cancelled_calls.append(cancelled)
+        snapshot = super().observe(
+            thorough=thorough,
+            budget_seconds=budget_seconds,
+            progress=progress,
+            focus=focus,
+            deep=deep,
+        )
+        return ProviderSnapshot(
+            snapshot.target,
+            snapshot.capacity,
+            snapshot.resources,
+            self.category_outcomes or snapshot.category_outcomes,
+            snapshot.drift,
+            snapshot.deep_attribution,
+            snapshot.capacity_scope_id,
         )
 
 
@@ -183,6 +222,226 @@ class TestResourceService(unittest.TestCase):
             50_000,
         )
 
+    def test_cancelled_deep_request_forwards_signal_and_retains_evidence(self):
+        deep = DeepAttribution(
+            status="partial",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000,
+                directory_allocated_bytes=60_000,
+            ),
+        )
+        adapter = CancellationAwareAdapter(deep_attribution=deep)
+        payload = self.service(adapter).status(deep=True, cancelled=True)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["data"]["completeness"], "cancelled")
+        self.assertEqual(payload["data"]["deep_attribution"]["status"], "partial")
+        self.assertEqual(adapter.cancelled_calls, [True])
+
+    def test_cancelled_request_does_not_call_legacy_provider(self):
+        adapter = FakeAdapter()
+        payload = self.service(adapter).status(cancelled=True)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["error"]["code"], "request_cancelled")
+        self.assertEqual(adapter.observe_calls, [])
+
+    def test_capable_provider_pre_cancellation_returns_structured_evidence(self):
+        adapter = CancellationAwareAdapter((
+            observation("completed-before-cancel", size_bytes=10_000),
+        ))
+
+        def cancelled_snapshot(**_kwargs):
+            return ProviderSnapshot(
+                adapter.target(),
+                None,
+                adapter.resources,
+                ({"category": "deep_directory", "status": "cancelled"},),
+            )
+
+        adapter.observe = cancelled_snapshot
+        payload = self.service(adapter).status(deep=True, cancelled=True)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["data"]["completeness"], "cancelled")
+        self.assertIsNone(payload["data"]["capacity"])
+        self.assertEqual(
+            payload["data"]["resources"][0]["resource_id"],
+            "completed-before-cancel",
+        )
+        self.assertIsNone(payload["error"])
+
+    def test_disconnected_category_retains_completed_evidence(self):
+        adapter = CancellationAwareAdapter(
+            (observation("completed", size_bytes=10_000),),
+            category_outcomes=({
+                "category": "remote_probe",
+                "status": "disconnected",
+                "reason": "ssh_disconnected_after_payload",
+            },),
+        )
+        payload = self.service(adapter).status(thorough=True)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "disconnected")
+        self.assertEqual(payload["data"]["resources"][0]["resource_id"], "completed")
+
+    def test_deep_capacity_scope_mismatch_is_partial_and_not_combined(self):
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=70_000,
+                directory_allocated_bytes=60_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            (observation("managed", size_bytes=20_000),),
+            deep_attribution=deep,
+        )).status(deep=True)
+
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 0)
+        self.assertEqual(payload["data"]["summary"]["unknown_bytes"], 80_000)
+        self.assertEqual(payload["data"]["deep_attribution"]["status"], "partial")
+        self.assertIn({
+            "category": "reconciliation",
+            "status": "partial",
+            "reason": "capacity_scope_mismatch",
+        }, payload["data"]["category_outcomes"])
+
+    def test_matching_used_bytes_with_distinct_scope_ids_is_not_combined(self):
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000,
+                directory_allocated_bytes=60_000,
+            ),
+        )
+        object.__setattr__(deep, "capacity_scope_id", "filesystem-deep")
+        adapter = FakeAdapter(deep_attribution=deep)
+        original_observe = adapter.observe
+
+        def scoped_observe(
+            *, thorough, budget_seconds, progress=None, focus=None, deep=False,
+        ):
+            snapshot = original_observe(
+                thorough=thorough,
+                budget_seconds=budget_seconds,
+                progress=progress,
+                focus=focus,
+                deep=deep,
+            )
+            return SimpleNamespace(
+                target=snapshot.target,
+                capacity=snapshot.capacity,
+                resources=snapshot.resources,
+                category_outcomes=snapshot.category_outcomes,
+                drift=snapshot.drift,
+                deep_attribution=snapshot.deep_attribution,
+                capacity_scope_id="filesystem-capacity",
+            )
+
+        adapter.observe = scoped_observe
+        payload = self.service(adapter).status(deep=True)
+
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["data"]["capacity_scope_id"], "filesystem-capacity")
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 0)
+
+    def test_matching_used_bytes_with_one_missing_scope_id_is_not_combined(self):
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000,
+                directory_allocated_bytes=60_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            deep_attribution=deep,
+            capacity_scope_id="filesystem-capacity",
+        )).status(deep=True)
+
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 0)
+
+    def test_legacy_multi_filesystem_deep_scope_fails_closed(self):
+        def filesystem(identity):
+            return FilesystemObservation(
+                filesystem_id=identity,
+                display_name=identity,
+                filesystem_type="unknown",
+                total_bytes=100_000,
+                used_bytes=40_000,
+                available_bytes=60_000,
+                writable=True,
+                selected=True,
+                selection_reason="managed_root",
+                status="complete",
+                observed_allocated_bytes=30_000,
+                hardlink_deduplication="confirmed",
+            )
+
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(filesystem("filesystem-a"), filesystem("filesystem-b")),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000,
+                directory_allocated_bytes=60_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            deep_attribution=deep,
+        )).status(deep=True)
+
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 0)
+
+    def test_deep_capacity_drift_is_reported_with_materiality(self):
+        capacity_drift = 5 * 1024 * 1024
+        attributed_drift = 65 * 1024 * 1024
+        deep = DeepAttribution(
+            status="complete",
+            filesystems=(),
+            findings=(),
+            capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=80_000_000,
+                directory_allocated_bytes=60_000_000,
+                capacity_drift_bytes=capacity_drift,
+                attributed_drift_bytes=attributed_drift,
+            ),
+        )
+        payload = self.service(FakeAdapter(deep_attribution=deep)).status(deep=True)
+
+        reported = payload["data"]["drift"]
+        self.assertEqual(reported["capacity_drift_bytes"], capacity_drift)
+        self.assertEqual(reported["attributed_drift_bytes"], attributed_drift)
+        self.assertFalse(reported["capacity_drift_material"])
+        self.assertTrue(reported["attributed_drift_material"])
+
     def test_cache_plan_is_read_only_and_excludes_named_volumes(self):
         cache = observation("cache", size_bytes=500)
         volume = observation(
@@ -251,6 +510,7 @@ class TestResourceService(unittest.TestCase):
         )
         payload = self.service(adapter).status()
         self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "unavailable")
         self.assertEqual(payload["error"]["code"], "measurement_unavailable")
 
 

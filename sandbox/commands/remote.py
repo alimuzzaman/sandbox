@@ -130,6 +130,17 @@ def _cmd_add(args, as_json: bool) -> None:
         print("  next: ./sb remote provision " + name)
 
 
+def _provider_label(entry: dict) -> str:
+    """Return only provider metadata safe for public CLI output."""
+    provider = entry.get("provider")
+    if not isinstance(provider, str):
+        return "unknown"
+    try:
+        return sr.validate_remote_name(provider)
+    except ValueError:
+        return "unknown"
+
+
 def _cmd_list(args, as_json: bool) -> None:
     remotes = sr.list_remotes()
     rows = []
@@ -140,6 +151,7 @@ def _cmd_list(args, as_json: bool) -> None:
             "ssh_configured": bool(entry.get("ssh")),
             "reachable": reachable,
             "provisioned": bool(entry.get("provisioned")),
+            "provider": _provider_label(entry),
         })
     if as_json:
         print(json.dumps({"ok": True, "remotes": rows, "error": None}))
@@ -150,7 +162,7 @@ def _cmd_list(args, as_json: bool) -> None:
     for r in rows:
         reach = "reachable" if r["reachable"] else "unreachable"
         prov = "provisioned" if r["provisioned"] else "not provisioned"
-        print(f"  {r['name']}  {reach}, {prov}")
+        print(f"  {r['name']}  {reach}, {prov}, provider {r['provider']}")
 
 
 def _cmd_set_origin(args, as_json: bool) -> None:

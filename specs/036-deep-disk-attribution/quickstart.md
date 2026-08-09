@@ -25,7 +25,8 @@ Verify deterministic fixtures for:
 - deleted-open aggregation and redaction;
 - structured container unique/shared accounting;
 - mount selection, nested boundaries, timeout, permission, delivered partial
-  payload, and total transport loss;
+  payload, total transport loss, safe `capacity_scope_id` reconciliation, and
+  pre-cancelled CLI/MCP seams;
 - non-negative reconciliation and overlap exclusion;
 - CLI/MCP parity and zero mutation.
 
@@ -49,12 +50,17 @@ The existing response and cleanup surfaces remain compatible.
 Expected:
 
 - the command performs no mutation;
-- every discovered writable local filesystem has a coverage status;
+- every discovered filesystem has a coverage status; only safe root,
+  Sandbox-home, Docker-data, and typed managed-root scopes are selected;
+- mount/source and managed-root paths are not disclosed; opaque mount and
+  capacity-scope identities demonstrate topology without locators;
 - the response names the selected directory, deleted-open, mount, and container
   capabilities;
-- overlapping container values do not increase accounted bytes;
+- Docker unique/shared/activity/reclaimable values remain logical diagnostics
+  and do not increase accounted bytes;
 - residual unexplained bytes are non-negative;
-- incomplete categories are explicit.
+- incomplete, cancelled, excluded, unavailable, and timed-out categories are
+  explicit; completed or parseable partial evidence remains present.
 
 ## 4. Live named-remote deep status
 
@@ -68,12 +74,14 @@ Expected:
 
 Expected:
 
-- root, Sandbox-home, and container-data filesystems are selected when distinct;
+- root, Sandbox-home, Docker-data, and typed managed-root filesystems are
+  selected when distinct and each capacity scope is counted once;
 - installed `gdu` is used when present, otherwise the standard fallback is
   reported (large inode-dense fallback scans may need the larger budget);
-- deleted-open bytes are measured or the precise availability/privilege limit
-  is reported;
-- detailed Docker values remain logical diagnostics;
+- deleted-open allocated blocks are mapped to selected filesystems or the
+  precise availability/privilege/metadata limit is reported;
+- detailed Docker unique/shared/activity/reclaimable values remain logical
+  diagnostics;
 - the previous capacity gap is reduced by new readable evidence or every
   remaining boundary is named.
 
@@ -81,18 +89,21 @@ Expected:
 
 ```sh
 ./sb resources status --deep --budget 60
+./sb resources status --deep --cancelled --json
 ./sb status
 ```
 
-The human report must expose the same target, capacity, reconciliation,
-coverage, and largest findings as JSON. `./sb status` must continue to report
-the current instance normally.
+The human report must expose the same target, capacity, both capacity and
+attributed drift, reconciliation, safe topology, coverage, limitations, and
+largest findings as JSON. The cancellation command is a non-mutating test seam;
+the MCP equivalent is `resource_status(deep=true, cancelled=true)`. `./sb
+status` must continue to report the current instance normally.
 
 ## Done gate
 
 - Focused resource tests pass.
 - Full repository tests pass.
-- Local and named-remote read-only deep status return within budget plus five
-  seconds.
+- Local and named-remote read-only deep status are contract-bounded to budget
+  plus five seconds; record actual timing separately before claiming live proof.
 - Existing status/plan/cleanup behavior remains compatible.
 - No packages, files, processes, mounts, privileges, or cleanup state changed.

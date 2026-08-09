@@ -26,12 +26,34 @@ ownership plus non-use evidence. Never replace this workflow with a broad
 Docker prune.
 
 When a remote scan reports a large unknown bucket, use `status --deep` with a
-larger bounded budget. Deep mode uses an already installed `gdu` when available
-or standard `du` as fallback, `lsof +L1`, filesystem inventory, and structured
-Docker diagnostics. It installs nothing, crosses no filesystem boundary, and
-must report missing privilege, tools, timeouts, and unselected mounts as
-partial evidence. Require complete deep coverage before interpreting the
+larger bounded budget. Deep mode inventories safe mount topology and uses
+opaque `capacity_scope_id` values so duplicate/nested capacity scopes are
+measured once. It selects only root, Sandbox-home, Docker-data, and typed
+managed-root filesystems; managed-root paths are never disclosed. The directory
+scanner is installed `gdu` when available, otherwise allocated-block `du`; it
+falls back from `gdu` only after a non-timeout failure with remaining budget.
+Both use one-filesystem traversal, but same-device nested mount limitations
+remain explicit coverage rather than a claim of universal mount exclusion.
+
+Deep also uses `lsof +L1` regular zero-link evidence and structured Docker
+diagnostics. Deleted-open allocated blocks are mapped to selected filesystems,
+deduplicated by stable file identity where possible, and grouped under safe
+process identity without path or command-line disclosure. Missing elevation,
+process visibility, or allocated-block metadata is partial evidence, not zero.
+Docker image/container/volume/build-cache values include unique/shared,
+activity, and potentially reclaimable diagnostics but remain non-accounted to
+avoid double counting a measured Docker root. It installs nothing and must
+report missing privilege, tools, timeouts, cancellation, and unselected mounts
+as coverage evidence. Require complete deep coverage before interpreting the
 residual as genuinely unlocated.
+
+Completed evidence and parseable directory output survive a timeout; the
+request contract is budget plus five seconds. Reconciliation reports capacity
+and attributed drift (material over max(1% used, 64 MiB)); a scope mismatch is
+partial and cannot be combined with the outer capacity summary. Use
+`sb resources status --deep --cancelled --json` or MCP
+`resource_status(deep=true, cancelled=true)` only as non-mutating
+pre-cancellation test seams.
 
 Deep status is diagnostic only. `existing_cache_scope` and
 `existing_stale_scope` may reference only eligibility independently established

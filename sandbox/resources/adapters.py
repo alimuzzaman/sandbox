@@ -12,16 +12,24 @@ import time
 import re
 from typing import Callable, Protocol
 
-from sandbox.services.process import BoundedProcessRunner
+from sandbox.services.process import BoundedProcessRunner, ProcessResult
 
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
+    ResourceRequest,
     ResourceObservation,
     StorageTarget,
     utc_now,
 )
-from .attribution import DeepAttribution, DeepAttributionCollector
+from .attribution import (
+    CapabilityObservation,
+    CoverageObservation,
+    DeepAttribution,
+    DeepAttributionCollector,
+    parse_df_output,
+    reconcile_attribution,
+)
 
 _BUILD_CACHE_ID = re.compile(r"^[a-z0-9]{12,128}$")
 _BYTE_SIZE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I)
@@ -61,6 +69,7 @@ class ProviderSnapshot:
     category_outcomes: tuple[dict, ...] = ()
     drift: dict | None = None
     deep_attribution: DeepAttribution | None = None
+    capacity_scope_id: str | None = None
 
 
 class ResourceAdapter(Protocol):
@@ -69,6 +78,7 @@ class ResourceAdapter(Protocol):
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
+        cancelled=False,
     ) -> ProviderSnapshot: ...
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None: ...
@@ -98,6 +108,7 @@ class LocalResourceAdapter:
         runner=None,
         registry_records: Callable[[], object] | None = None,
         job_resource_records: Callable[[], object] | None = None,
+        deep_collector_factory=DeepAttributionCollector,
         clock=utc_now,
         host_root: Path = Path("/"),
     ) -> None:
@@ -109,6 +120,7 @@ class LocalResourceAdapter:
         self.job_resource_records = job_resource_records or (
             lambda: {"jobs": [], "artifacts": []}
         )
+        self.deep_collector_factory = deep_collector_factory
         self.clock = clock
         self.host_root = Path(host_root)
 
@@ -128,8 +140,127 @@ class LocalResourceAdapter:
             "measured_at": self.clock().astimezone(timezone.utc).isoformat(),
         }
 
+    @staticmethod
+    def _managed_root_id(kind: str, path: Path) -> str:
+        """Return an opaque stable owner ID without retaining record labels."""
+        return _resource_id("managed_root", f"{kind}:{path}")
+
+    def _deep_managed_roots(self) -> tuple[dict[str, str], ...]:
+        """Build the collector's typed, internal-only managed-root handoff.
+
+        The collector uses paths solely to choose filesystem boundaries.  Root
+        paths and the source record's labels are never part of a public deep
+        attribution value, and owner IDs deliberately remain opaque.
+        """
+        roots: list[dict[str, str]] = []
+
+        try:
+            records = self.registry_records()
+            values = records.values() if isinstance(records, dict) else records
+        except Exception:
+            values = ()
+        for record in values or ():
+            if not isinstance(record, dict):
+                continue
+            value = record.get("root")
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                path = Path(value).expanduser().resolve(strict=False)
+            except (OSError, ValueError):
+                continue
+            roots.append({
+                "path": str(path),
+                "kind": "registry_root",
+                "owner_id": self._managed_root_id("registry_root", path),
+            })
+
+        try:
+            jobs = self.job_resource_records()
+        except Exception:
+            jobs = {"jobs": []}
+        records = jobs.get("jobs", ()) if isinstance(jobs, dict) else ()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            value = record.get("project_root")
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                path = Path(value).expanduser().resolve(strict=False)
+            except (OSError, ValueError):
+                continue
+            roots.append({
+                "path": str(path),
+                "kind": "job_root",
+                "owner_id": self._managed_root_id("job_root", path),
+            })
+
+        return tuple(sorted(roots, key=lambda item: (
+            item["path"], item["kind"], item["owner_id"],
+        )))
+
+    def _deep_capacity_snapshots(self, deadline: float) -> dict[str, dict]:
+        """Take a read-only, pre-scan capacity snapshot per mount boundary."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {}
+        result = self._run(("df", "-Pk"), min(remaining, 5))
+        if result.returncode != 0:
+            return {}
+        snapshots = {}
+        for row in parse_df_output(result.stdout):
+            mount = str(row["mount_point"])
+            snapshots[mount] = {
+                key: int(row[key])
+                for key in ("total_bytes", "used_bytes", "available_bytes")
+            }
+        return snapshots
+
+    @staticmethod
+    def _deep_collector_failure(
+        capacity: dict,
+        *,
+        status: str = "unavailable",
+        reason: str = "deep_collector_failed",
+    ) -> DeepAttribution:
+        """Preserve ordinary completed evidence when deep collection stops."""
+        return DeepAttribution(
+            status="partial",
+            filesystems=(),
+            findings=(),
+            capabilities=(CapabilityObservation(
+                category="deep_collection",
+                name="local_deep_collector",
+                version=None,
+                fallback=False,
+                privilege="unavailable",
+                status=status,
+                limitations=(
+                    "unexpected_collector_failure"
+                    if status == "unavailable" else "overall_budget_exhausted",
+                ),
+            ),),
+            coverage=(CoverageObservation(
+                category="deep_collection",
+                boundary_id=None,
+                status=status,
+                duration_ms=0,
+                confidence="low",
+                privilege_sufficient=False,
+                reason=reason,
+            ),),
+            reconciliation=reconcile_attribution(
+                used_bytes=int(capacity.get("used_bytes") or 0),
+                directory_allocated_bytes=0,
+            ),
+        )
+
     def _run(self, argv, timeout: float):
-        return self.runner.run(tuple(str(item) for item in argv), timeout=max(timeout, 0.01))
+        command = tuple(str(item) for item in argv)
+        if timeout <= 0:
+            return ProcessResult(command, 124, "", "overall budget exhausted")
+        return self.runner.run(command, timeout=timeout)
 
     def _du(self, path: Path, timeout: float) -> tuple[str, int | None, str | None]:
         result = self._run(("du", "-sk", str(path)), timeout)
@@ -164,7 +295,7 @@ class LocalResourceAdapter:
         outcomes = []
 
         def remaining(limit: float) -> float:
-            return max(min(deadline - time.monotonic(), limit), 0.01)
+            return min(deadline - time.monotonic(), limit)
 
         container_ids_result = self._run(("docker", "ps", "-aq"), remaining(3))
         containers = []
@@ -706,9 +837,15 @@ class LocalResourceAdapter:
             ):
                 metadata_size = None
             if thorough:
-                size_state, measured_size, error = self._du(
-                    path, min(max(deadline - time.monotonic(), 0.01), 5),
-                )
+                remaining = min(deadline - time.monotonic(), 5)
+                if remaining <= 0:
+                    size_state, measured_size, error = (
+                        "timed_out", None, "measurement timed out",
+                    )
+                else:
+                    size_state, measured_size, error = self._du(
+                        path, remaining,
+                    )
             else:
                 size_state = "measured" if metadata_size is not None else "not_measured"
                 measured_size, error = metadata_size, None
@@ -738,7 +875,21 @@ class LocalResourceAdapter:
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
+        cancelled=False,
     ) -> ProviderSnapshot:
+        request = ResourceRequest(float(budget_seconds), cancelled)
+        if request.is_cancelled():
+            try:
+                capacity = self._capacity()
+            except OSError:
+                capacity = None
+            return ProviderSnapshot(
+                self.target(), capacity, (), ({
+                    "category": "resource_measurement",
+                    "status": "cancelled",
+                    "reason": "request_cancelled_before_collection",
+                },),
+            )
         deadline = time.monotonic() + float(budget_seconds)
         capacity = self._capacity()
         protected_paths, protected_projects, job_records = self._ownership_index()
@@ -782,24 +933,62 @@ class LocalResourceAdapter:
                     evidence=("monitoring_only",),
                 ))
         deep_attribution = None
+        deep_outcomes = []
         if deep:
-            remaining = max(deadline - time.monotonic(), 0.1)
-            deep_attribution = DeepAttributionCollector(
-                self.runner,
-                host_root=self.host_root,
-                sandbox_home=self.sandbox_home,
-            ).collect(
-                capacity=capacity,
-                budget_seconds=remaining,
-                progress=progress,
-            )
+            try:
+                capacity_snapshots = self._deep_capacity_snapshots(deadline)
+            except Exception:
+                # The collector retains its own inventory fallback; a failed
+                # pre-snapshot must not discard its independent evidence.
+                capacity_snapshots = {}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                deep_attribution = self._deep_collector_failure(
+                    capacity,
+                    status="timed_out",
+                    reason="overall_budget_exhausted",
+                )
+                deep_outcomes.append({
+                    "category": "deep_attribution",
+                    "status": "partial",
+                    "reason": "overall_budget_exhausted",
+                })
+            else:
+                try:
+                    deep_attribution = self.deep_collector_factory(
+                        self.runner,
+                        host_root=self.host_root,
+                        sandbox_home=self.sandbox_home,
+                    ).collect(
+                        capacity=capacity,
+                        budget_seconds=remaining,
+                        progress=progress,
+                        managed_roots=self._deep_managed_roots(),
+                        capacity_snapshots=capacity_snapshots,
+                        cancelled=cancelled,
+                    )
+                    deep_outcomes.append({
+                        "category": "deep_attribution",
+                        "status": deep_attribution.status,
+                    })
+                except Exception:
+                    deep_attribution = self._deep_collector_failure(capacity)
+                    deep_outcomes.append({
+                        "category": "deep_attribution",
+                        "status": "partial",
+                        "reason": "deep_collector_failed",
+                    })
+        capacity_scope_id = getattr(
+            deep_attribution, "capacity_scope_id", None,
+        )
         return ProviderSnapshot(
             self.target(), capacity, tuple(resources),
-            tuple((*docker_outcomes, *path_outcomes, job_outcome)),
+            tuple((*docker_outcomes, *path_outcomes, job_outcome, *deep_outcomes)),
             {
                 "overlap_categories": ["job_storage_contains_job_artifacts"],
             } if job_resources else None,
             deep_attribution,
+            capacity_scope_id,
         )
 
     def _find_current(self, candidate: CleanupCandidate) -> ResourceObservation | None:

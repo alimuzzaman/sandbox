@@ -646,6 +646,22 @@ selection. See [native-runtime-isolation.md](native-runtime-isolation.md).
 Machine/global defaults (ports base, admin creds, image defaults) live in
 `sandbox.yml`; per-machine overrides in the gitignored `sandbox.local.yml`.
 
+### Machine-local remote metadata
+
+Each `remotes:` entry in `sandbox.local.yml` may include an optional lowercase
+`provider` slug:
+
+```yaml
+remotes:
+  myvps:
+    provider: hetzner
+```
+
+This field is descriptive only. `sb remote list` displays the configured value, or
+`unknown` when it is absent; it does not infer provider behavior, billing, or transport.
+Because it is machine-local metadata, edit `provider` directly in `sandbox.local.yml`
+when needed.
+
 ## Durable runtime policy
 
 `runtime` is an optional project-level policy for explicit argv development and

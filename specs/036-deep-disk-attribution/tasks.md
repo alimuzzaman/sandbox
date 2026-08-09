@@ -182,3 +182,21 @@ Foundation
 - Stop if deep evidence would create a cleanup candidate or broaden an existing
   deletion scope.
 - Stop after two failed attempts using the same host collector approach.
+
+## Phase 9: Convergence
+
+- [x] T031 CRITICAL Capture retained local and named-remote live deep-scan evidence, elapsed delivery time, and before/after zero-mutation baselines per Constitution IV and plan live-stack gate (partial)
+- [x] T032 CRITICAL Reconcile capacity and attributed bytes within the same filesystem scope, including APFS/firmlink mapping and all selected filesystems without double counting per FR-005, FR-026, FR-028, and US1/AC1 (contradicts)
+- [x] T033 Collect truthful mount type, flags, writability, and parent relationships and explicitly exclude nested mounts during scans per FR-005, FR-006, FR-009, US1/AC2, and the nested-mount edge case (partial)
+- [x] T034 Pass typed known-managed registry and job roots into local and remote deep selection and scan each distinct filesystem per FR-007 (partial)
+- [x] T035 Fall back from a failed or incompatible installed preferred scanner to standard `du` while budget remains per FR-014 and US4/AC1 (partial)
+- [x] T036 Measure deleted-open allocated blocks, map device identity to its filesystem, and aggregate/deduplicate by filesystem and process per FR-017 through FR-019 and US2/AC1 through US2/AC2 (contradicts)
+- [x] T037 Detect insufficient deleted-open privilege and surface partial coverage with explicit reasons instead of claiming completeness per FR-025 and US2/AC3 (contradicts)
+- [x] T038 Model Docker unique, shared, active, inactive, and potentially reclaimable diagnostics independently while keeping overlap diagnostic-only per FR-020 and US3/AC1 through US3/AC2 (partial)
+- [x] T039 Retain valid partial remote payloads on timeout or interruption, distinguish total transport loss, and enforce delivery within budget plus five seconds per FR-003, FR-004, US4/AC3 through US4/AC5, and SC-006 (contradicts)
+- [x] T040 Propagate cancellation through CLI, MCP, service, and collectors and emit explicit cancelled or disconnected completion while preserving completed evidence per FR-003, FR-023, and the Deep Attribution Request entity (missing)
+- [x] T041 Extend coverage with errors, exclusions, and limitations and isolate category failures so completed evidence survives unexpected provider or parser failures per FR-022, FR-039, and FR-040 (partial)
+- [x] T042 Render target, filesystems, capacity, full coverage, reconciliation, drift, limitations, and per-filesystem rankings with semantic human/structured parity per FR-005, FR-010, FR-033, and SC-011 (partial)
+- [x] T043 Measure and report local and remote capacity plus attributed-byte drift using the 1% or 64 MiB materiality rule per FR-038 and SC-009 (partial)
+- [x] T044 Match cleanup guidance to exact normalized resource identity and locator evidence while preserving every existing protection predicate per FR-030, FR-032, and US5/AC1 (partial)
+- [x] T045 Add deterministic hard-link, multi-filesystem, nested-mount, permission-partial, delivered-partial timeout, repeatability, semantic-parity, isolation, zero-mutation, and live acceptance evidence per SC-001 through SC-011, SC-013, SC-014, and T029 (missing)

@@ -191,7 +191,9 @@ def observation(kind, locator, display, owner_kind, owner_id, classification,
 def deep_finding(kind, identity, display, observed_bytes, filesystem_id=None,
                  owner_kind=None, owner_id=None, capacity_accounted=False,
                  overlap="unknown", activity="unknown",
-                 guidance="monitoring_only", evidence=(), limitations=()):
+                 guidance="monitoring_only", evidence=(), limitations=(),
+                 unique_bytes=None, shared_bytes=None,
+                 potentially_reclaimable_bytes=None):
     return {
         "finding_id": rid(kind, identity),
         "kind": kind,
@@ -205,9 +207,48 @@ def deep_finding(kind, identity, display, observed_bytes, filesystem_id=None,
         "guidance": guidance,
         "evidence": list(evidence),
         "limitations": list(limitations),
+        "unique_bytes": unique_bytes,
+        "shared_bytes": shared_bytes,
+        "potentially_reclaimable_bytes": potentially_reclaimable_bytes,
     }
 
+def mount_topology():
+    # Return sanitized mount topology without publishing sources or options.
+    rows = {}
+    try:
+        lines = Path("/proc/self/mountinfo").read_text(errors="replace").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        parts = line.split()
+        try:
+            separator = parts.index("-")
+            mount_id, parent_mount_id = parts[0], parts[1]
+            device = parts[2]
+            mount_point = (
+                parts[4].replace("\\040", " ").replace("\\011", "\t")
+                .replace("\\012", "\n").replace("\\134", "\\")
+            )
+            filesystem_type = parts[separator + 1]
+            mount_options = frozenset(parts[5].split(","))
+        except (IndexError, ValueError):
+            continue
+        rows[mount_point] = {
+            "mount_id": mount_id,
+            "parent_mount_id": parent_mount_id,
+            "device": device,
+            "filesystem_type": filesystem_type,
+            "writable": "rw" in mount_options,
+            "mount_flags": sorted(
+                mount_options.intersection({
+                    "ro", "rw", "nodev", "nosuid", "noexec", "relatime",
+                })
+            ),
+        }
+    return rows
+
 def df_rows():
+    topology = mount_topology()
     code, out, _err = run(["df", "-Pk"], 5)
     rows = []
     if code == 0:
@@ -223,9 +264,20 @@ def df_rows():
                 available = int(parts[3]) * 1024
             except ValueError:
                 continue
+            topology_row = topology.get(parts[5], {})
             rows.append({
                 "source": parts[0],
                 "mount_point": parts[5],
+                "mount_id": topology_row.get("mount_id"),
+                "parent_mount_id": topology_row.get("parent_mount_id"),
+                "device": topology_row.get("device"),
+                "filesystem_type": topology_row.get(
+                    "filesystem_type", "unknown",
+                ),
+                "writable": topology_row.get(
+                    "writable", os.access(parts[5], os.W_OK),
+                ),
+                "mount_flags": topology_row.get("mount_flags", []),
                 "total_bytes": max(total, 0),
                 "used_bytes": max(min(used, total), 0),
                 "available_bytes": max(available, 0),
@@ -246,6 +298,35 @@ def mount_for(path, rows):
         if target == mount or target.startswith(mount.rstrip("/") + os.sep):
             matches.append(mount)
     return max(matches, key=len) if matches else None
+
+def filesystem_for_device(device, filesystems):
+    if not device:
+        return None
+    def normalized(value):
+        text = str(value).lower()
+        if ":" in text:
+            try:
+                major, minor = text.split(":", 1)
+                return str(int(major, 10)) + ":" + str(int(minor, 10))
+            except ValueError:
+                return text
+        try:
+            encoded = int(text, 0)
+            # lsof reports Linux dev_t as hex; decode with Linux's stable
+            # userspace major/minor layout instead of the controller OS APIs.
+            major = (encoded >> 8) & 0xfff
+            minor = (encoded & 0xff) | ((encoded >> 12) & 0xfff00)
+            return str(major) + ":" + str(minor)
+        except ValueError:
+            return text
+    expected = normalized(device)
+    for item in sorted(
+        filesystems, key=lambda value: bool(value.get("selected")), reverse=True,
+    ):
+        candidate = normalized(item.get("device") or "")
+        if candidate == expected:
+            return item["filesystem_id"]
+    return None
 
 def parse_ranked_sizes(
     output, filesystem_id, root, multiplier, safe_labels=None,
@@ -305,7 +386,7 @@ def parse_ranked_sizes(
     )
     return findings, total if total is not None else frontier_total
 
-def deleted_open_findings(output, filesystem_id):
+def deleted_open_findings(output, filesystems):
     process = {}
     current = None
     records = []
@@ -336,13 +417,32 @@ def deleted_open_findings(output, filesystem_id):
     for process, record in records:
         if record.get("t") not in {"REG", "VREG"}:
             continue
-        try:
-            measured = int(record.get("s", ""))
-        except ValueError:
+        device, inode = record.get("D"), record.get("i")
+        filesystem_id = filesystem_for_device(device, filesystems)
+        if filesystem_id is None:
             continue
+        selected_filesystem = any(
+            item["filesystem_id"] == filesystem_id and item.get("selected")
+            for item in filesystems
+        )
+        pid = process.get("p") or "unknown"
+        fd = record.get("f") or ""
+        # Request/observe lsof access mode (record.get("a")) only as metadata;
+        # allocation comes from stat blocks, never from the access flag.
+        try:
+            stat_result = os.stat("/proc/" + pid + "/fd/" + fd)
+            measured = int(stat_result.st_blocks) * 512
+            apparent_fallback = False
+        except (AttributeError, OSError, TypeError, ValueError):
+            # lsof's size is an apparent-size fallback, explicitly identified
+            # below; it must never be treated as exact allocated blocks.
+            try:
+                measured = int(record.get("s", ""))
+            except ValueError:
+                continue
+            apparent_fallback = True
         if measured <= 0:
             continue
-        device, inode = record.get("D"), record.get("i")
         identity = (
             (device, inode) if device and inode else
             (
@@ -353,98 +453,155 @@ def deleted_open_findings(output, filesystem_id):
         if identity in seen:
             continue
         seen.add(identity)
-        pid = process.get("p") or "unknown"
-        grouped[pid] = grouped.get(pid, 0) + measured
+        key = (filesystem_id, pid)
+        previous = grouped.get(key, (0, False, selected_filesystem))
+        grouped[key] = (
+            previous[0] + measured, previous[1] or apparent_fallback,
+            previous[2] and selected_filesystem,
+        )
     findings = [
         deep_finding(
             "deleted_open", filesystem_id + ":" + pid,
             "process " + pid, measured,
             filesystem_id=filesystem_id,
             owner_kind="process", owner_id=pid,
-            capacity_accounted=True, overlap="none",
+            capacity_accounted=selected and not fallback, overlap="none",
             activity="active", guidance="manual",
-            evidence=("zero_link_count", "regular_file"),
+            evidence=("zero_link_count", "regular_file", "allocated_blocks",
+                      "device_filesystem_mapping"),
+            limitations=(
+                (("apparent_size_fallback",) if fallback else ())
+                + (("unselected_filesystem",) if not selected else ())
+            ),
         )
-        for pid, measured in sorted(
-            grouped.items(), key=lambda item: (item[1], item[0]), reverse=True,
+        for (filesystem_id, pid), (measured, fallback, selected) in sorted(
+            grouped.items(), key=lambda item: (item[1][0], item[0]), reverse=True,
         )
     ]
-    return findings, sum(item["observed_bytes"] for item in findings)
+    return findings, sum(
+        item["observed_bytes"] for item in findings
+        if item["capacity_accounted"]
+    )
 
 def docker_deep_findings(output):
     try:
         payload = json.loads(output)
     except (TypeError, json.JSONDecodeError):
         return [], 0
+    if isinstance(payload, list):
+        merged = {}
+        for section in payload:
+            if isinstance(section, dict):
+                merged.update(section)
+        payload = merged
     if not isinstance(payload, dict):
         return [], 0
     findings = []
 
-    def add(kind, identity, display, value, overlap, activity, evidence):
+    def category_rows(name):
+        value = payload.get(name)
+        return value if isinstance(value, (list, tuple)) else ()
+
+    def add(kind, identity, display, value, overlap, activity, evidence,
+            limitations=("logical_engine_accounting",), unique=None,
+            shared=None, reclaimable=None):
         measured = byte_count(value)
         if measured is None:
             return
+        unique_value = byte_count(unique)
+        shared_value = byte_count(shared)
+        reclaimable_value = byte_count(reclaimable)
         findings.append(deep_finding(
             kind, identity, display[:120], measured,
-            owner_kind="container_engine",
+            owner_kind="container_engine", owner_id=identity,
             capacity_accounted=False, overlap=overlap,
             activity=activity, guidance="monitoring_only",
             evidence=evidence,
-            limitations=("logical_engine_accounting",),
+            limitations=limitations,
+            unique_bytes=(measured if unique_value is None else unique_value),
+            shared_bytes=(0 if shared_value is None else shared_value),
+            potentially_reclaimable_bytes=(
+                0 if reclaimable_value is None else reclaimable_value
+            ),
         ))
 
-    for row in payload.get("Images") or ():
+    for row in category_rows("Images"):
         if not isinstance(row, dict):
             continue
         identity = str(row.get("ID") or row.get("Repository") or "")
         if not identity:
             continue
-        display = str(row.get("Repository") or "image")
-        if row.get("Tag") not in {None, "", "<none>"}:
-            display += ":" + str(row.get("Tag"))
+        display = "image " + hashlib.sha256(identity.encode()).hexdigest()[:12]
+        unique_value = row.get("UniqueSize")
+        if unique_value is None:
+            total_value = byte_count(row.get("Size"))
+            shared_value = byte_count(row.get("SharedSize"))
+            unique_value = (
+                max(total_value - shared_value, 0)
+                if total_value is not None and shared_value is not None
+                else row.get("Size")
+            )
+        active = str(row.get("Containers") or "0") != "0"
         add(
             "container_image", identity, display,
-            row.get("UniqueSize", row.get("Size")), "shared_layers",
-            "active" if str(row.get("Containers") or "0") != "0"
-            else "inactive",
-            ("docker_system_df", "unique_size", "shared_size_reported"),
+            unique_value, "shared_layers", "active" if active else "inactive",
+            (
+                "docker_system_df", "unique_size", "shared_size_reported",
+                "potentially_reclaimable" if row.get("Reclaimable") else
+                "retained_by_engine",
+            ), unique=unique_value, shared=row.get("SharedSize", 0),
+            reclaimable=0 if active else unique_value,
         )
-    for row in payload.get("Containers") or ():
+    for row in category_rows("Containers"):
         if not isinstance(row, dict):
             continue
         identity = str(row.get("ID") or row.get("Names") or "")
         if identity:
+            active = str(row.get("State") or "").lower() == "running"
             add(
-                "container", identity, str(row.get("Names") or "container"),
+                "container", identity,
+                "container " + hashlib.sha256(identity.encode()).hexdigest()[:12],
                 row.get("Size"), "directory_root",
-                "active" if str(row.get("State") or "").lower() == "running"
-                else "inactive",
-                ("docker_system_df", "writable_layer"),
+                "active" if active else "inactive",
+                (
+                    "docker_system_df", "writable_layer",
+                    "potentially_reclaimable" if row.get("Reclaimable") else
+                    "retained_by_engine",
+                ), reclaimable=0 if active else row.get("Size"),
             )
-    for row in payload.get("LocalVolumes") or ():
+    for row in category_rows("LocalVolumes"):
         if not isinstance(row, dict):
             continue
         identity = str(row.get("Name") or "")
         if identity:
+            active = str(row.get("Links") or "0") != "0"
             add(
-                "volume", identity, identity, row.get("Size"),
-                "directory_root",
-                "active" if str(row.get("Links") or "0") != "0"
-                else "inactive",
-                ("docker_system_df", "volume_detail"),
+                "volume", identity,
+                "volume " + hashlib.sha256(identity.encode()).hexdigest()[:12],
+                row.get("Size"), "directory_root",
+                "active" if active else "inactive",
+                (
+                    "docker_system_df", "volume_detail",
+                    "potentially_reclaimable" if row.get("Reclaimable") else
+                    "retained_by_engine",
+                ), reclaimable=0 if active else row.get("Size"),
             )
-    for row in payload.get("BuildCache") or ():
+    for row in category_rows("BuildCache"):
         if not isinstance(row, dict):
             continue
         identity = str(row.get("ID") or "")
         if identity:
+            active = str(row.get("InUse") or "").lower() == "true"
             add(
                 "build_cache", identity,
                 "build cache " + identity[:12], row.get("Size"),
                 "logical_cache",
-                "active" if str(row.get("InUse") or "").lower() == "true"
-                else "inactive",
-                ("docker_system_df", "build_cache_detail"),
+                "active" if active else "inactive",
+                (
+                    "docker_system_df", "build_cache_detail",
+                    "potentially_reclaimable" if row.get("Reclaimable") else
+                    "retained_by_engine",
+                ), reclaimable=0 if active else row.get("Size"),
             )
     findings.sort(key=lambda item: (
         item["observed_bytes"], item["kind"], item["finding_id"],
@@ -453,7 +610,7 @@ def docker_deep_findings(output):
         item["observed_bytes"] for item in findings
     )
 
-def deep_attribution(capacity):
+def deep_attribution(capacity, managed_roots=()):
     deep_started = time.monotonic()
     rows, mount_status = df_rows()
     if not rows:
@@ -463,6 +620,9 @@ def deep_attribution(capacity):
             "total_bytes": capacity["total_bytes"],
             "used_bytes": capacity["used_bytes"],
             "available_bytes": capacity["available_bytes"],
+            "filesystem_type": "unknown", "writable": True,
+            "mount_id": None, "parent_mount_id": None, "device": None,
+            "mount_flags": ["rw"],
         }]
     host_mount = mount_for(Path("/"), rows) or rows[0]["mount_point"]
     sandbox_mount = mount_for(HOME, rows)
@@ -481,10 +641,26 @@ def deep_attribution(capacity):
         selected[sandbox_mount] = "sandbox_home"
     if docker_mount and docker_mount not in selected:
         selected[docker_mount] = "container_data"
+    for managed_root in managed_roots:
+        managed_mount = mount_for(managed_root, rows)
+        if managed_mount and managed_mount not in selected:
+            selected[managed_mount] = "managed_root"
+    # A bind/alias mount can expose the same filesystem more than once. Select
+    # one boundary per device so neither capacity nor allocation is doubled.
+    selected_devices = set()
+    for mount in list(selected):
+        row = next((item for item in rows if item["mount_point"] == mount), {})
+        device = row.get("device") or row.get("source") or mount
+        if device in selected_devices:
+            del selected[mount]
+        else:
+            selected_devices.add(device)
     elevated = run(["sudo", "-n", "true"], 2)[0] == 0
     prefix = ["sudo", "-n"] if elevated else []
     gdu = shutil.which("gdu")
     scanner = "gdu" if gdu else "du"
+    scanner_fallback = not bool(gdu)
+    scanner_limitations = ["allocated_blocks_not_exact_physical_ownership"]
     scanner_version = None
     if gdu:
         version_code, version_out, _version_err = run([gdu, "--version"], 2)
@@ -502,37 +678,64 @@ def deep_attribution(capacity):
         "reason": None if mount_status == "complete"
         else "mount_inventory_unavailable",
     }]
-    root_allocated = 0
+    directory_allocated = 0
     directory_states = set()
+    attribution_rechecks = []
+    public_mount_ids = {
+        row.get("mount_id"): rid(
+            "mount", str(row.get("mount_id")) + "\0" + row["mount_point"],
+        )
+        for row in rows if row.get("mount_id")
+    }
     for index, row in enumerate(rows):
         mount = row["mount_point"]
         selected_mount = mount in selected
         filesystem_id = rid(
-            "filesystem", str(row.get("source") or "") + "\0" + mount,
+            "filesystem", str(row.get("device") or row.get("source") or "")
+            + "\0" + mount,
         )
         category_started = time.monotonic()
         observed = None
         hardlinks = "unavailable"
         reason = None
+        nested_mounts = sorted(
+            other["mount_point"] for other in rows
+            if other["mount_point"] != mount
+            and other["mount_point"].startswith(mount.rstrip("/") + "/")
+        )
         if selected_mount and time.monotonic() < DEADLINE:
             if gdu:
                 argv = prefix + [
                     gdu, "-n", "-p", "-c", "--no-prefix", "-x",
                     "--depth", "4",
                     "--no-delete", "--no-spawn-shell", "--no-view-file",
-                    mount,
                 ]
+                argv.extend("--exclude=" + path for path in nested_mounts)
+                argv.append(mount)
                 multiplier = 1
             else:
-                argv = prefix + ["du", "-x", "-k", "-d", "4", mount]
+                argv = prefix + ["du", "-x", "-k", "-d", "4"]
+                argv.extend("--exclude=" + path for path in nested_mounts)
+                argv.append(mount)
                 multiplier = 1024
             directory_timeout = min(
                 max(BUDGET_SECONDS - 90, 120), 600,
             )
             code, out, _err = run(argv, directory_timeout)
+            if code not in {0, 124} and gdu and time.monotonic() < DEADLINE:
+                scanner = "du"
+                scanner_version = None
+                scanner_fallback = True
+                scanner_limitations.append("gdu_failed_fell_back_to_du")
+                argv = prefix + ["du", "-x", "-k", "-d", "4"]
+                argv.extend("--exclude=" + path for path in nested_mounts)
+                argv.append(mount)
+                multiplier = 1024
+                code, out, _err = run(argv, directory_timeout)
             if code == 0 or (code == 124 and out.strip()):
-                ranked, observed = parse_ranked_sizes(
-                    out, filesystem_id, mount, multiplier, {
+                try:
+                    ranked, observed = parse_ranked_sizes(
+                        out, filesystem_id, mount, multiplier, {
                         str(HOME): "Sandbox home",
                         str(HOME.parent): "Sandbox host account",
                         str(HOME / "runtime"): "Sandbox runtime data",
@@ -552,15 +755,25 @@ def deep_attribution(capacity):
                             str(docker_root / "image"):
                                 "Docker image metadata",
                         } if docker_root else {}),
-                    },
-                )
-                findings.extend(ranked)
-                state = "complete" if code == 0 else "partial"
-                hardlinks = "confirmed" if code == 0 else "partial"
-                if state == "partial":
-                    reason = "directory_measurement_timed_out_with_partial"
-                if mount == host_mount:
-                    root_allocated = observed
+                        },
+                    )
+                except Exception:
+                    ranked, observed = [], None
+                if observed is None:
+                    state = "unavailable"
+                    reason = "directory_parser_failure"
+                else:
+                    findings.extend(ranked)
+                    state = "complete" if code == 0 else "partial"
+                    hardlinks = "confirmed" if code == 0 else "partial"
+                    if state == "partial":
+                        reason = "directory_measurement_timed_out_with_partial"
+                    directory_allocated += observed
+                    attribution_rechecks.append((
+                        mount, observed,
+                        "gdu" if multiplier == 1 else "du",
+                        tuple(nested_mounts),
+                    ))
             else:
                 state = "timed_out" if code == 124 else "unavailable"
                 reason = (
@@ -576,21 +789,36 @@ def deep_attribution(capacity):
             directory_states.add(state)
         filesystems.append({
             "filesystem_id": filesystem_id,
+            "device": row.get("device"),
             "display_name": (
                 "root filesystem" if mount == host_mount
                 else "filesystem " + str(index + 1)
             ),
-            "filesystem_type": "unknown",
+            "filesystem_type": row.get("filesystem_type") or "unknown",
             "total_bytes": row["total_bytes"],
             "used_bytes": row["used_bytes"],
             "available_bytes": row["available_bytes"],
-            "writable": os.access(mount, os.W_OK),
+            "writable": bool(row.get("writable")),
             "selected": selected_mount,
             "selection_reason": selected.get(mount, "unrelated"),
             "status": state,
             "observed_allocated_bytes": observed,
             "hardlink_deduplication": hardlinks,
-            "limitations": ["filesystem_capabilities_unverified"],
+            "mount_id": public_mount_ids.get(row.get("mount_id")),
+            "parent_mount_id": public_mount_ids.get(
+                row.get("parent_mount_id"),
+            ),
+            "capacity_scope_id": rid(
+                "capacity", str(row.get("device") or row.get("source") or mount),
+            ),
+            "mount_flags": row.get("mount_flags") or [
+                "rw" if row.get("writable") else "ro"
+            ],
+            "limitations": (
+                ["nested_mount_excluded"]
+                if selected_mount and nested_mounts
+                and state in {"complete", "partial"} else []
+            ),
         })
         coverage.append({
             "category": "directory",
@@ -618,28 +846,42 @@ def deep_attribution(capacity):
         "category": "directory",
         "name": scanner,
         "version": scanner_version,
-        "fallback": not bool(gdu),
+        "fallback": scanner_fallback,
         "privilege": "elevated" if elevated else "unprivileged",
         "status": directory_status,
-        "limitations": ["allocated_blocks_not_exact_physical_ownership"],
+        "limitations": scanner_limitations,
     }]
     deleted_started = time.monotonic()
     lsof = shutil.which("lsof")
     deleted_bytes = 0
     if lsof and time.monotonic() < DEADLINE:
-        code, out, _err = run(
-            prefix + [lsof, "-nP", "-FpcfDitsn", "+L1"], 20,
-        )
-        if code in {0, 1}:
-            deleted, deleted_bytes = deleted_open_findings(
-                out,
-                next(
-                    item["filesystem_id"] for item in filesystems
-                    if item["selection_reason"] == "root"
-                ),
+        try:
+            code, out, _err = run(
+                prefix + [lsof, "-nP", "-FpcfDitsn", "+L1"], 20,
             )
-            findings.extend(deleted)
-            deleted_status, deleted_reason = "complete", None
+        except Exception:
+            code, out = 127, ""
+        if code in {0, 1}:
+            try:
+                deleted, deleted_bytes = deleted_open_findings(
+                    out, filesystems,
+                )
+            except Exception:
+                deleted, deleted_bytes = [], 0
+                deleted_status = "unavailable"
+                deleted_reason = "deleted_open_parser_failure"
+            else:
+                findings.extend(deleted)
+                if elevated:
+                    deleted_status, deleted_reason = "complete", None
+                else:
+                    deleted_status = "partial"
+                    deleted_reason = (
+                        "deleted_open_visibility_requires_elevation"
+                    )
+                if any(item["limitations"] for item in deleted):
+                    deleted_status = "partial"
+                    deleted_reason = "deleted_open_allocated_blocks_incomplete"
         else:
             deleted_status = "timed_out" if code == 124 else "unavailable"
             deleted_reason = "deleted_open_measurement_unavailable"
@@ -661,7 +903,9 @@ def deep_attribution(capacity):
             "unprivileged" if lsof else "unavailable"
         ),
         "status": deleted_status,
-        "limitations": [],
+        "limitations": (
+            [] if elevated else ["other_user_processes_may_be_inaccessible"]
+        ),
     })
     coverage.append({
         "category": "deleted_open",
@@ -671,17 +915,26 @@ def deep_attribution(capacity):
             int((time.monotonic() - deleted_started) * 1000), 0,
         ),
         "confidence": "high" if deleted_status == "complete" else "low",
-        "privilege_sufficient": elevated or deleted_status == "complete",
+        "privilege_sufficient": elevated,
         "reason": deleted_reason,
     })
     docker_started = time.monotonic()
-    code, out, _err = run(
-        ["docker", "system", "df", "-v", "--format", "json"], 30,
-    )
+    try:
+        code, out, _err = run(
+            ["docker", "system", "df", "-v", "--format", "json"], 30,
+        )
+    except Exception:
+        code, out = 127, ""
     if code == 0:
-        docker_findings, logical_bytes = docker_deep_findings(out)
-        findings.extend(docker_findings)
-        docker_status, docker_reason = "complete", None
+        try:
+            docker_findings, logical_bytes = docker_deep_findings(out)
+        except Exception:
+            docker_findings, logical_bytes = [], 0
+            docker_status = "unavailable"
+            docker_reason = "docker_accounting_parser_failure"
+        else:
+            findings.extend(docker_findings)
+            docker_status, docker_reason = "complete", None
     else:
         logical_bytes = 0
         docker_status = "timed_out" if code == 124 else "unavailable"
@@ -706,33 +959,140 @@ def deep_attribution(capacity):
         "privilege_sufficient": docker_status == "complete",
         "reason": docker_reason,
     })
-    raw_accounted = root_allocated + deleted_bytes
-    used = capacity["used_bytes"]
+    selected_rows = [
+        row for row in rows if row["mount_point"] in selected
+    ]
+    selected_scope_ids = {
+        rid(
+            "capacity",
+            str(row.get("device") or row.get("source") or row["mount_point"]),
+        )
+        for row in selected_rows
+    }
+    used = sum(row["used_bytes"] for row in selected_rows)
+    raw_accounted = directory_allocated + deleted_bytes
     accounted = min(raw_accounted, used)
     findings.sort(key=lambda item: (
         item["observed_bytes"], item["kind"], item["finding_id"],
     ), reverse=True)
+    attributed_before = 0
+    attributed_after = 0
+    attributed_rechecks_complete = bool(attribution_rechecks)
+    for mount, previous, recheck_scanner, nested_mounts in attribution_rechecks:
+        if time.monotonic() >= DEADLINE:
+            attributed_rechecks_complete = False
+            break
+        if recheck_scanner == "gdu" and gdu:
+            argv = prefix + [
+                gdu, "-n", "-p", "-c", "--no-prefix", "-x",
+                "--depth", "0", "--no-delete", "--no-spawn-shell",
+                "--no-view-file",
+            ]
+            multiplier = 1
+        else:
+            argv = prefix + ["du", "-x", "-k", "-s"]
+            multiplier = 1024
+        argv.extend("--exclude=" + path for path in nested_mounts)
+        argv.append(mount)
+        try:
+            code, out, _err = run(argv, 30)
+        except Exception:
+            attributed_rechecks_complete = False
+            continue
+        if code != 0:
+            attributed_rechecks_complete = False
+            continue
+        try:
+            _ranked, current = parse_ranked_sizes(
+                out, "attribution-drift", mount, multiplier,
+            )
+        except Exception:
+            attributed_rechecks_complete = False
+            continue
+        attributed_before += previous
+        attributed_after += current
+    attributed_drift = (
+        abs(attributed_after - attributed_before)
+        if attributed_rechecks_complete else 0
+    )
+    coverage.append({
+        "category": "attributed_drift",
+        "boundary_id": None,
+        "status": "complete" if attributed_rechecks_complete else "partial",
+        "duration_ms": 0,
+        "confidence": "high" if attributed_rechecks_complete else "low",
+        "privilege_sufficient": True,
+        "reason": None if attributed_rechecks_complete
+        else "attributed_recheck_unknown",
+    })
+    try:
+        current_rows, current_status = df_rows()
+    except Exception:
+        current_rows, current_status = [], "unavailable"
+    current_by_device = {
+        (row.get("device") or row.get("source") or row["mount_point"]): row
+        for row in current_rows
+    }
+    selected_devices = [
+        row.get("device") or row.get("source") or row["mount_point"]
+        for row in selected_rows
+    ]
+    capacity_recheck_complete = (
+        current_status == "complete"
+        and all(device in current_by_device for device in selected_devices)
+    )
+    current_used = sum(
+        current_by_device[device]["used_bytes"] for device in selected_devices
+        if device in current_by_device
+    )
+    capacity_drift = (
+        abs(current_used - used) if capacity_recheck_complete else 0
+    )
+    coverage.append({
+        "category": "capacity_drift",
+        "boundary_id": None,
+        "status": "complete" if capacity_recheck_complete else "partial",
+        "duration_ms": 0,
+        "confidence": "high" if capacity_recheck_complete else "low",
+        "privilege_sufficient": True,
+        "reason": None if capacity_recheck_complete
+        else "capacity_recheck_unknown",
+    })
+    drift_threshold = max(int(used * 0.01), 64 * 1024 * 1024)
+    drift_bytes = max(capacity_drift, attributed_drift)
     incomplete = any(
         item["status"] not in {"complete", "not_selected"}
         for item in coverage
     )
+    # Device identities are needed only while correlating lsof and capacity.
+    # Do not expose them in the compact public payload.
+    for item in filesystems:
+        item.pop("device", None)
     return {
         "status": "partial" if incomplete else "complete",
+        "capacity_scope_id": (
+            next(iter(selected_scope_ids))
+            if len(selected_scope_ids) == 1 else None
+        ),
         "filesystems": filesystems,
         "findings": findings[:300],
         "capabilities": capabilities,
         "coverage": coverage,
         "reconciliation": {
             "used_bytes": used,
-            "directory_allocated_bytes": root_allocated,
+            "directory_allocated_bytes": directory_allocated,
             "deleted_open_bytes": deleted_bytes,
             "observable_overhead_bytes": 0,
             "overlapping_logical_bytes": logical_bytes,
             "accounted_bytes": accounted,
             "residual_unexplained_bytes": used - accounted,
             "overage_bytes": max(raw_accounted - used, 0),
-            "drift_bytes": 0,
-            "drift_material": False,
+            "drift_bytes": drift_bytes,
+            "drift_material": drift_bytes > drift_threshold,
+            "capacity_drift_bytes": capacity_drift,
+            "attributed_drift_bytes": attributed_drift,
+            "capacity_drift_material": capacity_drift > drift_threshold,
+            "attributed_drift_material": attributed_drift > drift_threshold,
         },
     }
 
@@ -952,7 +1312,12 @@ def scan():
     target_locator = str(REQUEST.get("target_locator") or "")
     targeted = bool(target_kind and target_locator)
     usage = shutil.disk_usage("/")
-    identity_source = platform.node() + ":" + str(os.stat("/").st_dev) + ":" + str(HOME)
+    root_stat = os.stat("/")
+    root_device = (
+        str(os.major(root_stat.st_dev)) + ":" + str(os.minor(root_stat.st_dev))
+    )
+    capacity_scope_id = rid("capacity", root_device)
+    identity_source = platform.node() + ":" + str(root_stat.st_dev) + ":" + str(HOME)
     identity = hashlib.sha256(identity_source.encode()).hexdigest()[:24]
     capacity = {
         "total_bytes": int(usage.total),
@@ -977,7 +1342,16 @@ def scan():
     deep = None
     if not targeted and focus is None and deep_requested:
         PHASE = "deep_attribution"
-        deep = deep_attribution(capacity)
+        try:
+            deep = deep_attribution(
+                capacity,
+                tuple(Path(path) for path in protected_paths),
+            )
+        except Exception:
+            outcomes.append({
+                "category": "deep_attribution", "status": "unavailable",
+                "reason": "category_failure_isolated",
+            })
     if not targeted and focus is None and not deep_requested:
         PHASE = "docker_storage"
         storage_resources, storage_outcomes = docker_storage_resources(thorough)
@@ -1398,6 +1772,7 @@ def scan():
     return {
         "identity": identity,
         "capacity": capacity,
+        "capacity_scope_id": capacity_scope_id,
         "resources": resources,
         "category_outcomes": outcomes,
         "drift": None,
@@ -1563,11 +1938,29 @@ class RemoteResourceAdapter:
             str(result.stderr or ""),
         )
 
+    @staticmethod
+    def _cancelled(signal) -> bool:
+        if isinstance(signal, bool):
+            return signal
+        probe = getattr(signal, "is_set", None)
+        if not callable(probe) and callable(signal):
+            probe = signal
+        try:
+            return bool(probe()) if callable(probe) else False
+        except Exception:
+            return False
+
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
+        cancelled=False,
     ) -> ProviderSnapshot:
         entry = self._entry()
+        if self._cancelled(cancelled):
+            return ProviderSnapshot(
+                self.target(), None, (),
+                ({"category": "remote_probe", "status": "cancelled"},),
+            )
         if progress:
             progress("remote_probe")
         response = self._ssh(entry, {
@@ -1578,17 +1971,8 @@ class RemoteResourceAdapter:
             "remote_name": self.remote_name,
             "focus": focus,
             "deep": bool(deep),
-        }, budget_seconds + 15)
-        if response.returncode == 124:
-            return ProviderSnapshot(
-                self.target(), None, (),
-                ({"category": "remote_probe", "status": "timed_out"},),
-            )
-        if response.returncode != 0:
-            return ProviderSnapshot(
-                self.target(), None, (),
-                ({"category": "remote_probe", "status": "unavailable"},),
-            )
+            "cancelled": self._cancelled(cancelled),
+        }, budget_seconds + 5)
         try:
             payload = json.loads(response.stdout)
             identity = payload["identity"]
@@ -1597,18 +1981,32 @@ class RemoteResourceAdapter:
             )
             target = StorageTarget("remote", self.remote_name, identity)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            status = (
+                "timed_out" if response.returncode == 124 else "unavailable"
+            )
             return ProviderSnapshot(
                 self.target(), None, (),
-                ({"category": "remote_probe", "status": "unavailable"},),
+                ({"category": "remote_probe", "status": status},),
             )
         self._target = target
+        outcomes = list(payload.get("category_outcomes") or ())
+        terminal = None
+        if self._cancelled(cancelled):
+            terminal = "cancelled"
+        elif response.returncode == 124:
+            terminal = "timed_out"
+        elif response.returncode != 0:
+            terminal = "disconnected"
+        if terminal is not None:
+            outcomes.append({"category": "remote_transport", "status": terminal})
         return ProviderSnapshot(
             target,
             payload.get("capacity"),
             resources,
-            tuple(payload.get("category_outcomes") or ()),
+            tuple(outcomes),
             payload.get("drift"),
             DeepAttribution.from_dict(payload.get("deep_attribution")),
+            payload.get("capacity_scope_id"),
         )
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:

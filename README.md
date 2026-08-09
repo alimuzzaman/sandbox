@@ -329,9 +329,13 @@ Inspect local or named-remote storage without booting an instance:
 Planning is read-only. Cleanup requires a current target-bound plan plus
 `--confirm`, revalidates each exact candidate, and never uses a broad Docker
 prune. Cache and stale persistent-resource cleanup are deliberately separate.
-Deep status uses an installed `gdu` or standard `du`, `lsof`, filesystem
-capacity, and structured Docker evidence to reconcile large unknown buckets;
-it installs nothing and adds no cleanup path.
+Deep status uses safe mount topology and opaque capacity-scope identities to
+measure selected root, Sandbox, Docker, and typed managed filesystems once.
+It uses installed `gdu` with allocated-block `du` fallback, deleted-open
+allocated-block evidence, and Docker unique/shared/activity/reclaimable
+diagnostics without double counting them. It is bounded (budget plus five
+seconds), preserves valid partial/cancelled evidence, installs nothing, and
+adds no cleanup path.
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
 ### Durable remote-first jobs

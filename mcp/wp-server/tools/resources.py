@@ -17,12 +17,18 @@ def resource_status(
     thorough: bool = False,
     deep: bool = False,
     budget_seconds: float = 15,
+    cancelled: bool = False,
 ) -> dict:
     """Inspect local or named-remote host storage without mutation."""
+    kwargs = {
+        "thorough": thorough or deep,
+        "budget_seconds": budget_seconds,
+        "deep": deep,
+    }
+    if cancelled:
+        kwargs["cancelled"] = True
     return _service(remote).status(
-        thorough=thorough or deep,
-        budget_seconds=budget_seconds,
-        deep=deep,
+        **kwargs,
     )
 
 

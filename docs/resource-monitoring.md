@@ -28,15 +28,30 @@ Use deep attribution when the capacity-level unknown bucket remains large:
 ./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 ```
 
-Deep mode implies `--thorough` and is status-only. It inventories filesystem
-boundaries, measures selected roots without crossing mounts, checks
-deleted-but-open regular files, and adds structured Docker diagnostics.
+Deep mode implies `--thorough` and is status-only. It inventories mount
+topology before walking, measures only the root, Sandbox-home, Docker-data,
+and typed managed-root capacity scopes, and uses one-filesystem scanner mode.
+Same-device nested-mount limitations remain explicit coverage rather than an
+unconditional exclusion guarantee. `capacity_scope_id` identifies the capacity
+boundary used for reconciliation: bind/nested mounts sharing a scope are
+measured and counted once. Public records expose opaque mount and scope identities plus safe mount
+flags, never mount sources or managed-root paths.
+
+Typed managed roots come only from existing read-only typed repositories. They
+select a containing filesystem but do not disclose their path, registry key, or
+other locator in a finding. Virtual, unrelated, unavailable, and duplicate
+mounts remain explicit coverage records rather than becoming scan targets.
+
 Sandbox uses an already installed `gdu` for directory ranking when available
-and falls back to standard `du`; it never installs host packages during a
-scan. Existing passwordless, non-interactive `sudo` may improve visibility,
-but missing privilege is reported as partial coverage instead of prompting.
+and falls back to standard allocated-block `du` when `gdu` is unavailable or
+fails before yielding usable partial output; the capability record reports that
+fallback. It never installs host packages during a scan. Existing passwordless,
+non-interactive `sudo -n` may improve visibility, but missing privilege is
+reported as partial coverage instead of prompting.
 On inode-dense hosts using the standard fallback, use a larger finite budget;
-completed partial entries are retained if the scan still times out.
+completed entries and parseable timeout output are retained if the scan still
+times out. A bounded local or remote request is expected to return within its
+budget plus five seconds; this is a contract target, not live-proof evidence.
 
 A scan reports raw total, used, available, attributed, unknown, and estimated
 reclaimable bytes. Each resource includes an owner or ownership gap, lifecycle
@@ -52,18 +67,44 @@ workspace/volume/image/build-cache detail so nested bytes do not inflate
 capacity attribution.
 
 Deep reconciliation separates filesystem used capacity, observed allocated
-directory blocks, deleted-open bytes, overlapping logical Docker values,
-accounted bytes, overage, drift, and the residual unexplained gap. Ranked
-directory names are intentionally anonymized. Docker image, volume, container,
-and build-cache detail is diagnostic and never added again to capacity when
-its engine root is already measured.
+directory blocks, deleted-open allocated blocks, overlapping logical Docker
+values, accounted bytes, overage, and the residual unexplained gap. It reports
+both capacity drift and attributed-allocation drift; each is material only when
+it exceeds the greater of one percent of used capacity or 64 MiB. A
+capacity-scope mismatch makes the result partial and prevents it being combined
+with the ordinary capacity summary. Ranked directory names are intentionally
+anonymized.
 
-Review `deep_attribution.coverage` before treating the residual as genuinely
-unlocated. Every discovered filesystem and category says whether it was
-complete, skipped, unavailable, or timed out, and whether privilege was
-sufficient. A nonzero residual after complete coverage can still represent
+Deleted-open evidence uses `lsof +L1` field output when available, accepts
+only regular zero-link records, deduplicates stable file identity where
+available, and maps allocated blocks to a selected filesystem. It aggregates
+safe process identity without file names or process arguments. Missing
+elevation, inaccessible processes, incomplete allocated-block metadata, and
+platform link-count limits are partial coverage—not zero bytes.
+
+Docker image, container, volume, and build-cache detail reports observed,
+unique, shared, activity, and potentially reclaimable logical values. These
+diagnostics are always non-capacity-accounted: shared layers, writable layers,
+volume data, and logical cache values must not be added to an already measured
+Docker data-root allocation.
+
+Review `deep_attribution.coverage`, capabilities, and filesystem limitations
+before treating the residual as genuinely unlocated. Every discovered
+filesystem and category says whether it was complete, partial, not selected,
+unavailable, timed out, cancelled, or disconnected, and whether privilege was
+sufficient. Coverage errors and excluded nested/virtual/unrelated mounts stay
+visible. A nonzero residual after complete coverage can still represent
 filesystem metadata, reserved blocks, snapshots, copy-on-write behavior,
-sparse-file differences, or live scan drift.
+sparse-file differences, hard-link allocation, or live capacity/attribution
+drift.
+
+`--cancelled` is an explicit non-interactive test seam valid only for
+`resources status`; MCP `resource_status(cancelled=true)` exposes the same
+pre-cancelled request state. Cancellation is not a cleanup action and any
+already returned valid evidence remains structured with a `cancelled` terminal
+status. A remote disconnect after a valid payload similarly retains it with a
+`disconnected` terminal status; total transport loss returns unavailable rather
+than fabricated partial evidence.
 
 Deep findings do not create deletion authority. An exact finding may reference
 `existing_cache_scope` or `existing_stale_scope` only when the ordinary

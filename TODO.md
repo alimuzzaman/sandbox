@@ -10,12 +10,10 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 
 - [ ] `hermes.asb.bd` serves the Cloudflare Access 302 for `/robots.txt` — Access runs ahead of Workers, so the deny never reaches it. Accepted: the host is Access-gated, nothing is crawlable. Revisit only if the route ever goes public. `[dns]`
 - [ ] Worker route patterns don't match a query string, so `/robots.txt?x=1` falls through to the origin (523 on hostnames with no vhost). Cosmetic — crawlers request it bare. `[dns]`
-- [ ] Branch-derived instance names read badly for `.t3` worktrees: dir `t3code-360e3021` + branch `t3code/theme-…` yields `t3code-360e-t3code-theme`. Strip a branch's first segment when it repeats the directory name. `[ops]`
 - [ ] `replay.lenzora.dev` returns 525 (TLS handshake failed at origin) — unrelated to mail, spotted during the robots sweep. `[ops]`
 
 ## 2. Platform integrity (continuous)
 
-- [ ] Remote `scaleway-sandbox` is a **Contabo** box (`vmi3430003.contaboserver.net`). The name drove a wrong provider assumption (Scaleway's port-25 block) through a whole research pass. Rename the remote or record the real provider in its registry entry, and have `sb remote` surface the host's actual provider. `[ops]`
 - [ ] `sandbox/core/_cloudflare.py` upserts address records only — no TXT/CNAME. Blocks every DNS-automating feature, mail first. `[dns → prd 00 §4.4]`
 - [ ] Instance mail is a dead end by construction: `_write_mail_muplugin` rewrites From to an invalid no-TLD address so `wp_mail()` fails loudly. Right for a laptop, wrong for a public preview. `[mail → prd 00]`
 - [ ] One IP, one reputation, shared by every preview and every permanent site. Needs per-instance rate limiting before sending is switched on widely. `[mail → prd 00 §10]`

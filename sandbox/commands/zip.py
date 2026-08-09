@@ -62,6 +62,12 @@ SIGNATURES = (
     {"mime": "application/x-elf", "exts": (), "prefix": b"\x7fELF", "dangerous": True},
     {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xce\xfa\xed\xfe", "dangerous": True},
     {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xcf\xfa\xed\xfe", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xfe\xed\xfa\xce", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xfe\xed\xfa\xcf", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xca\xfe\xba\xbe", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xbe\xba\xfe\xca", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xca\xfe\xba\xbf", "dangerous": True},
+    {"mime": "application/x-mach-binary", "exts": (), "prefix": b"\xbf\xba\xfe\xca", "dangerous": True},
 )
 
 # Webpack-style content-hashed filenames (`app.a1b2c3d4.js`): two builds of the
@@ -218,22 +224,29 @@ def _read_distignore(root: Path, dev: bool) -> tuple[DistIgnore, bool]:
     return DistIgnore(entries), True
 
 
-def _discover_files(root: Path, ignore: DistIgnore) -> list[str]:
+def _discover_files(root: Path, ignore: DistIgnore,
+                    excluded_roots: tuple[str, ...] = ()) -> list[str]:
     """Every shippable file as a POSIX project-relative path, sorted.
 
     Directories are pruned as soon as they match, so a `node_modules/` entry
     costs one check rather than a walk of 40,000 files. `.git` is pruned
     unconditionally — it is never shippable and is not always in `.distignore`."""
+    def excluded(rel: str) -> bool:
+        return any(rel == item or rel.startswith(item + "/")
+                   for item in excluded_roots)
+
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         prefix = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = sorted(
             d for d in dirnames
-            if not (prefix == "" and d == ".git") and not ignore.match(prefix + d))
+            if not (prefix == "" and d == ".git")
+            and not ignore.match(prefix + d)
+            and not excluded(prefix + d))
         for name in sorted(filenames):
             rel = prefix + name
-            if not ignore.match(rel):
+            if not ignore.match(rel) and not excluded(rel):
                 found.append(rel)
     return found
 
@@ -460,7 +473,7 @@ def cmd_zip(cfg, args) -> None:
         pconf = sc.load_project_config(pd)
     except sc.ConfigError as e:
         die(str(e))
-    root = Path(pconf["root"])
+    root = Path(pconf["root"]).resolve()
     as_json = bool(getattr(args, "json", False))
     is_dev = bool(getattr(args, "dev", False))
     zc = _resolve_zip_config(pconf)
@@ -488,10 +501,33 @@ def cmd_zip(cfg, args) -> None:
             print(f"Shipping the declared version {version or '(none)'} — "
                   f"{stamp['reason']}.\n")
 
+    out_dir = _output_dir(root, getattr(args, "out", None) or zc["output_dir"])
+    if out_dir == root:
+        die("zip output directory must not be the project root — choose a "
+            "dedicated directory so prior archives cannot be packaged into "
+            "later builds.")
+    # `<slug>[-dev][-<branch>].<version>.zip` — the branch segment keeps parallel
+    # worktree builds from overwriting each other in the shared output dir.
+    base_name = "-".join(p for p in (name, "dev" if is_dev else None,
+                                     stamp["branch_slug"] or None) if p)
+    zip_name = f"{base_name}.{stamp['version']}.zip" if stamp["version"] else f"{base_name}.zip"
+    zip_path = out_dir / zip_name
+
+    excluded_roots: list[str] = []
+    if out_dir != root:
+        try:
+            excluded_roots.append(out_dir.relative_to(root).as_posix())
+        except ValueError:
+            pass
+    try:
+        excluded_roots.append(zip_path.relative_to(root).as_posix())
+    except ValueError:
+        pass
+
     ignore, had_distignore = _read_distignore(root, is_dev)
     if not as_json and had_distignore:
         print("Using .distignore to exclude files.\n")
-    files = _discover_files(root, ignore)
+    files = _discover_files(root, ignore, tuple(excluded_roots))
     if not files:
         die(f"nothing to archive in {root} — every file is excluded by .distignore.")
 
@@ -503,6 +539,28 @@ def cmd_zip(cfg, args) -> None:
         die("hidden files detected in zip output — aborting.\n"
             "These must be added to .distignore:\n\n"
             + "\n".join(f"   {f}" for f in hidden))
+
+    unsafe_files: list[str] = []
+    for rel in files:
+        src = root / rel
+        if not src.is_symlink():
+            if not src.is_file():
+                unsafe_files.append(f"{rel} (not a regular file)")
+            continue
+        try:
+            target = src.resolve(strict=True)
+        except OSError:
+            unsafe_files.append(f"{rel} (broken symlink target)")
+            continue
+        if not target.is_relative_to(root):
+            unsafe_files.append(f"{rel} (symlink target outside project root)")
+        elif not target.is_file():
+            unsafe_files.append(f"{rel} (symlink target is not a regular file)")
+    if unsafe_files:
+        die("unsafe file entry detected in zip output — aborting.\n"
+            "Entries must be regular files, and symlinks must resolve to a "
+            "regular file inside the project root:\n\n"
+            + "\n".join(f"   {item}" for item in unsafe_files))
 
     mime_violations = _check_mime_mismatches(files, root)
     if mime_violations:
@@ -518,14 +576,6 @@ def cmd_zip(cfg, args) -> None:
 
     sites = _version_sites(zc["main_file"], zc["version_sites"])
     stamped_files: list[str] = []
-
-    out_dir = _output_dir(root, getattr(args, "out", None) or zc["output_dir"])
-    # `<slug>[-dev][-<branch>].<version>.zip` — the branch segment keeps parallel
-    # worktree builds from overwriting each other in the shared output dir.
-    base_name = "-".join(p for p in (name, "dev" if is_dev else None,
-                                     stamp["branch_slug"] or None) if p)
-    zip_name = f"{base_name}.{stamp['version']}.zip" if stamp["version"] else f"{base_name}.zip"
-    zip_path = out_dir / zip_name
 
     if not as_json:
         print("Using Plugin Handbook best practices to discover files:\n")

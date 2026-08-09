@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from sandbox.resources.adapters import LocalResourceAdapter
 from sandbox.resources.adapters import _parse_byte_size
 from sandbox.resources.models import CleanupCandidate, ResourceObservation
+from sandbox.resources.plans import PlanStore
+from sandbox.resources.service import ResourceService
 from sandbox.services.process import ProcessResult
-from tests.resource_fixtures import NOW
+from tests.resource_fixtures import NOW, deep_attribution
 
 
 class FakeRunner:
@@ -65,6 +68,42 @@ class TestLocalResourceAdapter(unittest.TestCase):
             for command, _timeout in runner.calls
         ))
 
+    def test_pre_cancelled_observation_runs_no_provider_commands(self):
+        runner = FakeRunner()
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=30, cancelled=True,
+        )
+
+        self.assertIsNotNone(snapshot.capacity)
+        self.assertEqual(snapshot.resources, ())
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(snapshot.category_outcomes, ({
+            "category": "resource_measurement",
+            "status": "cancelled",
+            "reason": "request_cancelled_before_collection",
+        },))
+
+    def test_pre_cancelled_observation_serializes_as_ok_cancelled(self):
+        runner = FakeRunner()
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        service = ResourceService(adapter, PlanStore(self.home / "plans"))
+
+        result = service.status(
+            thorough=True, deep=True, budget_seconds=30, cancelled=True,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["target"]["kind"], "local")
+        self.assertIn("capacity", result["data"])
+        self.assertEqual(runner.calls, [])
+
     def test_thorough_timeout_is_explicit_and_never_zero(self):
         runner = FakeRunner({
             ("du", "-sk"): response(returncode=124, stderr="process timed out"),
@@ -105,10 +144,251 @@ class TestLocalResourceAdapter(unittest.TestCase):
             snapshot.deep_attribution.reconciliation.directory_allocated_bytes,
             20 * 1024,
         )
+        self.assertEqual(
+            snapshot.capacity_scope_id,
+            snapshot.deep_attribution.capacity_scope_id,
+        )
         self.assertTrue(all(
             timeout is None or 0 < timeout <= 30
             for _command, timeout in runner.calls
         ))
+
+    def test_deep_managed_roots_are_typed_stable_and_not_public_evidence(self):
+        workspace = self.home / "deploy-src" / "project-workspace-deadbeef"
+        adapter = LocalResourceAdapter(
+            self.home,
+            registry_records=lambda: {
+                "fixture": {
+                    "root": str(workspace),
+                    "instance": "fixture-password=not-public",
+                },
+            },
+            job_resource_records=lambda: {
+                "jobs": [{
+                    "project_root": str(workspace),
+                    "job_id": "job-token=not-public",
+                    "lifecycle": "running",
+                }],
+                "artifacts": [],
+            },
+            clock=lambda: NOW,
+            host_root=self.home,
+        )
+
+        roots = adapter._deep_managed_roots()
+
+        self.assertEqual(roots, tuple(sorted(
+            roots, key=lambda item: (item["path"], item["kind"], item["owner_id"]),
+        )))
+        matching = [
+            item for item in roots
+            if item["path"] == str(workspace.resolve(strict=False))
+        ]
+        self.assertEqual({item["kind"] for item in matching}, {
+            "registry_root", "job_root",
+        })
+        self.assertTrue(all(
+            item["owner_id"].startswith("managed_root-")
+            for item in matching
+        ))
+        self.assertTrue(all(
+            "password" not in json.dumps(item)
+            and "token" not in json.dumps(item)
+            for item in roots
+        ))
+
+    def test_deep_collector_failure_returns_explicit_partial_evidence(self):
+        class RaisingCollector:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def collect(self, **_kwargs):
+                raise RuntimeError("password=do-not-expose")
+
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=FakeRunner(),
+            clock=lambda: NOW,
+            host_root=self.home,
+            deep_collector_factory=RaisingCollector,
+        )
+
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=30,
+        )
+
+        self.assertIsNotNone(snapshot.deep_attribution)
+        self.assertEqual(snapshot.deep_attribution.status, "partial")
+        coverage = snapshot.deep_attribution.coverage
+        self.assertEqual(coverage[0].category, "deep_collection")
+        self.assertEqual(coverage[0].status, "unavailable")
+        self.assertEqual(coverage[0].reason, "deep_collector_failed")
+        self.assertNotIn("password", json.dumps(snapshot.deep_attribution.to_dict()))
+        outcome = next(item for item in snapshot.category_outcomes
+                       if item["category"] == "deep_attribution")
+        self.assertEqual(outcome["status"], "partial")
+
+    def test_deep_hands_managed_roots_and_capacity_snapshots_to_collector(self):
+        workspace = self.home / "deploy-src" / "project-workspace-deadbeef"
+        received = {}
+
+        class CapturingCollector:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def collect(self, **kwargs):
+                received.update(kwargs)
+                return deep_attribution()
+
+        runner = FakeRunner({
+            ("df", "-Pk"): response(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                f"/dev/fixture 100 80 20 80% {self.home}\n",
+            ),
+        })
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=runner,
+            registry_records=lambda: {
+                "fixture": {"root": str(workspace)},
+            },
+            job_resource_records=lambda: {
+                "jobs": [{"project_root": str(workspace)}],
+                "artifacts": [],
+            },
+            clock=lambda: NOW,
+            host_root=self.home,
+            deep_collector_factory=CapturingCollector,
+        )
+
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=30,
+        )
+
+        self.assertIsNotNone(snapshot.deep_attribution)
+        self.assertEqual(received["capacity_snapshots"][str(self.home)], {
+            "total_bytes": 100 * 1024,
+            "used_bytes": 80 * 1024,
+            "available_bytes": 20 * 1024,
+        })
+        self.assertEqual(
+            {item["kind"] for item in received["managed_roots"]},
+            {"registry_root", "job_root"},
+        )
+        self.assertTrue(all(
+            item["owner_id"].startswith("managed_root-")
+            for item in received["managed_roots"]
+        ))
+
+    def test_pre_snapshot_failure_does_not_discard_collector_evidence(self):
+        received = {}
+
+        class SnapshotFailureRunner(FakeRunner):
+            def run(self, argv, *, cwd=None, env=None, timeout=None):
+                if tuple(argv) == ("df", "-Pk"):
+                    raise RuntimeError("unexpected parser failure")
+                return super().run(argv, cwd=cwd, env=env, timeout=timeout)
+
+        class CapturingCollector:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def collect(self, **kwargs):
+                received.update(kwargs)
+                return deep_attribution()
+
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=SnapshotFailureRunner(),
+            clock=lambda: NOW,
+            host_root=self.home,
+            deep_collector_factory=CapturingCollector,
+        )
+
+        snapshot = adapter.observe(
+            thorough=True, deep=True, budget_seconds=30,
+        )
+
+        self.assertEqual(snapshot.deep_attribution.status, "complete")
+        self.assertEqual(received["capacity_snapshots"], {})
+
+    def test_deep_budget_is_recomputed_after_capacity_snapshot(self):
+        now = [0.0]
+        received = {}
+
+        class SnapshotRunner(FakeRunner):
+            def run(self, argv, *, cwd=None, env=None, timeout=None):
+                if tuple(argv) == ("df", "-Pk"):
+                    now[0] = 2.0
+                    return response(
+                        "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        f"/dev/fixture 100 80 20 80% {self_home}\n",
+                    )
+                return super().run(argv, cwd=cwd, env=env, timeout=timeout)
+
+        class CapturingCollector:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def collect(self, **kwargs):
+                received.update(kwargs)
+                return deep_attribution()
+
+        self_home = self.home
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=SnapshotRunner(),
+            clock=lambda: NOW,
+            host_root=self.home,
+            deep_collector_factory=CapturingCollector,
+        )
+
+        with patch("sandbox.resources.adapters.time.monotonic", lambda: now[0]):
+            adapter.observe(thorough=False, deep=True, budget_seconds=10)
+
+        self.assertEqual(received["budget_seconds"], 8.0)
+
+    def test_expired_budget_does_not_start_deep_collector(self):
+        now = [0.0]
+        collector_started = []
+        calls_before_snapshot = []
+
+        class SnapshotRunner(FakeRunner):
+            def run(self, argv, *, cwd=None, env=None, timeout=None):
+                if tuple(argv) == ("df", "-Pk"):
+                    calls_before_snapshot.append(len(self.calls))
+                    now[0] = 1.0
+                    return response(
+                        "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        f"/dev/fixture 100 80 20 80% {self_home}\n",
+                    )
+                return super().run(argv, cwd=cwd, env=env, timeout=timeout)
+
+        class UnexpectedCollector:
+            def __init__(self, *_args, **_kwargs):
+                collector_started.append(True)
+
+            def collect(self, **_kwargs):
+                self.fail("collector must not start after deadline")
+
+        self_home = self.home
+        adapter = LocalResourceAdapter(
+            self.home,
+            runner=SnapshotRunner(),
+            clock=lambda: NOW,
+            host_root=self.home,
+            deep_collector_factory=UnexpectedCollector,
+        )
+
+        with patch("sandbox.resources.adapters.time.monotonic", lambda: now[0]):
+            snapshot = adapter.observe(thorough=False, deep=True, budget_seconds=1)
+
+        self.assertEqual(collector_started, [])
+        self.assertEqual(len(adapter.runner.calls), calls_before_snapshot[0])
+        self.assertEqual(snapshot.deep_attribution.status, "partial")
+        coverage = snapshot.deep_attribution.coverage[0]
+        self.assertEqual(coverage.status, "timed_out")
+        self.assertEqual(coverage.reason, "overall_budget_exhausted")
 
     def test_owned_unmounted_volume_requires_private_measurement_before_stale(self):
         containers = []

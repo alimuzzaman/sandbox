@@ -14,6 +14,7 @@ pro-license keys. Layout:
     remotes:
       myvps:
         ssh: "ubuntu@203.0.113.10"
+        provider: "contabo"                            # descriptive lowercase slug
         control_transport: "https"                     # https (default) or tailscale
         control_url: "https://sandbox.example.com"      # recorded by `provision`
         tailscale_host: "myvps.tailnet-name.ts.net"     # only for tailscale mode

@@ -1,10 +1,32 @@
+import os
+from pathlib import Path
+import signal
 import sys
+import time
 import unittest
+from unittest.mock import patch
 
 from sandbox.services.process import BoundedProcessRunner
 
 
 class TestBoundedProcessRunner(unittest.TestCase):
+    @staticmethod
+    def _linux_process_is_running(pid):
+        stat_path = Path(f"/proc/{pid}/stat")
+        if not Path("/proc").is_dir():
+            return None
+        try:
+            remainder = stat_path.read_text().rsplit(")", 1)[1].strip()
+        except (FileNotFoundError, PermissionError):
+            remainder = ""
+        if remainder and remainder.split(maxsplit=1)[0] in {"Z", "X"}:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
     def test_argument_list_cwd_environment_redaction_and_limit(self):
         secret = "recovery-secret-sentinel"
         runner = BoundedProcessRunner(max_output=20, secret_values=(secret,))
@@ -30,6 +52,119 @@ class TestBoundedProcessRunner(unittest.TestCase):
         self.assertEqual(result.returncode, 124)
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertIn("timed out", result.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
+    def test_timeout_terminates_descendants_that_inherit_output_pipes(self):
+        grandchild = (
+            "import os,time; "
+            "print(f'grandchild={os.getpid()}', flush=True); "
+            "time.sleep(5)"
+        )
+        child = (
+            "import os,subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); "
+            "print(f'child={os.getpid()}', flush=True); "
+            "time.sleep(5)"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+            "time.sleep(5)"
+        )
+        started = time.monotonic()
+        result = BoundedProcessRunner().run(
+            [sys.executable, "-c", parent],
+            timeout=0.4,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 124)
+        self.assertLess(elapsed, 1.5)
+        self.assertIn("child=", result.stdout)
+        self.assertIn("grandchild=", result.stdout)
+        pids = [
+            int(line.split("=", 1)[1])
+            for line in result.stdout.splitlines()
+            if "=" in line
+        ]
+        if Path("/proc").is_dir():
+            deadline = time.monotonic() + 1
+            while (any(self._linux_process_is_running(pid) for pid in pids)
+                   and time.monotonic() < deadline):
+                time.sleep(0.01)
+            self.assertFalse(any(self._linux_process_is_running(pid) for pid in pids))
+
+    def test_reaped_leader_with_escaped_pipe_holder_never_signals_old_group(self):
+        escaped = "import time; time.sleep(0.8)"
+        parent = (
+            "import subprocess,sys; "
+            f"subprocess.Popen([sys.executable, '-c', {escaped!r}], start_new_session=True)"
+        )
+        started = time.monotonic()
+        with patch.object(
+            BoundedProcessRunner,
+            "_terminate_process_tree",
+            side_effect=AssertionError("reaped leader's PID/PGID was signaled"),
+        ):
+            result = BoundedProcessRunner().run(
+                [sys.executable, "-c", parent],
+                timeout=0.1,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 124)
+        self.assertLess(elapsed, 0.8)
+        self.assertIn("timed out", result.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
+    @patch("sandbox.services.process.time.sleep")
+    @patch("sandbox.services.process.os.killpg")
+    def test_posix_group_signals_precede_the_only_reap(self, killpg, sleep):
+        events = []
+        killpg.side_effect = lambda pid, sig: events.append(("signal", pid, sig))
+        sleep.side_effect = lambda seconds: events.append(("sleep", seconds))
+
+        class GroupLeader:
+            pid = 123
+
+            def wait(self, *, timeout):
+                events.append(("wait", timeout))
+
+        BoundedProcessRunner._terminate_process_tree(GroupLeader())
+
+        self.assertEqual(events, [
+            ("signal", 123, signal.SIGTERM),
+            ("sleep", BoundedProcessRunner._TERMINATION_GRACE),
+            ("signal", 123, signal.SIGKILL),
+            ("wait", BoundedProcessRunner._TERMINATION_GRACE),
+        ])
+
+    @patch("sandbox.services.process.time.sleep")
+    @patch("sandbox.services.process.os.name", "nt")
+    def test_non_posix_timeout_fallback_is_immediate_process_only(self, sleep):
+        class ImmediateProcess:
+            pid = 123
+
+            def __init__(self):
+                self.calls = []
+
+            def terminate(self):
+                self.calls.append("terminate")
+
+            def kill(self):
+                self.calls.append("kill")
+
+            def wait(self, *, timeout):
+                self.calls.append(("wait", timeout))
+
+        process = ImmediateProcess()
+        BoundedProcessRunner._terminate_process_tree(process)
+
+        self.assertEqual(
+            process.calls,
+            ["terminate", "kill", ("wait", BoundedProcessRunner._TERMINATION_GRACE)],
+        )
+        sleep.assert_called_once_with(BoundedProcessRunner._TERMINATION_GRACE)
 
     def test_large_output_is_drained_without_exceeding_the_bound(self):
         runner = BoundedProcessRunner(max_output=128)

@@ -47,6 +47,20 @@ unaffected.
 ./sb remote provision myvps --control-host sandbox-control.example.com --confirm
 ```
 
+Optionally annotate a remote with its provider in the machine-local, gitignored
+`sandbox.local.yml` file:
+
+```yaml
+remotes:
+  myvps:
+    provider: hetzner
+```
+
+`provider` is an optional lowercase slug. `./sb remote list` shows that value, or
+`unknown` when it is not set. It is descriptive metadata only: Sandbox never uses it to
+infer transport, behavior, or billing. Edit it directly in the machine-local config when
+the annotation changes.
+
 `provision` asks whether you want Tailscale instead of public HTTPS when run
 interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
 `--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit

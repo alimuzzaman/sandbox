@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -79,7 +80,9 @@ def _implied_project_dir(instance: str | None, label: str | None):
     return None, None
 
 
-def main():
+def main(*, invocation_started_monotonic: float | None = None):
+    if invocation_started_monotonic is None:
+        invocation_started_monotonic = time.monotonic()
     p = argparse.ArgumentParser(
         prog="sandbox",
         description="WPDeveloper Sandbox — real WP runtime for designers, devs, QA.",
@@ -759,6 +762,17 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Resource status owns an end-to-end request budget.  The executable
+    # captures this timestamp before importing the CLI so parser, config, and
+    # dispatch startup consume the same budget as the provider.
+    if args.cmd == "resources" and getattr(args, "action", None) == "status":
+        requested_budget = (
+            args.budget if getattr(args, "budget", None) is not None else 15
+        )
+        args._invocation_deadline_monotonic = (
+            float(invocation_started_monotonic) + float(requested_budget)
+        )
+
     cfg = load_config()
 
     # Resolve which instance this invocation targets. Precedence:
@@ -768,15 +782,22 @@ Per-project (each plugin carries its own sandbox.config.json):
     # There is no implicit/global instance: `sb <cmd>` in a project dir targets
     # THAT project's instance; run outside any registered project (and not
     # project-routed) it aborts with guidance rather than targeting a fallback.
-    instances = resolve_instances(cfg)
-    # Generic adapters own their lifecycle records; they do not belong in the
-    # WordPress-specific sandbox.local.yml instance map.
-    for entry in _core().registry_all().values():
-        if entry.get("kind") == "compose" and entry.get("instance"):
-            instances.setdefault(entry["instance"], entry)
     explicit = getattr(args, "instance", None) or os.environ.get("SANDBOX_INSTANCE")
     cwd_label = getattr(args, "label", None) or os.environ.get("SANDBOX_LABEL")
-    chosen = explicit or _cwd_instance(label=cwd_label)
+    if args.cmd == "resources":
+        # Resource monitoring is host-global (or explicitly --remote), never
+        # instance-routed. Avoid the mutable registry lock and unrelated
+        # instance resolution on this bounded global command path.
+        instances = {}
+        chosen = None
+    else:
+        instances = resolve_instances(cfg)
+        # Generic adapters own their lifecycle records; they do not belong in
+        # the WordPress-specific sandbox.local.yml instance map.
+        for entry in _core().registry_all().values():
+            if entry.get("kind") == "compose" and entry.get("instance"):
+                instances.setdefault(entry["instance"], entry)
+        chosen = explicit or _cwd_instance(label=cwd_label)
     # Project-dir-routed commands derive their instance from the project root
     # (registry / ensure_instance), not this global gate.
     PROJECT_ROUTED = {"init", "ensure", "test", "mcp", "smoke", "e2e", "ci", "plugin-check", "deploy"}
@@ -848,11 +869,18 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     # (Re)generate per-instance compose files so they're always in sync with the
     # registered instances. Cheap + idempotent.
-    write_compose_files(cfg)
-    # Keep the legacy `.env` populated so anyone still invoking the
-    # checked-in docker-compose.yml directly (out-of-tree scripts, older
-    # skills) doesn't break. New flow ignores this file.
-    write_env_for_compose(cfg)
+    # Global resource observation neither consumes nor updates per-instance
+    # runtime files.  Avoiding these legacy rewrites keeps status read-only and
+    # removes unrelated initialization from its bounded request path.
+    bounded_resource_status = (
+        args.cmd == "resources" and getattr(args, "action", None) == "status"
+    )
+    if not bounded_resource_status:
+        write_compose_files(cfg)
+        # Keep the legacy `.env` populated so anyone still invoking the
+        # checked-in docker-compose.yml directly (out-of-tree scripts, older
+        # skills) doesn't break. New flow ignores this file.
+        write_env_for_compose(cfg)
 
     # Dispatch via the command registry (populated by sandbox.commands.* imports).
     # `apply --project-dir` → in-place reconcile; bare `apply` → setup alias.

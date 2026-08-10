@@ -384,8 +384,26 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     if not isinstance(deploy.get("allowed_branches") or [], list) or not deploy["allowed_branches"] or not isinstance(deploy.get("require_clean"), bool):
         raise HostingError("deploy.allowed_branches and deploy.require_clean are required")
     cf = env.get("cloudflare") or {}
-    if cf.get("proxied") is not True or cf.get("tls") != "origin-ca" or cf.get("ssl_mode") != "strict":
-        raise HostingError("cloudflare must require proxied Origin CA with strict SSL")
+    proxied_origin_ca = (
+        cf.get("proxied") is True
+        and cf.get("tls") == "origin-ca"
+        and cf.get("ssl_mode") == "strict"
+    )
+    public_acme = (
+        cf.get("proxied") is False
+        and cf.get("tls") == "acme"
+        and "ssl_mode" not in cf
+    )
+    if not (proxied_origin_ca or public_acme):
+        raise HostingError(
+            "Cloudflare must use either proxied Origin CA with strict SSL "
+            "or DNS-only public ACME"
+        )
+    if public_acme and any(route["hostname"].startswith("*.") for route in routes):
+        raise HostingError("public ACME does not support wildcard routes without a DNS challenge")
+    basic_auth = _basic_auth(env)
+    if public_acme and basic_auth and basic_auth.get("bypass_ips"):
+        raise HostingError("basic_auth.bypass_ips requires Cloudflare proxied hosting")
     # `robots: deny` makes Caddy answer /robots.txt with `Disallow: /` for every
     # served hostname of this environment — for a staging environment that is
     # publicly resolvable but must never be indexed. Default `allow` leaves the
@@ -396,7 +414,7 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
     return {"project_root": str(root), "project": project, "environment": env_name,
             "compose": compose, "healthcheck": healthcheck, "routes": routes,
             "deploy": deploy, "cloudflare": cf, "secrets": _secrets(env),
-            "autologin": _autologin(env), "basic_auth": _basic_auth(env),
+            "autologin": _autologin(env), "basic_auth": basic_auth,
             "robots": robots}
 
 
@@ -691,10 +709,11 @@ def caddyfile(validated: dict, port: int, cert_path: str | None = None,
 
 def desired_plan(validated: dict, origin_ipv4: str | None, origin_ipv6: str | None = None) -> dict:
     addresses = [a for a in [origin_ipv4, origin_ipv6] if a]
-    records = [{"hostname": r["hostname"], "address": a, "proxied": True,
+    proxied = validated["cloudflare"]["proxied"]
+    records = [{"hostname": r["hostname"], "address": a, "proxied": proxied,
                 "mode": r["mode"], "target": r.get("target")}
                for r in validated["routes"] for a in addresses]
     return {"project": validated["project"], "environment": validated["environment"],
             "routes": validated["routes"], "records": records,
             "certificate_hostnames": [r["hostname"] for r in validated["routes"]],
-            "ssl_mode": "strict"}
+            "ssl_mode": "strict" if proxied else None}

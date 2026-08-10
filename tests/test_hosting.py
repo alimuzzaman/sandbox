@@ -48,6 +48,15 @@ environments:
 """ % (aliases if aliases is not None else "        - hostname: '*.আমারসোনার.বাংলা'\n          mode: serve\n        - hostname: asb.bd\n          mode: redirect\n          target: https://আমারসোনার.বাংলা")
 
 
+def _public_acme_manifest(aliases=None):
+    if aliases is None:
+        aliases = "        - hostname: www.example.test\n          mode: serve"
+    return _manifest(aliases).replace(
+        "      proxied: true\n      tls: origin-ca\n      ssl_mode: strict\n",
+        "      proxied: false\n      tls: acme\n",
+    )
+
+
 class TestHostingManifest(unittest.TestCase):
     def _write(self, content):
         directory = tempfile.TemporaryDirectory()
@@ -288,6 +297,52 @@ class TestHostingManifest(unittest.TestCase):
         plan = hosting.desired_plan(result, "203.0.113.10")
         self.assertEqual(len(plan["records"]), len(result["routes"]))
         self.assertTrue(all(r["address"] == "203.0.113.10" for r in plan["records"]))
+
+    def test_public_acme_plan_uses_dns_only_records_and_automatic_caddy_tls(self):
+        with self._write(_public_acme_manifest()) as directory:
+            result = hosting.validate_manifest(directory)
+        plan = hosting.desired_plan(result, "203.0.113.10")
+        rendered = hosting.caddyfile(result, 18001)
+
+        self.assertTrue(all(record["proxied"] is False for record in plan["records"]))
+        self.assertIsNone(plan["ssl_mode"])
+        self.assertNotIn("    tls ", rendered)
+        self.assertIn("reverse_proxy 127.0.0.1:18001", rendered)
+
+    def test_rejects_mixed_cloudflare_tls_policies(self):
+        invalid_blocks = (
+            "      proxied: false\n      tls: origin-ca\n      ssl_mode: strict\n",
+            "      proxied: true\n      tls: acme\n",
+            "      proxied: false\n      tls: acme\n      ssl_mode: strict\n",
+        )
+        for block in invalid_blocks:
+            with self.subTest(block=block):
+                manifest = _manifest().replace(
+                    "      proxied: true\n      tls: origin-ca\n      ssl_mode: strict\n",
+                    block,
+                )
+                with self._write(manifest) as directory:
+                    with self.assertRaisesRegex(hosting.HostingError, "Cloudflare"):
+                        hosting.validate_manifest(directory)
+
+    def test_public_acme_rejects_cloudflare_header_ip_bypass(self):
+        manifest = _public_acme_manifest().replace(
+            "    cloudflare:\n",
+            "    basic_auth:\n"
+            "      username: lnzr_dev\n"
+            "      password_secret: BASIC_AUTH_PASSWORD\n"
+            "      bypass_ips: [103.95.98.15]\n"
+            "    cloudflare:\n",
+        )
+        with self._write(manifest) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "bypass_ips.*proxied"):
+                hosting.validate_manifest(directory)
+
+    def test_public_acme_rejects_wildcard_routes_without_dns_challenge_support(self):
+        aliases = "        - hostname: '*.example.test'\n          mode: serve"
+        with self._write(_public_acme_manifest(aliases)) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "public ACME.*wildcard"):
+                hosting.validate_manifest(directory)
 
     def test_runtime_is_namespaced_and_uses_loopback_only(self):
         with self._write(_manifest()) as directory:
@@ -572,6 +627,122 @@ class TestHostingManifest(unittest.TestCase):
             response.close()
 
         self.assertEqual(build_opener.return_value.open.call_count, 1)
+
+    @patch("sandbox.commands.hosting.hosting.save_host_state")
+    @patch("sandbox.commands.hosting._verify_edge")
+    @patch("sandbox.commands.hosting._configure_host_caddy")
+    @patch("sandbox.commands.hosting._verify_remote_health")
+    @patch("sandbox.commands.hosting._run_compose")
+    @patch("sandbox.commands.hosting._read_remote_optional", return_value=None)
+    @patch("sandbox.commands.hosting._origin_certificate")
+    @patch("sandbox.commands.hosting.remote.apply_uncommitted")
+    @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
+    @patch("sandbox.commands.hosting.remote.reset_target_to")
+    @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
+    @patch("sandbox.commands.hosting.cloudflare.Client")
+    def test_public_acme_apply_skips_origin_ca_and_creates_dns_only_records(
+        self, client_type, _source, _home, _push, _reset, _capture, _uncommitted,
+        origin_certificate, _read_caddy, _compose, _health, configure_caddy,
+        verify_edge, save_state,
+    ):
+        client = client_type.return_value
+        client.zone.return_value = {"id": "zone-1", "name": "example.test"}
+        client.records.return_value = []
+        client.upsert_address.side_effect = [
+            {"id": "record-1"}, {"id": "record-2"},
+        ]
+        with TestHostingManifest()._write(_public_acme_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        runtime = hosting.desired_runtime(validated, "myvps", state)
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+
+        hosting_cmd._apply_host(validated, {}, "myvps", runtime, state, False, "main")
+
+        origin_certificate.assert_not_called()
+        client.current_ssl_mode.assert_not_called()
+        client.ssl_mode.assert_not_called()
+        self.assertTrue(client.upsert_address.call_count)
+        self.assertTrue(all(call.kwargs["proxied"] is False for call in client.upsert_address.call_args_list))
+        self.assertNotIn("    tls ", configure_caddy.call_args.args[2])
+        verify_edge.assert_called_once_with(
+            validated["routes"],
+            healthcheck_path="/",
+            basic_auth_enabled=False,
+        )
+        save_state.assert_called_once()
+
+    @patch("sandbox.commands.hosting.cloudflare.cloudflare_token", return_value="configured")
+    @patch("sandbox.commands.hosting.cloudflare.Client")
+    def test_public_acme_drift_does_not_accept_redirect_cname_as_origin_route(
+        self, client_type, _token,
+    ):
+        client = client_type.return_value
+        client.zone.return_value = {"id": "zone-1", "name": "example.test"}
+        client.records.return_value = [{
+            "id": "cname-1", "type": "CNAME", "name": "old.example.test",
+            "content": "target.example.test", "proxied": False,
+        }]
+        plan = {
+            "records": [{
+                "hostname": "old.example.test", "address": "203.0.113.10",
+                "proxied": False, "mode": "redirect",
+                "target": "https://target.example.test",
+            }],
+        }
+
+        drift = hosting_cmd._cloudflare_drift(plan)
+
+        self.assertFalse(drift["records"][0]["exists"])
+        client.current_ssl_mode.assert_not_called()
+
+    @patch("sandbox.commands.hosting.hosting.save_host_state")
+    @patch("sandbox.commands.hosting._restore_host_caddy")
+    @patch("sandbox.commands.hosting._verify_edge", side_effect=RuntimeError("certificate pending"))
+    @patch("sandbox.commands.hosting._configure_host_caddy")
+    @patch("sandbox.commands.hosting._verify_remote_health")
+    @patch("sandbox.commands.hosting._run_compose")
+    @patch("sandbox.commands.hosting._read_remote_optional", return_value="old caddy")
+    @patch("sandbox.commands.hosting._origin_certificate")
+    @patch("sandbox.commands.hosting.remote.apply_uncommitted")
+    @patch("sandbox.commands.hosting.remote.capture_uncommitted", return_value=("", []))
+    @patch("sandbox.commands.hosting.remote.reset_target_to")
+    @patch("sandbox.commands.hosting.remote.push_commits", return_value="abc123")
+    @patch("sandbox.commands.hosting.remote.resolve_sandbox_home", return_value="/srv/sandbox")
+    @patch("sandbox.commands.hosting._ensure_host_source", return_value="/srv/sandbox/deploy-src/hosts/example-site")
+    @patch("sandbox.commands.hosting.cloudflare.Client")
+    def test_public_acme_apply_restores_dns_and_caddy_when_certificate_verification_fails(
+        self, client_type, _source, _home, _push, _reset, _capture, _uncommitted,
+        origin_certificate, _read_caddy, _compose, _health, _configure,
+        _verify_edge, restore_caddy, save_state,
+    ):
+        client = client_type.return_value
+        client.zone.return_value = {"id": "zone-1", "name": "example.test"}
+        previous = [
+            {"id": "record-1", "type": "A", "name": "example-1.test",
+             "content": "192.0.2.1", "proxied": True, "ttl": 1},
+            {"id": "record-2", "type": "A", "name": "example-2.test",
+             "content": "192.0.2.1", "proxied": True, "ttl": 1},
+        ]
+        client.records.side_effect = [[previous[0]], [previous[1]]]
+        client.upsert_address.side_effect = [{"id": "record-1"}, {"id": "record-2"}]
+        with TestHostingManifest()._write(_public_acme_manifest()) as directory:
+            validated = hosting.validate_manifest(directory)
+        state = {"version": 1, "hosts": {}}
+        runtime = hosting.desired_runtime(validated, "myvps", state)
+        runtime["records"] = hosting.desired_plan(validated, "203.0.113.10")["records"]
+
+        with self.assertRaisesRegex(RuntimeError, "certificate pending"):
+            hosting_cmd._apply_host(validated, {}, "myvps", runtime, state, False, "main")
+
+        origin_certificate.assert_not_called()
+        self.assertEqual(client.restore_record.call_count, 2)
+        restored = [call.args[1] for call in client.restore_record.call_args_list]
+        self.assertEqual(restored, list(reversed(previous)))
+        restore_caddy.assert_called_once_with({}, "sandbox-host-example-site-production", "old caddy")
+        save_state.assert_not_called()
 
 
 class _Response:

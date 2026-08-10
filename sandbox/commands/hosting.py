@@ -53,6 +53,7 @@ def _cloudflare_drift(plan: dict) -> dict:
         records = []
         for wanted in plan["records"]:
             hostname = wanted["hostname"]
+            desired_proxy = wanted["proxied"]
             zone = zones.get(hostname)
             if zone is None:
                 zone = _zone_for_hostname(client, hostname)
@@ -61,20 +62,23 @@ def _cloudflare_drift(plan: dict) -> dict:
             existing = [record for record in client.records(zone["id"], hostname)
                         if record.get("type") == record_type]
             cname_ok = False
-            if wanted.get("mode") == "redirect" and wanted.get("target"):
+            if desired_proxy and wanted.get("mode") == "redirect" and wanted.get("target"):
                 target_host = hosting.normalize_hostname(urllib.parse.urlsplit(wanted["target"]).hostname or "", wildcard=False)
-                cname_ok = any(record.get("type") == "CNAME" and record.get("proxied") is True and
+                cname_ok = any(record.get("type") == "CNAME" and record.get("proxied") is desired_proxy and
                                hosting.normalize_hostname(str(record.get("content") or ""), wildcard=False) == target_host
                                for record in client.records(zone["id"], hostname))
             records.append({
                 "hostname": hostname,
                 "type": record_type,
                 "desired_address": wanted["address"],
+                "proxied": desired_proxy,
                 "exists": cname_ok or any(record.get("content") == wanted["address"] and
-                                             record.get("proxied") is True for record in existing),
+                                             record.get("proxied") is desired_proxy for record in existing),
             })
-        ssl = {zone["name"]: client.current_ssl_mode(zone["id"])
-               for zone in {entry["id"]: entry for entry in zones.values()}.values()}
+        ssl = None
+        if any(record["proxied"] for record in plan["records"]):
+            ssl = {zone["name"]: client.current_ssl_mode(zone["id"])
+                   for zone in {entry["id"]: entry for entry in zones.values()}.values()}
         return {"configured": True, "records": records, "ssl": ssl}
     except cloudflare.CloudflareError as exc:
         # Planning remains useful when Cloudflare credentials expire; do not
@@ -428,7 +432,8 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
     )
 
 
-def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> None:
+def _verify_edge(routes: list[dict], *, healthcheck_path: str = "/",
+                 basic_auth_enabled: bool = False) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
 
@@ -443,8 +448,9 @@ def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> Non
     for route in routes:
         if route["hostname"].startswith("*."):
             continue
+        path = healthcheck_path if route.get("mode") == "serve" else "/"
         request = urllib.request.Request(
-            f"https://{route['hostname']}/", method="GET",
+            f"https://{route['hostname']}{path}", method="GET",
             headers={"User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)"},
         )
         last_error = None
@@ -538,7 +544,13 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     def apply() -> None:
         _run_compose(entry, validated, target, runtime_dir, runtime)
         _verify_remote_health(entry, runtime)
-        cert_path, key_path, certificate = _origin_certificate(entry, validated, runtime, previous_entry, client, home)
+        proxied = validated["cloudflare"]["proxied"]
+        cert_path = key_path = None
+        certificate = None
+        if proxied:
+            cert_path, key_path, certificate = _origin_certificate(
+                entry, validated, runtime, previous_entry, client, home,
+            )
         basic_hash = None
         if validated.get("basic_auth"):
             password_secret = validated["basic_auth"]["password_secret"]
@@ -554,27 +566,37 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             if zone is None:
                 zone = _zone_for_hostname(client, hostname)
                 zones[hostname] = zone
-            current = client.current_ssl_mode(zone["id"])
-            if current != "strict":
-                if not allow_zone_ssl_change:
-                    raise RuntimeError(f"zone {zone['name']} is {current or 'unset'}; pass --allow-zone-ssl-change")
-                ssl_previous[zone["id"]] = current
-                client.ssl_mode(zone["id"], "strict")
+            if proxied:
+                current = client.current_ssl_mode(zone["id"])
+                if current != "strict":
+                    if not allow_zone_ssl_change:
+                        raise RuntimeError(f"zone {zone['name']} is {current or 'unset'}; pass --allow-zone-ssl-change")
+                    ssl_previous[zone["id"]] = current
+                    client.ssl_mode(zone["id"], "strict")
             kind = "AAAA" if ":" in wanted["address"] else "A"
             all_records = client.records(zone["id"], hostname)
             cname = next((record for record in all_records if record.get("type") == "CNAME"), None)
+            if cname and not proxied:
+                raise RuntimeError(
+                    f"declared hostname {hostname} has a conflicting CNAME; "
+                    "DNS-only hosting requires an A or AAAA record at the Sandbox origin"
+                )
             if cname and wanted.get("mode") == "redirect" and wanted.get("target"):
                 target_host = hosting.normalize_hostname(urllib.parse.urlsplit(wanted["target"]).hostname or "", wildcard=False)
                 cname_target = hosting.normalize_hostname(str(cname.get("content") or ""), wildcard=False)
                 if cname_target == target_host:
-                    updated = client.update_record(zone["id"], cname, proxied=True)
+                    updated = client.update_record(zone["id"], cname, proxied=proxied)
                     changes.append({"zone_id": zone["id"], "previous": cname, "created_id": updated.get("id")})
                     continue
                 raise RuntimeError(f"declared hostname {hostname} has a conflicting CNAME to {cname_target}")
             previous = next((record for record in all_records if record.get("type") == kind), None)
-            created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=True)
+            created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=proxied)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
-        _verify_edge(validated["routes"], basic_auth_enabled=bool(validated.get("basic_auth")))
+        _verify_edge(
+            validated["routes"],
+            healthcheck_path=runtime["healthcheck"]["path"],
+            basic_auth_enabled=bool(validated.get("basic_auth")),
+        )
         state["hosts"][key] = {"loopback_port": runtime["loopback_port"], "compose_project": runtime["compose_project"],
                                "certificate": certificate, "records": changes, "commit": sha,
                                "caddy_name": caddy_name}

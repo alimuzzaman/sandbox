@@ -1,10 +1,7 @@
 # Contract: Abilities (MCP tools exposed at the instance endpoint)
 
 All abilities are namespaced `sandbox/`, `meta.mcp.public=true`, and gated by a
-`permission_callback` requiring a logged-in user with `manage_options`. (Exception:
-the discover override below intentionally re-registers the adapter's own
-`mcp-adapter/discover-abilities` name — it is not `sandbox/`-prefixed because it
-replaces an adapter-namespace tool.)
+`permission_callback` requiring a logged-in user with `manage_options`.
 
 ## `sandbox/execute-php`
 
@@ -41,11 +38,13 @@ Run PHP in the live WordPress runtime.
 - **Output**: `{ path, entries: [{name, type, size}] }`
 - **Annotations**: readonly=true, idempotent=true.
 
-## `mcp-adapter/discover-abilities` (override)
+## Discovery
 
-- **Output**: `{ sandbox_instructions: string, abilities: [{name,label,description}] }`
-- **Behavior**: lists public tool abilities + appends Sandbox environment guidance (focused plugin, instance URL, snapshot reminder).
-- **Annotations**: readonly=true, idempotent=true.
+The bundled adapter supplies standard MCP tool discovery for the registered
+`sandbox/*` abilities. Sandbox-specific environment guidance is intentionally not
+returned by discovery in the current implementation; use `./sb abilities status`
+for the endpoint and enable-state reminder, and the normal Sandbox context tools
+for focused-plugin and snapshot information.
 
 ## Errors
 

@@ -23,16 +23,22 @@ Expect: enabled + an endpoint URL. Confirm `wp-content/mu-plugins/00-sandbox-abi
 ## 3. External client connects directly
 
 ```
-./sb connect --client cursor
+./sb abilities connect
 ```
 Paste the emitted config into a fresh MCP client; confirm it lists the abilities and
-can call `execute-php`. Discovery includes the Sandbox instructions block.
+can call `sandbox/execute-php`. This real-client acceptance remains separate from
+the local command/documentation checks.
 
 ## 4. File abilities are jailed
 
-- `wp_file_write` a file under `wp-content/` → succeeds.
-- Attempt a path outside ABSPATH (and via a symlink) → rejected (`path_outside_base`).
-- Attempt to write a new `.php` outside `sandbox-code/` → rejected (`php_sandbox_required`).
+- From the direct client, call `sandbox/write-file` for a file under `wp-content/`
+  and then `sandbox/read-file` → succeeds.
+- Attempt a direct-client path outside ABSPATH (and via a symlink) → rejected
+  (`path_outside_base`).
+- Attempt to create a new `.php` outside `sandbox-code/` → rejected
+  (`php_sandbox_required`).
+- In the host-side Sandbox MCP, use the existing `fs_read`, `fs_write`, and
+  `fs_list` tools; no `wp_file_*` proxy tools are registered.
 
 ## 5. Crash recovery
 

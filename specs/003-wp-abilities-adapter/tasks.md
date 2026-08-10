@@ -89,3 +89,12 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 
 US1 (execute-php + proxy + verification, T001-T009 minus file/connect parts) is the
 minimal viable increment: an agent can run code in the live runtime.
+
+## Phase 9: Convergence — Local Interface and Documentation Parity
+
+- [x] T024 Align the Spec 003 CLI contract and quickstart with the implemented
+  `./sb abilities connect` command, the direct `sandbox/*` file abilities, and the
+  existing in-session `fs_*` tools; retain T012, T014, and T022 as open work because
+  discovery guidance, external-client acceptance, and Herd parity are not locally
+  verified. Verified by `tests/test_spec003_interface_docs.py` (FR-005, FR-009,
+  FR-010; partial).

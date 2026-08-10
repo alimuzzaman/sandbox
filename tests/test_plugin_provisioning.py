@@ -80,6 +80,75 @@ class PluginActivationOrderTests(unittest.TestCase):
                 ["plugin", "activate", "elementor", "elementor-pro", "--skip-plugins"],
             )
 
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.wpcli")
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_reconciles_active_plugin_to_inactive_without_touching_other_plugins(
+            self, wp_dir, plugins_dir, wpcli, _gate, _write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            (pdir / "managed").mkdir()
+            (pdir / "user-plugin").mkdir()
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            provision._wire_project_plugins("fixture", str(root), {
+                "plugins_resolved": {
+                    "managed": {"source": {"kind": "org", "value": None}, "active": False},
+                },
+            })
+
+            self.assertIn(
+                ["plugin", "deactivate", "managed", "--skip-plugins"],
+                [call.args[0] for call in wpcli.call_args_list],
+            )
+            self.assertNotIn("user-plugin", str(wpcli.call_args_list))
+
+    @patch("sandbox.core._provision._write_local_sources")
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.wpcli")
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_missing_ondemand_path_stays_registered_for_fail_closed_install(
+            self, wp_dir, plugins_dir, wpcli, _gate, write_sources):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdir = root / "wp-content" / "plugins"
+            pdir.mkdir(parents=True)
+            plugins_dir.return_value = pdir
+            wp_dir.return_value = root
+
+            provision._wire_project_plugins("fixture", str(root), {
+                "plugins_resolved": {
+                    "optional": {
+                        "source": {"kind": "path", "value": "missing-checkout"},
+                        "on_demand": True,
+                    },
+                },
+            })
+
+            write_sources.assert_called_once_with(
+                "fixture", {"optional": {"path": str(root / "missing-checkout")}})
+            self.assertEqual(wpcli.call_count, 0)
+
+    @patch("sandbox.core._provision._managed_execution_gate", return_value=None)
+    @patch("sandbox.core._provision.plugins_dir")
+    @patch("sandbox.core._provision.wp_dir")
+    def test_rejects_traversal_slug_before_any_filesystem_mutation(
+            self, wp_dir, plugins_dir, _gate):
+        with self.assertRaises(ValueError):
+            provision._wire_project_plugins("fixture", "/tmp/project", {
+                "plugins_resolved": {
+                    "../outside": {"source": {"kind": "path", "value": "/tmp/source"}},
+                },
+            })
+        plugins_dir.assert_not_called()
+        wp_dir.assert_not_called()
+
 
 class ThemeProvisioningTests(unittest.TestCase):
     @patch("sandbox.core._provision._managed_execution_gate", return_value=None)

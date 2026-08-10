@@ -3,7 +3,7 @@
   "slug": "fixture-plugin",
   "plugins": {
     "fixture-plugin": ".",
-    "query-monitor": true
+    "query-monitor": false
   },
   "server": "nginx"
 }

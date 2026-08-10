@@ -924,23 +924,40 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
     )
     if gateway is not None:
         raise RuntimeError(gateway.stderr)
+    resolved = pconf.get("plugins_resolved")
+    if not isinstance(resolved, dict):
+        resolved = {}
+
+    # The canonical key becomes a directory under wp-content/plugins. Validate
+    # the complete payload before creating or replacing anything on disk. The
+    # loader already enforces this; this second boundary protects direct callers
+    # and future config facades from a traversal-shaped resolved map.
+    slug_re = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+    for slug, entry in resolved.items():
+        if not isinstance(slug, str) or not slug_re.fullmatch(slug):
+            raise ValueError(f"invalid resolved plugin slug {slug!r}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"plugin '{slug}': resolved entry must be an object")
+        source = entry.get("source") or {"kind": "org", "value": None}
+        if not isinstance(source, dict) or source.get("kind") not in {"org", "zip", "path"}:
+            raise ValueError(f"plugin '{slug}': invalid resolved source")
+        if source.get("kind") in {"path", "zip"} and not isinstance(source.get("value"), str):
+            raise ValueError(f"plugin '{slug}': resolved source value must be a string")
+
     pdir = plugins_dir(name)
     pdir.mkdir(parents=True, exist_ok=True)
     root_path = Path(root)
     wp_root = wp_dir(name)
 
     def _abs(val: str) -> Path:
-        p = Path(str(val)).expanduser()
+        p = Path(val).expanduser()
         return p if p.is_absolute() else (root_path / p).resolve()
-
-    resolved = pconf.get("plugins_resolved")
-    if not isinstance(resolved, dict):
-        resolved = {}
 
     activate: list[str] = []            # slugs to activate (symlinked or present)
     org_install_active, org_install_inactive = [], []
     zip_install_active, zip_install_inactive = [], []
     local_sources: dict[str, dict] = {}  # slug -> {path|zip} for the mu-plugin
+    deactivate: list[str] = []            # configured slugs that must no longer run
 
     for slug, e in resolved.items():
         src = e.get("source") or {"kind": "org", "value": None}
@@ -950,10 +967,17 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             # attempt (FSI / wp-cli / wp-admin) is served from local.
             if kind == "path":
                 p = _abs(src["value"])
-                if p.exists():
-                    local_sources[slug] = {"path": str(p)}
+                # Keep a missing path in the map. The mu-plugin then owns the
+                # request and returns an actionable WP_Error instead of letting
+                # wp.org download the same slug.
+                local_sources[slug] = {"path": str(p)}
+                if not p.exists():
+                    info(f"plugin '{slug}': on-demand local source not found at {p}; "
+                         "install requests will fail closed.")
             elif kind == "zip":
                 local_sources[slug] = {"zip": src["value"]}
+            if (pdir / slug).exists():
+                deactivate.append(slug)
             continue  # org on-demand: nothing to register (WP pulls org on demand)
         if kind == "path":
             p = _abs(src["value"])
@@ -965,6 +989,8 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
             local_sources[slug] = {"path": str(p)}  # also serve local on re-install
             if e.get("active"):
                 activate.append(slug)
+            else:
+                deactivate.append(slug)
         elif kind == "zip":
             if (pdir / slug).exists():
                 # Already present (prior provision / bundled). Reinstalling only
@@ -972,20 +998,28 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
                 # installed." noise — skip it, same as org and theme entries.
                 if e.get("active"):
                     activate.append(slug)
+                else:
+                    deactivate.append(slug)
             else:
                 (zip_install_active if e.get("active")
                  else zip_install_inactive).append(src["value"])
                 if e.get("active"):
                     activate.append(slug)
+                else:
+                    deactivate.append(slug)
         else:  # org
             if (pdir / slug).exists():
                 if e.get("active"):
                     activate.append(slug)
+                else:
+                    deactivate.append(slug)
             else:
                 (org_install_active if e.get("active") else org_install_inactive).append(
                     slug)
                 if e.get("active"):
                     activate.append(slug)
+                else:
+                    deactivate.append(slug)
 
     # Legacy NON-plugin mappings (wp-paths that aren't wp-content/plugins/<slug>):
     # symlink as before. Plugin-path mappings were folded into plugins_resolved.
@@ -1012,6 +1046,12 @@ def _wire_project_plugins(name: str, root: str, pconf: dict) -> None:
               instance=name, check=False)
     if zip_install_inactive:
         wpcli(["plugin", "install", *zip_install_inactive], instance=name, check=False)
+    if deactivate:
+        # Only configured entries are reconciled. Plugins a user installed but
+        # did not declare are never touched; a declared state change is applied
+        # before new activations so re-provisioning is idempotent.
+        wpcli(["plugin", "deactivate", *sorted(set(deactivate)), "--skip-plugins"],
+              instance=name, check=False)
     if activate:
         # Install every source before activation, then honor Requires Plugins.
         # Skipping already-active plugins prevents their wp_loaded onboarding

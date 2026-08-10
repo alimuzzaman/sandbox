@@ -169,3 +169,11 @@ listed + installable in wp-admin. **Independent test**: quickstart §3.
 **Foundational + US1 (T001-T009)** is the first shippable increment: the slug-keyed map
 merges per-slug with zero clobbering and provisions correctly. US2 (worktree), US4 (legacy
 parity), then US3 (on-demand + admin UI) layer on top.
+
+## Phase 8: Convergence
+
+- [x] T024 Validate canonical plugin map keys and strict object schemas before a slug can
+  become a filesystem destination, per FR-001/FR-012 (partial).
+- [x] T025 Reconcile declared active-to-inactive/on-demand transitions and keep missing
+  on-demand local sources registered for fail-closed interception, per FR-006/FR-007/FR-011
+  (partial).

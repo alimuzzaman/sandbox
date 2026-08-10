@@ -164,7 +164,7 @@ file path.
   //   "<slug>": { "path"|"zip"|"source", "active", "onDemand" }  → full control
   "plugins": {
     "my-addon":  ".",          // this repo, active (slug = the key, not the dir)
-    "query-monitor": true,     // wp.org, active by default in new scaffolds
+    "query-monitor": false,    // wp.org, installed inactive; qm_capture activates it
     "mcp-adapter": "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
     "elementor": true,         // wp.org, active
     "elementor-pro": { "path": "~/dev/elementor-pro", "onDemand": true }
@@ -261,10 +261,14 @@ orthogonal axes:
   something requests the slug).
 
 The **key is the authoritative slug**, so a local source installs under the right
-slug even from a git worktree whose directory name differs.
+slug even from a git worktree whose directory name differs. Canonical keys must
+be lowercase WordPress slugs (`a-z`, `0-9`, `-`, `_`) and cannot contain a path
+or traversal segment. Object entries accept only `path`, `zip`, `source`,
+`active`, and `onDemand`; their values are validated rather than coerced.
 
-New `sandbox init` scaffolds include the current project (`"."`), Query Monitor,
-and the official WordPress MCP Adapter release zip by default. Replace the
+New `sandbox init` scaffolds include the current project (`"."`), Query Monitor
+(installed but inactive until the first QM capture), and the official WordPress
+MCP Adapter release zip by default. Replace the
 `plugins` field in a project config with a smaller map/list if that project
 should not install those development helpers.
 
@@ -319,6 +323,12 @@ copy** (no download) via a mu-plugin (`plugins_api` + `upgrader_pre_download`,
 zipping the local dir to a throwaway temp copy). A wp-admin screen — **Plugins →
 Sandbox On-Demand** — lists on-demand plugins with a one-click "Install from
 local" button.
+
+If an on-demand local path disappears after provisioning, it remains registered
+so the install interception returns a clear local-source error. Sandbox never
+falls back to downloading that configured slug from the registry. Re-provisioning
+also reconciles declared plugins from active to inactive or on-demand by
+deactivating that declared slug; unrelated user-installed plugins are untouched.
 
 The generated Apache and Nginx/FPM stacks also reconcile ownership of
 `wp-content/plugins` during bootstrap. This keeps the WordPress web user able to

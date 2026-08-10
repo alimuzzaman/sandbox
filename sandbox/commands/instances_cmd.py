@@ -224,6 +224,15 @@ def cmd_init(cfg, args) -> None:
         # The resolved pconf already carries the canonical schema (defaults
         # merged, .wp-env.json mapped). Persist exactly the schema keys.
         data = {k: pconf.get(k, v) for k, v in sc.DEFAULTS.items()}
+        if base_source == "defaults":
+            # Defaults use the canonical map so Query Monitor can be declared
+            # installed-but-inactive. Add this checkout under its real slug at
+            # scaffold time; a map key, unlike legacy ["."], is worktree-safe.
+            project_slug = str(data.get("slug") or root.name).strip()
+            data["plugins"] = {
+                project_slug: ".",
+                **dict(data.get("plugins") or {}),
+            }
         # Regenerate the SAME native file (preserving an existing .yml/.yaml);
         # scaffold/convert to sandbox.config.json. Writing a fresh .json beside
         # an existing .yml would shadow it (json wins load order) and silently

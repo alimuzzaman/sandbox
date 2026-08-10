@@ -651,12 +651,12 @@ class TestPluginConfigMap(unittest.TestCase):
     def test_default_scaffold_plugins_include_debug_and_mcp(self):
         m, _legacy, self_e = sandbox_core._normalize_plugins(
             {"plugins": sandbox_core.DEFAULTS["plugins"]})
-        self.assertIsNotNone(self_e)
+        self.assertIsNone(self_e)
         self.assertIn("query-monitor", m)
         self.assertIn("plugin-check", m)
         self.assertIn("mcp-adapter", m)
         self.assertEqual(m["mcp-adapter"]["source"]["kind"], "zip")
-        self.assertTrue(m["query-monitor"]["active"])
+        self.assertFalse(m["query-monitor"]["active"])
         self.assertTrue(m["plugin-check"]["active"])
         self.assertTrue(m["mcp-adapter"]["active"])
 
@@ -769,6 +769,25 @@ class TestPluginConfigMap(unittest.TestCase):
         with self.assertRaises(sandbox_core.ConfigError):
             sandbox_core._normalize_plugins(
                 {"plugins": {"t": {"path": "/p", "zip": "https://x/t.zip"}}})
+
+    def test_canonical_slug_rejects_path_traversal_before_provisioning(self):
+        for slug in ("../outside", "a/b", ".", "UPPER", ""):
+            with self.subTest(slug=slug), self.assertRaises(sandbox_core.ConfigError):
+                sandbox_core._normalize_plugins({"plugins": {slug: True}})
+
+    def test_object_schema_rejects_unknown_fields_and_coercions(self):
+        invalid = (
+            {"unknown": True},
+            {"active": "yes"},
+            {"onDemand": 1},
+            {"path": 42},
+            {"zip": "/tmp/not-a-url.zip"},
+            {"source": "registry"},
+            {"active": True, "onDemand": True},
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(sandbox_core.ConfigError):
+                sandbox_core._normalize_plugins({"plugins": {"safe-slug": value}})
 
     def test_sc001_legacy_equivalence(self):
         # SC-001: the canonical map expresses every legacy case identically.

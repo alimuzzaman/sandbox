@@ -70,12 +70,14 @@ USER_CONFIG_BASENAMES = ("config.json", "config.yml", "config.yaml")
 # "use the wordpress:latest default" — no implicit pinning.
 DEFAULTS: dict = {
     "slug": None,              # project plugin slug; used for legacy plugins:["."]
-    "plugins": [
-        ".",                   # this repo; others are slugs/paths/zip URLs
-        "query-monitor",
-        "plugin-check",        # wp.org "Plugin Check" — automated compliance/lint testing
-        "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
-    ],
+    "plugins": {
+        # `sandbox init` adds the current project's slug -> "." entry when
+        # it writes this default map. Query Monitor is deliberately provisioned
+        # installed-but-inactive and qm_capture activates it on first capture.
+        "query-monitor": False,
+        "plugin-check": True,  # wp.org "Plugin Check" — automated compliance/lint testing
+        "mcp-adapter": "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip",
+    },
     "themes": [],
     "mappings": {},            # wp-path -> host path, bind-mounted AND activated
     "mappings_inactive": {},   # wp-path -> host path, bind-mounted but NOT activated
@@ -196,6 +198,22 @@ def _deep_merge(a: dict, b: dict) -> dict:
 _UNSET = object()  # "this field was not specified by any layer (yet)"
 
 _PLUGIN_PREFIX = "wp-content/plugins/"
+_PLUGIN_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def _canonical_plugin_slug(slug) -> str:
+    """Validate a canonical map key before it can become a plugin path.
+
+    Canonical entries use their key as the WordPress install directory. Keep
+    path separators and traversal syntax out at config-load time; legacy list
+    entries retain their established compatibility behaviour.
+    """
+    if not isinstance(slug, str) or not _PLUGIN_SLUG_RE.fullmatch(slug):
+        raise ConfigError(
+            f"invalid plugin slug {slug!r}; use lowercase letters, numbers, "
+            "hyphen, and underscore (no path separators)"
+        )
+    return slug
 
 
 def _is_zip_url(s: str) -> bool:
@@ -226,32 +244,47 @@ def _normalize_plugin_value(value, slug: str) -> dict:
             entry["source"] = {"kind": "zip", "value": value}
         elif _looks_like_path(value):
             entry["source"] = {"kind": "path", "value": value}
-        else:  # a bare word as a value: treat as an explicit org source
-            entry["source"] = {"kind": "org", "value": None}
+        else:
+            raise ConfigError(
+                f"plugin '{slug}': unsupported string shorthand {value!r}; "
+                "use true/false, a local path, or a .zip URL"
+            )
     elif isinstance(value, dict):
+        allowed = {"path", "zip", "source", "active", "onDemand"}
+        unknown = sorted(str(k) for k in set(value) - allowed)
+        if unknown:
+            raise ConfigError(
+                f"plugin '{slug}': unknown field(s) {', '.join(unknown)}; "
+                "allowed fields are path, zip, source, active, onDemand"
+            )
         srcs = [k for k in ("path", "zip", "source") if k in value]
         if len(srcs) > 1:
             raise ConfigError(
                 f"plugin '{slug}': more than one source ({', '.join(srcs)}) — "
                 f"use exactly one of path / zip / source")
         if "path" in value:
+            if not isinstance(value["path"], str) or not value["path"].strip():
+                raise ConfigError(f"plugin '{slug}': path must be a non-empty string")
             entry["source"] = {"kind": "path", "value": value["path"]}
         elif "zip" in value:
+            if not isinstance(value["zip"], str) or not _is_zip_url(value["zip"]):
+                raise ConfigError(f"plugin '{slug}': zip must be an http(s) .zip URL")
             entry["source"] = {"kind": "zip", "value": value["zip"]}
         elif "source" in value:
             sv = value["source"]
-            if sv == "org":
-                entry["source"] = {"kind": "org", "value": None}
-            elif _is_zip_url(sv):
-                entry["source"] = {"kind": "zip", "value": sv}
-            elif _looks_like_path(sv):
-                entry["source"] = {"kind": "path", "value": sv}
-            else:
-                entry["source"] = {"kind": "org", "value": None}
+            if sv != "org":
+                raise ConfigError(f"plugin '{slug}': source must be exactly 'org'")
+            entry["source"] = {"kind": "org", "value": None}
         if "active" in value:
-            entry["active"] = bool(value["active"])
-        if "onDemand" in value or "on_demand" in value:
-            entry["on_demand"] = bool(value.get("onDemand", value.get("on_demand")))
+            if not isinstance(value["active"], bool):
+                raise ConfigError(f"plugin '{slug}': active must be true or false")
+            entry["active"] = value["active"]
+        if "onDemand" in value:
+            if not isinstance(value["onDemand"], bool):
+                raise ConfigError(f"plugin '{slug}': onDemand must be true or false")
+            entry["on_demand"] = value["onDemand"]
+        if entry["active"] is True and entry["on_demand"] is True:
+            raise ConfigError(f"plugin '{slug}': active and onDemand cannot both be true")
     else:
         raise ConfigError(f"plugin '{slug}': unsupported value {value!r}")
     return entry
@@ -311,6 +344,7 @@ def _normalize_plugins(doc: dict):
     plugins = doc.get("plugins")
     if isinstance(plugins, dict):
         for slug, val in plugins.items():
+            slug = _canonical_plugin_slug(slug)
             out[slug] = _normalize_plugin_value(val, slug)
             canonical.add(slug)
     elif isinstance(plugins, list):
@@ -323,6 +357,8 @@ def _normalize_plugins(doc: dict):
                 self_entry = entry[1]
             else:
                 out[slug] = entry
+    elif "plugins" in doc and plugins is not None:
+        raise ConfigError("plugins must be either a legacy array or a slug-keyed object")
     # Fold legacy plugin mappings (wp-content/plugins/<slug>) into the map. A slug
     # already declared via the canonical map WINS — skip + warn (FR-012).
     for key, active in (("mappings", True), ("mappings_inactive", False)):

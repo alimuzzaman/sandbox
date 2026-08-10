@@ -15,12 +15,13 @@ Use when you see a fatal, a white screen, a 500, an unexpected REST 4xx, a
 
 Climb only as far as the bug needs:
 
-1. **`dump()` / `dd()` + `tail_log`** — drop `dump($x)` in plugin code (captured,
-   not echoed) and watch the log. `tail_log` takes a `file` selector:
-   `debug.log` (default), `php` (PHP error log), `fpm`, `nginx`. Fastest signal.
+1. **`dump()` / `dd()` + `tail_log`** — on a local instance, drop `dump($x)` in
+   plugin code (captured, not echoed) and read `tail_log(file="dump")` or
+   `./sb dump`. The selector also accepts `debug` (default) and `qm`; use the
+   latter only to inspect raw JSONL. Fastest signal.
 2. **`qm_capture`** (`./sb qm`) — load a URL and capture **Query Monitor**:
-   queries (+ slow/dupe), hooks/callbacks, PHP errors/notices, HTTP calls, and
-   timing. The right tool for "why is this slow / which hook / what query."
+   queries (+ slow/dupe), PHP errors/notices, HTTP calls, and timing. The right
+   tool for "why is this slow / which query." It auto-activates QM on first use.
 3. **`xdebug`** (`./sb xdebug on`) — real breakpoints when you need to step. See
    below; trigger-gated so normal traffic isn't blocked.
 
@@ -47,6 +48,10 @@ Browser: install any "Xdebug helper" extension or append `?XDEBUG_TRIGGER=1`
 to the URL.
 
 CLI: `XDEBUG_TRIGGER=1 ./sb wp …`
+
+On a Herd instance, `./sb xdebug status` reports whether the host PHP has
+Xdebug loaded. `on` and `off` cannot alter it per instance because Herd shares
+host PHP; configure Herd/PHP instead, then send a request with `XDEBUG_TRIGGER`.
 
 ---
 
@@ -84,13 +89,15 @@ noise from background cron 10×.
 ## Query Monitor (recommended for any non-trivial debug session)
 
 ```bash
-./sb wp plugin install query-monitor --activate
+./sb qm / --collectors db_queries,timing,php_errors
+./sb qm off                  # deactivate after the session, if desired
 ```
 
-Then any admin page or front-end page exposes a panel with: PHP errors,
-slow queries, hooks fired, HTTP API calls, REST calls, capabilities checked,
-template hierarchy hit. Pairs well with `tail_log` — QM shows what fired,
-log shows what broke.
+QM is installed inactive by default, then auto-activates for the first capture.
+Each command tags its actual anonymous HTTP request and returns that exact JSON
+record, rather than a stale final JSONL line. It works on Docker and Herd.
+The default response omits the large `hooks` collector; request an explicit
+subset with `--collectors`. `tail_log(file="qm")` is the raw JSONL fallback.
 
 ---
 

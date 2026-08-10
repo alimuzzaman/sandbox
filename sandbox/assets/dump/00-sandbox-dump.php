@@ -6,7 +6,7 @@
  * wp-content/debug-dump.log (separate from the noisy debug.log) with a timestamp
  * + caller file:line. Read it with `./sb dump` or tail_log(file="dump").
  *
- * Dev/staging only: hard-returns unless WP_DEBUG or WP_ENVIRONMENT_TYPE=local.
+ * Local development only: hard-returns outside WP_ENVIRONMENT_TYPE=local.
  * function_exists-guarded so it never collides with Symfony's / another plugin's.
  */
 
@@ -14,10 +14,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-if (
-    !(defined('WP_DEBUG') && WP_DEBUG)
-    && !(function_exists('wp_get_environment_type') && wp_get_environment_type() === 'local')
-) {
+$sandbox_dump_environment = function_exists('wp_get_environment_type')
+    ? wp_get_environment_type()
+    : (defined('WP_ENVIRONMENT_TYPE') ? WP_ENVIRONMENT_TYPE : '');
+if ('local' !== $sandbox_dump_environment) {
     return;
 }
 

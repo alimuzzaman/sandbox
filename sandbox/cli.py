@@ -169,9 +169,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     dp = sub.add_parser("dump", help="Tail/clear the dump()/dd() log (spec 007)")
     dp.add_argument("--follow", action="store_true")
     dp.add_argument("--clear", action="store_true")
-    qm = sub.add_parser("qm", help="Capture Query Monitor data for a URL (spec 007)")
+    qm = sub.add_parser("qm", help="Capture Query Monitor data for a URL; `off` deactivates it (spec 007)")
     qm.add_argument("url", nargs="?", default="/")
     qm.add_argument("--clear", action="store_true")
+    qm.add_argument("--collectors", help="comma-separated Query Monitor collector ids to return")
 
     sk = sub.add_parser("skill", help="Author/list skills (spec 006)")
     sk.add_argument("action", choices=["list", "write", "edit", "delete", "show"])
@@ -233,7 +234,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     rs = sub.add_parser("reset", help="Reset DB to the post-install @install baseline (spec 008)")
     rs.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     rs.add_argument("--rebaseline", action="store_true", help="re-capture the baseline from the current DB")
-    xd = sub.add_parser("xdebug", help="Toggle Xdebug in the WP container")
+    xd = sub.add_parser("xdebug", help="Toggle Docker Xdebug or report Herd host status")
     xd.add_argument("state", choices=["on", "off", "status"])
 
     ab = sub.add_parser("abilities", help="Toggle the in-instance WP Abilities layer (spec 003)")

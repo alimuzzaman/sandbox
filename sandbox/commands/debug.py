@@ -13,6 +13,9 @@ from contextlib import contextmanager
 import io
 import threading
 from contextlib import redirect_stdout, redirect_stderr
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import urlopen
+import ssl
 
 
 
@@ -53,6 +56,14 @@ def cmd_xdebug(cfg, args) -> None:
         # Herd's PHP is a shared host install — toggling its global ini would
         # affect every Herd site + needs a restart we can't do per-instance.
         # Report status + actionable guidance rather than a hard abort (spec 007).
+        result = wpcli(
+            ["eval", "echo extension_loaded('xdebug') ? 'on' : 'off';"],
+            instance=inst, check=False, capture=True,
+        )
+        reported = (getattr(result, "stdout", "") or "").strip()
+        if reported not in ("on", "off"):
+            reported = "unknown"
+        print(reported)
         info(f"xdebug on herd ({inst}) is host-managed (shared PHP install).")
         print("  Per-instance toggling is unsupported; manage Xdebug via Herd's")
         print("  PHP settings (herd) or your php.ini, then set XDEBUG_TRIGGER on requests.")
@@ -428,34 +439,120 @@ def cmd_dump(cfg, args) -> None:
 def cmd_qm(cfg, args) -> None:
     """Capture Query Monitor data for a URL → JSON (spec 007).
 
-    Ensures QM is active, fires a real request (curl -k from the wp container so
-    the self-signed .tst cert is accepted), then prints the last qm.jsonl line.
+    Ensures QM is active, fires a real request, and returns the JSONL record
+    tagged for that exact request. The tag prevents unrelated/stale requests
+    from being mistaken for the requested capture.
     """
     inst = args.resolved_instance
-    if _is_herd_instance(inst):
-        die("qm capture isn't wired for herd instances yet")
     if getattr(args, "clear", False):
         f = wp_dir(inst) / "wp-content" / "qm.jsonl"
         if f.exists():
             f.write_text("")
         ok("qm.jsonl cleared")
         return
-    # ensure QM active (installs from wp.org on first use)
+    if args.url == "off":
+        wpcli(["plugin", "deactivate", "query-monitor"], instance=inst, check=False)
+        ok("Query Monitor deactivated")
+        return
+
+    # QM is normally provisioned installed-but-inactive. Keep first capture
+    # robust for older instances that predate that provisioning policy.
+    installed = wpcli(["plugin", "is-installed", "query-monitor"], instance=inst,
+                      check=False, capture=True)
+    if getattr(installed, "returncode", 1) != 0:
+        info("installing Query Monitor…")
+        installed = wpcli(["plugin", "install", "query-monitor"], instance=inst,
+                          check=False, capture=True)
+        if getattr(installed, "returncode", 1) != 0:
+            die("could not install Query Monitor for capture")
+
     r = wpcli(["plugin", "is-active", "query-monitor"], instance=inst, check=False, capture=True)
     if (getattr(r, "returncode", 1) != 0):
         info("activating Query Monitor…")
-        wpcli(["plugin", "install", "query-monitor", "--activate"], instance=inst, check=False)
-    path = args.url or "/"
-    if path.startswith("http"):
-        from urllib.parse import urlparse
-        path = urlparse(path).path or "/"
-    compose("exec", "-T", "wp", "sh", "-c",
-            f"curl -s -k -o /dev/null 'http://localhost{path}'", instance=inst, check=False)
+        activated = wpcli(["plugin", "activate", "query-monitor"], instance=inst,
+                          check=False, capture=True)
+        if getattr(activated, "returncode", 1) != 0:
+            die("could not activate Query Monitor for capture")
+
     qm = wp_dir(inst) / "wp-content" / "qm.jsonl"
-    if not qm.exists():
-        die("no qm.jsonl produced — is Query Monitor active?")
-    last = qm.read_text().strip().splitlines()[-1:]
-    print(last[0] if last else "(empty)")
+    before = qm.stat().st_size if qm.exists() else 0
+    capture_id = os.urandom(16).hex()
+    capture_url = _qm_capture_url(args.url or "/", capture_id)
+    if _is_herd_instance(inst):
+        _qm_fetch_herd(inst, capture_url)
+    else:
+        _qm_fetch_docker(inst, capture_url)
+
+    payload = _qm_record_for_capture(qm, before, capture_id)
+    if payload is None:
+        die("no fresh qm.jsonl record for this request — is Query Monitor active?")
+    print(json.dumps(_qm_filter_collectors(payload, getattr(args, "collectors", None))))
+
+
+def _qm_capture_url(url: str, capture_id: str) -> str:
+    """Add an internal, one-request QM correlation value to a local URL."""
+    parsed = urlsplit(url)
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query.append(("sandbox_qm_capture", capture_id))
+    return urlunsplit(("", "", path, urlencode(query), ""))
+
+
+def _qm_fetch_docker(instance: str, path: str) -> None:
+    """Issue an anonymous capture request from the Docker web container."""
+    from shlex import quote
+
+    result = compose("exec", "-T", "wp", "sh", "-c",
+                     "curl -sS -k -o /dev/null -- " + quote("http://localhost" + path),
+                     instance=instance, check=False, capture=True)
+    if getattr(result, "returncode", 1) != 0:
+        die("Query Monitor capture request failed")
+
+
+def _qm_fetch_herd(instance: str, path: str) -> None:
+    """Issue an anonymous Herd request without claiming Docker-only support."""
+    instances = resolve_instances(load_config())
+    config = instances.get(instance)
+    if not config:
+        die(f"unknown instance: {instance}")
+    base = site_url(config).rstrip("/")
+    try:
+        with urlopen(base + path, timeout=30, context=ssl._create_unverified_context()) as response:
+            response.read()
+    except OSError as exc:
+        die(f"Query Monitor Herd capture request failed: {exc}")
+
+
+def _qm_record_for_capture(path: Path, offset: int, capture_id: str) -> dict | None:
+    """Return this invocation's tagged JSONL record, never a stale last line."""
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as records:
+        records.seek(offset)
+        for line in records:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("capture_id") == capture_id:
+                return payload
+    return None
+
+
+def _qm_filter_collectors(payload: dict, requested: str | None) -> dict:
+    """Return only requested collectors; default remains the no-hooks safe set."""
+    result = dict(payload)
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return result
+    if requested:
+        names = {name.strip() for name in requested.split(",") if name.strip()}
+        result["data"] = {name: value for name, value in data.items() if name in names}
+    else:
+        result["data"] = {name: value for name, value in data.items() if name != "hooks"}
+    return result
 
 
 register({

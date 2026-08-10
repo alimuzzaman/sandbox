@@ -69,3 +69,10 @@ Two provisioned mu-plugins + host CLI/MCP: `mcp/wp-server/tools/`,
 
 US1 (T001-T006) — `dump()`/`dd()` to a tailable file — is the smallest standalone
 increment; US2 (QM capture) is the next independent slice.
+
+## Phase 7: Convergence
+
+- [x] T016 Restrict the dump and Query Monitor mu-plugin supports to `local` only so `WP_DEBUG` alone cannot expose development debugging surfaces outside the development environment, per FR-002 (contradicts). **DONE: both mu-plugin assets gate on `wp_get_environment_type() === 'local'` (with the constant fallback).**
+- [ ] T017 Make Query Monitor provisioned installed-but-inactive by default, retaining first-capture activation and updating default-policy coverage, per FR-005 and SC-004 (contradicts).
+- [x] T018 Correlate each `./sb qm` request with its own fresh JSONL record, support the documented collector filtering/off controls, and issue the real capture request on Herd, per FR-004, FR-005, and plan: QM capture path (partial). **DONE: capture IDs persist in JSONL and the CLI scans only post-request matching records; Herd uses an anonymous host request.**
+- [x] T019 Report the actual host Xdebug status for Herd before returning per-instance-toggle guidance, and make the wp-debug guide accurately describe dump, QM, and Herd behavior, per FR-007, SC-005, and plan: docs-with-code (partial). **DONE: Herd evaluates `extension_loaded('xdebug')` before guidance; the debugging guides and Herd reference are aligned.**

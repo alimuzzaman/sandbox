@@ -143,6 +143,16 @@ print("CAPABILITY_REJECTION", json.dumps([
     data_tools.db_query("SELECT 1", project_dir="/tmp/project"),
     wp_side_effects,
 ]))
+data_tools._require_project_capability = lambda *_args: None
+data_tools._project_instance = lambda *_args: ("fixture", None)
+snapshot_calls = []
+data_tools._run_sandbox_json = lambda cmd, timeout: snapshot_calls.append([cmd, timeout]) or {
+    "timed_out": False, "returncode": 0, "stdout": "saved\\n", "stderr": "", "payload": None,
+}
+print("MCP_SNAPSHOT", json.dumps([
+    data_tools.snapshot("before", db_only=True, force=True, project_dir="/tmp/project"),
+    snapshot_calls,
+]))
 """
 
 
@@ -200,6 +210,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("wp_cli_job_kill", "job_id,project_dir"), ("http_fetch", "url"),
             ("pixelmatch_diff", "build,reference"), ("visit", "url"),
             ("db_query", "project_dir,sql"), ("import_content", "project_dir,seed_file"),
+            ("snapshot", "name,project_dir"),
             ("wp_reset", "project_dir"), ("tail_log", "project_dir"),
             ("fs_read", "path,project_dir"), ("fs_write", "content,path,project_dir"),
             ("fs_list", "project_dir"), ("mail_list", "project_dir"),
@@ -235,7 +246,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 120)
+        self.assertEqual(len(actual), 121)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 
@@ -340,6 +351,16 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
         self.assertFalse(wp_result["ok"])
         self.assertFalse(db_result["ok"])
         self.assertEqual(side_effects, [])
+        snapshot_line = next(line for line in r.stdout.splitlines()
+                             if line.startswith("MCP_SNAPSHOT "))
+        snapshot, calls = __import__("json").loads(
+            snapshot_line.removeprefix("MCP_SNAPSHOT ")
+        )
+        self.assertTrue(snapshot["ok"])
+        self.assertEqual(snapshot["output"], "saved")
+        self.assertEqual(calls[0], [
+            [str(ROOT / "sb"), "--instance", "fixture", "snapshot", "before", "--db-only", "--force"], 300,
+        ])
         capability_import_line = next(line for line in r.stdout.splitlines()
                                       if line.startswith("CAPABILITY_IMPORT "))
         capability_import = __import__("json").loads(

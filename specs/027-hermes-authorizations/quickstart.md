@@ -53,3 +53,11 @@ resume only that reviewed scope until `expires_at`; the local five-minute
 - Authorization approval concurrency is fixture-proven: state CAS conflicts fail before prompt
   mutation, and prompt-delivery failures restore the prior state with a second CAS. A live race
   drill remains unperformed.
+
+## Artifact reconciliation (2026-08-10, local-only)
+
+The live commands above are historical. The current committed catalog declares
+the Lenzora TODO worker disabled, so it must not be read as current evidence of
+an enabled Lenzora companion or active approval path. This refresh made no
+remote call, deployment, approval, scheduler change, or reconciliation. The
+protected live acceptance remains T021.

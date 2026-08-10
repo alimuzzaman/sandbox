@@ -37,7 +37,9 @@ With `orb config` `docker.expose_ports_to_lan: true`, OrbStack widens a publishe
 that bind failed silently: `docker ps` showed the mapping, `netstat` showed no listener,
 and connections were refused. Non-privileged ports on the same alias (81, 8099) worked.
 Stopping Herd cleared it. This is the FR-034 case — a foreign listener owning a required
-endpoint — and `sb doctor` does not yet detect the published-but-not-listening state.
+endpoint. This capture predates the diagnostic fix: `sb doctor` now detects a
+published-but-not-listening state and names the observed owner. That behavior has focused
+regression coverage; it is not additional live proof from this historical capture.
 
 ## Linux (Ubuntu 24.04, 2026-08-02)
 

@@ -67,7 +67,53 @@ def normalize_hostname(value: str, *, wildcard: bool = True) -> str:
         raise HostingError(f"invalid internationalized hostname {value!r}") from exc
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", encoded):
         raise HostingError(f"invalid hostname {value!r}")
+    if len(encoded) > 253 or any(len(label) > 63 for label in encoded.split(".")):
+        raise HostingError(f"invalid hostname {value!r}")
     return prefix + encoded
+
+
+def _normalize_redirect_target(value: object) -> str:
+    """Return a canonical HTTPS hostname target for a redirect route.
+
+    Caddy appends ``{uri}`` to this value, so allowing a target path or query
+    would duplicate or discard a request path/query instead of preserving it.
+    Canonicalising the hostname here also ensures that state, DNS planning, and
+    the rendered Caddyfile use the same ASCII IDN form.
+    """
+    if not isinstance(value, str):
+        raise HostingError("redirect aliases require an https target")
+    try:
+        parsed = urllib.parse.urlsplit(value.strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise HostingError("redirect aliases require a valid https target") from exc
+    if (parsed.scheme.lower() != "https" or not parsed.netloc or parsed.username
+            or parsed.password or not parsed.hostname):
+        raise HostingError("redirect aliases require an https target")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise HostingError("redirect aliases must target a hostname without a path, query, or fragment")
+    hostname = normalize_hostname(parsed.hostname, wildcard=False)
+    authority = hostname if port is None else f"{hostname}:{port}"
+    return f"https://{authority}"
+
+
+def _reject_redirect_cycles(routes: list[dict]) -> None:
+    """Reject cycles among declared redirect aliases before any remote action."""
+    redirects = {
+        route["hostname"]: normalize_hostname(
+            urllib.parse.urlsplit(route["target"]).hostname or "", wildcard=False
+        )
+        for route in routes if route["mode"] == "redirect"
+    }
+    for start in redirects:
+        visited: set[str] = set()
+        current = start
+        while current in redirects:
+            if current in visited:
+                chain = " -> ".join([*visited, current])
+                raise HostingError(f"redirect aliases form a cycle ({chain})")
+            visited.add(current)
+            current = redirects[current]
 
 
 def _project_root(project_dir: str | Path) -> Path:
@@ -328,12 +374,12 @@ def validate_manifest(project_dir: str | Path, environment: str | None = None) -
             raise HostingError("wildcard aliases may only serve an application")
         target = alias.get("target")
         if mode == "redirect":
-            if not isinstance(target, str) or not target.startswith("https://"):
-                raise HostingError(f"redirect alias {hostname} requires an https target")
-            if normalize_hostname(target.split("/", 3)[2], wildcard=False) == hostname:
+            target = _normalize_redirect_target(target)
+            if normalize_hostname(urllib.parse.urlsplit(target).hostname or "", wildcard=False) == hostname:
                 raise HostingError(f"redirect alias {hostname} cannot target itself")
         routes.append({"hostname": hostname, "mode": mode, "target": target, "primary": False})
         seen.add(hostname)
+    _reject_redirect_cycles(routes)
     deploy = env.get("deploy") or {}
     if not isinstance(deploy.get("allowed_branches") or [], list) or not deploy["allowed_branches"] or not isinstance(deploy.get("require_clean"), bool):
         raise HostingError("deploy.allowed_branches and deploy.require_clean are required")
@@ -535,14 +581,27 @@ def desired_runtime(validated: dict, remote_name: str, state: dict | None = None
 
 
 def apply_with_rollback(apply, rollback) -> None:
-    """Run a guarded mutation and restore managed remote/DNS state on failure."""
+    """Run a guarded mutation and attempt every rollback step on failure.
+
+    A routing restore must not be skipped merely because an earlier DNS restore
+    failed.  Preserve the original apply exception when rollback succeeds; if
+    it does not, report the original failure plus every rollback failure.
+    """
     try:
         apply()
-    except Exception:
-        try:
-            rollback()
-        except Exception as rollback_error:
-            raise HostingError(f"hosting apply failed and rollback failed: {rollback_error}") from rollback_error
+    except Exception as apply_error:
+        steps = (rollback,) if callable(rollback) else tuple(rollback)
+        failures: list[Exception] = []
+        for step in steps:
+            try:
+                step()
+            except Exception as rollback_error:
+                failures.append(rollback_error)
+        if failures:
+            details = "; ".join(str(error) or type(error).__name__ for error in failures)
+            raise HostingError(
+                f"hosting apply failed: {apply_error}; rollback failures: {details}"
+            ) from apply_error
         raise
 
 

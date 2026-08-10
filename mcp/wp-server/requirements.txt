@@ -1,3 +1,6 @@
-mcp
+# server.py uses the v1 FastMCP import and streamable_http_app() contract.
+# MCP 2 removed mcp.server.fastmcp, so leave this intentionally exact until
+# the remote transport is migrated and verified against its replacement API.
+mcp==1.25.0
 httpx
 pyyaml

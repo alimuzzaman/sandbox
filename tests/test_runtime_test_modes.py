@@ -128,6 +128,27 @@ class TestRuntimeTestModes(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_test_mode(value, allow_none=False)
 
+    def test_cli_rejects_invalid_wordpress_mode_before_remote_target_resolution(self):
+        import sandbox.commands.debug as debug
+
+        args = SimpleNamespace(project_dir="/fixture", label=None, mode="coverage",
+                               provision_only=False, local=False, remote="vps", workspace=None,
+                               timeout=60, output_profile="smart", json=False, passthrough=[])
+
+        class RegistryFacade:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_path, label=None):
+                return {"root": "/fixture", "tests": {"suite": "auto"}}
+
+        with patch.object(debug, "_core", return_value=RegistryFacade()), \
+                patch("sandbox.application.context.durable_job_dependencies") as dependencies:
+            with self.assertRaises(SystemExit):
+                debug.cmd_test({}, args)
+
+        dependencies.assert_not_called()
+
     def test_unit_runner_does_not_mount_wordpress_environment(self):
         from sandbox.core._tests import _run_tests_unit
 

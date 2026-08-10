@@ -37,6 +37,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SB = REPOSITORY_ROOT / "sb"
 MAX_CAPTURE_BYTES = 16 * 1024
 MAX_EVENTS = 384
+_GIT_REVISION_LENGTH = 40
 # Measured on a host where the check actually runs. The previous 3-second bound
 # came from macOS, where the managed runtime is unsupported and preflight
 # short-circuits without probing anything -- it recorded 0.30s. On Ubuntu the
@@ -124,6 +125,48 @@ def _candidate_result(event: dict[str, Any]) -> bool:
         candidate = payload["runtime"].get("proof_candidate")
         adoptable = payload["runtime"].get("adoptable")
     return candidate is True and adoptable is False
+
+
+def _source_identity(root: Path = REPOSITORY_ROOT, *, run: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """Capture a bounded, non-secret identity for a live-proof artifact.
+
+    A proof result without an exact revision cannot later establish what code
+    was measured.  The worktree state is included rather than assumed clean so
+    an operator can distinguish a committed source tree from a local patch.
+    """
+    def git(*args: str):
+        return run(
+            ("git", "-C", str(root), *args), capture_output=True, text=True,
+            timeout=5, check=False,
+        )
+
+    try:
+        revision_result = git("rev-parse", "HEAD")
+        revision = str(revision_result.stdout or "").strip()
+        status_result = git("status", "--porcelain=v1")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("could not capture proof source identity") from exc
+    if revision_result.returncode != 0 or len(revision) != _GIT_REVISION_LENGTH \
+            or any(char not in "0123456789abcdef" for char in revision.lower()):
+        raise RuntimeError("proof source revision is unavailable")
+    if status_result.returncode != 0:
+        raise RuntimeError("proof source worktree state is unavailable")
+    return {
+        "revision": revision.lower(),
+        "worktree_clean": not bool(str(status_result.stdout or "").strip()),
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+
+
+def _durable_job_ids(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Extract recorded durable-job IDs without trusting arbitrary event text."""
+    identifiers = set()
+    for event in events:
+        payload = event.get("json") if isinstance(event, dict) else None
+        identifier = payload.get("job_id") if isinstance(payload, dict) else None
+        if isinstance(identifier, str) and identifier:
+            identifiers.add(identifier)
+    return tuple(sorted(identifiers))
 
 
 def _tree_digest(root: Path) -> str:
@@ -1124,6 +1167,10 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "schema": "sandbox.native-live-acceptance/v1",
         "ok": truthy(checks),
+        "provenance": {
+            "source": _source_identity(),
+            "durable_job_ids": _durable_job_ids(events),
+        },
         "matrix": {
             "primary": {"project": str(primary.root), "label": primary.label, "web_server": primary.web_server},
             "sibling": {"project": str(sibling.root), "label": sibling.label, "web_server": sibling.web_server},

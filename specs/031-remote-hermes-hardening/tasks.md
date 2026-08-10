@@ -113,6 +113,15 @@ malformed output, and missing transitions remain failures.
 - [x] T034 Run the applicable full unit suite and read-only CLI probes from `specs/031-remote-hermes-hardening/quickstart.md`.
 - [x] T035 Perform separately approved disposable-remote reboot, listener-scope, selected-unit-stop, and optionally cron-migration acceptance; record only sanitized evidence in `docs/remote-hermes-operations-prd.md` or a follow-up note.
 
+## Phase 8: Post-convergence classifier correction
+
+- [X] T036 [US4] Require an observed terminal scheduler transition before a documented marker can recover an upstream wrapper error; retain provider-error precedence and expose a failed protocol classification for missing transitions in `sandbox/hermes/scheduler.py`.
+- [X] T037 [US4] Cover missing-transition terminal markers in scheduler status, `hermes cron verify`, and `hermes health` fixtures in `tests/test_hermes.py`; run the focused Hermes/remote regression suite and record its result.
+
+### Phase 8 evidence
+
+- 2026-08-10 local verification: `python3 -m unittest -q tests.test_hermes tests.test_remote tests.test_hermes_gateway tests.test_remote_job_transport` passed 294 tests. This run uses mocked/local contracts only and makes no remote acceptance claim.
+
 ## Dependencies & Execution Order
 
 - Setup → Foundational → US1/US2/US3/US4 → Polish.

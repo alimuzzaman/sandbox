@@ -85,8 +85,33 @@ class TestHostingManifest(unittest.TestCase):
             result = hosting.validate_manifest(directory)
         rendered = hosting.caddyfile(result, 18001, "/cert.pem", "/key.pem")
         self.assertIn("reverse_proxy 127.0.0.1:18001", rendered)
-        self.assertIn("redir https://আমারসোনার.বাংলা{uri} 308", rendered)
+        self.assertIn("redir https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri} 308", rendered)
         self.assertIn("tls /cert.pem /key.pem", rendered)
+
+    def test_normalizes_an_idn_redirect_target_before_rendering_or_planning(self):
+        aliases = "        - hostname: asb.bd\n          mode: redirect\n          target: https://আমারসোনার.বাংলা"
+        with self._write(_manifest(aliases)) as directory:
+            result = hosting.validate_manifest(directory)
+        redirect = next(route for route in result["routes"] if route["mode"] == "redirect")
+        self.assertEqual(redirect["target"], "https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc")
+        self.assertIn("xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri}", hosting.caddyfile(result, 18001))
+
+    def test_rejects_redirect_alias_cycles(self):
+        aliases = """        - hostname: one.example.test
+          mode: redirect
+          target: https://two.example.test
+        - hostname: two.example.test
+          mode: redirect
+          target: https://one.example.test"""
+        with self._write(_manifest(aliases)) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "cycle"):
+                hosting.validate_manifest(directory)
+
+    def test_rejects_redirect_target_path_that_cannot_preserve_request_uri(self):
+        aliases = "        - hostname: asb.bd\n          mode: redirect\n          target: https://example.test/fixed"
+        with self._write(_manifest(aliases)) as directory:
+            with self.assertRaisesRegex(hosting.HostingError, "path, query, or fragment"):
+                hosting.validate_manifest(directory)
 
     def test_robots_defaults_to_allow_and_leaves_the_render_untouched(self):
         with self._write(_manifest()) as directory:
@@ -107,7 +132,7 @@ class TestHostingManifest(unittest.TestCase):
                         rendered.index("reverse_proxy 127.0.0.1:18001"))
         self.assertIn("    handle {\n        reverse_proxy 127.0.0.1:18001", rendered)
         # Redirect-only aliases stay plain redirects.
-        self.assertIn("redir https://আমারসোনার.বাংলা{uri} 308", rendered)
+        self.assertIn("redir https://xn--94b2eraib0c0bd9i.xn--54b7fta0cc{uri} 308", rendered)
 
     def test_rejects_an_unknown_robots_mode(self):
         manifest = _manifest().replace("    cloudflare:\n", "    robots: sometimes\n    cloudflare:\n")
@@ -485,6 +510,24 @@ class TestHostingManifest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "remote rejected"):
             hosting.apply_with_rollback(apply, lambda: events.append("rollback"))
         self.assertEqual(events, ["apply", "rollback"])
+
+    def test_failed_apply_continues_all_rollback_steps_and_reports_every_failure(self):
+        events = []
+
+        def apply():
+            raise RuntimeError("Caddy validation failed")
+
+        def failed_dns_restore():
+            events.append("dns")
+            raise RuntimeError("DNS API unavailable")
+
+        def failed_caddy_restore():
+            events.append("caddy")
+            raise RuntimeError("Caddy reload unavailable")
+
+        with self.assertRaisesRegex(hosting.HostingError, "Caddy validation failed.*DNS API unavailable.*Caddy reload unavailable"):
+            hosting.apply_with_rollback(apply, [failed_dns_restore, failed_caddy_restore])
+        self.assertEqual(events, ["dns", "caddy"])
 
     def test_apply_rejects_disallowed_branch_before_reading_remote_state(self):
         args = types.SimpleNamespace(

@@ -34,3 +34,8 @@ all pass, `ubuntu-nspawn` remains `implemented_unproven` and `adoptable=false`.
 No failed or partial run is accepted as promotion evidence. Each live file must
 include its durable job identifier, exact source identity, effective isolation
 observations, host baseline comparison, cleanup result, and timing bounds.
+The generated `sandbox.native-live-acceptance/v1` record carries these provenance
+fields under `provenance`: `source.revision`, `source.worktree_clean`,
+`source.harness_sha256`, and `durable_job_ids`. Transcribe or link that record
+from the corresponding human-readable evidence file; neither a host date nor a
+claim of a clean source tree is a substitute for the captured identity.

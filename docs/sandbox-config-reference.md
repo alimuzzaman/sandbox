@@ -114,6 +114,13 @@ all other machine-state. `config.yml` / `.yaml` also work. Backward-compat: unti
 `./sb migrate --apply` runs, the legacy `~/.config/sandbox/config.json`
 (honoring `$XDG_CONFIG_HOME`) is still read as a fallback.
 
+`SANDBOX_HOME` is the explicit, highest-priority location selector. `./sb home <dir>`
+relocates the base and, after verification, records the selected path in the non-secret
+owner-only bootstrap hint `~/.config/sandbox/home`, so subsequent CLI and MCP launches
+continue to agree without exporting the variable in every shell. A normal first command
+automatically migrates old repo/config-only state only when that selected base is empty;
+if both sides hold state, Sandbox stops without merging or deleting either source.
+
 It sits **under** the project in priority:
 
 - **Scalars** (`phpVersion`, `server`, `port`, …): the project wins; the
@@ -551,11 +558,20 @@ Without it the official `wordpress` image's `sendmail` is absent, so
 ## Snapshot / restore
 
 `./sb snapshot <name>` exports the DB (`wp db export --add-drop-table`) and
-tars uploads. `./sb restore <name>` runs **`wp db reset --yes` before the
+tars uploads. Add `--db-only` to omit uploads; when forcing a DB-only overwrite,
+any old uploads archive is removed. `./sb restore <name>` runs **`wp db reset --yes` before the
 import**, so restore is a true point-in-time replacement: tables created
 *after* the snapshot (e.g. multisite sub-site `wp_2_*` tables from an FSI run)
 are dropped, not merged. `--add-drop-table` alone only drops tables present in
 the dump, so without the pre-reset those newer tables would survive.
+
+Each newly provisioned Docker instance captures a protected DB-only `@install`
+baseline and a full `install-baseline` snapshot after final setup or plugin/theme
+wiring. A successful onboarding seed refreshes those restore points to include its fixture.
+`./sb snapshots` reports `@install` separately (it is a reset target, not a
+normal named snapshot); use `./sb reset --yes` or MCP `wp_reset(confirm=true)`
+to restore it. MCP `snapshot(name, db_only=true, project_dir=...)` captures a
+named DB-only snapshot.
 
 ## Host ingress and clean URLs
 

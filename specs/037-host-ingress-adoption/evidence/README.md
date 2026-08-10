@@ -1,8 +1,9 @@
 # Host ingress evidence index
 
 Live evidence exists for the default provider and for every read-only surface, on macOS.
-No incumbent adapter is adoptable on any platform yet, so every adoption-lifecycle artifact
-remains open.
+The Ubuntu system-Caddy lifecycle is also captured through the single-invocation conformance
+harness. No incumbent adapter is normally adoptable in production yet: the harness-only
+proof attestation does not change ordinary CLI support, so end-user adoption remains open.
 
 | Evidence | State | Covers | Still required |
 |---|---|---|---|

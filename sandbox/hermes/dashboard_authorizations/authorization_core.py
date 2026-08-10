@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 _ID = re.compile(r"^[0-9a-f]{16}$")
 _SCOPE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_JOB = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _SECRET = re.compile(r"(?i)(?:\b(?:token|password|secret|authorization|cookie|session)\b\s*[:=]\s*\S+|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-(?:proj-)?[a-z0-9_-]{20,}|BEGIN (?:RSA|OPENSSH|EC|PRIVATE) KEY)")
 MAX_REQUESTS = 100
 MAX_AUDIT = 200
@@ -55,10 +56,19 @@ def valid_origin(value: str) -> str:
 
 
 def valid_reason(value: str) -> str:
+    return _valid_nonsecret_text(value, "rationale")
+
+
+def valid_blocker(value: str) -> str:
+    """Validate stored review output before it can reach an operator view."""
+    return _valid_nonsecret_text(value, "blocker")
+
+
+def _valid_nonsecret_text(value: str, field: str) -> str:
     value = value.strip() if isinstance(value, str) else ""
     if (not 1 <= len(value) <= 500 or any(ord(char) < 32 or ord(char) == 127 for char in value)
             or _SECRET.search(value)):
-        raise AuthorizationError("rationale must be 1-500 non-secret characters")
+        raise AuthorizationError(f"{field} must be 1-500 non-secret characters")
     return value
 
 
@@ -66,6 +76,56 @@ def fingerprint(job_name: str, scope: str, origin: str, rationale: str) -> str:
     payload = json.dumps({"job_name": job_name, "scope": scope, "replay_origin": origin,
                           "reason": rationale}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _timestamp(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise AuthorizationError(f"authorization request has an invalid {field}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise AuthorizationError(f"authorization request has an invalid {field}") from exc
+    if parsed.tzinfo is None or parsed.isoformat() != value:
+        raise AuthorizationError(f"authorization request has an invalid {field}")
+    return value
+
+
+def validate_request(request: object) -> dict:
+    """Fail closed unless a stored request remains canonical and immutable."""
+    if not isinstance(request, dict):
+        raise AuthorizationError("invalid authorization request")
+    required = {"id", "job_name", "scope", "replay_origin", "rationale", "status",
+                "created_at", "expires_at", "fingerprint"}
+    if not required <= set(request):
+        raise AuthorizationError("invalid authorization request")
+    request_id = request["id"]
+    if not isinstance(request_id, str) or not _ID.fullmatch(request_id):
+        raise AuthorizationError("invalid authorization request")
+    job_name = request["job_name"].strip() if isinstance(request["job_name"], str) else ""
+    if not _JOB.fullmatch(job_name) or job_name != request["job_name"]:
+        raise AuthorizationError("invalid authorization request")
+    scope = valid_scope(request["scope"])
+    origin = valid_origin(request["replay_origin"])
+    rationale = valid_reason(request["rationale"])
+    if scope != request["scope"] or origin != request["replay_origin"] or rationale != request["rationale"]:
+        raise AuthorizationError("authorization request is not canonical")
+    if request.get("status") not in {"pending", "approved", "expired", "superseded", "review_required"}:
+        raise AuthorizationError("invalid authorization request")
+    _timestamp(request["created_at"], "creation timestamp")
+    _timestamp(request["expires_at"], "expiry")
+    expected = fingerprint(job_name, scope, origin, rationale)
+    if request.get("fingerprint") != expected:
+        raise AuthorizationError("authorization request fingerprint does not match its fields")
+    blocker = request.get("blocker")
+    if blocker is not None and valid_blocker(blocker) != blocker:
+        raise AuthorizationError("authorization request blocker is not canonical")
+    source = request.get("source_fingerprint")
+    if source is not None and (not isinstance(source, str) or not re.fullmatch(r"[0-9a-f]{64}", source)):
+        raise AuthorizationError("invalid authorization request")
+    approved_at = request.get("approved_at")
+    if approved_at is not None:
+        _timestamp(approved_at, "approval timestamp")
+    return request
 
 
 def new_state() -> dict:
@@ -84,18 +144,15 @@ def normalize_state(state: object) -> dict:
             or not all(isinstance(request, dict) for request in auth["requests"].values())
             or not all(isinstance(event, dict) for event in auth["audit"])):
         raise AuthorizationError("invalid authorization state")
-    request_fields = {"id", "status", "created_at", "expires_at", "fingerprint"}
     audit_fields = {"request_id", "event", "at", "fingerprint"}
-    if (any(not request_fields <= set(request) for request in auth["requests"].values())
-            or any(not audit_fields <= set(event) for event in auth["audit"])):
+    if any(not audit_fields <= set(event) for event in auth["audit"]):
         raise AuthorizationError("invalid authorization state")
     statuses = {"pending", "approved", "expired", "superseded", "review_required"}
     for request_id, request in auth["requests"].items():
-        if (not isinstance(request_id, str) or request.get("id") != request_id or not _ID.fullmatch(request_id) or
-                not isinstance(request.get("status"), str) or request["status"] not in statuses or
-                any(not isinstance(request.get(field), str) for field in request_fields) or
-                not re.fullmatch(r"[0-9a-f]{64}", request["fingerprint"])):
+        if (not isinstance(request_id, str) or request.get("id") != request_id or
+                request.get("status") not in statuses):
             raise AuthorizationError("invalid authorization state")
+        validate_request(request)
     for event in auth["audit"]:
         if (not isinstance(event.get("request_id"), str) or not _ID.fullmatch(event["request_id"]) or
                 not isinstance(event.get("event"), str) or not event["event"] or
@@ -161,13 +218,7 @@ def audit(state: dict, request: dict, event: str, actor: str | None = None) -> N
 
 
 def _expiry(request: dict) -> datetime:
-    try:
-        expiry = datetime.fromisoformat(request["expires_at"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AuthorizationError("authorization request has an invalid expiry") from exc
-    if expiry.tzinfo is None:
-        raise AuthorizationError("authorization request has an invalid expiry")
-    return expiry
+    return datetime.fromisoformat(_timestamp(request.get("expires_at"), "expiry"))
 
 
 def approval_prompt(job: dict, request: dict) -> str:
@@ -202,9 +253,13 @@ def expire(state: dict) -> None:
 
 
 def view(state: dict, request: dict, detail: bool = False) -> dict:
+    validate_request(request)
     keys = ("id", "job_name", "scope", "replay_origin", "rationale", "blocker", "source_fingerprint",
             "fingerprint", "status", "created_at", "expires_at", "approved_at")
     result = {key: request[key] for key in keys if key in request}
+    if request["status"] in {"pending", "approved"} and _expiry(request) <= now():
+        # Observations expose effective expiry but never mutate state or audit.
+        result["status"] = "expired"
     if detail:
         result["audit"] = [item for item in state["authorizations"]["audit"] if item["request_id"] == request["id"]]
     return result

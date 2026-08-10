@@ -498,7 +498,7 @@ def _web_do_action(payload: dict) -> dict:
     from sandbox.commands.lifecycle import cmd_up, cmd_down, cmd_status, cmd_update, cmd_doctor
     from sandbox.commands.instances_cmd import cmd_focus, cmd_instance
     from sandbox.commands.debug import cmd_introspect, cmd_xdebug
-    from sandbox.commands.data import cmd_restore, cmd_snapshot
+    from sandbox.commands.data import cmd_reset, cmd_restore, cmd_snapshot
     from sandbox.commands.wp import cmd_seed, cmd_wp
     from sandbox.commands.net import cmd_server
     """Dispatch a UI action to the matching cmd_*. Fast actions return output
@@ -568,7 +568,7 @@ def _web_do_action(payload: dict) -> dict:
     # panel tails. All read or scoped to one instance; destructive ones
     # (restore) are confirmed client-side. `shell`/`claude` are intentionally
     # NOT exposed (interactive, can't work over HTTP).
-    OPS = {"logs", "status", "doctor", "snapshot", "restore", "seed",
+    OPS = {"logs", "status", "doctor", "snapshot", "restore", "reset", "seed",
            "update", "xdebug", "wp", "introspect", "install", "term"}
     if action in OPS:
         if not name:
@@ -600,12 +600,18 @@ def _web_do_action(payload: dict) -> dict:
                 if not snap:
                     print("invalid snapshot name"); return False
                 cmd_snapshot(cfg, _types.SimpleNamespace(
-                    name=snap, force=bool(payload.get("force")), **ns_base))
+                    name=snap, force=bool(payload.get("force")),
+                    db_only=bool(payload.get("db_only")), **ns_base))
             elif action == "restore":
                 snap = (payload.get("name") or "").strip()
                 if not snap:
                     print("missing snapshot name"); return False
                 cmd_restore(cfg, _types.SimpleNamespace(name=snap, **ns_base))
+            elif action == "reset":
+                if not payload.get("confirm"):
+                    print("reset requires confirm=true"); return False
+                cmd_reset(cfg, _types.SimpleNamespace(
+                    yes=True, rebaseline=bool(payload.get("rebaseline")), **ns_base))
             elif action == "seed":
                 f = (payload.get("file") or "").strip()
                 if not f:

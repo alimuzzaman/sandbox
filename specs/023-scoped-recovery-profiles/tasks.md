@@ -220,3 +220,12 @@ US2 + US3 + US4 -> US5 Fresh-server proof -> Final safety/protected plans
 - Existing legacy Drive code is compatibility-only and cannot be called by new profiles.
 - All server/database/Drive operations are invoked through Sandbox interfaces.
 - Commit and push require separate explicit user approval.
+
+---
+
+## Phase 9: Convergence
+
+- [X] T073 Bind local recovery staging, pending retry, and artifact materialization to Sandbox-owned machine state; reject artifact paths outside the owned materialization root per FR-008/FR-012 (partial)
+- [X] T074 Bind staged manifests to selected profile dependencies, restore targets, and allowed roots; reject dependency drift during restore planning per FR-011/FR-020 (partial)
+- [X] T075 Bound GnuPG child execution and output, and make rendered systemd units invoke a valid reserved scheduled-create command per FR-013/FR-022/FR-027 (partial)
+- [X] T076 Preserve safe non-mutating schedule/retention planning and leave legacy candidate deletion, real-set proof, fresh-server proof, and schedule activation behind T060/T061/T069/T071/T072 (partial)

@@ -17,7 +17,7 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from authorization_core import (AuthorizationError, approval_prompt, audit, expire, read_state,
-                                state_digest, supersede_approved, view, write_state)
+                                state_digest, supersede_approved, validate_request, view, write_state)
 
 router = APIRouter()
 ROOT = Path(os.environ.get("SANDBOX_AUTHORIZATION_HOME", Path.home() / ".hermes" / "sandbox-authorizations"))
@@ -71,9 +71,7 @@ def _catalog() -> dict[str, dict]:
 
 
 def _state() -> dict:
-    state = read_state(STATE)
-    expire(state)
-    return state
+    return read_state(STATE)
 
 
 def _failure(exc: Exception) -> HTTPException:
@@ -100,7 +98,6 @@ async def health():
 async def list_requests(request: Request):
     _actor(request)
     state = _state()
-    write_state(STATE, state)
     rows = [view(state, item) for item in state["authorizations"]["requests"].values()]
     rows.sort(key=lambda item: item["created_at"], reverse=True)
     return {"requests": rows}
@@ -132,6 +129,9 @@ async def approve(request_id: str, request: Request):
         item = state["authorizations"]["requests"].get(request_id)
         if not item or item.get("status") != "pending":
             raise AuthorizationError("authorization request is not pending")
+        # Repeat canonical/fingerprint validation immediately before every
+        # scheduler-dependent step, even though read_state validates it too.
+        validate_request(item)
         job = _catalog().get(item["job_name"])
         if not job:
             raise AuthorizationError("authorization job is not cataloged")

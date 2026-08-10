@@ -73,7 +73,7 @@ BUILTIN_TOOL_NAMES = {
     "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),
-    "data": ("db_query", "import_content", "wp_reset"),
+    "data": ("db_query", "import_content", "snapshot", "wp_reset"),
     "fs": ("tail_log", "fs_read", "fs_write", "fs_list"),
     "mail": ("mail_list", "mail_get"),
     "context": ("focus_get", "activate_plugin", "deactivate_plugin", "load_context", "load_workflow", "load_skill"),

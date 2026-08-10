@@ -268,3 +268,17 @@ Phase 1+2 → US1 (MVP: CLI gate works) → US2 (`--update` convenience) → US3
 → US4 (report polish/validation) → Phase 7 (docs + full live verification). Each story
 adds value without breaking the previous one; T029's full quickstart run is the final
 gate before considering the feature done, per Constitution Principle IV.
+
+---
+
+## Phase 8: Convergence
+
+- [x] T031 Make a first run without a baseline non-gating through the CLI JSON and MCP
+  contract, while still explicitly reporting how to establish the baseline per FR-016
+  (partial)
+- [x] T032 Reject malformed or unrecognised `wp plugin check --format=json` output as
+  an infrastructure failure rather than parsing it as an empty, passing finding set per
+  FR-010 (partial)
+- [x] T033 Reconcile Spec 013's configuration guidance so an absent `pluginCheck`
+  object remains supported and `.distignore` fallback is accurately documented per
+  FR-002/FR-003 (contradicts)

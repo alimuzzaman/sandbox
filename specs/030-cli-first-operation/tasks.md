@@ -44,3 +44,7 @@ commit/push plus protected actions.
 - [x] T013 Run generic Compose live execution from `tests/fixtures/generic-compose`
 - [x] T014 Run full test suite and documentation diff checks
 - [x] T015 Commit and push verified completed work on the active branch
+
+## Phase 7: Convergence
+
+- [x] T016 Align active fix and MCP task guidance with the automatic commit/push policy while preserving the fix workflow's live-proof boundary per FR-007 and FR-008 (contradicts)

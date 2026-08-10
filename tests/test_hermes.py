@@ -6,6 +6,7 @@ without installing Hermes, authenticating a Git provider, or changing a VPS.
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import io
 import os
@@ -356,6 +357,15 @@ class TestValidation(unittest.TestCase):
         })
         self.assertEqual(provider["effective_status"], "failed")
         self.assertEqual(provider["terminal_classification"], "provider_failure")
+
+    def test_documented_terminal_marker_without_transition_remains_failed(self):
+        status = effective_job_status({
+            "last_status": "error", "last_run_at": None,
+            "last_error": "RuntimeError: COMPLETED_SPEC_TASK",
+        })
+        self.assertEqual(status["effective_status"], "failed")
+        self.assertEqual(status["terminal_classification"], "protocol_error")
+        self.assertEqual(status["reason"], "documented terminal result lacks an observed transition")
 
     def test_reconciliation_is_exact_and_idempotent(self):
         paths = {"repo_root": "/home/u/repos", "sandbox_home": "/home/u/sandbox",
@@ -816,6 +826,25 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertTrue(out["data"]["transitioned"])
         self.assertTrue(out["data"]["false_success"])
         self.assertEqual(out["status"], "failed")
+
+    @patch("sandbox.core._hermes.time.sleep")
+    @patch("sandbox.core._hermes.time.time", side_effect=[0, 60, 60])
+    @patch("sandbox.core._hermes._cron_request_evidence", return_value={"files_checked": 0, "failure": False, "reason": ""})
+    @patch("sandbox.core._hermes._ssh", return_value=_completed())
+    @patch("sandbox.core._hermes._paths", return_value={"launcher": "$HOME/.local/bin/hermes"})
+    @patch("sandbox.core._hermes._require_remote", return_value={})
+    @patch("sandbox.core._hermes._cron_snapshot")
+    def test_verified_run_marker_without_transition_remains_failed(
+            self, snapshot, require_remote, paths, ssh, evidence, now, sleep):
+        job = {"id": "deadbeef1234", "name": "worker", "last_run_at": None,
+               "last_status": "error", "last_error": "RuntimeError: COMPLETED_SPEC_TASK",
+               "model_snapshot": "gpt-5.6-terra"}
+        snapshot.side_effect = [{"jobs": [job]}, {"jobs": [job]}]
+        out = hermes.cron_verify("test", "deadbeef1234", 60, True)
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["data"]["transitioned"])
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["data"]["terminal_result"]["classification"], "protocol_error")
 
     @patch("sandbox.core._hermes.time.sleep")
     @patch("sandbox.core._hermes.time.time", side_effect=[0, 0, 0, 1])
@@ -1420,11 +1449,12 @@ class TestProfileRendering(unittest.TestCase):
             {"sandbox_home": "/home/u/sandbox", "sb": "/home/u/sandbox/sb-src/sb", "state": "/home/u/sandbox/runtime/hermes.json"},
             "gdrive:hermes-backups", "20260711T000000Z-deadbeef",
         )
-        self.assertIn('SANDBOX = pathlib.Path("/home/u/sandbox")', command)
-        marker = "python3 - <<'PY'"
-        start = command.index(marker) + len(marker) + 1
-        end = command.rindex("\nPY\n")
-        generated = command[start:end]
+        self.assertNotIn("<<'PY'", command)
+        self.assertIn("base64.b64decode(sys.argv[1])", command)
+        encoded = command.rsplit(" ", 1)[-1].strip()
+        generated = base64.b64decode(encoded).decode()
+        self.assertIn('SANDBOX = pathlib.Path("/home/u/sandbox")', generated)
+        command = generated
         compile(generated, "<drive-backup>", "exec")
         self.assertIn('f"{HOME}/.hermes"', command)
         self.assertIn('f"{HOME}/.config/gh"', command)
@@ -2368,7 +2398,7 @@ class TestRemoteCommands(unittest.TestCase):
         get_remote.return_value = self.entry
         ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox\n"),
-            _completed(stdout="completed\n0\nfinished\n"),
+            _completed(stdout="completed\n0\noutput\t11\t3\t8\nfinished\n"),
             _completed(stdout=json.dumps({"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {
                 "0123456789abcdef": {"state": "running"},
             }})),
@@ -2378,6 +2408,8 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertEqual(out["status"], "completed")
         self.assertEqual(out["exit_code"], 0)
         self.assertEqual(out["stdout"], "finished")
+        self.assertEqual(out["next_offset"], 11)
+        self.assertFalse(out["truncated"])
 
     @patch("sandbox.core._hermes.remote.ssh_run")
     @patch("sandbox.core._hermes.remote.get_remote")
@@ -2393,6 +2425,7 @@ class TestRemoteCommands(unittest.TestCase):
         ]
         out = hermes.job_kill("test", "0123456789abcdef")
         self.assertTrue(out["killed"])
+        self.assertEqual(out["status"], "cancelled")
         self.assertIn("kill -- -", ssh_run.call_args_list[1].args[1])
 
     @patch("sandbox.core._hermes.remote.ssh_run")
@@ -2555,6 +2588,31 @@ class TestRemoteCommands(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertNotIn("cron_result_protocol_error", out["data"]["reasons"])
         self.assertEqual(out["data"]["cron"]["recovered_protocol_results"], ["job-1"])
+
+    def test_health_does_not_recover_terminal_marker_without_transition(self):
+        entry = {**self.entry, "mcp_service": {"service_name": "sandbox-mcp-remote.service"}}
+        state = {"schema_version": 1, "repositories": {}, "gates": {}, "sessions": {}}
+        diagnostic = {"ok": True, "data": {"checks": {}}, "error": None}
+        service = {"installed": True, "enabled": True, "active": True, "linger": True,
+                   "ownership": "proven", "listener_state": "expected", "listener_expected": True,
+                   "auth_state": "ok", "authenticated": True}
+        observed = {"jobs": [{"id": "job-1", "name": "catalog-job", "last_status": "error",
+                                "last_run_at": None, "last_error": "RuntimeError: COMPLETED_SPEC_TASK"}]}
+        with patch.object(hermes, "doctor", return_value=diagnostic), \
+             patch.object(hermes, "_require_remote", return_value=entry), \
+             patch.object(hermes, "_paths", return_value={"state": "/tmp/hermes.json"}), \
+             patch.object(hermes, "_remote_state_read", return_value=state), \
+             patch.object(hermes, "_ssh", return_value=_completed(stdout="active\nyes\nenabled\n")), \
+             patch.object(hermes, "_gateway_ownership", return_value={"healthy": True, "conflict": False}), \
+             patch.object(hermes, "_cron_snapshot", return_value=observed), \
+             patch.object(hermes, "_worktree_snapshot", return_value=[]), \
+             patch.object(hermes, "reconciliation_plan", return_value={"changes": False, "catalog_fingerprint": "a" * 64}), \
+             patch.object(hermes.remote, "remote_mcp_service_status", return_value=service):
+            out = hermes.health("test")
+        self.assertFalse(out["ok"])
+        self.assertIn("cron_failure", out["data"]["reasons"])
+        self.assertIn("cron_result_protocol_error", out["data"]["reasons"])
+        self.assertEqual(out["data"]["cron"]["recovered_protocol_results"], [])
 
     @patch("sandbox.core._hermes.subprocess.run")
     @patch("sandbox.core._hermes.remote.ssh_run")

@@ -6,13 +6,16 @@ logic (spec FR-017). Run from the repo root:
     .cli-venv/bin/python -m unittest discover -s tests -v
 """ 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,13 +50,28 @@ class TestParseFindings(unittest.TestCase):
         self.assertEqual(findings[2]["file"],
                          "/var/www/html/wp-content/plugins/demo/includes/bar.php")
 
-    def test_ignores_stray_non_json_lines(self):
+    def test_rejects_stray_non_plugin_check_output(self):
         noisy = "some docker-compose debug line\n" + SAMPLE_OUTPUT + "\ntrailing noise\n"
-        findings = pc._parse_findings(noisy)
-        self.assertEqual(len(findings), 3)
+        with self.assertRaises(pc.PluginCheckOutputError):
+            pc._parse_findings(noisy)
 
-    def test_empty_output_yields_no_findings(self):
-        self.assertEqual(pc._parse_findings(""), [])
+    def test_rejects_empty_output(self):
+        with self.assertRaises(pc.PluginCheckOutputError):
+            pc._parse_findings("")
+
+    def test_plain_empty_array_is_a_valid_zero_finding_result(self):
+        self.assertEqual(pc._parse_findings("[]\n"), [])
+
+    def test_rejects_malformed_or_unrecognised_findings(self):
+        for output in (
+            "FILE: includes/Foo.php\nnot-json\n",
+            "FILE: includes/Foo.php\n{}\n",
+            'FILE: includes/Foo.php\n[{"type":"NOTICE","code":"x"}]\n',
+            'FILE: includes/Foo.php\n[{"type":"ERROR"}]\n',
+            "FILE: includes/Foo.php\n",
+        ):
+            with self.subTest(output=output), self.assertRaises(pc.PluginCheckOutputError):
+                pc._parse_findings(output)
 
     def test_root_converts_host_absolute_paths_to_relative(self):
         # Real bug found via live testing: sandbox bind-mounts plugin source at
@@ -350,6 +368,52 @@ class TestRunWpPluginCheck(unittest.TestCase):
             self.assertEqual(call_args[1].get("check"), False)
 
 
+class TestFirstRunJsonResult(unittest.TestCase):
+    def _command_patches(self, root: Path):
+        fake_core = SimpleNamespace(
+            load_project_config=lambda _path: {"root": str(root), "plugins_resolved": {}}
+        )
+        return (
+            patch.object(pc, "_core", return_value=fake_core),
+            patch.object(pc, "_resolve_plugin_check_config", return_value={
+                "slug": "demo", "exclude_directories": [],
+                "version_file": "demo.php", "baseline_file": "plugin-check-baseline.json",
+            }),
+            patch.object(pc, "ensure_instance", return_value={"instance": "demo"}),
+        )
+
+    def test_missing_baseline_is_a_successful_non_gating_json_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            args = SimpleNamespace(project_dir=str(root), json=True, update=False)
+            output = io.StringIO()
+            core, config, instance = self._command_patches(root)
+            with core, config, instance, \
+                 patch.object(pc, "_run_wp_plugin_check", return_value=SAMPLE_OUTPUT), \
+                 redirect_stdout(output):
+                pc.cmd_plugin_check({}, args)
+
+            result = json.loads(output.getvalue())
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["baseline_exists"])
+            self.assertEqual(result["new_count"], 0)
+            self.assertEqual(result["violations"], [])
+            self.assertIn("no baseline exists", result["message"])
+            self.assertIsNone(result["error"])
+
+    def test_unrecognised_output_fails_before_generating_a_false_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            args = SimpleNamespace(project_dir=str(root), json=True, update=False)
+            core, config, instance = self._command_patches(root)
+            with core, config, instance, \
+                 patch.object(pc, "_run_wp_plugin_check", return_value="not plugin check JSON"), \
+                 patch.object(pc, "die", side_effect=SystemExit) as die:
+                with self.assertRaises(SystemExit):
+                    pc.cmd_plugin_check({}, args)
+            self.assertIn("unrecognised output", die.call_args.args[0])
+
+
 class TestRenderReport(unittest.TestCase):
     BASE_META = {
         "plugin_slug": "my-test-plugin", "plugin_version": "1.2.3",
@@ -464,6 +528,24 @@ class TestRunPluginCheckMcpWrapper(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["action"], "update")
         self.assertIn("timed out", result["error"])
+
+    def test_missing_baseline_payload_remains_a_non_gating_success(self):
+        module = self._load_tool_module()
+        payload = {
+            "ok": True, "action": "check", "plugin_slug": "demo",
+            "errors": 3, "warnings": 1, "baseline_total": 0, "new_count": 0,
+            "violations": [], "baseline_exists": False,
+            "message": "no baseline exists yet — run with --update", "error": None,
+            "report_path": "tests/test-results/plugin-check-report.html",
+        }
+        with patch.object(module, "_run_sandbox_json", return_value={
+            "timed_out": False, "returncode": 0, "stdout": "", "stderr": "",
+            "payload": payload,
+        }):
+            result = module.run_plugin_check("/tmp/project")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["baseline_exists"])
+        self.assertIn("no baseline exists", result["message"])
 
 
 if __name__ == "__main__":

@@ -434,3 +434,8 @@ feature requirements rather than treated as documentation-only follow-up.
 - [X] T153 [US3] Run disposable remote WordPress integration/E2E and reusable-workspace reset/destroy acceptance with separate runtime state and retained failure output per FR-023 through FR-030 and SC-004 through SC-008
 - [X] T154 [US4] Run disposable remote CI compatible/incompatible workflow acceptance, including matrix/dependency result inspection, safe-mode differences, artifacts, retry, and cleanup per FR-031 through FR-037 and SC-009 (evidence: implementation-evidence.md, T154 section)
 - [X] T155 [Phase 8] Reconcile every spec 032 checkbox and implementation-evidence entry against current live remote results, retain only evidence actually observed, run the full regression suite, and record completion/remaining gates per FR-040 and SC-010 (evidence: implementation-evidence.md, T155 section)
+
+## Phase 11: Outstanding live measurement proofs
+
+- [ ] T156 [US1/US2] On an approved disposable provisioned remote, run 100 controlled caller-disconnect/reconnect submissions and retain only sanitized job IDs, terminal-or-reconciled lifecycle counts, and cursor duplicate results to prove SC-002 and SC-003.
+- [ ] T157 [US2] On an approved reachable provisioned remote, measure active-job status latency and retain sanitized lifecycle/liveness/deadline/last-activity evidence proving the SC-004 five-second target.

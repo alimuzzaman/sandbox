@@ -246,3 +246,22 @@ proof-gated, the default is not (spec FR-029 - FR-033; constitution VI).
 - Every test task must fail for the intended missing behavior before implementation.
 - All runtime-touching validation uses `./sb`; no raw resolver or process commands in user workflows.
 - Verified logical groups are committed and pushed on the active non-`main` branch.
+
+## Phase 8: Convergence
+
+- [X] T066 Reconcile the 038 evidence index to distinguish harness-only live resolver
+      conformance from ordinary production support without extending any live-proof claim
+      (documentation reconciliation)
+- [ ] T067 Define and implement a non-forgeable production qualification path for a
+      live-proven resolver adapter, then verify normal `./sb domains use systemd-resolved`
+      setup can adopt only within its evidenced constraints (FR-027, FR-031; missing)
+- [ ] T068 Resolve the managed-Linux default-path gap: implement and prove a
+      Sandbox-owned default resolution path for supported systemd-resolved/NetworkManager
+      hosts, or obtain an approved scope change before narrowing FR-029 and SC-011
+      (FR-029, SC-011; missing)
+- [ ] T069 Prove default Sandbox-owned resolution on a Linux host with a plain
+      `/etc/resolv.conf`, including fresh DNS, HTTP through the default ingress, and
+      repeatability without a per-port-only result (T065, SC-011; missing host proof)
+- [ ] T070 Capture the remaining resolver host-proof gates: owner change between apply and
+      cleanup, two-project wildcard shared-owner release, and the exact-name-only negative
+      multisite case (FR-015, FR-020, SC-006; missing host proof)

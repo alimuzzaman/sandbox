@@ -75,3 +75,11 @@ skill roots = repo `skills/`, `<focused-plugin>/.claude/skills/`, `~/.claude/ski
 
 US1 (T001-T006) — the agent can persist a skill and it's discoverable — is the
 minimal viable increment.
+
+## Phase 8: Convergence
+
+- [ ] T016 Propagate MCP `project_dir` through the skill resolver and CLI invocation, and make `load_skill` resolve the enabled precedence winner (project > personal > sandbox) per FR-004 / SC-003 (partial)
+- [ ] T017 Refuse `on_conflict="replace"` for an existing sandbox built-in skill, while preserving explicit rename behavior, per FR-003 / US1/AC3 (partial)
+- [ ] T018 Complete the enabled-only skill catalog surfaces (`list_skills`, `focus_get`, `load_context`, CLI list/show) and return the catalog source/path contract per FR-004 / FR-009 (partial)
+- [ ] T019 Return structured MCP skill-operation outcomes (`slug`, `path`, `action` or conflict details) per contracts/cli-contract.md / SC-001 (partial)
+- [x] T020 Add the MCP startup catalog snapshot and `list_skills`/`load_skill` guidance in `mcp/wp-server/app.py` per FR-004 / plan: startup catalog snapshot. **DONE:** enabled built-ins are snapshotted at startup; callers use `list_skills(project_dir=...)` for the current enabled catalog and `load_skill` only after selection.

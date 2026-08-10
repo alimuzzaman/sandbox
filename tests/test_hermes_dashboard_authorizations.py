@@ -105,6 +105,22 @@ class TestDashboardAuthorizationCore(unittest.TestCase):
         with self.assertRaises(core.AuthorizationError):
             core.valid_reason(123)
 
+    def test_stored_requests_require_canonical_review_fields_and_fingerprint(self):
+        state = core.new_state()
+        catalog = {"job": {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}}
+        item = core.create_request(state, catalog, "job", "preview-overlay", "https://example.test", "safe", 60, "op")
+        item["replay_origin"] = "https://EXAMPLE.test"
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state(state)
+        item["replay_origin"] = "https://example.test"
+        item["fingerprint"] = "0" * 64
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state(state)
+        item["fingerprint"] = core.fingerprint("job", "preview-overlay", "https://example.test", "safe")
+        item["blocker"] = "authorization=not-safe"
+        with self.assertRaises(core.AuthorizationError):
+            core.normalize_state(state)
+
     def test_state_write_rejects_a_stale_digest(self):
         state = core.new_state()
         with tempfile.TemporaryDirectory() as directory:
@@ -342,6 +358,32 @@ class TestDashboardAuthorizationInstaller(unittest.TestCase):
 
 
 class TestDashboardAuthorizationAuth(unittest.TestCase):
+    @staticmethod
+    def _plugin(module_name: str):
+        class Router:
+            def get(self, *_args, **_kwargs): return lambda fn: fn
+            def post(self, *_args, **_kwargs): return lambda fn: fn
+        class HttpError(Exception):
+            def __init__(self, status_code, detail): self.status_code, self.detail = status_code, detail
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.APIRouter, fake_fastapi.HTTPException, fake_fastapi.Request = Router, HttpError, object
+        plugin_path = ROOT / "sandbox/hermes/dashboard_authorizations/dashboard/plugin_api.py"
+        old_fastapi = sys.modules.get("fastapi")
+        sys.modules["fastapi"] = fake_fastapi
+        spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+        plugin = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(plugin)
+        return plugin, HttpError, old_fastapi
+
+    @staticmethod
+    def _unload_plugin(module_name: str, old_fastapi):
+        sys.modules.pop(module_name, None)
+        if old_fastapi is None:
+            sys.modules.pop("fastapi", None)
+        else:
+            sys.modules["fastapi"] = old_fastapi
+
     def test_plugin_requires_hermes_authenticated_session(self):
         class Router:
             def get(self, *_args, **_kwargs): return lambda fn: fn
@@ -455,6 +497,51 @@ class TestDashboardAuthorizationAuth(unittest.TestCase):
                 sys.modules.pop("fastapi", None)
             else:
                 sys.modules["fastapi"] = old_fastapi
+
+    def test_list_is_observational_and_reports_effective_expiry(self):
+        module_name = "dashboard_authorization_plugin_list_test"
+        plugin, _, old_fastapi = self._plugin(module_name)
+        try:
+            job = {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}
+            state = core.new_state()
+            item = core.create_request(state, {"job": job}, "job", "preview-overlay",
+                                       "https://example.test", "safe", 60, "operator")
+            item["expires_at"] = "2000-01-01T00:00:00+00:00"
+            with tempfile.TemporaryDirectory() as directory:
+                plugin.STATE = Path(directory) / "state.json"
+                core.write_state(plugin.STATE, state)
+                plugin.write_state = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("GET wrote state"))
+                request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(auth_required=False)),
+                                                state=types.SimpleNamespace(session=None))
+                response = asyncio.run(plugin.list_requests(request))
+                self.assertEqual(response["requests"][0]["status"], "expired")
+                self.assertEqual(core.read_state(plugin.STATE)["authorizations"]["requests"][item["id"]]["status"], "pending")
+        finally:
+            self._unload_plugin(module_name, old_fastapi)
+
+    def test_tampered_request_is_rejected_before_cron_or_prompt_mutation(self):
+        module_name = "dashboard_authorization_plugin_tamper_test"
+        plugin, HttpError, old_fastapi = self._plugin(module_name)
+        try:
+            job = {"name": "job", "kind": "agent", "enabled": True, "prompt": "safe"}
+            state = core.new_state()
+            item = core.create_request(state, {"job": job}, "job", "preview-overlay",
+                                       "https://example.test", "safe", 60, "operator")
+            item["fingerprint"] = "0" * 64
+            plugin._actor = lambda _request: "operator"
+            plugin._cron_jobs = lambda: (_ for _ in ()).throw(AssertionError("cron read"))
+            plugin.subprocess = types.SimpleNamespace(run=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt edit")),
+                                                       SubprocessError=subprocess.SubprocessError)
+            async def request_json(): return {"confirm": True}
+            request = types.SimpleNamespace(json=request_json)
+            with tempfile.TemporaryDirectory() as directory:
+                plugin.STATE = Path(directory) / "state.json"
+                plugin.STATE.write_text(json.dumps(state))
+                with self.assertRaises(HttpError) as caught:
+                    asyncio.run(plugin.approve(item["id"], request))
+                self.assertEqual(caught.exception.status_code, 400)
+        finally:
+            self._unload_plugin(module_name, old_fastapi)
 
 
 if __name__ == "__main__":

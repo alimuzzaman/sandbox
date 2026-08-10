@@ -433,6 +433,7 @@ and resolves the target instance from the registry — booting one if needed.
 | `http_fetch` | Lightweight anonymous HTTP probe — status, headers, body, redirects |
 | `visit` | Headless Chromium; auto-logs in on `/wp-admin/`. Returns status + DOM + iframes + console + network + optional screenshot |
 | `db_query` | Run SQL — writes require `mutate: true` |
+| `snapshot` / `wp_reset` | Capture a named snapshot (`db_only: true` skips uploads) / reset to protected `@install` (`confirm: true`) |
 | `tail_log` | Tail `wp-content/debug.log` |
 | `fs_read` / `fs_write` / `fs_list` | Read/write files under the instance's WP dir |
 | `mail_list` / `mail_get` | Read Mailpit (test SMTP inbox) |
@@ -510,8 +511,9 @@ sandbox test [-- <args>]  # run the plugin's phpunit tests (pass extra phpunit a
 ./sb focus <plugin>       # mark which plugin is focused (for Claude)
 ./sb open [admin|site|mail]  # open in browser (default: admin)
 ./sb visit <url> [...]    # load URL in headless Chromium, report DOM/console/iframes
-./sb snapshot <name>      # save DB + uploads (fast bug repro / QA)
+./sb snapshot <name> [--db-only]  # save DB + uploads, or fast DB-only state
 ./sb restore <name>       # restore a saved snapshot
+./sb reset --yes          # restore the protected post-install DB baseline
 ./sb update               # git pull the project repo this instance tracks
 ./sb xdebug on|off        # toggle step-debug (port 9003, host trigger)
 ./sb zip [--dev|--clean]  # build the distributable plugin zip (see docs/plugin-zip.md)

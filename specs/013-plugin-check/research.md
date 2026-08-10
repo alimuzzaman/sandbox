@@ -13,7 +13,7 @@ with NO `slug` key at all:
 
 ```python
 "pluginCheck": {
-    "excludeDirectories": [],                   # default: no exclusions
+    "excludeDirectories": [],                   # empty/unset falls back to .distignore
     "versionFile": None,                        # default: guessed "<slug>.php"
     "baselineFile": "plugin-check-baseline.json",
 },
@@ -22,7 +22,9 @@ with NO `slug` key at all:
 **Rationale**: matches the existing `"tests": {"suite": "auto"}` precedent exactly — a
 nested settings object for one feature area, picked up automatically by the existing
 generic `_deep_merge` (project config overrides these per-key, no new merge logic
-needed).
+needed). The object is optional for Plugin Check itself: absence has the same resolved
+defaults as an empty object, so projects need not add redundant feature-specific
+configuration merely to check their own plugin.
 
 **Revised, twice, after initial implementation** (see spec.md's FR-002 amendment for the
 full story): the FIRST design had `pluginCheck.slug` as a required key with no default.

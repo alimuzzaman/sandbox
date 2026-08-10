@@ -516,12 +516,24 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     ssl_previous: dict[str, str | None] = {}
 
     def rollback() -> None:
+        failures: list[str] = []
         for change in reversed(changes):
-            client.restore_record(change["zone_id"], change["previous"], change["created_id"])
+            try:
+                client.restore_record(change["zone_id"], change["previous"], change["created_id"])
+            except Exception as exc:
+                failures.append(f"DNS restore for {change['zone_id']}: {exc}")
         for zone_id, mode in ssl_previous.items():
-            if mode and mode != "strict":
-                client.ssl_mode(zone_id, mode)
-        _restore_host_caddy(entry, caddy_name, previous_caddy)
+            try:
+                if mode and mode != "strict":
+                    client.ssl_mode(zone_id, mode)
+            except Exception as exc:
+                failures.append(f"SSL mode restore for {zone_id}: {exc}")
+        try:
+            _restore_host_caddy(entry, caddy_name, previous_caddy)
+        except Exception as exc:
+            failures.append(f"Caddy restore: {exc}")
+        if failures:
+            raise hosting.HostingError("; ".join(failures))
 
     def apply() -> None:
         _run_compose(entry, validated, target, runtime_dir, runtime)

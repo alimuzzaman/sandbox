@@ -15,13 +15,15 @@ scope checks. All checks are live (constitution IV).
 
 ## 3. Load on match
 
-- `load_skill("repro-flaky-import")` returns the full SKILL.md + parsed frontmatter.
+- `load_skill("repro-flaky-import", project_dir=…)` returns the full
+  precedence-selected SKILL.md + parsed frontmatter.
 
 ## 4. Conflict paths
 
 - Re-write the same title with `on_conflict="fail"` → returns conflict + a suggested free slug.
 - `on_conflict="rename"` → writes `repro-flaky-import-2`.
-- `on_conflict="replace"` on a same-scope skill → overwrites; on a built-in → refused.
+- `on_conflict="replace"` on a same-scope project/personal skill → overwrites;
+  on a built-in sandbox skill → refused.
 
 ## 5. Precedence
 
@@ -35,4 +37,5 @@ scope checks. All checks are live (constitution IV).
 
 ## 7. skill-creator
 
-- `load_skill("skill-creator")` returns guidance on frontmatter, description-as-trigger, the foldered layout rule, and the write→load→verify loop.
+- `load_skill("skill-creator", project_dir=…)` returns guidance on frontmatter,
+  description-as-trigger, the foldered layout rule, and the write→load→verify loop.

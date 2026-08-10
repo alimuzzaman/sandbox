@@ -41,7 +41,7 @@ lower-severity tier that isn't a useful regression signal at the volume typicall
 {
   "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
   "pluginCheck": {
-    "excludeDirectories": ["tests", "docs"],     // optional, default: none
+    "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default: "<slug>.php"
     "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
   }
@@ -55,6 +55,12 @@ self-check tool only, matching the reference implementation this was ported from
 hardcodes its own plugin's name as a literal, with no config concept of checking a
 different plugin at all). A directory name/slug that doesn't look like a valid WP plugin
 slug still gets a clear `die()` message rather than a silent guess.
+
+The `pluginCheck` object itself is optional. With no object, Plugin Check still runs
+using the resolved project slug, `<slug>.php`, and `plugin-check-baseline.json`; it uses
+entries from `.distignore` as excludes when that file exists, otherwise no exclusions.
+A non-empty `excludeDirectories` list overrides `.distignore`; an absent or empty list
+uses the fallback.
 
 The `plugin-check` WordPress.org plugin itself installs the same way any other plugin
 dependency does — it's already in sandbox's own default scaffold plugin list
@@ -75,6 +81,11 @@ Exit codes: `0` on gate pass (or successful `--update`); `1` on gate failure (ne
 finding(s) beyond baseline) OR an infrastructure failure (instance unreachable, plugin
 not installed/active, or an unresolvable plugin slug).
 
+A first run with no baseline is a successful, non-gating setup state: `ok` is `true`,
+`new_count` is `0`, `baseline_exists` is `false`, and `message` tells the caller to run
+`--update`. By contrast, malformed or unrecognised Plugin Check output is rejected as an
+infrastructure failure; it is never treated as an empty finding set.
+
 MCP tool, mirroring `run_tests`'s calling convention:
 
 ```python
@@ -91,6 +102,8 @@ Both interfaces return the identical JSON shape:
   "errors": 198, "warnings": 42,
   "baseline_total": 198, "new_count": 0,
   "violations": [],                // only populated on gate failure
+  "baseline_exists": true,          // false on a first, non-gating run
+  "message": null,                 // setup guidance when baseline_exists is false
   "report_path": "tests/test-results/plugin-check-report.html",
   "error": null
 }
@@ -168,7 +181,7 @@ absolute- and relative-path cases, plus the `TestReadDistignoreDirectories` and
 `TestResolvePluginCheckConfig` fallback-priority tests). A 2026-07-16 live run against
 `alims-builder-authoring` confirmed the current relative-path format stays in project
 identity space: the gate reported 17 errors and 8 warnings, with no `../sandbox` keys.
-That project has no baseline, so the expected gate failure remains; establishing a
-baseline is a separate, explicitly approved acceptance action. The
+That project has no baseline, so the expected first-run result is non-gating setup
+guidance; establishing a baseline is a separate, explicitly approved acceptance action. The
 `specs/013-plugin-check/quickstart.md` file documents the from-scratch scratch-project
 verification scenario.

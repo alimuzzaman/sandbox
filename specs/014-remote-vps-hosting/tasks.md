@@ -206,3 +206,7 @@ Task: "Unit test: provisioning idempotency in tests/test_remote.py"
 - Per Constitution Principle IV, T044 (the real-VPS live-verification pass) is NOT
   optional polish — the feature is unproven without it, no matter how green the unit
   suite is.
+
+## Phase 7: Convergence
+
+- [x] T045 Pin the MCP SDK to the verified FastMCP v1 transport contract and add a fresh-venv compatibility test per FR-018 (partial).

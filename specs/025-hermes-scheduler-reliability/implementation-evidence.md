@@ -116,3 +116,12 @@ Learning delta: Added durable safeguards for positional CLI compatibility, false
 
 - A live review found that the automatic Lenzora dispatcher was healthy but had no ready work, quota requeue had no marked quota block, and the Terra worker consumed 51 seconds to correctly report `NO_APPROVED_WORK` after every approved Sandbox task was complete.
 - The committed catalog now keeps only `lenzora-kanban-dispatch` active. It preserves quota requeue and the Sandbox Terra worker as disabled reviewed definitions, so they can be deliberately re-enabled and reconciled when their real prerequisites exist.
+
+## Artifact reconciliation (2026-08-10, local-only)
+
+The preceding live records are historical evidence, not a claim about the
+current declared catalog. The current committed catalog enables
+`codex-quota-requeue`, `authorization-expiry`, and `sandbox-spec-backlog`, and
+declares both Lenzora jobs disabled. This conflicts with the earlier
+one-active-Lenzora narrative. No catalog edit, job enablement, remote read,
+reconciliation, or live acceptance was performed to resolve that policy choice.

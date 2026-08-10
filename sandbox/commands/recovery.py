@@ -23,6 +23,7 @@ def configure_recovery(parser) -> None:
     parser.add_argument("--keep-count", type=int, default=1)
     parser.add_argument("--minimum-age-days", type=int, default=0)
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--scheduled", action="store_true", help="reserved for an enabled reviewed timer")
     parser.add_argument("--json", action="store_true")
 
 
@@ -78,6 +79,10 @@ def _emit(payload: dict, as_json: bool) -> None:
         candidates = tuple(data.get("candidates") or ())
         print(f"  protected: {', '.join(protected) or '(none)'}")
         print(f"  candidates: {', '.join(candidates) or '(none)'}")
+        legacy = tuple(data.get("legacy_candidates") or ())
+        print(f"  legacy candidates: {', '.join(legacy) or '(blocked/none)'}")
+        if data.get("legacy_candidate_status"):
+            print(f"  legacy status: {data['legacy_candidate_status']}")
         for item in data.get("unclassified") or ():
             if isinstance(item, dict):
                 print(f"  unclassified: {item.get('id', '(unknown)')} ({item.get('reason', 'unknown')})")
@@ -116,13 +121,18 @@ def cmd_recovery(_cfg, args) -> None:
         elif not os.environ.get("RECOVERY_PASSPHRASE"):
             payload = result(False, "create", remote=args.remote,
                              error=RecoveryError("RECOVERY_PASSPHRASE is not available", "missing_passphrase"))
-        elif not args.backup_id:
+        elif not args.backup_id and not args.scheduled:
             payload = result(False, "create", remote=args.remote,
                              error=RecoveryError("--backup-id is required", "missing_backup_id"))
         elif not args.profile:
             payload = result(False, "create", remote=args.remote,
                              error=RecoveryError("at least one --profile is required", "missing_profiles"))
         else:
+            if args.scheduled:
+                payload = result(False, "create", remote=args.remote, error=RecoveryError(
+                    "scheduled capture requires configured owned materialization", "capture_not_ready"))
+                _emit(payload, args.json)
+                raise SystemExit(1)
             try:
                 artifacts = _parse_artifacts(getattr(args, "artifact", []))
                 payload = service.create(args.backup_id, artifacts, tuple(args.profile),

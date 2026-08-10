@@ -4,7 +4,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 MCP_ROOT = Path(__file__).parent.parent / "mcp" / "wp-server"
@@ -108,6 +108,36 @@ class JobMcpTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True, "passed": None, "summary": "remote test job accepted",
                                   "output": "", "mode": "unit", "job_id": "b" * 32,
                                   "lifecycle": "accepted", "workspace": "php", "remote": "vps"})
+
+    def test_remote_run_tests_reports_config_resolved_mode_not_auto(self):
+        wp = _load_wp_tool()
+        target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 workspace_label="php", runtime_policy={})
+        dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target)}
+        submissions = []
+        transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {
+            "ok": True, "job_id": "c" * 32,
+        })
+        config = SimpleNamespace(load_project_config=lambda _path, label=None: {
+            "tests": {"suite": "unit"},
+        })
+        with patch.object(wp, "_core", return_value=config), \
+                patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
+                patch.object(wp, "_remote_job_transport", return_value=transport):
+            result = wp.run_tests("/project", remote="vps", workspace="php", timeout_seconds=120)
+
+        self.assertEqual(result["mode"], "unit")
+        self.assertEqual(submissions[0].argv[:3], ("sb", "test", "unit"))
+
+    def test_wp_cli_job_rejects_malformed_id_before_instance_resolution(self):
+        wp = _load_wp_tool()
+        instance = Mock()
+        wp._project_instance = instance
+
+        result = wp.wp_cli_job("../not-a-job", project_dir="/project")
+
+        self.assertEqual(result, {"ok": False, "error": "invalid job id"})
+        instance.assert_not_called()
 
     def test_remote_instance_exec_uses_durable_runtime_exec_job(self):
         from tools import jobs, runtime

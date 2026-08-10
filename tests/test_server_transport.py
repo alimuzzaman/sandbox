@@ -19,6 +19,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 MCP_DIR = ROOT / "mcp" / "wp-server"
@@ -84,6 +85,14 @@ class TestStreamableHttpSafetyGates(unittest.TestCase):
     def test_refuses_0_0_0_0_bind(self):
         with self.assertRaises(SystemExit):
             server._run_streamable_http("0.0.0.0", 9174, "sekrit")
+
+    def test_pinned_fastmcp_builds_the_streamable_http_app(self):
+        """Exercise the v1 API used by the remote service without opening a port."""
+        with patch("uvicorn.run") as run:
+            server._run_streamable_http("127.0.0.1", 9174, "sekrit", "https://control.example.test")
+        app = run.call_args.args[0]
+        self.assertEqual(run.call_args.kwargs, {"host": "127.0.0.1", "port": 9174})
+        self.assertTrue(any(getattr(route, "path", None) == "/diagnostics" for route in app.routes))
 
 
 if __name__ == "__main__":

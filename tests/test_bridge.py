@@ -74,6 +74,16 @@ class TestBridgeHandle(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual([s["name"] for s in data["snapshots"]], ["t1"])
 
+    def test_list_reports_protected_install_baseline_separately(self):
+        self._mksnap("__install__")
+        (self.tmp / "__install__" / "META").write_text("mode=db-only\n")
+        code, data = self.call("GET", "/snapshots")
+        self.assertEqual(code, 200)
+        self.assertEqual(data["snapshots"], [])
+        self.assertEqual(data["baseline"], {
+            "name": "@install", "size_kb": 0, "mode": "db-only", "protected": True,
+        })
+
     # --- take ---
     def test_take_valid_202(self):
         code, data = self.call("POST", "/snapshot", {"name": "good"})

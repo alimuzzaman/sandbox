@@ -100,7 +100,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `visit` | Headless Chromium; auto-login on `/wp-admin/`. |
 | `pixelmatch_diff` | Diff two PNGs (reference vs build) → mismatch % + per-band locator (`worstBands`). |
 | `db_query` | SQL (`mutate: true` for writes). |
-| `wp_reset` | Reset DB to `@install` baseline (`confirm: true` required). |
+| `snapshot` / `wp_reset` | Capture a named snapshot (`db_only: true` skips uploads) / reset DB to `@install` (`confirm: true` required). |
 | `qm_capture` | Query Monitor data for a URL. |
 | `xdebug` | Toggle step-debugging. |
 | `tail_log` | Tail debug.log / php / fpm / nginx. |

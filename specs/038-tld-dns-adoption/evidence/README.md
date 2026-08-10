@@ -1,23 +1,25 @@
 # DNS adoption evidence index
 
-The default Sandbox-owned strategy is proven live on macOS. No resolver adapter is
-adoptable on any platform, so every ADOPTION artifact remains open — implementation tests
-alone never promote support.
+The default Sandbox-owned strategy is proven live on macOS. The Ubuntu
+systemd-resolved lifecycle is captured through the single-invocation conformance harness,
+but no resolver adapter is normally adoptable in production: implementation tests and
+harness attestations alone never promote support for ordinary CLI callers.
 
 | Scenario | Evidence | Status | Still required |
 |---|---|---|---|
 | Default Sandbox-owned resolution | `default-strategy.md` | live (macOS) | Linux run |
 | Persisted `.tst` and Compose fallback | `compatibility.md` | live (macOS) | Linux run |
 | Read-only quickstart baseline | `quickstart-run.md` | partial (macOS) | adoption lifecycle section |
-| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (Ubuntu 24.04) | — |
+| Ubuntu 24.04 systemd-resolved exact name | `systemd-resolved.md` | live (harness, Ubuntu 24.04) | production qualification remains open |
 | Cleanup, drift, and repeated cleanup | `cleanup.md` | live (Ubuntu 24.04) | owner change (needs a second resolver manager) |
 | Wildcard and shared-owner lifecycle | `wildcards.md` | live (Ubuntu 24.04) | the two-project shared-owner run |
 
 ## What the open items need
 
-T034 is captured: exact-name adoption, fresh lookup, HTTP through the ingress, repeat
-apply, and cleanup all pass live on Ubuntu 24.04, and the run found and fixed five
-defects that made adoption impossible on any real host. The remaining items —
+T034 is captured in the harness: exact-name adoption, fresh lookup, HTTP through the
+ingress, repeat apply, and cleanup all pass live on Ubuntu 24.04, and the run found and
+fixed five defects that made adoption impossible on any real host. It does not promote
+ordinary CLI support. The remaining items —
 owner-change/drift/unreachable cleanup (T050) and the wildcard zone lifecycle (T055) —
 now have a working adapter to exercise; they need their own fixture runs.
 

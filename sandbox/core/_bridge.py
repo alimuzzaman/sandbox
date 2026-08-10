@@ -132,7 +132,8 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     if _is_herd_instance(instance):
         return 409, {"ok": False, "error": "unsupported", "reason": "herd"}
     _ok_name = _valid_snapshot_name  # applied to EVERY name the bridge turns into
-    from sandbox.commands.data import cmd_reset, cmd_snapshot, cmd_restore  # late: avoid cycle
+    from sandbox.commands.data import (_BASELINE_DIR, cmd_reset, cmd_snapshot,
+                                       cmd_restore)  # late: avoid cycle
     cfg = load_config()
 
     if method == "GET" and subpath == "/snapshots":
@@ -152,7 +153,17 @@ def _bridge_handle(method: str, instance: str, subpath: str,
                 size = sum(f.stat().st_size for f in e.rglob("*") if f.is_file())
                 snaps.append({"name": e.name, "size_kb": size // 1024,
                               "mode": mode, "meta": meta})
-        return 200, {"ok": True, "snapshots": snaps}
+        baseline_dir = root / _BASELINE_DIR
+        baseline = None
+        if (baseline_dir / "db.sql").exists():
+            meta_txt = ((baseline_dir / "META").read_text()
+                        if (baseline_dir / "META").exists() else "")
+            mode = next((ln[len("mode="):].strip() for ln in meta_txt.splitlines()
+                         if ln.startswith("mode=")), "db-only")
+            size = sum(f.stat().st_size for f in baseline_dir.rglob("*") if f.is_file())
+            baseline = {"name": "@install", "size_kb": size // 1024,
+                        "mode": mode, "protected": True}
+        return 200, {"ok": True, "snapshots": snaps, "baseline": baseline}
 
     if method == "POST" and subpath == "/snapshot":
         raw = (body.get("name") or "").strip()

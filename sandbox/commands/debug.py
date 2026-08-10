@@ -259,6 +259,18 @@ def cmd_test(cfg, args) -> None:
             die(result.message)
         print(result.data.get("output", ""), end="")
         return
+    # Resolve WordPress mode before target/capability selection.  In particular,
+    # an invalid explicit mode must fail without consulting a remote target (and
+    # therefore without its capability checks or deployment side effects).
+    try:
+        initial_mode = resolve_test_mode(
+            pconf["root"], configured=pconf.get("tests", {}).get("suite", "auto"),
+            explicit=getattr(args, "mode", None),
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        die(str(exc))
+    if getattr(args, "provision_only", False) and initial_mode == "unit":
+        die("--provision-only is only valid for integration test mode")
     # Remote is the project-level default when configured. Submit the explicit
     # test command to the durable remote runtime before touching local instance
     # state; the remote command uses --local to prevent recursive remote
@@ -278,14 +290,7 @@ def cmd_test(cfg, args) -> None:
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
     if selected_target.kind == "remote":
-        try:
-            mode = resolve_test_mode(
-                selected_target.project_root,
-                configured=pconf.get("tests", {}).get("suite", "auto"),
-                explicit=getattr(args, "mode", None),
-            )
-        except (AttributeError, TypeError, ValueError) as exc:
-            die(str(exc))
+        mode = initial_mode
         if getattr(args, "provision_only", False):
             die("--provision-only is only available for local integration harness setup")
         extra = [a for a in passthrough if a != "--"]

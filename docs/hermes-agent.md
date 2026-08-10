@@ -34,7 +34,12 @@ Hermes state manifest, model/profile defaults, `SOUL.md`, and memory files when
 present. It never includes provider or GitHub credentials, OAuth/session data,
 cookies, private keys, checkpoints, logs, databases, worktrees, or runtime
 binaries. Setup fails closed if the configured repository is unreachable or its
-manifest contains forbidden paths. Authentication must be completed separately
+manifest lacks the supported schema/revision or contains a symlink, forbidden
+path, or secret-like content. Restore stages allowlisted files and rolls the
+prior Hermes/runtime state back if its swap cannot complete. State repository
+mutations use a scoped lock and export a stable schema/revision manifest. Older
+automation may continue to use `hermes state setup --repo URL`; `--state-repo`
+is the explicit spelling. Authentication must be completed separately
 on a rebuilt remote.
 
 ## Google Drive full recovery
@@ -184,15 +189,23 @@ job, installs the committed scripts, and recreates exactly the reviewed catalog.
 A partial failure reports removed and created IDs and retains the protected
 backup so the same command can be rerun.
 
-The base catalog keeps one bounded Lenzora TODO worker active. It reads only
-repository-root `TODO.md`, advances at most one actionable `- [ ]` task per run
+The current committed catalog is a declaration, not proof of a live inventory:
+it enables codex-quota-requeue, authorization-expiry, and sandbox-spec-backlog,
+while lenzora-kanban-dispatch and lenzora-todo-task are disabled. The previously
+documented one-active-Lenzora policy conflicts with that declaration and remains
+an explicit operational policy choice; do not enable a job or infer a reconciled
+remote state from this documentation. The protected Lenzora live-acceptance task
+remains open.
+
+When the Lenzora TODO worker is explicitly enabled by a future approved policy,
+it reads only repository-root `TODO.md`, advances at most one actionable `- [ ]` task per run
 in a clean isolated Lenzora worktree, and reports `NO_TODO_WORK` when the file
 is absent or complete. It can bypass an item only when the item explicitly says
 that an unmet prerequisite blocks it; if every item is blocked, it reports
-`REVIEW_REQUIRED` without a mutation. The quota requeue, Kanban dispatcher, and Sandbox Terra worker remain
-disabled reviewed definitions: enable each only when its respective source of
-work exists, then reconcile so its managed worktree is current. Spark remains
-orchestration only; Luna remains read-only.
+`REVIEW_REQUIRED` without a mutation. Any future change to the enabled set must
+be separately reviewed against its source of work and reconciled only with the
+required explicit confirmation. Spark remains orchestration only; Luna remains
+read-only.
 
 For the Lenzora TODO worker only, reconciliation makes Sandbox's committed
 Spec-Kit templates, scripts, and Codex skill workflows available in the isolated
@@ -400,7 +413,10 @@ The local Sandbox MCP server also exposes `hermes_status(remote)` and
 available as `hermes_health`, `hermes_worktree_list`, and
 `hermes_gateway_converge`; mutating calls require `confirm=true`. Async runs return a Hermes job ID; the
 equivalent CLI operations are `sb hermes job status|kill`. Returned output is
-bounded and sanitized, including labelled and common bare provider/API,
+bounded, sanitized, and includes the next byte offset plus an honest
+truncation indicator. A kill returns `cancelling` until the detached process
+group has exited, then `cancelled`; it does not claim completion only because a
+signal was sent. Output includes labelled and common bare provider/API,
 OAuth, and cookie credential forms.
 
 ## V2 and V3 gates

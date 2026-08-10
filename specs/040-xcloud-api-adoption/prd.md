@@ -1,10 +1,10 @@
 # Product Requirements Draft: xCloud API Adoption
 
-**Status**: Discovery
+**Status**: Deferred
 
 **Created**: 2026-08-05
 
-**Last Refined**: 2026-08-05
+**Last Refined**: 2026-08-09
 
 **Input**: "we also need xcloud api suppots / check requirement" — expanded by the
 user to all four candidate scopes: deploy to an xCloud site, pull an xCloud site
@@ -23,6 +23,11 @@ specification.
 **Artifact Owner**: `speckit-refine`
 
 **Next Stage**: `speckit.prd.refine`
+
+> **Deferred on 2026-08-09 by owner decision.** Do not advance this track to
+> specification or implementation until the owner explicitly resumes it. The
+> unresolved product decisions and `NOT READY` gate below are intentionally
+> preserved for that future refinement.
 
 > This document captures product intent before formal specification. It must
 > not contain implementation plans, task breakdowns, contracts, or source-code
@@ -259,6 +264,7 @@ managed WordPress setup remains a deliberate later phase.
 
 | Decision | Choice | Rationale | Confirmed by |
 |----------|--------|-----------|--------------|
+| Track status | Deferred; no specification or implementation work proceeds | The owner directed Sandbox to defer xCloud integration and finish other outstanding work | User, 2026-08-09 |
 | Scope breadth | Reopened: pull-down is excluded, local ingress is constrained by the Docker/Caddy default, and Docker deployment is unsupported by the API contract | The prior "all four" choice no longer matches the refined scope or verified API boundary | Independent review, 2026-08-05 |
 | Target path | Reopened: the API-only Docker deployment path described by this draft is not exposed by the published contract | Git-site creation rejects Docker servers; Compose script content is not writable; Git deploy only pulls an already configured Git site | Independent review, 2026-08-05 |
 | Managed WordPress stack | Deferred to a later phase | User: "we will later add support for xcloud wordpress setup also" | User, 2026-08-05 |

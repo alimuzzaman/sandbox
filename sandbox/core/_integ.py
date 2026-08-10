@@ -35,9 +35,9 @@ def _build_mcp_entry(cfg: dict | None = None) -> dict:
     sb_on_path = shutil.which("sb")
     command = "sb" if sb_on_path else str(ROOT / "sb")
     entry = {"command": command, "args": ["mcp"]}
-    # Spec 009: if the base is explicitly overridden, bake it into the MCP
-    # registration so the (separate) server process resolves the SAME base as
-    # the CLI. When unset, both default to ~/sandbox — no env needed (FR-006/C4).
+    # Spec 009: an explicit override is baked into the MCP registration. When
+    # absent, both processes use the same persisted home-selection hint (or
+    # the shared ~/sandbox default), so no divergent state path is possible.
     home = os.environ.get("SANDBOX_HOME")
     if home:
         entry["env"] = {"SANDBOX_HOME": str(Path(home).expanduser().resolve())}

@@ -1,25 +1,36 @@
-"""`sb migrate` / `sb home` — relocate ALL machine-state under the single
-per-user base ($SANDBOX_HOME, default ~/sandbox) — spec 009.
+"""Safe relocation for the spec-009 per-user Sandbox base.
 
-Pure-data artifacts (wp-<inst>, snapshots, dl-cache, seeds, registry, test
-harness, proxy certs, sandbox.local.yml, .env.local, config.json) MOVE as-is.
-Baked artifacts (compose files, herd shims, Caddyfile, the tools venv) are
-REGENERATED/RECREATED for the new base, never moved. The move is idempotent and
-re-runnable; on conflict the base is authoritative (no merge).
+Pure data is copied to a same-filesystem staging path, verified, promoted, and
+only then removed from its source.  Generated artifacts are deliberately never
+moved: Compose, Herd shims, proxy routing files, and the tooling venv are
+rebuilt after the transfer.  The small journal makes an interrupted transfer
+resumable without ever treating a different destination as disposable.
 """
 from __future__ import annotations
+
+import filecmp
+import json
 import os
 import shutil
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 
 
-# Items directly under the legacy runtime dir that are REGENERATED (skip the move;
-# they're rebuilt from config for the new base). Everything else is pure data.
 _REGENERATED = {"compose", "herd-shims", ".venv-tools"}
+_PROXY_REGENERATED = {"Caddyfile", "proxy.yml"}
+_JOURNAL = ".migration-state.json"
+_LOCK = ".migration.lock"
+_AUTO_FINALIZE_ENV = "SANDBOX_AUTO_MIGRATION_FINALIZE"
+_PERSIST_PENDING_ENV = "SANDBOX_HOME_SELECTION_PENDING"
+
+
+class MigrationConflict(RuntimeError):
+    """A destination differs from the source and must be resolved by a human."""
 
 
 def _legacy_runtime() -> Path:
@@ -27,11 +38,14 @@ def _legacy_runtime() -> Path:
 
 
 def _new_base() -> Path:
-    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+    return BASE
+
+
+def _state_present(path: Path) -> bool:
+    return path.exists() and (not path.is_dir() or any(path.iterdir()))
 
 
 def _legacy_config_secrets() -> list[tuple[Path, Path]]:
-    """(src, dst) pairs for per-machine config/secrets consolidating under base."""
     base = _new_base()
     return [
         (ROOT / "sandbox.local.yml", base / "sandbox.local.yml"),
@@ -40,216 +54,371 @@ def _legacy_config_secrets() -> list[tuple[Path, Path]]:
     ]
 
 
-def _state_present(p: Path) -> bool:
-    return p.exists() and (not p.is_dir() or any(p.iterdir()))
+def _runtime_moves(source_runtime: Path, destination_runtime: Path) -> list[tuple[Path, Path]]:
+    """Return pure-data moves, excluding every baked-path artifact."""
+    moves: list[tuple[Path, Path]] = []
+    if not source_runtime.exists():
+        return moves
+    for item in sorted(source_runtime.iterdir()):
+        if item.name in _REGENERATED:
+            continue
+        if item.name == "proxy" and item.is_dir():
+            for child in sorted(item.iterdir()):
+                if child.name not in _PROXY_REGENERATED:
+                    moves.append((child, destination_runtime / "proxy" / child.name))
+            continue
+        moves.append((item, destination_runtime / item.name))
+    return moves
 
 
-def _plan(legacy_rt: Path, new_rt: Path) -> tuple[list, list]:
-    """Return (runtime_moves, config_moves) as (src, dst) lists."""
-    runtime_moves = []
-    if legacy_rt.exists():
-        for item in sorted(legacy_rt.iterdir()):
-            if item.name in _REGENERATED:
-                continue
-            runtime_moves.append((item, new_rt / item.name))
-    config_moves = [(s, d) for s, d in _legacy_config_secrets() if s.exists()]
-    return runtime_moves, config_moves
+def _plan(source_runtime: Path, destination_runtime: Path,
+          config_pairs: list[tuple[Path, Path]]) -> list[tuple[Path, Path]]:
+    return _runtime_moves(source_runtime, destination_runtime) + [
+        (source, destination) for source, destination in config_pairs if source.exists()
+    ]
 
 
-def _move(src: Path, dst: Path) -> None:
-    """Move src→dst preserving mode (shutil.move keeps it). Re-runnable: if dst
-    already exists (interrupted prior run) and src still does, prefer the dst that
-    is already in place and drop the stale src copy."""
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        # Already moved in a prior run; remove the leftover source.
-        if src.is_dir():
-            shutil.rmtree(src, ignore_errors=True)
-        else:
-            try:
-                src.unlink()
-            except OSError:
-                pass
+def _same_content(left: Path, right: Path) -> bool:
+    """Compare files/trees deeply before a retry can remove a source copy."""
+    if left.is_symlink() or right.is_symlink():
+        return left.is_symlink() and right.is_symlink() and os.readlink(left) == os.readlink(right)
+    if left.is_file() or right.is_file():
+        return left.is_file() and right.is_file() and filecmp.cmp(left, right, shallow=False)
+    if not left.is_dir() or not right.is_dir():
+        return False
+    comparison = filecmp.dircmp(left, right)
+    if comparison.left_only or comparison.right_only or comparison.funny_files:
+        return False
+    for name in comparison.common_files:
+        if not filecmp.cmp(left / name, right / name, shallow=False):
+            return False
+    return all(_same_content(left / name, right / name) for name in comparison.common_dirs)
+
+
+def _remove_source(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _stage_copy(source: Path, destination: Path) -> None:
+    """Copy source next to destination, verify it, then atomically promote it.
+
+    A failed copy never changes ``source``.  A pre-existing destination is only
+    accepted when it is an exact retry copy; anything else is a conflict.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        if not _same_content(source, destination):
+            raise MigrationConflict(
+                f"Conflict at {destination}: destination differs from {source}. "
+                "No source was removed and no merge was performed."
+            )
         return
-    shutil.move(str(src), str(dst))
-
-
-def cmd_migrate(cfg, args) -> None:
-    legacy_rt = _legacy_runtime()
-    base = _new_base()
-    new_rt = base / "runtime"
-
-    finalize = getattr(args, "finalize", False)
-    do_apply = getattr(args, "apply", False) or finalize
-
-    # --finalize: second pass after re-exec, with module constants recomputed
-    # against the now-populated base. Regenerate baked artifacts + verify.
-    if finalize:
-        _finalize(cfg)
-        return
-
-    legacy_has = _state_present(legacy_rt) and (legacy_rt / "registry.json").exists()
-    new_has = (new_rt / "registry.json").exists()
-
-    # Idempotent no-op: already migrated.
-    if new_has and not legacy_has:
-        ok(f"Already migrated — state lives under {base}. Nothing to do.")
-        return
-
-    # Conflict: both populated. Base is authoritative; never merge/overwrite.
-    if new_has and legacy_has:
-        die(f"Conflict: state exists BOTH under the base ({new_rt}) and in the "
-            f"repo ({legacy_rt}). The base is authoritative. Resolve manually "
-            f"(remove or archive {legacy_rt}) then re-run. No merge performed.")
-
-    if not legacy_has:
-        ok(f"No in-repo state to migrate; base is {base}. Nothing to do.")
-        return
-
-    runtime_moves, config_moves = _plan(legacy_rt, new_rt)
-
-    # Dry-run (default): show the plan, change nothing.
-    if not do_apply:
-        info(f"Migration plan → base {base} (dry-run; pass --apply to execute):")
-        print(f"\n  runtime → {new_rt}")
-        for s, d in runtime_moves:
-            print(f"    move  {s.name}")
-        print(f"\n  config/secrets → {base}")
-        for s, d in config_moves:
-            print(f"    move  {s.name}  →  {d}")
-        print("\n  regenerate (not moved): compose files, herd shims, "
-              "Caddyfile, .venv-tools")
-        print("\n  Then: recreate each running instance's web tier (absolute "
-              "mounts) and verify it serves.")
-        info("Re-run with `./sb migrate --apply` to perform the migration.")
-        return
-
-    # --- Execute -----------------------------------------------------------
-    info(f"Migrating machine-state under {base} …")
-    new_rt.mkdir(parents=True, exist_ok=True)
-    for s, d in runtime_moves:
-        _move(s, d)
-    info(f"  moved {len(runtime_moves)} runtime item(s)")
-    for s, d in config_moves:
-        _move(s, d)
-        if d.name == ".env.local":
-            try:
-                d.chmod(0o600)
-            except OSError:
-                pass
-    if config_moves:
-        info(f"  moved {len(config_moves)} config/secret file(s)")
-
-    # Drop the now-emptied legacy runtime dir (regenerated leftovers aside).
-    for name in _REGENERATED:
-        shutil.rmtree(legacy_rt / name, ignore_errors=True)
+    stage_dir = Path(tempfile.mkdtemp(prefix=f".{destination.name}.migrate-", dir=destination.parent))
+    staged = stage_dir / "payload"
     try:
-        if legacy_rt.exists() and not any(legacy_rt.iterdir()):
-            legacy_rt.rmdir()
+        if source.is_dir() and not source.is_symlink():
+            shutil.copytree(source, staged, symlinks=True, copy_function=shutil.copy2)
+        else:
+            shutil.copy2(source, staged, follow_symlinks=False)
+        if not _same_content(source, staged):
+            raise MigrationConflict(f"Staged copy verification failed for {source}; source retained.")
+        os.replace(staged, destination)
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+@contextmanager
+def _migration_lock(*bases: Path):
+    """Fail closed when another Sandbox process is already relocating state."""
+    try:
+        import fcntl
+    except ImportError as exc:  # Spec 009 supports macOS/Linux only.
+        raise MigrationConflict("Migration locking requires a POSIX filesystem.") from exc
+    handles = []
+    try:
+        for base in sorted({path.resolve() for path in bases}, key=str):
+            base.mkdir(parents=True, exist_ok=True)
+            handle = (base / _LOCK).open("a+")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                handle.close()
+                raise MigrationConflict(
+                    f"Migration is already running for {base}; wait for it to finish and retry."
+                ) from exc
+            handles.append(handle)
+        yield
+    finally:
+        for handle in reversed(handles):
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+
+def _journal_path(base: Path) -> Path:
+    return base / _JOURNAL
+
+
+def _load_journal(base: Path) -> dict | None:
+    try:
+        data = json.loads(_journal_path(base).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_journal(base: Path, source_base: Path, moves: list[tuple[Path, Path]]) -> None:
+    path = _journal_path(base)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"source": str(source_base.resolve()), "moves": [str(dst) for _, dst in moves]}
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+
+
+def _clear_journal(base: Path) -> None:
+    try:
+        _journal_path(base).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _base_has_state(base: Path) -> bool:
+    if not base.exists():
+        return False
+    return any(child.name not in {_LOCK, _JOURNAL} for child in base.iterdir())
+
+
+def _legacy_registry_conflict(source_runtime: Path, destination_runtime: Path,
+                              base: Path, source_base: Path) -> None:
+    """Distinguish an interrupted transfer from a separately restored legacy tree."""
+    if not ((source_runtime / "registry.json").exists() and
+            (destination_runtime / "registry.json").exists()):
+        return
+    journal = _load_journal(base)
+    if not journal or journal.get("source") != str(source_base.resolve()):
+        raise MigrationConflict(
+            f"Conflict: state exists both in {source_runtime} and {destination_runtime}. "
+            "The destination base is authoritative; resolve or archive the legacy tree manually."
+        )
+
+
+def _drop_baked_artifacts(source_runtime: Path) -> None:
+    """Remove only Sandbox-generated artifacts after every pure-data copy verifies."""
+    for name in _REGENERATED:
+        path = source_runtime / name
+        if path.exists() or path.is_symlink():
+            _remove_source(path)
+    proxy = source_runtime / "proxy"
+    for name in _PROXY_REGENERATED:
+        path = proxy / name
+        if path.exists() or path.is_symlink():
+            _remove_source(path)
+    try:
+        if proxy.exists() and not any(proxy.iterdir()):
+            proxy.rmdir()
+        if source_runtime.exists() and not any(source_runtime.iterdir()):
+            source_runtime.rmdir()
     except OSError:
         pass
 
-    ok("Pure-data moved. Re-running to regenerate baked artifacts + verify…")
-    # Re-exec so RUNTIME_DIR/COMPOSE_DIR/etc. recompute against the populated
-    # base (the dispatch gate also regenerates compose with absolute mounts).
-    os.execv(sys.executable,
-             [sys.executable, str(ENTRY), "migrate", "--finalize"])
+
+def _transfer(source_runtime: Path, destination_runtime: Path, source_base: Path,
+              destination_base: Path, config_pairs: list[tuple[Path, Path]]) -> int:
+    """Run a resumable transfer. Sources survive until all targets verify."""
+    moves = _plan(source_runtime, destination_runtime, config_pairs)
+    if not moves:
+        return 0
+    _legacy_registry_conflict(source_runtime, destination_runtime, destination_base, source_base)
+    _write_journal(destination_base, source_base, moves)
+    # First promote/verify every destination. An interruption here leaves all
+    # originals intact and the journal authorizes a verified retry.
+    for source, destination in moves:
+        _stage_copy(source, destination)
+    # Only after every target exists and compares exactly may any source go away.
+    for source, destination in moves:
+        if not _same_content(source, destination):
+            raise MigrationConflict(f"Destination changed while migrating {source}; source retained.")
+    for source, _ in moves:
+        _remove_source(source)
+    _drop_baked_artifacts(source_runtime)
+    env = destination_base / ".env.local"
+    if env.exists():
+        try:
+            env.chmod(0o600)
+        except OSError:
+            pass
+    return len(moves)
+
+
+def _reexec_finalize(*, original_command: bool = False, persist_home: Path | None = None) -> None:
+    if persist_home is not None:
+        os.environ[_PERSIST_PENDING_ENV] = str(persist_home)
+    if original_command:
+        os.environ[_AUTO_FINALIZE_ENV] = "1"
+        os.execv(sys.executable, [sys.executable, str(ENTRY), *sys.argv[1:]])
+    os.execv(sys.executable, [sys.executable, str(ENTRY), "migrate", "--finalize"])
+
+
+def _regenerate_baked_artifacts(cfg) -> None:
+    """Rebuild every artifact whose contents can bake the old base path."""
+    write_compose_files(cfg)
+    regen_caddyfile(cfg)
+    # Herd shims are recreated by regular reconcile.  Remove stale paths first
+    # so a later ensure cannot accidentally reuse a moved shim.
+    shutil.rmtree(RUNTIME_DIR / "herd-shims", ignore_errors=True)
+    ensure_tools_venv()
 
 
 def _finalize(cfg) -> None:
-    """Post-move pass (fresh module constants). Compose was already regenerated by
-    the dispatch gate (write_compose_files). Recreate the venv, regenerate proxy,
-    recreate each running instance's web tier, and verify it serves."""
     info(f"Finalizing migration. RUNTIME_DIR = {RUNTIME_DIR}")
-
-    # Tools venv: recreated lazily on next use via the stale-path guard; nudge it.
     try:
-        ensure_tools_venv()
-    except Exception as e:
-        info(f"  (tools venv will rebuild on next use: {e})")
+        _regenerate_baked_artifacts(cfg)
+    except Exception as exc:
+        die(f"Migration retained its verified data but could not regenerate baked artifacts: {exc}")
 
-    # Unreceipted aggregate proxy state is never regenerated during migration.
-    # Receipt-owned services reconcile independently; per-port URLs remain the
-    # deterministic fallback until that succeeds.
-
-    instances = resolve_instances(cfg)
     failed = []
-    for name in sorted(instances):
-        inst_cfg = instances[name]
-        # Herd (host) instances aren't docker — their WP dir moved with the base
-        # and Herd serves from it directly; nothing to recreate here.
-        if _is_herd_instance(name):
-            continue
-        if not _instance_running(name):
+    for name, inst_cfg in sorted(resolve_instances(cfg).items()):
+        if _is_herd_instance(name) or not _instance_running(name):
             continue
         info(f"  recreating web tier for '{name}' (new absolute mounts)…")
         try:
             compose("up", "-d", "--force-recreate", instance=name, check=True)
-        except Exception as e:
-            failed.append((name, str(e)))
-            continue
-        if not _wait_reachable(inst_cfg, timeout=40):
-            failed.append((name, f"not reachable at {site_url(inst_cfg)}"))
-
+            if not _wait_reachable(inst_cfg, timeout=40):
+                raise RuntimeError(f"not reachable at {site_url(inst_cfg)}")
+        except Exception as exc:
+            failed.append((name, str(exc)))
     if failed:
-        for n, why in failed:
-            info(f"  ! {n}: {why}")
+        for name, reason in failed:
+            info(f"  ! {name}: {reason}")
         die(f"Migration finished but {len(failed)} instance(s) did not verify. "
-            f"Investigate with `./sb status --instance <name>` / `./sb doctor`.")
+            "Investigate with `./sb status --instance <name>` / `./sb doctor`.")
+
+    pending = os.environ.pop(_PERSIST_PENDING_ENV, None)
+    if pending:
+        _persist_home_selection(Path(pending))
+    _clear_journal(BASE)
     ok(f"Migration complete. All state under {BASE}; instances verified.")
 
 
+def _persist_home_selection(base: Path) -> None:
+    """Persist the non-secret selector only after relocation succeeds."""
+    hint = Path.home() / ".config" / "sandbox" / "home"
+    hint.parent.mkdir(parents=True, exist_ok=True)
+    temporary = hint.with_name(f".{hint.name}.tmp")
+    temporary.write_text(str(base.expanduser().resolve()) + "\n")
+    temporary.chmod(0o600)
+    os.replace(temporary, hint)
+
+
+def cmd_migrate(cfg, args) -> None:
+    if getattr(args, "finalize", False):
+        with _migration_lock(BASE):
+            _finalize(cfg)
+        return
+
+    if getattr(args, "force", False):
+        if not getattr(args, "apply", False):
+            die("`--force` is a re-verification action; use it with `--apply`.")
+        with _migration_lock(BASE):
+            _finalize(cfg)
+        return
+
+    source_runtime = _legacy_runtime()
+    destination_base = _new_base()
+    destination_runtime = destination_base / "runtime"
+    pairs = _legacy_config_secrets()
+    moves = _plan(source_runtime, destination_runtime, pairs)
+    if not moves:
+        journal = _load_journal(destination_base)
+        if journal and journal.get("source") == str(ROOT.resolve()):
+            info("Resuming verified migration finalization…")
+            _reexec_finalize()
+        ok(f"No legacy state to migrate; base is {destination_base}. Nothing to do.")
+        return
+    if getattr(args, "dry_run", False) or not getattr(args, "apply", False):
+        _legacy_registry_conflict(source_runtime, destination_runtime, destination_base, ROOT)
+        info(f"Migration plan → base {destination_base} (dry-run; pass --apply to execute):")
+        for source, destination in moves:
+            print(f"  move  {source}  →  {destination}")
+        print("  regenerate compose, Herd shims, proxy routing, and .venv-tools")
+        return
+    try:
+        with _migration_lock(destination_base):
+            moved = _transfer(source_runtime, destination_runtime, ROOT, destination_base, pairs)
+    except MigrationConflict as exc:
+        die(str(exc))
+    info(f"Moved {moved} verified pure-data artifact(s). Re-running to regenerate baked artifacts…")
+    _reexec_finalize()
+
+
+def maybe_auto_migrate() -> bool:
+    """Apply exactly the safe first-run upgrade path before normal dispatch.
+
+    It runs only when the destination has no user state.  A populated base is
+    never merged by an ordinary command; the user receives the explicit
+    ``sb migrate --apply`` conflict handling instead.
+    """
+    if os.environ.get(_AUTO_FINALIZE_ENV):
+        return False
+    source_runtime = _legacy_runtime()
+    destination_base = _new_base()
+    moves = _plan(source_runtime, destination_base / "runtime", _legacy_config_secrets())
+    if not moves:
+        journal = _load_journal(destination_base)
+        if journal and journal.get("source") == str(ROOT.resolve()):
+            info("Resuming verified automatic migration finalization…")
+            _reexec_finalize(original_command=True)
+        return False
+    if _base_has_state(destination_base):
+        _legacy_registry_conflict(source_runtime, destination_base / "runtime", destination_base, ROOT)
+        return False
+    try:
+        with _migration_lock(destination_base):
+            moved = _transfer(source_runtime, destination_base / "runtime", ROOT,
+                              destination_base, _legacy_config_secrets())
+    except MigrationConflict as exc:
+        die(str(exc))
+    info(f"Automatically migrated {moved} legacy artifact(s) under {destination_base}.")
+    _reexec_finalize(original_command=True)
+    return True  # pragma: no cover - os.execv never returns
+
+
+def finalize_auto_migration(cfg) -> None:
+    if not os.environ.pop(_AUTO_FINALIZE_ENV, None):
+        return
+    with _migration_lock(BASE):
+        _finalize(cfg)
+
+
 def cmd_home(cfg, args) -> None:
-    """Print the resolved base, or relocate the base to a new directory."""
     target = getattr(args, "dir", None)
     if not target:
         info(f"SANDBOX_HOME base: {BASE}")
         info(f"  runtime: {RUNTIME_DIR}  (present: {_state_present(RUNTIME_DIR)})")
         info(f"  config : {CONFIG_FILE}  (exists: {CONFIG_FILE.exists()})")
-        info("Relocate with `SANDBOX_HOME=<dir> ./sb migrate --apply`, or "
-             "`./sb home <dir>`.")
         return
-    new_dir = Path(target).expanduser().resolve()
-    info(f"Relocating base → {new_dir}")
-    # Reuse the migration engine pointed at the new base. The current state may be
-    # in-repo (pre-migration) or already under the old base; in both cases the
-    # move lands under SANDBOX_HOME=new_dir on the re-exec.
-    os.environ["SANDBOX_HOME"] = str(new_dir)
-    # Delegate: from the OLD base to the new one we move runtime + config.
-    _relocate_existing_base(cfg, new_dir)
-
-
-def _relocate_existing_base(cfg, new_dir: Path) -> None:
-    """Move an already-consolidated base (old SANDBOX_HOME) to new_dir, then
-    re-exec to regenerate + verify."""
-    old_rt = RUNTIME_DIR  # resolved against the pre-exec env
-    new_rt = new_dir / "runtime"
-    if old_rt.resolve() == new_rt.resolve():
+    destination_base = Path(target).expanduser().resolve()
+    source_base = BASE
+    if source_base == destination_base:
         ok("Base already at that location. Nothing to do.")
         return
-    new_dir.mkdir(parents=True, exist_ok=True)
-    new_rt.mkdir(parents=True, exist_ok=True)
-    if old_rt.exists():
-        for item in sorted(old_rt.iterdir()):
-            if item.name in _REGENERATED:
-                shutil.rmtree(item, ignore_errors=True)
-                continue
-            _move(item, new_rt / item.name)
-    for name in ("sandbox.local.yml", ".env.local", "config.json"):
-        src = BASE / name
-        if src.exists():
-            _move(src, new_dir / name)
-            if name == ".env.local":
-                try:
-                    (new_dir / name).chmod(0o600)
-                except OSError:
-                    pass
-    ok("Moved. Re-running to regenerate + verify under the new base…")
-    os.execv(sys.executable,
-             [sys.executable, str(ENTRY), "migrate", "--finalize"])
+    source_runtime = RUNTIME_DIR
+    pairs = [(source_base / name, destination_base / name)
+             for name in ("sandbox.local.yml", ".env.local", "config.json")]
+    try:
+        with _migration_lock(source_base, destination_base):
+            moved = _transfer(source_runtime, destination_base / "runtime", source_base,
+                              destination_base, pairs)
+    except MigrationConflict as exc:
+        die(str(exc))
+    os.environ["SANDBOX_HOME"] = str(destination_base)
+    info(f"Moved {moved} verified artifact(s). Re-running under {destination_base}…")
+    _reexec_finalize(persist_home=destination_base)
 
 
-register({
-    'migrate': cmd_migrate,
-    'home': cmd_home,
-})
+register({"migrate": cmd_migrate, "home": cmd_home})

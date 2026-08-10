@@ -104,3 +104,9 @@ def _onboard_instance(cfg: dict, name: str, args) -> None:
             cmd_seed(cfg, _t.SimpleNamespace(resolved_instance=name, file=seed))
         except Exception as e:
             info(f"seed import failed: {e}")
+        else:
+            # A seed selected during onboarding is part of the requested
+            # post-provision fixture. Refresh both install restore points only
+            # after that import succeeds, so reset returns to the seeded state.
+            from sandbox.commands.data import capture_install_snapshots
+            capture_install_snapshots(name, force=True)

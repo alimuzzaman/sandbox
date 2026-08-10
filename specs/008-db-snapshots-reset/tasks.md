@@ -94,3 +94,12 @@ full/db snapshot"):
   (not silently swallow) — fixes the empty 0 KB `__install__` left by a swallowed
   failure. Live-verified: both captured, listed correctly, `reset` + `restore
   install-baseline` both roll back.
+
+## Phase 8: Convergence
+
+- [ ] T016 Capture the DB-only `@install` and full `install-baseline` snapshots for newly provisioned instances only after their final plugin/theme/seed onboarding state is complete; retain idempotency for existing instances per FR-004/FR-005 (partial).
+- [ ] T017 Remove a pre-existing `uploads.tgz` when `snapshot --db-only --force` overwrites a full snapshot, so its recorded mode and restore behavior remain DB-only per FR-001/FR-002 (partial).
+- [ ] T018 Make `./sb snapshots` and the dashboard bridge represent the protected `@install` baseline explicitly and separately from normal snapshots, without exposing it as an ordinary restore/delete target, per FR-003/FR-006 (partial).
+- [ ] T019 Dispatch the dashboard’s reset operation through `cmd_reset` with its explicit confirmed arguments and add focused coverage, per FR-008 (missing).
+- [ ] T020 Add the MCP `snapshot` tool with `db_only` support, register it in the data manifest, and cover its capability and CLI forwarding behavior per FR-009 (missing).
+- [ ] T021 Update the Spec 008 contract, quickstart, snapshot skill, and focused tests to describe and verify the corrected baseline, DB-only overwrite, dashboard, and MCP semantics per Constitution V (partial).

@@ -27,12 +27,6 @@ class IsolationLauncher:
         if entry_path not in ENTRY_PATHS:
             return {"ok": False, "state": "blocked", "mutated": False,
                     "reason": {"code": "unsupported_execution_path"}}
-        verified = self.verifier.verify(policy)
-        if not verified.get("ok"):
-            return {**verified, "operation": entry_path,
-                    "reason": {"code": "isolation_prerequisite_missing",
-                               "details": verified.get("reason")}}
-        context = sanitize_execution_context(environment or {}, credential_refs)
         active_grants = ()
         if grants is not None:
             values = getattr(grants, "grants", grants)
@@ -41,6 +35,17 @@ class IsolationLauncher:
                         "reason": {"code": "invalid_egress_grant_state"}}
             active_grants = tuple(grant for grant in values
                                   if not getattr(grant, "revoked", False))
+        # An active egress capability changes the effective boundary.  Verify
+        # its digest-bound broker immediately before every payload, not merely
+        # when the grant was reconciled or status was last queried (FR-011,
+        # FR-016).  Keep the no-grants call shape stable for baseline adapters.
+        verified = (self.verifier.verify(policy, grants=grants) if active_grants
+                    else self.verifier.verify(policy))
+        if not verified.get("ok"):
+            return {**verified, "operation": entry_path,
+                    "reason": {"code": "isolation_prerequisite_missing",
+                               "details": verified.get("reason")}}
+        context = sanitize_execution_context(environment or {}, credential_refs)
         if active_grants:
             host = str(policy.network["host_address"]).split("/", 1)[0]
             proxy = f"http://{host}:18443"

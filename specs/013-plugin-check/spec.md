@@ -22,7 +22,7 @@ A plugin developer wants to know whether their latest changes introduced any new
 
 1. **Given** a project configured with a plugin slug and a committed baseline file that matches its current Plugin Check findings, **When** the developer runs `./sb plugin-check`, **Then** the command reports the run passed and exits successfully.
 2. **Given** the same project, **When** a code change introduces a genuinely new Plugin Check ERROR-level finding not present in the baseline, **Then** running `./sb plugin-check` fails, and the failure output names the specific new finding(s) (file, rule, count above baseline).
-3. **Given** a project with no Plugin Check configuration in `sandbox.config.json`, **When** the developer runs `./sb plugin-check`, **Then** the command explains what configuration is missing and how to add it, rather than failing with a confusing internal error.
+3. **Given** a project with no `pluginCheck` object in `sandbox.config.json`, **When** the developer runs `./sb plugin-check`, **Then** the command uses its existing plugin identity and defaults rather than requiring redundant feature-specific configuration. If that existing identity cannot be resolved to a valid plugin identifier, the command explains the missing identity and how to correct it rather than failing with a confusing internal error.
 
 ---
 
@@ -102,7 +102,7 @@ A developer wants to browse all current findings (including the lower-severity o
 
 ### Key Entities
 
-- **Plugin Check configuration**: Per-project settings declaring which plugin to check, which directories to exclude, which file holds the version header, and where the baseline file lives. Attached to a project's existing configuration; entirely optional until a project opts in.
+- **Plugin Check configuration**: Optional per-project overrides for excluded directories, the version-header file, and the baseline-file path. The checked plugin always comes from the project's existing plugin identity, not this object; omitting the object uses the documented defaults.
 - **Finding**: A single reported issue from a check run — which file it's in, its severity tier, which rule it violates, its location within the file, and a human-readable message. Line/column location is informational only and never part of a finding's identity for baseline purposes.
 - **Baseline**: A project-owned, version-controlled record of the finding counts (grouped by file and rule) considered already accounted for. Compared against every run's current findings; updated only via an explicit action, never silently by a normal run.
 - **Report**: A single self-contained, shareable artifact summarizing one run's findings, gate outcome, and per-project metadata (plugin name/version, check-tool version, environment), regenerated on every run.

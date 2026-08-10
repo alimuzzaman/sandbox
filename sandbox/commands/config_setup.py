@@ -128,6 +128,12 @@ def cmd_setup(cfg, args) -> None:
         else:
             print(f"\n▸ Instance '{inst_name}': installing WordPress + provisioning app password…")
             cmd_install(cfg, sub_args)
+            # Setup-created instances do not pass through the per-project
+            # ensure flow, so capture their post-install restore points here.
+            # This is deliberately after cmd_install has wired Sandbox's own
+            # provisioned state; normal repeat setup skips this block.
+            from sandbox.commands.data import capture_install_snapshots
+            capture_install_snapshots(inst_name)
 
     # Clean URLs: give every instance a http://<name>.tst (no port) via the URL
     # proxy. Local + interactive + Docker only. Skipped in server mode (the box

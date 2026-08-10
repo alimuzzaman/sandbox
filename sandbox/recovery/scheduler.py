@@ -45,7 +45,7 @@ def build_schedule_policy(policy_id: str, profiles: tuple[str, ...], calendar: s
 def render_systemd_units(policy: SchedulePolicy, command: str = "sb recovery create") -> dict[str, str]:
     if any(char in command for char in "\r\n\0") or command != "sb recovery create":
         raise RecoveryError("recovery schedule command is invalid", "invalid_schedule_command")
-    arguments = ["sb", "recovery", "create", "--confirm"]
+    arguments = ["sb", "recovery", "create", "--scheduled", "--confirm"]
     for profile in policy.profiles:
         arguments.extend(("--profile", profile))
     if policy.remote is not None:
@@ -55,7 +55,7 @@ def render_systemd_units(policy: SchedulePolicy, command: str = "sb recovery cre
     service = "\n".join(("[Unit]", "Description=Sandbox scoped recovery capture", "",
                            "[Service]", "Type=oneshot", "UMask=0077",
                            f"TimeoutStartSec={policy.timeout}",
-                           f"ExecStart=/usr/bin/flock -n %t/{name}.lock {scheduled_command}", ""))
+                           f"ExecStart=/usr/bin/flock -n %t/{name}.lock /usr/bin/env {scheduled_command}", ""))
     timer = "\n".join(("[Unit]", "Description=Schedule scoped recovery capture", "",
                          "[Timer]", f"OnCalendar={policy.calendar}",
                          f"RandomizedDelaySec={policy.randomized_delay}",

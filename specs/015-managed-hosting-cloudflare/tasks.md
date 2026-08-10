@@ -81,6 +81,12 @@ T031 remains pending until the Lenzora change is merged onto the manifest's allo
 refuses to mutate the remote. The already-live route was separately verified with
 anonymous `401` and authenticated `200` responses.
 
+## Phase 10: Convergence
+
+- [x] T032 Normalize redirect-target IDNs and reject declared redirect cycles per FR-002 and FR-003 (partial).
+- [x] T033 Continue every rollback operation and aggregate restore failures per FR-007 (partial).
+- [x] T034 Add focused validation and rollback tests, and reconcile implemented artifact status with the no-live-mutation boundary (partial).
+
 ## Dependencies
 
 T003-T008 block all user stories. User Story 1 precedes live planning. User Story 2

@@ -183,3 +183,14 @@ base. **Independent test**: quickstart §3.
 **US1 (T001-T014)** is the first shippable increment: existing developers upgrade, state
 relocates once, instances keep working. US2 (clean-clone) and US3 (base relocation) build
 on the same engine.
+
+## Phase 8: Convergence
+
+- [x] T027 Reject a destination collision before any source is removed, comparing staged/retry artifacts and preserving the authoritative base on conflict per FR-007/FR-013 (partial).
+- [x] T028 Serialize relocation with a migration lock and stage pure-data transfers so a failed copy leaves the legacy source usable and an interrupted run can safely resume per US1/AC3 (partial).
+- [x] T029 Migrate config-only legacy installations and preserve the restricted `.env.local` mode without treating an absent registry as a no-op per FR-004/FR-007 (missing).
+- [x] T030 Explicitly regenerate Compose, Herd shims/proxy routing, and the tooling venv after a transfer so no baked artifact refers to the former base per FR-009/FR-012 (partial).
+- [x] T031 Persist `sb home <dir>` as a non-secret base-selection hint, with `SANDBOX_HOME` retaining precedence and the MCP resolver using the same selection per FR-001/FR-006 (missing).
+- [x] T032 Invoke one guarded automatic migration for an empty destination on an ordinary first command, while refusing conflicts and leaving read-only/finalization paths safe per FR-007 and C3 (missing).
+- [x] T033 Add fixture-driven migration safety coverage and document the persisted selection/automatic migration behavior per SC-004/SC-006/SC-007 (missing).
+- [x] T034 Restore the documented `sb migrate --dry-run`/guarded `--force` contract without allowing either flag to merge conflicting state per C3 (missing).

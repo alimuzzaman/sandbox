@@ -45,7 +45,17 @@ SANDBOX_ROOT = Path(__file__).resolve().parents[2]
 # sandbox_core resolve this identically — same env, same default — so the two
 # processes never disagree about where state lives.
 def _sandbox_base() -> Path:
-    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+    # Keep this standalone resolver in lockstep with sandbox.core._paths:
+    # explicit SANDBOX_HOME wins, otherwise honour sb home's non-secret
+    # bootstrap hint before falling back to ~/sandbox.
+    raw = os.environ.get("SANDBOX_HOME")
+    if not raw:
+        hint = Path.home() / ".config" / "sandbox" / "home"
+        try:
+            raw = hint.read_text().strip() or None
+        except OSError:
+            raw = None
+    return Path(raw or "~/sandbox").expanduser().resolve()
 
 
 def _runtime_dir() -> Path:
@@ -350,21 +360,6 @@ def _admin_creds() -> tuple[str, str]:
     rt = (_load_sandbox_yml().get("runtime") or {}).get("admin") or {}
     return rt.get("user", "admin"), rt.get("password", "admin")
 
-SANDBOX_INSTRUCTIONS = """Sandbox runtime tools are available.
-
-Pass the target project root as `project_dir`. Call `ensure_instance(project_dir=...)` before instance-scoped tools; use `label` only for an additional instance. Use MCP for live runtime evidence and `./sb` for routine CLI work.
-
-For a project configured with a remote default, prefer the co-located remote MCP
-server for live work. Start long-running work as a durable job, retain its `job_id`,
-and recover with bounded `job_status` and `job_output` reads; an MCP disconnection
-must never be treated as a child-process failure. Use an explicit local target only
-when deliberately overriding the configured remote.
-
-Detailed operating rules are available on demand through `load_context`, `load_skill`, and `load_workflow`. Keep responses bounded and request detail only when needed.
-"""
-
-mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)
-
 def _compose(*args: str, instance: str,
              capture: bool = True, timeout: int = 60) -> dict:
     cf = _compose_file(instance)
@@ -621,6 +616,8 @@ def _list_sandbox_skills() -> list[dict]:
         skill_md = entry / "SKILL.md"
         if entry.is_dir() and skill_md.is_file():
             meta = _parse_skill_metadata(skill_md)
+            if not meta["enable"]:
+                continue
             out.append({
                 "name": meta["name"] or entry.name,
                 "description": meta["description"],
@@ -642,6 +639,40 @@ def _list_sandbox_workflows() -> list[dict]:
                 "path": str(wf_md.relative_to(SANDBOX_ROOT)),
             })
     return out
+
+
+def _startup_skill_catalog() -> str:
+    """Render the enabled built-in catalog captured when the MCP server starts."""
+    skills = _list_sandbox_skills()
+    if not skills:
+        return "none"
+    return "; ".join(
+        f"`{skill['name']}`" + (f" — {skill['description']}" if skill["description"] else "")
+        for skill in skills
+    )
+
+
+def _startup_instructions() -> str:
+    return f"""Sandbox runtime tools are available.
+
+Pass the target project root as `project_dir`. Call `ensure_instance(project_dir=...)` before instance-scoped tools; use `label` only for an additional instance. Use MCP for live runtime evidence and `./sb` for routine CLI work.
+
+For a project configured with a remote default, prefer the co-located remote MCP
+server for live work. Start long-running work as a durable job, retain its `job_id`,
+and recover with bounded `job_status` and `job_output` reads; an MCP disconnection
+must never be treated as a child-process failure. Use an explicit local target only
+when deliberately overriding the configured remote.
+
+Enabled built-in skills at server startup: {_startup_skill_catalog()}. For the current
+enabled project, personal, and sandbox catalog, call `list_skills(project_dir=...)`.
+Call `load_skill(name, project_dir=...)` only after selecting a matching skill.
+Detailed operating rules are available on demand through `load_context` and
+`load_workflow`. Keep responses bounded and request detail only when needed.
+"""
+
+
+SANDBOX_INSTRUCTIONS = _startup_instructions()
+mcp = FastMCP("sandbox", instructions=SANDBOX_INSTRUCTIONS)
 
 def _skill_prompt_body(name: str, task: str = "") -> str:
     skill_md = SANDBOX_SKILLS_DIR / name / "SKILL.md"

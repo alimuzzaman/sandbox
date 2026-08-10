@@ -4,7 +4,8 @@
 
 **Created**: 2026-07-09
 
-**Status**: Implemented (all code/spec artifacts in place), pending live VPS validation
+**Status**: Implemented. HTTPS MCP live validation completed on 2026-07-16; the
+remote transport dependency remains pinned and fresh-venv tested.
 
 **Input**: User description: "Bring remote VPS hosting for sandbox instances into the
 tool as a first-class, opt-in capability, per docs/remote-hosting-prd.md's now-resolved

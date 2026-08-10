@@ -11,7 +11,10 @@ These are the contracts other code/users depend on.
 | `SANDBOX_HOME` | absolute or `~`/relative path | `~/sandbox` | The single base for ALL machine-state. Read identically by the `sb` CLI and the MCP server. Changing it relocates everything (after `sb migrate`/`sb home <dir>`). |
 
 Resolution: `expanduser()` then `resolve()`. Both processes MUST produce the same value
-for the same environment.
+for the same environment. An explicit `SANDBOX_HOME` always wins. After a successful
+`sb home <dir>`, Sandbox records a non-secret, owner-only selection hint at
+`~/.config/sandbox/home`; a later shell/MCP process uses that hint only when the variable
+is absent.
 
 ## C2 — On-disk base layout (post-migration)
 
@@ -51,6 +54,11 @@ sb migrate [--dry-run] [--force]
 | Conflict | If both base and `<repo>/runtime` hold state: abort non-zero with guidance; base is authoritative; no merge. `--force` is NOT a merge — reserved for re-verify only. |
 | Secrets | Move `.env.local` preserving mode 600; never print contents. |
 | Auto-hook | When old state is detected and the base is empty, ordinary commands trigger the same migration once (no manual step required for the common upgrade). |
+
+The automatic path is conservative: it stages and verifies every destination before
+removing a source, holds a migration lock, and refuses any populated/different
+destination instead of merging it. A journal permits a verified interrupted transfer to
+resume; a separately restored legacy runtime remains a visible conflict.
 
 ```
 sb home [<new-dir>]

@@ -57,7 +57,9 @@ All well inside the 2-second read-only and 3-second planning bounds.
 ## Not run
 
 - **Live incumbent lifecycle** (`domains apply` through a real system Caddy, request
-  through the incumbent, repeat apply, cleanup twice): needs the T044 host.
+  through the incumbent, repeat apply, cleanup twice): captured subsequently on Ubuntu in
+  `system-caddy.md`; it was not part of this macOS quickstart run. Ordinary CLI adoption
+  remains proof-gated.
 - **Transaction failure proof** against a real incumbent (invalid current config, invalid
   candidate, reload failure, health failure, foreign collision, incumbent disappearance).
   Unit coverage exists in `tests/test_ingress_transactions.py`; the live half is open.

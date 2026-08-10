@@ -264,3 +264,18 @@ path in place counts as removal (spec FR-007, FR-031 - FR-034; constitution VI).
 - Every test task must fail for the intended missing behavior before implementation.
 - All runtime-touching validation uses `./sb`; no raw service or proxy commands in user workflows.
 - Verified logical groups are committed and pushed on the active non-`main` branch.
+
+## Phase 8: Convergence
+
+- [X] T077 Reconcile stale 037 evidence prose for the published-listener diagnostic and the
+      subsequently captured system-Caddy lifecycle without extending any live-proof claim
+      (documentation reconciliation)
+- [ ] T078 Define and implement a non-forgeable production qualification path for a
+      live-proven incumbent adapter, then verify normal `./sb domains use system-caddy`
+      setup can adopt only within its evidenced constraints (FR-010, FR-032; missing)
+- [ ] T079 Prove the default Docker/Caddy provider on a Linux host with free `:80` and
+      `:443`, including HTTP(S), repeatability, and no per-port-only result (SC-011;
+      missing host proof)
+- [ ] T080 Capture the remaining ingress host-proof matrix: Linux listener observation and
+      IPv6 dual-stack, live transaction failures, and cleanup after incumbent replacement
+      (SC-001, SC-004, SC-009; missing host proof)

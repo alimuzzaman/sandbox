@@ -12,7 +12,7 @@ class TestRecoveryInterfaces(unittest.TestCase):
     def _args(self, action, **extra):
         values = {"action": action, "remote": None, "profile": [], "backup_id": None,
                   "artifact": [], "keep_count": 1, "minimum_age_days": 0,
-                  "confirm": False, "json": True}
+                  "confirm": False, "scheduled": False, "json": True}
         values.update(extra)
         return SimpleNamespace(**values)
 
@@ -48,6 +48,11 @@ class TestRecoveryInterfaces(unittest.TestCase):
         with self.assertRaises(SystemExit), patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True):
             cmd_recovery(None, args)
 
+    def test_cli_scheduled_create_is_reserved_until_owned_materialization_exists(self):
+        args = self._args("create", profile=["fixture"], confirm=True, scheduled=True)
+        with self.assertRaises(SystemExit), patch.dict(os.environ, {"RECOVERY_PASSPHRASE": "fixture-secret"}, clear=True):
+            cmd_recovery(None, args)
+
     def test_cli_retention_routes_policy_inputs_to_service(self):
         calls = []
         service = SimpleNamespace(retention_plan=lambda *args, **kwargs: calls.append((args, kwargs)) or {
@@ -61,6 +66,7 @@ class TestRecoveryInterfaces(unittest.TestCase):
         service = SimpleNamespace(retention_plan=lambda *args, **kwargs: {
             "action": "retention", "ok": True, "status": "planned", "data": {
                 "protected_sets": ("new",), "candidates": ("old",),
+                "legacy_candidates": (), "legacy_candidate_status": "blocked_no_current_verified_set",
                 "unclassified": ({"id": "legacy", "reason": "invalid_manifest"},),
             }
         })
@@ -71,6 +77,7 @@ class TestRecoveryInterfaces(unittest.TestCase):
         self.assertIn("protected: new", output.getvalue())
         self.assertIn("candidates: old", output.getvalue())
         self.assertIn("unclassified: legacy (invalid_manifest)", output.getvalue())
+        self.assertIn("legacy status: blocked_no_current_verified_set", output.getvalue())
 
     def test_cli_list_human_output_shows_categorized_paths(self):
         service = SimpleNamespace(list=lambda *args, **kwargs: {

@@ -52,3 +52,8 @@ commit or remote mutation occurs.
 - US1 precedes setup-triggered restore validation in US2.
 - US3 hardens both US1 and US2 and must complete before release.
 - T016-T017 follow all implementation tasks.
+
+## Phase 7: Convergence
+
+- [X] T018 Validate state manifests and revisions before restore; reject symlinks, unexpected paths, and secret-like content; and roll back the staged state swap atomically per US1/AC and US3/AC (partial)
+- [X] T019 Serialize state repository mutations, export only owned paths, and persist a stable manifest schema/revision per US2/AC and US3/AC (partial)

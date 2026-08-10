@@ -91,6 +91,16 @@ def verify_manifest(drive, set_id: str) -> dict:
             names.append(name)
         if "plaintext_sha256" in manifest and not _valid_digest(manifest["plaintext_sha256"]):
             raise RecoveryError("recovery plaintext digest is invalid", "invalid_manifest")
+        bindings = manifest.get("profile_bindings")
+        if bindings is not None:
+            if not isinstance(bindings, dict) or set(bindings) != set(profiles):
+                raise RecoveryError("recovery profile bindings are invalid", "invalid_manifest")
+            for profile, binding in bindings.items():
+                if (not isinstance(binding, dict) or not isinstance(binding.get("dependencies"), list) or
+                        any(dep not in bindings or not isinstance(dep, str) for dep in binding["dependencies"]) or
+                        not isinstance(binding.get("restore_target"), str) or not binding["restore_target"] or
+                        not isinstance(binding.get("allowed_roots"), list) or not binding["allowed_roots"]):
+                    raise RecoveryError("recovery profile bindings are invalid", "invalid_manifest")
     _verify_remote_ciphertext(drive, manifest["ciphertext_object"], digest, size)
     return manifest
 
@@ -121,7 +131,14 @@ def build_restore_plan(drive, set_id: str, profiles: tuple[str, ...] = (), *,
     selected = profiles or available
     if set(selected) - set(available):
         raise RecoveryError("restore profile is not in the recovery set", "unknown_profile")
-    ordered = _ordered_profiles(tuple(selected), dependencies or {})
+    manifest_bindings = manifest.get("profile_bindings") or {}
+    bound_dependencies = {name: tuple(value["dependencies"])
+                          for name, value in manifest_bindings.items()}
+    configured = dependencies or {}
+    if any(profile in configured and tuple(configured[profile]) != bound_dependencies[profile]
+           for profile in bound_dependencies):
+        raise RecoveryError("restore dependencies do not match the recovery set", "invalid_restore_dependencies")
+    ordered = _ordered_profiles(tuple(selected), bound_dependencies or configured)
     if target_root is not None and shutil.disk_usage(target_root).free < required_bytes:
         raise RecoveryError("restore target has insufficient free space", "insufficient_free_space")
     actions = tuple(f"restore:{profile}" for profile in ordered)

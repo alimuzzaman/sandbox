@@ -87,6 +87,15 @@ class TestGpgCrypto(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse((Path(str(target) + ".pending")).exists())
 
+    def test_timeout_is_bounded_and_cleans_pending_ciphertext(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+                "sandbox.recovery.crypto.subprocess.run",
+                side_effect=__import__("subprocess").TimeoutExpired("gpg", 1)):
+            source = Path(directory) / "plain"; target = Path(directory) / "cipher"; source.write_bytes(b"payload")
+            with self.assertRaisesRegex(RecoveryError, "timed out"):
+                GpgCrypto("fixture", timeout_seconds=1).encrypt_file(source, target)
+            self.assertFalse((Path(str(target) + ".pending")).exists())
+
     def test_verification_rejects_plaintext_mutation_between_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "plain"; source.write_bytes(b"payload")

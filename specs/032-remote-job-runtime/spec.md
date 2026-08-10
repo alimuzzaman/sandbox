@@ -2,7 +2,7 @@
 
 **Feature Branch**: `032-remote-job-runtime`  
 **Created**: 2026-07-18  
-**Status**: Draft  
+**Status**: Implemented; outstanding live measurement proofs tracked in T156-T157
 **Input**: User description: "Make remote execution the recommended development and testing path. Run tests and supported GitHub Actions workflows on reusable remote workspaces, with durable logs, agent-oriented streaming, process health, explicit deadlines, isolated matrix execution, artifacts, and complete CLI/MCP control."
 
 ## User Scenarios & Testing *(mandatory)*

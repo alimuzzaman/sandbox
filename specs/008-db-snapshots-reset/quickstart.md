@@ -10,7 +10,8 @@ All checks are live (constitution IV). (herd: snapshots/reset unsupported in v1.
 ```
 - Snapshot dir has `db.sql` + `META` (`mode=db-only`), **no** `uploads.tgz`; finishes
   faster than a full snapshot.
-- `./sb snapshots` shows it with mode `db-only`.
+- `./sb snapshots` shows it with mode `db-only`; it also reports the protected
+  `@install` reset baseline separately when one is present.
 
 ## 2. DB-only restore leaves uploads alone
 
@@ -20,11 +21,14 @@ All checks are live (constitution IV). (herd: snapshots/reset unsupported in v1.
 
 ## 3. Reset to fresh install
 
-- Confirm the `@install` baseline exists (auto-captured at install).
+- Confirm the `@install` baseline exists (auto-captured after final instance
+  provisioning; a successful onboarding seed becomes part of that baseline).
 - Dirty the DB; `./sb reset --yes` (or `wp_reset(confirm=true)`) → site back to its
   post-install state (admin, default content, activated plugins); uploads untouched.
 - On an instance with no baseline → `reset` prints actionable guidance (run `--rebaseline`).
 - `./sb reset --rebaseline` re-captures the baseline from the current DB.
+- `snapshot(name, db_only=true, project_dir=...)` exposes the same fast capture
+  through MCP; pass `force=true` to replace an existing snapshot safely.
 
 ## 4. Guards
 

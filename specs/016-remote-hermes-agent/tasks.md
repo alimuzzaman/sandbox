@@ -346,3 +346,9 @@ T061: Managed-hosting/OAuth/rollback tests in tests/test_hermes.py after coordin
 ## Phase 15: Convergence
 
 - [X] T093 Preserve the verified Hermes upstream URL and release tag refs during backup restore so repeated pinned installation remains idempotent after recovery, per FR-023 and FR-024 (partial)
+
+## Phase 16: Convergence
+
+- [X] T094 Serialize managed clone and sync mutations with repository-scoped locks, retain worktree protection, and report detached output/cancellation states truthfully per US2/AC and FR-015b (partial)
+- [X] T095 Preserve the legacy `hermes state setup --repo` spelling and move state-sync command construction behind the Hermes state service facade per CLI contract and plan compatibility-facade decision (partial)
+- [X] T096 Repair Drive backup source delivery so the GPG passphrase remains on SSH stdin rather than being consumed by a source heredoc per FR-011 and Drive compatibility contract (contradicts)

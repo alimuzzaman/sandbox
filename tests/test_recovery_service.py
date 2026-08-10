@@ -163,6 +163,12 @@ class TestRecoveryService(unittest.TestCase):
             {"id": "stale", "reason": "passphrase_not_current,invalid_created_at"},
         ))
 
+    def test_retention_keeps_legacy_candidates_blocked_until_a_current_verified_set(self):
+        drive = MemoryDrive(); drive.put("legacy/archive.tar", b"opaque")
+        blocked = RecoveryService(RecoveryCatalog(1, ()), drive=drive).retention_plan()
+        self.assertEqual(blocked["data"]["legacy_candidates"], ())
+        self.assertEqual(blocked["data"]["legacy_candidate_status"], "blocked_no_current_verified_set")
+
     def test_verify_checks_manifest_and_ciphertext(self):
         drive = MemoryDrive()
         CaptureCoordinator(FixtureCrypto(), drive).publish("set-1", {"artifact.txt": b"payload"})

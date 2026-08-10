@@ -67,10 +67,12 @@ class StagingCaptureCoordinator:
     separate from publication ordering.
     """
     def __init__(self, crypto, drive, *, staging_root: str | Path | None = None,
-                 pending_root: str | Path | None = None, clock=None) -> None:
+                 pending_root: str | Path | None = None,
+                 materialization_root: str | Path | None = None, clock=None) -> None:
         self.crypto, self.drive = crypto, drive
         self.staging_root = Path(staging_root) if staging_root else None
         self.pending_root = Path(pending_root) if pending_root else None
+        self.materialization_root = Path(materialization_root).resolve() if materialization_root else None
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
     def _stage(self) -> Path:
@@ -79,7 +81,8 @@ class StagingCaptureCoordinator:
         return directory
 
     def publish_files(self, set_id: str, artifacts: dict[str, str | Path], *,
-                      profiles: tuple[str, ...], provenance: dict | None = None) -> dict:
+                      profiles: tuple[str, ...], provenance: dict | None = None,
+                      profile_bindings: dict | None = None) -> dict:
         if not _valid_set_id(set_id):
             raise RecoveryError("recovery set id is invalid", "invalid_set_id")
         if (not isinstance(artifacts, dict) or not artifacts or
@@ -90,6 +93,9 @@ class StagingCaptureCoordinator:
             raise RecoveryError("recovery set requires artifacts and profiles", "empty_set")
         if provenance is not None and not isinstance(provenance, dict):
             raise RecoveryError("recovery provenance is invalid", "invalid_provenance")
+        if profile_bindings is not None and (not isinstance(profile_bindings, dict) or
+                                             set(profile_bindings) != set(profiles)):
+            raise RecoveryError("recovery profile bindings are invalid", "invalid_manifest_binding")
         for name, value in artifacts.items():
             if (not isinstance(name, str) or not name or name.startswith("/") or
                     ".." in Path(name).parts or any(ord(char) < 32 or ord(char) == 127 for char in name) or
@@ -97,6 +103,12 @@ class StagingCaptureCoordinator:
                 raise RecoveryError("recovery artifact name is invalid", "invalid_artifact")
         if not all(self._is_regular_nonempty_file(Path(value)) for value in artifacts.values()):
             raise RecoveryError("recovery artifact is unavailable", "missing_artifact")
+        if self.materialization_root is not None:
+            for value in artifacts.values():
+                try:
+                    Path(value).resolve().relative_to(self.materialization_root)
+                except ValueError as exc:
+                    raise RecoveryError("recovery artifact is outside owned materialization", "invalid_artifact") from exc
         stage = self._stage()
         verified_ciphertext = None
         try:
@@ -131,6 +143,8 @@ class StagingCaptureCoordinator:
                 "ciphertext_size": ciphertext.stat().st_size, "plaintext_sha256": plaintext_hash,
                 "restore_compatibility": "sandbox-recovery-v1",
             }
+            if profile_bindings is not None:
+                manifest["profile_bindings"] = profile_bindings
             # This write is intentionally last: the manifest is the sole complete-set marker.
             self.drive.put(f"sets/{set_id}/manifest.json", json.dumps(manifest, sort_keys=True).encode())
             return manifest

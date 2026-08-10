@@ -2,16 +2,18 @@
 
 ## PluginCheckConfig
 
-Per-project settings, read from `sandbox.config.json`'s `pluginCheck` key (see
-`research.md`'s config-schema decision). Not a runtime object with behavior — a plain
-resolved dict, same as every other `sandbox_core.load_project_config()` section.
+Optional per-project settings, read from `sandbox.config.json`'s `pluginCheck` key (see
+`research.md`'s config-schema decision). The object may be absent entirely; the command
+still uses the project's resolved slug and defaults. It is not a runtime object with
+behavior — only a plain resolved dict, same as every other `sandbox_core.load_project_config()`
+section.
 
 There is no `slug` field in this config — the checked plugin is ALWAYS the project's own
 resolved slug (see below), not a separately-configured value.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `excludeDirectories` | `list[str]` | `[]` | Directories excluded from the check, relative to the project root. Passed verbatim to `wp plugin check --exclude-directories=`. |
+| `excludeDirectories` | `list[str]` | Entries from `.distignore`, or `[]` when none exist | Directories excluded from the check, relative to the project root. A non-empty explicit list wins; otherwise the project's `.distignore` is read. Passed verbatim to `wp plugin check --exclude-directories=`. |
 | `versionFile` | `str \| None` | `None` | Path (relative to project root) to read a `Version:` header from for report metadata. `None` resolves at run time to `<slug>.php` at the project root (spec FR-004's stated default). |
 | `baselineFile` | `str` | `"plugin-check-baseline.json"` | Path (relative to project root) to the committed baseline file (spec FR-005). |
 
@@ -26,10 +28,11 @@ Validation rules:
 - An unresolvable slug (the project directory name doesn't look like a valid WP plugin
   slug, and neither does an explicit top-level `slug`) → `die()` with `_project_slug`'s
   own validation message, before any instance/docker work happens (fail fast, cheap).
-- `excludeDirectories` entries are joined with `,` for the `--exclude-directories` flag,
-  exactly as the reference implementation does (no per-entry validation beyond being
-  strings — an invalid directory name is the underlying tool's problem to report, not
-  this feature's to pre-validate).
+- A non-empty `excludeDirectories` list takes priority over `.distignore`; an absent or
+  empty list falls back to that file. The resulting entries are joined with `,` for the
+  `--exclude-directories` flag, exactly as the reference implementation does (no
+  per-entry validation beyond being strings — an invalid directory name is the
+  underlying tool's problem to report, not this feature's to pre-validate).
 
 ## Finding
 

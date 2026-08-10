@@ -21,6 +21,11 @@ not installed/active, or an unresolvable plugin slug — see data-model.md's
 new-vs-baseline violations (file, code, current count, baselined count) on failure, and
 the path to the generated HTML report.
 
+On a first run with no baseline, the JSON and MCP result are a successful non-gating
+setup state (`ok: true`, `baseline_exists: false`, `new_count: 0`) with the `--update`
+instruction in `message`. Malformed or unrecognised Plugin Check output is an
+infrastructure failure, never an empty successful finding set.
+
 **JSON output shape** (`--json`):
 
 ```jsonc
@@ -35,6 +40,8 @@ the path to the generated HTML report.
   "violations": [                  // only when new_count > 0
     {"key": "includes/foo.php::some_rule", "current": 3, "baseline": 1, "delta": 2}
   ],
+  "baseline_exists": true,         // false on a successful first run; that run is not gated
+  "message": null,                 // first-run setup guidance; errors use `error` instead
   "report_path": "tests/test-results/plugin-check-report.html",
   "error": null                    // set (string) instead of the above on infra failure
 }
@@ -55,13 +62,13 @@ established pattern: build argv, `subprocess.run` with a timeout, parse the last
 line of stdout, return it directly on success or a `{"ok": false, "error": ...}` shape
 on timeout/parse failure).
 
-## sandbox.config.json: `pluginCheck`
+## Optional `sandbox.config.json` overrides: `pluginCheck`
 
 ```jsonc
 {
   "slug": "my-plugin",                          // top-level — Plugin Check reuses THIS
   "pluginCheck": {
-    "excludeDirectories": ["tests", "docs"],     // optional, default []
+    "excludeDirectories": ["tests", "docs"],     // optional; otherwise use .distignore when present
     "versionFile": "my-plugin.php",              // optional, default "<slug>.php"
     "baselineFile": "plugin-check-baseline.json" // optional, this is already the default
   }
@@ -74,3 +81,7 @@ unset), the same resolution legacy `plugins: ["."]` self-entries already use. A 
 whose directory name (and top-level `slug`, if set) doesn't look like a valid WP plugin
 slug gets a clear `die()` message — the command must never guess or silently no-op, but
 it also never asks for a value the project has typically already declared elsewhere.
+The `pluginCheck` object itself is optional: omitting it uses the derived version-file
+and baseline-file defaults plus `.distignore` entries (or no exclusions when the file is
+absent). A first run with no baseline is a successful non-gating result with
+`baseline_exists: false` and setup guidance in `message`, not an `error`.

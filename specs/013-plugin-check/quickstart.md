@@ -37,7 +37,8 @@ cd /path/to/sandbox
 ```
 
 **Expected**: clear message that no baseline exists yet (spec FR-016) — NOT a gate
-failure treating every finding as newly regressed. Exit code reflects "no baseline yet,"
+failure treating every finding as newly regressed. Exit code is `0`, `ok` is `true`, and
+the JSON result has `baseline_exists: false` plus setup guidance in `message`; this is
 distinct from a genuine gate failure.
 
 ## Run 2 — establish the baseline

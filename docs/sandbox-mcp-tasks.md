@@ -11,7 +11,9 @@ Reference: [`sandbox-notes.md`](sandbox-notes.md).
 - Keep one shared core: put reusable logic (config load, registry, ensure-instance,
   test-harness) in importable functions called by **both** the CLI and the MCP tools —
   don't duplicate.
-- Don't `git commit`/`push` unless the user says so.
+- After required verification passes, stage, commit, and push the relevant
+  completed work on the active non-`main` branch. Force-pushes, tags, releases,
+  deployments, and PR actions still require explicit approval.
 - Land docs in the same change as the code (except the Phase 3 README rewrite).
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.

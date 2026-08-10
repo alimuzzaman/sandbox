@@ -298,9 +298,12 @@ def cmd_hermes(cfg, args) -> None:
             )
         elif action == "state":
             if args.subaction == "setup":
-                if not args.state_repo:
+                # Older scripts used the shared --repo spelling before state
+                # gained its explicit option.  Keep it as a scoped alias.
+                repository = args.state_repo or args.repo
+                if not repository:
                     raise hermes.HermesError("hermes state setup requires --state-repo", "missing_state_repo")
-                payload = hermes.state_setup(args.remote, args.state_repo)
+                payload = hermes.state_setup(args.remote, repository)
             elif args.subaction == "sync":
                 payload = hermes.state_sync(args.remote, args.confirm)
             elif args.subaction == "restore":

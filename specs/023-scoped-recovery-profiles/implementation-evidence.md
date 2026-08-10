@@ -45,6 +45,17 @@ Interface inventory: CLI 68 commands (one new feature-owned command); MCP 53 too
 
 ## Residual gates
 
+## Local convergence follow-up
+
+The local-only convergence pass binds staging, retry ciphertext, and accepted
+materialized artifacts to `$SANDBOX_HOME/recovery/`; no checkout path is used for
+plaintext recovery staging. Staged manifests now bind selected profile dependencies,
+restore targets, and allowed-root labels, and restore planning rejects catalog
+dependency drift. GnuPG execution uses a finite timeout with all child output discarded.
+Rendered units use `/usr/bin/env sb recovery create --scheduled --confirm`; that
+reserved invocation fails closed until owned materialization exists. No capture, restore,
+deletion, timer installation/activation, real-set proof, or fresh-server drill occurred.
+
 ## Fixture capture checkpoint
 
 The new recovery module now has fixture-only proof for the capture pipeline:

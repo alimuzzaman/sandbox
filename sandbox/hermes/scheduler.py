@@ -119,14 +119,22 @@ _TERMINAL_RESULT_RE = re.compile(
 )
 
 
-def classify_terminal_result(value: str, *, provider_failure: bool = False) -> dict[str, Any]:
-    """Classify documented final output without allowing it to mask a provider error."""
+def classify_terminal_result(value: str, *, provider_failure: bool = False,
+                            transition_observed: bool = True) -> dict[str, Any]:
+    """Classify documented final output without allowing it to mask a provider error.
+
+    A marker is protocol evidence, not a successful run by itself.  The
+    scheduler must also have observed a terminal transition for it to recover
+    an upstream wrapper error.
+    """
     match = _TERMINAL_RESULT_RE.search(str(value or "")[:8000])
     marker = match.group(1) if match else None
     if provider_failure:
         classification = "provider_failure"
-    elif marker:
+    elif marker and transition_observed:
         classification = "successful_terminal"
+    elif marker:
+        classification = "protocol_error"
     else:
         classification = "none"
     return {"terminal_result": marker, "terminal_classification": classification}
@@ -241,13 +249,20 @@ def effective_job_status(job: dict[str, Any], evidence: str = "") -> dict[str, A
     error = str(job.get("last_error") or "")
     combined = "\n".join((error, evidence))[:8000]
     evidence_failure = bool(_ERROR_RE.search(combined))
-    terminal = classify_terminal_result(combined, provider_failure=evidence_failure)
+    transition_observed = bool(job.get("last_run_at"))
+    terminal = classify_terminal_result(
+        combined,
+        provider_failure=evidence_failure,
+        transition_observed=transition_observed,
+    )
     if route_reason:
         status = "invalid"
     elif evidence_failure:
         status = "failed"
     elif terminal["terminal_classification"] == "successful_terminal":
         status = "ok"
+    elif terminal["terminal_classification"] == "protocol_error":
+        status = "failed"
     elif last in {"error", "failed", "failure"}:
         status = "failed"
     elif str(job.get("state") or "").lower() in {"running", "claimed"}:
@@ -262,7 +277,11 @@ def effective_job_status(job: dict[str, Any], evidence: str = "") -> dict[str, A
         "effective_status": status,
         "false_success": evidence_failure and last in {"ok", "success", "completed"},
         "route_valid": route_reason is None,
-        "reason": route_reason or ("bounded request evidence records a provider/client failure" if evidence_failure else ""),
+        "reason": route_reason or (
+            "bounded request evidence records a provider/client failure" if evidence_failure
+            else "documented terminal result lacks an observed transition"
+            if terminal["terminal_classification"] == "protocol_error" else ""
+        ),
         **terminal,
         "result_protocol_error": bool(terminal["terminal_result"] and last in {"error", "failed", "failure"}),
     }

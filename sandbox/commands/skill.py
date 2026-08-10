@@ -20,8 +20,18 @@ def _slugify(title: str) -> str:
     return s
 
 
-def _project_skills_dir() -> Path | None:
-    """`.claude/skills` of the project rooted at cwd (walk up for a marker)."""
+def _project_skills_dir(project_dir: str | os.PathLike[str] | None = None) -> Path | None:
+    """Return a project's ``.claude/skills`` root without requiring a stack.
+
+    MCP callers provide the target project explicitly; CLI callers retain the
+    convenient cwd-based discovery.  Authoring intentionally does not use the
+    instance-gated focus tool, because skills must work before a stack exists.
+    """
+    if project_dir:
+        try:
+            return Path(project_dir).expanduser().resolve() / ".claude" / "skills"
+        except OSError:
+            return None
     cur = Path(os.getcwd()).resolve()
     for d in (cur, *cur.parents):
         if (d / ".git").exists() or any(d.glob("sandbox.config.*")) or (d / ".claude").is_dir():
@@ -31,13 +41,13 @@ def _project_skills_dir() -> Path | None:
     return None
 
 
-def _scope_root(scope: str) -> Path | None:
+def _scope_root(scope: str, project_dir: str | os.PathLike[str] | None = None) -> Path | None:
     if scope == "sandbox":
         return _SANDBOX_SKILLS
     if scope == "personal":
         return _PERSONAL_SKILLS
     if scope == "project":
-        return _project_skills_dir()
+        return _project_skills_dir(project_dir)
     return None
 
 
@@ -61,24 +71,34 @@ def _parse_frontmatter(skill_md: Path) -> dict:
     return {"name": name, "description": desc, "enable": enable}
 
 
-def _iter_source(scope: str):
-    root = _scope_root(scope)
+def _within(path: Path, root: Path) -> bool:
+    """Whether a resolved skill path remains inside its declared scope root."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _iter_source(scope: str, project_dir: str | os.PathLike[str] | None = None):
+    root = _scope_root(scope, project_dir)
     if not root or not root.is_dir():
         return
     for entry in sorted(root.iterdir()):
         md = entry / "SKILL.md"
-        if entry.is_dir() and md.is_file():
+        if entry.is_dir() and md.is_file() and _within(md, root):
             meta = _parse_frontmatter(md)
             yield {"slug": entry.name, "scope": scope, "path": md,
                    "description": meta["description"], "enable": meta["enable"]}
 
 
-def _resolve(include_disabled: bool = False) -> dict:
+def _resolve(include_disabled: bool = False,
+             project_dir: str | os.PathLike[str] | None = None) -> dict:
     """slug → winning record, precedence project > personal > sandbox."""
     out: dict[str, dict] = {}
     seen_roots: set[str] = set()
     for scope in ("sandbox", "personal", "project"):  # later overrides earlier
-        root = _scope_root(scope)
+        root = _scope_root(scope, project_dir)
         try:
             real = str(root.resolve()) if root else None
         except OSError:
@@ -87,7 +107,7 @@ def _resolve(include_disabled: bool = False) -> dict:
             continue  # e.g. sandbox repo's .claude/skills symlinks to ./skills
         if real:
             seen_roots.add(real)
-        for rec in _iter_source(scope):
+        for rec in _iter_source(scope, project_dir):
             if not include_disabled and not rec["enable"]:
                 continue
             out[rec["slug"]] = rec  # project written last → wins
@@ -97,20 +117,19 @@ def _resolve(include_disabled: bool = False) -> dict:
 def cmd_skill(cfg, args) -> None:
     action = args.action
     if action == "list":
-        recs = _resolve(include_disabled=True)
+        recs = _resolve()
         if not recs:
             info("no skills found")
             return
         for slug in sorted(recs):
             r = recs[slug]
-            flag = "" if r["enable"] else " (disabled)"
-            print(f"  {slug:<28} [{r['scope']}]{flag}  {r['description']}")
+            print(f"  {slug:<28} [{r['scope']}]  {r['description']}")
         return
 
     if action == "show":
         if not args.slug:
             die("usage: ./sb skill show <slug>")
-        r = _resolve(include_disabled=True).get(args.slug)
+        r = _resolve().get(args.slug)
         if not r:
             die(f"no skill '{args.slug}'")
         print(r["path"].read_text())
@@ -126,12 +145,14 @@ def cmd_skill(cfg, args) -> None:
         root = _scope_root(scope)
         if not root:
             die(f"scope '{scope}' unavailable here (no project root for cwd?)")
-        # never silently shadow a built-in sandbox skill from another scope
+        # Project/personal skills must never shadow a built-in silently.
         if scope != "sandbox" and (_SANDBOX_SKILLS / slug).is_dir():
             if args.on_conflict != "rename":
                 die(f"'{slug}' shadows a built-in sandbox skill — use --on-conflict rename")
         dest = root / slug
         if dest.exists():
+            if scope == "sandbox" and args.on_conflict == "replace":
+                die(f"cannot replace built-in sandbox skill '{slug}' — use --on-conflict rename")
             if args.on_conflict == "fail" or not args.on_conflict:
                 n = 2
                 while (root / f"{slug}-{n}").exists():
@@ -161,7 +182,10 @@ def cmd_skill(cfg, args) -> None:
     if action == "edit":
         if not args.slug:
             die("usage: ./sb skill edit <slug> [--desc D] [--file body.md|-]")
-        r = _resolve(include_disabled=True).get(args.slug)
+        if args.scope:
+            r = next((x for x in _iter_source(args.scope) if x["slug"] == args.slug), None)
+        else:
+            r = _resolve(include_disabled=True).get(args.slug)
         if not r:
             die(f"no skill '{args.slug}'")
         meta = _parse_frontmatter(r["path"])

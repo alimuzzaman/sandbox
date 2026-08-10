@@ -107,6 +107,27 @@ class TestRecoveryCapture(unittest.TestCase):
                 StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root).publish_files(
                     "fixture-set", {"artifact": source}, profiles=("fixture",))
 
+    def test_file_capture_rejects_artifacts_outside_owned_materialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); owned = root / "materialized"; owned.mkdir()
+            source = root / "outside"; source.write_bytes(b"data")
+            with self.assertRaisesRegex(RecoveryError, "owned materialization"):
+                StagingCaptureCoordinator(FixtureCrypto(), MemoryDrive(), staging_root=root,
+                                          materialization_root=owned).publish_files(
+                    "fixture-set", {"artifact": source}, profiles=("fixture",))
+
+    def test_file_capture_records_complete_profile_bindings(self):
+        class FileCrypto:
+            def encrypt_file(self, source, target): Path(target).write_bytes(b"cipher:" + Path(source).read_bytes())
+            def verify_file(self, source, target): return hashlib.sha256(Path(source).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            receipt = StagingCaptureCoordinator(FileCrypto(), MemoryDrive(), staging_root=root).publish_files(
+                "fixture-set", {"artifact": source}, profiles=("fixture",),
+                profile_bindings={"fixture": {"dependencies": [], "restore_target": "fixture-target",
+                                                "allowed_roots": ["fixture-root"]}})
+        self.assertEqual(receipt["profile_bindings"]["fixture"]["restore_target"], "fixture-target")
+
     def test_file_capture_rejects_non_string_set_and_artifact_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); source = root / "source"; source.write_bytes(b"data")

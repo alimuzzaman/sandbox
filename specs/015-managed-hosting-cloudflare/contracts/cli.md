@@ -22,6 +22,11 @@ Optional `secrets.values`, `secrets.required`, and `secrets.generated` map conta
 environment keys to public values or names in `~/.zshrc.secrets`; secret values never
 appear in the manifest.
 
+Each redirect alias target is an HTTPS hostname with no path, query, or fragment. Its
+hostname is canonicalized to ASCII IDNA before rendering, DNS planning, or persistence;
+the original request URI is then appended by Caddy. Redirect aliases may not form a
+cycle.
+
 `basic_auth.password_secret` is an owner-only secret-store key, not a Compose
 environment key. During confirmed apply, Sandbox streams that secret to remote Caddy's
 `hash-password` command and writes only the resulting hash to the managed Caddy

@@ -14,6 +14,12 @@ from sandbox.services.process import BoundedProcessRunner
 
 def recovery_service(root: str | Path) -> RecoveryService:
     root = Path(root)
+    # Recovery plaintext is never staged in the checkout.  Keep all transient
+    # material under the Sandbox-owned machine state directory instead.
+    state_root = Path(os.environ.get("SANDBOX_HOME", Path.home() / "sandbox")) / "recovery"
+    staging_root = state_root / "staging"
+    pending_root = state_root / "pending"
+    materialization_root = state_root / "materialized"
     destination = os.environ.get("RECOVERY_RCLONE_DESTINATION")
     passphrase = os.environ.get("RECOVERY_PASSPHRASE")
     drive = None
@@ -27,13 +33,14 @@ def recovery_service(root: str | Path) -> RecoveryService:
             capture = StagingCaptureCoordinator(
                 GpgCrypto(passphrase),
                 drive,
-                staging_root=os.environ.get("RECOVERY_STAGING_ROOT") or None,
-                pending_root=os.environ.get("RECOVERY_PENDING_ROOT") or None,
+                staging_root=staging_root,
+                pending_root=pending_root,
+                materialization_root=materialization_root,
             )
     return RecoveryService(
         load_catalog(root / "config" / "recovery-profiles.json"),
         inventory=SandboxRemoteInventory(),
         drive=drive,
         capture=capture,
-        pending_root=os.environ.get("RECOVERY_PENDING_ROOT") or None,
+        pending_root=pending_root,
     )

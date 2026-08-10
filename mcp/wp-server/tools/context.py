@@ -10,7 +10,26 @@ import re as _re
 
 
 
-from app import (SANDBOX_CLAUDE_MD, SANDBOX_ROOT, SANDBOX_SKILLS_DIR, SANDBOX_WORKFLOWS_DIR, _core, _focus_file, _list_sandbox_skills, _list_sandbox_workflows, _parse_skill_metadata, _project_instance, _resolve_instance, _require_project_capability, _site_url, _skill_prompt_body, _wpcli, mcp)
+from app import (SANDBOX_CLAUDE_MD, SANDBOX_ROOT, SANDBOX_WORKFLOWS_DIR, _core, _focus_file, _list_sandbox_skills, _list_sandbox_workflows, _parse_skill_metadata, _project_instance, _resolve_instance, _require_project_capability, _site_url, _skill_prompt_body, _wpcli, mcp)
+
+
+def _catalog(project_dir: str) -> dict:
+    """Resolve the live catalog without importing another MCP tool group."""
+    import sys
+    if str(SANDBOX_ROOT) not in sys.path:
+        sys.path.insert(0, str(SANDBOX_ROOT))
+    from sandbox.commands import skill
+    return skill._resolve(project_dir=project_dir)
+
+
+def _record_payload(slug: str, record: dict) -> dict:
+    return {
+        "slug": slug,
+        "source": record["scope"],
+        "scope": record["scope"],
+        "description": record["description"],
+        "path": str(record["path"]),
+    }
 
 
 
@@ -56,17 +75,16 @@ def focus_get(project_dir: str, include_claude_md: bool = False,
                 out["claude_md_truncated"] = cmd.stat().st_size > max_bytes
                 break
 
-    skills_dir = root / ".claude" / "skills"
-    if skills_dir.is_dir():
-        for entry in sorted(skills_dir.iterdir()):
-            skill_md = entry / "SKILL.md"
-            if entry.is_dir() and skill_md.is_file():
-                meta = _parse_skill_metadata(skill_md)
-                out["available_skills"].append({
-                    "name": meta["name"] or entry.name,
-                    "description": meta["description"],
-                    "path": str(skill_md),
-                })
+    # Reuse the same enabled-only, path-jailed resolver as list_skills so a
+    # disabled project skill cannot leak through the focus convenience view.
+    for slug, record in sorted(_catalog(project_dir).items()):
+        if record["scope"] != "project":
+            continue
+        meta = _parse_skill_metadata(record["path"])
+        out["available_skills"].append({
+            "name": meta["name"] or slug,
+            **_record_payload(slug, record),
+        })
     return out
 
 @mcp.tool()
@@ -109,7 +127,14 @@ def load_context() -> dict:
         "ok": True,
         "claude_md": SANDBOX_CLAUDE_MD.read_text(errors="replace"),
         "claude_md_path": str(SANDBOX_CLAUDE_MD),
-        "available_skills": _list_sandbox_skills(),
+        "available_skills": [
+            skill for skill in _list_sandbox_skills()
+            if _parse_skill_metadata(SANDBOX_ROOT / skill["path"])["enable"]
+        ],
+        "skill_catalog_guidance": (
+            "Use list_skills(project_dir=...) for the live enabled catalog and "
+            "load_skill(name, project_dir=...) to fetch only the precedence-selected body."
+        ),
     }
 
 @mcp.tool()
@@ -139,26 +164,38 @@ def load_workflow(name: str) -> dict:
     }
 
 @mcp.tool()
-def load_skill(name: str) -> dict:
-    """Return the full text of a top-level sandbox skill (SKILL.md).
+def load_skill(name: str, project_dir: str = "") -> dict:
+    """Return one enabled skill body, resolving project > personal > sandbox.
 
     Use this when a reflex tells you to engage a specific skill — e.g.
     `load_skill('fix')` before starting a bug-fix loop, `load_skill('wp-pilot')`
-    before editor-driven authoring. Skill names match the directories
-    under sandbox/skills/ (fix, bug-repro, snapshot, wp-debug, wp-pilot,
-    fluentboards).
+    before editor-driven authoring. Pass project_dir after matching a project
+    catalog entry; without it this retains the sandbox-only default behavior.
     """
-    skill_md = SANDBOX_SKILLS_DIR / name / "SKILL.md"
-    if not skill_md.is_file():
+    if project_dir and not Path(project_dir).expanduser().is_dir():
+        return {"ok": False, "error": f"invalid project_dir {project_dir!r}"}
+    catalog = _catalog(project_dir or str(SANDBOX_ROOT))
+    record = catalog.get(name)
+    if not record:
         return {
             "ok": False,
-            "error": f"no skill '{name}' (looked at {skill_md})",
-            "available_skills": [s["name"] for s in _list_sandbox_skills()],
+            "error": f"no enabled skill '{name}'",
+            "available_skills": [
+                _record_payload(slug, entry)
+                for slug, entry in sorted(catalog.items())
+            ],
         }
+    skill_md = record["path"]
+    try:
+        path = str(skill_md.relative_to(SANDBOX_ROOT))
+    except ValueError:
+        path = str(skill_md)
     return {
         "ok": True,
         "name": name,
-        "path": str(skill_md.relative_to(SANDBOX_ROOT)),
+        "source": record["scope"],
+        "scope": record["scope"],
+        "path": path,
         "content": skill_md.read_text(errors="replace"),
     }
 

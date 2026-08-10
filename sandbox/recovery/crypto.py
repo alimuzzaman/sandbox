@@ -24,7 +24,7 @@ class FixtureCrypto:
 class GpgCrypto:
     """Symmetric GnuPG adapter using a dedicated inherited passphrase descriptor."""
 
-    def __init__(self, passphrase: str, *, executable: str = "gpg") -> None:
+    def __init__(self, passphrase: str, *, executable: str = "gpg", timeout_seconds: int = 900) -> None:
         if not isinstance(passphrase, str) or not passphrase:
             raise RecoveryError("recovery passphrase is unavailable", "missing_passphrase")
         if len(passphrase) > 4096:
@@ -33,6 +33,9 @@ class GpgCrypto:
             raise RecoveryError("recovery passphrase contains unsafe control text", "invalid_passphrase")
         self._passphrase = passphrase
         self.executable = executable
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+            raise RecoveryError("GnuPG timeout is invalid", "invalid_gpg_timeout")
+        self.timeout_seconds = timeout_seconds
 
     def _run(self, argv: list[str], *, input_path: Path, output_path: Path) -> None:
         read_fd, write_fd = os.pipe()
@@ -46,9 +49,12 @@ class GpgCrypto:
             os.close(write_fd); write_fd = -1
             command = [self.executable, "--batch", "--yes", "--pinentry-mode", "loopback",
                        "--passphrase-fd", str(read_fd), *argv, "--output", str(output_path), str(input_path)]
-            result = subprocess.run(command, pass_fds=(read_fd,), stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    text=True, check=False)
+            try:
+                result = subprocess.run(command, pass_fds=(read_fd,), stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=self.timeout_seconds, check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise RecoveryError("GnuPG operation timed out", "gpg_timeout") from exc
             if result.returncode != 0:
                 raise RecoveryError("GnuPG encryption operation failed", "gpg_failed")
         finally:

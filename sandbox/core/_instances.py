@@ -776,6 +776,13 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
 
+        # Spec 008: a newly provisioned instance gets both restore points only
+        # after its project plugins/themes are in their final installed state.
+        # `capture_install_snapshots` is idempotent, so resuming a pending
+        # instance never replaces a clean baseline with later DB changes.
+        from sandbox.commands.data import capture_install_snapshots
+        capture_install_snapshots(name)
+
         # Read the autologin token that cmd_install just generated so we can
         # include login_url in the return value for the agent / human.
         _local_data = _local_yaml()
@@ -897,18 +904,6 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         # 3. Re-sync plugins + themes (idempotent symlinks + installs).
         _wire_project_plugins(name, root, pconf)
         _wire_project_themes(name, root, pconf)
-
-        # spec 008: capture the post-provision @install state ONCE (no-op if it
-        # already exists; a destroy wipes snapshots, so recreate naturally refreshes
-        # both). The db-only `__install__` baseline powers `./sb reset`; the full
-        # `install-baseline` named snapshot (DB + uploads) allows a complete rollback.
-        try:
-            from sandbox.commands.data import (capture_install_baseline,
-                                               capture_install_full_snapshot)
-            capture_install_baseline(name)
-            capture_install_full_snapshot(name)
-        except Exception:
-            pass
 
         # 4. Multisite: convert if newly enabled. Skip if it was already a
         #    network (idempotent) or if the config still disables multisite.

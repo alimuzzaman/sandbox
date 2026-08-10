@@ -10,7 +10,8 @@ import re as _re
 
 
 
-from app import SANDBOX_ROOT, _is_herd, _project_instance, _require_project_capability, _wpcli, mcp
+from app import (SANDBOX_ROOT, _is_herd, _project_instance,
+                 _require_project_capability, _run_sandbox_json, _wpcli, mcp)
 
 
 
@@ -58,6 +59,41 @@ def import_content(seed_file: str, authors: str = "create",
             if _is_herd(inst) else f"/seeds/{seed_file}")
     return _wpcli(["import", seed, f"--authors={authors}"],
                   instance=inst, timeout=180)
+
+
+@mcp.tool()
+def snapshot(name: str, db_only: bool = False, force: bool = False, *,
+             project_dir: str, label: str | None = None) -> dict:
+    """Capture a named WordPress snapshot.
+
+    Set db_only=true to export only the database and leave uploads out of the
+    snapshot. force=true intentionally replaces an existing snapshot of the
+    same name. project_dir: the plugin project to target (call
+    ensure_instance first).
+    """
+    capability_error = _require_project_capability(project_dir, label, "wordpress.snapshot")
+    if capability_error:
+        return capability_error
+    inst, err = _project_instance(project_dir, label)
+    if err:
+        return err
+    if not (name or "").strip():
+        return {"ok": False, "error": "snapshot name is required"}
+    command = [str(SANDBOX_ROOT / "sb"), "--instance", inst, "snapshot", name]
+    if db_only:
+        command.append("--db-only")
+    if force:
+        command.append("--force")
+    result = _run_sandbox_json(command, 300)
+    if result["timed_out"]:
+        return {"ok": False, "error": "snapshot timed out after 300s"}
+    payload = result["payload"]
+    if isinstance(payload, dict):
+        return payload
+    output = ((result["stdout"] or "") + (result["stderr"] or "")).strip()
+    if result["returncode"] == 0:
+        return {"ok": True, "output": output}
+    return {"ok": False, "error": output or "snapshot failed"}
 
 
 @mcp.tool()

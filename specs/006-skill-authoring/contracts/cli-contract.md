@@ -6,7 +6,8 @@
 - Writes `<scope-root>/skills/<slug>/SKILL.md` (slug = `sanitize_title(title)`; foldered, uppercase entry).
 - Default scope: `project` when a plugin is focused, else `sandbox`.
 - `on_conflict`: `fail` → `{ok:false, conflict, suggested_slug}`; `replace` → overwrite (same-scope user/project only; never a built-in); `rename` → auto-suffix.
-- Returns `{ ok, slug, path, action: created|updated|renamed }`.
+- Returns `{ ok, slug, source, path, action: created|updated|renamed }`; conflicts
+  return `{ok:false, code, error, slug, suggested_slug?}`.
 
 ### `skill_edit(slug, description?, body?, scope?, *, project_dir)`
 - Updates description/body of the resolved skill (precedence-aware).
@@ -17,7 +18,8 @@
 ### `list_skills(*, project_dir)`
 - `[{ slug, description, source, path }]` across all sources; precedence **project > personal > sandbox**; may flag shadowed duplicates.
 
-(Existing `load_skill(slug)` is the on-demand body fetch — unchanged; documented here as the match→load step.)
+`load_skill(slug, project_dir?)` is the on-demand body fetch. With a project it
+returns the enabled precedence winner; its response includes `source` and `path`.
 
 ## CLI (`sandbox/commands/skill.py`)
 
@@ -33,6 +35,7 @@ All path-jailed to the scope roots (repo `skills/`, focused plugin's `.claude/sk
 ## Guarantees
 
 - Foldered output only; flat single-file skills rejected.
-- Built-in slugs cannot be silently shadowed (must rename).
+- Built-in slugs cannot be silently shadowed (must rename), and a sandbox
+  built-in cannot be replaced.
 - Disabled skills omitted from `list_skills`/catalog.
 - A newly written/edited skill is discoverable without a restart (sources re-globbed).

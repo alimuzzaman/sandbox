@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-18
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: User description: "Implement the Remote and Hermes Operations Hardening PRD: secure remote MCP service ownership and secret handling, truthful remote and Hermes health, transactional cron reconciliation with safe rollback, and terminal result classification. Keep all remote mutations explicitly confirmation-gated."
 

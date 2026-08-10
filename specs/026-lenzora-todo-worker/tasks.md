@@ -31,3 +31,7 @@
 - T002 before T003 because reconciliation must prepare the new worktree.
 - T003 before T004–T006.
 - T006 is the final live acceptance gate.
+
+## Phase 4: Convergence
+
+- [X] T007 Record that the current committed catalog disables the Lenzora TODO worker despite the earlier one-enabled-worker narrative; leave the policy decision and protected T006 live acceptance open (FR-007, SC-004; contradicts)

@@ -76,3 +76,8 @@
 - [X] T023 Add a concurrency regression and guarded state-transition mechanism proving competing authorization approvals cannot lose audit/state updates or leave a mismatched cron prompt (FR-007; fixture-level proof; live race remains unperformed).
 - [X] T024 Resolve the remaining Spec-Kit placeholder sections in `spec.md` through the canonical specify/clarify workflows, including measurable edge-case acceptance criteria and assumptions (spec quality; resolved; live operational gaps remain separately protected).
 - [X] T025 Refresh `quickstart.md` with current focused/full test counts and clearly separate fixture evidence from unperformed live acceptance (SC-004; partial).
+
+## Phase 10: Convergence
+
+- [X] T026 Make dashboard request listing observational, validate canonical stored request fields and secret-screened blocker content, and recompute the immutable fingerprint before scheduler-dependent approval work (FR-001, FR-002, FR-003, FR-005, FR-007; partial)
+- [X] T027 Reconcile authorization runbook evidence with the current disabled Lenzora catalog declaration, while retaining protected T021 as the only path to live deployment/reconciliation acceptance (FR-004, FR-006, FR-007; contradicts)

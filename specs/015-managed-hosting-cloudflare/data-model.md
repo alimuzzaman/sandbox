@@ -7,8 +7,10 @@ Compose web service, deployment policy, host routes, and Cloudflare policy.
 
 ## HostRoute
 
-Normalized hostname; `serve` routes to the environment service, while `redirect`
-requires an HTTPS target. Wildcards are valid only for `serve` routes.
+Normalized ASCII hostname; `serve` routes to the environment service, while `redirect`
+requires a canonical HTTPS hostname target. Redirect targets cannot carry a path,
+query, or fragment because Caddy appends the original URI; cycles among declared
+redirect aliases are rejected. Wildcards are valid only for `serve` routes.
 
 ## HostedEnvironmentState
 

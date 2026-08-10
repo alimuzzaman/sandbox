@@ -139,3 +139,16 @@ sets before invoking an adapter.
 The CLI accepts repeated explicit materialized inputs with the recovery create command:
 --backup-id SET --profile PROFILE --artifact NAME=PATH. It does not discover paths from the
 host; unresolved catalog roots remain blocked.
+# Scoped recovery safety boundaries
+
+Recovery staging, retry ciphertext, and capture inputs are machine-state data. The
+standard recovery context uses `$SANDBOX_HOME/recovery/{staging,pending,materialized}`;
+it does not stage plaintext in a checkout. A capture accepts only regular artifacts
+under the owned `materialized` directory, and production profiles remain review-only
+until a dedicated adapter materializes approved inputs there.
+
+Each staged manifest binds every selected profile to its dependencies, restore target,
+and allowed-root labels. Restore planning rejects a catalog whose dependency graph does
+not match that immutable binding. The `schedule` command only renders disabled units.
+Its reserved `create --scheduled --confirm` invocation fails closed until owned
+materialization is configured; it neither installs a timer nor captures data.

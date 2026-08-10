@@ -31,6 +31,7 @@ of WordPress catalogs. `SANDBOX_MCP_GROUPS` remains an explicit operator overrid
 | `wp_cli` | run any wp-cli command |
 | `wp_rest` | call the WP REST API (auth: Application Password) |
 | `db_query` | read-only SQL (SELECT/SHOW/DESCRIBE/EXPLAIN) |
+| `snapshot` / `wp_reset` | capture a named snapshot (`db_only: true` skips uploads) / reset to protected `@install` (`confirm: true`) |
 | `tail_log` | tail `wp-content/debug.log` |
 | `activate_plugin` / `deactivate_plugin` | toggle plugins by slug |
 | `import_content` | import a WXR XML from `runtime/seeds/` |
@@ -42,7 +43,10 @@ cd ../..    # back to sandbox/ root
 make mcp-install
 ```
 
-This creates `mcp/wp-server/.venv` and installs `mcp` + `httpx`.
+This creates `mcp/wp-server/.venv` and installs the pinned MCP 1.25.0 SDK plus
+`httpx`. The pin preserves the `FastMCP.streamable_http_app()` transport used by
+remote VPS hosting; do not upgrade it independently of `server.py` and its
+fresh-venv transport test.
 
 ## Configure your LLM client
 

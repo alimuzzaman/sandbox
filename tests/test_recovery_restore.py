@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 import hashlib
 import json
 from unittest.mock import patch
@@ -131,3 +133,19 @@ class TestRecoveryRestore(unittest.TestCase):
         self.assertIn("rollback:two", events)
         self.assertIn("resume:two", events)
         self.assertIn("rollback:one", events)
+
+    def test_restore_rejects_catalog_dependency_drift_from_bound_manifest(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "artifact"; source.write_bytes(b"data")
+            class Crypto:
+                def encrypt_file(self, src, dst): Path(dst).write_bytes(b"c" + Path(src).read_bytes())
+                def verify_file(self, src, dst): return hashlib.sha256(Path(src).read_bytes()).hexdigest()
+            drive = MemoryDrive()
+            from sandbox.recovery.capture import StagingCaptureCoordinator
+            StagingCaptureCoordinator(Crypto(), drive, staging_root=root).publish_files(
+                "bound", {"artifact": source}, profiles=("base", "app"),
+                profile_bindings={"base": {"dependencies": [], "restore_target": "base-target", "allowed_roots": ["base"]},
+                                  "app": {"dependencies": ["base"], "restore_target": "app-target", "allowed_roots": ["app"]}})
+            with self.assertRaisesRegex(RecoveryError, "dependencies do not match"):
+                build_restore_plan(drive, "bound", dependencies={"base": (), "app": ()})

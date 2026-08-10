@@ -46,6 +46,8 @@ from sandbox.hermes.scheduler import (
     scheduled_route,
     scripts_path,
 )
+from sandbox.hermes.state import state_restore_command as _safe_state_restore_command
+from sandbox.hermes.state import state_sync_command as _safe_state_sync_command
 
 
 SUPPORTED_TAG = "v2026.7.7.2"
@@ -1018,26 +1020,7 @@ def _state_repo(entry: dict) -> str:
 
 
 def _state_restore_command(paths: dict, repository: str) -> str:
-    repo = shlex.quote(repository)
-    return (
-        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
-        f"git clone --quiet --depth=1 {repo} \"$stage/repo\"; "
-        "test -f \"$stage/repo/manifest.json\"; "
-        "grep -q 'schema_version' \"$stage/repo/manifest.json\"; "
-        "for forbidden in auth.json credentials cookies sessions checkpoints state.db; do "
-        "if find \"$stage/repo\" -type f -iname \"$forbidden\" | grep -q .; then exit 42; fi; done; "
-        "mkdir -p \"$stage/new-hermes\" \"$stage/new-runtime\"; "
-        "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json SOUL.md; do "
-        "test ! -e \"$stage/repo/hermes/$safe\" || cp -p \"$stage/repo/hermes/$safe\" \"$stage/new-hermes/$safe\"; done; "
-        "test ! -d \"$stage/repo/hermes/memories\" || cp -R \"$stage/repo/hermes/memories\" \"$stage/new-hermes/memories\"; "
-        f"test ! -e \"$stage/repo/sandbox/hermes.json\" || cp -p \"$stage/repo/sandbox/hermes.json\" \"$stage/new-runtime/hermes.json\"; "
-        f"mkdir -p \"$HOME/.hermes\" {shlex.quote(paths['sandbox_home'])}/runtime; "
-        "for safe in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json SOUL.md; do "
-        "test ! -e \"$stage/new-hermes/$safe\" || install -m 600 \"$stage/new-hermes/$safe\" \"$HOME/.hermes/$safe\"; done; "
-        "test ! -d \"$stage/new-hermes/memories\" || { rm -rf \"$HOME/.hermes/memories.new\"; cp -R \"$stage/new-hermes/memories\" \"$HOME/.hermes/memories.new\"; mv \"$HOME/.hermes/memories.new\" \"$HOME/.hermes/memories\"; }; "
-        f"test ! -e \"$stage/new-runtime/hermes.json\" || install -m 600 \"$stage/new-runtime/hermes.json\" {shlex.quote(paths['state'])}; "
-        "printf '%s\\n' restored"
-    )
+    return _safe_state_restore_command(paths, repository)
 
 
 def state_restore(remote_name: str, confirm: bool) -> dict:
@@ -1053,19 +1036,7 @@ def state_restore(remote_name: str, confirm: bool) -> dict:
 
 
 def _state_sync_command(paths: dict, repository: str) -> str:
-    repo = shlex.quote(repository)
-    return (
-        "set -eu; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; "
-        f"git clone --quiet {repo} \"$stage/repo\"; mkdir -p \"$stage/repo/hermes\" \"$stage/repo/sandbox\"; "
-        "for src in sandbox-integration.json sandbox-resource-policy.json sandbox-gateway-allowlist.json; do "
-        "test ! -e \"$HOME/.hermes/$src\" || cp -p \"$HOME/.hermes/$src\" \"$stage/repo/hermes/$src\"; done; "
-        "test ! -e \"$HOME/.hermes/SOUL.md\" || cp -p \"$HOME/.hermes/SOUL.md\" \"$stage/repo/hermes/SOUL.md\"; "
-        "test ! -d \"$HOME/.hermes/memories\" || cp -R \"$HOME/.hermes/memories\" \"$stage/repo/hermes/memories\"; "
-        f"test ! -e {shlex.quote(paths['state'])} || cp -p {shlex.quote(paths['state'])} \"$stage/repo/sandbox/hermes.json\"; "
-        "if find \"$stage/repo\" -type f \\( -iname 'auth.json' -o -iname 'credentials*' -o -iname 'cookies*' -o -iname 'sessions*' -o -iname 'checkpoints*' -o -iname '*.pem' -o -iname '*.key' -o -iname 'state.db*' \\) | grep -q .; then exit 42; fi; "
-        "if grep -RIEq 'github_pat_[A-Za-z0-9_]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|sk-[A-Za-z0-9_-]{30,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY' \"$stage/repo/hermes\" \"$stage/repo/sandbox\" 2>/dev/null; then exit 43; fi; "
-        "cd \"$stage/repo\"; git add -A; if git diff --cached --quiet; then echo unchanged; else git -c user.name='Hermes State Backup' -c user.email='hermes-state@users.noreply.github.com' commit -qm 'chore: sync sanitized Hermes state'; git push -q origin HEAD; echo pushed; fi"
-    )
+    return _safe_state_sync_command(paths, repository)
 
 
 def state_sync(remote_name: str, confirm: bool) -> dict:
@@ -1075,9 +1046,12 @@ def state_sync(remote_name: str, confirm: bool) -> dict:
     repository = _state_repo(entry)
     res = _checked(entry, _state_sync_command(_paths(entry), repository), timeout=300,
                    what="Hermes state sync failed")
-    status = (res.stdout or "").strip().splitlines()[-1:] or ["unknown"]
-    return result(True, "state_sync", remote_name, status=status[0],
-                  data={"repository": repository})
+    report = (res.stdout or "").strip().splitlines()[-1] if (res.stdout or "").strip() else ""
+    status, separator, revision = report.partition(":")
+    if status not in {"pushed", "unchanged"} or not separator or not _COMMIT_RE.fullmatch(revision):
+        raise HermesError("Hermes state sync returned invalid revision evidence", "state_sync_failed", True)
+    return result(True, "state_sync", remote_name, status=status,
+                  data={"repository": repository, "revision": revision})
 
 
 def validate_drive_destination(value: str) -> str:
@@ -1284,11 +1258,15 @@ print(f"archive_bytes={cipher.stat().st_size}")
     script = script.replace("__BACKUP_ID__", json.dumps(backup_id))
     script = script.replace("__SCOPE__", json.dumps(scope))
 
+    # A heredoc consumes the remote process stdin, which used to leave the
+    # passphrase unread.  Feed source through argv-safe base64 instead so the
+    # Python program receives only the SSH stdin secret.
+    encoded = base64.b64encode(script.encode()).decode()
     return (
         "set -eu; umask 077; "
-        "python3 - <<'PY'\n"
-        f"{script}\n"
-        "PY\n"
+        "python3 -c 'import base64,sys; exec(compile(base64.b64decode(sys.argv[1]), "
+        "\"<drive-backup>\", \"exec\"))' "
+        f"{shlex.quote(encoded)}\n"
     )
 
 
@@ -3210,8 +3188,10 @@ def clone_repo(remote_name: str, url: str, name: str | None = None, ref: str | N
     destination = f"{paths['repo_root']}/{repo_name}"
     temp = f"{paths['repo_root']}/.{repo_name}.clone-{secrets.token_hex(4)}"
     ref_arg = f" --branch {shlex.quote(ref)}" if ref else ""
+    locks = paths.get("locks", f"{paths['sandbox_home']}/runtime/hermes-locks")
     command = (
-        f"set -eu; mkdir -p {shlex.quote(paths['repo_root'])}; "
+        f"set -eu; mkdir -p {shlex.quote(paths['repo_root'])} {shlex.quote(locks)}; "
+        f"exec 9>{shlex.quote(locks + '/' + repo_name + '.lock')}; flock -w 30 9; "
         f"if test -e {shlex.quote(destination)}; then "
         f"if git -C {shlex.quote(destination)} rev-parse --is-inside-work-tree >/dev/null 2>&1 && "
         f"test \"$(git -C {shlex.quote(destination)} remote get-url origin)\" = {shlex.quote(safe_url)}; "
@@ -3277,7 +3257,10 @@ run(["git","-C",str(repo),"merge","--ff-only",f"origin/{branch}"])
 head=run(["git","-C",str(repo),"rev-parse","HEAD"])
 print(json.dumps({"branch":branch,"head":head}))
 '''
-    res = _checked(entry, f"python3 -c {shlex.quote(program)} {shlex.quote(repo)}", timeout=120,
+    locks = paths.get("locks", f"{paths['sandbox_home']}/runtime/hermes-locks")
+    lock = f"{locks}/{name}.lock"
+    res = _checked(entry, f"mkdir -p {shlex.quote(locks)}; exec 9>{shlex.quote(lock)}; flock -w 30 9; "
+                   f"python3 -c {shlex.quote(program)} {shlex.quote(repo)}", timeout=120,
                    what="managed repository synchronization failed")
     try:
         data = json.loads((res.stdout or "").splitlines()[-1])
@@ -3388,7 +3371,7 @@ def _record_session_completion(entry: dict, paths: dict, job_id: str, exit_code:
     session = state["sessions"].get(job_id)
     if not session or session.get("state") != "running":
         return
-    session["state"] = "completed"
+    session["state"] = "cancelled" if exit_code == 143 else "completed"
     session["completed_at"] = datetime.now(timezone.utc).isoformat()
     session["exit_code"] = exit_code
     _remote_state_write(entry, paths, state)
@@ -3441,10 +3424,13 @@ def job_status(remote_name: str, job_id: str, offset: int = 0) -> dict:
         raise HermesError("job output offset must not be negative", "invalid_offset")
     root = f"{paths['jobs']}/{job_id}"
     command = (
-        f"if test ! -f {shlex.quote(root + '.log')} && test ! -f {shlex.quote(root + '.status')}; then echo not_found; exit 0; fi; "
-        f"if test -f {shlex.quote(root + '.status')}; then echo completed; cat {shlex.quote(root + '.status')}; "
-        "else echo running; fi; "
-        f"if test -f {shlex.quote(root + '.log')}; then tail -c +{offset + 1} {shlex.quote(root + '.log')} | head -c 1048576; fi"
+        f"root={shlex.quote(root)}; offset={offset}; "
+        "if test ! -f \"$root.log\" && test ! -f \"$root.status\"; then echo not_found; exit 0; fi; "
+        "if test -f \"$root.status\"; then code=$(cat \"$root.status\"); case \"$code\" in 143) echo cancelled;; *) echo completed;; esac; echo \"$code\"; else echo running; fi; "
+        "size=0; test ! -f \"$root.log\" || size=$(wc -c < \"$root.log\"); "
+        "test \"$offset\" -le \"$size\" || offset=$size; remain=$((size-offset)); read=$remain; test \"$read\" -le 1048576 || read=1048576; "
+        "printf 'output\\t%s\\t%s\\t%s\\n' \"$size\" \"$offset\" \"$read\"; "
+        "test \"$read\" = 0 || tail -c +$((offset+1)) \"$root.log\" | head -c \"$read\""
     )
     res = _ssh(entry, command, timeout=30)
     if res.returncode != 0:
@@ -3455,17 +3441,24 @@ def job_status(remote_name: str, job_id: str, offset: int = 0) -> dict:
         return {"job_id": job_id, "status": "not_found"}
     exit_code = None
     body_index = 1
-    if state == "completed" and len(lines) > 1:
+    if state in {"completed", "cancelled"} and len(lines) > 1:
         try:
             exit_code = int(lines[1])
         except ValueError:
             pass
         body_index = 2
-    if state == "completed":
+    if state in {"completed", "cancelled"}:
         _record_session_completion(entry, paths, job_id, exit_code)
-    output = "\n".join(lines[body_index:])
+    metadata = lines[body_index] if len(lines) > body_index else ""
+    tag, total, start, read = metadata.split("\t") if metadata.count("\t") == 3 else ("", "0", "0", "0")
+    if tag != "output" or not all(value.isdigit() for value in (total, start, read)):
+        raise HermesError("Hermes job output metadata was invalid", "job_status_failed", True)
+    output = "\n".join(lines[body_index + 1:])
+    total_bytes, start_offset, bytes_read = int(total), int(start), int(read)
     return {"job_id": job_id, "status": state, "exit_code": exit_code,
-            "stdout": _redact(output, entry)[-1_048_576:], "truncated": len(output.encode()) > 1_048_576}
+            "stdout": _redact(output, entry)[-1_048_576:], "bytes_read": bytes_read,
+            "next_offset": start_offset + bytes_read,
+            "truncated": start_offset + bytes_read < total_bytes}
 
 
 def job_kill(remote_name: str, job_id: str) -> dict:
@@ -3477,7 +3470,7 @@ def job_kill(remote_name: str, job_id: str) -> dict:
         f"if test ! -f {shlex.quote(root + '.pid')}; then echo not_found; exit 0; fi; "
         f"if test -f {shlex.quote(root + '.status')}; then echo completed; exit 0; fi; "
         f"pid=$(cat {shlex.quote(root + '.pid')}); case \"$pid\" in ''|*[!0-9]*) echo invalid; exit 0;; esac; "
-        f"kill -- -\"$pid\" 2>/dev/null || true; echo 143 > {shlex.quote(root + '.status')}; echo killed"
+        f"kill -- -\"$pid\" 2>/dev/null || true; for attempt in 1 2 3 4 5; do kill -0 \"$pid\" 2>/dev/null || {{ echo 143 > {shlex.quote(root + '.status')}; echo killed; exit 0; }}; sleep 1; done; echo cancelling"
     )
     res = _ssh(entry, command, timeout=30)
     state = (res.stdout or "").strip().splitlines()[-1] if (res.stdout or "").strip() else "unknown"
@@ -3485,10 +3478,12 @@ def job_kill(remote_name: str, job_id: str) -> dict:
         return {"job_id": job_id, "status": "not_found"}
     if state == "completed":
         return {"job_id": job_id, "status": "completed", "killed": False}
-    if res.returncode != 0 or state != "killed":
+    if res.returncode != 0 or state not in {"killed", "cancelling"}:
         raise HermesError(_redact(res.stderr or "could not cancel Hermes job", entry), "job_kill_failed", True)
-    _record_session_completion(entry, paths, job_id, 143)
-    return {"job_id": job_id, "status": "completed", "exit_code": 143, "killed": True}
+    if state == "killed":
+        _record_session_completion(entry, paths, job_id, 143)
+        return {"job_id": job_id, "status": "cancelled", "exit_code": 143, "killed": True}
+    return {"job_id": job_id, "status": "cancelling", "exit_code": None, "killed": False}
 
 
 def chat(remote_name: str, repo: str, *, worktree: bool = True) -> dict:

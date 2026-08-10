@@ -94,12 +94,22 @@ class TestBoundedProcessRunner(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(any(self._linux_process_is_running(pid) for pid in pids))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
     def test_reaped_leader_with_escaped_pipe_holder_never_signals_old_group(self):
-        escaped = "import time; time.sleep(0.8)"
-        parent = (
-            "import subprocess,sys; "
-            f"subprocess.Popen([sys.executable, '-c', {escaped!r}], start_new_session=True)"
-        )
+        # Fork only after the interpreter has started, so the group leader can
+        # deterministically exit inside the deadline even when the full suite
+        # is competing for CPU. The detached child keeps the inherited pipes
+        # open long enough to exercise the post-reap drain timeout.
+        parent = """
+import os
+import time
+
+if os.fork() == 0:
+    os.setsid()
+    time.sleep(1.5)
+    os._exit(0)
+os._exit(0)
+"""
         started = time.monotonic()
         with patch.object(
             BoundedProcessRunner,
@@ -108,12 +118,12 @@ class TestBoundedProcessRunner(unittest.TestCase):
         ):
             result = BoundedProcessRunner().run(
                 [sys.executable, "-c", parent],
-                timeout=0.1,
+                timeout=0.5,
             )
         elapsed = time.monotonic() - started
 
         self.assertEqual(result.returncode, 124)
-        self.assertLess(elapsed, 0.8)
+        self.assertLess(elapsed, 1.5)
         self.assertIn("timed out", result.stderr)
 
     @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")

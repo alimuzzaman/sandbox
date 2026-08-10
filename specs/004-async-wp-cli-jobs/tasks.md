@@ -61,3 +61,7 @@ tools), not all in `tools/wp.py` as the original plan guessed.
   logic they call are live-verified.
 - The async-start latency is the docker `compose run` container-create cost (~7s, fixed)
   — it does NOT scale with command duration, which is the property that matters.
+
+## Phase 9: Convergence
+
+- [ ] T021 Reduce or otherwise redesign Docker async-job acceptance so it meets SC-001's under-2-second target; the recorded ~7-second `compose run -d` acceptance is a partial implementation of SC-001 (partial).

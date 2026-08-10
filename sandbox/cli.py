@@ -193,8 +193,13 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     mg = sub.add_parser("migrate",
         help="Relocate all machine-state under the per-user base $SANDBOX_HOME (spec 009)")
-    mg.add_argument("--apply", action="store_true",
+    mg_mode = mg.add_mutually_exclusive_group()
+    mg_mode.add_argument("--apply", action="store_true",
         help="Perform the migration (default is a dry-run plan)")
+    mg_mode.add_argument("--dry-run", action="store_true",
+        help="Print the migration plan without changing state (the default)")
+    mg.add_argument("--force", action="store_true",
+        help="Re-verify/regenerate an already migrated base; never merges conflicts")
     mg.add_argument("--finalize", action="store_true",
         help=argparse.SUPPRESS)  # internal: post-move re-exec pass
     hm = sub.add_parser("home",
@@ -763,6 +768,14 @@ Per-project (each plugin carries its own sandbox.config.json):
         p.print_help()
         return
 
+    # Spec 009 upgrade path: before a normal command can touch the legacy
+    # fallback, move it once when the selected base is genuinely empty.  The
+    # helper re-execs this exact command after staging the data; explicit
+    # migration/home commands keep their own dry-run and relocation semantics.
+    if args.cmd not in {"migrate", "home"}:
+        from sandbox.commands.migrate import maybe_auto_migrate
+        maybe_auto_migrate()
+
     # Resource status owns an end-to-end request budget.  The executable
     # captures this timestamp before importing the CLI so parser, config, and
     # dispatch startup consume the same budget as the provider.
@@ -882,6 +895,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         # checked-in docker-compose.yml directly (out-of-tree scripts, older
         # skills) doesn't break. New flow ignores this file.
         write_env_for_compose(cfg)
+
+    # The re-exec above must regenerate baked absolute-path artifacts before
+    # dispatching the ordinary command that triggered the upgrade.
+    from sandbox.commands.migrate import finalize_auto_migration
+    finalize_auto_migration(cfg)
 
     # Dispatch via the command registry (populated by sandbox.commands.* imports).
     # `apply --project-dir` → in-place reconcile; bare `apply` → setup alias.

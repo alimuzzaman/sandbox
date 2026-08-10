@@ -10,6 +10,10 @@ from sandbox.registry import register
 from sandbox.core._plugin_check_report import render_report
 
 
+class PluginCheckOutputError(ValueError):
+    """`wp plugin check --format=json` did not emit its documented format."""
+
+
 # See docs/plugin-check.md and specs/013-plugin-check/ for the full design this module
 # implements. Brings WordPress.org's official Plugin Check tool (`wp plugin check`)
 # in as a first-class sandbox command, applying the SAME baseline-gate pattern already
@@ -112,9 +116,11 @@ def _run_wp_plugin_check(instance: str, slug: str, exclude_dirs: list[str]) -> s
 def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
     """`wp plugin check --format=json` prints one `FILE: <path>` line followed by a
     JSON array line, repeated per file with findings — not a single JSON document.
-    Parse that into a flat findings list, each tagged with its file. Ported from the
-    reference implementation's `parseFindings` (identical shape, translated to
-    Python).
+    Parse that into a flat findings list, each tagged with its file. A single `[]`
+    is also accepted for a successful zero-finding run. Any other malformed or
+    unrecognised output raises `PluginCheckOutputError` so a tool failure cannot
+    become a false passing gate. Ported from the reference implementation's
+    `parseFindings` (identical shape, translated to Python).
 
     `root`, when given, converts each reported path to PROJECT-RELATIVE via
     `os.path.relpath` (matching the reference's own `path.relative(REPO_ROOT,
@@ -127,30 +133,59 @@ def _parse_findings(output: str, root: str | Path | None = None) -> list[dict]:
     (not `Path.relative_to`) matches JS's `path.relative` exactly: it never
     raises even when the reported path isn't actually under `root`, unlike
     `Path.relative_to`, which would."""
+    def normalise_file(raw: str) -> str:
+        if root and os.path.isabs(raw):
+            return os.path.relpath(raw, str(root))
+        # Plugin Check versions differ: some report host-absolute paths, while
+        # current releases report project-relative paths. A relative path is
+        # already in baseline identity space; do not resolve it against the
+        # Sandbox checkout's cwd.
+        return os.path.normpath(raw)
+
+    lines = [(number, line.strip()) for number, line in
+             enumerate(output.splitlines(), start=1) if line.strip()]
+    if not lines:
+        raise PluginCheckOutputError("empty output")
+    # A successful zero-finding run may be emitted as a plain JSON empty array.
+    # It is the only FILE-less form accepted; accepting arbitrary prose here
+    # would turn tool failures into false passing gates.
+    if len(lines) == 1 and lines[0][1] == "[]":
+        return []
+
     findings: list[dict] = []
-    current_file: str | None = None
-    for line in output.splitlines():
-        m = re.match(r"^FILE:\s*(.+)$", line)
-        if m:
-            raw = m.group(1).strip()
-            if root and os.path.isabs(raw):
-                current_file = os.path.relpath(raw, str(root))
-            else:
-                # Plugin Check versions differ: some report host-absolute
-                # paths, while current releases report project-relative paths.
-                # A relative path is already in baseline identity space; do
-                # not resolve it against the Sandbox checkout's cwd.
-                current_file = os.path.normpath(raw)
-            continue
-        trimmed = line.strip()
-        if not trimmed.startswith("[") or current_file is None:
-            continue
+    index = 0
+    while index < len(lines):
+        line_number, file_line = lines[index]
+        match = re.fullmatch(r"FILE:\s*(.+)", file_line)
+        if not match:
+            raise PluginCheckOutputError(
+                f"unexpected output on line {line_number}: {file_line[:160]!r}")
+        raw_file = match.group(1).strip()
+        if not raw_file:
+            raise PluginCheckOutputError(f"empty FILE path on line {line_number}")
+        if index + 1 >= len(lines):
+            raise PluginCheckOutputError(
+                f"missing JSON findings array after FILE line {line_number}")
+        json_line_number, json_line = lines[index + 1]
         try:
-            items = json.loads(trimmed)
-        except (json.JSONDecodeError, ValueError):
-            continue
+            items = json.loads(json_line)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise PluginCheckOutputError(
+                f"malformed JSON findings array on line {json_line_number}") from exc
+        if not isinstance(items, list):
+            raise PluginCheckOutputError(
+                f"expected a JSON findings array on line {json_line_number}")
+        current_file = normalise_file(raw_file)
         for item in items:
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("type"), str)
+                    or item["type"] not in {"ERROR", "WARNING"}
+                    or not isinstance(item.get("code"), str)
+                    or not item["code"]):
+                raise PluginCheckOutputError(
+                    f"unrecognised finding in JSON array on line {json_line_number}")
             findings.append({"file": current_file, **item})
+        index += 2
     return findings
 
 
@@ -233,7 +268,10 @@ def cmd_plugin_check(cfg, args) -> None:
     instance = entry["instance"]
 
     raw = _run_wp_plugin_check(instance, pc["slug"], pc["exclude_directories"])
-    findings = _parse_findings(raw, root=root)
+    try:
+        findings = _parse_findings(raw, root=root)
+    except PluginCheckOutputError as exc:
+        die(f"`wp plugin check {pc['slug']}` returned unrecognised output: {exc}")
 
     results_dir = root / "tests" / "test-results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -269,6 +307,7 @@ def cmd_plugin_check(cfg, args) -> None:
         result = {"ok": True, "action": "update", "plugin_slug": pc["slug"],
                  "errors": len(errors), "warnings": len(warnings),
                  "baseline_total": total, "new_count": 0, "violations": [],
+                 "baseline_exists": True, "message": None,
                  "report_path": str(report_path.relative_to(root)), "error": None}
         if as_json:
             print(json.dumps(result))
@@ -279,7 +318,10 @@ def cmd_plugin_check(cfg, args) -> None:
         return
 
     baseline_total = sum(baseline.values())
-    violations = _diff_against_baseline(current, baseline)
+    # A first run is deliberately informational, not a gate. Do not expose its
+    # current findings as "new" in JSON: clients use `ok`/`new_count` to decide
+    # whether to stop, and must be able to distinguish this state explicitly.
+    violations = _diff_against_baseline(current, baseline) if had_baseline else []
     new_count = sum(v["delta"] for v in violations)
     meta["baseline_total"] = baseline_total
     meta["new_count"] = new_count
@@ -288,12 +330,13 @@ def cmd_plugin_check(cfg, args) -> None:
     result = {"ok": new_count == 0, "action": "check", "plugin_slug": pc["slug"],
              "errors": len(errors), "warnings": len(warnings),
              "baseline_total": baseline_total, "new_count": new_count,
-             "violations": violations,
+             "violations": violations, "baseline_exists": had_baseline,
+             "message": None,
              "report_path": str(report_path.relative_to(root)), "error": None}
 
-    if not had_baseline and as_json:
-        result["error"] = ("no baseline exists yet — run with --update to establish "
-                           "one from current findings")
+    if not had_baseline:
+        result["message"] = ("no baseline exists yet — run with --update to establish "
+                             "one from current findings")
     if as_json:
         print(json.dumps(result))
         if not result["ok"]:

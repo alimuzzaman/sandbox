@@ -119,6 +119,28 @@ class LiveNativeAcceptanceHarnessTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             live._enable_proof_candidate({"SANDBOX_NATIVE_PROOF_CANDIDATE": "forged"})
 
+    def test_provenance_records_exact_source_identity_and_durable_jobs(self):
+        observed = []
+
+        def fake_run(argv, **kwargs):
+            observed.append((argv, kwargs))
+            if argv[-2:] == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(argv, 0, stdout="a" * 40 + "\n", stderr="")
+            if argv[-2:] == ("status", "--porcelain=v1"):
+                return subprocess.CompletedProcess(argv, 0, stdout=" M local-change\n", stderr="")
+            self.fail(f"unexpected provenance command: {argv}")
+
+        identity = live._source_identity(ROOT, run=fake_run)
+        self.assertEqual(identity["revision"], "a" * 40)
+        self.assertFalse(identity["worktree_clean"])
+        self.assertEqual(len(identity["harness_sha256"]), 64)
+        self.assertEqual(len(observed), 2)
+        self.assertTrue(all(call[1]["timeout"] == 5 for call in observed))
+        self.assertEqual(live._durable_job_ids((
+            {"json": {"job_id": "job-b"}}, {"json": {"job_id": "job-a"}},
+            {"json": {"job_id": "job-b"}}, {"json": {"job_id": 7}}, {},
+        )), ("job-a", "job-b"))
+
     def test_io_proof_rejects_post_hoc_only_liveness(self):
         evidence = dict(
             started={"phase": "started", "resource": "io", "io_weight": "default 100"},

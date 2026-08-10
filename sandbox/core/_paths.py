@@ -36,7 +36,22 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # module load — keep the three copies in lockstep.
 
 def _sandbox_base() -> Path:
-    return Path(os.environ.get("SANDBOX_HOME", "~/sandbox")).expanduser().resolve()
+    """Resolve the selected state base.
+
+    ``SANDBOX_HOME`` is deliberately the one runtime override.  ``sb home``
+    records its last successful selection in a tiny, non-secret bootstrap hint
+    so a new shell (and the separately launched MCP process) keeps using that
+    base.  The hint contains only an absolute path and never replaces an
+    explicit environment choice.
+    """
+    raw = os.environ.get("SANDBOX_HOME")
+    if not raw:
+        hint = Path.home() / ".config" / "sandbox" / "home"
+        try:
+            raw = hint.read_text().strip() or None
+        except OSError:
+            raw = None
+    return Path(raw or "~/sandbox").expanduser().resolve()
 
 
 def _resolve_runtime_dir() -> Path:
@@ -324,6 +339,7 @@ function sandbox_snapshots_render() {
 	echo '<label><input type="checkbox" id="sbx-force"> overwrite</label> ';
 	echo '<label title="Capture the database only (skip the uploads archive)"><input type="checkbox" id="sbx-dbonly"> DB only</label></p>';
 	echo '<p><button class="button" id="sbx-reset">Reset to fresh install</button> <span class="description">Restores the post-install database baseline; uploads are kept.</span></p>';
+	echo '<p id="sbx-baseline" class="description"></p>';
 	echo '<div id="sbx-msg" style="margin:8px 0"></div>';
 	echo '<table class="widefat striped" id="sbx-table"><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Meta</th><th></th></tr></thead><tbody></tbody></table>';
 	echo '</div>';
@@ -332,7 +348,7 @@ function sandbox_snapshots_render() {
 <script>
 (function(){
   var AJAX=<?php echo wp_json_encode( $ajax ); ?>, NONCE=<?php echo wp_json_encode( $nonce ); ?>;
-  var msg=document.getElementById('sbx-msg'), tb=document.querySelector('#sbx-table tbody');
+  var msg=document.getElementById('sbx-msg'), tb=document.querySelector('#sbx-table tbody'), baseline=document.getElementById('sbx-baseline');
   function call(op, extra){ var d=new URLSearchParams(Object.assign({action:'sandbox_snap',nonce:NONCE,op:op},extra||{}));
     return fetch(AJAX,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d}).then(function(r){return r.json();}); }
   function say(t,err){ msg.textContent=t; msg.style.color=err?'#b32d2e':'#2271b1'; }
@@ -343,6 +359,7 @@ function sandbox_snapshots_render() {
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function refresh(){ return call('list').then(function(r){ tb.innerHTML='';
+    baseline.textContent=r.baseline ? '@install baseline: '+(r.baseline.mode||'db-only')+' ('+(parseInt(r.baseline.size_kb)||0)+' KB), protected; used by Reset.' : '@install baseline: not captured yet.';
     (r.snapshots||[]).forEach(function(s){ var tr=document.createElement('tr'); var n=esc(s.name);
       var mode=s.mode||((/mode=([\w-]+)/.exec(s.meta||'')||[])[1])||'';
       tr.innerHTML='<td>'+n+'</td><td>'+(parseInt(s.size_kb)||0)+' KB</td><td>'+esc(mode)+'</td><td>'+esc(s.meta)+'</td>'+

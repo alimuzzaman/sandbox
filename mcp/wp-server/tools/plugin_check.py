@@ -26,6 +26,8 @@ def _plugin_check_error(message: str, *, action: str = "check",
         "baseline_total": 0,
         "new_count": 0,
         "violations": [],
+        "baseline_exists": None,
+        "message": None,
         "report_path": None,
         "error": message,
     }
@@ -52,9 +54,10 @@ def run_plugin_check(project_dir: str, update: bool = False) -> dict:
       gating against it (use after fixing findings, to tighten the baseline).
 
     Returns {ok, action, plugin_slug, errors, warnings, baseline_total, new_count,
-    violations:[{key, current, baseline, delta}], report_path, error}. `ok` is
-    true when the gate passes (or `update` succeeds); `violations` is only
-    populated on a gate failure.
+    violations:[{key, current, baseline, delta}], baseline_exists, message,
+    report_path, error}. `ok` is true when the gate passes (or `update` succeeds);
+    a missing baseline is an explicitly non-gating successful check
+    (`baseline_exists: false`) with setup guidance in `message`.
     """
     capability_error = _capability_error(project_dir, "wordpress.cli")
     if capability_error:

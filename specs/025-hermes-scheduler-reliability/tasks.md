@@ -167,3 +167,7 @@
 3. Add preview/apply and verified-run controls behind explicit confirmation.
 4. Add gateway and worktree safeguards.
 5. Verify every local contract, review remote work, then perform the authorized remote convergence once through the new Sandbox commands.
+
+## Phase 10: Convergence
+
+- [X] T051 Record the current committed catalog separately from historical remote evidence, correcting the conflicting enabled-job narrative without changing catalog policy or running reconciliation (FR-005, FR-007, FR-018; contradicts)

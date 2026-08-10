@@ -1120,3 +1120,17 @@ secrets, credential-bearing SSH targets, or unredacted project output.
   tests with two documented environment-gated skips. The exact
   `./sb selftest` reproduction also passed 1,232 tests with the same two skips
   and completed the registry and CLI self-tests.
+
+## Convergence evidence reconciliation — 2026-08-10
+
+- The T143 Phase 1/Phase 2 and T155 statements at earlier points in this
+  chronological journal are historical snapshots, not the current task state.
+  Later entries record the remote CI, workspace, E2E, cleanup, and regression
+  evidence that superseded their broad “unchecked” wording. They must not be
+  read as a claim that every measurable success criterion has live proof.
+- The controlled 100-job observation at T136 is explicitly host-local. It is
+  not evidence for SC-002's remote caller-disconnect requirement or SC-004's
+  reachable-remote status-latency target. The remote E2E cursor observations
+  are likewise not a 100-disconnect measurement.
+- T156 and T157 in `tasks.md` remain intentionally open pending separately
+  approved disposable-remote measurement. No live result is claimed here.

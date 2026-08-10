@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -66,13 +67,18 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
     failed capture never leaves a half-written snapshot (e.g. an empty dir with no
     db.sql that later reads as a 0 KB snapshot)."""
     target = snap_root / name
-    target.mkdir(parents=True, exist_ok=True)
+    # Capture into a sibling first.  In particular, `--db-only --force` must
+    # not retain uploads.tgz from the full snapshot it replaces; staging also
+    # keeps the old snapshot usable if export fails.
+    staging_name = f".{name}.tmp-{uuid.uuid4().hex}"
+    staging = snap_root / staging_name
+    staging.mkdir(parents=True, exist_ok=False)
     try:
         info(f"Exporting DB → {target}/db.sql")
         compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
-                "wpcli", "db", "export", f"/snapshots/{name}/db.sql", "--add-drop-table",
+                "wpcli", "db", "export", f"/snapshots/{staging_name}/db.sql", "--add-drop-table",
                 instance=inst)
-        if not (target / "db.sql").exists():
+        if not (staging / "db.sql").exists():
             raise RuntimeError(f"db export produced no db.sql for snapshot '{name}'")
         mode = "db-only"
         if not db_only:
@@ -80,12 +86,15 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
             if uploads.exists():
                 info(f"Archiving uploads → {target}/uploads.tgz")
                 run(["tar", "-C", str(uploads.parent), "-czf",
-                     str(target / "uploads.tgz"), "uploads"])
+                     str(staging / "uploads.tgz"), "uploads"])
                 mode = "full"
         active = _active_project_name(inst) or ""
-        (target / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+        (staging / "META").write_text(f"project={active}\ninstance={inst}\nmode={mode}\n")
+        if target.exists():
+            shutil.rmtree(target)
+        staging.replace(target)
     except Exception:
-        shutil.rmtree(target, ignore_errors=True)  # no half-written snapshot left behind
+        shutil.rmtree(staging, ignore_errors=True)  # no half-written snapshot left behind
         raise
 
 
@@ -132,6 +141,17 @@ def capture_install_full_snapshot(inst: str, force: bool = False) -> None:
     except Exception as e:
         info(f"⚠ full install snapshot '{INSTALL_FULL_SNAPSHOT}' capture failed "
              f"for '{inst}': {e}")
+
+
+def capture_install_snapshots(inst: str, force: bool = False) -> None:
+    """Capture both post-provision install restore points together.
+
+    The DB-only baseline powers `reset`; the full named snapshot remains the
+    opt-in complete rollback.  Keeping this pair in one helper prevents fresh
+    provisioning and seed onboarding from drifting in capture order.
+    """
+    capture_install_baseline(inst, force=force)
+    capture_install_full_snapshot(inst, force=force)
 
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance
@@ -207,25 +227,30 @@ def cmd_reset(cfg, args) -> None:
 def cmd_snapshots(cfg, args) -> None:
     inst = args.resolved_instance
     snap_root = snapshots_dir(inst)
-    # Count only user snapshots (reserved baselines like __install__ use a leading
-    # underscore and are hidden), so a baseline-only dir still reads as "empty".
+    # The protected baseline is displayed separately: it is informative for
+    # reset readiness, but it is not a normal snapshot name/action target.
     user_snaps = ([p for p in snap_root.iterdir() if p.is_dir() and not p.name.startswith("_")]
                   if snap_root.exists() else [])
-    if not user_snaps:
+    baseline = snap_root / _BASELINE_DIR
+    if not user_snaps and not (baseline / "db.sql").exists():
         info(f"No snapshots yet for instance '{inst}'. "
              f"Save one: ./sb snapshot <name> --instance {inst}")
         return
     print()
+    if (baseline / "db.sql").exists():
+        m = baseline / "META"
+        meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""
+        size = sum(f.stat().st_size for f in baseline.rglob("*") if f.is_file())
+        print(f"  {'@install (baseline)':<24} {size // 1024:>6} KB   {meta}  [protected; reset target]")
     for entry in sorted(snap_root.iterdir()):
-        # Hide reserved internal baselines (_BASELINE_DIR / __install__) — they are
-        # not restorable as named user snapshots (leading-underscore convention).
+        # The reserved internal baseline was emitted above; it cannot be
+        # restored/deleted as a named snapshot.
         if not entry.is_dir() or entry.name.startswith("_"):
             continue
         m = entry / "META"
         meta = m.read_text().strip().replace("\n", " ") if m.exists() else ""
         size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
-        label = "@install (baseline)" if entry.name == _BASELINE_DIR else entry.name
-        print(f"  {label:<24} {size // 1024:>6} KB   {meta}")
+        print(f"  {entry.name:<24} {size // 1024:>6} KB   {meta}")
     print()
 
 def cmd_clean(cfg, args) -> None:

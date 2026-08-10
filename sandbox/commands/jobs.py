@@ -1,8 +1,10 @@
 from __future__ import annotations
 import json
+import os
 import re
 import secrets
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -12,11 +14,13 @@ from sandbox.registry import register
 
 _JOB_RE = re.compile(r"^[a-f0-9]{16}$")
 _JOB_MAX_AGE = 24 * 3600  # prune jobs older than 24h (spec FR-007)
+_JOB_ORPHAN_EXIT = 1
 
 
-def _job_dir(instance: str) -> Path:
+def _job_dir(instance: str, *, create: bool = True) -> Path:
     d = wp_dir(instance) / ".sb-jobs"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -26,6 +30,97 @@ def _valid_job_id(jid: str) -> bool:
 
 def _job_name(instance: str, jid: str) -> str:
     return f"sb-job-{instance}-{jid}"
+
+
+def _job_paths(instance: str, jid: str) -> tuple[Path, Path, Path]:
+    """Return the per-job log, terminal-status, and process-handle paths.
+
+    Callers validate ``jid`` before reaching here.  Keeping all three paths in
+    one helper makes reaping an atomic *job group* operation rather than a
+    best-effort deletion of whichever individual artifact happened to age out.
+    """
+    job_dir = _job_dir(instance, create=False)
+    return tuple(job_dir / f"job_{jid}.{suffix}" for suffix in ("log", "status", "pid"))
+
+
+def _known_job(paths: tuple[Path, Path, Path]) -> bool:
+    return any(path.exists() for path in paths)
+
+
+def _read_group_pid(pid_file: Path) -> int | None:
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def _herd_group_running(pid: int) -> bool:
+    """Whether a Herd wrapper's process group still exists.
+
+    ``start_new_session=True`` below makes the wrapper PID its process-group
+    leader without depending on an external ``setsid`` executable.
+    """
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists, but the current user is not allowed to signal it.
+        return True
+    return True
+
+
+def _docker_job_running(instance: str, jid: str) -> bool | None:
+    """Return True/False for a known job container, or None if unobservable.
+
+    A Docker daemon/transport failure is deliberately not treated as a dead
+    process: doing so would manufacture a terminal result during an outage.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", _job_name(instance, jid)],
+            check=False, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return result.stdout.strip().lower() == "true"
+    detail = ((result.stdout or "") + (result.stderr or "")).lower()
+    if "no such object" in detail or "no such container" in detail:
+        return False
+    return None
+
+
+def _job_process_running(instance: str, jid: str, pid_file: Path) -> bool | None:
+    if _is_herd_instance(instance):
+        pid = _read_group_pid(pid_file)
+        return _herd_group_running(pid) if pid is not None else None
+    return _docker_job_running(instance, jid)
+
+
+def _record_terminal(status_file: Path, exit_code: int) -> None:
+    """Persist a terminal state only after its process is known to be gone."""
+    status_file.write_text(str(exit_code))
+
+
+def _reconcile_job(instance: str, jid: str, paths: tuple[Path, Path, Path] | None = None) -> str:
+    """Turn a dead, unrecorded job into a durable terminal failure.
+
+    A status file remains authoritative.  If a known process handle says the
+    wrapper/container is gone before it could write that file, record a stable
+    non-zero result so polling cannot claim ``running`` indefinitely.
+    """
+    log, status_file, pid_file = paths or _job_paths(instance, jid)
+    if status_file.exists():
+        return "completed"
+    if not _known_job((log, status_file, pid_file)):
+        return "not_found"
+    running = _job_process_running(instance, jid, pid_file)
+    if running is False:
+        _record_terminal(status_file, _JOB_ORPHAN_EXIT)
+        return "completed"
+    return "running"
 
 
 def launch_job(instance: str, wp_args: list[str]) -> str:
@@ -43,9 +138,13 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
             f"{wp} {quoted} > .sb-jobs/job_{jid}.log 2>&1; "
             f"echo $? > .sb-jobs/job_{jid}.status"
         )
-        subprocess.Popen(["setsid", "sh", "-c", wrapper], cwd=str(root),
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        process = subprocess.Popen(["sh", "-c", wrapper], cwd=str(root),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        # The wrapper writes the same value as ``$$`` once scheduled.  Write it
+        # here too so an immediate poll/cancel has a process handle instead of
+        # racing the shell's first instruction.
+        _job_paths(instance, jid)[2].write_text(str(process.pid))
     else:
         wrapper = (
             f"echo $$ > /var/www/html/.sb-jobs/job_{jid}.pid; "
@@ -55,21 +154,31 @@ def launch_job(instance: str, wp_args: list[str]) -> str:
         # wpcli is a run-style service; entrypoint is `wp`, override to sh (gotcha #6).
         compose("run", "-d", "--name", _job_name(instance, jid),
                 "--entrypoint", "sh", "wpcli", "-c", wrapper, instance=instance)
+        # ``compose run -d`` has accepted the detached container by this point.
+        # The empty log is the durable running marker until the wrapper writes
+        # its PID and first output.
+        _job_paths(instance, jid)[0].touch(exist_ok=True)
     return jid
 
 
 def job_status(instance: str, jid: str, offset: int = 0, limit: int = 1_048_576) -> dict:
-    jd = _job_dir(instance)
-    log = jd / f"job_{jid}.log"
-    st = jd / f"job_{jid}.status"
-    if not log.exists() and not st.exists():
+    if not _valid_job_id(jid):
+        raise ValueError("invalid job id")
+    if (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+            or isinstance(limit, bool) or not isinstance(limit, int) or limit < -1):
+        raise ValueError("offset must be non-negative and limit must be -1 or non-negative")
+    log, st, pid_file = _job_paths(instance, jid)
+    state = _reconcile_job(instance, jid, (log, st, pid_file))
+    if state == "not_found":
         return {"job_id": jid, "status": "not_found"}
-    status = "completed" if st.exists() else "running"
-    out = {"job_id": jid, "status": status, "stdout": "", "bytes_read": 0, "truncated": False}
+    out = {"job_id": jid, "status": state, "stdout": "", "bytes_read": 0, "truncated": False}
     if st.exists():
         c = st.read_text().strip()
         if c:
-            out["exit_code"] = int(c)
+            try:
+                out["exit_code"] = int(c)
+            except ValueError:
+                out["exit_code"] = _JOB_ORPHAN_EXIT
     if log.exists():
         size = log.stat().st_size
         if offset < size:
@@ -83,33 +192,66 @@ def job_status(instance: str, jid: str, offset: int = 0, limit: int = 1_048_576)
 
 
 def kill_job(instance: str, jid: str) -> dict:
-    jd = _job_dir(instance)
-    st = jd / f"job_{jid}.status"
-    if st.exists():
+    if not _valid_job_id(jid):
+        raise ValueError("invalid job id")
+    log, st, pid_file = _job_paths(instance, jid)
+    if not _known_job((log, st, pid_file)):
+        return {"job_id": jid, "status": "not_found", "killed": False}
+    state = _reconcile_job(instance, jid, (log, st, pid_file))
+    if state == "completed":
         return {"job_id": jid, "status": "completed", "killed": False}
     if _is_herd_instance(instance):
-        pidf = jd / f"job_{jid}.pid"
-        pid = pidf.read_text().strip() if pidf.exists() else ""
-        if pid:
-            subprocess.run(["kill", "-TERM", f"-{pid}"], check=False,
-                           capture_output=True)  # negative pid = process group
+        pid = _read_group_pid(pid_file)
+        if pid is None:
+            return {"job_id": jid, "status": "running", "killed": False,
+                    "error": "job process group is not available"}
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            _record_terminal(st, _JOB_ORPHAN_EXIT)
+            return {"job_id": jid, "status": "completed", "exit_code": _JOB_ORPHAN_EXIT,
+                    "killed": False}
+        except PermissionError:
+            return {"job_id": jid, "status": "running", "killed": False,
+                    "error": "permission denied terminating job process group"}
+        deadline = time.monotonic() + 2
+        while _herd_group_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        terminated = not _herd_group_running(pid)
     else:
-        subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
-                       check=False, capture_output=True)  # kills container + children
-    st.write_text("143")
+        result = subprocess.run(["docker", "rm", "-f", _job_name(instance, jid)],
+                                check=False, capture_output=True, text=True)
+        # Do not create a successful cancellation record solely because the
+        # removal command returned.  The follow-up inspect is the proof that
+        # no child process remains in the detached container.
+        terminated = result.returncode == 0 and _docker_job_running(instance, jid) is False
+    if not terminated:
+        return {"job_id": jid, "status": "running", "killed": False,
+                "error": "job termination could not be verified"}
+    _record_terminal(st, 143)
     return {"job_id": jid, "status": "completed", "exit_code": 143, "killed": True}
 
 
 def prune_jobs(instance: str, max_age: int = _JOB_MAX_AGE) -> int:
-    jd = wp_dir(instance) / ".sb-jobs"
+    jd = _job_dir(instance, create=False)
     if not jd.is_dir():
         return 0
     now = time.time()
     n = 0
-    for f in jd.glob("job_*"):
+    job_ids = sorted({match.group(1) for path in jd.glob("job_*")
+                      if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid)", path.name))})
+    for jid in job_ids:
+        paths = _job_paths(instance, jid)
         try:
-            if now - f.stat().st_mtime > max_age:
-                f.unlink()
+            # Reconcile first: only terminal job *groups* are eligible.  An
+            # active long-running log must never be partially removed merely
+            # because its first output is older than the retention window.
+            if _reconcile_job(instance, jid, paths) != "completed":
+                continue
+            newest = max(path.stat().st_mtime for path in paths if path.exists())
+            if now - newest > max_age:
+                for path in paths:
+                    path.unlink(missing_ok=True)
                 n += 1
         except OSError:
             pass
@@ -205,10 +347,13 @@ def cmd_jobs(cfg, args) -> None:
     inst = args.resolved_instance
     if getattr(args, "prune", False):
         n = prune_jobs(inst)
-        ok(f"pruned {n} old job artifact(s)")
+        ok(f"pruned {n} old terminal job group(s)")
         return
-    jd = wp_dir(inst) / ".sb-jobs"
-    ids = sorted({p.name[4:].split(".")[0] for p in jd.glob("job_*")}) if jd.is_dir() else []
+    # Ordinary list is also the retention sweep required by FR-007.
+    prune_jobs(inst)
+    jd = _job_dir(inst, create=False)
+    ids = sorted({match.group(1) for path in jd.glob("job_*")
+                  if (match := re.fullmatch(r"job_([a-f0-9]{16})\.(?:log|status|pid)", path.name))}) if jd.is_dir() else []
     if not ids:
         info(f"no jobs for instance '{inst}'")
         return

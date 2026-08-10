@@ -96,7 +96,17 @@ class RecoveryService:
             return result(False, "create", remote=remote, error=RecoveryError(
                 "recovery capture is not configured", "recovery_not_configured"))
         try:
-            manifest = self.capture.publish_files(set_id, artifacts, profiles=profiles, provenance=provenance)
+            by_id = self.catalog.by_id()
+            bindings = {
+                profile_id: {"dependencies": list(by_id[profile_id].dependencies),
+                             "restore_target": by_id[profile_id].restore_target,
+                             "allowed_roots": list(by_id[profile_id].allowed_roots)}
+                for profile_id in plan.profiles
+            }
+            manifest = self.capture.publish_files(
+                set_id, artifacts, profiles=plan.profiles, provenance=provenance,
+                profile_bindings=bindings,
+            )
         except RecoveryError as exc:
             return result(False, "create", remote=remote, error=exc)
         except (OSError, TypeError, ValueError) as exc:
@@ -243,6 +253,13 @@ class RecoveryService:
                 "sets/", tuple(observed), keep_count=keep_count,
                 minimum_age=timedelta(days=minimum_age_days), now=now,
             )
+            # Legacy paths are review-only candidates.  They are deliberately
+            # withheld until at least one current-passphrase verified set exists.
+            current_verified = any(item["verified"] and item["passphrase_current"]
+                                   and _retention_timestamp_valid(item["created_at"])
+                                   for item in observed)
+            legacy_paths = tuple(sorted(_listing_path(item) for item in objects
+                                        if not _listing_path(item).startswith("sets/")))
         except RecoveryError as exc:
             return result(False, "retention", remote=remote, error=exc)
         except (OSError, TypeError, ValueError) as exc:
@@ -252,6 +269,8 @@ class RecoveryService:
             "destination_prefix": plan.destination_prefix,
             "protected_sets": plan.protected_sets,
             "candidates": plan.candidates,
+            "legacy_candidates": legacy_paths if current_verified else (),
+            "legacy_candidate_status": "review_required" if current_verified else "blocked_no_current_verified_set",
             "unclassified": tuple(unclassified),
             "requires_confirmation": plan.requires_confirmation,
         })

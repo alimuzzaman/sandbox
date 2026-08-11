@@ -6,13 +6,25 @@
 
 ## Summary
 
-Add a transport-neutral least-disclosure secret broker for registered personal and project literal-assignment files. A new modular `sandbox.secrets` package owns secure source opening, inert parsing, metadata and profile validation, fixed masking, owner-only audit, bounded child use, targeted atomic updates, and local TTY reveal. The existing `secrets` CLI is migrated to an owned `CommandSpec`; an explicit opt-in MCP group delegates to the same service; a built-in agent skill and operator guide enforce the safe sequence. Existing migration and secret-resolution behavior remain intact.
+Add a transport-neutral least-disclosure secret broker for registered personal
+and project secret files. The initial literal-assignment boundary is extended by
+an approved follow-up to explicitly configured JSON, INI, properties, TOML,
+YAML, XML, PEM, opaque-token, and binary-container sources. A modular
+`sandbox.secrets` package owns secure source opening, inert parsing, metadata and
+profile validation, fixed masking, owner-only audit, bounded child use, targeted
+atomic dotenv updates, and local TTY reveal. The existing `secrets` CLI is
+migrated to an owned `CommandSpec`; an explicit opt-in MCP group delegates to
+the same service; a built-in agent skill and operator guide enforce the safe
+sequence. Existing migration and secret-resolution behavior remain intact.
 
 ## Technical Context
 
 **Language/Version**: Python 3.10+ compatible production code; validation on the repository's current Python 3.14 runtime
 
-**Primary Dependencies**: Python standard library; existing Sandbox command registry, configuration provider manifest, MCP composition registry, and streaming redactor; FastMCP through the existing server environment
+**Primary Dependencies**: Python standard library plus the repository's existing
+safe YAML dependency; existing Sandbox command registry, configuration provider
+manifest, MCP composition registry, and streaming redactor; FastMCP through the
+existing server environment
 
 **Storage**: Registered plaintext literal-assignment sources; owner-only append-only JSONL security audit under `$SANDBOX_HOME/runtime/secrets/`; short-lived in-memory request/value state only
 
@@ -26,7 +38,17 @@ Add a transport-neutral least-disclosure secret broker for registered personal a
 
 **Constraints**: Never echo a password/token to stdout; never put plaintext in argv, MCP arguments, JSON, logs, audit, errors, commits, or chat; reveal only to the controlling TTY; no arbitrary paths; no source execution; no hidden CLI runtime reconciliation; Python-level memory zeroization is not claimed
 
-**Scale/Scope**: Up to 1 MiB, 4,096 assignments, 64 KiB per value, 100 inventory/metadata keys per request, exactly one key for validation/mask/use/update/reveal
+**Scale/Scope**: Up to 1 MiB, 4,096 assignments or structured scalar leaves, 32
+levels of nesting, 64 KiB per scalar, 100 inventory/metadata selectors per
+request, exactly one selector for validation/mask/use/update/reveal; structured
+sources are read-only in this follow-up
+
+**Metadata-only follow-up**: Registered sources also expose a no-content-read
+probe for existence, file type, empty/nonempty state, size bucket, configured
+format, and broker-safe readability. Exact bytes are local-CLI opt-in; MCP has
+no exact-size input and requires a distinct `source_info` grant. Paths, UIDs,
+raw permission modes, timestamps, OS diagnostics, and source bytes remain
+undisclosed.
 
 ## Constitution Check
 
@@ -75,6 +97,7 @@ sandbox/
     ├── __init__.py
     ├── audit.py                    # owner-only intent/outcome journal
     ├── context.py                  # CLI/MCP service composition
+    ├── formats.py                  # explicit bounded structured/PEM/binary adapters
     ├── models.py                   # bounded requests/results and reason codes
     ├── parser.py                   # inert syntax-preserving assignments
     ├── policy.py                   # metadata, profiles, masking, destination policy
@@ -94,7 +117,9 @@ docs/secret-inspection.md           # operator guide and threat boundaries
 README.md                           # command/catalog discovery link
 
 tests/
+├── fixtures/secret-formats/       # synthetic provider shapes plus provenance
 ├── test_secret_config.py
+├── test_secret_formats.py
 ├── test_secret_parser.py
 ├── test_secret_policy.py
 ├── test_secret_service.py

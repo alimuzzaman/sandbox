@@ -1,7 +1,8 @@
 # Safe secret inspection
 
 Sandbox's secret broker lets agents answer common credential questions without
-opening an entire `.env` file. Its default output is key names only. Higher
+opening an entire secret file. Its default output is key names or safe
+structured selectors only. Higher
 disclosure is explicit and ordered: metadata, shape validation, a fixed mask,
 bounded use, protected update, then a human-only single-secret reveal.
 
@@ -12,7 +13,7 @@ reads.
 
 ## Register project sources
 
-Project `.env*` sources and MCP permissions are explicit in
+Project sources, formats, and MCP permissions are explicit in
 `sandbox.config.json` (or the equivalent YAML/config override layer). No source
 is discovered by scanning the project, and callers cannot supply an arbitrary
 path.
@@ -23,7 +24,12 @@ path.
     "sources": {
       "project-env": {
         "path": ".env.local",
-        "mcpModes": ["keys", "metadata", "validate", "masked", "use"]
+        "mcpModes": ["source_info", "keys", "metadata", "validate", "masked", "use"]
+      },
+      "gcp-credentials": {
+        "path": "config/gcp-credentials.json",
+        "format": "json",
+        "mcpModes": ["source_info", "keys", "metadata"]
       }
     },
     "useProfiles": {
@@ -42,8 +48,10 @@ path.
 ```
 
 The example contains identifiers only, not a credential. Source aliases and
-profile names are lowercase safe slugs. A project source path must be a relative
-`.env*` path contained by the project root. The file must be regular,
+profile names are lowercase safe slugs. A project source path must be relative,
+contained by the project root, and have a suffix or protected basename matching
+its explicit format. Omit `format` only for backward-compatible dotenv sources.
+The file must be regular,
 owner-controlled, and inaccessible to group and other users. The built-in
 `personal` source cannot be overridden by project config and grants no MCP mode
 by default.
@@ -53,11 +61,31 @@ must separately grant the required `mcpModes`; a use profile must also set
 `mcp: true`. Keep the grant list minimal. The secrets group is absent from all
 default MCP catalogs.
 
-V1 parses only inert literal assignments. It never runs interpolation, command
-substitution, includes, executable tags, or shell evaluation. Duplicate keys,
-unsupported syntax, unsafe links or permissions, terminal controls, oversized
-sources, and changes during an operation fail closed without returning a source
-line.
+Supported registered formats are:
+
+| Format | Typical documented sources | Inspection behavior |
+|---|---|---|
+| `dotenv` | `.env*`, Sandbox personal assignments | Names, scalar metadata, eligible fixed mask, validation, bounded use, targeted update |
+| `json` | GCP credentials, Docker config, Terraform credentials, Composer auth | RFC 6901-style leaf selectors; no mask, exact length, or update |
+| `ini` | AWS credentials, `.pypirc`, OCI config | `/section/key` selectors; no interpolation |
+| `properties` | `.npmrc`-style flat configuration | Escaped `/key` selectors; continuations rejected |
+| `toml` | Cargo credentials | Structured leaf selectors |
+| `yaml` | kubeconfig and similar credentials | Safe scalar leaves; aliases, anchors, explicit tags, and duplicates rejected |
+| `xml` | Maven settings and NuGet config | Element, attribute, and `#text` selectors; DTDs and entities rejected |
+| `pem` | GitHub App, Azure service-principal, TLS/private-key bundles | Block labels only; material remains protected |
+| `opaque` | OIDC/JWT/token files | One `/value` selector; scalar policy still applies |
+| `binary` | PKCS#12/PFX, JKS/keystore containers | One `/file` selector and bucketed file metadata only |
+
+Structured selectors use JSON Pointer escaping: `/` inside a source key becomes
+`~1`, and `~` becomes `~0`. XML uses `@name` for attributes and `#text` for text
+nodes; repeated sibling names receive a numeric segment. Selectors identify a
+field without returning its value.
+
+All parsers are bounded and inert. They never run interpolation, command
+substitution, includes, executable tags, XML entities, shell evaluation, or
+credential-source commands. Duplicate keys, unsupported active syntax, unsafe
+links or permissions, terminal controls, oversized sources, excessive depth,
+and changes during an operation fail closed without returning a source line.
 
 Failures expose only a stable broker code and bounded public message. Unknown
 parser, filesystem, subprocess, or future backend failures become
@@ -72,6 +100,39 @@ code—never copy a raw exception or retry by opening the source.
 Every example uses placeholders. Replace only aliases, key names, profile names,
 paths, destinations, and trusted program arguments. Never place a secret value
 in an example or command.
+
+### 0. Check whether the registered source is usable
+
+```bash
+./sb secrets source-info --source SOURCE_ALIAS --project-dir PROJECT_DIR
+```
+
+This operation uses filesystem metadata and an open-without-read safety check.
+It does not parse the source, issue a read syscall, follow symlinks, return the
+registered path, or expose file bytes. The result contains:
+
+- `exists`: `true`, `false`, or `null` when the operating system will not even
+  disclose existence;
+- `file_type`: `regular_file`, `missing`, `directory`, `symlink`, another
+  special-file class, or `unknown`;
+- `content_state`: `empty`, `nonempty`, `not_applicable`, or `unknown`;
+- `size_bucket` for regular files, configured `format`, and source `scope`;
+- `broker_readable` and `safety` (`safe`, `missing`, `unsafe`, `inaccessible`,
+  `changed`, or `too_large`).
+
+The default omits exact byte length because it can fingerprint a short or
+provider-specific credential file. A local CLI operator may request it only
+when necessary:
+
+```bash
+./sb secrets source-info --source SOURCE_ALIAS --exact-size \
+  --project-dir PROJECT_DIR --json
+```
+
+MCP exposes `secret_source_info` only when that source explicitly grants
+`source_info`. MCP never accepts an exact-size option. A missing or unsafe file
+is a useful result; do not bypass it by opening the path directly. Fix the
+registered source, owner-only permissions, or file type and repeat this probe.
 
 ### 1. List key names
 
@@ -90,10 +151,10 @@ It does not return source paths or values. Select one key before continuing.
 ```
 
 Metadata distinguishes states such as missing, empty, present, multiline,
-structured, or unsupported. Length is bucketed by default. `--exact-length` is
-allowed only with metadata mode and one selected key; because exact length is
-additional value-derived information, use it only when a documented format
-requires it.
+structured, binary, or unsupported. Length is bucketed by default.
+`--exact-length` is available only for eligible dotenv or opaque scalar values
+with one selected key. Structured, PEM, and binary formats deny it even when a
+caller requests it.
 
 ### 3. Validate a reviewed shape
 
@@ -123,7 +184,8 @@ Mask output has a fixed disclosure budget:
   characters.
 - Protected or ineligible values: no character preview.
 
-Protected values include passwords, values shorter than 24 characters,
+Structured-source values never expose a mask. For dotenv and opaque sources,
+protected values include passwords, values shorter than 24 characters,
 low-variety values, credential-bearing URLs and connection strings, JWTs,
 structured documents, multiline values, PEM/private keys, certificates, and
 binary material. Callers cannot choose prefix or suffix lengths, offsets,
@@ -168,7 +230,8 @@ exact-match output redaction before launch, but transformed, encoded, fragmented
 or remotely logged forms may escape redaction. Redaction is defense in depth,
 not permission to run an untrusted child.
 
-For MCP, arbitrary commands are prohibited. `secret_use_profile` accepts only a
+For MCP, arbitrary commands are prohibited. `secret_source_info` performs only
+the metadata-only file probe above. `secret_use_profile` accepts only a
 registered reviewed profile whose source, key, direct argv, destination, output
 budget, and timeout are fixed in configuration. `secret_inspect` and
 `secret_validate` also require explicit source-mode authorization. No MCP tool
@@ -214,7 +277,7 @@ Broker-side copy and reviewed generation avoid a caller-visible value entirely:
 V1 ships the reviewed generator profile `random-base64url-32-v1`; unknown
 generation profiles fail closed.
 
-V1 writes one single-line literal assignment. It refuses structured, multiline,
+V1 writes one single-line dotenv assignment. It refuses structured, multiline,
 binary, private-key, certificate, and PEM updates. A successful replacement
 preserves unrelated assignments, comments, ordering, newline style, ownership,
 and restrictive permissions and returns only the target identifiers, status,
@@ -304,8 +367,12 @@ unintended:
 ## Limitations
 
 - V1 covers the built-in personal assignment source and explicitly registered
-  project `.env*` files. It does not enumerate the process environment, infer
-  secrets from mixed config documents, or connect to external secret managers.
+  dotenv, JSON, INI, properties, TOML, YAML, XML, PEM, opaque-token, and binary
+  project sources. It never scans for files or auto-detects a format from
+  content, does not enumerate the process environment, and does not connect to
+  external secret managers.
+- Targeted updates currently remain dotenv-only. Structured round-trip writers
+  require separate syntax-preservation and atomicity evidence.
 - Shape validation is offline and always reports `live_checked=false`.
 - Exact length and fixed masks remain deliberate metadata disclosure.
 - The same OS identity may retain direct filesystem access.

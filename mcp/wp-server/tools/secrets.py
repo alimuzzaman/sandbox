@@ -33,6 +33,11 @@ def secret_inspect(project_dir: str, source: str, keys: list[str] | None = None,
     ))
 
 
+def secret_source_info(project_dir: str, source: str) -> dict:
+    """Return registered file existence/type/size-bucket metadata without reading contents."""
+    return _safe(lambda: _service(project_dir).source_info(source, surface="mcp"))
+
+
 def secret_validate(project_dir: str, source: str, key: str, profile: str) -> dict:
     """Run one reviewed offline shape profile; never retrieve or live-check the value."""
     return _safe(lambda: _service(project_dir).validate(
@@ -48,5 +53,5 @@ def secret_use_profile(project_dir: str, profile: str) -> dict:
 def register(server, dependencies) -> None:
     global _service_factory
     _service_factory = dependencies.require("secret_service_factory")
-    for function in (secret_inspect, secret_validate, secret_use_profile):
+    for function in (secret_source_info, secret_inspect, secret_validate, secret_use_profile):
         server.tool()(function)

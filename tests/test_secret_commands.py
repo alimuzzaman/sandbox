@@ -28,6 +28,13 @@ class SecretCommandTests(unittest.TestCase):
         self.assertEqual((args.action, args.mode, args.keys, args.project_dir),
                          ("inspect", "keys", None, "."))
 
+    def test_source_info_defaults_to_bucketed_metadata(self):
+        args = self.parser().parse_args(["source-info", "--source", "fixture"])
+        self.assertEqual(
+            (args.action, args.source, args.exact_size, args.json, args.project_dir),
+            ("source-info", "fixture", False, False, "."),
+        )
+
     def test_parser_has_no_plaintext_value_or_reveal_json_flags(self):
         help_text = self.parser().format_help()
         self.assertNotIn("--value", help_text)
@@ -138,12 +145,24 @@ class SecretCommandTests(unittest.TestCase):
                             "internal_port": 80, "health_path": "/"},
                 "secrets": {"sources": {"fixture": {
                     "path": ".env.fixture",
-                    "mcpModes": ["keys", "metadata", "validate", "masked", "use"],
+                    "mcpModes": [
+                        "source_info", "keys", "metadata", "validate", "masked", "use",
+                    ],
+                }, "gcp-fixture": {
+                    "path": "gcp-credentials.json", "format": "json",
+                    "mcpModes": ["source_info", "keys", "metadata"],
                 }}},
             }))
             source = root / ".env.fixture"
             source.write_text(f"API_TOKEN={fixture_value}\nOTHER_NAME=identifier\n")
             source.chmod(0o600)
+            structured = root / "gcp-credentials.json"
+            structured.write_text(json.dumps({
+                "type": "service_account",
+                "client_email": "synthetic@project.invalid",
+                "private_key": "SB_SYNTHETIC_PRIVATE_KEY_NOT_REAL",
+            }))
+            structured.chmod(0o600)
             environment = {
                 **os.environ,
                 "SANDBOX_HOME": str(home),
@@ -165,6 +184,34 @@ class SecretCommandTests(unittest.TestCase):
             listed = invoke("inspect", "--source", "fixture", "--json")
             self.assertEqual(listed.returncode, 0, listed.stderr)
             self.assertEqual(json.loads(listed.stdout)["keys"], ["API_TOKEN", "OTHER_NAME"])
+            source_info = invoke("source-info", "--source", "fixture", "--json")
+            source_payload = json.loads(source_info.stdout)
+            self.assertTrue(source_payload["exists"])
+            self.assertEqual(source_payload["file_type"], "regular_file")
+            self.assertEqual(source_payload["content_state"], "nonempty")
+            self.assertNotIn("size_bytes", source_payload)
+            exact_info = invoke(
+                "source-info", "--source", "fixture", "--exact-size", "--json",
+            )
+            self.assertEqual(json.loads(exact_info.stdout)["size_bytes"], source.stat().st_size)
+            structured_list = invoke("inspect", "--source", "gcp-fixture", "--json")
+            self.assertEqual(
+                json.loads(structured_list.stdout)["keys"],
+                ["/client_email", "/private_key", "/type"],
+            )
+            parser_canary = "SB_SYNTHETIC_SECRET_CANARY_91ac"
+            structured.write_text('{"private_key":"' + parser_canary + '",')
+            malformed = invoke("inspect", "--source", "gcp-fixture", "--json")
+            self.assertNotEqual(malformed.returncode, 0)
+            malformed_output = malformed.stdout + malformed.stderr
+            self.assertIn("syntax_unsupported", malformed_output)
+            self.assertNotIn(parser_canary, malformed_output)
+            self.assertNotIn("Traceback", malformed_output)
+            structured.write_text(json.dumps({
+                "type": "service_account",
+                "client_email": "synthetic@project.invalid",
+                "private_key": "SB_SYNTHETIC_PRIVATE_KEY_NOT_REAL",
+            }))
             checked = invoke("validate", "--source", "fixture", "--key", "API_TOKEN",
                              "--profile", "stripe-secret-v1", "--json")
             self.assertEqual(json.loads(checked.stdout)["validation"]["syntax"], "pass")

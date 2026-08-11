@@ -6,9 +6,10 @@ import string
 from collections.abc import Callable, Sequence
 
 from .audit import SecretAudit
+from .formats import SecretFormatError, parse_secret_document, validate_selector
 from .models import MAX_SELECTED_KEYS, SecretBrokerError, UseProfile, success
 from .parser import SecretParseError, parse_document
-from .policy import fixed_mask, metadata, validate, validate_key
+from .policy import fixed_mask, length_bucket, metadata, validate, validate_key
 from .runner import run_with_secret
 from .sources import SourceRegistry
 from .writer import load_revision_key, opaque_revision, update_source
@@ -46,10 +47,49 @@ class SecretService:
     def _document(self, source: str):
         safe = self.registry.read(source)
         try:
-            return safe, parse_document(safe.content)
-        except SecretParseError as exc:
+            document = (
+                parse_document(safe.content)
+                if safe.policy.format == "dotenv"
+                else parse_secret_document(safe.content, safe.policy.format)
+            )
+            return safe, document
+        except (SecretParseError, SecretFormatError) as exc:
             code = "duplicate_key" if exc.code == "duplicate_key" else "syntax_unsupported"
             raise SecretBrokerError(code, "registered secret source could not be parsed safely") from exc
+
+    def _validate_source_key(self, source: str, key: str) -> str:
+        if self.registry.policy(source).format == "dotenv":
+            return validate_key(key)
+        try:
+            return validate_selector(key)
+        except SecretFormatError:
+            raise SecretBrokerError("key_invalid", "secret key selector is invalid") from None
+
+    @staticmethod
+    def _entry_value(record) -> str:
+        if record.value is None:
+            raise SecretBrokerError("value_unavailable", "secret value is not available for this format")
+        return record.value
+
+    @staticmethod
+    def _entry_metadata(key: str, record, *, exact_length: bool) -> dict:
+        if exact_length and not getattr(record, "allow_exact_length", True):
+            raise SecretBrokerError(
+                "exact_length_denied", "exact length is not available for this secret format",
+            )
+        value = getattr(record, "value", None)
+        if value is None:
+            size = getattr(record, "byte_length", 0) or 0
+            return {
+                "key": key, "state": "present",
+                "kind": getattr(record, "kind_hint", None) or "binary",
+                "length_bucket": length_bucket(size),
+            }
+        result = metadata(key, value, exact_length=exact_length)
+        hint = getattr(record, "kind_hint", None)
+        if hint:
+            result["kind"] = hint
+        return result
 
     def _operate(self, operation, source, keys, surface, callback, *, profile=None, input_channel=None):
         correlation, failure = _bounded_call(lambda: self.audit.intent(
@@ -87,7 +127,7 @@ class SecretService:
         if len(selected) > MAX_SELECTED_KEYS:
             raise SecretBrokerError("selection_too_large", "too many secret keys were selected")
         for key in selected:
-            validate_key(key)
+            self._validate_source_key(source, key)
         if mode not in {"keys", "metadata", "masked"}:
             raise SecretBrokerError("mode_invalid", "secret inspection mode is invalid")
         if exact_length and (mode != "metadata" or len(selected) != 1):
@@ -108,30 +148,50 @@ class SecretService:
                 if record is None:
                     entries.append({"key": key, "state": "missing"})
                 elif mode == "metadata":
-                    entries.append(metadata(key, record.value, exact_length=exact_length))
+                    entries.append(self._entry_metadata(key, record, exact_length=exact_length))
                 else:
-                    entries.append(fixed_mask(key, record.value))
+                    if not getattr(record, "allow_mask", True):
+                        raise SecretBrokerError(
+                            "mask_denied", "masking is not available for this secret format",
+                        )
+                    entries.append(fixed_mask(key, self._entry_value(record)))
             return success(mode, source=source, entries=entries, count=len(entries),
                            correlation_id=correlation,
                            revision=opaque_revision(load_revision_key(self.revision_key_path), safe.content))
         return self._operate(mode, source, selected, surface, perform)
 
+    def source_info(self, source: str, *, exact_size: bool = False,
+                    surface: str = "cli") -> dict:
+        if exact_size and surface != "cli":
+            raise SecretBrokerError(
+                "exact_size_denied", "exact source size is available only to the local CLI",
+            )
+
+        def perform(correlation):
+            self._authorize(source, "source_info", surface)
+            details = self.registry.probe(source, exact_size=exact_size)
+            return success("source_info", **details, correlation_id=correlation)
+
+        return self._operate("source_info", source, (), surface, perform)
+
     def validate(self, source: str, key: str, profile: str, *, surface: str = "cli") -> dict:
-        validate_key(key)
+        self._validate_source_key(source, key)
         def perform(correlation):
             self._authorize(source, "validate", surface)
             _, document = self._document(source)
             record = document.entries.get(key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")
-            return success("validate", source=source, validation=validate(profile, key, record.value),
+            return success("validate", source=source, validation=validate(
+                profile, key, self._entry_value(record),
+            ),
                            correlation_id=correlation)
         return self._operate("validate", source, (key,), surface, perform, profile=profile)
 
     def run(self, source: str, key: str, argv: Sequence[str], *, destination: str,
             timeout_seconds: int = 300, max_output_bytes: int = 1_048_576,
             surface: str = "cli") -> dict:
-        validate_key(key)
+        self._validate_source_key(source, key)
         if surface != "cli":
             raise SecretBrokerError("command_denied", "arbitrary secret commands are local CLI only")
         def perform(correlation):
@@ -139,7 +199,7 @@ class SecretService:
             record = document.entries.get(key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")
-            result = run_with_secret(argv, destination=destination, value=record.value,
+            result = run_with_secret(argv, destination=destination, value=self._entry_value(record),
                                      timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
             return success("run", source=source, key=key, result=result.as_dict(), correlation_id=correlation)
         return self._operate("use", source, (key,), surface, perform)
@@ -157,7 +217,8 @@ class SecretService:
             record = document.entries.get(profile.key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")
-            result = run_with_secret(profile.argv, destination=profile.destination, value=record.value,
+            result = run_with_secret(
+                profile.argv, destination=profile.destination, value=self._entry_value(record),
                                      timeout_seconds=profile.timeout_seconds,
                                      max_output_bytes=profile.max_output_bytes)
             return success("use", source=profile.source, profile=profile_name,
@@ -167,12 +228,16 @@ class SecretService:
     def set(self, source: str, key: str, value: str, *, intent="either",
             expected_revision=None, validation_profile=None, input_channel="tty",
             surface="cli") -> dict:
-        validate_key(key)
+        self._validate_source_key(source, key)
         if surface != "cli":
             raise SecretBrokerError("update_denied", "secret updates require the local CLI")
         if not isinstance(value, str) or not value:
             raise SecretBrokerError("input_invalid", "secret input must be non-empty text")
         def perform(correlation):
+            if self.registry.policy(source).format != "dotenv":
+                raise SecretBrokerError(
+                    "update_unsupported", "secret updates are not supported for this format",
+                )
             if validation_profile:
                 checked = validate(validation_profile, key, value)
                 if checked["syntax"] != "pass":
@@ -191,8 +256,8 @@ class SecretService:
 
     def copy_reference(self, source: str, key: str, reference_source: str,
                        reference_key: str, **kwargs) -> dict:
-        validate_key(key)
-        validate_key(reference_key)
+        self._validate_source_key(source, key)
+        self._validate_source_key(reference_source, reference_key)
         if reference_source == source and reference_key == key:
             raise SecretBrokerError("input_invalid", "secret reference cannot target itself")
         if kwargs.get("surface", "cli") != "cli":
@@ -201,16 +266,22 @@ class SecretService:
         expected_revision = kwargs.get("expected_revision")
         validation_profile = kwargs.get("validation_profile")
         def perform(correlation):
+            if self.registry.policy(source).format != "dotenv":
+                raise SecretBrokerError(
+                    "update_unsupported", "secret updates are not supported for this format",
+                )
             _, reference_document = self._document(reference_source)
             record = reference_document.entries.get(reference_key)
             if record is None:
                 raise SecretBrokerError("key_missing", "referenced secret key does not exist")
-            checked = validate(validation_profile, key, record.value) if validation_profile else None
+            checked = validate(
+                validation_profile, key, self._entry_value(record),
+            ) if validation_profile else None
             if checked is not None and checked["syntax"] != "pass":
                 raise SecretBrokerError("shape_failed", "referenced secret failed the requested profile")
             safe = self.registry.read(source)
             action, revision = update_source(
-                safe, key=key, value=record.value,
+                safe, key=key, value=self._entry_value(record),
                 revision_key=load_revision_key(self.revision_key_path), intent=intent,
                 expected_revision=expected_revision,
             )
@@ -228,7 +299,7 @@ class SecretService:
 
     def reveal(self, source: str, key: str, consumer: Callable[[str], None], *,
                confirmed: bool, surface="cli") -> None:
-        validate_key(key)
+        self._validate_source_key(source, key)
         if surface != "cli":
             raise SecretBrokerError("reveal_denied", "secret reveal is local human-only")
         def perform(correlation):
@@ -238,6 +309,6 @@ class SecretService:
             record = document.entries.get(key)
             if record is None:
                 raise SecretBrokerError("key_missing", "secret key does not exist")
-            consumer(record.value)
+            consumer(self._entry_value(record))
             return success("reveal", source=source, key=key, correlation_id=correlation)
         self._operate("reveal", source, (key,), surface, perform)

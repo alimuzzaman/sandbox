@@ -13,17 +13,33 @@ secret in an argument, or export a secret into the parent shell.
 
 Stop as soon as the task is satisfied:
 
-1. List eligible key names from a registered source alias.
-2. Inspect metadata for exactly one key.
-3. Validate that key against a reviewed shape profile.
-4. Request the fixed mask only when identification still requires it.
-5. Let one trusted, bounded child process use the key without displaying it.
-6. Update one key through hidden or protected input without reading the file.
-7. If none of those works, ask the human to reveal one key outside every
+1. Check the registered source's existence/type/content state without reading it.
+2. List eligible key names from a registered source alias.
+3. Inspect metadata for exactly one key.
+4. Validate that key against a reviewed shape profile.
+5. Request the fixed mask only when identification still requires it.
+6. Let one trusted, bounded child process use the key without displaying it.
+7. Update one key through hidden or protected input without reading the file.
+8. If none of those works, ask the human to reveal one key outside every
    agent-captured terminal, transcript, recording, or tool call.
 
 All examples below use placeholders. Replace identifiers such as `SOURCE_ALIAS`,
 `SECRET_KEY`, and `PROFILE_NAME`; never substitute a secret value into a command.
+
+## 0. Check the source without reading it
+
+```bash
+./sb secrets source-info --source SOURCE_ALIAS --project-dir PROJECT_DIR
+```
+
+Use this first when you only need to know whether a registered file exists or
+has contents. It returns file type, `empty`/`nonempty` content state, a size
+bucket, configured format, and broker safety/readability. It returns neither the
+path nor bytes and does not parse the document. Treat `missing`, `unsafe`,
+`inaccessible`, or `changed` as a security result; never bypass it with a raw
+file read. Request `--exact-size` only through the local CLI when an exact byte
+count is necessary and its fingerprinting risk is acceptable. MCP has no exact
+size option and requires the source to grant `source_info` explicitly.
 
 ## 1. Discover names only
 
@@ -32,8 +48,14 @@ All examples below use placeholders. Replace identifiers such as `SOURCE_ALIAS`,
 ```
 
 This is the default `keys` mode. Do not pass an arbitrary file path. If the
-source is not registered, ask the operator to register the project `.env*`
-source rather than reading it directly.
+source is not registered, ask the operator to register its project-relative
+path and explicit format rather than reading it directly. Supported formats are
+`dotenv`, `json`, `ini`, `properties`, `toml`, `yaml`, `xml`, `pem`, `opaque`,
+and `binary`. Never request automatic detection or a directory scan.
+
+Structured key results are selectors, not values. JSON/YAML/TOML use JSON
+Pointer-style paths, INI uses `/section/key`, XML may include `@attribute` or
+`#text`, PEM lists block labels, and binary containers expose only `/file`.
 
 ## 2. Inspect one key without characters
 
@@ -43,8 +65,9 @@ source rather than reading it directly.
 ```
 
 Metadata reports a safe state and a length bucket. Exact length is additional
-disclosure; request `--exact-length` only for one key when a documented format
-requires it.
+disclosure; request `--exact-length` only for one eligible dotenv or opaque key
+when a documented format requires it. Structured, PEM, and binary sources deny
+exact length.
 
 ## 3. Validate shape, not live validity
 
@@ -74,6 +97,8 @@ Masking is fixed and non-expandable:
 - Passwords, short or low-variety values, credential-bearing URLs, connection
   strings, JWTs, structured or multiline values, PEM/private keys,
   certificates, and binary material expose no characters.
+- JSON, INI, properties, TOML, YAML, XML, PEM, and binary source entries never
+  expose a mask, even if a leaf happens to resemble an opaque token.
 
 Never attempt repeated masks, caller-selected prefix/suffix lengths, offsets,
 templates, regular expressions, or guesses. The interface intentionally offers
@@ -138,6 +163,9 @@ approved-secret-producer | ./sb secrets set --source SOURCE_ALIAS SECRET_KEY \
 
 The reviewed V1 generator is `random-base64url-32-v1`; do not invent profile
 names or generate candidate material in the agent transcript.
+
+Targeted update remains dotenv-only. A refusal for another format is not
+permission to rewrite or open that file manually.
 
 The producer used with `--stdin` must be trusted and must not log its output.
 Never use a plaintext flag, `KEY=value`, an ordinary environment variable, an

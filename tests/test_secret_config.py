@@ -43,7 +43,9 @@ class TestSecretConfigNormalization(unittest.TestCase):
                     "sources": {
                         "project-env": {
                             "path": "config/.env.fixture",
-                            "mcpModes": ["use", "keys", "metadata", "validate", "masked"],
+                            "mcpModes": [
+                                "use", "source_info", "keys", "metadata", "validate", "masked",
+                            ],
                         },
                     },
                     "useProfiles": {
@@ -64,7 +66,9 @@ class TestSecretConfigNormalization(unittest.TestCase):
             "sources": {
                 "project-env": {
                     "path": "config/.env.fixture",
-                    "mcpModes": ["keys", "metadata", "validate", "masked", "use"],
+                    "mcpModes": [
+                        "source_info", "keys", "metadata", "validate", "masked", "use",
+                    ],
                 },
             },
             "useProfiles": {
@@ -113,6 +117,62 @@ class TestSecretConfigNormalization(unittest.TestCase):
             with self.subTest(path=path), self.assertRaisesRegex(ValueError, "path"):
                 normalize_secret_config({"root": "/tmp/project", "_secrets_raw": {
                     "project": {"sources": {"project-env": {"path": path}}},
+                    "machine_override": {},
+                }})
+
+    def test_explicit_structured_formats_require_matching_safe_paths(self):
+        from sandbox.config.secrets import normalize_secret_config
+
+        accepted = {
+            "json-source": ("config/credentials.json", "json"),
+            "ini-source": ("config/credentials.ini", "ini"),
+            "properties-source": ("config/.npmrc", "properties"),
+            "toml-source": ("config/credentials.toml", "toml"),
+            "yaml-source": ("config/kubeconfig.yaml", "yaml"),
+            "xml-source": ("config/settings.xml", "xml"),
+            "pem-source": ("config/app.pem", "pem"),
+            "opaque-source": ("config/workload.jwt", "opaque"),
+            "binary-source": ("config/client.pfx", "binary"),
+        }
+        project = {"sources": {
+            alias: {
+                "path": path, "format": format_name,
+                "mcpModes": ["source_info", "keys", "metadata"],
+            }
+            for alias, (path, format_name) in accepted.items()
+        }}
+        result = normalize_secret_config({"root": "/tmp/project", "_secrets_raw": {
+            "project": project, "machine_override": {},
+        }})
+        self.assertEqual(
+            {alias: item["format"] for alias, item in result["sources"].items()},
+            {alias: format_name for alias, (_, format_name) in accepted.items()},
+        )
+
+        for format_name, path in (
+            ("json", "config/credentials.yaml"),
+            ("yaml", "config/credentials.json"),
+            ("pem", "config/key.txt"),
+            ("auto", "config/credentials.json"),
+        ):
+            with self.subTest(format=format_name, path=path), self.assertRaises(ValueError):
+                normalize_secret_config({"root": "/tmp/project", "_secrets_raw": {
+                    "project": {"sources": {"fixture": {
+                        "path": path, "format": format_name,
+                    }}},
+                    "machine_override": {},
+                }})
+
+    def test_structured_mcp_modes_do_not_enable_value_use_or_masking(self):
+        from sandbox.config.secrets import normalize_secret_config
+
+        for mode in ("validate", "masked", "use"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "format"):
+                normalize_secret_config({"root": "/tmp/project", "_secrets_raw": {
+                    "project": {"sources": {"fixture": {
+                        "path": "credentials.json", "format": "json",
+                        "mcpModes": ["keys", mode],
+                    }}},
                     "machine_override": {},
                 }})
 

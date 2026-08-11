@@ -190,6 +190,36 @@
 
 ---
 
+## Phase 10: Approved follow-up - structured credential files
+
+**Purpose**: Extend the registered-source boundary to documented credential
+containers without adding arbitrary paths, format inference, or broader MCP
+value access.
+
+- [X] T062 Record official provider-format provenance and the open-source wrapper decision in `specs/041-safe-secret-inspection/research.md`
+- [X] T063 Add an all-synthetic provider fixture corpus and exact selector expectations under `tests/fixtures/secret-formats/`
+- [X] T064 Add bounded inert JSON, INI, properties, TOML, YAML, XML, PEM, opaque, and binary adapters in `sandbox/secrets/formats.py`
+- [X] T065 Extend explicit source configuration and service dispatch while retaining dotenv-only mutation and structured MCP keys/metadata limits
+- [X] T066 Add parser, service, CLI, malformed-input, exception-chain, and traceback non-disclosure regressions
+- [X] T067 Update the operator guide, agent skill, README, plan, and research with structured selector and refusal behavior
+- [ ] T068 Run focused plus composition regressions, static checks, fixture provenance/credential scans, then commit and push the verified follow-up on `latest`
+
+---
+
+## Phase 11: Approved follow-up - metadata-only source probing
+
+**Purpose**: Let agents determine whether a registered secret file exists, has
+contents, and is broker-safe without reading or parsing the file.
+
+- [X] T069 Define the metadata-only source contract and exact-size disclosure boundary in the operator guide and agent skill
+- [X] T070 Implement no-follow, nonblocking source probing without read syscalls in `sandbox/secrets/sources.py`
+- [X] T071 Add audited service and CLI `source-info` operations with local-only opt-in exact byte size
+- [X] T072 Add explicitly authorized MCP `secret_source_info` without an exact-size argument
+- [X] T073 Add missing, empty, unsafe-type, symlink, inaccessible-error, no-read, CLI, MCP, and configuration regressions
+- [ ] T074 Run the complete relevant suite, static checks, diff security review, then commit and push the verified metadata follow-up on `latest`
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -285,3 +315,7 @@ T051 operator guide
   credential-pattern scan passed. No existing personal, project, `.env`, or
   machine secret source was opened; all exercised values were temporary,
   synthetic fixtures.
+- 2026-08-11 follow-up: Added 18 synthetic provider/container fixtures covering
+  10 explicit broker formats. Focused secret suites passed 76 tests before the
+  final malformed-parser matrix was added; the structured parser/service/CLI
+  subset then passed 38 tests. Composition/config regressions passed 50 tests.

@@ -38,6 +38,7 @@ class SourcePolicy:
     alias: str
     scope: str
     path: Path
+    format: str = "dotenv"
     mcp_modes: frozenset[str] = frozenset()
 
 

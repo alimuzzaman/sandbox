@@ -13,16 +13,28 @@ from sandbox.secrets.context import build_secret_service
 from sandbox.secrets.models import MAX_VALUE_BYTES
 
 
-ACTIONS = ("inspect", "validate", "run", "set", "reveal", "migrate-zshrc")
+ACTIONS = ("source-info", "inspect", "validate", "run", "set", "reveal", "migrate-zshrc")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
+)
+_DISPLAY_SOURCE_FIELDS = (
+    "source", "scope", "format", "exists", "file_type", "content_state",
+    "size_bucket", "size_bytes", "broker_readable", "safety",
 )
 
 
 def configure_parser(parser) -> None:
     parser.description = "Inspect, use, or update registered secrets with least disclosure"
     actions = parser.add_subparsers(dest="action", required=True)
+    source_info = actions.add_parser(
+        "source-info", help="inspect registered file metadata without reading its contents",
+    )
+    source_info.add_argument("--source", required=True)
+    source_info.add_argument("--exact-size", action="store_true")
+    source_info.add_argument("--json", action="store_true")
+    source_info.add_argument("--project-dir", default=".")
+
     inspect = actions.add_parser("inspect", help="list keys (default) or inspect bounded metadata")
     inspect.add_argument("--source", required=True)
     inspect.add_argument("--key", action="append", dest="keys")
@@ -99,6 +111,11 @@ def _emit(payload: dict, as_json: bool) -> None:
         print(json.dumps(payload["validation"], sort_keys=True))
     if payload.get("action"):
         print(f"  {payload['action']}: {payload.get('key', '')}")
+    if operation == "source_info":
+        fields = ", ".join(
+            f"{name}={payload[name]}" for name in _DISPLAY_SOURCE_FIELDS if name in payload
+        )
+        print(f"  {fields}")
     result = payload.get("result") or {}
     if result.get("output"):
         sys.stdout.write(result["output"])
@@ -167,7 +184,9 @@ def cmd_secrets(cfg, args) -> None:
         return
     try:
         service = _service(args.project_dir)
-        if args.action == "inspect":
+        if args.action == "source-info":
+            _emit(service.source_info(args.source, exact_size=args.exact_size), args.json)
+        elif args.action == "inspect":
             payload = service.inspect(args.source, keys=args.keys, mode=args.mode,
                                       exact_length=args.exact_length)
             _emit(payload, args.json)

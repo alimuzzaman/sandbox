@@ -1,0 +1,14 @@
+{
+  "http-basic": {
+    "repo.example.invalid": {
+      "username": "synthetic-user",
+      "password": "SB_SYNTHETIC_COMPOSER_PASSWORD_NOT_REAL"
+    }
+  },
+  "bearer": {
+    "repo.example.invalid": "SB_SYNTHETIC_COMPOSER_BEARER_NOT_REAL"
+  },
+  "github-oauth": {
+    "github.com": "SB_SYNTHETIC_GITHUB_TOKEN_NOT_REAL"
+  }
+}

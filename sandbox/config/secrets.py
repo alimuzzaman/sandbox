@@ -7,13 +7,15 @@ import copy
 from pathlib import Path, PurePosixPath
 import re
 
+from sandbox.secrets.formats import SUPPORTED_FORMATS
+
 
 _SAFE_SLUG = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
-_MCP_MODE_ORDER = ("keys", "metadata", "validate", "masked", "use")
+_MCP_MODE_ORDER = ("source_info", "keys", "metadata", "validate", "masked", "use")
 _MCP_MODES = frozenset(_MCP_MODE_ORDER)
 _SECRET_KEYS = frozenset(("sources", "useProfiles"))
-_SOURCE_KEYS = frozenset(("path", "mcpModes"))
+_SOURCE_KEYS = frozenset(("path", "format", "mcpModes"))
 _PROFILE_KEYS = frozenset((
     "source", "key", "argv", "destination", "timeoutSeconds",
     "maxOutputBytes", "mcp",
@@ -49,13 +51,48 @@ def _env_name(value: object, label: str) -> str:
     return value
 
 
-def _source_path(value: object, root: object = None) -> str:
+_FORMAT_SUFFIXES = {
+    "binary": frozenset((".jks", ".keystore", ".p12", ".pfx")),
+    "ini": frozenset((".cfg", ".conf", ".ini")),
+    "json": frozenset((".json",)),
+    "opaque": frozenset((".jwt", ".token")),
+    "pem": frozenset((".cer", ".crt", ".key", ".pem")),
+    "properties": frozenset((".properties",)),
+    "toml": frozenset((".toml",)),
+    "xml": frozenset((".config", ".xml")),
+    "yaml": frozenset((".yaml", ".yml")),
+}
+_FORMAT_BASENAMES = {
+    "ini": frozenset((".pypirc", "config", "credentials")),
+    "opaque": frozenset((".vault-token",)),
+    "properties": frozenset((".npmrc",)),
+    "toml": frozenset(("credentials",)),
+}
+
+
+def _source_format(value: object) -> str:
+    if not isinstance(value, str) or value not in SUPPORTED_FORMATS:
+        raise ValueError("secret source format is not supported")
+    return value
+
+
+def _source_path(value: object, format_name: str, root: object = None) -> str:
     if (not isinstance(value, str) or not value or value.endswith("/") or "\\" in value or
             any(ord(char) < 32 or ord(char) == 127 for char in value)):
-        raise ValueError("secret source path must be a safe project-relative .env* path")
+        raise ValueError("secret source path must be a safe project-relative file")
     candidate = PurePosixPath(value)
-    if candidate.is_absolute() or ".." in candidate.parts or not candidate.name.startswith(".env"):
-        raise ValueError("secret source path must be a project-relative .env* file")
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("secret source path must be a safe project-relative file")
+    lowered = candidate.name.lower()
+    if format_name == "dotenv":
+        eligible = lowered.startswith(".env")
+    else:
+        eligible = (
+            candidate.suffix.lower() in _FORMAT_SUFFIXES.get(format_name, ())
+            or lowered in _FORMAT_BASENAMES.get(format_name, ())
+        )
+    if not eligible:
+        raise ValueError("secret source path does not match its explicit format")
     if root is not None:
         project_root = Path(root).expanduser().resolve()
         try:
@@ -65,12 +102,17 @@ def _source_path(value: object, root: object = None) -> str:
     return value
 
 
-def _mcp_modes(value: object) -> list[str]:
+def _mcp_modes(value: object, format_name: str) -> list[str]:
     if (not isinstance(value, list) or any(not isinstance(mode, str) for mode in value)
             or len(value) != len(set(value)) or set(value) - _MCP_MODES):
         raise ValueError(
             "secret source mcpModes must be a unique list containing only "
-            "keys, metadata, validate, masked, and use"
+            "source_info, keys, metadata, validate, masked, and use"
+        )
+    if (format_name not in {"dotenv", "opaque"}
+            and set(value) - {"source_info", "keys", "metadata"}):
+        raise ValueError(
+            "secret source format permits only source_info, keys, and metadata over MCP"
         )
     selected = set(value)
     return [mode for mode in _MCP_MODE_ORDER if mode in selected]
@@ -84,11 +126,15 @@ def _normalize_source(alias: object, value: object, root: object) -> tuple[str, 
     _unknown_keys(descriptor, _SOURCE_KEYS, f"secret source {name!r}")
     if "path" not in descriptor:
         raise ValueError(f"secret source {name!r} requires path")
-    return name, {
-        "path": _source_path(descriptor["path"], root),
-        "mcpModes": _mcp_modes(descriptor["mcpModes"])
+    format_name = _source_format(descriptor.get("format", "dotenv"))
+    normalized = {
+        "path": _source_path(descriptor["path"], format_name, root),
+        "mcpModes": _mcp_modes(descriptor["mcpModes"], format_name)
         if "mcpModes" in descriptor else [],
     }
+    if "format" in descriptor:
+        normalized["format"] = format_name
+    return name, normalized
 
 
 def _bounded_int(value: object, minimum: int, maximum: int, label: str) -> int:
@@ -128,7 +174,15 @@ def _normalize_profile(name: object, value: object, sources: Mapping[str, dict])
     source = descriptor["source"]
     if not isinstance(source, str) or (source != "personal" and source not in sources):
         raise ValueError(f"secret use profile {profile_name!r} references an unknown source")
-    key = _env_name(descriptor["key"], "key")
+    source_format = "dotenv" if source == "personal" else sources[source].get("format", "dotenv")
+    if source_format == "dotenv":
+        key = _env_name(descriptor["key"], "key")
+    else:
+        from sandbox.secrets.formats import SecretFormatError, validate_selector
+        try:
+            key = validate_selector(descriptor["key"])
+        except (SecretFormatError, TypeError):
+            raise ValueError("secret use profile key must be a valid source selector") from None
     enabled_for_mcp = descriptor.get("mcp", False)
     if not isinstance(enabled_for_mcp, bool):
         raise ValueError("secret use profile mcp must be a boolean")

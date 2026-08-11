@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSourceCredentials>
+    <sandbox>
+      <add key="Username" value="synthetic-user" />
+      <add key="ClearTextPassword" value="SB_SYNTHETIC_NUGET_PASSWORD_NOT_REAL" />
+    </sandbox>
+  </packageSourceCredentials>
+</configuration>

@@ -18,19 +18,19 @@
 
 ## Decision 3: Registered project sources in common configuration
 
-**Decision**: Add a common `secrets.sources` descriptor to `sandbox.config.*`; paths must be project-relative `.env*` files that resolve within the project root. Keep the personal assignment file as the built-in `personal` alias.
+**Decision**: Add a common `secrets.sources` descriptor to `sandbox.config.*`; every source declares an explicit reviewed format and uses a project-relative path with a compatible suffix or basename that resolves within the project root. Keep the personal assignment file as the built-in `personal` alias.
 
 **Rationale**: Explicit aliases prevent the inspector from becoming a general file-read primitive. A common config provider keeps WordPress and Compose behavior identical and follows the repository's schema-manifest boundary.
 
-**Alternatives considered**: Arbitrary `--file`, directory scanning, and auto-exposing every `.env*` were rejected. A fixed `.env.local` only was too narrow for the approved explicit-registration requirement.
+**Alternatives considered**: Arbitrary `--file`, directory scanning, format auto-detection, and auto-exposing credential files were rejected. A fixed `.env.local` only was too narrow for the approved explicit-registration requirement.
 
 ## Decision 4: Descriptor-safe reads and inert parser
 
-**Decision**: Open sources with no-follow semantics, inspect the open descriptor for type/owner/mode/link/size, read bounded bytes, and parse literal assignments without shell execution. Preserve raw non-target lines for updates.
+**Decision**: Open sources with no-follow semantics, inspect the open descriptor for type/owner/mode/link/size, read bounded bytes, and dispatch only to the explicitly configured inert parser. Dotenv preserves raw non-target lines for updates. Structured formats expose stable selectors such as JSON Pointer paths, never source snippets; YAML aliases/tags, XML DTDs/entities, duplicates, excessive depth, and oversized documents fail closed.
 
 **Rationale**: The current personal parser safely rejects expansion but its path read follows links and is not syntax-preserving. The repository already uses descriptor-based credential reads and a strict assignment grammar that can be adapted.
 
-**Alternatives considered**: `Path.read_text`, `source`, dotenv packages with interpolation, and YAML inference were rejected because they widen race, execution, and dependency surfaces.
+**Alternatives considered**: `Path.read_text`, `source`, dotenv packages with interpolation, implicit format inference, unsafe YAML loaders, XML entity expansion, and generic parser exception rendering were rejected because they widen race, execution, dependency, and disclosure surfaces.
 
 ## Decision 5: Owner-only JSONL audit with intent first
 
@@ -112,6 +112,35 @@ stdout/stderr. Message-only redaction is therefore insufficient. The broker
 creates a fresh bounded error and raises it only after the original handler has
 returned, severing cause, context, traceback, and secret-bearing frame locals.
 
+## Follow-up: Official-format synthetic corpus
+
+**Decision**: Maintain a checked-in corpus of wholly synthetic credential-file
+shapes linked to the provider documentation that defines each format. The
+initial corpus covers Google Cloud ADC variants, AWS shared credentials and web
+identity, Azure certificate credentials, Kubernetes kubeconfig, Docker, npm,
+PyPI, Terraform, Composer, Cargo, Maven, NuGet, OCI, GitHub App PEM, and a
+binary-container placeholder. Never download or commit credential examples
+whose provenance or active status cannot be proven.
+
+**Rationale**: Provider documentation is the authority for field names and
+container structure, but copying realistic example keys creates unnecessary
+scanner noise and disclosure risk. Synthetic fixtures let tests exercise exact
+selectors and parser behavior without creating usable credentials. A manifest
+records the source URL, configured format, fixture, and expected selectors.
+
+**Disclosure policy**: Structured values support inventory, metadata,
+registered validation, bounded child-process use, and the separately confirmed
+local TTY reveal path. They do not support masked previews or exact lengths:
+arbitrary prefixes/suffixes of passwords, PEM bodies, JSON fields, or config
+values are not generally public identifiers. Only the existing reviewed opaque
+token profiles may return a fixed public prefix plus `last4`.
+
+**Mutation policy**: The initial structured adapters are read-only. Updating a
+nested JSON/YAML/XML/INI credential safely also requires syntax-preserving
+round trips, duplicate-key handling, revision checks, and provider-specific
+validation; until that is implemented and reviewed, targeted update remains
+limited to dotenv assignments.
+
 ## Primary external evidence
 
 - [Doppler Secrets Access Guide](https://docs.doppler.com/docs/accessing-secrets)
@@ -127,3 +156,19 @@ returned, severing cause, context, traceback, and secret-bearing frame locals.
 - [dotenvx get, masking, and decrypt behavior](https://github.com/dotenvx/dotenvx)
 - [Gitleaks redacted scanner output](https://github.com/gitleaks/gitleaks)
 - [detect-secrets baseline scanner](https://github.com/Yelp/detect-secrets)
+- [Google Cloud Application Default Credentials](https://docs.cloud.google.com/docs/authentication/application-default-credentials)
+- [Google external account credential configuration](https://google.aip.dev/auth/4117)
+- [AWS shared credentials and config files](https://docs.aws.amazon.com/sdkref/latest/guide/file-format.html)
+- [AWS web identity token files](https://docs.aws.amazon.com/sdkref/latest/guide/access-assume-role-web.html)
+- [Azure service-principal authentication](https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-service-principal)
+- [Kubernetes kubeconfig v1 schema](https://kubernetes.io/docs/reference/config-api/kubeconfig.v1/)
+- [Docker registry authentication storage](https://docs.docker.com/reference/cli/docker/login/)
+- [npmrc authentication configuration](https://docs.npmjs.com/cli/v8/configuring-npm/npmrc/)
+- [Python package index configuration](https://packaging.python.org/en/latest/specifications/pypirc/)
+- [Terraform CLI credentials](https://developer.hashicorp.com/terraform/cli/commands/login)
+- [Composer private-package authentication](https://getcomposer.org/doc/articles/authentication-for-private-packages.md)
+- [Cargo credentials configuration](https://doc.rust-lang.org/cargo/reference/config.html#credentials)
+- [Maven settings reference](https://maven.apache.org/settings.html)
+- [NuGet authenticated feeds](https://learn.microsoft.com/en-us/nuget/consume-packages/consuming-packages-authenticated-feeds)
+- [OCI SDK configuration](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm)
+- [GitHub App private-key management](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)

@@ -316,10 +316,15 @@ screenshot, DOM, and console errors without you switching tabs.
 
 ### Safe secret inspection and use
 
-Use the registered-source secret broker to list key names, validate or apply a
-fixed mask to one key, run a bounded trusted child without displaying the
-credential, and update one assignment through protected input. Plaintext reveal
-is a human-only local TTY exception and is never available through MCP. See
+Use the registered-source secret broker to list key names or structured key
+paths across dotenv, JSON, INI, properties, TOML, YAML, XML, PEM, opaque-token,
+and binary-container sources. Before parsing, `secrets source-info` can report
+whether the registered file exists, whether it is empty, its type, a size
+bucket, and whether the broker can safely open it—without reading its contents
+or returning its path. It can validate or apply a fixed mask to an
+eligible scalar, run a bounded trusted child without displaying the credential,
+and update one dotenv assignment through protected input. Plaintext reveal is a
+human-only local TTY exception and is never available through MCP. See
 [Safe secret inspection](docs/secret-inspection.md) or load the
 `secret-inspection` skill for the least-disclosure workflow and incident steps.
 

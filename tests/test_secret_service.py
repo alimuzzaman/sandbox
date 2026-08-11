@@ -40,6 +40,80 @@ class TestSecretSources(unittest.TestCase):
         self.assertEqual(opened.policy.alias, "fixture-env")
         self.assertEqual(opened.content, b"API_TOKEN=test-only\n")
 
+    def test_probe_reports_registered_file_metadata_without_reading_contents(self):
+        with mock.patch("sandbox.secrets.sources.os.read", side_effect=AssertionError("read")):
+            result = self.registry.probe("fixture-env")
+
+        self.assertEqual(result, {
+            "source": "fixture-env",
+            "scope": "project",
+            "format": "dotenv",
+            "exists": True,
+            "file_type": "regular_file",
+            "content_state": "nonempty",
+            "size_bucket": "1_to_1_kib",
+            "broker_readable": True,
+            "safety": "safe",
+        })
+        exact = self.registry.probe("fixture-env", exact_size=True)
+        self.assertEqual(exact["size_bytes"], self.source.stat().st_size)
+        self.assertNotIn(str(self.root), repr(result))
+        self.assertNotIn("test-only", repr(result))
+
+    def test_probe_distinguishes_missing_empty_and_unsafe_types_without_following_links(self):
+        self.source.unlink()
+        missing = self.registry.probe("fixture-env")
+        self.assertEqual(
+            (missing["exists"], missing["file_type"], missing["content_state"], missing["safety"]),
+            (False, "missing", "not_applicable", "missing"),
+        )
+
+        self.source.write_bytes(b"")
+        self.source.chmod(0o600)
+        empty = self.registry.probe("fixture-env")
+        self.assertEqual((empty["content_state"], empty["size_bucket"]), ("empty", "empty"))
+
+        target = self.root / ".env.target"
+        self.source.rename(target)
+        self.source.symlink_to(target)
+        linked = self.registry.probe("fixture-env")
+        self.assertEqual(
+            (linked["file_type"], linked["content_state"], linked["broker_readable"]),
+            ("symlink", "unknown", False),
+        )
+
+        self.source.unlink()
+        self.source.mkdir(mode=0o700)
+        directory = self.registry.probe("fixture-env")
+        self.assertEqual(directory["file_type"], "directory")
+        self.assertEqual(directory["safety"], "unsafe")
+
+    def test_probe_returns_stable_inaccessible_state_without_os_error_detail(self):
+        canary = "SB_SYNTHETIC_PATH_CANARY_31f2"
+        with mock.patch("sandbox.secrets.sources.os.lstat", side_effect=OSError(canary)):
+            result = self.registry.probe("fixture-env")
+        self.assertEqual(result["safety"], "inaccessible")
+        self.assertIsNone(result["exists"])
+        self.assertNotIn(canary, repr(result))
+
+    def test_probe_detects_source_swap_and_oversize_without_reading(self):
+        changed = list(os.lstat(self.source))
+        changed[1] += 1
+        with mock.patch("sandbox.secrets.sources.os.fstat", return_value=os.stat_result(changed)), \
+             mock.patch("sandbox.secrets.sources.os.read", side_effect=AssertionError("read")):
+            swapped = self.registry.probe("fixture-env", exact_size=True)
+        self.assertEqual(swapped["safety"], "changed")
+        self.assertEqual(swapped["content_state"], "unknown")
+        self.assertNotIn("size_bucket", swapped)
+        self.assertNotIn("size_bytes", swapped)
+
+        self.source.write_bytes(b"x" * (1_048_576 + 1))
+        with mock.patch("sandbox.secrets.sources.os.read", side_effect=AssertionError("read")):
+            oversized = self.registry.probe("fixture-env")
+        self.assertEqual(oversized["safety"], "too_large")
+        self.assertFalse(oversized["broker_readable"])
+        self.assertEqual(oversized["size_bucket"], "over_1_mib")
+
     def test_broad_permissions_are_refused(self):
         self.source.chmod(0o640)
         with self.assertRaisesRegex(SecretBrokerError, "permissions"):
@@ -174,7 +248,7 @@ class TestSecretBrokerService(unittest.TestCase):
         self.source.chmod(0o600)
         registry = SourceRegistry(
             self.root, {"fixture": {"path": ".env.fixture", "mcpModes": [
-                "keys", "metadata", "validate", "masked", "use",
+                "source_info", "keys", "metadata", "validate", "masked", "use",
             ]}}, personal_path=self.root / ".personal",
         )
         self.service = SecretService(
@@ -209,6 +283,66 @@ class TestSecretBrokerService(unittest.TestCase):
         service.inspect("fixture", surface="mcp")
         with self.assertRaisesRegex(SecretBrokerError, "not authorized"):
             service.inspect("fixture", keys=["API_TOKEN"], mode="masked", surface="mcp")
+
+    def test_source_info_does_not_parse_content_and_exact_size_is_cli_only(self):
+        with mock.patch.object(self.service.registry, "read", side_effect=AssertionError("read")):
+            result = self.service.source_info("fixture", surface="mcp")
+        self.assertEqual(result["operation"], "source_info")
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["content_state"], "nonempty")
+        self.assertIn("size_bucket", result)
+        self.assertNotIn("size_bytes", result)
+        self.assertNotIn("Fixture1234567890", repr(result))
+
+        exact = self.service.source_info("fixture", exact_size=True)
+        self.assertEqual(exact["size_bytes"], self.source.stat().st_size)
+        with self.assertRaisesRegex(SecretBrokerError, "local CLI"):
+            self.service.source_info("fixture", exact_size=True, surface="mcp")
+
+        self.service.registry._sources["missing"] = {
+            "path": ".env.missing", "mcpModes": ["source_info"],
+        }
+        missing = self.service.source_info("missing", surface="mcp")
+        self.assertFalse(missing["exists"])
+        self.assertEqual(missing["safety"], "missing")
+
+    def test_structured_source_lists_paths_and_denies_derived_disclosure_and_update(self):
+        structured = self.root / "credentials.json"
+        structured.write_text(json.dumps({
+            "type": "service_account",
+            "private_key": "SB_SYNTHETIC_PRIVATE_KEY_NOT_REAL",
+            "nested": {"token": "SB_SYNTHETIC_TOKEN_NOT_REAL"},
+        }))
+        structured.chmod(0o600)
+        self.service.registry._sources["structured"] = {
+            "path": "credentials.json", "format": "json",
+            "mcpModes": ["keys", "metadata"],
+        }
+
+        listed = self.service.inspect("structured")
+        self.assertEqual(
+            listed["keys"], ["/nested/token", "/private_key", "/type"],
+        )
+        metadata_result = self.service.inspect(
+            "structured", keys=["/private_key"], mode="metadata",
+        )
+        self.assertEqual(metadata_result["entries"][0]["kind"], "password")
+        self.assertNotIn("SB_SYNTHETIC", repr(metadata_result))
+        with self.assertRaisesRegex(SecretBrokerError, "exact length"):
+            self.service.inspect(
+                "structured", keys=["/private_key"], mode="metadata", exact_length=True,
+            )
+        with self.assertRaisesRegex(SecretBrokerError, "mask"):
+            self.service.inspect("structured", keys=["/nested/token"], mode="masked")
+        with self.assertRaisesRegex(SecretBrokerError, "update"):
+            self.service.set("structured", "/nested/token", "SB_SYNTHETIC_REPLACEMENT")
+
+        with mock.patch.object(self.service, "_document") as read_reference, \
+             self.assertRaisesRegex(SecretBrokerError, "update"):
+            self.service.copy_reference(
+                "structured", "/nested/token", "fixture", "API_TOKEN",
+            )
+        read_reference.assert_not_called()
 
     def test_mcp_use_accepts_only_an_authorized_fixed_profile(self):
         profile = UseProfile(
@@ -328,6 +462,27 @@ class TestSecretBrokerService(unittest.TestCase):
             for line in (self.root / "runtime/audit.jsonl").read_text().splitlines()
         ]
         self.assertEqual(events[-1]["reason_code"], "operation_failed")
+
+    def test_malformed_structured_source_does_not_leak_parser_input_or_chain(self):
+        canary = "SB_SYNTHETIC_SECRET_CANARY_91ac"
+        structured = self.root / "credentials.json"
+        structured.write_text('{"private_key":"' + canary + '",')
+        structured.chmod(0o600)
+        self.service.registry._sources["structured"] = {
+            "path": "credentials.json", "format": "json",
+            "mcpModes": ["keys", "metadata"],
+        }
+
+        with self.assertRaises(SecretBrokerError) as raised:
+            self.service.inspect("structured")
+
+        error = raised.exception
+        self.assertEqual(error.code, "syntax_unsupported")
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        rendered = "".join(traceback.format_exception(error))
+        self.assertNotIn(canary, rendered)
+        self.assertNotIn("credentials.json", rendered)
 
 
 if __name__ == "__main__":

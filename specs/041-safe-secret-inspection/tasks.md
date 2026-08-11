@@ -202,7 +202,7 @@ value access.
 - [X] T065 Extend explicit source configuration and service dispatch while retaining dotenv-only mutation and structured MCP keys/metadata limits
 - [X] T066 Add parser, service, CLI, malformed-input, exception-chain, and traceback non-disclosure regressions
 - [X] T067 Update the operator guide, agent skill, README, plan, and research with structured selector and refusal behavior
-- [ ] T068 Run focused plus composition regressions, static checks, fixture provenance/credential scans, then commit and push the verified follow-up on `latest`
+- [X] T068 Run focused plus composition regressions, static checks, fixture provenance/credential scans, then commit and push the verified follow-up on `latest`
 
 ---
 
@@ -216,7 +216,7 @@ contents, and is broker-safe without reading or parsing the file.
 - [X] T071 Add audited service and CLI `source-info` operations with local-only opt-in exact byte size
 - [X] T072 Add explicitly authorized MCP `secret_source_info` without an exact-size argument
 - [X] T073 Add missing, empty, unsafe-type, symlink, inaccessible-error, no-read, CLI, MCP, and configuration regressions
-- [ ] T074 Run the complete relevant suite, static checks, diff security review, then commit and push the verified metadata follow-up on `latest`
+- [X] T074 Run the complete relevant suite, static checks, diff security review, then commit and push the verified metadata follow-up on `latest`
 
 ---
 
@@ -308,7 +308,7 @@ T051 operator guide
   redacted direct-child use, protected stdin update, non-TTY reveal refusal,
   and absence of Compose reconciliation.
 - 2026-08-11: Fake-TTY and fake-MCP tests proved TTY-only reveal with empty
-  stdout, exact three-tool MCP registration, default-catalog exclusion, bounded
+  stdout, exact four-tool MCP registration, default-catalog exclusion, bounded
   denials, and profile-only use.
 - 2026-08-11: `sb skill list` and `sb skill show secret-inspection` passed after
   the supported skill edit/load loop. `py_compile`, `git diff --check`, and the
@@ -319,3 +319,14 @@ T051 operator guide
   10 explicit broker formats. Focused secret suites passed 76 tests before the
   final malformed-parser matrix was added; the structured parser/service/CLI
   subset then passed 38 tests. Composition/config regressions passed 50 tests.
+- 2026-08-11 final follow-up: The combined secret, configuration, CLI, MCP,
+  composition, architecture, and modularity suite passed 152 tests. Metadata
+  regressions proved no read syscall, missing/empty/type states, symlink and
+  special-file refusal, source-swap and oversize classification, stable OS-error
+  output, default size buckets, CLI-only exact size, and explicit MCP
+  `source_info` authorization. Compilation, fixture integrity, skill rendering,
+  and `git diff --check` passed.
+- 2026-08-11 security receipt: Codex Security diff scan
+  `c14205a9-eb80-4189-821c-e40d8f3cde8d` sealed 21/21 worklist rows across
+  seven surfaces with zero findings. Implementation commit `6b4c060` was pushed
+  to `origin/latest` before this evidence-only closeout.

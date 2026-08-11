@@ -1,12 +1,13 @@
 # Sandbox PRDs — index, order, decisions
 
-Date: 2026-08-06. Standalone product briefs, each owning one delivery phase. A PRD here is **not a spec**: it is the pre-spec brief an implementing agent converts through Spec-Kit (`speckit-specify` → `clarify` → `plan` → `tasks`). Nothing under `specs/` is created or modified by writing one. `TODO.md` at the repo root is reconciled against this set; finished work is deleted from TODO.md, not archived — history lives in git and the spec ledgers.
+Date: 2026-08-11. Standalone product briefs, each owning one delivery phase. A PRD here is **not a spec**: it is the pre-spec brief an implementing agent converts through Spec-Kit (`speckit-specify` → `clarify` → `plan` → `tasks`). Nothing under `specs/` is created or modified by writing one. `TODO.md` at the repo root is reconciled against this set; finished work is deleted from TODO.md, not archived — history lives in git and the spec ledgers.
 
 Convention follows the lenzora repo (`todo/NN-slug/prd.md` + this index + a reconciled root `TODO.md`).
 
 | # | PRD | One line |
 | --- | --- | --- |
 | 00 | [Outbound mail](00-outbound-mail/prd.md) | Instances send as their own bound domain, direct from the Sandbox host — Postfix + OpenDKIM, capture-by-default, Cloudflare-automated SPF/DKIM/DMARC |
+| 01 | [Herd-equivalent polyglot stacks](01-herd-equivalent-polyglot-stacks/prd.md) | Guided Laravel/database and Node environments with honest parity evidence, secret-safe configuration, and related-project coordination |
 
 ## Implementation order
 
@@ -14,6 +15,7 @@ Convention follows the lenzora repo (`todo/NN-slug/prd.md` + this index + a reco
 now ─────────────────────────────────────────────▶
 [TODO §1 loose ends]  [TODO §2 platform integrity]   (continuous, independent)
 Phase 0 (00 outbound mail)  ─ independent; blocked only on the manual rDNS change
+Phase 1 (01 polyglot stacks) ─ independent discovery; blocked on five owner decisions
 ```
 
 ## Standing decisions these PRDs inherit
@@ -34,3 +36,8 @@ Phase 0 (00 outbound mail)  ─ independent; blocked only on the manual rDNS cha
 | `asb.bd` DMARC strict alignment blocks subdomain senders | 00 §4.2, decision 4 |
 | Remote named `scaleway-sandbox` is actually Contabo | TODO §2 (naming/ops honesty; no PRD) |
 | `hermes.asb.bd` robots.txt returns the Access 302 | TODO §1 (accepted gap) |
+| Laravel/Node `sb init --type` labels require an existing Compose file | 01 §1, §5.2 |
+| Herd-equivalent version and extension evidence is not reported | 01 §5.1, §5.5 |
+| Related backend/frontend instances have no owned coordination contract | 01 §5.3 |
+| The secret broker cannot deliver a declared application environment | 01 §5.4 |
+| Exact MySQL 8.0.27 on Apple Silicon requires amd64 emulation | 01 §2.3, §12 |

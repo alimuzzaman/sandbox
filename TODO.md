@@ -1,8 +1,8 @@
 # Sandbox TODO
 
-Updated: 2026-08-10. Structure: standing engineering work (§1–§2) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
+Updated: 2026-08-11. Structure: standing engineering work (§1–§2) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
 
-Sources: `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
+Sources: `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[herd-parity]` = 2026-08-11 local probes + official Herd/Laravel/Docker/Node/pnpm/MySQL research under `.ai/research/2026-08-11-herd-sandbox-parity/` · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
 
 Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is Contabo not Scaleway). Do not re-run the provider comparison; the open questions that remain are listed in `todo/00-outbound-mail/prd.md` §11.
 
@@ -34,3 +34,19 @@ Direct delivery from the Sandbox host, no paid provider. The research is settled
 - [ ] `mail:` block in `sandbox.config.json` and `sandbox.hosting.yml`, beside the `robots:` key. `[prd 00 §4.5]`
 - [ ] Delivery proof: preview password reset reaching a Gmail **inbox** with DKIM pass + SPF pass + DMARC aligned, headers recorded in the spec ledger. `[prd 00 §9]`
 - [ ] Resolve the five owner decisions in `todo/00-outbound-mail/prd.md` §11 before `speckit-specify`. `[prd 00 §11]`
+
+## Phase 1 — Herd-equivalent polyglot development stacks `[prd 01]`
+
+Reproduce the observable Laravel + database + Node development contract through
+Sandbox without claiming that Linux containers are Laravel Herd. Compose remains
+the supported default; the detected Herd adapter stays non-adoptable until its own
+proof gates pass.
+
+- [ ] Resolve the five owner decisions in `todo/01-herd-equivalent-polyglot-stacks/prd.md` §12 before `speckit-specify`: equivalence target, frontend execution strategy, MySQL 8.0.27 emulation versus a native-ARM version, application-environment delivery scope, and related-project ownership. `[herd-parity → prd 01 §12]`
+- [ ] Add a read-only parity preflight that distinguishes compatible, mismatched, unavailable, and unverified PHP/extension, Node/package-manager, database, port, environment-source, routing, and health facts. It must never print secret values or call a mismatch “exact.” `[prd 01 §5.1, §5.5]`
+- [ ] Make explicit Laravel and Node initialization useful without a pre-existing Compose file: produce reviewable proposals from inert manifests, report every inferred value and uncertainty, and execute no repository command before a separate start action. `[prd 01 §5.2]`
+- [ ] Support a project-owned relation between backend and frontend instances with stable service discovery, ordered health, bounded diagnostics, and cleanup that cannot delete a sibling project or its persistent database. `[prd 01 §5.3]`
+- [ ] Define a secret-safe application environment handoff for registered `.env*` sources. Preserve the broker's no-raw-read policy, grant only declared consumers/keys, keep values out of argv/logs/registry/committed config, and do not mistake Compose interpolation for container environment delivery. `[prd 01 §5.4]`
+- [ ] Make requested-port conflicts actionable: identify only safe process metadata, refuse implicit takeover, and require a fresh explicit stop/replace decision before claiming ports such as 3000 or 8000. `[prd 01 §5.6]`
+- [ ] Prove the selected product contract on representative Laravel 12 + MySQL and Next.js + pnpm projects on Apple Silicon, including edit/reload behavior, backend calls from browser and server components, database persistence, repeated lifecycle operations, test commands, secret non-disclosure, and a measured comparison with the prior host-native baseline. `[prd 01 §8]`
+- [ ] Keep generic incumbent-Herd execution outside this phase unless the owner explicitly selects native equivalence. If selected later, it needs a separate PRD and must remain labeled trusted shared-host/lower-isolation; it may not weaken Compose defaults or reuse the WordPress-only unproven adoption claim. `[prd 01 §6, §12]`

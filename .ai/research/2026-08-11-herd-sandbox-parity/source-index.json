@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "topic": "Laravel Herd environment parity through Sandbox",
+  "accessedOn": "2026-08-11",
+  "sources": [
+    {
+      "id": "herd-installation",
+      "authority": "Laravel Herd",
+      "url": "https://herd.laravel.com/docs/macos/getting-started/installation",
+      "supports": ["Herd is a native macOS stack", "Herd bundles PHP, nginx, dnsmasq, and Node.js", "Herd serves .test domains"]
+    },
+    {
+      "id": "herd-project-config",
+      "authority": "Laravel Herd",
+      "url": "https://herd.laravel.com/docs/macos/sites/herd-yaml",
+      "supports": ["herd.yml records team PHP, TLS, aliases, and service versions", "herd init applies configuration idempotently"]
+    },
+    {
+      "id": "herd-php-extensions",
+      "authority": "Laravel Herd",
+      "url": "https://herd.laravel.com/docs/macos/technology/php-extensions",
+      "supports": ["Herd ships a broad curated PHP extension set", "pdo_mysql and other application extensions are included"]
+    },
+    {
+      "id": "herd-services",
+      "authority": "Laravel Herd",
+      "url": "https://herd.laravel.com/docs/macos/herd-pro-services/services",
+      "supports": ["Herd Pro manages versioned MySQL and other local services", "services have independent lifecycle and data"]
+    },
+    {
+      "id": "laravel-sail",
+      "authority": "Laravel",
+      "url": "https://laravel.com/docs/12.x/sail",
+      "supports": ["Compose is Laravel's supported container development model", "Laravel connects to MySQL by service name", "Sail supports PHP 8.4 and Node 22"]
+    },
+    {
+      "id": "compose-services",
+      "authority": "Docker",
+      "url": "https://docs.docker.com/reference/compose-file/services/",
+      "supports": ["depends_on service_healthy waits for dependency health", "env_file passes variables to containers", "expose does not publish to the host"]
+    },
+    {
+      "id": "compose-networking",
+      "authority": "Docker",
+      "url": "https://docs.docker.com/compose/how-tos/networking/",
+      "supports": ["service names provide stable discovery", "external networks can connect separate Compose projects", "internal networks can isolate databases"]
+    },
+    {
+      "id": "compose-environment",
+      "authority": "Docker",
+      "url": "https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/",
+      "supports": ["Compose interpolation and container environment are distinct", "env_file can pass multiple application variables", "Docker advises secrets instead of sensitive environment variables"]
+    },
+    {
+      "id": "compose-secrets",
+      "authority": "Docker",
+      "url": "https://docs.docker.com/compose/how-tos/use-secrets/",
+      "supports": ["Compose grants secrets per service", "secrets are mounted under /run/secrets", "environment variables have broader disclosure risk"]
+    },
+    {
+      "id": "docker-bind-mounts",
+      "authority": "Docker",
+      "url": "https://docs.docker.com/engine/storage/bind-mounts/",
+      "supports": ["bind mounts support live source development", "bind mounts are writable by default", "Docker Desktop mediates mounts through a Linux VM"]
+    },
+    {
+      "id": "next-deploying",
+      "authority": "Next.js",
+      "url": "https://nextjs.org/docs/app/getting-started/deploying",
+      "supports": ["Next.js supports Docker", "Next.js recommends native local development on macOS and Windows for better development performance"]
+    },
+    {
+      "id": "node-docker",
+      "authority": "Node.js Docker image maintainers",
+      "url": "https://github.com/nodejs/docker-node",
+      "supports": ["version-pinned Debian and Alpine images are available", "Alpine uses musl rather than glibc", "Node images support multiple architectures"]
+    },
+    {
+      "id": "node-docker-best-practices",
+      "authority": "Node.js Docker image maintainers",
+      "url": "https://github.com/nodejs/docker-node/blob/main/docs/BestPractices.md",
+      "supports": ["run as a non-root user", "use an init wrapper for signal handling", "apply memory limits"]
+    },
+    {
+      "id": "pnpm-installation",
+      "authority": "pnpm",
+      "url": "https://pnpm.io/installation",
+      "supports": ["pnpm 11 supports Node 22", "specific pnpm versions can be installed", "glibc and musl builds differ"]
+    },
+    {
+      "id": "pnpm-package-json",
+      "authority": "pnpm",
+      "url": "https://pnpm.io/package_json",
+      "supports": ["projects can constrain Node and pnpm versions", "package manager and runtime declarations are distinct compatibility inputs"]
+    },
+    {
+      "id": "mysql-image",
+      "authority": "Docker and MySQL image maintainers",
+      "url": "https://hub.docker.com/_/mysql/",
+      "supports": ["MySQL data should use persistent storage", "initialization is not ready for connections immediately", "supported credentials can use _FILE secrets"]
+    },
+    {
+      "id": "php-image",
+      "authority": "Docker PHP image maintainers",
+      "url": "https://hub.docker.com/_/php/",
+      "supports": ["PHP image extension sets are image-specific", "core and PECL extensions require explicit installation and enablement"]
+    }
+  ]
+}

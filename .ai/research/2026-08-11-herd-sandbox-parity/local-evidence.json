@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "observedOn": "2026-08-11",
+  "secretValuesRead": false,
+  "sandbox": {
+    "branch": "latest",
+    "revision": "3cbb172",
+    "matchedRemoteAtStart": true,
+    "composeVersion": "5.1.2",
+    "genericComposeAdoptable": true,
+    "herdAdapter": {
+      "supportTier": "implemented_unproven",
+      "adoptable": false,
+      "isolation": "trusted_shared_host",
+      "projectKindToday": "wordpress-only"
+    },
+    "initializer": {
+      "acceptedTypes": ["compose", "generic", "astro", "laravel", "php", "node", "javascript"],
+      "generatedPresetTypes": ["astro"],
+      "laravelOrNodeWithoutCompose": "refused before project execution"
+    },
+    "secretBroker": {
+      "supportsRegisteredDotEnvSources": true,
+      "boundedUseCardinality": "one selected key to one direct-argv child",
+      "wholeApplicationEnvironmentDelivery": false
+    }
+  },
+  "referenceEnvironment": {
+    "herdVersion": "1.29.0",
+    "herdGlobalPhp": "8.5.8",
+    "backend": {
+      "framework": "Laravel 12",
+      "laravelFrameworkLocked": "12.59.0",
+      "phpConstraint": "^8.3",
+      "observedPhp": "8.4.23",
+      "phpDistribution": "Laravel Herd macOS binary",
+      "phpExtensionsObserved": [
+        "bcmath",
+        "bz2",
+        "calendar",
+        "ctype",
+        "curl",
+        "dba",
+        "dom",
+        "exif",
+        "ffi",
+        "fileinfo",
+        "ftp",
+        "gd",
+        "gettext",
+        "gmp",
+        "herd",
+        "iconv",
+        "igbinary",
+        "imagick",
+        "imap",
+        "intl",
+        "ldap",
+        "mbstring",
+        "mongodb",
+        "mysqli",
+        "opcache",
+        "openssl",
+        "pcntl",
+        "pdo",
+        "pdo_mysql",
+        "pdo_pgsql",
+        "pdo_sqlite",
+        "pdo_sqlsrv",
+        "pgsql",
+        "phar",
+        "posix",
+        "readline",
+        "redis",
+        "session",
+        "shmop",
+        "simplexml",
+        "soap",
+        "sockets",
+        "sodium",
+        "sqlite3",
+        "sqlsrv",
+        "sysvmsg",
+        "sysvsem",
+        "sysvshm",
+        "xml",
+        "xmlreader",
+        "xmlwriter",
+        "xsl",
+        "zip",
+        "zlib",
+        "zstd"
+      ],
+      "composerExtensionRequirements": [
+        "ctype",
+        "curl",
+        "date",
+        "dom",
+        "exif",
+        "fileinfo",
+        "filter",
+        "hash",
+        "iconv",
+        "imagick",
+        "json",
+        "libxml",
+        "mbstring",
+        "openssl",
+        "pcre",
+        "phar",
+        "pdo",
+        "reflection",
+        "session",
+        "simplexml",
+        "tokenizer",
+        "xml",
+        "xmlwriter",
+        "zip",
+        "zlib"
+      ],
+      "observedServerShape": "PHP built-in server on requested port, not Herd nginx routing",
+      "composeFilePresent": false
+    },
+    "frontend": {
+      "framework": "Next.js",
+      "nextVersion": "16.2.12",
+      "nodePin": "22",
+      "observedNode": "22.18.0",
+      "declaredPackageManager": "pnpm@11.5.2",
+      "observedGlobalPnpm": "11.17.0",
+      "devCommand": "next dev --turbopack",
+      "composeFilePresent": false
+    },
+    "database": {
+      "provider": "DBngin",
+      "engine": "MySQL",
+      "version": "8.0.27"
+    }
+  },
+  "imageAvailability": {
+    "hostArchitecture": "darwin/arm64",
+    "php_8_4_23_cli": {
+      "digest": "sha256:3a70cc45c4b03b691f04ea3c032030613a5ff6ee61053127aadb8a93b39cc7c3",
+      "arm64": true
+    },
+    "node_22_18_0_bookworm_slim": {
+      "digest": "sha256:752ea8a2f758c34002a0461bd9f1cee4f9a3c36d48494586f60ffce1fc708e0e",
+      "arm64": true
+    },
+    "mysql_8_0_27": {
+      "digest": "sha256:e9027fe4d91c0153429607251656806cc784e914937271037f7738bd5b8e7709",
+      "arm64": false,
+      "amd64": true,
+      "implication": "exact version requires emulation on this host"
+    }
+  },
+  "sourcePermissions": {
+    "backendDotEnvMode": "0755",
+    "frontendDotEnvMode": "0644",
+    "brokerRequirement": "owner-controlled and inaccessible to group and other users",
+    "eligibleWithoutPermissionChange": false
+  },
+  "transientPortEvidence": {
+    "warning": "Port occupancy changed during research and must be re-probed immediately before any apply operation.",
+    "stableClaim": "Sandbox must refuse implicit takeover and report conflicts safely."
+  },
+  "workingTreeSafety": {
+    "backend": "ahead of upstream with concurrent user changes and untracked files",
+    "frontend": "ahead of upstream",
+    "filesModifiedByResearchProbe": false
+  }
+}

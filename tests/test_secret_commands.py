@@ -45,6 +45,13 @@ class SecretCommandTests(unittest.TestCase):
             with patch.object(command.sys, "stdin", fake_stdin), self.assertRaises(SecretBrokerError):
                 command._stdin_secret()
 
+        fake_stdin = type("Input", (), {"buffer": io.BytesIO(b"\xff\n")})()
+        with patch.object(command.sys, "stdin", fake_stdin), \
+             self.assertRaises(SecretBrokerError) as raised:
+            command._stdin_secret()
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+
     def test_feature_skill_is_discoverable_and_forbids_pasted_secrets(self):
         body = (Path(__file__).parent.parent / "skills/secret-inspection/SKILL.md").read_text()
         self.assertIn("secrets inspect", body)
@@ -98,6 +105,23 @@ class SecretCommandTests(unittest.TestCase):
         rendered = tty.getvalue()
         self.assertIn("WARNING", rendered)
         self.assertIn("SyntheticTtyOnly", rendered)
+
+    def test_unknown_cli_failure_never_returns_exception_detail_or_traceback(self):
+        canary = "SB_SYNTHETIC_SECRET_CANARY_7f34"
+        args = SimpleNamespace(
+            action="inspect", source="fixture", keys=None, mode="keys",
+            exact_length=False, json=False, project_dir=".",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(command, "_service", side_effect=RuntimeError(canary)), \
+             redirect_stdout(stdout), redirect_stderr(stderr), \
+             self.assertRaises(SystemExit):
+            command.cmd_secrets({}, args)
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("operation_failed", rendered)
+        self.assertNotIn(canary, rendered)
+        self.assertNotIn("Traceback", rendered)
 
     def test_isolated_live_cli_flow_never_prints_fixture_value(self):
         repository = Path(__file__).parent.parent

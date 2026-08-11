@@ -80,6 +80,38 @@
 
 **Alternatives considered**: Adding more centralized parser branches, shelling from MCP into `sb`, or reading config/state JSON directly were rejected as architectural regressions.
 
+## Follow-up: Open-source backend evaluation
+
+**Decision**: Keep the least-disclosure broker as the public CLI/MCP boundary.
+Evaluate SOPS as an optional, pinned backend for files already encrypted with
+SOPS; do not expose the SOPS CLI directly and do not replace the current inert
+plaintext assignment parser with dotenvx. Secret scanners remain optional test
+and CI controls rather than readers.
+
+**Rationale**: SOPS supports encrypted YAML, JSON, ENV, INI, and binary files,
+targeted `set --value-stdin`, and FIFO-backed `exec-file`. Those mechanisms are
+useful below the broker. Its normal decrypt and extract operations write
+plaintext to stdout, however, and its process commands accept shell-shaped
+command strings. dotenvx likewise has plaintext `get`/decrypt output and a
+caller-variable mask that exposes six leading characters by default. Gitleaks
+and detect-secrets detect likely credentials but do not provide typed,
+syntax-preserving inspection or updates.
+
+**Wrapper requirements**: A backend adapter must use direct argv; never place a
+secret in argv; accept candidate material only through a protected descriptor,
+FIFO, or stdin; bound and discard backend stdout/stderr on failure; translate
+all failures to a stable broker code; never return exception text, exception
+attributes, source snippets, or tracebacks; and retain the existing audit,
+registration, disclosure, and MCP authorization checks. A dependency must be
+pinned and verified and must not be downloaded implicitly during an operation.
+
+**Failure research**: Synthetic canary tests confirmed that Python JSON and
+TOML decode exceptions retain the complete input in `.doc`, PyYAML retains its
+source buffer through parser marks, and subprocess exceptions retain captured
+stdout/stderr. Message-only redaction is therefore insufficient. The broker
+creates a fresh bounded error and raises it only after the original handler has
+returned, severing cause, context, traceback, and secret-bearing frame locals.
+
 ## Primary external evidence
 
 - [Doppler Secrets Access Guide](https://docs.doppler.com/docs/accessing-secrets)
@@ -89,3 +121,9 @@
 - [MCP elicitation security requirements](https://modelcontextprotocol.io/specification/draft/client/elicitation)
 - [Stripe API-key types, prefixes, and reveal behavior](https://docs.stripe.com/keys)
 - [Kubernetes Secret good practices](https://kubernetes.io/docs/concepts/security/secrets-good-practices/)
+- [SOPS supported formats and key providers](https://getsops.io/docs/)
+- [SOPS targeted updates and stdin input](https://getsops.io/docs/usage/common-operations/)
+- [SOPS FIFO and child-process delivery](https://getsops.io/docs/usage/advanced/)
+- [dotenvx get, masking, and decrypt behavior](https://github.com/dotenvx/dotenvx)
+- [Gitleaks redacted scanner output](https://github.com/gitleaks/gitleaks)
+- [detect-secrets baseline scanner](https://github.com/Yelp/detect-secrets)

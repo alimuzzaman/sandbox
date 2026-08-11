@@ -14,6 +14,24 @@ from .sources import SourceRegistry
 from .writer import load_revision_key, opaque_revision, update_source
 
 
+def _bounded_call(callback):
+    """Return a result or a newly allocated public error with no traceback chain.
+
+    Secret-bearing parser and subprocess exceptions can retain their complete
+    input in attributes even when their rendered message looks harmless.  The
+    public error is therefore created here and raised only after this exception
+    handler has returned, so neither ``__context__`` nor ``__cause__`` can point
+    back to the original exception or its frame locals.
+    """
+    try:
+        return callback(), None
+    except SecretBrokerError as exc:
+        public = (exc.code, exc.message, exc.retryable)
+    except Exception:
+        public = ("operation_failed", "secret operation failed", False)
+    return None, SecretBrokerError(public[0], public[1], retryable=public[2])
+
+
 class SecretService:
     def __init__(self, registry: SourceRegistry, audit: SecretAudit, *, revision_key_path, use_profiles=None):
         self.registry = registry
@@ -34,25 +52,33 @@ class SecretService:
             raise SecretBrokerError(code, "registered secret source could not be parsed safely") from exc
 
     def _operate(self, operation, source, keys, surface, callback, *, profile=None, input_channel=None):
-        correlation = self.audit.intent(operation, source, list(keys), surface=surface,
-                                        profile=profile, input_channel=input_channel)
-        try:
-            result = callback(correlation)
-        except SecretBrokerError as exc:
-            self.audit.outcome(correlation, operation, source, list(keys), surface=surface,
-                               decision="refused", reason_code=exc.code, profile=profile,
-                               input_channel=input_channel)
-            raise
-        except Exception:
-            self.audit.outcome(correlation, operation, source, list(keys), surface=surface,
-                               decision="failed", reason_code="operation_failed", profile=profile,
-                               input_channel=input_channel)
-            raise
+        correlation, failure = _bounded_call(lambda: self.audit.intent(
+            operation, source, list(keys), surface=surface,
+            profile=profile, input_channel=input_channel,
+        ))
+        if failure is not None:
+            raise failure
+
+        result, failure = _bounded_call(lambda: callback(correlation))
+        if failure is not None:
+            decision = "refused" if failure.code != "operation_failed" else "failed"
+            _, audit_failure = _bounded_call(lambda: self.audit.outcome(
+                correlation, operation, source, list(keys), surface=surface,
+                decision=decision, reason_code=failure.code, profile=profile,
+                input_channel=input_channel,
+            ))
+            if audit_failure is not None:
+                raise audit_failure
+            raise failure
         revision = result.get("revision") if isinstance(result, dict) else None
         count = result.get("count") if isinstance(result, dict) else None
-        self.audit.outcome(correlation, operation, source, list(keys), surface=surface,
-                           decision="succeeded", profile=profile, revision=revision, count=count,
-                           input_channel=input_channel)
+        _, failure = _bounded_call(lambda: self.audit.outcome(
+            correlation, operation, source, list(keys), surface=surface,
+            decision="succeeded", profile=profile, revision=revision, count=count,
+            input_channel=input_channel,
+        ))
+        if failure is not None:
+            raise failure
         return result
 
     def inspect(self, source: str, *, keys: Sequence[str] | None = None,

@@ -60,6 +60,18 @@ class SecretMcpTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "source_mode_denied")
         self.assertNotIn("value", repr(result).lower())
 
+    def test_adapter_discards_unknown_exception_detail_and_traceback(self):
+        module = importlib.import_module("tools.secrets")
+        canary = "SB_SYNTHETIC_SECRET_CANARY_7f34"
+        class Service:
+            def inspect(self, *args, **kwargs):
+                raise RuntimeError(canary)
+        module._service_factory = lambda _: Service()
+        result = module.secret_inspect("/fixture", "fixture")
+        self.assertEqual(result["error"]["code"], "operation_failed")
+        self.assertNotIn(canary, repr(result))
+        self.assertNotIn("Traceback", repr(result))
+
 
 if __name__ == "__main__":
     unittest.main()

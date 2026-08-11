@@ -175,6 +175,11 @@ unsupported syntax, duplicate key, failed audit, dangerous destination, stale
 revision, failed profile, missing TTY, or failed confirmation by reading the
 source manually.
 
+Broker failures return only a stable code and bounded public message. Never ask
+for a traceback, dependency stderr, parser context, source excerpt, or debug
+dump; those may retain the complete secret-bearing input. Report identifiers,
+the correlation ID when present, and the stable code only.
+
 If plaintext appears anywhere unintended:
 
 1. Stop using the credential and stop any command still handling it.

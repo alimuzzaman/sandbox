@@ -119,8 +119,12 @@ def _stdin_secret() -> str:
         raise SecretBrokerError("input_invalid", "secret stdin must contain one non-empty line")
     try:
         value = candidate.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SecretBrokerError("input_invalid", "secret stdin must be UTF-8 text") from exc
+    except UnicodeDecodeError:
+        # Raise after the decoder exception leaves scope: it retains the input
+        # bytes and must never become a public exception context.
+        value = None
+    if value is None:
+        raise SecretBrokerError("input_invalid", "secret stdin must be UTF-8 text")
     if not value:
         raise SecretBrokerError("input_invalid", "secret stdin must not be empty")
     return value
@@ -210,6 +214,11 @@ def cmd_secrets(cfg, args) -> None:
     except SecretBrokerError as exc:
         from sandbox.core import die
         die(f"{exc.code}: {exc.message}")
+    except Exception:
+        # Do not render, repr, or chain unknown failures. Parser and backend
+        # exceptions may retain secret-bearing source buffers or stderr.
+        from sandbox.core import die
+        die("operation_failed: secret operation failed")
 
 
 register_specs((CommandSpec(

@@ -59,6 +59,14 @@ unsupported syntax, unsafe links or permissions, terminal controls, oversized
 sources, and changes during an operation fail closed without returning a source
 line.
 
+Failures expose only a stable broker code and bounded public message. Unknown
+parser, filesystem, subprocess, or future backend failures become
+`operation_failed`; their message, stdout, stderr, source buffer, exception
+attributes, cause, context, and traceback are neither returned to CLI/MCP nor
+written to the secret audit. Debug mode must not weaken this boundary. Report
+the operation, source alias, key name, correlation ID when available, and stable
+code—never copy a raw exception or retry by opening the source.
+
 ## Lowest-disclosure workflow
 
 Every example uses placeholders. Replace only aliases, key names, profile names,
@@ -306,6 +314,10 @@ unintended:
 - Atomic update may leave owner-only plaintext temporary remnants after a host
   crash; cleanup is best effort.
 - V1 does not promise perfect in-memory zeroization.
+- SOPS, dotenvx, Gitleaks, and detect-secrets are not currently broker
+  dependencies. SOPS is the preferred candidate for a separately reviewed
+  encrypted-file backend; its plaintext-output commands must never be exposed
+  directly to agents.
 
 For the concise agent decision tree, load the `secret-inspection` skill with
 `./sb skill show secret-inspection`.

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import time
 import sys
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -298,6 +300,34 @@ class TestSecretBrokerService(unittest.TestCase):
         self.assertEqual(seen, [])
         events = [json.loads(line) for line in (self.root / "runtime/audit.jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["reason_code"], "confirmation_failed")
+
+    def test_unknown_failure_is_bounded_without_exception_or_traceback_leakage(self):
+        canary = "SB_SYNTHETIC_SECRET_CANARY_7f34"
+        retained_failures = (
+            RuntimeError(canary),
+            json.JSONDecodeError("invalid", canary, 0),
+            subprocess.CalledProcessError(
+                7, ["synthetic-backend"], output=canary, stderr=canary,
+            ),
+        )
+        for retained in retained_failures:
+            with self.subTest(kind=type(retained).__name__), mock.patch.object(
+                self.service.registry, "read", side_effect=retained
+            ), self.assertRaises(SecretBrokerError) as raised:
+                self.service.inspect("fixture")
+
+            error = raised.exception
+            self.assertEqual(error.code, "operation_failed")
+            self.assertIsNone(error.__cause__)
+            self.assertIsNone(error.__context__)
+            self.assertNotIn(canary, str(error))
+            self.assertNotIn(canary, repr(error))
+            self.assertNotIn(canary, "".join(traceback.format_exception(error)))
+        events = [
+            json.loads(line)
+            for line in (self.root / "runtime/audit.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(events[-1]["reason_code"], "operation_failed")
 
 
 if __name__ == "__main__":

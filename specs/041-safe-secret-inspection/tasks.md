@@ -186,7 +186,7 @@
 - [X] T058 Execute explicit fake-server MCP composition and authorized/unauthorized tool checks from `specs/041-safe-secret-inspection/quickstart.md`
 - [X] T059 Run `git diff --check`, review all changed files for secret literals or value-bearing diagnostics, and confirm no real secret source was opened
 - [X] T060 Mark completed tasks and final observed evidence in `specs/041-safe-secret-inspection/tasks.md`
-- [ ] T061 Stage only feature-owned files, commit the verified implementation on `latest`, and push `latest` without force in the repository root
+- [X] T061 Stage only feature-owned files, commit the verified implementation on `latest`, and push `latest` without force in the repository root
 
 ---
 

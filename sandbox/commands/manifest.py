@@ -75,7 +75,7 @@ LEGACY_BRIDGE_COMMANDS = {
     "license": "license", "migrate": "migrate", "home": "migrate", "uninstall": "uninstall",
     "e2e": "e2e", "ci": "ci", "plugin-check": "plugin_check", "zip": "zip",
     "remote": "remote",
-    "deploy": "deploy", "host": "hosting", "preview": "preview", "secrets": "secrets",
+    "deploy": "deploy", "host": "hosting", "preview": "preview",
     "hermes": "hermes", "recovery": "recovery",
 }
 
@@ -88,5 +88,8 @@ def load_builtin_commands() -> tuple[str, ...]:
 
 def validate_builtin_command_coverage() -> tuple[str, ...]:
     """Return unbridged registered command names, if a manifest was missed."""
-    from sandbox.registry import COMMANDS
-    return tuple(sorted(set(COMMANDS) - set(LEGACY_BRIDGE_COMMANDS)))
+    from sandbox.registry import COMMANDS, COMMAND_SPECS
+    feature_owned = {
+        spec.name for spec in COMMAND_SPECS.specs() if spec.configure is not None
+    }
+    return tuple(sorted(set(COMMANDS) - set(LEGACY_BRIDGE_COMMANDS) - feature_owned))

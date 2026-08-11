@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .domains import normalize_domain_policy
 from .runtime import normalize_runtime_policy
+from .secrets import normalize_secret_config
 from .wordpress_runtime import normalize_wordpress_runtime
 
 
@@ -13,6 +14,7 @@ COMMON_CONFIG_PROVIDERS = (
     ("domains", normalize_domain_policy, "sandbox.config.domains", 20),
     ("wordpressRuntime", normalize_wordpress_runtime,
      "sandbox.config.wordpress_runtime", 30),
+    ("secrets", normalize_secret_config, "sandbox.config.secrets", 40),
 )
 
 
@@ -23,4 +25,5 @@ def apply_common_config(result: dict) -> dict:
     resolved.pop("_domains_raw", None)
     resolved.pop("_persisted_hostname", None)
     resolved.pop("_wordpress_runtime_raw", None)
+    resolved.pop("_secrets_raw", None)
     return resolved

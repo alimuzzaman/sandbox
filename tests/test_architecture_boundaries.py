@@ -113,12 +113,12 @@ class TestArchitectureBoundaries(unittest.TestCase):
         sys.path.insert(0, str(mcp_root))
         try:
             from tools.manifest import BUILTIN_TOOL_GROUPS, BUILTIN_TOOL_NAMES
-            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 22)
+            self.assertEqual(len(BUILTIN_TOOL_GROUPS), 23)
             tool_names = tuple(
                 name for group_id in BUILTIN_TOOL_GROUPS
                 for name in BUILTIN_TOOL_NAMES[group_id]
             )
-            self.assertEqual(len(tool_names), 120)
+            self.assertEqual(len(tool_names), 124)
             self.assertEqual(len(tool_names), len(set(tool_names)))
         finally:
             sys.path.remove(str(mcp_root))

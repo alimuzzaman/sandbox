@@ -498,9 +498,6 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="bounded number of recent hosted-service log lines (1-1000)")
     host_p.add_argument("--json", action="store_true", help="print JSON")
 
-    secrets_p = sub.add_parser("secrets", help="Manage the personal Sandbox secret file")
-    secrets_p.add_argument("action", choices=["migrate-zshrc"])
-    secrets_p.add_argument("--json", action="store_true", help="print names only as JSON")
 
     preview_p = sub.add_parser("preview", help="Create and remove disposable public remote Sandbox instances")
     preview_p.add_argument("action", choices=["create", "list", "destroy", "cleanup"])
@@ -889,7 +886,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     bounded_resource_status = (
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
-    if not bounded_resource_status:
+    if not bounded_resource_status and args.cmd != "secrets":
         write_compose_files(cfg)
         # Keep the legacy `.env` populated so anyone still invoking the
         # checked-in docker-compose.yml directly (out-of-tree scripts, older

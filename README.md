@@ -314,6 +314,15 @@ screenshot, DOM, and console errors without you switching tabs.
 
 ## CLI-first operation (MCP optional)
 
+### Safe secret inspection and use
+
+Use the registered-source secret broker to list key names, validate or apply a
+fixed mask to one key, run a bounded trusted child without displaying the
+credential, and update one assignment through protected input. Plaintext reveal
+is a human-only local TTY exception and is never available through MCP. See
+[Safe secret inspection](docs/secret-inspection.md) or load the
+`secret-inspection` skill for the least-disclosure workflow and incident steps.
+
 ### Host storage monitoring and safe cleanup
 
 Inspect local or named-remote storage without booting an instance:

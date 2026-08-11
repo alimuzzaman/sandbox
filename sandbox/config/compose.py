@@ -5,6 +5,7 @@ import re
 
 from .descriptors import _load_mapping
 from .domains import raw_domain_layer
+from .secrets import merge_secret_layers, raw_secret_layer
 from .wordpress_runtime import raw_wordpress_runtime_layer
 
 _SAFE_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
@@ -32,8 +33,10 @@ class ComposeSchemaProvider:
         document = _load_mapping(config_path)
         project_domains = raw_domain_layer(document)
         project_runtime = raw_wordpress_runtime_layer(document)
+        project_secrets = raw_secret_layer(document)
         machine_domains = {}
         machine_runtime = {}
+        machine_secrets = {}
         override = next((root / name for name in (
             "sandbox.config.override.json", "sandbox.config.override.yml",
             "sandbox.config.override.yaml",
@@ -44,6 +47,7 @@ class ComposeSchemaProvider:
             document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
             machine_domains.update(raw_domain_layer(override_doc))
             machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
+            merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
         if label:
             override = next((root / f"sandbox.config.{label}{suffix}" for suffix in (".json", ".yml", ".yaml") if (root / f"sandbox.config.{label}{suffix}").exists()), None)
             if override is not None:
@@ -52,6 +56,7 @@ class ComposeSchemaProvider:
                 document["runtime"] = {**document.get("runtime", {}), **override_doc.get("runtime", {})}
                 machine_domains.update(raw_domain_layer(override_doc))
                 machine_runtime.update(raw_wordpress_runtime_layer(override_doc))
+                merge_secret_layers(machine_secrets, raw_secret_layer(override_doc))
         compose = document.get("compose")
         if not isinstance(compose, dict):
             raise ValueError("compose project requires a compose descriptor")
@@ -125,4 +130,6 @@ class ComposeSchemaProvider:
                                  "machine_override": machine_domains},
                 "_wordpress_runtime_raw": {"project": project_runtime,
                                             "machine_override": machine_runtime},
+                "_secrets_raw": {"project": project_secrets,
+                                  "machine_override": machine_secrets},
                 "root": str(root), "source": config_path.name}

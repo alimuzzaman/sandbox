@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sandbox.runtimes.base import OperationRequest
@@ -17,6 +18,12 @@ class ApplicationDependencies:
     paths: Any
     proxy: Any
     clock: Any | None = None
+
+
+def load_project_descriptor(project_dir: str | Path) -> dict:
+    """Load one normalized project descriptor behind the composition seam."""
+    import sandbox_core as sc
+    return sc.load_project_config(str(Path(project_dir).expanduser().resolve()))
 
 
 def runtime_neutral_dependencies(

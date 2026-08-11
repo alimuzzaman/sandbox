@@ -5,6 +5,7 @@ from typing import Callable
 
 from .descriptors import _load_mapping
 from .domains import raw_domain_layer
+from .secrets import merge_secret_layers, raw_secret_layer
 from .wordpress_runtime import raw_wordpress_runtime_layer
 
 
@@ -22,14 +23,13 @@ class WordPressSchemaProvider:
         project_path = next((root / name for name in (
             "sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml",
         ) if (root / name).exists()), None)
-        project_domains = raw_domain_layer(
-            _load_mapping(project_path) if project_path is not None else {},
-        )
-        project_runtime = raw_wordpress_runtime_layer(
-            _load_mapping(project_path) if project_path is not None else {},
-        )
+        project_document = _load_mapping(project_path) if project_path is not None else {}
+        project_domains = raw_domain_layer(project_document)
+        project_runtime = raw_wordpress_runtime_layer(project_document)
+        project_secrets = raw_secret_layer(project_document)
         machine_domains = {}
         machine_runtime = {}
+        machine_secrets = {}
         for path in (
             next((root / name for name in (
                 "sandbox.config.override.json", "sandbox.config.override.yml",
@@ -44,13 +44,18 @@ class WordPressSchemaProvider:
                 document = _load_mapping(path)
                 machine_domains.update(raw_domain_layer(document))
                 machine_runtime.update(raw_wordpress_runtime_layer(document))
+                merge_secret_layers(machine_secrets, raw_secret_layer(document))
         result = dict(self._legacy_loader(root, label=label))
+        result.setdefault("root", str(root))
         result["_domains_raw"] = {
             "project": project_domains,
             "machine_override": machine_domains,
         }
         result["_wordpress_runtime_raw"] = {
             "project": project_runtime, "machine_override": machine_runtime,
+        }
+        result["_secrets_raw"] = {
+            "project": project_secrets, "machine_override": machine_secrets,
         }
         if "tests" not in result:
             result["tests"] = {"suite": "auto"}

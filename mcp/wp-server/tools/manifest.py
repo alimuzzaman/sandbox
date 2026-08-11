@@ -10,7 +10,7 @@ from composition import ToolGroupRegistry, ToolGroupSpec
 BUILTIN_TOOL_GROUPS = (
     "instances", "domains", "runtime", "jobs", "wp", "net", "data", "fs", "mail", "context", "cache",
     "resources",
-    "abilities", "skills", "debug", "e2e", "ci", "asyncjobs",
+    "abilities", "skills", "debug", "e2e", "ci", "asyncjobs", "secrets",
     "plugin_check", "remote", "hermes", "recovery",
 )
 
@@ -61,6 +61,7 @@ _EXPLICIT_GROUP_DEPENDENCIES = {
     "jobs": ("job_service", "target_service", "workspace_service"),
     "hermes": ("hermes_service",),
     "resources": ("resource_service_factory",),
+    "secrets": ("secret_service_factory",),
 }
 
 # Exact registration ownership and order, kept separate from implementation
@@ -91,6 +92,7 @@ BUILTIN_TOOL_NAMES = {
     "remote": ("remote_deploy",),
     "hermes": ("hermes_status", "hermes_run", "hermes_job_status", "hermes_job_kill", "hermes_cron_list", "hermes_cron_validate", "hermes_cron_create", "hermes_cron_route", "hermes_cron_run", "hermes_cron_output", "hermes_authorization_sync", "hermes_authorization_list", "hermes_authorization_show", "hermes_authorization_request", "hermes_authorization_approve", "hermes_health", "hermes_worktree_list", "hermes_worktree_inspect", "hermes_worktree_preserve", "hermes_repo_sync", "hermes_gateway_converge", "hermes_cron_catalog", "hermes_cron_reconcile", "hermes_cron_verify"),
     "recovery": ("recovery_profiles", "recovery_plan", "recovery_list", "recovery_verify", "recovery_create", "recovery_restore_plan", "recovery_restore_apply", "recovery_schedule_plan", "recovery_retention_plan"),
+    "secrets": ("secret_inspect", "secret_validate", "secret_use_profile"),
 }
 
 

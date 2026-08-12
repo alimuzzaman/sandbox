@@ -51,7 +51,7 @@ class TestCommandComposition(unittest.TestCase):
         load_builtin_commands()
         self.assertEqual(len(BUILTIN_COMMAND_MODULES), len(set(BUILTIN_COMMAND_MODULES)))
         self.assertEqual(set(COMMANDS), set(COMMAND_SPECS.names()))
-        self.assertEqual(len(COMMANDS), 87)
+        self.assertEqual(len(COMMANDS), 88)
         self.assertIn("sandbox.commands.recovery", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.domains", BUILTIN_COMMAND_MODULES)
         self.assertIn("sandbox.commands.jobs_runtime", BUILTIN_COMMAND_MODULES)

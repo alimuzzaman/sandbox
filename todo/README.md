@@ -14,6 +14,7 @@ Convention follows the lenzora repo (`todo/NN-slug/prd.md` + this index + a reco
 
 ```
 now ─────────────────────────────────────────────────────────────────────▶
+[TODO §0 remote capacity blocker] ─ must precede new remote harness work
 [TODO §1 loose ends]  [TODO §2 platform integrity]       (continuous)
 Phase 0 (00 Release Guardian) ─ lead 12-month product; P0 safety and one gate first
 Phase 1 (01 outbound mail)    ─ deferred unless a Guardian pilot needs real mail
@@ -21,7 +22,8 @@ Phase 2 (02 polyglot stacks)  ─ deferred; independent discovery remains valid
 ```
 
 Phase 0 priority is internal as well: authority and fail-closed deterministic proof
-come before AI triage; tracing starts with the first runnable gate; evaluation and
+come before AI triage; reliable remote harness admission precedes matrix claims;
+tracing starts with the first runnable gate; evaluation and
 pilot discovery begin before feature expansion; measured adoption and publication
 complete the product rather than serving as optional marketing work.
 
@@ -38,6 +40,7 @@ complete the product rather than serving as optional marketing work.
 
 | TODO.md item | Covered by |
 | --- | --- |
+| Remote Docker subnet-pool exhaustion, admission evidence, and structured inventory failures | TODO §0, 00 §5 P0 |
 | Safe, bounded WordPress abilities for a release agent | 00 §4.2, §5 P0 |
 | Plugin Check + PHPUnit + compatibility + security as one release verdict | 00 §5 P0, §6 |
 | Audit trails, traces, latency, resource use, and AI cost | 00 §4.3, §5 P0–P1 |

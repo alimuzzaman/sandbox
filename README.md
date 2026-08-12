@@ -457,6 +457,7 @@ and resolves the target instance from the registry — booting one if needed.
 | `load_context` | Pull the full sandbox `CLAUDE.md` on demand |
 | `load_skill` | Pull a skill (`fix`, `bug-repro`, `snapshot`, `wp-debug`, `wp-pilot`, `fluentboards`) |
 | `load_workflow` | Pull a workflow (`build-feature`) |
+| `feedback_submit` / `feedback_list` | Send or inspect bounded, secret-redacted agent feedback stored as untrusted machine-local data (see `docs/feedback.md`) |
 
 Plus Claude's normal `Read`/`Write`/`Edit` reach the plugin source on disk —
 bind-mounted into the container, so edits are live with no rebuild.

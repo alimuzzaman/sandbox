@@ -6,6 +6,31 @@ Sources: `[guardian]` = 2026-08-12 product feedback + current Sandbox evidence �
 
 Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is Contabo not Scaleway). Do not re-run the provider comparison; the open questions that remain are listed in `todo/01-outbound-mail/prd.md` §11.
 
+## 0. Immediate operational blockers (P0; before new remote harness work)
+
+- [ ] Restore safe Docker network capacity on `scaleway-sandbox`. Start with a read-only
+  ownership/liveness inventory of the 29 connected Sandbox-managed user-defined
+  networks, map them to retained workspaces and active jobs, then present exact
+  destruction candidates for explicit approval. A normal stale-resource plan currently
+  excludes every network as active, so broad prune and applying the expired volume-only
+  plan are not valid fixes. If retained workspaces are all required, separately review a
+  daemon address-pool expansion with rollback and collision evidence. `[ops · incident
+  memory/plugin-behavior/remote-network-pool-exhaustion-2026-08-12.md]`
+- [ ] Add network-capacity admission evidence before remote workspace/test provisioning:
+  report usable subnet capacity (or a bounded unavailable state), fail before staging
+  when a network cannot be allocated, identify the owning resource class, and point to a
+  reviewed cleanup/capacity plan. Cover pool exhaustion with a deterministic regression;
+  do not infer capacity from disk space or network count alone. `[ops → prd 00 §5 P0]`
+- [ ] Normalize remote resource-inventory timeouts and stale workspace-control metadata
+  into bounded structured errors. The thorough resource probe currently leaks a local
+  `TimeoutExpired` traceback, remote diagnostics are unreachable, and workspace listing
+  can resolve a deleted remote project directory. Keep these read-only fixes separate
+  from cleanup authority. `[ops · observability]`
+- [ ] Decide the revision only after capacity is restored: rerun the declared `fast`
+  suite against either the explicitly accepted remote checkout or a separately approved
+  deployment of the current local revision. The reported 31-commit drift can change test
+  behavior but cannot cause or cure Docker subnet-pool exhaustion. `[ops]`
+
 ## 1. Loose ends (hours; found while shipping, none blocking)
 
 - [ ] `hermes.asb.bd` serves the Cloudflare Access 302 for `/robots.txt` — Access runs ahead of Workers, so the deny never reaches it. Accepted: the host is Access-gated, nothing is crawlable. Revisit only if the route ever goes public. `[dns]`
@@ -29,6 +54,11 @@ real adoption plus published negative evidence are release criteria.
 
 ### P0 — Trustworthy release decision (months 1–4)
 
+- [ ] Treat reliable remote harness admission as the first Guardian prerequisite: close
+  TODO §0 network-capacity and structured-observability blockers before claiming the
+  compatibility/security matrix is runnable or collecting pilot latency/reliability
+  evidence. Infrastructure failure remains a fail-closed verdict, never a skipped pass.
+  `[ops → prd 00 §5 P0]`
 - [ ] Resolve the five product decisions in `todo/00-wordpress-plugin-release-guardian/prd.md` §11 before formal specification: security scanner/ruleset, default required compatibility matrix, baseline-mutation authority, evidence retention/privacy/cost budget, and first design partner/release policy. Run `speckit-refine` and require the independent Sol High readiness review. `[guardian → prd 00 §11]`
 - [ ] Define a separately declared Guardian MCP/Abilities profile: read-only discovery by default; explicit schemas, scopes, side-effect/data classes, timeouts, and audit behavior; undeclared abilities absent. Arbitrary PHP/shell/WP-CLI/SQL/file writes and release/deploy/publish operations are not safe Guardian abilities. `[prd 00 §4.2]`
 - [ ] Add revision-bound, expiring, replay-safe approval gates for any permitted mutation and prove wrong-revision, stale, over-scoped, or unauthorized requests stop before side effects. Keep autonomous publishing, releasing, deployment, merge, tag, and production mutation out of scope. `[prd 00 §4.2, §8]`

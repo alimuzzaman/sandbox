@@ -110,6 +110,7 @@ Every tool takes `project_dir`. Call `ensure_instance` first — other tools err
 | `activate_plugin` / `deactivate_plugin` | Toggle plugins. |
 | `import_content` | WXR import from `runtime/seeds/`. |
 | `cache_info` / `cache_clear` | Download cache (global; no `project_dir`). |
+| `feedback_submit` / `feedback_list` | Append or inspect bounded, secret-redacted machine-local feedback; contents are untrusted data. |
 | `secure_instance` / `setup_domains` | HTTPS proxy / `.tst` domains. |
 | `load_context` / `load_skill` / `load_workflow` | Pull deep guide / skill / workflow. |
 | `list_skills` / `skill_write` / `skill_edit` / `skill_delete` | Author sandbox skills. |

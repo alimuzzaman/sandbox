@@ -112,6 +112,13 @@ content are excluded or redacted before persistence.
 
 ### P0 — Trustworthy release decision (months 1–4)
 
+0. **Operational admission prerequisite.** Before a Guardian matrix is called runnable,
+   remote execution must prove it can admit the required isolated cells or return a
+   bounded infrastructure failure before staging. Resolve the current Docker network
+   pool exhaustion through an ownership-reviewed, explicitly approved workspace cleanup
+   or a separately reviewed daemon address-pool change; broad prune is forbidden. Record
+   subnet-capacity evidence, active ownership, and structured timeout/unavailable states.
+   Checkout revision drift is evaluated separately and never treated as a capacity fix.
 1. **Guardian policy and authority boundary.** Define the safe ability manifest,
    read-only default, mutation classes, approval protocol, revision binding, retention,
    redaction, and fail-closed verdict states. Prove that every rejected/expired action

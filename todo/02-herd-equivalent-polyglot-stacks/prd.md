@@ -1,4 +1,4 @@
-# PRD 01 — Herd-equivalent polyglot development stacks
+# PRD 02 — Herd-equivalent polyglot development stacks
 
 Date: 2026-08-11 · Status: Product brief for later Spec-Kit conversion; **NOT READY** pending §12 decisions · Owner surfaces: generic project initialization, parity inspection, related-project lifecycle, registered application environments, generic Compose health/diagnostics
 

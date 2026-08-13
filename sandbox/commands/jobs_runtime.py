@@ -23,6 +23,12 @@ def _die(message: str) -> None:
     die(message)
 
 
+def _emit_json_line(payload: dict) -> None:
+    """Publish one complete control-plane envelope before process teardown."""
+    encoded = json.dumps(payload, sort_keys=True)
+    print(encoded, flush=True)
+
+
 def _source_identity(root: str) -> SourceIdentity:
     # Local execution still has an identity. Remote submission replaces this with
     # the deploy identity returned by the deployment transport before acceptance.
@@ -307,7 +313,7 @@ def cmd_job_start(_cfg, args) -> None:
                 break
             time.sleep(.2)
     if getattr(args, "json", False):
-        print(json.dumps(accepted, sort_keys=True))
+        _emit_json_line(accepted)
     else:
         target_info = accepted.get("target", {})
         target_name = target_info.get("remote") or target_info.get("kind", target.kind)

@@ -1,4 +1,5 @@
 import hashlib
+import io
 import importlib.util
 import json
 import subprocess
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
-                                          cmd_job_start, cmd_job_status,
+                                          cmd_job_start, cmd_job_status, _emit_json_line,
                                           configure_list_parser, configure_start_parser)
 
 
@@ -32,6 +33,25 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_job_acceptance_json_is_flushed_as_one_complete_line(self):
+        class Output(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_count = 0
+
+            def flush(self):
+                self.flush_count += 1
+                return super().flush()
+
+        output = Output()
+        with redirect_stdout(output):
+            _emit_json_line({"ok": True, "status": "accepted", "job_id": "a" * 32})
+
+        self.assertEqual(output.flush_count, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": True, "status": "accepted", "job_id": "a" * 32,
+        })
+
     def test_remote_job_list_translates_the_project_path_to_canonical_identity(self):
         parser = __import__("argparse").ArgumentParser()
         configure_list_parser(parser)

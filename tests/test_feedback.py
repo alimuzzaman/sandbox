@@ -218,6 +218,20 @@ class TestFeedbackService(unittest.TestCase):
         self.assertTrue(exported["ok"])
         self.assertLessEqual(exported["data"]["bytes"], 100_000)
 
+    def test_regression_eb496b17_date_filters_return_json_safe_receipts(self):
+        self.assertTrue(self.service.submit("dated feedback", category="bug")["ok"])
+
+        payload = self.service.list(
+            10,
+            since="2026-08-12T08:00:00Z",
+            until=datetime(2026, 8, 12, 9, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["filters"]["since"], "2026-08-12T08:00:00Z")
+        self.assertEqual(payload["data"]["filters"]["until"], "2026-08-12T09:00:00Z")
+        self.assertEqual(json.loads(json.dumps(payload)), payload)
+
     def test_regression_retention_and_prune_never_delete_without_confirmation(self):
         old_service = FeedbackService(
             self.service.store,

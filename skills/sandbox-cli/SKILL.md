@@ -98,6 +98,12 @@ uncommitted and untracked changes. Named workspaces are reusable; matrix cells
 must use isolated labels and explicit cleanup. Prefer the co-located remote MCP
 server for live remote job status/output operations.
 
+Use a stable `--request-id` for every detached submission. The accepted JSON
+line is flushed immediately after the durable row exists. Empty, malformed, or
+lost output is `acceptance_unknown`, not an accepted job: inspect the bounded
+job ledger first, then replay only the identical request ID so the repository
+returns the original job instead of creating a duplicate.
+
 Output controls read retained logs in bounded pages. Use `--stream`,
 `--tail-bytes`, a cursor, or `--wait-seconds` to choose verbosity without
 streaming process pipes across SSH. The MCP workspace tools mirror `sb

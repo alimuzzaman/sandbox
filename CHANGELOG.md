@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.1] — 2026-08-13
+
+### Fixed
+- Feedback list date filters now return RFC 3339 strings in JSON response
+  receipts instead of leaking internal `datetime` objects to the encoder.
+- Detached `job-start --json` acceptance is flushed as one complete line after
+  durable acceptance, while replay-safe request guidance treats missing output
+  as unknown rather than success.
+
 ## [0.2.0] — 2026-08-13
 
 ### Added

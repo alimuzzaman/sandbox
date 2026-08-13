@@ -405,6 +405,23 @@ class FeedbackService:
         return values
 
     @staticmethod
+    def _public_filters(filters: dict[str, Any]) -> dict[str, Any]:
+        """Return the normalized filter receipt using JSON-safe values.
+
+        Date filters are normalized to UTC ``datetime`` objects internally so
+        comparisons cannot mix naive timestamps or offsets.  Those internal
+        values must never escape into the CLI/MCP response envelope: Python's
+        JSON encoder cannot serialize them and a successful bounded query would
+        otherwise fail only at presentation time.
+        """
+        output: dict[str, Any] = {}
+        for key, value in filters.items():
+            if value is None:
+                continue
+            output[key] = _timestamp(value) if isinstance(value, datetime) else value
+        return output
+
+    @staticmethod
     def _export_record(record: dict[str, Any]) -> dict[str, Any]:
         """Project a record into a bounded, path-free export representation."""
         output: dict[str, Any] = {"schema_version": 1}
@@ -530,7 +547,7 @@ class FeedbackService:
                 "cursor": cursor,
                 "next_cursor": page["next_cursor"],
                 "has_more": page["has_more"],
-                "filters": {key: value for key, value in filters.items() if value is not None},
+                "filters": self._public_filters(filters),
                 "trust": "untrusted_data",
             })
         except FeedbackError as exc:

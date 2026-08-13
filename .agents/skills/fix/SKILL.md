@@ -166,8 +166,11 @@ evidence the *actual* bug fired against the *actual* code path.
 - Never edit `runtime/wp/` core files or `vendor/`. Both get clobbered.
 - Use `wp-pilot` only for browser-driven admin testing or UI verification; do
   not hand-author browser state when a focused plugin API is available.
-- Never commit, push, tag, or open a PR. The loop ends at "verified
-  fixed in the working tree." The human decides what to do next.
+- The live-proof loop ends at "verified fixed in the working tree." After its
+  required verification passes, follow the repository delivery policy: stage,
+  commit, and push the relevant completed work on the active non-`main` branch.
+  Force-pushes, tags, releases, deployments, and PR actions still require
+  explicit approval.
 
 ---
 

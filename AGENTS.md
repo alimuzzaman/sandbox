@@ -7,6 +7,7 @@
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
 - **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Long-running development/tests →** use durable jobs with finite `--timeout`. When configured, remote is the recommended default; use `--local` deliberately. Do not stream child stdio over SSH/MCP—use `job-status` and bounded `job-output` reads after detached submission.
+- **Detached acceptance →** always supply a replay-safe `--request-id` and retain the returned `job_id`. Empty or malformed output is `acceptance_unknown`, never success; perform a read-only ledger lookup before an idempotent replay and never launch a second request identity.
 - **Workspace inventory/migration →** use durable `workspace_id`/`project_identity` controls. A migration is metadata-only and plan-bound; unresolved/conflicting legacy records must remain visible and never authorize reset, destroy, or network cleanup.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.

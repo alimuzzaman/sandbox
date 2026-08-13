@@ -132,7 +132,7 @@ class PluginActivationOrderTests(unittest.TestCase):
             })
 
             write_sources.assert_called_once_with(
-                "fixture", {"optional": {"path": str(root / "missing-checkout")}})
+                "fixture", {"optional": {"path": str((root / "missing-checkout").resolve())}})
             self.assertEqual(wpcli.call_count, 0)
 
     @patch("sandbox.core._provision._managed_execution_gate", return_value=None)

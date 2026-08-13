@@ -73,6 +73,10 @@ Still open operationally:
 - the remote holds 31 active managed user-defined networks plus one foreign active
   network, with zero stale candidates; no network is safe to remove automatically;
 - remote GD/workspace proof remains blocked by that capacity pressure;
+- read-only `workspace list` is also blocked because legacy workspace metadata is
+  keyed by a retired deployment path and has no durable project identity. A quick
+  identity-only lookup was rejected and reverted because it could falsely report an
+  empty inventory; closing this requires an approved workspace metadata/index migration;
 - do not destroy a workspace or change daemon pools without an exact reviewed plan and
   explicit authority.
 

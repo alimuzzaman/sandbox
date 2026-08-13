@@ -89,6 +89,13 @@ verified at the time it was recorded.
   observation was recorded as high-severity feedback
   `c841bc711c53936d6a6ce94cfe7200e7`. No network cleanup, workspace allocation, or
   daemon change was attempted.
+- 2026-08-13T09:15:41Z — The supported read-only `workspace list` command failed
+  because the remote controller resolved a retired `deploy-src` project path. The
+  failure was recorded as high-severity feedback
+  `b06bb2505db8cfe037fe4af3f908f5c6`. A bounded identity-only implementation was
+  reviewed and fully reverted: legacy records are stored under a path-derived namespace
+  and do not carry the new project identity, so that implementation could have hidden
+  existing workspaces behind a false empty result. No cleanup or migration was run.
 
 ## Current diagnosis
 
@@ -98,4 +105,6 @@ active, but all 31 managed networks remain connected and active; the inventory e
 no retained or stale candidate. The safe remediation therefore still requires an exact
 ownership/liveness review and an explicit decision to destroy selected workspaces, or
 an independently reviewed Docker daemon address-pool change. Updating the control
-plane fixed protocol skew but correctly did not claim to release a subnet.
+plane fixed protocol skew but correctly did not claim to release a subnet. Exact
+workspace review additionally requires a durable metadata/index migration that can
+adopt legacy path-keyed records without hiding or renaming them.

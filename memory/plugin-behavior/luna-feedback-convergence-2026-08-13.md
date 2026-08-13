@@ -37,6 +37,7 @@ currency-cost telemetry, so cost is reported as unavailable rather than estimate
 | Final PHP image-cache rework | ~5m / ~20 calls | 38 focused tests | Added label/provenance receipts and zero-Docker rejection for observation-only requests. |
 | Final nested-host upgrade rework | ~20–28m / ~26 calls across two passes | 200 focused/contract tests | Real bare-repository proof covers legacy full-tree to subtree migration without force-push. |
 | Final apply rollback rework | elapsed/calls unavailable | 43 focused tests | Rollback now covers persistence, Compose generation, reconcile, and four-plane verification. |
+| Post-deploy workspace triage | elapsed/calls unavailable | 18 workspace + 35 job/CLI tests before review | Proposed identity lookup was reverted after root review found it could hide legacy path-keyed records; useful evidence, not shippable output. |
 
 ## Quality assessment
 

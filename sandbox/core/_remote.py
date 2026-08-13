@@ -1358,7 +1358,7 @@ REMOTE_DOCKER_ADDRESS_POOLS = (
 )
 
 
-def _remote_docker_pool_program(*, confirm: bool) -> str:
+def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False) -> str:
     """Build the fixed, non-interactive host-pool transaction."""
     desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
     return f'''import datetime, fcntl, hashlib, ipaddress, json, os, pathlib, shutil, subprocess, sys, tempfile, time
@@ -1366,6 +1366,7 @@ CONFIG = pathlib.Path("/etc/docker/daemon.json")
 LOCK = pathlib.Path("/run/lock/sandbox-docker-pool.lock")
 DESIRED = json.loads({desired!r})
 APPLY = {confirm!r}
+RECOVER_INTERRUPTED = {recover_interrupted!r}
 
 def run(argv, timeout=60, check=True):
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
@@ -1378,8 +1379,8 @@ def running_ids():
 
 def recover(expected):
     missing = sorted(expected - running_ids())
-    if missing:
-        run(["docker", "start", *missing], timeout=120, check=False)
+    for container_id in missing:
+        run(["docker", "start", container_id], timeout=20, check=False)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         remaining = expected - running_ids()
@@ -1473,6 +1474,41 @@ except BlockingIOError:
     print(json.dumps({{"ok": False, "code": "docker_pool_busy", "status": "failed",
                       "message": "Docker pool transaction is busy"}}))
     raise SystemExit(2)
+
+if RECOVER_INTERRUPTED:
+    backups = sorted(CONFIG.parent.glob(CONFIG.name + ".bak-*"),
+                     key=lambda path: path.stat().st_mtime, reverse=True)
+    if not backups or time.time() - backups[0].stat().st_mtime > 3600:
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Recent recovery evidence is unavailable"}}))
+        raise SystemExit(2)
+    since = max(0, int(backups[0].stat().st_mtime) - 5)
+    # Docker restart exits occur immediately after the backup/config swap. A
+    # fixed three-minute window excludes later, unrelated one-shot workloads.
+    until = min(int(time.time()) + 1, since + 180)
+    events = run(["docker", "events", "--since", str(since), "--until", str(until),
+                  "--filter", "event=die", "--filter", "event=stop",
+                  "--format", "{{{{.Actor.ID}}}}"], timeout=30)
+    candidates = set(filter(None, events.stdout.splitlines())) - running_ids()
+    recovery_base = {{
+        "ok": True, "status": "recovery_planned" if not APPLY else "recovery_complete",
+        "requires_confirm": not APPLY, "recovery_candidate_count": len(candidates),
+        "recovery_window_seconds": until - since,
+    }}
+    if not APPLY:
+        print(json.dumps(recovery_base, sort_keys=True))
+        raise SystemExit(0)
+    missing = recover(candidates)
+    recovery_base.update({{"requires_confirm": False,
+                           "containers_restored": len(candidates) - missing,
+                           "containers_missing": missing,
+                           "ok": missing == 0,
+                           "status": "recovery_complete" if missing == 0 else "recovery_failed"}})
+    if missing:
+        recovery_base.update({{"code": "docker_pool_recovery_failed",
+                              "message": "Interrupted transaction recovery was incomplete"}})
+    print(json.dumps(recovery_base, sort_keys=True))
+    raise SystemExit(0 if missing == 0 else 3)
 
 try:
     networks = pool_networks()
@@ -1629,11 +1665,13 @@ raise SystemExit(0 if missing_after_recovery == 0 else 4)
 
 
 def remote_docker_pool(remote: dict, *, confirm: bool = False,
-                       timeout: int = 300) -> dict:
+                       recover_interrupted: bool = False,
+                       timeout: int = 900) -> dict:
     """Plan or apply the fixed Docker address-pool transaction on one remote."""
     import base64
     program = base64.b64encode(
-        _remote_docker_pool_program(confirm=confirm).encode()).decode()
+        _remote_docker_pool_program(
+            confirm=confirm, recover_interrupted=recover_interrupted).encode()).decode()
     command = (
         "sudo -n python3 -c " + shlex.quote(
             "import base64;exec(base64.b64decode(" + repr(program) + "))")
@@ -1654,11 +1692,13 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "restart_performed", "containers_restored", "containers_missing",
         "backup_created", "config_digest", "rollback_attempted",
         "rollback_succeeded", "route_overlap_count", "apply_safe",
+        "recovery_candidate_count", "recovery_window_seconds",
     }
     if set(payload) - allowed:
         raise RuntimeError("remote Docker pool operation returned unexpected fields")
     status = payload.get("status")
-    if status not in {"planned", "unchanged", "complete", "degraded", "failed"}:
+    if status not in {"planned", "unchanged", "complete", "degraded", "failed",
+                      "recovery_planned", "recovery_complete", "recovery_failed"}:
         raise RuntimeError("remote Docker pool operation returned an invalid status")
     code = payload.get("code")
     known_errors = {
@@ -1667,6 +1707,8 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "docker_pool_busy": "Docker pool transaction is busy",
         "docker_pool_preflight_failed": "Docker pool preflight failed",
         "docker_pool_route_overlap": "Docker pool overlaps host routes",
+        "docker_pool_recovery_evidence_missing": "Recent recovery evidence is unavailable",
+        "docker_pool_recovery_failed": "Interrupted transaction recovery was incomplete",
     }
     if payload["ok"] is False:
         if code not in known_errors:
@@ -1698,6 +1740,14 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
             "containers_restored", "containers_missing", "backup_created",
             "config_digest",
         },
+        "recovery_planned": {
+            "ok", "status", "requires_confirm", "recovery_candidate_count",
+            "recovery_window_seconds",
+        },
+        "recovery_complete": {
+            "ok", "status", "requires_confirm", "recovery_candidate_count",
+            "recovery_window_seconds", "containers_restored", "containers_missing",
+        },
     }
     if payload["ok"]:
         if status not in required_by_status or not required_by_status[status].issubset(payload):
@@ -1712,12 +1762,16 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
                 payload.get("restart_performed") is not True or
                 payload.get("containers_missing") != 0):
             raise RuntimeError("remote Docker pool completion receipt is inconsistent")
+        if status == "recovery_complete" and payload.get("containers_missing") != 0:
+            raise RuntimeError("remote Docker pool recovery receipt is inconsistent")
     else:
         expected_exit = {
             "docker_pool_config_invalid": 2,
             "docker_pool_busy": 2,
             "docker_pool_preflight_failed": 2,
             "docker_pool_route_overlap": 2,
+            "docker_pool_recovery_evidence_missing": 2,
+            "docker_pool_recovery_failed": 3,
             "docker_pool_apply_failed": 3,
         }[code]
         if result.returncode != expected_exit or status != "failed":
@@ -1728,13 +1782,17 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         if code == "docker_pool_apply_failed":
             failure_required.update({"rollback_attempted", "rollback_succeeded",
                                      "containers_missing"})
+        if code == "docker_pool_recovery_failed":
+            failure_required.update({"recovery_candidate_count", "recovery_window_seconds",
+                                     "containers_restored", "containers_missing"})
         if not failure_required.issubset(payload):
             raise RuntimeError("remote Docker pool error omitted required evidence")
     if "desired_pools" in payload and payload["desired_pools"] != list(REMOTE_DOCKER_ADDRESS_POOLS):
         raise RuntimeError("remote Docker pool operation returned unexpected desired pools")
     for field in ("network_count", "running_container_count", "restart_policy_none_count",
                   "subnet_capacity", "current_pool_count", "containers_restored",
-                  "containers_missing", "route_overlap_count"):
+                  "containers_missing", "route_overlap_count",
+                  "recovery_candidate_count", "recovery_window_seconds"):
         value = payload.get(field)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise RuntimeError("remote Docker pool operation returned invalid counts")

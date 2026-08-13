@@ -1497,6 +1497,18 @@ json.load(open(path))
         with self.assertRaisesRegex(RuntimeError, "incomplete evidence"):
             sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
 
+    @patch("sandbox.core._remote.ssh_run")
+    def test_recovery_plan_requires_exact_bounded_evidence(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "recovery_planned", "requires_confirm": True,
+            "recovery_candidate_count": 20, "recovery_window_seconds": 600,
+        }))
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, recover_interrupted=True)
+        self.assertEqual(result["recovery_candidate_count"], 20)
+        decoded_command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", decoded_command)
+
     def test_transaction_validates_then_applies_and_preserves_mode(self):
         with tempfile.TemporaryDirectory() as temporary:
             result, config = self._run_transaction(Path(temporary))

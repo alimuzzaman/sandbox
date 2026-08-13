@@ -17,6 +17,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A confirmation-gated `remote docker-pool` transaction that backs up and
   validates Docker daemon configuration, restarts Docker, recovers previously
   running containers, and reports only bounded host-capacity evidence.
+- Event-backed, confirmation-gated recovery for containers stopped by an
+  interrupted Docker-pool transaction.
 
 ### Changed
 - Remote job and workspace protocols now use canonical project identity, durable

@@ -42,7 +42,8 @@ def _cmd_docker_pool(args, as_json: bool) -> None:
         die(f"no remote named '{name}'")
     try:
         data = sr.remote_docker_pool(
-            entry, confirm=_arg_true(args, "confirm"))
+            entry, confirm=_arg_true(args, "confirm"),
+            recover_interrupted=_arg_true(args, "recover_interrupted"))
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         data = {"ok": False, "code": "docker_pool_unavailable",
                 "message": sr.redact_ssh_connection(str(exc), entry)}

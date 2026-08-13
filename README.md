@@ -377,6 +377,7 @@ verbosity; the complete sealed log remains available for later retrieval.
 ./sb workspace migrate --remote scaleway-sandbox --plan-id <plan-id> --confirm --json
 ./sb remote docker-pool scaleway-sandbox --json             # read-only plan
 ./sb remote docker-pool scaleway-sandbox --confirm --json   # backup, validate, restart, verify
+./sb remote docker-pool scaleway-sandbox --recover-interrupted --json # exact event-backed recovery plan
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ./sb test matrix --remote scaleway-sandbox --plan verify --timeout 1800 --json
 ./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json

@@ -138,6 +138,13 @@ def cmd_deploy(cfg, args) -> None:
                 raise RuntimeError("remote ensure did not return an instance object")
             instance_name = _require_instance_field(instance, "instance")
             if is_wordpress:
+                reconciled = sr.reconcile_remote_instance(entry, target)
+                reconciled_name = _require_instance_field(reconciled, "instance")
+                if reconciled_name != instance_name:
+                    raise RuntimeError(
+                        "remote apply selected a different instance than ensure"
+                    )
+                instance.update(reconciled)
                 plugin_slug = (
                     getattr(args, "plugin_slug", None)
                     or pconf.get("slug")

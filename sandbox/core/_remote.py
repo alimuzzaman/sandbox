@@ -692,6 +692,45 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
     return data
 
 
+def reconcile_remote_instance(remote: dict, target_path: str,
+                              label: str | None = None) -> dict:
+    """Apply the deployed WordPress config before post-deploy activation.
+
+    ``ensure`` deliberately fast-returns for a reachable ready instance. A
+    deploy can still change local-plugin paths and therefore the Compose bind
+    mounts, so the remote deploy flow must run the existing non-destructive
+    apply operation before expecting the deployed plugin to be visible.
+    """
+    sb = remote_sb_path(remote)
+    label_arg = f" --label {shlex.quote(label)}" if label else ""
+    apply = (
+        f"{shlex.quote(sb)} apply --project-dir {shlex.quote(target_path)}"
+        f"{label_arg} --json"
+    )
+    cmd = (
+        "exec timeout --signal=TERM "
+        f"--kill-after={REMOTE_ENSURE_KILL_GRACE_SECONDS}s "
+        f"{REMOTE_ENSURE_TIMEOUT_SECONDS}s {apply}"
+    )
+    try:
+        res = ssh_run(remote, cmd, timeout=REMOTE_ENSURE_CLIENT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"remote instance apply timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        ) from exc
+    data = _last_json(res.stdout or "")
+    if res.returncode == 124:
+        raise RuntimeError(
+            f"remote instance apply timed out after {REMOTE_ENSURE_TIMEOUT_SECONDS}s"
+        )
+    if res.returncode != 0 or not data:
+        raise RuntimeError(
+            "could not reconcile remote instance: "
+            f"{(res.stderr or res.stdout or '').strip()[:2000]}"
+        )
+    return data
+
+
 def activate_remote_plugin(remote: dict, target_path: str, instance: str,
                            plugin_slug: str) -> None:
     """Make the deployed project the active plugin inside the remote instance.

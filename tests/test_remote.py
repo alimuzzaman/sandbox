@@ -1295,6 +1295,22 @@ class TestRemotePreviewInstances(unittest.TestCase):
         self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
 
     @patch("sandbox.core._remote.ssh_run")
+    def test_reconcile_remote_instance_applies_deployed_config(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            stdout='progress\n{"instance":"preview-a","wordpress_port":8123}\n'
+        )
+
+        result = sr.reconcile_remote_instance(
+            {"ssh": "ubuntu@1.2.3.4"}, "/srv/project", "preview-a"
+        )
+
+        self.assertEqual(result["instance"], "preview-a")
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("apply --project-dir /srv/project", command)
+        self.assertIn("--label preview-a --json", command)
+        self.assertEqual(mock_ssh_run.call_args.kwargs["timeout"], 345)
+
+    @patch("sandbox.core._remote.ssh_run")
     def test_ensure_remote_instance_reports_timeout_once(self, mock_ssh_run):
         mock_ssh_run.side_effect = [
             _completed(stdout="/home/ubuntu/sandbox/sb\n"),
@@ -1816,6 +1832,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
                      patch.object(sr, "apply_uncommitted", return_value=0), \
                      patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
                      patch.object(sr, "configure_instance_https_route") as mock_route, \
                      patch.object(sr, "set_remote_instance_url") as mock_url, \
@@ -1831,6 +1848,9 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
                 )
                 mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
+                mock_apply.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo"
+                )
                 mock_activate.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo", "demo", "demo"
                 )

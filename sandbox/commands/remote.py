@@ -43,7 +43,8 @@ def _cmd_docker_pool(args, as_json: bool) -> None:
     try:
         data = sr.remote_docker_pool(
             entry, confirm=_arg_true(args, "confirm"),
-            recover_interrupted=_arg_true(args, "recover_interrupted"))
+            recover_interrupted=_arg_true(args, "recover_interrupted"),
+            expected_running=getattr(args, "expected_running", None))
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         data = {"ok": False, "code": "docker_pool_unavailable",
                 "message": sr.redact_ssh_connection(str(exc), entry)}

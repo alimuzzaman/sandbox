@@ -507,6 +507,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="allow a protected remote service or Docker-pool mutation")
     remote_p.add_argument("--recover-interrupted", action="store_true",
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
+    remote_p.add_argument("--expected-running", type=int, default=None,
+        help="required interrupted-recovery assertion: exact pre-transaction running-container count")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 

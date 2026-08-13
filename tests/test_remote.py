@@ -1501,10 +1501,12 @@ json.load(open(path))
     def test_recovery_plan_requires_exact_bounded_evidence(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(stdout=json.dumps({
             "ok": True, "status": "recovery_planned", "requires_confirm": True,
-            "recovery_candidate_count": 20, "recovery_window_seconds": 600,
+            "recovery_candidate_count": 20, "recovery_window_seconds": 180,
+            "recovery_expected_count": 72, "recovery_evidence_count": 72,
         }))
         result = sr.remote_docker_pool(
-            {"ssh": "registered-target"}, recover_interrupted=True)
+            {"ssh": "registered-target"}, recover_interrupted=True,
+            expected_running=72)
         self.assertEqual(result["recovery_candidate_count"], 20)
         decoded_command = mock_ssh_run.call_args.args[1]
         self.assertIn("sudo -n python3", decoded_command)

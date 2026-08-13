@@ -1359,7 +1359,8 @@ REMOTE_DOCKER_ADDRESS_POOLS = (
 
 
 def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False,
-                                expected_running: int | None = None) -> str:
+                                expected_running: int | None = None,
+                                recovery_since: str | None = None) -> str:
     """Build the fixed, non-interactive host-pool transaction."""
     desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
     return f'''import datetime, fcntl, hashlib, ipaddress, json, os, pathlib, shutil, subprocess, sys, tempfile, time
@@ -1369,6 +1370,7 @@ DESIRED = json.loads({desired!r})
 APPLY = {confirm!r}
 RECOVER_INTERRUPTED = {recover_interrupted!r}
 EXPECTED_RUNNING = {expected_running!r}
+RECOVERY_SINCE = {recovery_since!r}
 
 def run(argv, timeout=60, check=True):
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
@@ -1488,11 +1490,23 @@ if RECOVER_INTERRUPTED:
         raise SystemExit(2)
     backups = sorted(CONFIG.parent.glob(CONFIG.name + ".bak-*"),
                      key=lambda path: path.stat().st_mtime, reverse=True)
-    if not backups or time.time() - backups[0].stat().st_mtime > 3600:
+    asserted_since = None
+    if isinstance(RECOVERY_SINCE, str):
+        try:
+            asserted_since = datetime.datetime.strptime(
+                RECOVERY_SINCE, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            asserted_since = None
+    if backups and time.time() - backups[0].stat().st_mtime <= 3600:
+        evidence_start = backups[0].stat().st_mtime
+    else:
+        evidence_start = asserted_since
+    if evidence_start is None or not (0 <= time.time() - evidence_start <= 3600):
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
                           "status": "failed", "message": "Recent recovery evidence is unavailable"}}))
         raise SystemExit(2)
-    since = max(0, int(backups[0].stat().st_mtime) - 5)
+    since = max(0, int(evidence_start) - 5)
     # Docker restart exits occur immediately after the backup/config swap. A
     # fixed three-minute window excludes later, unrelated one-shot workloads.
     until = min(int(time.time()) + 1, since + 180)
@@ -1703,13 +1717,15 @@ raise SystemExit(0 if missing_after_recovery == 0 else 4)
 def remote_docker_pool(remote: dict, *, confirm: bool = False,
                        recover_interrupted: bool = False,
                        expected_running: int | None = None,
+                       recovery_since: str | None = None,
                        timeout: int = 900) -> dict:
     """Plan or apply the fixed Docker address-pool transaction on one remote."""
     import base64
     program = base64.b64encode(
         _remote_docker_pool_program(
             confirm=confirm, recover_interrupted=recover_interrupted,
-            expected_running=expected_running).encode()).decode()
+            expected_running=expected_running,
+            recovery_since=recovery_since).encode()).decode()
     command = (
         "sudo -n python3 -c " + shlex.quote(
             "import base64;exec(base64.b64decode(" + repr(program) + "))")

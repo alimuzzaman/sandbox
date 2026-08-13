@@ -45,6 +45,7 @@ def _cmd_docker_pool(args, as_json: bool) -> None:
             entry, confirm=_arg_true(args, "confirm"),
             recover_interrupted=_arg_true(args, "recover_interrupted"),
             expected_running=getattr(args, "expected_running", None),
+            expected_removed=getattr(args, "expected_removed", 0),
             recovery_since=getattr(args, "recovery_since", None))
     except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
         data = {"ok": False, "code": "docker_pool_unavailable",

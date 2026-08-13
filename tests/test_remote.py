@@ -1503,6 +1503,7 @@ json.load(open(path))
             "ok": True, "status": "recovery_planned", "requires_confirm": True,
             "recovery_candidate_count": 20, "recovery_window_seconds": 180,
             "recovery_expected_count": 72, "recovery_evidence_count": 72,
+            "recovery_removed_count": 0,
         }))
         result = sr.remote_docker_pool(
             {"ssh": "registered-target"}, recover_interrupted=True,

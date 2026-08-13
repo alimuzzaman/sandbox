@@ -509,6 +509,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="for `remote docker-pool`: plan/recover only containers proven to have stopped during the latest interrupted transaction")
     remote_p.add_argument("--expected-running", type=int, default=None,
         help="required interrupted-recovery assertion: exact pre-transaction running-container count")
+    remote_p.add_argument("--expected-removed", type=int, default=0,
+        help="interrupted-recovery assertion: baseline containers no longer present in Docker inventory")
     remote_p.add_argument("--recovery-since", default=None,
         help="required UTC transaction-start assertion when no daemon backup exists (YYYY-MM-DDTHH:MM:SSZ)")
     remote_p.add_argument("--json", action="store_true",

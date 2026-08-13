@@ -1360,6 +1360,7 @@ REMOTE_DOCKER_ADDRESS_POOLS = (
 
 def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False,
                                 expected_running: int | None = None,
+                                expected_removed: int = 0,
                                 recovery_since: str | None = None) -> str:
     """Build the fixed, non-interactive host-pool transaction."""
     desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
@@ -1370,6 +1371,7 @@ DESIRED = json.loads({desired!r})
 APPLY = {confirm!r}
 RECOVER_INTERRUPTED = {recover_interrupted!r}
 EXPECTED_RUNNING = {expected_running!r}
+EXPECTED_REMOVED = {expected_removed!r}
 RECOVERY_SINCE = {recovery_since!r}
 
 def run(argv, timeout=60, check=True):
@@ -1488,6 +1490,10 @@ if RECOVER_INTERRUPTED:
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
                           "status": "failed", "message": "Expected running count is required"}}))
         raise SystemExit(2)
+    if isinstance(EXPECTED_REMOVED, bool) or not isinstance(EXPECTED_REMOVED, int) or not (0 <= EXPECTED_REMOVED < EXPECTED_RUNNING):
+        print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
+                          "status": "failed", "message": "Expected removed count is invalid"}}))
+        raise SystemExit(2)
     backups = sorted(CONFIG.parent.glob(CONFIG.name + ".bak-*"),
                      key=lambda path: path.stat().st_mtime, reverse=True)
     asserted_since = None
@@ -1538,10 +1544,11 @@ if RECOVER_INTERRUPTED:
                 continue
         if any(since <= value <= until for value in timestamps):
             evidence_ids.add(container_id)
-    if len(evidence_ids) != EXPECTED_RUNNING:
+    if len(evidence_ids) + EXPECTED_REMOVED != EXPECTED_RUNNING:
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_mismatch",
                           "status": "failed", "message": "Restart event evidence does not match baseline",
                           "recovery_expected_count": EXPECTED_RUNNING,
+                          "recovery_removed_count": EXPECTED_REMOVED,
                           "recovery_evidence_count": len(evidence_ids)}}))
         raise SystemExit(2)
     candidates = evidence_ids - running_ids()
@@ -1550,6 +1557,7 @@ if RECOVER_INTERRUPTED:
         "requires_confirm": not APPLY, "recovery_candidate_count": len(candidates),
         "recovery_window_seconds": until - since,
         "recovery_expected_count": EXPECTED_RUNNING,
+        "recovery_removed_count": EXPECTED_REMOVED,
         "recovery_evidence_count": len(evidence_ids),
     }}
     if not APPLY:
@@ -1724,6 +1732,7 @@ raise SystemExit(0 if missing_after_recovery == 0 else 4)
 def remote_docker_pool(remote: dict, *, confirm: bool = False,
                        recover_interrupted: bool = False,
                        expected_running: int | None = None,
+                       expected_removed: int = 0,
                        recovery_since: str | None = None,
                        timeout: int = 900) -> dict:
     """Plan or apply the fixed Docker address-pool transaction on one remote."""
@@ -1732,6 +1741,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         _remote_docker_pool_program(
             confirm=confirm, recover_interrupted=recover_interrupted,
             expected_running=expected_running,
+            expected_removed=expected_removed,
             recovery_since=recovery_since).encode()).decode()
     command = (
         "sudo -n python3 -c " + shlex.quote(
@@ -1755,6 +1765,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "rollback_succeeded", "route_overlap_count", "apply_safe",
         "recovery_candidate_count", "recovery_window_seconds",
         "recovery_expected_count", "recovery_evidence_count",
+        "recovery_removed_count",
     }
     if set(payload) - allowed:
         raise RuntimeError("remote Docker pool operation returned unexpected fields")
@@ -1806,12 +1817,13 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         "recovery_planned": {
             "ok", "status", "requires_confirm", "recovery_candidate_count",
             "recovery_window_seconds", "recovery_expected_count",
-            "recovery_evidence_count",
+            "recovery_evidence_count", "recovery_removed_count",
         },
         "recovery_complete": {
             "ok", "status", "requires_confirm", "recovery_candidate_count",
             "recovery_window_seconds", "recovery_expected_count",
-            "recovery_evidence_count", "containers_restored", "containers_missing",
+            "recovery_evidence_count", "recovery_removed_count",
+            "containers_restored", "containers_missing",
         },
     }
     if payload["ok"]:
@@ -1865,14 +1877,16 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
                   "subnet_capacity", "current_pool_count", "containers_restored",
                   "containers_missing", "route_overlap_count",
                   "recovery_candidate_count", "recovery_window_seconds",
-                  "recovery_expected_count", "recovery_evidence_count"):
+                  "recovery_expected_count", "recovery_evidence_count",
+                  "recovery_removed_count"):
         value = payload.get(field)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise RuntimeError("remote Docker pool operation returned invalid counts")
     if payload.get("recovery_window_seconds", 0) > 1200:
         raise RuntimeError("remote Docker pool recovery window is unbounded")
     if payload["ok"] and payload.get("recovery_evidence_count") is not None and (
-            payload.get("recovery_evidence_count") != payload.get("recovery_expected_count")):
+            payload.get("recovery_evidence_count") + payload.get("recovery_removed_count", 0) !=
+            payload.get("recovery_expected_count")):
         raise RuntimeError("remote Docker pool recovery evidence is inconsistent")
     if payload.get("containers_restored") is not None and payload.get("recovery_candidate_count") is not None and (
             payload["containers_restored"] + payload.get("containers_missing", 0) !=

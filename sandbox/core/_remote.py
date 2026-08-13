@@ -1916,7 +1916,13 @@ def add(domain, owner, source, status=None):
     if not isinstance(domain, str): return
     domain = domain.strip().lower().rstrip(".")
     if domain.startswith("*."): domain = domain[2:]
-    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain): return
+    if domain == "localhost" or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain): return
+    try:
+        import ipaddress
+        ipaddress.ip_address(domain)
+        return
+    except ValueError:
+        pass
     item = rows.setdefault(domain, {{"domain": domain, "owners": set(), "sources": set(), "statuses": set()}})
     if isinstance(owner, str) and owner: item["owners"].add(owner[:120])
     item["sources"].add(source)
@@ -1942,9 +1948,13 @@ if caddy.is_dir():
         owner = path.stem[:120]
         try: text = path.read_text()
         except Exception: continue
+        depth = 0
         for line in text.splitlines():
-            match = re.match(r"^\\s*(?:https?://)?(\\*\\.)?([a-zA-Z0-9.-]+)(?::\\d+)?(?:,|\\s*\\{{)", line)
-            if match: add(match.group(2), owner, "caddy_route", "configured")
+            if depth == 0:
+                match = re.match(r"^\\s*(?:https?://)?(\\*\\.)?([a-zA-Z0-9.-]+)(?::\\d+)?(?:,|\\s*\\{{)", line)
+                if match: add(match.group(2), owner, "caddy_route", "configured")
+            depth += line.count("{{") - line.count("}}")
+            depth = max(depth, 0)
 output = []
 for domain in sorted(rows):
     item = rows[domain]

@@ -345,3 +345,12 @@ markers.
 - [ ] T077 [US1/US6] Record only pattern names and aggregate pass/fail counts in
   implementation evidence, run `git diff --check` and focused secret suites,
   and retain the no-real-secret fixture boundary.
+
+## Phase 13: Feedback query JSON convergence — 2026-08-13
+
+- [X] T078 [US6] Normalize internal UTC `datetime` filters to RFC 3339 strings
+  before returning feedback list receipts, closing feedback
+  `eb496b17c1c33e47aaa7e74fde5ea4bf` without changing append-only records.
+- [X] T079 [US6] Add service and live CLI regressions proving `--since` and
+  `--until` response filters round-trip through JSON while bounded untrusted
+  records retain the established redaction projection.

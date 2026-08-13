@@ -457,7 +457,7 @@ dated contract amendment; no prior task is reclassified as complete.
 - [x] T161 [US1/US5] Add the shared job-list contract regression for `6bc4c6d5`:
   parse the existing top-level page, reject a duplicate `.data`-expecting decoder,
   and prove monitor/CLI/MCP consumers use the feature-owned parser.
-- [ ] T162 [US1] Record focused and remote acceptance evidence for T158-T161 in
+- [X] T162 [US1] Record focused and remote acceptance evidence for T158-T161 in
   `implementation-evidence.md` with safe job/source identities and no secret or
   credential material.
 

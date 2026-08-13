@@ -172,12 +172,17 @@ def cmd_status(cfg, args) -> None:
         return
     inst = args.resolved_instance
     if getattr(args, "json", False):
-        print(json.dumps(_status_json_payload(cfg, inst), sort_keys=True, default=str))
+        print(json.dumps(_status_json_payload(
+            cfg, inst, refresh=bool(getattr(args, "refresh", False))),
+            sort_keys=True, default=str))
         return
     owner = _core().registry_find_instance(inst)
     runtime_data = None
     if owner and owner.get("kind") == "compose":
-        result = runtime_service(cfg).invoke(OperationRequest(owner["root"], "status", label=owner.get("label", "default")))
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], "status", label=owner.get("label", "default"),
+            arguments={"refresh": bool(getattr(args, "refresh", False))},
+        ))
         if isinstance(result, OperationError):
             die(result.message)
         data = dict(result.data)
@@ -191,6 +196,7 @@ def cmd_status(cfg, args) -> None:
             project_root=owner["root"],
             operation="status",
             label=owner.get("label", "default"),
+            arguments={"refresh": bool(getattr(args, "refresh", False))},
         ))
         if isinstance(result, OperationError):
             die(result.message)
@@ -225,7 +231,7 @@ def cmd_status(cfg, args) -> None:
         _ensure_bridge_server()
 
 
-def _status_json_payload(cfg, inst: str) -> dict:
+def _status_json_payload(cfg, inst: str, *, refresh: bool = False) -> dict:
     """Return one bounded, machine-readable status document.
 
     The human status path intentionally has progress output and health hints.
@@ -235,7 +241,9 @@ def _status_json_payload(cfg, inst: str) -> dict:
     owner = _core().registry_find_instance(inst) or {}
     if owner.get("kind") == "compose":
         result = runtime_service(cfg).invoke(OperationRequest(
-            owner.get("root", ""), "status", label=owner.get("label", "default")))
+            owner.get("root", ""), "status", label=owner.get("label", "default"),
+            arguments={"refresh": refresh},
+        ))
         if isinstance(result, OperationError):
             return {"ok": False, "instance": inst,
                     "error": {"code": result.code, "message": result.message}}
@@ -246,7 +254,9 @@ def _status_json_payload(cfg, inst: str) -> dict:
     runtime_error = None
     if owner.get("root"):
         result = runtime_service(cfg).invoke(OperationRequest(
-            owner["root"], "status", label=owner.get("label", "default")))
+            owner["root"], "status", label=owner.get("label", "default"),
+            arguments={"refresh": refresh},
+        ))
         if isinstance(result, OperationError):
             runtime_error = {"code": result.code, "message": result.message}
         else:
@@ -981,6 +991,10 @@ def configure_parser(sub) -> None:
     sub.add_parser("up", help="Boot the docker stack")
     sub.add_parser("down", help="Stop the stack")
     status = sub.add_parser("status", help="Show container + project status")
+    status.add_argument(
+        "--refresh", action="store_true",
+        help="force a fresh runtime observation (never use a cached snapshot)",
+    )
     logs = sub.add_parser("logs", help="Tail WP + DB logs")
     for parser in (status, logs):
         parser.add_argument("--project-dir", default=None)

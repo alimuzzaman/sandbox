@@ -52,9 +52,10 @@ def _typed_invoke(project_dir: str, label: str | None, operation: str, arguments
             **dict(result.data)}
 
 
-def instance_status(project_dir: str, label: str | None = None) -> dict:
+def instance_status(project_dir: str, label: str | None = None,
+                    refresh: bool = False) -> dict:
     """Return runtime-neutral status for a project instance."""
-    return _typed_invoke(project_dir, label, "status")
+    return _typed_invoke(project_dir, label, "status", {"refresh": bool(refresh)})
 
 
 def instance_logs(project_dir: str, label: str | None = None) -> dict:

@@ -180,7 +180,30 @@ class ComposeAdapter:
 
         if op == "status":
             result = self.dependencies.process.run(["docker", "compose", *project_args, "ps", "--format", "json"], cwd=descriptor["root"], timeout=30)
-            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": "ready" if result.returncode == 0 else "error", "compose": result.stdout[-10000:]}
+            compose_output = result.stdout[-10000:]
+            states = []
+            for line in compose_output.splitlines():
+                try:
+                    item = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    states.append(item)
+            service_state = next(
+                (item.get("State") for item in states
+                 if item.get("Service") == service),
+                None,
+            )
+            if result.returncode != 0:
+                status = "error"
+            elif service_state is None:
+                # Preserve the historical ready result for older Compose
+                # implementations that return non-JSON output, while an
+                # explicit service row is authoritative when available.
+                status = "ready" if not states else "stopped"
+            else:
+                status = "ready" if service_state == "running" else "stopped"
+            data = {"instance": runtime_id, "root": descriptor["root"], "label": request.label, "kind": "compose", "adapter": self.adapter_id, "service": service, "http_port": http_port, "url": f"http://127.0.0.1:{http_port}", "status": status, "compose": compose_output, "observation": {"source": "compose", "freshness": "live"}}
             return OperationResult(result.returncode == 0, op, descriptor["root"], "compose", data)
 
         commands = {"start": ["start", service], "stop": ["stop", service], "logs": ["logs", "--no-color", service], "apply": ["up", "-d", "--force-recreate", service], "destroy": ["down"]}

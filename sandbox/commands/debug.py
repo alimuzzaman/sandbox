@@ -29,15 +29,17 @@ def _remote_test_matrix_submissions(target, mode: str, extra: list[str],
                                     workspaces: list[str], timeout: int,
                                     output_profile: str) -> list:
     """Turn selected WordPress test workspaces into isolated remote leaves."""
-    from sandbox.jobs.models import JobSubmission, SourceIdentity
+    from sandbox.jobs.models import JobSubmission
+    from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
 
-    identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    identity = _resolved_project_identity(target)
+    source = _source_identity(target.project_root)
     command = ["sb", "test", "--local", "--project-dir", ".", mode]
     if extra:
         command += ["--", *extra]
     return [JobSubmission(
         "test", target.project_root, identity, "remote", workspace, tuple(command), timeout,
-        SourceIdentity("sha256:" + identity), remote_name=target.remote_name,
+        source, remote_name=target.remote_name,
         workspace_mode="isolated", output_profile=output_profile,
         deadline_source="explicit" if timeout else "profile:test",
     ) for workspace in workspaces]
@@ -226,7 +228,7 @@ def cmd_test(cfg, args) -> None:
         argv = list(declared[mode]["argv"])
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
-        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.jobs.models import JobSubmission, TargetRequest
         try:
             target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
                 project_dir=pd, local=bool(getattr(args, "local", False)),
@@ -237,10 +239,11 @@ def cmd_test(cfg, args) -> None:
         except TargetResolutionError as exc:
             die(f"{exc.code}: {exc}")
         if target.kind == "remote":
+            from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
             submission = JobSubmission("runtime-exec", target.project_root,
-                hashlib.sha256(target.project_root.encode()).hexdigest(), "remote", target.workspace_label,
+                _resolved_project_identity(target), "remote", target.workspace_label,
                 tuple(argv), int(getattr(args, "timeout", 900) or 900),
-                SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest()),
+                _source_identity(target.project_root),
                 remote_name=target.remote_name, output_profile=getattr(args, "output_profile", None) or "smart",
                 deadline_source="explicit")
             from sandbox.core import _remote
@@ -277,7 +280,7 @@ def cmd_test(cfg, args) -> None:
     # resolution on the deployed checkout.
     from sandbox.application.context import durable_job_dependencies
     from sandbox.application.target_service import TargetResolutionError
-    from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+    from sandbox.jobs.models import JobSubmission, TargetRequest
     requested_workspaces = list(getattr(args, "workspace", None) or [])
     try:
         selected_target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
@@ -290,6 +293,7 @@ def cmd_test(cfg, args) -> None:
     except TargetResolutionError as exc:
         die(f"{exc.code}: {exc}")
     if selected_target.kind == "remote":
+        from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
         mode = initial_mode
         if getattr(args, "provision_only", False):
             die("--provision-only is only available for local integration harness setup")
@@ -318,9 +322,9 @@ def cmd_test(cfg, args) -> None:
             return
         submission = JobSubmission(
             "test", selected_target.project_root,
-            hashlib.sha256(selected_target.project_root.encode()).hexdigest(), "remote",
+            _resolved_project_identity(selected_target), "remote",
             selected_target.workspace_label, tuple(command), timeout,
-            SourceIdentity("sha256:" + hashlib.sha256(selected_target.project_root.encode()).hexdigest()),
+            _source_identity(selected_target.project_root),
             remote_name=selected_target.remote_name, output_profile=output_profile,
             deadline_source="explicit" if getattr(args, "timeout", None) else "profile:test",
         )

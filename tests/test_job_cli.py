@@ -87,7 +87,8 @@ class JobCliTests(unittest.TestCase):
             "--output-profile", "full", "--request-id", "request-1", "--", "python", "-c", "print('ok')",
         ])
         target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
-                                 workspace_label="unit", runtime_policy={})
+                                 workspace_label="unit", runtime_policy={},
+                                 sources={"identity": "project:cli"})
         captured = []
         accepted = {"ok": True, "job_id": "d" * 32, "target": {"kind": "local", "remote": None},
                     "workspace": "unit", "deadline": {"seconds": 120, "source": "explicit"}}
@@ -100,7 +101,28 @@ class JobCliTests(unittest.TestCase):
         self.assertEqual(captured[0].argv, ("python", "-c", "print('ok')"))
         self.assertEqual(captured[0].request_id, "request-1")
         self.assertEqual(captured[0].output_profile, "full")
+        self.assertEqual(captured[0].project_identity, "project:cli")
+        self.assertEqual(
+            captured[0].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
         self.assertIn("target=local workspace=unit deadline=120s source=explicit", output.getvalue())
+
+    def test_start_rejects_source_path_hash_as_project_identity_fallback(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        args = parser.parse_args([
+            "--project-dir", "/project", "--local", "--workspace", "unit",
+            "--timeout", "120", "--", "echo", "ok",
+        ])
+        target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 workspace_label="unit", runtime_policy={}, sources={})
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                "target_service": SimpleNamespace(resolve=lambda _request: target),
+                "job_service": SimpleNamespace(submit=lambda _submission: self.fail("submitted")),
+            }):
+            with self.assertRaisesRegex(ValueError, "canonical project identity"):
+                cmd_job_start(None, args)
 
     def test_start_rejects_missing_or_malformed_explicit_argv(self):
         parser = __import__("argparse").ArgumentParser()

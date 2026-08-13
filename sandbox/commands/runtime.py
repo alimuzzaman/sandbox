@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import time
 import argparse
 import shlex
@@ -157,7 +156,8 @@ def cmd_exec(cfg, args) -> None:
                                  (target is not None and target.kind == "remote")):
         from sandbox.application.context import durable_job_dependencies
         from sandbox.application.target_service import TargetResolutionError
-        from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
+        from sandbox.jobs.models import JobSubmission, TargetRequest
+        from sandbox.commands.jobs_runtime import _resolved_project_identity, _source_identity
         if target is None:
             try:
                 target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
@@ -168,9 +168,9 @@ def cmd_exec(cfg, args) -> None:
             except TargetResolutionError as exc:
                 die(f"{exc.code}: {exc}")
         timeout = args.timeout or 900
-        source = SourceIdentity("sha256:" + hashlib.sha256(target.project_root.encode()).hexdigest())
+        source = _source_identity(target.project_root)
         submission = JobSubmission("runtime-exec" if target.kind == "remote" else "exec", target.project_root,
-            hashlib.sha256(target.project_root.encode()).hexdigest(), target.kind,
+            _resolved_project_identity(target), target.kind,
             target.workspace_label, tuple(command), timeout, source,
             remote_name=target.remote_name, output_profile=args.output_profile,
             output_profile_definition=(getattr(target, "runtime_policy", {}).get("outputProfiles", {})

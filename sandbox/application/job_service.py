@@ -48,8 +48,16 @@ class JobService:
     launcher: Any = None
     scheduler: Any = None
     runtime_selector: Any = None
+    workspace_registry: Any = None
 
     def submit(self, submission: JobSubmission):
+        # Production composition supplies the durable workspace boundary.  It
+        # must commit ownership before the job repository can acknowledge an
+        # acceptance, otherwise a detached job can outlive the only metadata
+        # capable of identifying its workspace.  The dependency stays optional
+        # for compatibility adapters and isolated repository tests.
+        if self.workspace_registry is not None:
+            self.workspace_registry.ensure_submission(submission)
         row, replay = self.repository.accept(submission)
         if replay:
             return self._accepted(row, replay=True)

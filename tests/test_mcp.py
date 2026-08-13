@@ -205,9 +205,10 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("job_follow", "job_id"), ("job_metrics", "job_id"), ("job_reconcile", ""), ("job_retention", ""), ("job_cancel", "job_id"),
             ("job_artifacts", "job_id"), ("job_artifact_get", "artifact_id,job_id"),
             ("job_retry", "job_id"), ("job_cleanup", "job_id"),
-            ("workspace_create", "project_dir"), ("workspace_list", "project_dir"),
-            ("workspace_status", "project_dir"), ("workspace_reset", "project_dir"),
-            ("workspace_destroy", "project_dir"),
+            ("workspace_create", ""), ("workspace_list", ""),
+            ("workspace_status", ""), ("workspace_reset", ""),
+            ("workspace_destroy", ""), ("workspace_migration_plan", ""),
+            ("workspace_migration_apply", "plan_id"),
             ("wp_cli", "command,project_dir"), ("wp_exec", "command,project_dir"),
             ("wp_rest", "method,path,project_dir"), ("run_tests", "project_dir"),
             ("wp_cli_async", "command,project_dir"), ("wp_cli_job", "job_id,project_dir"),
@@ -255,7 +256,7 @@ print(wp._remote_job_transport().remote_sb_path is _remote.remote_sb_path)
             ("recovery_restore_apply", "backup_id"), ("recovery_schedule_plan", ""),
             ("recovery_retention_plan", ""),
         )
-        self.assertEqual(len(actual), 127)
+        self.assertEqual(len(actual), 129)
         self.assertEqual([(name, ",".join(required)) for name, required, _response in actual], list(expected))
         self.assertTrue(all(response is None for _name, _required, response in actual), actual)
 

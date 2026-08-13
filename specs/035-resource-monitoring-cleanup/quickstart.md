@@ -162,3 +162,25 @@ Capture evidence from:
 
 The feature is done only when status and planning return valid live envelopes,
 planning causes no mutation, and the existing instance remains healthy.
+
+## 10. Workspace metadata/index ownership compatibility
+
+Run the metadata migration in a disposable base or against an explicitly approved
+metadata-only fixture. Do not use resource cleanup, network release, reset, or destroy.
+
+```bash
+./sb resources status --remote REMOTE_NAME --json
+./sb workspace migrate --remote REMOTE_NAME --project-identity PROJECT_ID --json
+./sb resources status --remote REMOTE_NAME --json
+```
+
+Verify:
+
+- both status responses identify the same remote and retain stable resource IDs/counts;
+- workspace bindings are typed by opaque `workspace_id`, include index generation and
+  active lease/container/job references, and never expose direct paths or file contents;
+- missing, unresolved, conflicting, duplicate, stale, or unavailable index evidence is
+  `partial`/`unknown`/`indeterminate` with zero reclaimable bytes and no cleanup plan;
+- a nested/malformed job-list response fails through the shared top-level decoder;
+- moving metadata or a checkout locator does not release networks or change
+  container/job/network counts; a fresh rescan is required before any plan.

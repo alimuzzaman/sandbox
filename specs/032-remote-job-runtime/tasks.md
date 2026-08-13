@@ -460,3 +460,38 @@ dated contract amendment; no prior task is reclassified as complete.
 - [ ] T162 [US1] Record focused and remote acceptance evidence for T158-T161 in
   `implementation-evidence.md` with safe job/source identities and no secret or
   credential material.
+
+## Phase 13: Convergence — durable workspace metadata/index (2026-08-13)
+
+These tasks extend the existing remote job/runtime contracts and do not authorize cleanup,
+reset, destroy, deploy, or network release. Completion marks reflect only the implementation
+and evidence actually present in this branch.
+
+- [X] T163 [US3] Add the owner-only versioned SQLite workspace repository at
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`, with WAL/foreign keys, schema
+  generation, opaque IDs, alias collision records, and unique `(project_identity,label)`;
+  cover initialization, idempotency, rollback, and concurrency.
+- [X] T164 [US3] Add exact-depth legacy discovery for
+  `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json`; preserve source
+  bytes and test exact project-root/namespace correlation, unique project identity,
+  adopted/unresolved/conflict/invalid decisions, malformed/symlink/oversized rejection,
+  and `workspace_index_incomplete`.
+- [X] T165 [US3] Integrate workspace lifecycle and job leases by durable workspace ID;
+  persist provisioning/ready/resetting/destroying/destroyed/indeterminate states, busy
+  locks, startup reconciliation, missing-checkout status, and no automatic destructive
+  retry.
+- [X] T166 [US1/US3] Implement strict remote workspace transport controls using
+  project identity/workspace ID (never project-dir), exact-tree registration, bounded
+  response parsing, and stable identity/alias/index errors.
+- [X] T167 [US3/US5] Add CLI/MCP contract and parity tests for list/status/migrate,
+  plan/apply digest+generation+expiry, reset/destroy confirmation, and remote controls
+  without checkout paths.
+- [X] T168 [US1/US3] Add acceptance coverage for job submission/lease interactions,
+  concurrent migration/lifecycle operations, alias collisions, plan drift, and idempotent
+  replay without duplicate workspace/job ownership.
+- [X] T169 [US3/US5] Expose typed workspace resource bindings/projections to resource
+  monitoring; reject duplicate/stale ownership as unknown/indeterminate and prove no
+  consumer opens the workspace SQLite index or legacy JSON directly.
+- [ ] T170 [Phase 8] Record focused and read-only remote evidence for metadata migration,
+  relocation, checkout-independent controls, and unchanged job/container/network counts;
+  keep unresolved/conflict decisions visible and do not claim cleanup proof.

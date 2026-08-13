@@ -411,7 +411,8 @@ class RemoteJobTransport:
 
     def list(self, remote_name: str, *, limit: int = 50, project_dir: str | None = None,
              project_identity: str | None = None, workspace: str | None = None,
-             active_only: bool = False) -> dict:
+             active_only: bool = False, lifecycle: str | None = None,
+             kind: str | None = None, cursor_job_id: str | None = None) -> dict:
         args = ["job-list", "--limit", str(limit)]
         # `job-list` is already running on the selected controller. Passing
         # `--local` made the remote parser reject the request, while a client
@@ -430,6 +431,13 @@ class RemoteJobTransport:
             args += ["--workspace", workspace]
         if active_only:
             args.append("--active-only")
+        if lifecycle:
+            args += ["--lifecycle", lifecycle]
+        category = kind
+        if category:
+            args += ["--kind", category]
+        if cursor_job_id:
+            args += ["--cursor-job-id", cursor_job_id]
         try:
             return _decode_job_page(self.control(remote_name, args))
         except ValueError as exc:

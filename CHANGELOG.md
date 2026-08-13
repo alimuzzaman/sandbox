@@ -5,6 +5,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-08-13
+
+### Added
+- Durable, owner-only workspace identity and migration index with byte-preserved
+  legacy metadata, checkout-independent CLI/MCP controls, and plan-bound migration.
+- WordPress PHP-extension requirements, deterministic image/package planning,
+  four-plane verification, and rollback-safe apply behavior.
+- Secret-redacted feedback detail/export/retention controls and conservative
+  workspace-aware resource ownership diagnostics.
+
+### Changed
+- Remote job and workspace protocols now use canonical project identity, durable
+  acceptance receipts, and strict top-level response envelopes.
+- Remote deployment and hosting preserve exact nested source roots and immutable
+  source provenance.
+- Agents must verify local and installed remote revisions before depending on a
+  changed CLI/MCP protocol.
+
+### Security
+- Destructive restore requires explicit confirmation.
+- Workspace migration is metadata-only and cannot authorize workspace destruction,
+  network cleanup, or ambiguous ownership adoption.
+
 ## [Unreleased] — v1.0.0 target
 
 ### Added

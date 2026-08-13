@@ -378,3 +378,54 @@ recovery and bounded export.
     false terminal state.
 12. Storage/output failure cannot be represented as complete success.
 
+## Convergence amendment — 2026-08-13 (durable workspace metadata/index)
+
+### Workspace index storage
+
+Each execution host additionally owns
+`$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. The file is owner-only and uses WAL,
+foreign keys, a bounded busy timeout, and an explicit schema/generation record. It is
+accessed only through a workspace repository and application service; no transport,
+resource provider, CLI adapter, or MCP tool may read the SQLite file or legacy metadata
+directly.
+
+### Workspace index tables
+
+| Table | Fields and invariants |
+|---|---|
+| `workspace_schema` | `schema_version`, `index_generation`, migration identity, and timestamps. Generation increments only after a committed index mutation. |
+| `workspaces` | Opaque `workspace_id` primary key; `project_identity`; validated `workspace_label`; mode; lifecycle state; metadata/checkout locators and digests; runtime/Compose identity; generation and timestamps. Unique `(project_identity, workspace_label)`. |
+| `workspace_aliases` | `alias_kind`, normalized `alias_digest`, `workspace_id`, evidence digest, and observation time. Unique kind/digest; collisions are retained as explicit ambiguity. |
+| `workspace_migrations` | Legacy locator/digest, decision (`adopted`, `unresolved`, `conflict`, `invalid`), bounded reason/evidence, optional workspace ID, and timestamps. The source remains untouched. |
+| `workspace_resource_bindings` | Typed resource kind/identity, workspace ID/project identity, active references, evidence digest, lifecycle and observation time; consumed through a typed projection. |
+| `workspace_migration_plans` | Immutable plan ID, target identity, complete inventory digest, index generation, candidate decisions, created/expiry timestamps, and state. Apply requires both digest and generation to match. |
+
+Workspace lifecycle is `provisioning`, `ready`, `resetting`, `destroying`, `destroyed`,
+or `indeterminate`. An opaque workspace ID remains stable when a checkout or generated
+runtime locator moves. Job `workspace_leases` reference the ID plus target namespace;
+label-only lookup is a display/filter convenience, never a control identity.
+
+### Legacy metadata discovery
+
+The compatibility source is the exact-depth file
+`runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` (under the active
+base and any still-supported legacy fallback root). Discovery rejects symlinks, path
+escapes, oversized files, malformed JSON, and inconsistent path/field values. It joins
+job rows by exact project-root hash/namespace and label and requires exactly one distinct
+job `project_identity`; registry/runtime aliases can corroborate but cannot resolve a
+conflict. Caller identity is accepted only when it matches an exact expected alias.
+
+Each source obtains a durable migration decision. If the index is empty while relevant
+sources are unresolved or conflicting, list/status returns `workspace_index_incomplete`
+with bounded decision summaries instead of a false empty result. A malformed or unsafe
+source is preserved and reported, never “repaired” in place.
+
+### Crash-safe plan/apply and relocation
+
+Plan creation records the complete source inventory digest and current index generation.
+Apply holds a global migration lock and per-workspace locks, rescans before one SQLite
+transaction, and refuses drift (`workspace_migration_plan_stale` or
+`workspace_ownership_drift`). Startup changes unfinished destructive operations to
+`indeterminate`; no reset/destroy action is repeated automatically. Migration and base
+relocation only add/move index metadata and regenerate path-bearing locators: they do not
+delete legacy files, release networks, destroy containers, or alter job counts.

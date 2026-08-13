@@ -280,3 +280,45 @@ counts as applicable), not `{ "data": { ... } }`. CLI, MCP, monitoring, and
 network consumers MUST call this decoder and MUST reject malformed envelopes
 without guessing another shape. The decoder is tolerant only of additive fields;
 it MUST NOT silently reinterpret a nested or unrelated response.
+
+## Workspace identity/index extension
+
+Workspace lifecycle calls use the durable workspace repository. A workspace response adds
+an opaque `workspace_id`, `project_identity`, label, lifecycle state, locator digests,
+index generation, and bounded migration decision summary. The compatibility metadata file
+at `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` is never rewritten.
+
+```json
+{
+  "ok": true,
+  "workspace_id": "opaque-id",
+  "project_identity": "project-id",
+  "workspace_label": "unit",
+  "state": "ready",
+  "checkout": {"present": false, "identity": "opaque-locator-digest"},
+  "index": {"generation": 4, "complete": true},
+  "migration": {"decision": "adopted", "source_digest": "sha256:..."},
+  "error": null
+}
+```
+
+### Migration
+
+`workspace_migrate(project_identity, plan_id?, confirm?)` first creates a no-write plan
+with target identity, complete legacy inventory digest, index generation, bounded
+candidate decisions, and expiry. Applying an exact plan is confirmation-gated, acquires
+the global/per-workspace locks, rescans, and commits all adoptable rows in one
+transaction. It returns `workspace_index_incomplete` when unresolved/conflicting legacy
+records remain and `workspace_migration_plan_stale` or `workspace_ownership_drift` when
+the inventory or generation changes. It never deletes or rewrites legacy metadata and
+never releases networks or performs cleanup.
+
+### Remote controls
+
+Remote list/status/migrate use `project_identity` and/or `workspace_id`; they MUST NOT
+require `project_dir`, checkout path, or a derived namespace. Reset/destroy require the
+opaque workspace ID plus confirmation and a busy-lock check. Missing checkout locators
+are an observable state, not a reason to fail list/status. Stable errors include
+`workspace_identity_ambiguous`, `workspace_alias_collision`, `workspace_busy`,
+`workspace_index_unavailable`, `workspace_index_incomplete`,
+`workspace_migration_plan_stale`, and `workspace_ownership_drift`.

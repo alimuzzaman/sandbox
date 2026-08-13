@@ -121,6 +121,103 @@ def owner(labels):
         return project
     return None
 
+def load_workspace_projection():
+    # Read ownership through the installed typed application boundary.
+    try:
+        from sandbox.application.context import workspace_ownership_projection
+        return workspace_ownership_projection()
+    except Exception:
+        return None
+
+def workspace_owner(projection, resource_type, resource_id):
+    # Resolve one exact binding; never infer ownership from a label/path.
+    if not isinstance(projection, dict):
+        return "unknown", None, ("workspace_index_unavailable",), False
+    records = projection.get("records", projection.get("workspaces"))
+    if not isinstance(records, list):
+        return "unknown", None, ("workspace_index_unavailable",), False
+    counts = projection.get("counts") or {}
+    projection_generation = projection.get(
+        "index_generation", projection.get("generation"))
+    valid_lifecycles = {
+        "provisioning", "ready", "resetting", "destroying", "destroyed",
+        "indeterminate",
+    }
+    incomplete = any(
+        isinstance(counts.get(key), int) and counts.get(key) > 0
+        for key in ("unresolved", "conflict", "incomplete")
+    )
+    if (isinstance(projection_generation, bool) or
+            not isinstance(projection_generation, int)):
+        incomplete = True
+    if not records:
+        incomplete = True
+    matches = set()
+    for record in records:
+        if not isinstance(record, dict):
+            incomplete = True
+            continue
+        if record.get("complete") is False:
+            incomplete = True
+            continue
+        if (projection_generation is not None and
+                record.get("index_generation") != projection_generation):
+            incomplete = True
+            continue
+        workspace_id = record.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            incomplete = True
+            continue
+        lifecycle = record.get("lifecycle")
+        status = record.get("status")
+        observed_at = record.get("observed_at")
+        if (record.get("owner_kind") != "workspace" or
+                not isinstance(lifecycle, str) or
+                lifecycle.lower() not in valid_lifecycles or
+                not isinstance(status, str) or
+                not isinstance(observed_at, str) or not observed_at):
+            incomplete = True
+            continue
+        if lifecycle.lower() in {
+            "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
+            "destroyed", "tombstoned",
+        } or status.lower() in {
+            "invalid", "incomplete", "unresolved", "conflict", "indeterminate",
+            "destroyed", "tombstoned",
+        }:
+            incomplete = True
+            continue
+        active_references = record.get("active_references")
+        reference_active = isinstance(active_references, dict) and any(
+            isinstance(value, int) and not isinstance(value, bool) and value > 0
+            or value is True
+            for value in active_references.values()
+        )
+        for binding in record.get("bindings") or ():
+            if not isinstance(binding, dict):
+                incomplete = True
+                continue
+            binding_type = binding.get("resource_type", binding.get("type"))
+            binding_id = binding.get("resource_id", binding.get("id"))
+            if binding_type != resource_type or binding_id != resource_id:
+                continue
+            binding_status = str(binding.get("status") or "owned").lower()
+            if binding_status not in {"owned", "active", "retained", "ready"}:
+                incomplete = True
+                continue
+            matches.add((workspace_id, binding_status, reference_active))
+    if len(matches) == 1:
+        workspace_id, _status, reference_active = next(iter(matches))
+        evidence = ("workspace_binding", resource_type)
+        if reference_active:
+            evidence += ("workspace_active_reference",)
+        return "workspace", workspace_id, evidence, True
+    if len(matches) > 1:
+        return "unknown", None, ("workspace_alias_collision", resource_type), False
+    return "unknown", None, (
+        "workspace_index_incomplete" if incomplete else "workspace_binding_missing",
+    ), False
+
 def docker_inventory():
     outcomes = []
     inventory = {
@@ -1342,9 +1439,23 @@ def scan():
         lifecycle_complete,
         lifecycle_outcomes,
     ) = lifecycle_evidence()
+    PHASE = "workspace_ownership"
+    workspace_projection = load_workspace_projection()
     PHASE = "docker_inventory"
     inventory, outcomes = docker_inventory()
     outcomes.extend(lifecycle_outcomes)
+    outcomes.append({
+        "category": "workspace_ownership",
+        "status": (
+            "complete" if isinstance(workspace_projection, dict)
+            and not (workspace_projection.get("counts") or {}).get("incomplete")
+            and not (workspace_projection.get("counts") or {}).get("unresolved")
+            and not (workspace_projection.get("counts") or {}).get("conflict")
+            else "partial" if isinstance(workspace_projection, dict)
+            else "unavailable"
+        ),
+        "reason": "workspace_index_unavailable" if workspace_projection is None else None,
+    })
     resources = []
     deep = None
     if not targeted and focus is None and deep_requested:
@@ -1389,19 +1500,28 @@ def scan():
         project = owner(labels)
         if not project:
             continue
+        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+            workspace_projection, "compose_project", project,
+        )
         oneoff = str(labels.get("com.docker.compose.oneoff") or "").lower() == "true"
         locator = str(container.get("Id") or container.get("Name") or "")
         if targeted and (target_kind != "container" or target_locator != locator):
             continue
         raw_size = container.get("SizeRw")
         measured = isinstance(raw_size, int) and not isinstance(raw_size, bool) and raw_size >= 0
-        if running:
+        workspace_active = "workspace_active_reference" in owner_evidence
+        if running or workspace_active:
             classification = "active"
-            references = ("running_container",)
+            references = (("running_container",) if running else ()) + (
+                ("workspace_active_reference",) if workspace_active else ()
+            )
+        elif owner_kind == "unknown":
+            classification = "unverified"
+            references = ()
         elif project in active_projects:
             classification = "retained"
             references = ("live_compose_project",)
-        elif project in protected_projects:
+        elif owner_protected or project in protected_projects:
             classification = "retained"
             references = ("instance_or_job_registry",)
         elif oneoff and lifecycle_complete:
@@ -1412,12 +1532,12 @@ def scan():
             references = ()
         resources.append(observation(
             "container", locator, str(container.get("Name") or locator).lstrip("/"),
-            "project", project, classification,
+            owner_kind, owner_id, classification,
             "measured" if measured else "unavailable", raw_size if measured else None,
             raw_size if measured and classification == "disposable_cache" else 0,
             references,
             (
-                "compose_project_label",
+                *owner_evidence,
                 "running" if running else (
                     "instance_or_job_registry" if project in protected_projects else
                     "compose_oneoff" if oneoff and lifecycle_complete else
@@ -1433,18 +1553,25 @@ def scan():
             continue
         project = owner(volume.get("Labels"))
         active = name in active_volumes
+        owner_kind, owner_id, owner_evidence, owner_protected = (
+            workspace_owner(workspace_projection, "compose_project", project)
+            if project else ("unmanaged", None, ("ownership_unverified",), False)
+        )
         state, measured_size, error = "not_measured", None, None
         if not project:
             classification = "unmanaged"
-        elif active:
+        elif active or "workspace_active_reference" in owner_evidence:
             classification = "active"
+        elif owner_kind == "unknown":
+            classification = "unverified"
         elif project in active_projects:
             classification = "retained"
-        elif project in protected_projects:
+        elif owner_protected or project in protected_projects:
             classification = "retained"
         else:
             classification = "unverified"
-        if thorough and focus != "cache" and project and not active:
+        if thorough and focus != "cache" and project and not active \
+                and "workspace_active_reference" not in owner_evidence:
             mountpoint = str(volume.get("Mountpoint") or "")
             code, out, _err = run([
                 "sudo", "-n", "du", "-sk", mountpoint,
@@ -1463,6 +1590,8 @@ def scan():
             project
             and not active
             and project not in active_projects
+            and owner_kind != "unknown"
+            and not owner_protected
             and project not in protected_projects
             and lifecycle_complete
             and state == "measured"
@@ -1470,25 +1599,27 @@ def scan():
             classification = "stale_candidate"
         references = (
             ("live_container_mount",) if active else
+            ("workspace_active_reference",)
+            if "workspace_active_reference" in owner_evidence else
             ("live_compose_project",)
             if project in active_projects else
             ("instance_or_job_registry",)
-            if project in protected_projects else ()
+            if owner_protected or project in protected_projects else ()
         )
         resources.append(observation(
-            "volume", name, name, "project" if project else "unmanaged", project,
+            "volume", name, name, owner_kind, owner_id,
             classification, state, measured_size,
             measured_size if classification == "stale_candidate" else 0,
             references,
             (
-                ("compose_project_label",)
+                tuple(owner_evidence)
                 if (
                     active or project in active_projects
                     or project in protected_projects
                 ) else
-                ("compose_project_label", "registry_and_job_absence")
+                tuple((*owner_evidence, "registry_and_job_absence"))
                 if lifecycle_complete else
-                ("compose_project_label", "lifecycle_evidence_unavailable")
+                tuple((*owner_evidence, "lifecycle_evidence_unavailable"))
             ) if project else ("ownership_unverified",),
             (error,) if error else (),
         ))
@@ -1506,21 +1637,26 @@ def scan():
             continue
         active = bool(network.get("Containers"))
         if project:
-            owner_kind, owner_id = "project", project
+            owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+                workspace_projection, "compose_project", project,
+            )
             classification = (
-                "active" if active else
+                "active" if active or "workspace_active_reference" in owner_evidence else
                 "retained" if project in active_projects else
-                "retained" if project in protected_projects else
+                "retained" if owner_protected or project in protected_projects else
                 # A stopped job is not sufficient evidence that its network
                 # is stale; require an explicit lifecycle release signal.
                 "unverified"
             )
-            evidence = ("compose_project_label",)
-            if not active and classification == "unverified":
+            evidence = owner_evidence
+            if not active and "workspace_active_reference" not in owner_evidence \
+                    and classification == "unverified":
                 evidence += ("network_liveness_unverified",)
             references = ("connected_container",) if active else (
+                ("workspace_active_reference",)
+                if "workspace_active_reference" in owner_evidence else (
                 "live_compose_project",) if project in active_projects else (
-                "instance_or_job_registry",) if project in protected_projects else ()
+                "instance_or_job_registry",) if owner_protected or project in protected_projects else ())
         else:
             labels = network.get("Labels")
             owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
@@ -1550,6 +1686,9 @@ def scan():
         project = owner((image.get("Config") or {}).get("Labels"))
         if not project:
             continue
+        owner_kind, owner_id, owner_evidence, owner_protected = workspace_owner(
+            workspace_projection, "compose_project", project,
+        )
         used = locator in used_images
         raw_size = image.get("Size")
         measured = (
@@ -1558,23 +1697,27 @@ def scan():
             and raw_size >= 0
         )
         classification = (
-            "active" if used else
-            "retained" if project in protected_projects else
+            "active" if used or "workspace_active_reference" in owner_evidence else
+            "retained" if owner_protected or project in protected_projects else
+            "unverified" if owner_kind == "unknown" else
             "disposable_cache" if lifecycle_complete else
             "unverified"
         )
         display = next(iter(image.get("RepoTags") or ()), locator)
         resources.append(observation(
-            "image", locator, str(display), "project", project,
+            "image", locator, str(display), owner_kind, owner_id,
             classification,
             "measured" if measured else "unavailable",
             raw_size if measured else None,
             raw_size if measured and classification == "disposable_cache" else 0,
-            ("container_image",) if used else (
+            (("container_image",) if used else ()) + (
+                ("workspace_active_reference",)
+                if "workspace_active_reference" in owner_evidence else ()
+            ) if used or "workspace_active_reference" in owner_evidence else (
                 ("instance_or_job_registry",)
-                if project in protected_projects else ()
+                if owner_protected or project in protected_projects else ()
             ),
-            ("compose_project_label",),
+            owner_evidence,
         ))
     for record in inventory["build_cache"]:
         locator = record.get("ID")
@@ -1679,6 +1822,23 @@ def scan():
                     classification, references = "stale_candidate", ()
                 else:
                     classification, references = "unverified", ()
+                if is_workspace:
+                    workspace_kind, workspace_id, workspace_evidence, _workspace_protected = workspace_owner(
+                        workspace_projection, "runtime_instance", path.name,
+                    )
+                    if workspace_kind == "workspace":
+                        owner_kind, owner_id = workspace_kind, workspace_id
+                    elif workspace_kind == "unknown":
+                        owner_kind, owner_id = "unknown", None
+                        if classification == "stale_candidate":
+                            classification = "unverified"
+                        references = tuple(dict.fromkeys(
+                            tuple(references) + tuple(workspace_evidence),
+                        ))
+                    else:
+                        owner_kind, owner_id = "workspace", path.name
+                else:
+                    owner_kind, owner_id = "project", path.name
                 state, measured_size, error = size(path, resource_thorough)
                 if (
                     classification == "stale_candidate"
@@ -1687,7 +1847,7 @@ def scan():
                     classification = "unverified"
                 item = observation(
                     "worktree", str(path), path.name,
-                    "workspace" if is_workspace else "project", path.name,
+                    owner_kind, owner_id,
                     classification, state, measured_size,
                     measured_size if classification == "stale_candidate" else 0,
                     references,

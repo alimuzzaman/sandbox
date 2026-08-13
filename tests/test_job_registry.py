@@ -55,6 +55,19 @@ class JobRegistryTests(unittest.TestCase):
         reopened = self.repository()
         self.assertEqual(reopened.get(first["job_id"])["lifecycle"], "accepted")
 
+    def test_resource_index_exposes_exact_workspace_ownership_evidence(self):
+        from sandbox.jobs.registry import read_resource_index
+
+        repo = self.repository()
+        row, _ = repo.accept(submission())
+        indexed = read_resource_index(self.path)["jobs"]
+        self.assertEqual(len(indexed), 1)
+        self.assertEqual(indexed[0]["job_id"], row["job_id"])
+        self.assertEqual(indexed[0]["project_identity"], "project-1")
+        self.assertEqual(indexed[0]["project_root"], "/tmp/project")
+        self.assertEqual(indexed[0]["target_kind"], "local")
+        self.assertIsNone(indexed[0]["remote_name"])
+
     def test_heartbeat_updates_preserve_prior_observation_timestamps(self):
         repo = self.repository()
         row, _ = repo.accept(submission())

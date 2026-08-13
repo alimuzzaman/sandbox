@@ -72,7 +72,7 @@ BUILTIN_TOOL_NAMES = {
     "domains": ("domain_status", "domain_plan", "domain_apply", "domain_cleanup", "domain_support", "ingress_status", "ingress_support", "ingress_plan", "ingress_cleanup", "ingress_reconcile", "ingress_reconsider", "ingress_apply"),
     "runtime": ("instance_status", "instance_logs", "instance_exec",
                 "native_support", "native_preflight", "native_install_plan"),
-    "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy"),
+    "jobs": ("job_start", "job_matrix", "job_status", "job_list", "job_output", "job_follow", "job_metrics", "job_reconcile", "job_retention", "job_cancel", "job_artifacts", "job_artifact_get", "job_retry", "job_cleanup", "workspace_create", "workspace_list", "workspace_status", "workspace_reset", "workspace_destroy", "workspace_migration_plan", "workspace_migration_apply"),
     "wp": ("wp_cli", "wp_exec", "wp_rest", "run_tests", "wp_cli_async", "wp_cli_job", "wp_cli_job_kill"),
     "net": ("http_fetch", "pixelmatch_diff", "visit"),
     "data": ("db_query", "import_content", "snapshot", "wp_reset"),

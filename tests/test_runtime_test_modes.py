@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,11 +14,17 @@ class TestRuntimeTestModes(unittest.TestCase):
     def test_remote_wordpress_workspace_selection_builds_isolated_matrix_leaves(self):
         import sandbox.commands.debug as debug
 
-        target = SimpleNamespace(project_root="/fixture", remote_name="vps")
+        target = SimpleNamespace(project_root="/fixture", remote_name="vps",
+                                 sources={"identity": "project:fixture"})
         submissions = debug._remote_test_matrix_submissions(
             target, "integration", ["--filter", "Smoke"], ["wp-a", "wp-b"], 120, "smart")
         self.assertEqual([item.workspace_label for item in submissions], ["wp-a", "wp-b"])
         self.assertTrue(all(item.workspace_mode == "isolated" for item in submissions))
+        self.assertEqual({item.project_identity for item in submissions}, {"project:fixture"})
+        self.assertEqual(
+            {item.source.identity for item in submissions},
+            {"sha256:" + hashlib.sha256("/fixture".encode()).hexdigest()},
+        )
         self.assertTrue(all(item.argv == (
             "sb", "test", "--local", "--project-dir", ".", "integration", "--", "--filter", "Smoke")
             for item in submissions))

@@ -1,6 +1,6 @@
 {
   "name": "@alimuzzaman/sandbox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP-first, per-project WordPress dev/test stack — cd into a plugin, boot an instance, and run its phpunit tests with zero composer pollution.",
   "keywords": [
     "wordpress",

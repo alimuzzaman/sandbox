@@ -823,65 +823,158 @@ def managed_native_instance_selected(instance: str) -> tuple[str, str] | None:
     return str(root), label
 
 
-def _remote_workspace_control(resolved_target, action):
-    """Delegate one confirmed workspace lifecycle request to the remote CLI."""
-    import json
-    import shlex
+def _remote_workspace_control(resolved_target, action, request=None):
+    """Delegate workspace control by durable identity, never checkout lookup."""
     from sandbox.core import _remote
+    from sandbox.transports.remote_workspaces import RemoteWorkspaceTransport
 
     remote = _remote.get_remote(resolved_target.remote_name)
-    deployed = None
+    identity = (getattr(request, "project_identity", None)
+                or getattr(resolved_target, "sources", {}).get("identity"))
+    workspace_id = getattr(request, "workspace_id", None)
+    plan_id = getattr(request, "migration_plan_id", None)
+    confirm = bool(getattr(request, "confirm", False))
+
+    transport = RemoteWorkspaceTransport(
+        remote_lookup=lambda _name: remote,
+        ssh_run=_remote.ssh_run,
+        remote_sb_path=_remote.remote_sb_path,
+        timeout_seconds=60,
+    )
+    if action == "list":
+        return transport.list(
+            resolved_target.remote_name, project_identity=identity,
+            workspace_id=workspace_id,
+            limit=getattr(request, "limit", 50),
+            active_only=getattr(request, "active_only", False),
+        )
+    if action == "migration_plan":
+        return transport.migration_plan(
+            resolved_target.remote_name, identity,
+            inventory_digest=getattr(request, "inventory_digest", None),
+            index_generation=getattr(request, "index_generation", None),
+        )
+    if action == "migration_apply":
+        return transport.migration_apply(
+            resolved_target.remote_name, plan_id, confirm=confirm,
+            project_identity=identity,
+        )
     if action == "create":
         deployed = _remote.deploy_exact_working_tree(
             remote, resolved_target.project_root)
-        workspace_path = _remote.prepare_remote_workspace(
+        prepared_path = _remote.prepare_remote_workspace(
             remote, resolved_target.project_root,
             resolved_target.workspace_label,
-            deployed_path=deployed["target_path"])
-    else:
-        workspace_path = _remote.remote_workspace_path(
-            remote, resolved_target.project_root,
-            resolved_target.workspace_label)
-    sb = _remote.remote_sb_path(remote)
+            deployed_path=deployed["target_path"],
+        )
+        prepared = {
+            **deployed,
+            "source_checkout_locator": deployed["target_path"],
+            "target_path": prepared_path,
+        }
+        receipt = _remote.register_workspace_deployment_receipt(
+            remote, prepared, identity)
+        try:
+            payload = transport.create(
+                resolved_target.remote_name, identity,
+                resolved_target.workspace_label,
+                mode=getattr(request, "mode", "persistent"),
+                deployment_receipt=receipt,
+            )
+        except Exception as exc:
+            from sandbox.transports.remote_workspaces import RemoteWorkspaceError
+            raise RemoteWorkspaceError(
+                "workspace_create_indeterminate",
+                "exact tree was prepared but controller registration was not confirmed; retry with the same project and label",
+            ) from exc
+        return {**payload, "source": {
+            "commit": deployed.get("commit"),
+            "dirty": bool(deployed.get("dirty")),
+        }}
+
+    if workspace_id is None:
+        listing = transport.list(
+            resolved_target.remote_name, project_identity=identity)
+        matches = [item for item in listing.get("workspaces", ())
+                   if item.get("label") == resolved_target.workspace_label]
+        if len(matches) != 1 or not matches[0].get("workspace_id"):
+            if listing.get("ok") is False:
+                return listing
+            return {"ok": False, "code": "workspace_identity_ambiguous",
+                    "error": "workspace ID is required for remote lifecycle control"}
+        workspace_id = matches[0]["workspace_id"]
+    if action == "status":
+        return transport.status(
+            resolved_target.remote_name, workspace_id,
+            project_identity=identity)
     if action in {"reset", "destroy"}:
-        busy_command = shlex.join([
-            sb, "job-list", "--project-dir", workspace_path,
-            "--workspace", resolved_target.workspace_label,
-            "--active-only", "--json",
-        ])
-        busy_result = _remote.ssh_run(remote, busy_command, timeout=25)
-        busy_payload = next((
-            json.loads(line)
-            for line in reversed((busy_result.stdout or "").splitlines())
-            if line.startswith("{")
-        ), None)
-        if busy_result.returncode != 0 or not busy_payload:
-            raise RuntimeError("remote workspace activity check failed")
-        if busy_payload.get("jobs"):
-            raise RuntimeError(
-                f"workspace {resolved_target.workspace_label!r} "
-                "is busy with active remote jobs")
-    command_args = [
-        sb, "workspace", action, "--local", "--project-dir",
-        workspace_path, "--workspace", resolved_target.workspace_label,
-    ]
-    if action in {"reset", "destroy"}:
-        command_args.append("--confirm")
-    command_args.append("--json")
-    result = _remote.ssh_run(
-        remote, shlex.join(command_args), timeout=60)
-    payload = next((
-        json.loads(line)
-        for line in reversed((result.stdout or "").splitlines())
-        if line.startswith("{")
-    ), None)
-    if result.returncode != 0 or not payload:
-        detail = (result.stderr or result.stdout or "").strip().replace(
-            "\n", " ")[:500]
-        raise RuntimeError(
-            f"remote workspace control failed"
-            f"{': ' + detail if detail else ''}")
-    return {**payload, "source": deployed}
+        return getattr(transport, action)(
+            resolved_target.remote_name, workspace_id, confirm=confirm,
+            project_identity=identity)
+    raise RuntimeError(f"unsupported remote workspace action {action!r}")
+
+
+def _resolve_workspace_deployment_receipt(receipt_id: str, project_identity: str) -> dict:
+    """Resolve one owner-only exact-tree receipt without exposing its path."""
+    import json
+    import re
+    from sandbox.core._paths import RUNTIME_DIR
+
+    if not isinstance(receipt_id, str) or not re.fullmatch(
+            r"wdr_[0-9a-f]{64}", receipt_id):
+        raise RuntimeError("workspace deployment receipt is invalid")
+    root = RUNTIME_DIR / "workspaces" / "deployment-receipts"
+    path = root / f"{receipt_id}.json"
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("workspace deployment receipt was not found")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(payload, dict) or payload.get("schema_version") != 1 or
+            payload.get("receipt_id") != receipt_id or
+            payload.get("project_identity") != project_identity):
+        raise RuntimeError("workspace deployment receipt does not match the project")
+    locator = payload.get("checkout_locator")
+    if not isinstance(locator, str) or not locator:
+        raise RuntimeError("workspace deployment receipt has no checkout locator")
+    checkout = Path(locator).resolve(strict=False)
+    home = RUNTIME_DIR.parent.resolve(strict=False)
+    try:
+        checkout.relative_to(home / "deploy-src")
+    except ValueError as exc:
+        raise RuntimeError("workspace deployment receipt escapes deploy storage") from exc
+    if not checkout.is_dir() or checkout.is_symlink():
+        raise RuntimeError("workspace deployment receipt target is unavailable")
+    source_locator = payload.get("source_checkout_locator")
+    if not isinstance(source_locator, str) or not source_locator:
+        raise RuntimeError("workspace deployment receipt has no source checkout locator")
+    source_checkout = Path(source_locator).resolve(strict=False)
+    try:
+        source_checkout.relative_to(home / "deploy-src")
+    except ValueError as exc:
+        raise RuntimeError("workspace deployment source receipt escapes deploy storage") from exc
+    if (not source_checkout.is_dir() or source_checkout.is_symlink() or
+            source_checkout == checkout):
+        raise RuntimeError("workspace deployment source receipt is unavailable")
+    return {
+        "checkout_locator": str(checkout),
+        "source_checkout_locator": str(source_checkout),
+        "source_identity": payload.get("source_identity"),
+        "commit": payload.get("commit"),
+        "dirty_digest": payload.get("dirty_digest"),
+    }
+
+
+def workspace_ownership_projection() -> dict:
+    """Read the workspace ownership index without initialization or mutation."""
+    from sandbox.core._paths import RUNTIME_DIR
+    from sandbox.jobs.registry import read_resource_index
+    from sandbox.workspaces.repository import read_only_projection
+
+    return read_only_projection(
+        RUNTIME_DIR / "workspaces" / "index.sqlite3",
+        RUNTIME_DIR / "jobs" / "workspaces",
+        job_index_reader=lambda: read_resource_index(
+            RUNTIME_DIR / "jobs" / "registry.sqlite3"),
+    )
 
 
 def durable_job_dependencies():
@@ -900,6 +993,7 @@ def durable_job_dependencies():
     from sandbox.jobs.registry import JobRepository
     from sandbox.jobs.storage import JobStorage
     from sandbox.jobs.scheduler import JobScheduler
+    from sandbox.workspaces import WorkspaceRepository
 
     repository = JobRepository(RUNTIME_DIR / "jobs" / "registry.sqlite3")
     storage = JobStorage(RUNTIME_DIR)
@@ -915,11 +1009,35 @@ def durable_job_dependencies():
         config_loader=sc.load_project_config, remote_lookup=get_remote,
         remote_list=list_remotes)
     scheduler = JobScheduler(repository)
+    workspace_repository = WorkspaceRepository(
+        RUNTIME_DIR / "workspaces" / "index.sqlite3",
+        storage.root / "workspaces",
+        job_index_reader=lambda: __import__(
+            "sandbox.jobs.registry", fromlist=["read_resource_index"]
+        ).read_resource_index(repository.path),
+    )
+    workspace_repository.reconcile_startup()
+
+    def workspace_resource_bindings(submission):
+        entry = sc.registry_get(submission.project_root, label="default") or {}
+        instance = entry.get("instance")
+        if not isinstance(instance, str) or not instance:
+            return ()
+        return (
+            ("runtime_instance", instance),
+            ("compose_project", f"sandbox-{instance}"),
+        )
+
     workspace = WorkspaceService(
-        target, storage, _remote_workspace_control, scheduler)
+        target, storage, _remote_workspace_control, scheduler,
+        repository=workspace_repository,
+        resource_binding_resolver=workspace_resource_bindings,
+        deployment_receipt_resolver=_resolve_workspace_deployment_receipt,
+        deployment_root=RUNTIME_DIR.parent / "deploy-src")
     job = JobService(
         repository, storage, components, scheduler=scheduler,
         runtime_selector=managed_native_project_selected,
+        workspace_registry=workspace,
     )
     # A controller process may start after its host or a prior supervisor was
     # interrupted. Reconcile bounded active state before exposing services so

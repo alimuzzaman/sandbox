@@ -462,3 +462,42 @@ create/stop/destroy, active and foreign networks, collision, exhaustion and
 recovery, remote observation timeout, and top-level job-list decoding. All
 checks are read-only unless an already-authorized exact cleanup plan is under
 test; no broad prune or automatic retention deletion is implied.
+
+## Convergence amendment — 2026-08-13 (workspace index ownership projection)
+
+Resource monitoring must remain a typed consumer of durable workspace ownership. This
+amendment closes the workspace metadata/index boundary without making resource monitoring
+an owner of workspace migration or authorizing network cleanup.
+
+### Normative requirements
+
+- **WM-FR-001**: Workspace resources MUST be attributed through a typed projection keyed
+  by opaque `workspace_id` and `project_identity`; resource providers MUST NOT open
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` or legacy `workspace.json` files.
+- **WM-FR-002**: A projection MUST include workspace label, owner kind, lifecycle state,
+  alias evidence, active lease/container/job references, locator/evidence digests, and
+  observation time. Paths and names alone MUST NOT establish ownership.
+- **WM-FR-003**: Missing, unresolved, conflicting, duplicate, stale, or generation-drifted
+  workspace bindings MUST produce explicit unknown/indeterminate evidence and zero
+  reclaimable bytes; an empty/incomplete workspace index MUST surface
+  `workspace_index_incomplete` rather than an empty-success resource status.
+- **WM-FR-004**: Resource status, plan, and apply MUST consume one projection and one
+  lifecycle model. Alias collisions, duplicate owner bindings, active references, and
+  foreign/unknown networks MUST remain exclusions across rescans; monitoring MUST not
+  repair ownership by guessing or by mutating workspace metadata.
+- **WM-FR-005**: Workspace metadata migration or base relocation MUST be observable as
+  metadata-only. It MUST not change network, container, job, volume, upload, snapshot, or
+  project-file counts and MUST not create a cleanup candidate merely because a locator
+  moved.
+- **WM-FR-006**: Remote resource status MUST obtain the projection through the supported
+  workspace/job service and strict top-level job-list decoder. A remote timeout, stale
+  generation, or unavailable index yields bounded partial evidence and requires a fresh
+  rescan before planning or apply.
+
+### Acceptance evidence required before closing this amendment
+
+Fixtures MUST cover complete, missing, unresolved, conflicting, duplicate, stale, and
+relocated workspace bindings; active/foreign/indeterminate network references; and remote
+partial results. Checks must prove no direct SQLite/legacy JSON consumer and unchanged
+resource counts across a metadata-only migration. No broad prune, network release, reset,
+or destroy is implied.

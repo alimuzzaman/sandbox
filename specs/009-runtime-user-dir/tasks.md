@@ -210,3 +210,37 @@ PHP extension feature; they do not claim that the feature is implemented.
 - [ ] T037 Add CLI/MCP parity and redaction tests for extension cache/provenance status;
   output MUST contain no secrets or private source contents and MUST remain safe when
   an entry is missing, stale, or discarded.
+
+## Phase 10: Convergence — durable workspace metadata/index (2026-08-13)
+
+These tasks extend the existing base migration and do not create a new Spec Kit feature
+or authorize cleanup, reset, destroy, or network release. Completion marks reflect only
+the implementation and evidence actually present in this branch.
+
+- [X] T038 Add the owner-only, versioned SQLite workspace repository at
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` with WAL, foreign keys, bounded busy
+  handling, schema migrations, opaque IDs, and unique `(project_identity, label)`; add
+  initialization/idempotency/rollback/concurrency tests.
+- [X] T039 Add exact-depth legacy discovery for
+  `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json`; reject symlinks,
+  path escapes, oversized/malformed records, and inconsistent namespace/label evidence;
+  preserve every source byte-for-byte and test adopted, unresolved, conflict, and invalid
+  decisions from exact job/project evidence.
+- [X] T040 Add immutable migration plans bound to target identity, complete inventory
+  digest, index generation, candidate decisions, and expiry; implement lock-serialized
+  rescan/apply and fail-closed `workspace_migration_plan_stale`/
+  `workspace_ownership_drift` tests.
+- [X] T041 Route workspace lifecycle writes through the repository/service with explicit
+  provisioning/ready/resetting/destroying/destroyed/indeterminate states, per-workspace
+  busy locks, startup reconciliation, and no automatic destructive retry.
+- [ ] T042 Add relocation tests proving the index and pure metadata move safely while
+  legacy `workspace.json`, project files, uploads, snapshots, database volumes, and
+  network/container/job counts remain unchanged; regenerate only path-bearing locators.
+- [X] T043 Add incomplete-index, missing-checkout, alias-collision, and duplicate-owner
+  tests so list/status never false-empty and always expose stable safe error codes.
+- [X] T044 Add typed workspace-resource binding/projection fixtures and CLI/MCP/resource
+  consumer boundary tests proving no caller opens the SQLite index or legacy JSON directly
+  and no migration path performs cleanup or network release.
+- [ ] T045 Run the isolated migration quickstart and record read-only before/after
+  inventory, byte-preservation, relocation, and protected-resource evidence; leave
+  unresolved/conflict cases visible for explicit operator review.

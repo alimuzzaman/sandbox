@@ -1,6 +1,7 @@
 """MCP target-input parity for durable remote-first job operations."""
 
 import importlib.util
+import hashlib
 import sys
 import types
 import unittest
@@ -28,8 +29,10 @@ class RemoteFirstMcpTests(unittest.TestCase):
         module = _load_jobs_tool()
         requests = []
         module._target_service = SimpleNamespace(resolve=lambda request: requests.append(request) or SimpleNamespace(
-            kind="remote", project_root="/project", remote_name="vps", workspace_label="default"))
-        transport = SimpleNamespace(submit=lambda submission: {
+            kind="remote", project_root="/project", remote_name="vps", workspace_label="default",
+            sources={"identity": "project:remote"}))
+        submissions = []
+        transport = SimpleNamespace(submit=lambda submission: submissions.append(submission) or {
             "job_id": "a" * 32, "target": submission.target_kind,
             "remote": submission.remote_name, "workspace": submission.workspace_label,
         })
@@ -39,6 +42,11 @@ class RemoteFirstMcpTests(unittest.TestCase):
         self.assertEqual(result["workspace"], "default")
         self.assertFalse(requests[0].local)
         self.assertIsNone(requests[0].remote)
+        self.assertEqual(submissions[0].project_identity, "project:remote")
+        self.assertEqual(
+            submissions[0].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
 
     def test_unknown_target_is_reported_without_submission(self):
         module = _load_jobs_tool()

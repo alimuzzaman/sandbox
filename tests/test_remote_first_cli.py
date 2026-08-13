@@ -1,6 +1,7 @@
 """CLI regression coverage for remote-first target selection."""
 
 import json
+import hashlib
 import subprocess
 import unittest
 from io import StringIO
@@ -24,6 +25,7 @@ class RemoteFirstCliTests(unittest.TestCase):
 
     def test_configured_remote_uses_durable_transport_without_explicit_flag(self):
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="vps",
+                                 sources={"identity": "project:remote"},
                                  workspace_label="default", runtime_policy={
                                      "outputProfiles": {"agent": {"mode": "errors"}},
                                  })
@@ -44,6 +46,11 @@ class RemoteFirstCliTests(unittest.TestCase):
             cmd_exec(None, self._args(output_profile="agent"))
         self.assertEqual(json.loads(output.getvalue())["remote"], "vps")
         self.assertEqual(submissions[0].output_profile_definition, {"mode": "errors"})
+        self.assertEqual(submissions[0].project_identity, "project:remote")
+        self.assertEqual(
+            submissions[0].source.identity,
+            "sha256:" + hashlib.sha256("/project".encode()).hexdigest(),
+        )
 
     def test_explicit_local_does_not_resolve_the_configured_remote(self):
         accepted = {"job_id": "b" * 32}
@@ -53,7 +60,8 @@ class RemoteFirstCliTests(unittest.TestCase):
             read_output=lambda _job_id: {"data": "ok\n"},
         )
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: SimpleNamespace(
-            kind="local", project_root="/project", remote_name=None, workspace_label="default")),
+            kind="local", project_root="/project", remote_name=None, workspace_label="default",
+            sources={"identity": "project:local"})),
             "job_service": local_service}
         output = StringIO()
         with patch("sandbox.application.context.durable_job_dependencies", return_value=dependencies), \
@@ -63,6 +71,7 @@ class RemoteFirstCliTests(unittest.TestCase):
 
     def test_explicit_named_remote_is_forwarded_to_the_shared_target_resolver(self):
         target = SimpleNamespace(kind="remote", project_root="/project", remote_name="named-vps",
+                                 sources={"identity": "project:named"},
                                  workspace_label="qa", runtime_policy={})
         requests = []
         dependencies = {"target_service": SimpleNamespace(
@@ -117,6 +126,7 @@ class RemoteFirstCliTests(unittest.TestCase):
         accepted = {"job_id": "c" * 32, "target": {"kind": "local", "remote": None},
                     "workspace": "unit", "deadline": {"seconds": 120, "source": "explicit"}}
         target = SimpleNamespace(kind="local", project_root="/project", remote_name=None,
+                                 sources={"identity": "project:local"},
                                  workspace_label="unit", runtime_policy={})
         dependencies = {"target_service": SimpleNamespace(resolve=lambda _request: target),
                         "job_service": SimpleNamespace(submit=lambda _submission: accepted)}

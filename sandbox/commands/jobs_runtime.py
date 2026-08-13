@@ -26,22 +26,27 @@ def _die(message: str) -> None:
 def _source_identity(root: str) -> SourceIdentity:
     # Local execution still has an identity. Remote submission replaces this with
     # the deploy identity returned by the deployment transport before acceptance.
-    return SourceIdentity("sha256:" + hashlib.sha256(str(Path(root)).encode()).hexdigest())
+    canonical_root = str(Path(root).expanduser().resolve())
+    return SourceIdentity("sha256:" + hashlib.sha256(canonical_root.encode()).hexdigest())
 
 
-def _target_project_identity(target, fallback_root: str | None = None) -> str:
-    """Use the resolver's canonical identity, with a legacy path fallback.
+def _resolved_project_identity(target) -> str:
+    """Return only the resolver-owned canonical project identity.
 
-    Detached controllers must receive the identity selected by the target
-    resolver; hashing the controller's staged checkout path would make a
-    remote job invisible to a client listing the originating project.
+    A source-root digest is intentionally not a project identity fallback: the
+    same project can be submitted from a staged checkout whose path differs
+    from the caller's canonical root.  Detached nested controllers may pass an
+    explicit identity separately, but every producer that has a resolved target
+    must use this value for ``JobSubmission.project_identity``.
     """
-    sources = getattr(target, "sources", {}) or {}
-    identity = sources.get("identity") if isinstance(sources, dict) else None
-    if isinstance(identity, str) and identity.strip():
-        return identity
-    root = getattr(target, "project_root", None) or fallback_root
-    return hashlib.sha256(str(Path(root).expanduser().resolve()).encode()).hexdigest()
+    try:
+        value = target.project_identity
+    except (AttributeError, ValueError):
+        sources = getattr(target, "sources", None)
+        value = sources.get("identity") if isinstance(sources, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("resolved target has no canonical project identity")
+    return value
 
 
 def _download_artifact_file(destination: str | Path, metadata: dict, fetch) -> dict:
@@ -161,6 +166,9 @@ def configure_list_parser(parser) -> None:
     project.add_argument("--project-identity", help=argparse.SUPPRESS)
     parser.add_argument("--workspace")
     parser.add_argument("--active-only", action="store_true")
+    parser.add_argument("--lifecycle", help=argparse.SUPPRESS)
+    parser.add_argument("--kind", help=argparse.SUPPRESS)
+    parser.add_argument("--cursor-job-id", help=argparse.SUPPRESS)
     parser.add_argument("--remote")
     parser.add_argument("--json", action="store_true")
 
@@ -263,21 +271,13 @@ def cmd_job_start(_cfg, args) -> None:
         _die(f"{exc.code}: {exc}")
     timeout, profile = _profile_timeout(target, getattr(args, "profile", "exec"),
                                         getattr(args, "timeout", None))
-    target_sources = getattr(target, "sources", {}) or {}
-    resolved_source_identity = (
-        target_sources.get("identity")
-        if isinstance(target_sources, dict) else None
-    )
     source = SourceIdentity(
-        getattr(args, "source_identity", None) or resolved_source_identity
+        getattr(args, "source_identity", None)
         or _source_identity(target.project_root).identity,
         getattr(args, "source_commit", None),
         getattr(args, "source_dirty_digest", None),
     )
-    project_identity = (
-        getattr(args, "project_identity", None)
-        or _target_project_identity(target, target.project_root)
-    )
+    project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     output_profile = getattr(args, "output_profile", "smart")
     submission = JobSubmission(
         kind="exec", project_root=target.project_root, project_identity=project_identity,
@@ -392,6 +392,9 @@ def cmd_job_list(_cfg, args) -> None:
         )
     workspace = getattr(args, "workspace", None)
     active_only = getattr(args, "active_only", False)
+    lifecycle = getattr(args, "lifecycle", None)
+    category = getattr(args, "kind", None)
+    cursor_job_id = getattr(args, "cursor_job_id", None)
     limit = getattr(args, "limit", 50)
     dependencies = durable_job_dependencies()
     project_identity = explicit_identity
@@ -403,25 +406,39 @@ def cmd_job_list(_cfg, args) -> None:
                     project_dir, local=not bool(remote_name), remote=remote_name,
                     workspace=workspace,
                 ))
-                project_identity = _target_project_identity(target, project_dir)
+                project_identity = _resolved_project_identity(target)
             except TargetResolutionError as exc:
                 _die(f"{exc.code}: {exc}")
         else:
-            project_identity = hashlib.sha256(
-                str(Path(project_dir).expanduser().resolve()).encode()).hexdigest()
+            _die("workspace_identity_unavailable: canonical target resolver is unavailable")
     if remote_name:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
+        list_options = {
+            "limit": limit, "project_identity": project_identity,
+            "workspace": workspace, "active_only": active_only,
+        }
+        if lifecycle:
+            list_options["lifecycle"] = lifecycle
+        if category:
+            list_options["kind"] = category
+        if cursor_job_id:
+            list_options["cursor_job_id"] = cursor_job_id
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
-            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(remote_name, limit=limit,
-                project_identity=project_identity,
-                workspace=workspace, active_only=active_only)
+            remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(
+                remote_name, **list_options)
     else:
         query = {"limit": limit}
         if project_identity:
             query["project_identity"] = project_identity
         if workspace:
             query["workspace_label"] = workspace
+        if lifecycle:
+            query["lifecycle"] = lifecycle
+        if category:
+            query["kind"] = category
+        if cursor_job_id:
+            query["cursor_job_id"] = cursor_job_id
         result = dependencies["job_service"].list(query)
     # The application service returns a list while remote control returns a
     # bounded JobPage object. Normalize both at this adapter boundary so the
@@ -619,10 +636,7 @@ def cmd_declared_test_plan(_cfg, args) -> None:
     if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or not 1 <= max_parallel <= 64:
         _die(f"declared test plan {args.plan!r} has an invalid maxParallel")
     source = _source_identity(target.project_root)
-    project_identity = (
-        getattr(args, "project_identity", None)
-        or _target_project_identity(target, target.project_root)
-    )
+    project_identity = getattr(args, "project_identity", None) or _resolved_project_identity(target)
     submissions = []
     for index, step in enumerate(raw_steps):
         argv = step.get("argv")
@@ -693,7 +707,7 @@ def cmd_job_matrix(_cfg, args) -> None:
     except TargetResolutionError as exc:
         _die(f"{exc.code}: {exc}")
     source = _source_identity(target.project_root)
-    project_identity = hashlib.sha256(target.project_root.encode()).hexdigest()
+    project_identity = _resolved_project_identity(target)
     if args.spec_json:
         try:
             decoded = base64.b64decode(args.spec_json.encode(), validate=True).decode()

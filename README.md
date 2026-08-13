@@ -371,12 +371,23 @@ verbosity; the complete sealed log remains available for later retrieval.
 ./sb job-output <job-id> --follow
 ./sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 ./sb workspace create --local --workspace node-unit
+./sb workspace list --remote scaleway-sandbox --project-identity <id> --json
+./sb workspace migrate --remote scaleway-sandbox --project-identity <id> --json
+# Apply only the exact unexpired metadata-only plan after reviewing all records:
+./sb workspace migrate --remote scaleway-sandbox --plan-id <plan-id> --confirm --json
 ./sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 ./sb test matrix --remote scaleway-sandbox --plan verify --timeout 1800 --json
 ./sb ci run .github/workflows/tests.yml --remote scaleway-sandbox --timeout 3600 --json
 ./sb job-artifact-get <child-job-id> <artifact-id> --remote scaleway-sandbox \
   --output-file tmp/report.tar
 ```
+
+Workspace control is backed by an owner-only durable index under
+`$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. Remote list/status use project or
+workspace identity rather than a deployed checkout path. Legacy `workspace.json`
+files remain byte-preserved; ambiguous, malformed, or unattributed records return
+`workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
+and never resets/destroys a workspace or removes a Docker network.
 
 Remote CI is a durable parent/child submission. Sandbox preflights the workflow
 and blocks named incompatibilities until explicitly accepted, deploys the exact

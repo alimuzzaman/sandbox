@@ -7,6 +7,7 @@
 - **Bug / error / "X doesn't work" →** reproduce on the live stack first (`wp_cli`, `wp_rest`, `visit`, `tail_log`, `wp_exec`, `db_query`). Can't reproduce → `STATUS: BLOCKED`. Once reproduced, `load_skill('fix')`.
 - **Anything runtime-touching →** `./sb` first. Use `./sb wp`, `./sb exec`, `./sb status`, and `./sb logs`; never substitute raw Docker, curl, or mysql.
 - **Long-running development/tests →** use durable jobs with finite `--timeout`. When configured, remote is the recommended default; use `--local` deliberately. Do not stream child stdio over SSH/MCP—use `job-status` and bounded `job-output` reads after detached submission.
+- **Workspace inventory/migration →** use durable `workspace_id`/`project_identity` controls. A migration is metadata-only and plan-bound; unresolved/conflicting legacy records must remain visible and never authorize reset, destroy, or network cleanup.
 - **Browser-rendered bug (JS, Gutenberg, Elementor) →** `visit` (auto-logs in on `/wp-admin/`).
 - **About to mutate DB / migrate / touch licensing →** `./sb snapshot <name>` first.
 - **"Add" / "build" / "implement" →** follow the applicable local skill; use MCP workflow loading only when that integration is active.
@@ -18,6 +19,8 @@
 ## Non-negotiable rules
 
 **Git & shipping — hard branch rule.** `main` is read-only: agents must never switch to it for work, commit on it, push to it, or merge into it. Do all work on `latest` or a feature branch. Feature branches may be merged only into `latest`; never create, prepare, or merge a PR targeting `main`. After required checks pass, agents must `git commit` and `git push` the relevant completed work to the active non-`main` branch automatically. Force-pushes, tags, releases, deployments, PR creation, and PR merges still require explicit approval. Push new branches with `-u origin <branch>`. No emojis in code or commit messages.
+
+**Version/revision hygiene.** Check the local Git revision and installed remote Sandbox revision before remote jobs, workspace control, or deployment, and recheck them at least weekly while a remote is in active use. Any public CLI/MCP option, wire envelope, schema, or controller behavior change must carry updated release/revision evidence and matching docs/tests. After the branch passes its required gates, update the remote only through the supported Sandbox lifecycle command and independently verify the installed revision before relying on the new protocol; never work around client/controller skew with raw SSH edits.
 
 **Backup reference point.** `original-reference` branch = commit `f3f36330feab8906ac04e7226abb0a094a9d1039`. If deleted: `git branch original-reference f3f36330feab8906ac04e7226abb0a094a9d1039`. Never rewrite this point.
 

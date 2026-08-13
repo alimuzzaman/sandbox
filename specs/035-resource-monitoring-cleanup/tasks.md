@@ -322,3 +322,30 @@ T001-T044.
 - [x] T050 [US1/US6] Add the `6bc4c6d5` consumer regression proving resource
   monitoring uses the Spec 032 top-level job-list decoder and rejects a nested
   `.data` response without changing network state.
+
+## Phase 11: Convergence — workspace index ownership projection (2026-08-13)
+
+These tasks add typed consumption of the workspace index and do not authorize cleanup,
+reset, destroy, network release, or broad prune. Completion marks reflect only the
+implementation and evidence actually present in this branch.
+
+- [X] T051 [US1/US2] Define the typed workspace resource binding/projection keyed by
+  opaque `workspace_id` and `project_identity`, including lifecycle, alias/evidence
+  digests, active references, index generation, completeness, and bounded errors.
+- [X] T052 [US1/US2] Add complete/missing/unresolved/conflict/invalid/duplicate/stale
+  workspace-index fixtures; prove unknown/indeterminate classifications, zero
+  reclaimable bytes, and `workspace_index_incomplete`/`workspace_ownership_drift` errors.
+- [X] T053 [US1/US5] Route local/remote resource providers through the typed projection
+  and shared Spec 032 top-level job-list decoder; add boundary tests proving no direct
+  SQLite or legacy `workspace.json` consumer exists.
+- [X] T054 [US1/US3/US5] Add network/resource lifecycle tests proving a moved checkout or
+  metadata locator does not release an active network and active/foreign/unknown aliases
+  remain exclusions across rescan and plan/apply.
+- [X] T055 [US6] Add CLI/MCP parity tests for checkout-independent workspace identity,
+  incomplete index, alias collision, generation drift, remote timeout, and fresh-rescan
+  requirements before planning.
+- [ ] T056 [US1/US2] Record read-only before/after evidence for metadata migration and
+  base relocation showing unchanged network/container/job/volume/upload/snapshot counts
+  and no cleanup mutation.
+- [X] T057 [US1/US2/US6] Update resource status/plan quickstart and operator guidance to
+  keep unresolved ownership visible and forbid guessing from labels, paths, or age.

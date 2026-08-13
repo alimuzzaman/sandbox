@@ -224,3 +224,36 @@ Reset/destroy refuse to run while the workspace has active jobs. Job cleanup is 
 
 Production deployment, release publishing, and destructive cleanup outside the named
 job/workspace remain outside this workflow.
+
+## 13. Durable workspace metadata/index migration
+
+Use a disposable project identity and isolated base for this metadata-only check. The
+remote controls below intentionally omit `--project-dir` and do not run reset, destroy,
+cleanup, deploy, or network release.
+
+```bash
+export SANDBOX_HOME="$(mktemp -d)/sandbox"
+./sb workspace migrate --remote scaleway-sandbox --project-identity PROJECT_ID --json
+./sb workspace migrate --remote scaleway-sandbox --plan-id PLAN_ID --confirm --json
+./sb workspace list --remote scaleway-sandbox --project-identity PROJECT_ID --json
+./sb workspace status --remote scaleway-sandbox --workspace-id WORKSPACE_ID --json
+```
+
+Expected:
+
+- the plan includes an opaque plan ID, complete legacy inventory digest, index generation,
+  expiry, and one adopted/unresolved/conflict/invalid decision per source;
+- the remote index is `$SANDBOX_HOME/runtime/workspaces/index.sqlite3` on that host and
+  the legacy `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` bytes
+  are unchanged;
+- list/status reports `workspace_index_incomplete` rather than silently returning empty
+  when relevant legacy records remain unresolved, and status by workspace ID works when
+  the checkout locator is absent;
+- modified inventory or index generation fails closed with
+  `workspace_migration_plan_stale` and does not partially adopt rows;
+- relocation changes only index/locator paths and leaves project files, uploads, snapshots,
+  database volumes, jobs, containers, and networks unchanged;
+- resource status receives typed workspace ownership and does not open the index.
+
+Repeat the plan/apply operation to verify idempotency. Keep unresolved/conflict decisions
+visible for explicit operator review; never resolve them from names, age, or a path alone.

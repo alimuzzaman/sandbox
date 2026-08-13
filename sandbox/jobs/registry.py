@@ -51,8 +51,9 @@ def read_resource_index(path: str | Path) -> dict[str, list[dict[str, Any]]]:
     try:
         jobs = [
             dict(row) for row in connection.execute(
-                "SELECT job_id, project_root, lifecycle, workspace_label, "
-                "workspace_mode, cleanup_policy, cleanup_state, finished_at "
+                "SELECT job_id, project_root, project_identity, target_kind, "
+                "remote_name, lifecycle, workspace_label, workspace_mode, "
+                "cleanup_policy, cleanup_state, finished_at "
                 "FROM jobs ORDER BY job_id LIMIT 10000"
             )
         ]
@@ -460,7 +461,9 @@ class JobRepository:
         return value if isinstance(value, dict) and value.get("version") == 1 else None
 
     def list(self, *, limit: int = 50, project_identity: str | None = None,
-             workspace_label: str | None = None) -> list[dict[str, Any]]:
+             workspace_label: str | None = None, lifecycle: str | None = None,
+             kind: str | None = None,
+             cursor_job_id: str | None = None) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
             raise ValueError("job list limit must be between 1 and 200")
         clauses = []
@@ -471,6 +474,23 @@ class JobRepository:
         if workspace_label is not None:
             clauses.append("workspace_label=?")
             values.append(workspace_label)
+        if lifecycle is not None:
+            clauses.append("lifecycle=?")
+            values.append(lifecycle)
+        category = kind
+        if category is not None:
+            clauses.append("kind=?")
+            values.append(category)
+        if cursor_job_id is not None:
+            validate_job_id(cursor_job_id)
+            cursor = self.connection.execute(
+                "SELECT accepted_at,job_id FROM jobs WHERE job_id=?",
+                (cursor_job_id,),
+            ).fetchone()
+            if cursor is None:
+                raise ValueError("job list cursor is stale")
+            clauses.append("(accepted_at < ? OR (accepted_at = ? AND job_id < ?))")
+            values.extend((cursor["accepted_at"], cursor["accepted_at"], cursor["job_id"]))
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = self.connection.execute(
             f"SELECT * FROM jobs{where} ORDER BY accepted_at DESC, job_id DESC LIMIT ?",

@@ -171,6 +171,54 @@ def deploy_exact_working_tree(
             "source_immutable": resolved_source is not None}
 
 
+def register_workspace_deployment_receipt(
+    remote: dict, deployed: dict, project_identity: str,
+) -> str:
+    """Persist an opaque remote-side receipt for one exact deployed tree.
+
+    Workspace control receives only the receipt ID.  The protected target path
+    stays inside the deployment adapter and the remote controller's owner-only
+    receipt store; it is never serialized as a workspace CLI argument.
+    """
+    import base64
+    import shlex
+
+    target = deployed.get("target_path")
+    commit = deployed.get("commit")
+    source_identity = deployed.get("identity")
+    if not all(isinstance(item, str) and item for item in (
+            target, commit, source_identity, project_identity)):
+        raise RuntimeError("exact deployment did not produce a registerable receipt")
+    receipt_id = "wdr_" + hashlib.sha256(
+        f"{project_identity}\0{source_identity}\0{target}".encode()
+    ).hexdigest()
+    payload = json.dumps({
+        "schema_version": 1,
+        "receipt_id": receipt_id,
+        "project_identity": project_identity,
+        "checkout_locator": target,
+        "source_checkout_locator": deployed.get("source_checkout_locator"),
+        "source_identity": source_identity,
+        "commit": commit,
+        "dirty_digest": deployed.get("dirty_digest"),
+    }, sort_keys=True, separators=(",", ":")).encode()
+    encoded = base64.b64encode(payload).decode("ascii")
+    receipt_root = resolve_sandbox_home(remote) + "/runtime/workspaces/deployment-receipts"
+    program = (
+        "import base64,os,pathlib,sys,tempfile;"
+        "root=pathlib.Path(sys.argv[1]);rid=sys.argv[2];data=base64.b64decode(sys.argv[3]);"
+        "root.mkdir(parents=True,exist_ok=True,mode=0o700);os.chmod(root,0o700);"
+        "fd,tmp=tempfile.mkstemp(prefix='.'+rid+'.',dir=root);os.fchmod(fd,0o600);"
+        "f=os.fdopen(fd,'wb');f.write(data);f.flush();os.fsync(f.fileno());f.close();"
+        "os.replace(tmp,root/(rid+'.json'))"
+    )
+    command = shlex.join(["python3", "-c", program, receipt_root, receipt_id, encoded])
+    result = ssh_run(remote, command, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError("could not persist exact deployment receipt")
+    return receipt_id
+
+
 def put_remote(name: str, **fields) -> dict:
     """Insert or update one remote's entry. Idempotent by design -- re-adding
     an existing name updates it rather than erroring (spec FR-005's

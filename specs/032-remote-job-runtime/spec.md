@@ -220,3 +220,55 @@ The job acceptance matrix MUST exercise local and remote submission, immediate
 ID visibility, control by that ID after reconnect, guide-resolved proof checkout,
 and both accepted and failed acknowledgements. Each case records its feedback ID,
 request/transport identity, and safe terminal evidence without credentials.
+
+## Convergence amendment — 2026-08-13 (durable workspace metadata/index)
+
+This amendment makes workspace identity durable across remote checkout relocation and
+legacy metadata migration. It preserves the existing job contracts and does not authorize
+workspace cleanup, reset, destroy, or network release as part of indexing.
+
+### Normative requirements
+
+- **FR-046**: A workspace MUST be represented by an opaque durable `workspace_id` and
+  an owner tuple `(project_identity, workspace_label)` that is unique on each execution
+  host. Checkout paths, legacy namespaces, Compose projects, and runtime instance names
+  are aliases/locators only and MUST NOT be used as control identity.
+- **FR-047**: The host MUST expose a versioned workspace repository at
+  `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`; its rows, aliases, migration audit,
+  resource bindings, and generation MUST be transactionally durable and owner-only. Job,
+  lease, resource, and MCP consumers MUST use typed service interfaces rather than open
+  the database or legacy JSON directly.
+- **FR-048**: Existing legacy metadata at
+  `runtime/jobs/workspaces/<legacy-namespace>/<label>/workspace.json` MUST remain
+  byte-identical. Discovery MUST use exact job `project_root`/namespace evidence and a
+  single distinct `project_identity`; names, age, directory order, or ambiguous aliases
+  MUST never auto-adopt a record.
+- **FR-049**: Migration MUST persist `adopted`, `unresolved`, `conflict`, or `invalid`
+  decisions, with safe evidence/reasons, and MUST return `workspace_index_incomplete` if
+  relevant legacy records remain unresolved. An empty index MUST NOT produce an empty or
+  false “workspace not found” response.
+- **FR-050**: Plan/apply MUST bind target project identity, complete legacy inventory
+  digest, current index generation, immutable plan ID, and expiry. Apply MUST acquire the
+  migration/per-workspace locks, rescan, reject drift with
+  `workspace_migration_plan_stale` or `workspace_ownership_drift`, and adopt rows in one
+  transaction. It MUST be idempotent and MUST perform no cleanup or network release.
+- **FR-051**: Workspace lifecycle state MUST be explicit (`provisioning`, `ready`,
+  `resetting`, `destroying`, `destroyed`, or `indeterminate`). Remote create MUST register
+  the exact deployed tree and identity after successful preparation; reset/destroy MUST
+  require an opaque workspace ID, confirmation, and a busy lock. Startup MUST mark
+  unfinished destructive operations `indeterminate` rather than retrying them.
+- **FR-052**: Remote workspace list/status/migrate operations MUST work with
+  `project_identity` and/or `workspace_id` and MUST NOT require a local checkout path.
+  Missing checkout locators MUST not prevent status/list by ID, while ambiguous aliases
+  fail closed with `workspace_identity_ambiguous` or `workspace_alias_collision`.
+- **FR-053**: Resource monitoring MUST consume a typed workspace ownership projection
+  keyed by `workspace_id` and MUST classify duplicate or stale bindings as unknown/
+  indeterminate; it MUST not infer ownership from path or network names.
+
+### Acceptance evidence required before closing this amendment
+
+The workspace matrix MUST prove index initialization/retry, exact legacy adoption,
+unresolved/conflict/invalid records, alias collisions, missing checkouts, plan digest or
+generation drift, lock contention, remote control without project-dir, and relocation with
+unchanged job/container/network counts. No cleanup or destructive lifecycle action is
+implied by these checks.

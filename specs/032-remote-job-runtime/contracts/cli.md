@@ -151,3 +151,23 @@ All JSON responses include `ok`, stable error `code`, and safe `message` when ap
 - Existing `sb exec -- <argv>` remains local unless project runtime configuration
   explicitly selects remote; `--local` always forces local.
 
+## Workspace metadata/index controls (convergence)
+
+Workspace discovery and control use durable identity rather than checkout paths:
+
+```text
+sb workspace list --remote NAME --project-identity ID [--json]
+sb workspace status --remote NAME --workspace-id ID [--json]
+sb workspace migrate --remote NAME --project-identity ID [--json]
+sb workspace migrate --remote NAME --plan-id PLAN_ID --confirm [--json]
+sb workspace reset --remote NAME --workspace-id ID --confirm [--json]
+sb workspace destroy --remote NAME --workspace-id ID --confirm [--json]
+```
+
+`--project-dir` is not required or accepted for these remote controls. A migration plan
+is read-only until `--confirm` is supplied with its exact plan ID; apply rechecks the
+inventory digest and index generation. Status/list by workspace ID remain valid when a
+checkout locator is missing. Stable failures include `workspace_index_incomplete`,
+`workspace_identity_ambiguous`, `workspace_alias_collision`, `workspace_busy`,
+`workspace_migration_plan_stale`, and `workspace_ownership_drift`. Index migration is
+metadata-only and never performs cleanup or network release.

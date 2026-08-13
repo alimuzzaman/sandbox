@@ -87,6 +87,8 @@ sb job-status <job-id> --json
 sb job-output <job-id> --follow
 sb job-output <job-id> --stream stderr --tail-bytes 8192 --wait-seconds 2
 sb workspace create --remote scaleway-sandbox --workspace node-unit
+sb workspace list --remote scaleway-sandbox --project-identity <id> --json
+sb workspace migrate --remote scaleway-sandbox --project-identity <id> --json
 sb test matrix --local --workspace node-20 --workspace node-22 --timeout 3600 -- npm test
 sb test matrix --remote scaleway-sandbox --plan verify --timeout 1800 --json
 ```
@@ -123,6 +125,13 @@ the developer workstation, and prevents a remote-first project from
 recursively selecting its named remote again. The controller's internal
 `--in-instance` execution then runs directly in the declared Compose service,
 so the project's pinned container image remains authoritative.
+
+Workspace list/status and migration controls are identity-based; never reconstruct a
+retired remote checkout as `--project-dir`. Review a migration plan before repeating
+it with `--plan-id ID --confirm`. Migration writes only the durable workspace index and
+preserves every legacy `workspace.json` byte. Treat `workspace_index_incomplete`,
+conflicts, and invalid records as operator-visible blockers; never turn them into an
+empty list or use them as cleanup authority.
 
 ## Remote CI workflows
 

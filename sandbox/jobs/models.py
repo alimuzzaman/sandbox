@@ -253,11 +253,23 @@ class SourceIdentity:
 
 @dataclass(frozen=True)
 class TargetRequest:
-    project_dir: str
+    project_dir: str = "."
     local: bool = False
     remote: str | None = None
     workspace: str | None = None
     required_capability: str | None = None
+    project_identity: str | None = None
+    workspace_id: str | None = None
+    migration_plan_id: str | None = None
+    confirm: bool = False
+    expected_legacy_namespace: str | None = None
+    checkout_locator: str | None = None
+    deployment_receipt: str | None = None
+    inventory_digest: str | None = None
+    index_generation: int | None = None
+    limit: int = 50
+    active_only: bool = False
+    mode: str = "persistent"
 
     def __post_init__(self) -> None:
         _safe_text(self.project_dir, "project directory")
@@ -269,6 +281,28 @@ class TargetRequest:
             _safe_name(self.workspace, "workspace label")
         if self.required_capability is not None:
             _safe_text(self.required_capability, "required capability")
+        for value, label in (
+            (self.project_identity, "project identity"),
+            (self.workspace_id, "workspace id"),
+            (self.migration_plan_id, "migration plan id"),
+            (self.expected_legacy_namespace, "legacy workspace namespace"),
+            (self.checkout_locator, "workspace checkout locator"),
+            (self.deployment_receipt, "workspace deployment receipt"),
+            (self.inventory_digest, "workspace inventory digest"),
+        ):
+            if value is not None:
+                _safe_text(value, label)
+        if not isinstance(self.confirm, bool):
+            raise ValueError("workspace confirmation must be boolean")
+        if (isinstance(self.index_generation, bool) or
+                self.index_generation is not None and
+                (not isinstance(self.index_generation, int) or self.index_generation < 0)):
+            raise ValueError("workspace index generation must be non-negative")
+        if isinstance(self.limit, bool) or not isinstance(self.limit, int) or not 1 <= self.limit <= 5000:
+            raise ValueError("workspace list limit must be between 1 and 5000")
+        if not isinstance(self.active_only, bool):
+            raise ValueError("workspace active-only selector must be boolean")
+        _safe_name(self.mode, "workspace mode")
 
 
 @dataclass(frozen=True)
@@ -296,6 +330,13 @@ class ResolvedTarget:
             "target": {"kind": self.kind, "remote": self.remote_name},
             "namespace": self.namespace,
         }
+
+    @property
+    def project_identity(self) -> str:
+        value = self.sources.get("identity")
+        if not isinstance(value, str) or not value:
+            raise ValueError("resolved target has no canonical project identity")
+        return value
 
 
 @dataclass(frozen=True)

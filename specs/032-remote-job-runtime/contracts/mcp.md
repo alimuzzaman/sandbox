@@ -148,3 +148,25 @@ Errors preserve `ok:false`, `code`, `message`, target/workspace/job identity whe
 and actionable suggestion. Secret values, SSH connection strings, raw environment, and
 unsafe artifact paths are redacted.
 
+## Workspace metadata/index controls (convergence)
+
+Workspace tools use typed service inputs:
+
+```json
+{
+  "remote": "scaleway-sandbox",
+  "project_identity": "project-id",
+  "workspace_id": "opaque-id",
+  "plan_id": "opaque-plan-id",
+  "confirm": false
+}
+```
+
+`workspace_list`, `workspace_status`, and `workspace_migrate` MUST work without
+`project_dir`; reset/destroy require an opaque workspace ID, explicit confirmation, and
+the busy-lock controller. Migration plans expose inventory digest, index generation,
+expiry, and adopted/unresolved/conflict/invalid decisions. Apply refuses drift with
+`workspace_migration_plan_stale`/`workspace_ownership_drift` and reports
+`workspace_index_incomplete` rather than an empty success. MCP adapters consume the
+workspace service and typed resource projection; they never open the SQLite index or
+legacy workspace JSON. No metadata migration call releases networks or performs cleanup.

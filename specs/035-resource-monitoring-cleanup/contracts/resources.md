@@ -271,3 +271,36 @@ wire shape remains the top-level page (`jobs`, cursor, and bounded counts), not 
 `.data` envelope. A malformed or nested response is a parser error and leaves
 network lifecycle state `indeterminate`; the resource consumer must not invent a
 second decoder.
+
+## Workspace ownership projection (convergence)
+
+Resource status and cleanup receive workspace ownership through a typed service result,
+not through direct SQLite or legacy JSON reads:
+
+```json
+{
+  "workspace_id": "opaque-workspace-id",
+  "project_identity": "project-id",
+  "workspace_label": "unit",
+  "lifecycle": "ready",
+  "index_generation": 4,
+  "alias_evidence": [{"kind": "compose-project", "digest": "sha256:...", "quality": "high"}],
+  "active_references": {"leases": 1, "containers": 1, "jobs": 0, "mounts": 1},
+  "complete": true,
+  "error": null
+}
+```
+
+Providers MUST use `workspace_id` as the owner key. Labels, checkout paths, Compose
+names, and network names are display/alias evidence only. `complete:false`, a duplicate
+alias, unresolved/conflict/invalid migration decision, missing index, or generation drift
+returns unknown/indeterminate evidence and zero reclaimable bytes; status may be partial,
+but plan/apply MUST require a fresh rescan. Stable additions include:
+`workspace_index_incomplete`, `workspace_alias_collision`, `workspace_ownership_drift`,
+and `workspace_index_unavailable`.
+
+Workspace metadata migration and base relocation are metadata-only: resource IDs and
+active references remain stable, network/container/job counts must not change, and no
+network release or cleanup is implicit. The resource consumer calls the Spec 032
+top-level job-list decoder where job evidence is needed and rejects nested `.data` or
+malformed envelopes without mutating state.

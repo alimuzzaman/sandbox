@@ -48,10 +48,14 @@ def run(cmd: list[str], check: bool = True, capture: bool = False, **kw):
     # stdin-only callers still use this path so their input is forwarded while
     # output remains live in the web console.
     if (_WEB_STREAM[0] and not capture and kw.get("stdout") is None):
-        kw.pop("capture_output", None)
+        popen_kw = dict(kw)
+        popen_kw.pop("capture_output", None)
+        # subprocess.Popen has no timeout keyword; compose passes its optional
+        # timeout through this layer, so omit it from the streaming constructor.
+        popen_kw.pop("timeout", None)
         proc = subprocess.Popen(cmd, text=True, cwd=str(ROOT),
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, **kw)
+                                stderr=subprocess.STDOUT, **popen_kw)
         collected = []
         for line in proc.stdout:
             collected.append(line)

@@ -1749,6 +1749,23 @@ class TestRejectHerdProjects(unittest.TestCase):
 
 
 class TestDeployEnsureExpose(unittest.TestCase):
+    def test_remote_plugin_activation_targets_returned_instance_explicitly(self):
+        remote = {"ssh": "ubuntu@example.test"}
+        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with patch.object(sr, "resolve_sandbox_home", return_value="/srv/sandbox"), \
+             patch.object(sr, "remote_sb_path", return_value="/usr/local/bin/sb"), \
+             patch.object(sr, "ssh_run", return_value=result) as run:
+            sr.activate_remote_plugin(
+                remote, "/srv/deploy/demo", "demo-default", "demo"
+            )
+
+        command = run.call_args.args[1]
+        self.assertIn(
+            "/usr/local/bin/sb --instance demo-default wp plugin activate demo",
+            command,
+        )
+
     def test_default_instance_domain_uses_hyphenated_label_and_slug(self):
         self.assertEqual(
             sr.default_instance_domain("default", "templately.ai.builder"),

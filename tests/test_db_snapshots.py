@@ -36,12 +36,13 @@ class TestSnapshotCapture(unittest.TestCase):
         with mock.patch.object(_ui.subprocess, "Popen", return_value=proc) as popen, \
                 mock.patch.object(_ui.subprocess, "run") as run, \
                 mock.patch.object(_ui, "_WEB_STREAM", [True]):
-            result = _ui.run(["docker", "compose", "db"], stdin=source)
+            result = _ui.run(["docker", "compose", "db"], stdin=source, timeout=10)
 
         self.assertEqual(result.stdout, "output\n")
         self.assertIs(popen.call_args.kwargs["stdin"], source)
         self.assertIs(popen.call_args.kwargs["stdout"], _ui.subprocess.PIPE)
         self.assertIs(popen.call_args.kwargs["stderr"], _ui.subprocess.STDOUT)
+        self.assertNotIn("timeout", popen.call_args.kwargs)
         run.assert_not_called()
 
     def test_compose_forwards_explicit_stream_sinks(self):

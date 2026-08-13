@@ -709,7 +709,8 @@ def activate_remote_plugin(remote: dict, target_path: str, instance: str,
         f"rm -rf {shlex.quote(plugin_path)}; "
         f"ln -s {shlex.quote(target_path)} {shlex.quote(plugin_path)}; "
         f"cd {shlex.quote(target_path)}; "
-        f"{shlex.quote(sb)} wp plugin activate {shlex.quote(plugin_slug)}"
+        f"{shlex.quote(sb)} --instance {shlex.quote(instance)} "
+        f"wp plugin activate {shlex.quote(plugin_slug)}"
     )
     res = ssh_run(remote, cmd, timeout=120)
     if res.returncode != 0:

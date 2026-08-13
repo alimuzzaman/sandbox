@@ -120,6 +120,25 @@ class RemoteJobTransportTests(unittest.TestCase):
         self.assertTrue(all("--json" in command for command, _ in commands))
         self.assertIn("job-cancel abc --force", commands[2][0])
 
+    def test_remote_list_filters_by_canonical_project_identity_without_forwarding_local_path(self):
+        commands = []
+        transport = RemoteJobTransport(
+            deploy=lambda *_: {},
+            ssh_run=lambda remote, command, timeout: commands.append(command) or SimpleNamespace(
+                returncode=0, stdout='{"ok":true,"jobs":[]}\n'),
+            remote_lookup=lambda name: {"provisioned": True},
+            remote_sb_path=lambda remote: "/srv/sandbox/sb-src/sb",
+        )
+        identity = "a" * 64
+
+        transport.list("r", project_identity=identity, workspace="unit")
+
+        self.assertEqual(commands, [
+            f"/srv/sandbox/sb-src/sb job-list --limit 50 --project-identity {identity} "
+            "--workspace unit --json",
+        ])
+        self.assertNotIn("--project-dir", commands[0])
+
     def test_control_uses_the_staged_remote_cli_not_path_lookup(self):
         commands = []
         transport = RemoteJobTransport(

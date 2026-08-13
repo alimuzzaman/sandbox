@@ -12,8 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_start,
-                                          cmd_job_status, configure_start_parser)
+from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
+                                          cmd_job_start, cmd_job_status,
+                                          configure_list_parser, configure_start_parser)
 
 
 ROOT = Path(__file__).parent.parent
@@ -31,6 +32,53 @@ def _load_mcp_jobs_tool():
 
 
 class JobCliTests(unittest.TestCase):
+    def test_remote_job_list_translates_the_project_path_to_canonical_identity(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp).resolve()
+            args = parser.parse_args([
+                "--remote", "r", "--project-dir", str(project),
+                "--workspace", "unit", "--json",
+            ])
+            expected_identity = "project:" + hashlib.sha256(
+                f"{project}\0default".encode()).hexdigest()
+            target = SimpleNamespace(
+                project_root=str(project),
+                sources={"identity": expected_identity},
+            )
+            captured = []
+            output = StringIO()
+            with patch("sandbox.core._remote.get_remote", return_value={"provisioned": True}), \
+                    patch("sandbox.core._remote.remote_sb_path", return_value="/srv/sandbox/sb-src/sb"), \
+                    patch("sandbox.commands.jobs_runtime.durable_job_dependencies", return_value={
+                        "target_service": SimpleNamespace(resolve=lambda _request: target),
+                        "job_service": SimpleNamespace(list=lambda _query: []),
+                    }), \
+                    patch("sandbox.transports.remote_jobs.RemoteJobTransport.list",
+                          autospec=True,
+                          side_effect=lambda _transport, *positional, **keywords:
+                          captured.append((positional, keywords)) or {"jobs": []}), \
+                    redirect_stdout(output):
+                cmd_job_list(None, args)
+
+        self.assertEqual(captured, [(('r',), {
+            "limit": 50,
+            "project_identity": expected_identity,
+            "workspace": "unit",
+            "active_only": False,
+        })])
+        self.assertEqual(json.loads(output.getvalue()), {"jobs": [], "ok": True})
+
+    def test_job_list_rejects_a_malformed_controller_project_identity(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        args = parser.parse_args(["--project-identity", "not-a-digest", "--json"])
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies") as dependencies:
+            with self.assertRaisesRegex(ValueError, "project identity"):
+                cmd_job_list(None, args)
+            dependencies.assert_not_called()
+
     def test_start_parser_and_detached_acceptance_preserve_explicit_argv_context(self):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

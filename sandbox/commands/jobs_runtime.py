@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -154,9 +156,9 @@ def configure_output_parser(parser) -> None:
 
 def configure_list_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--project-dir")
-    parser.add_argument("--project-identity",
-                        help="canonical project identity filter (advanced/control-plane use)")
+    project = parser.add_mutually_exclusive_group()
+    project.add_argument("--project-dir")
+    project.add_argument("--project-identity", help=argparse.SUPPRESS)
     parser.add_argument("--workspace")
     parser.add_argument("--active-only", action="store_true")
     parser.add_argument("--remote")
@@ -383,6 +385,11 @@ def cmd_job_list(_cfg, args) -> None:
     remote_name = getattr(args, "remote", None)
     project_dir = getattr(args, "project_dir", None)
     explicit_identity = getattr(args, "project_identity", None)
+    if (explicit_identity is not None
+            and not re.fullmatch(r"(?:project:)?[a-f0-9]{64}", explicit_identity)):
+        raise ValueError(
+            "project identity must be project:<sha256> or a legacy 64-character lowercase SHA-256 digest"
+        )
     workspace = getattr(args, "workspace", None)
     active_only = getattr(args, "active_only", False)
     limit = getattr(args, "limit", 50)
@@ -407,7 +414,7 @@ def cmd_job_list(_cfg, args) -> None:
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(remote_name, limit=limit,
-                project_dir=project_dir, project_identity=project_identity,
+                project_identity=project_identity,
                 workspace=workspace, active_only=active_only)
     else:
         query = {"limit": limit}

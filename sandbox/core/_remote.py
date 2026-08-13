@@ -1514,7 +1514,7 @@ if RECOVER_INTERRUPTED:
         configured = json.loads(CONFIG.read_text()) if CONFIG.exists() else {{}}
     except Exception:
         configured = None
-    if not isinstance(configured, dict) or configured.get("default-address-pools") == DESIRED:
+    if not isinstance(configured, dict):
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
                           "status": "failed", "message": "Interrupted rollback state is not proven"}}))
         raise SystemExit(2)

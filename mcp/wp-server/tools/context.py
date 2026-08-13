@@ -123,14 +123,23 @@ def load_context() -> dict:
     """
     if not SANDBOX_CLAUDE_MD.exists():
         return {"ok": False, "error": f"missing {SANDBOX_CLAUDE_MD}"}
+    available_skills = []
+    for skill in _list_sandbox_skills():
+        skill_path = Path(skill["path"])
+        slug = skill_path.parent.name
+        available_skills.append({
+            "slug": slug,
+            "name": skill["name"] or slug,
+            "description": skill["description"],
+            "source": "sandbox",
+            "scope": "sandbox",
+            "path": str(skill_path),
+        })
     return {
         "ok": True,
         "claude_md": SANDBOX_CLAUDE_MD.read_text(errors="replace"),
         "claude_md_path": str(SANDBOX_CLAUDE_MD),
-        "available_skills": [
-            skill for skill in _list_sandbox_skills()
-            if _parse_skill_metadata(SANDBOX_ROOT / skill["path"])["enable"]
-        ],
+        "available_skills": available_skills,
         "skill_catalog_guidance": (
             "Use list_skills(project_dir=...) for the live enabled catalog and "
             "load_skill(name, project_dir=...) to fetch only the precedence-selected body."

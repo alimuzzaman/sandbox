@@ -15,6 +15,21 @@
 - **Recovery →** use `./sb recovery`; never substitute raw `gpg`, `rclone`, Docker, or SSH.
 - **Verified work →** stage, commit, and push the active branch automatically. Never force-push, tag, release, deploy, or open/merge a PR without explicit approval.
 
+## Product goal and learning loop
+
+Sandbox exists to eliminate repeated agent work across repositories. It should turn
+recurring environment discovery, setup, recovery, validation, and evidence gathering
+into safe, deterministic capabilities so agents finish with fewer steps, fewer tool
+calls and tokens, less wall time, and fewer workflow-specific mistakes.
+
+Treat recurring toil as product evidence, not merely an agent inconvenience. When a
+safe multi-step workflow is reconstructed more than once and Sandbox cannot express it,
+submit sanitized `idea` or `usability` feedback with the repeated steps, occurrence or
+cost evidence when known, the missing reusable capability, and a bounded success
+criterion. Do not manufacture repetition, file vague wishes, or let feedback authorize
+implementation or mutation. Prefer reusable mechanisms with deterministic checks over
+larger prompts or repository-specific workarounds.
+
 ---
 
 ## Non-negotiable rules

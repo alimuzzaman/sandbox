@@ -1,6 +1,6 @@
 # Sandbox TODO
 
-Updated: 2026-08-12. Structure: standing engineering work (§1–§2) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
+Updated: 2026-08-13. Structure: standing engineering work (§1–§2) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
 
 Sources: `[guardian]` = 2026-08-12 product feedback + current Sandbox evidence · `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[herd-parity]` = 2026-08-11 local probes + official Herd/Laravel/Docker/Node/pnpm/MySQL research under `.ai/research/2026-08-11-herd-sandbox-parity/` · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
 
@@ -8,28 +8,16 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 
 ## 0. Immediate operational blockers (P0; before new remote harness work)
 
-- [ ] Restore safe Docker network capacity on `scaleway-sandbox`. Start with a read-only
-  ownership/liveness inventory of the 29 connected Sandbox-managed user-defined
-  networks, map them to retained workspaces and active jobs, then present exact
-  destruction candidates for explicit approval. A normal stale-resource plan currently
-  excludes every network as active, so broad prune and applying the expired volume-only
-  plan are not valid fixes. If retained workspaces are all required, separately review a
-  daemon address-pool expansion with rollback and collision evidence. `[ops · incident
-  memory/plugin-behavior/remote-network-pool-exhaustion-2026-08-12.md]`
 - [ ] Add network-capacity admission evidence before remote workspace/test provisioning:
   report usable subnet capacity (or a bounded unavailable state), fail before staging
   when a network cannot be allocated, identify the owning resource class, and point to a
   reviewed cleanup/capacity plan. Cover pool exhaustion with a deterministic regression;
   do not infer capacity from disk space or network count alone. `[ops → prd 00 §5 P0]`
-- [ ] Normalize remote resource-inventory timeouts and stale workspace-control metadata
-  into bounded structured errors. The thorough resource probe currently leaks a local
-  `TimeoutExpired` traceback, remote diagnostics are unreachable, and workspace listing
-  can resolve a deleted remote project directory. Keep these read-only fixes separate
-  from cleanup authority. `[ops · observability]`
-- [ ] Decide the revision only after capacity is restored: rerun the declared `fast`
-  suite against either the explicitly accepted remote checkout or a separately approved
-  deployment of the current local revision. The reported 31-commit drift can change test
-  behavior but cannot cause or cure Docker subnet-pool exhaustion. `[ops]`
+- [ ] Complete the durable workspace index on `scaleway-sandbox` without guessing
+  ownership. The current metadata-only plan exposes 32 unresolved legacy records and
+  therefore correctly refuses a complete list. Preserve every legacy record, require
+  exact job/project evidence or operator mapping, and keep migration separate from
+  reset, destroy, network release, and cleanup authority. `[ops · observability]`
 
 ## 1. Loose ends (hours; found while shipping, none blocking)
 

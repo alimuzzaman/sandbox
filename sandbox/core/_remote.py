@@ -1507,9 +1507,9 @@ if RECOVER_INTERRUPTED:
                           "status": "failed", "message": "Recent recovery evidence is unavailable"}}))
         raise SystemExit(2)
     since = max(0, int(evidence_start) - 5)
-    # Docker restart exits occur immediately after the backup/config swap. A
-    # fixed three-minute window excludes later, unrelated one-shot workloads.
-    until = min(int(time.time()) + 1, since + 180)
+    # Container State timestamps persist across daemon restarts. The bounded
+    # twenty-minute interval covers restart plus the interrupted recovery.
+    until = min(int(time.time()) + 1, since + 1200)
     try:
         configured = json.loads(CONFIG.read_text()) if CONFIG.exists() else {{}}
     except Exception:
@@ -1518,32 +1518,39 @@ if RECOVER_INTERRUPTED:
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_missing",
                           "status": "failed", "message": "Interrupted rollback state is not proven"}}))
         raise SystemExit(2)
-    events = run(["docker", "events", "--since", str(since), "--until", str(until),
-                  "--filter", "event=die", "--filter", "event=stop",
-                  "--format", "{{{{json .}}}}"], timeout=30)
-    event_ids = set()
-    for line in events.stdout.splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
+    all_ids = list(filter(None, run(["docker", "ps", "-aq"], timeout=30).stdout.splitlines()))
+    rows = json.loads(run(["docker", "inspect", *all_ids], timeout=90).stdout) if all_ids else []
+    evidence_ids = set()
+    for row in rows:
+        state = row.get("State") if isinstance(row, dict) else None
+        container_id = row.get("Id") if isinstance(row, dict) else None
+        if not isinstance(state, dict) or not isinstance(container_id, str):
             continue
-        actor = row.get("Actor") if isinstance(row, dict) else None
-        actor_id = actor.get("ID") if isinstance(actor, dict) else None
-        if isinstance(actor_id, str) and actor_id:
-            event_ids.add(actor_id)
-    if len(event_ids) != EXPECTED_RUNNING:
+        timestamps = []
+        for key in ("StartedAt", "FinishedAt"):
+            value = state.get(key)
+            if not isinstance(value, str) or value.startswith("0001-"):
+                continue
+            try:
+                timestamps.append(datetime.datetime.fromisoformat(
+                    value.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                continue
+        if any(since <= value <= until for value in timestamps):
+            evidence_ids.add(container_id)
+    if len(evidence_ids) != EXPECTED_RUNNING:
         print(json.dumps({{"ok": False, "code": "docker_pool_recovery_evidence_mismatch",
                           "status": "failed", "message": "Restart event evidence does not match baseline",
                           "recovery_expected_count": EXPECTED_RUNNING,
-                          "recovery_evidence_count": len(event_ids)}}))
+                          "recovery_evidence_count": len(evidence_ids)}}))
         raise SystemExit(2)
-    candidates = event_ids - running_ids()
+    candidates = evidence_ids - running_ids()
     recovery_base = {{
         "ok": True, "status": "recovery_planned" if not APPLY else "recovery_complete",
         "requires_confirm": not APPLY, "recovery_candidate_count": len(candidates),
         "recovery_window_seconds": until - since,
         "recovery_expected_count": EXPECTED_RUNNING,
-        "recovery_evidence_count": len(event_ids),
+        "recovery_evidence_count": len(evidence_ids),
     }}
     if not APPLY:
         print(json.dumps(recovery_base, sort_keys=True))
@@ -1862,7 +1869,7 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
         value = payload.get(field)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise RuntimeError("remote Docker pool operation returned invalid counts")
-    if payload.get("recovery_window_seconds", 0) > 180:
+    if payload.get("recovery_window_seconds", 0) > 1200:
         raise RuntimeError("remote Docker pool recovery window is unbounded")
     if payload["ok"] and payload.get("recovery_evidence_count") is not None and (
             payload.get("recovery_evidence_count") != payload.get("recovery_expected_count")):

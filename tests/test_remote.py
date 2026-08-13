@@ -728,6 +728,19 @@ class TestPushCommits(unittest.TestCase):
 
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
+    def test_deploy_descriptor_includes_primary_but_not_machine_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sandbox.config.json").write_text('{"slug":"demo"}')
+            (root / "sandbox.config.override.json").write_text(
+                '{"plugins":{"private":"/machine/path"}}'
+            )
+
+            self.assertEqual(
+                sr.deploy_project_descriptor_files(root),
+                ["sandbox.config.json"],
+            )
+
     @patch("subprocess.run")
     def test_capture_returns_diff_and_untracked_files(self, mock_run):
         mock_run.side_effect = [
@@ -1805,6 +1818,9 @@ class TestDeployEnsureExpose(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
             with _patched_config_local(root / "sandbox.local.yml"):
                 sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
                 args = MagicMock()
@@ -1830,7 +1846,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "push_commits", return_value="abc123"), \
                      patch.object(sr, "reset_target_to"), \
                      patch.object(sr, "capture_uncommitted", return_value=("", [])), \
-                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "apply_uncommitted", return_value=0) as mock_overlay, \
                      patch.object(sr, "ensure_remote_instance", return_value=inst) as mock_ensure, \
                      patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
@@ -1848,6 +1864,10 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     "https://default-demo.sandbox.asb.bd/?sandbox_autologin=abc123",
                 )
                 mock_ensure.assert_called_once_with(sr.get_remote("myvps"), "/remote/demo")
+                mock_overlay.assert_called_once_with(
+                    sr.get_remote("myvps"), "/remote/demo", root, "",
+                    ["sandbox.config.json"],
+                )
                 mock_apply.assert_called_once_with(
                     sr.get_remote("myvps"), "/remote/demo"
                 )

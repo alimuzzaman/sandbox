@@ -130,6 +130,10 @@ existing SSH connection).
    brand-new untracked files. This step REPLACES whatever a previous deploy applied; it
    never stacks. "Is my code live on the VPS" always has one answer: "as of my last
    `./sb deploy`."
+4. Transfers the selected primary project descriptor (`sandbox.config.*` or
+   `.wp-env.json`) even when the checkout keeps that file out of Git, so the remote can
+   reproduce plugin mounts. Machine-only `sandbox.config.override.*` and secret files
+   are never included by this exception.
 
 Before the remote instance is considered ready, `ensure` reconciles each instance's
 published WordPress, database, and Mailpit ports against listeners already present on

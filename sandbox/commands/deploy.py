@@ -127,6 +127,13 @@ def cmd_deploy(cfg, args) -> None:
         sr.reset_target_to(entry, target, pushed_sha)
         if resolved_source is None:
             diff_text, untracked = sr.capture_uncommitted(root)
+            # The canonical project descriptor is runtime intent, not a
+            # machine override. Carry it even when a checkout keeps it out of
+            # Git; without it a ready remote fast-path cannot reconstruct the
+            # deployed plugin bind mount.
+            untracked = list(dict.fromkeys([
+                *untracked, *sr.deploy_project_descriptor_files(root),
+            ]))
             applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
         else:
             applied = 0

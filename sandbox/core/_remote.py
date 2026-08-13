@@ -1166,6 +1166,36 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     return diff_text, untracked
 
 
+def deploy_project_descriptor_files(project_root) -> list[str]:
+    """Return project-local runtime descriptors that deploy must carry.
+
+    A repository may intentionally keep ``sandbox.config.*`` out of Git (for
+    example through ``.git/info/exclude``). The descriptor is still required
+    to reconstruct plugin mounts on the remote. Transfer only the selected
+    primary project descriptor; machine overrides and secret files remain
+    local by design.
+    """
+    from sandbox.config.descriptors import primary_config
+
+    root = Path(project_root).expanduser().resolve()
+    selected = primary_config(root)
+    if selected is None:
+        selected = next(
+            (root / name for name in (".wp-env.json",)
+             if (root / name).is_file()),
+            None,
+        )
+    if selected is None:
+        return []
+    try:
+        relative = selected.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("project descriptor must stay within the deploy root") from exc
+    if not selected.is_file():
+        raise RuntimeError("project descriptor is not a regular file")
+    return [relative.as_posix()]
+
+
 def apply_uncommitted(remote: dict, target_path: str, project_root,
                        diff_text: str, untracked: list[str]) -> int:
     """Applies the dirty working tree on top of a just-reset clean tree by

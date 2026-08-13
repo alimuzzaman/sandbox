@@ -445,13 +445,22 @@ def write_compose_files(cfg: dict) -> None:
 
 def compose(*args: str, instance: str,
             check: bool = True, capture: bool = False,
-            timeout: float | None = None):
+            timeout: float | None = None, stdin=None, stdout=None):
     """Run `docker compose` against one instance's stack.
 
     Uses the per-instance project name (-p sandbox-<instance>) and
     generated compose file. Caller must have run write_compose_files()
     at least once (the CLI entrypoint does this on every invocation).
     """
+    run_kwargs = {
+        "check": check,
+        "capture": capture,
+        "timeout": timeout,
+    }
+    if stdin is not None:
+        run_kwargs["stdin"] = stdin
+    if stdout is not None:
+        run_kwargs["stdout"] = stdout
     return run(
         ["docker", "compose",
          "-p", project_name(instance),
@@ -462,8 +471,8 @@ def compose(*args: str, instance: str,
          # runtime/compose/config/x. Load-bearing for the nginx/litespeed
          # server config mounts.
          "--project-directory", str(ROOT),
-         *args],
-        check=check, capture=capture, timeout=timeout,
+        *args],
+        **run_kwargs,
     )
 
 

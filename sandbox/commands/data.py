@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -58,6 +59,23 @@ def cmd_snapshot(cfg, args) -> None:
 # name (leading underscore), so it can never collide with `./sb snapshot <name>`.
 _BASELINE_DIR = "__install__"
 
+def _open_snapshot_dump(path: Path):
+    """Open a new host-owned snapshot dump for direct child stdout streaming."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        # Neither fchmod nor fdopen transfers ownership when it fails. Close
+        # the raw descriptor on every error, including an interrupted call.
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
 
 def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -> None:
     """Export the DB (always) + uploads (unless db_only) into snap_root/<name>/,
@@ -72,13 +90,17 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
     # keeps the old snapshot usable if export fails.
     staging_name = f".{name}.tmp-{uuid.uuid4().hex}"
     staging = snap_root / staging_name
-    staging.mkdir(parents=True, exist_ok=False)
+    staging_db = staging / "db.sql"
     try:
+        staging.mkdir(parents=True, exist_ok=False, mode=0o700)
         info(f"Exporting DB → {target}/db.sql")
-        compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
-                "wpcli", "db", "export", f"/snapshots/{staging_name}/db.sql", "--add-drop-table",
-                instance=inst)
-        if not (staging / "db.sql").exists():
+        # Stream stdout directly into a 0600 host file. The wpcli service keeps
+        # its normal UID and no snapshot directory is bind-mounted into it.
+        with _open_snapshot_dump(staging_db) as dump:
+            compose("run", "--rm", "-T", "wpcli", "db", "export", "-", "--quiet",
+                    "--add-drop-table",
+                    instance=inst, stdout=dump)
+        if not staging_db.exists() or staging_db.stat().st_size == 0:
             raise RuntimeError(f"db export produced no db.sql for snapshot '{name}'")
         mode = "db-only"
         if not db_only:
@@ -93,8 +115,10 @@ def _capture_snapshot(inst: str, snap_root: Path, name: str, *, db_only: bool) -
         if target.exists():
             shutil.rmtree(target)
         staging.replace(target)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)  # no half-written snapshot left behind
+    except (Exception, SystemExit):
+        # Remove the whole sibling even when compose exits via SystemExit, so a
+        # failed capture never leaves a half-written dump behind.
+        shutil.rmtree(staging, ignore_errors=True)
         raise
 
 
@@ -110,12 +134,12 @@ def capture_install_baseline(inst: str, force: bool = False) -> None:
     if _is_herd_instance(inst):
         return
     snap_root = snapshots_dir(inst)
-    snap_root.mkdir(parents=True, exist_ok=True)
-    if (snap_root / _BASELINE_DIR / "db.sql").exists() and not force:
-        return
     try:
+        snap_root.mkdir(parents=True, exist_ok=True)
+        if (snap_root / _BASELINE_DIR / "db.sql").exists() and not force:
+            return
         _capture_snapshot(inst, snap_root, _BASELINE_DIR, db_only=True)
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         info(f"⚠ @install baseline capture failed for '{inst}' (reset won't have a "
              f"baseline until the next up): {e}")
 
@@ -133,12 +157,12 @@ def capture_install_full_snapshot(inst: str, force: bool = False) -> None:
     if _is_herd_instance(inst):
         return
     snap_root = snapshots_dir(inst)
-    snap_root.mkdir(parents=True, exist_ok=True)
-    if (snap_root / INSTALL_FULL_SNAPSHOT / "db.sql").exists() and not force:
-        return
     try:
+        snap_root.mkdir(parents=True, exist_ok=True)
+        if (snap_root / INSTALL_FULL_SNAPSHOT / "db.sql").exists() and not force:
+            return
         _capture_snapshot(inst, snap_root, INSTALL_FULL_SNAPSHOT, db_only=False)
-    except Exception as e:
+    except (Exception, SystemExit) as e:
         info(f"⚠ full install snapshot '{INSTALL_FULL_SNAPSHOT}' capture failed "
              f"for '{inst}': {e}")
 
@@ -214,19 +238,32 @@ def _restore_snapshot(inst: str, snap_root: Path, name: str) -> None:
     uploads if the snapshot has them (db-only snapshots leave uploads untouched)."""
     target = snap_root / name
     sql = target / "db.sql"
-    if not sql.exists():
+    try:
+        sql_stat = sql.lstat()
+    except FileNotFoundError:
         die(f"snapshot is missing db.sql: {sql}")
+    except OSError as e:
+        die(f"snapshot db.sql cannot be inspected: {sql}: {e}")
+    if stat.S_ISLNK(sql_stat.st_mode) or not stat.S_ISREG(sql_stat.st_mode):
+        die(f"snapshot db.sql is not a regular file: {sql}")
+    if sql_stat.st_size == 0:
+        die(f"snapshot db.sql is empty: {sql}")
+    try:
+        dump = sql.open("rb")
+    except OSError as e:
+        die(f"snapshot db.sql cannot be opened: {sql}: {e}")
     # `db reset --yes` drops+recreates the empty schema first so restore is a true
     # replacement (tables created after the snapshot don't survive).
-    info("Resetting DB (drop all tables) before import…")
-    # Run via the dedicated `wpcli` service, NOT the wpcli() helper: that helper
-    # execs into the web (php-fpm) container, which has no mysql client, so
-    # `wp db reset` dies with "env: 'mysql': No such file or directory". The wpcli
-    # service image ships the client — same path the import/export below use.
-    compose("run", "--rm", "wpcli", "db", "reset", "--yes", instance=inst)
-    info(f"Importing DB ← {sql}")
-    compose("run", "--rm", "-v", f"{snap_root}:/snapshots",
-            "wpcli", "db", "import", f"/snapshots/{name}/db.sql", instance=inst)
+    with dump:
+        info("Resetting DB (drop all tables) before import…")
+        # Run via the dedicated `wpcli` service, NOT the wpcli() helper: that helper
+        # execs into the web (php-fpm) container, which has no mysql client, so
+        # `wp db reset` dies with "env: 'mysql': No such file or directory". The wpcli
+        # service image ships the client — same path the import/export below use.
+        compose("run", "--rm", "wpcli", "db", "reset", "--yes", instance=inst)
+        info(f"Importing DB ← {sql}")
+        compose("run", "--rm", "-T", "wpcli", "db", "import", "-",
+                instance=inst, stdin=dump)
     tgz = target / "uploads.tgz"
     if tgz.exists():
         info(f"Restoring uploads ← {tgz}")

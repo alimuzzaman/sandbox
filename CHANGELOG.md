@@ -62,6 +62,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Caddy route, so a failed proxy step no longer leaves an unrepairable half-state.
 - `domains setup` wires new routes before deciding each site's URL, so freshly
   assigned domains reach WP's `siteurl`/`home` instead of staying on localhost.
+- Snapshot database capture and restore now stream through host-owned `0600`
+  files instead of bind-mounting snapshot directories, avoiding remote
+  `Permission denied` without chowning paths to MariaDB's `mysql` UID or
+  weakening global permissions.
 
 ---
 

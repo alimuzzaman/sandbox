@@ -14,6 +14,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   four-plane verification, and rollback-safe apply behavior.
 - Secret-redacted feedback detail/export/retention controls and conservative
   workspace-aware resource ownership diagnostics.
+- A confirmation-gated `remote docker-pool` transaction that backs up and
+  validates Docker daemon configuration, restarts Docker, recovers previously
+  running containers, and reports only bounded host-capacity evidence.
 
 ### Changed
 - Remote job and workspace protocols now use canonical project identity, durable
@@ -22,6 +25,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   source provenance.
 - Agents must verify local and installed remote revisions before depending on a
   changed CLI/MCP protocol.
+- Remote revision receipts now cover every shipped CLI, service, workspace, and
+  MCP Python source instead of a small proxy subset.
 
 ### Security
 - Destructive restore requires explicit confirmation.

@@ -1350,6 +1350,19 @@ class TestStopRemoteMcpServer(unittest.TestCase):
 
 
 class TestRemoteMcpServiceStatus(unittest.TestCase):
+    def test_runtime_revision_covers_the_shipped_cli_and_mcp_surface(self):
+        root = Path(sr.__file__).resolve().parents[2]
+        relative = {
+            source.relative_to(root).as_posix()
+            for source in sr._remote_mcp_revision_sources(root)
+        }
+        self.assertIn("VERSION", relative)
+        self.assertIn("sb", relative)
+        self.assertIn("sandbox/commands/jobs_runtime.py", relative)
+        self.assertIn("sandbox/workspaces/repository.py", relative)
+        self.assertIn("mcp/wp-server/server.py", relative)
+        self.assertFalse(any(".venv" in source for source in relative))
+
     @patch("sandbox.core._remote.ssh_run")
     def test_status_proves_unit_metadata_listener_and_authenticated_route(self, mock_ssh_run):
         mock_ssh_run.return_value = _completed(
@@ -1373,6 +1386,140 @@ class TestRemoteMcpServiceStatus(unittest.TestCase):
         self.assertIn("exc.code in (200,204,400,405,406)", command)
         self.assertNotIn(". $HOME/.sandbox/mcp-remote.env", command)
         self.assertNotIn("bearer_token", command)
+
+
+class TestRemoteDockerPool(unittest.TestCase):
+    def _run_transaction(self, root: Path, *, systemctl_ok: bool = True):
+        binary = root / "bin"
+        binary.mkdir()
+        scripts = {
+            "docker": '''#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args[:2] == ["ps", "-q"]: print("container-one")
+elif args[:2] == ["network", "ls"]: print("network-one")
+elif args[:2] == ["network", "inspect"]:
+    print(json.dumps([{"Id":"a" * 64,"Options":{"com.docker.network.bridge.name":"docker-test"}}]))
+elif args and args[0] == "inspect": print("no")
+raise SystemExit(0)
+''',
+            "ip": '''#!/usr/bin/env python3
+print("[]")
+''',
+            "dockerd": '''#!/usr/bin/env python3
+import json, sys
+path = sys.argv[sys.argv.index("--config-file") + 1]
+json.load(open(path))
+''',
+            "systemctl": "#!/usr/bin/env python3\nraise SystemExit(%d)\n" % (
+                0 if systemctl_ok else 1),
+        }
+        for name, source in scripts.items():
+            target = binary / name
+            target.write_text(source)
+            target.chmod(0o755)
+        config = root / "daemon.json"
+        config.write_text('{"log-driver":"json-file"}\n')
+        config.chmod(0o600)
+        source = sr._remote_docker_pool_program(confirm=True)
+        source = source.replace(
+            'pathlib.Path("/etc/docker/daemon.json")', f'pathlib.Path({str(config)!r})')
+        source = source.replace(
+            'pathlib.Path("/run/lock/sandbox-docker-pool.lock")',
+            f'pathlib.Path({str(root / "transaction.lock")!r})')
+        env = dict(os.environ)
+        env["PATH"] = str(binary) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [sys.executable, "-c", source], text=True, capture_output=True,
+            timeout=15, env=env, check=False)
+        return result, config
+
+    def test_fixed_transaction_program_compiles_and_has_rollback_recovery(self):
+        source = sr._remote_docker_pool_program(confirm=True)
+        compile(source, "<remote-docker-pool>", "exec")
+        self.assertIn('"172.16.0.0/12"', source)
+        self.assertIn('"10.201.0.0/16"', source)
+        self.assertIn('"10.202.0.0/16"', source)
+        self.assertIn('"size": 24', source)
+        self.assertIn("dockerd", source)
+        self.assertIn("rollback_attempted", source)
+        self.assertIn("docker\", \"start", source)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_plan_uses_registered_remote_and_returns_bounded_counts(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "planned", "requires_confirm": True,
+            "network_count": 31, "running_container_count": 74,
+            "restart_policy_none_count": 3,
+            "current_pools_configured": False, "current_pool_count": 0,
+            "current_pools_digest": "sha256:" + "a" * 64,
+            "desired_pools": list(sr.REMOTE_DOCKER_ADDRESS_POOLS),
+            "subnet_capacity": 4608, "restart_required": True,
+            "route_overlap_count": 0, "apply_safe": True,
+        }))
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, confirm=False)
+        self.assertEqual(result["network_count"], 31)
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_structured_apply_failure_is_preserved(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(
+            returncode=3,
+            stdout=json.dumps({
+                "ok": False, "code": "docker_pool_apply_failed",
+                "status": "failed", "message": "unsafe remote detail",
+                "rollback_attempted": True, "rollback_succeeded": True,
+                "containers_missing": 0,
+            }),
+        )
+        result = sr.remote_docker_pool(
+            {"ssh": "registered-target"}, confirm=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rollback_attempted"])
+        self.assertEqual(result["message"], "Docker pool update failed")
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_remote_response_rejects_unexpected_fields(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "planned", "secret": "must-not-pass",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
+            sr.remote_docker_pool({"ssh": "registered-target"})
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_remote_response_rejects_false_complete_receipt(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "status": "complete",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "incomplete evidence"):
+            sr.remote_docker_pool({"ssh": "registered-target"}, confirm=True)
+
+    def test_transaction_validates_then_applies_and_preserves_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config = self._run_transaction(Path(temporary))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "complete")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                json.loads(config.read_text())["default-address-pools"],
+                list(sr.REMOTE_DOCKER_ADDRESS_POOLS),
+            )
+            self.assertNotIn("log-driver", payload)
+            self.assertEqual(len(list(config.parent.glob("daemon.json.bak-*"))), 1)
+
+    def test_failed_restart_atomically_restores_original_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result, config = self._run_transaction(
+                Path(temporary), systemctl_ok=False)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["code"], "docker_pool_apply_failed")
+            self.assertEqual(json.loads(config.read_text()), {"log-driver": "json-file"})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
     @patch("sandbox.core._remote.remote_mcp_service_status")
     @patch("sandbox.core._remote.check_reachable", return_value=True)

@@ -41,7 +41,6 @@ import hashlib
 import ipaddress
 import urllib.error
 import urllib.request
-import re
 import subprocess
 import time
 from pathlib import PurePosixPath
@@ -1243,12 +1242,27 @@ def _remote_mcp_marker(bind: str, port: int, public_url: str | None = None) -> s
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
+def _remote_mcp_revision_sources(root: Path | None = None) -> tuple[Path, ...]:
+    """Return the deterministic shipped CLI/MCP source surface."""
+    root = root or Path(__file__).resolve().parents[2]
+    parts = [root / "VERSION", root / "sb"]
+    for source_root in (root / "sandbox", root / "mcp" / "wp-server"):
+        parts.extend(source_root.rglob("*.py"))
+    return tuple(sorted(
+        (source for source in parts if source.is_file() and
+         ".venv" not in source.parts and "__pycache__" not in source.parts),
+        key=lambda source: source.relative_to(root).as_posix(),
+    ))
+
+
 def _remote_mcp_runtime_revision() -> str:
-    """Return a non-secret local runtime identity that survives staged uploads."""
+    """Return a non-secret identity for the complete staged runtime surface."""
     root = Path(__file__).resolve().parents[2]
-    parts = (Path(__file__), root / "mcp" / "wp-server" / "server.py")
     digest = hashlib.sha256()
-    for source in parts:
+    for source in _remote_mcp_revision_sources(root):
+        relative = source.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
         digest.update(source.read_bytes())
     return digest.hexdigest()[:24]
 
@@ -1332,6 +1346,408 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
         raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
+    return payload
+
+
+REMOTE_DOCKER_ADDRESS_POOLS = (
+    # The /12 must use its canonical network boundary. Docker's built-in pools
+    # begin at 172.17/16, but the enclosing configurable pool is 172.16/12.
+    {"base": "172.16.0.0/12", "size": 24},
+    {"base": "10.201.0.0/16", "size": 24},
+    {"base": "10.202.0.0/16", "size": 24},
+)
+
+
+def _remote_docker_pool_program(*, confirm: bool) -> str:
+    """Build the fixed, non-interactive host-pool transaction."""
+    desired = json.dumps(list(REMOTE_DOCKER_ADDRESS_POOLS), sort_keys=True)
+    return f'''import datetime, fcntl, hashlib, ipaddress, json, os, pathlib, shutil, subprocess, sys, tempfile, time
+CONFIG = pathlib.Path("/etc/docker/daemon.json")
+LOCK = pathlib.Path("/run/lock/sandbox-docker-pool.lock")
+DESIRED = json.loads({desired!r})
+APPLY = {confirm!r}
+
+def run(argv, timeout=60, check=True):
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+    if check and result.returncode != 0:
+        raise RuntimeError(argv[0] + " failed")
+    return result
+
+def running_ids():
+    return set(filter(None, run(["docker", "ps", "-q"], timeout=30).stdout.splitlines()))
+
+def recover(expected):
+    missing = sorted(expected - running_ids())
+    if missing:
+        run(["docker", "start", *missing], timeout=120, check=False)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        remaining = expected - running_ids()
+        if not remaining:
+            return 0
+        time.sleep(2)
+    return len(expected - running_ids())
+
+def wait_docker(timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run(["docker", "info"], timeout=15, check=False).returncode == 0:
+            return True
+        time.sleep(2)
+    return False
+
+def sync_parent(path):
+    descriptor = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def write_candidate(data, mode, uid, gid):
+    descriptor, temporary = tempfile.mkstemp(prefix="daemon.json.", dir=str(CONFIG.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.chown(temporary, uid, gid)
+        return temporary
+    except Exception:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+def pool_networks():
+    networks = []
+    for item in DESIRED:
+        network = ipaddress.ip_network(item["base"], strict=True)
+        size = item["size"]
+        if network.version != 4 or not network.is_private or not isinstance(size, int):
+            raise ValueError("address pool is invalid")
+        if size < network.prefixlen or size > 30:
+            raise ValueError("address pool size is invalid")
+        networks.append(network)
+    if any(left.overlaps(right) for index, left in enumerate(networks)
+           for right in networks[index + 1:]):
+        raise ValueError("address pools overlap")
+    return networks
+
+def unsafe_route_count(networks):
+    docker_interfaces = {{"docker0"}}
+    links = run(["docker", "network", "ls", "-q"], timeout=30).stdout.splitlines()
+    if links:
+        details = run(["docker", "network", "inspect", *links], timeout=60)
+        for row in json.loads(details.stdout or "[]"):
+            options = row.get("Options") if isinstance(row, dict) else None
+            bridge = options.get("com.docker.network.bridge.name") if isinstance(options, dict) else None
+            if isinstance(bridge, str) and bridge:
+                docker_interfaces.add(bridge)
+            network_id = row.get("Id") if isinstance(row, dict) else None
+            if isinstance(network_id, str) and len(network_id) >= 12:
+                docker_interfaces.add("br-" + network_id[:12])
+    result = run(["ip", "-j", "route", "show", "table", "all"], timeout=30)
+    routes = json.loads(result.stdout or "[]")
+    unsafe = 0
+    for row in routes:
+        destination = row.get("dst")
+        device = str(row.get("dev") or "")
+        if not destination or destination == "default":
+            continue
+        try:
+            route = ipaddress.ip_network(destination, strict=False)
+        except ValueError:
+            continue
+        if route.version != 4 or not any(route.overlaps(pool) for pool in networks):
+            continue
+        if device in docker_interfaces:
+            continue
+        unsafe += 1
+    return unsafe
+
+LOCK.parent.mkdir(parents=True, exist_ok=True)
+lock_stream = LOCK.open("a+")
+try:
+    fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print(json.dumps({{"ok": False, "code": "docker_pool_busy", "status": "failed",
+                      "message": "Docker pool transaction is busy"}}))
+    raise SystemExit(2)
+
+try:
+    networks = pool_networks()
+    route_overlap_count = unsafe_route_count(networks)
+except Exception:
+    print(json.dumps({{"ok": False, "code": "docker_pool_preflight_failed",
+                      "status": "failed", "message": "Docker pool preflight failed"}}))
+    raise SystemExit(2)
+
+before = running_ids()
+network_count = len(list(filter(None, run(
+    ["docker", "network", "ls", "--filter", "type=custom", "-q"], timeout=30
+).stdout.splitlines())))
+restart_policies = []
+if before:
+    inspected = run([
+        "docker", "inspect", "--format", "{{{{.HostConfig.RestartPolicy.Name}}}}", *sorted(before)
+    ], timeout=60).stdout.splitlines()
+    restart_policies = [value.strip() or "no" for value in inspected]
+had_config = CONFIG.exists()
+initial_bytes = CONFIG.read_bytes() if had_config else b""
+initial_digest = hashlib.sha256(initial_bytes).hexdigest()
+initial_stat = CONFIG.stat() if had_config else None
+try:
+    current = json.loads(initial_bytes.decode()) if had_config else {{}}
+    if not isinstance(current, dict):
+        raise ValueError("daemon config must be an object")
+except Exception:
+    print(json.dumps({{"ok": False, "code": "docker_pool_config_invalid",
+                      "status": "failed",
+                      "message": "Docker daemon configuration is invalid"}}))
+    raise SystemExit(2)
+current_pools = current.get("default-address-pools")
+current_pools_json = json.dumps(current_pools, sort_keys=True, separators=(",", ":"))
+base = {{
+    "ok": True, "status": "planned" if not APPLY else "unchanged",
+    "current_pools_configured": "default-address-pools" in current,
+    "current_pool_count": len(current_pools) if isinstance(current_pools, list) else 0,
+    "current_pools_digest": "sha256:" + hashlib.sha256(current_pools_json.encode()).hexdigest(),
+    "desired_pools": DESIRED,
+    "network_count": network_count, "running_container_count": len(before),
+    "restart_policy_none_count": sum(value == "no" for value in restart_policies),
+    "subnet_capacity": 4608, "requires_confirm": not APPLY,
+    "restart_required": current_pools != DESIRED,
+    "route_overlap_count": route_overlap_count,
+    "apply_safe": route_overlap_count == 0,
+}}
+if not APPLY or current_pools == DESIRED:
+    print(json.dumps(base, sort_keys=True))
+    raise SystemExit(0)
+if route_overlap_count:
+    print(json.dumps({{"ok": False, "code": "docker_pool_route_overlap",
+                      "status": "failed", "message": "Docker pool overlaps host routes",
+                      "route_overlap_count": route_overlap_count}}))
+    raise SystemExit(2)
+
+stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+backup = CONFIG.with_name(CONFIG.name + ".bak-" + stamp)
+mode = (initial_stat.st_mode & 0o777) if initial_stat else 0o600
+uid = initial_stat.st_uid if initial_stat else 0
+gid = initial_stat.st_gid if initial_stat else 0
+restart_attempted = False
+config_replaced = False
+failure_stage = "backup_config"
+try:
+    if had_config:
+        backup_tmp = write_candidate(initial_bytes, mode, uid, gid)
+        os.replace(backup_tmp, backup)
+        sync_parent(backup)
+    failure_stage = "write_config"
+    updated = dict(current)
+    updated["default-address-pools"] = DESIRED
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(updated, indent=2, sort_keys=True) + "\\n").encode()
+    temporary = write_candidate(encoded, mode, uid, gid)
+    try:
+        failure_stage = "validate_config"
+        run(["dockerd", "--validate", "--config-file", temporary], timeout=30)
+        current_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
+        if hashlib.sha256(current_bytes).hexdigest() != initial_digest:
+            raise RuntimeError("daemon configuration changed concurrently")
+        failure_stage = "activate_config"
+        os.replace(temporary, CONFIG)
+        sync_parent(CONFIG)
+        config_replaced = True
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    restart_attempted = True
+    failure_stage = "restart_docker"
+    run(["systemctl", "restart", "docker"], timeout=120)
+    failure_stage = "wait_for_docker"
+    if not wait_docker():
+        raise RuntimeError("docker did not become ready")
+    failure_stage = "recover_containers"
+    missing_after_recovery = recover(before)
+    if missing_after_recovery:
+        raise RuntimeError("previously running containers did not recover")
+except Exception:
+    rollback_missing = len(before)
+    rollback_succeeded = not config_replaced
+    rollback_error = False
+    try:
+        if config_replaced:
+            if had_config:
+                restored = write_candidate(initial_bytes, mode, uid, gid)
+                try:
+                    os.replace(restored, CONFIG)
+                    sync_parent(CONFIG)
+                finally:
+                    if os.path.exists(restored):
+                        os.unlink(restored)
+            else:
+                CONFIG.unlink(missing_ok=True)
+                sync_parent(CONFIG)
+        if restart_attempted and config_replaced:
+            restarted = run(["systemctl", "restart", "docker"], timeout=120, check=False)
+            if restarted.returncode == 0 and wait_docker():
+                try:
+                    rollback_missing = recover(before)
+                except Exception:
+                    rollback_error = True
+            else:
+                rollback_error = True
+        elif not restart_attempted:
+            try:
+                rollback_missing = len(before - running_ids())
+            except Exception:
+                rollback_error = True
+        restored_bytes = CONFIG.read_bytes() if CONFIG.exists() else b""
+        rollback_succeeded = (not rollback_error and rollback_missing == 0 and
+                              hashlib.sha256(restored_bytes).hexdigest() == initial_digest)
+    except Exception:
+        rollback_error = True
+    finally:
+        print(json.dumps({{"ok": False, "code": "docker_pool_apply_failed",
+                          "status": "failed",
+                          "message": "Docker pool update failed during " + failure_stage,
+                          "rollback_attempted": True,
+                          "rollback_succeeded": rollback_succeeded,
+                          "containers_missing": rollback_missing}}))
+    raise SystemExit(3)
+
+digest = hashlib.sha256(CONFIG.read_bytes()).hexdigest()
+print(json.dumps({{**base, "ok": missing_after_recovery == 0,
+                  "status": "complete" if missing_after_recovery == 0 else "degraded",
+                  "requires_confirm": False, "restart_performed": True,
+                  "containers_restored": len(before) - missing_after_recovery,
+                  "containers_missing": missing_after_recovery,
+                  "backup_created": had_config,
+                  "config_digest": "sha256:" + digest}}, sort_keys=True))
+raise SystemExit(0 if missing_after_recovery == 0 else 4)
+'''
+
+
+def remote_docker_pool(remote: dict, *, confirm: bool = False,
+                       timeout: int = 300) -> dict:
+    """Plan or apply the fixed Docker address-pool transaction on one remote."""
+    import base64
+    program = base64.b64encode(
+        _remote_docker_pool_program(confirm=confirm).encode()).decode()
+    command = (
+        "sudo -n python3 -c " + shlex.quote(
+            "import base64;exec(base64.b64decode(" + repr(program) + "))")
+    )
+    result = ssh_run(remote, command, timeout=timeout)
+    output = (result.stdout or "").strip()
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("remote Docker pool operation returned invalid output") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+        raise RuntimeError("remote Docker pool operation returned an invalid envelope")
+    allowed = {
+        "ok", "status", "code", "message", "current_pools_configured",
+        "current_pool_count", "current_pools_digest", "desired_pools",
+        "network_count", "running_container_count", "restart_policy_none_count",
+        "subnet_capacity", "requires_confirm", "restart_required",
+        "restart_performed", "containers_restored", "containers_missing",
+        "backup_created", "config_digest", "rollback_attempted",
+        "rollback_succeeded", "route_overlap_count", "apply_safe",
+    }
+    if set(payload) - allowed:
+        raise RuntimeError("remote Docker pool operation returned unexpected fields")
+    status = payload.get("status")
+    if status not in {"planned", "unchanged", "complete", "degraded", "failed"}:
+        raise RuntimeError("remote Docker pool operation returned an invalid status")
+    code = payload.get("code")
+    known_errors = {
+        "docker_pool_config_invalid": "Docker daemon configuration is invalid",
+        "docker_pool_apply_failed": "Docker pool update failed",
+        "docker_pool_busy": "Docker pool transaction is busy",
+        "docker_pool_preflight_failed": "Docker pool preflight failed",
+        "docker_pool_route_overlap": "Docker pool overlaps host routes",
+    }
+    if payload["ok"] is False:
+        if code not in known_errors:
+            raise RuntimeError("remote Docker pool operation returned an unknown error")
+        payload["message"] = known_errors[code]
+    elif code is not None or payload.get("message") is not None:
+        raise RuntimeError("remote Docker pool operation returned an invalid success envelope")
+    required_by_status = {
+        "planned": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe",
+        },
+        "unchanged": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe",
+        },
+        "complete": {
+            "ok", "status", "current_pools_configured", "current_pool_count",
+            "current_pools_digest", "desired_pools", "network_count",
+            "running_container_count", "restart_policy_none_count",
+            "subnet_capacity", "requires_confirm", "restart_required",
+            "route_overlap_count", "apply_safe", "restart_performed",
+            "containers_restored", "containers_missing", "backup_created",
+            "config_digest",
+        },
+    }
+    if payload["ok"]:
+        if status not in required_by_status or not required_by_status[status].issubset(payload):
+            raise RuntimeError("remote Docker pool operation returned incomplete evidence")
+        if result.returncode != 0:
+            raise RuntimeError("remote Docker pool operation failed without a safe error")
+        if status == "planned" and payload.get("requires_confirm") is not True:
+            raise RuntimeError("remote Docker pool plan omitted confirmation gate")
+        if status == "unchanged" and payload.get("restart_required") is not False:
+            raise RuntimeError("remote Docker pool unchanged receipt is inconsistent")
+        if status == "complete" and (
+                payload.get("restart_performed") is not True or
+                payload.get("containers_missing") != 0):
+            raise RuntimeError("remote Docker pool completion receipt is inconsistent")
+    else:
+        expected_exit = {
+            "docker_pool_config_invalid": 2,
+            "docker_pool_busy": 2,
+            "docker_pool_preflight_failed": 2,
+            "docker_pool_route_overlap": 2,
+            "docker_pool_apply_failed": 3,
+        }[code]
+        if result.returncode != expected_exit or status != "failed":
+            raise RuntimeError("remote Docker pool error receipt is inconsistent")
+        failure_required = {"ok", "status", "code", "message"}
+        if code == "docker_pool_route_overlap":
+            failure_required.add("route_overlap_count")
+        if code == "docker_pool_apply_failed":
+            failure_required.update({"rollback_attempted", "rollback_succeeded",
+                                     "containers_missing"})
+        if not failure_required.issubset(payload):
+            raise RuntimeError("remote Docker pool error omitted required evidence")
+    if "desired_pools" in payload and payload["desired_pools"] != list(REMOTE_DOCKER_ADDRESS_POOLS):
+        raise RuntimeError("remote Docker pool operation returned unexpected desired pools")
+    for field in ("network_count", "running_container_count", "restart_policy_none_count",
+                  "subnet_capacity", "current_pool_count", "containers_restored",
+                  "containers_missing", "route_overlap_count"):
+        value = payload.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise RuntimeError("remote Docker pool operation returned invalid counts")
+    for field in ("current_pools_configured", "requires_confirm", "restart_required",
+                  "restart_performed", "backup_created", "rollback_attempted",
+                  "rollback_succeeded", "apply_safe"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, bool):
+            raise RuntimeError("remote Docker pool operation returned invalid flags")
+    for field in ("current_pools_digest", "config_digest"):
+        value = payload.get(field)
+        if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise RuntimeError("remote Docker pool operation returned an invalid digest")
     return payload
 
 

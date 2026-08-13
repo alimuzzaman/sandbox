@@ -17,7 +17,7 @@ import sandbox.core._remote as sr
 # independent registry, never here (see _remote.py's module docstring).
 
 def cmd_remote(cfg, args) -> None:
-    """`./sb remote <add|list|provision|up|down|remove|set-origin> [name] [ssh_url] [--json]`
+    """`./sb remote <add|list|provision|up|down|remove|set-origin|docker-pool> [name] [ssh_url] [--json]`
     -- register and manage remote VPS targets. See docs/remote-hosting.md."""
     action = args.action
     as_json = bool(getattr(args, "json", False))
@@ -29,9 +29,45 @@ def cmd_remote(cfg, args) -> None:
         "down": _cmd_down,
         "remove": _cmd_remove,
         "set-origin": _cmd_set_origin,
+        "docker-pool": _cmd_docker_pool,
         "service": _cmd_service,
     }
     dispatch[action](args, as_json)
+
+
+def _cmd_docker_pool(args, as_json: bool) -> None:
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        data = sr.remote_docker_pool(
+            entry, confirm=_arg_true(args, "confirm"))
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        data = {"ok": False, "code": "docker_pool_unavailable",
+                "message": sr.redact_ssh_connection(str(exc), entry)}
+    payload = {
+        "ok": data.get("ok") is True,
+        "name": name,
+        "status": data.get("status", "failed"),
+        "data": data,
+        "error": None if data.get("ok") is True else {
+            "code": data.get("code", "docker_pool_failed"),
+            "message": data.get("message", "remote Docker pool operation failed"),
+        },
+    }
+    if as_json:
+        print(json.dumps(payload, sort_keys=True))
+        if not payload["ok"]:
+            raise SystemExit(1)
+        return
+    if payload["ok"]:
+        if data.get("requires_confirm"):
+            print(f"'{name}' Docker pool update is planned; re-run with --confirm")
+        else:
+            ok(f"'{name}' Docker address pools: {data.get('status')}")
+        return
+    die(f"{payload['error']['code']}: {payload['error']['message']}")
 
 
 def _cmd_service(args, as_json: bool) -> None:

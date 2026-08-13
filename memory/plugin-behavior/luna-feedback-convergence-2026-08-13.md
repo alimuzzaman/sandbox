@@ -33,6 +33,10 @@ currency-cost telemetry, so cost is reported as unavailable rather than estimate
 | PHP integration | elapsed/calls unavailable | 31 focused + 148 legacy tests | Persisted config/status well, but independent review found child images were never actually built. |
 | PHP four-plane probes | elapsed/calls unavailable | 27 focused tests | Correct bounded probe argv/timeout design; live build/apply proof remained outstanding. |
 | Architecture rework | ~7–8m; calls unavailable | 29 architecture + 74 related tests | Restored the architecture counter to 113 without weakening the gate. |
+| Final managed preflight rework | ~10m / ~12 calls | 111 focused tests | Invalid extension plans now leave repository bytes and network count unchanged. |
+| Final PHP image-cache rework | ~5m / ~20 calls | 38 focused tests | Added label/provenance receipts and zero-Docker rejection for observation-only requests. |
+| Final nested-host upgrade rework | ~20–28m / ~26 calls across two passes | 200 focused/contract tests | Real bare-repository proof covers legacy full-tree to subtree migration without force-push. |
+| Final apply rollback rework | elapsed/calls unavailable | 43 focused tests | Rollback now covers persistence, Compose generation, reconcile, and four-plane verification. |
 
 ## Quality assessment
 
@@ -79,14 +83,18 @@ implementation asserts the parent's core modules, uses a literal Alpine package 
 restores the WP-CLI runtime user, and binds the Dockerfile generator plus recipes into the
 cache digest.
 
-Observed final gates before the second independent review:
+Observed final gates and delivery:
 
-- 354 focused integration/architecture/security tests passed;
-- 2,319 full-discovery tests ran with seven skips and only the three established
+- the combined focused integration/architecture/security gate passed;
+- 2,325 full-discovery tests ran with seven skips and only the three established
   unrelated baseline failures (macOS `/private/var` normalization and the `fix` and
   `snapshot` skill mirrors);
 - live local build/ensure/status/apply proved all four PHP planes ready and fresh, while
-  DB/Mailpit containers plus database/uploads markers were preserved across apply.
+  DB/Mailpit containers plus database/uploads markers were preserved across apply;
+- independent Sol High verdicts progressed from 58/100 to 64/100 and 82/100 as upgrade
+  and rollback gaps were reproduced, then to a final GO at 94/100;
+- the branch was merged with current `origin/latest`, pushed, and the supported remote
+  update completed; canonical remote job-list now succeeds with zero active jobs.
 
 This confirms the earlier quality conclusion: Luna Max provided useful breadth and fast
 bounded fixes, but composition review and live execution were necessary for release-grade

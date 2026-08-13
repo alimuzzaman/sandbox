@@ -80,14 +80,22 @@ verified at the time it was recorded.
   observation was recorded as high-severity feedback
   `600d2def1a44dde2e811a79e01b9aa25`; no cleanup, deployment, workspace destruction,
   or daemon change was attempted.
+- 2026-08-13T09:14:03Z — After the active durable job reached a terminal state, the
+  feature runtime was installed through the supported `sb remote up` lifecycle. The
+  control service is active, authenticated, and ownership-proven; canonical
+  project-identity job-list calls succeed and report zero active jobs. A fresh
+  read-only resource check still found 31 active managed networks, zero retained,
+  unverified, or stale-candidate networks, and one active foreign network. The
+  observation was recorded as high-severity feedback
+  `c841bc711c53936d6a6ce94cfe7200e7`. No network cleanup, workspace allocation, or
+  daemon change was attempted.
 
 ## Current diagnosis
 
 The immediate failure is caused by network lifecycle/capacity, not the plugin test or
-the remote checkout revision. The latest check found 31 connected, active managed
-networks and one active durable job. A normal stale-resource plan correctly refuses to
-remove active networks. The safe remediation therefore still requires an exact
-ownership/liveness review after the active job reaches a terminal state, followed by
-an explicit decision to destroy selected retained workspaces, or an independently
-reviewed Docker daemon address-pool change. Updating the remote checkout would not
-release a subnet and must remain a separate decision.
+the remote checkout revision. The remote tooling is now current and no durable job is
+active, but all 31 managed networks remain connected and active; the inventory exposes
+no retained or stale candidate. The safe remediation therefore still requires an exact
+ownership/liveness review and an explicit decision to destroy selected workspaces, or
+an independently reviewed Docker daemon address-pool change. Updating the control
+plane fixed protocol skew but correctly did not claim to release a subnet.

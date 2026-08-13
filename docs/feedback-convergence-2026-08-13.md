@@ -33,7 +33,7 @@ the owning behavior, and observed evidence; it grants no cleanup or deployment a
 | `ad190c71` | Implemented | Bounded detail, filtering, cursor paging, JSON/JSONL export, and retention planning are available. |
 | `81f43e6f` | Implemented after review | Provider/bearer/Basic-Auth redaction plus a strict display allowlist protects hostile legacy records. |
 | `f90c6712` | Implemented | Invalid-record count is independent of page/display limits. |
-| `78aaf583` | Code complete; host pressure open | Live incident is monitored and logged; current observation remains 31 active networks and one active job. |
+| `78aaf583` | Code complete; host pressure open | Live incident is monitored and logged; current observation remains 31 active managed networks with zero active jobs and no stale candidates. |
 | `108318d9` | Validated as no-code | WordPress ensure/status and generic Compose status already perform live observation; no stale plugin-state cache was found. |
 
 The later local restore-parser feedback was also closed by the `--yes` parser and caller
@@ -53,17 +53,28 @@ seams. The current network-monitor observation is recorded in
   `todo/00-wordpress-plugin-release-guardian/prd.md`, ahead of outbound mail and
   polyglot-stack work. Reliable remote harness admission is its P0 prerequisite.
 
-## Release gates still required
+## Delivery and remaining operational gates
 
-1. Close the independent-review rework and rerun focused plus full repository tests.
-2. Prove allowlisted PHP child-image build/apply and matching web, WP-CLI, bounded exec,
-   and PHPUnit observations without changing database or uploads.
-3. Commit and push the feature branch while excluding the owner-controlled Spec 042
-   files.
-4. Provision the remote Sandbox runtime from the immutable commit and prove durable
-   protocol compatibility.
-5. Recheck network ownership after the active job reaches a terminal state. Do not
-   destroy a retained workspace or change daemon pools without an exact reviewed plan.
+Completed delivery evidence:
+
+1. Three independent Sol High release passes drove nested-host upgrade, managed-plan
+   preflight, image-receipt, no-mutation validation, and apply-rollback fixes; the final
+   pre-merge verdict was GO at 94/100.
+2. The allowlisted PHP child-image build/apply proof observed matching web, WP-CLI,
+   bounded exec, and PHPUnit planes without changing database, uploads, or Mailpit.
+3. The feature branch was committed, merged with `origin/latest`, and pushed while the
+   owner-controlled Spec 042 files retained their original hashes outside the commit.
+4. `sb remote up scaleway-sandbox --confirm --json` updated the remote control plane.
+   Its service is active, authenticated, ownership-proven, and accepts the canonical
+   project-identity job-list protocol with zero active jobs.
+
+Still open operationally:
+
+- the remote holds 31 active managed user-defined networks plus one foreign active
+  network, with zero stale candidates; no network is safe to remove automatically;
+- remote GD/workspace proof remains blocked by that capacity pressure;
+- do not destroy a workspace or change daemon pools without an exact reviewed plan and
+  explicit authority.
 
 ## Local PHP runtime proof
 

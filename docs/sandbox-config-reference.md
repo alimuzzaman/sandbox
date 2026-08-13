@@ -431,6 +431,7 @@ INI mutation are never auto-modified by this field.
 provenance, every observed plane, drift, and staleness. `sb apply` rebuilds only
 the WordPress web tier (`wp` plus nginx when selected); DB, Mailpit, uploads,
 snapshots, and project files are preserved.
+Status JSON omits credential-like fields and redacts `sandbox_autologin` values.
 
 ## Host driver (`server: "herd"`)
 

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 import types as _types
+from collections.abc import Mapping
 from contextlib import contextmanager
 import io
 import threading
@@ -165,14 +166,15 @@ def cmd_status(cfg, args) -> None:
     remote_result = _remote_lifecycle(cfg, args, "status")
     if remote_result is not None:
         if getattr(args, "json", False):
-            print(json.dumps(remote_result, sort_keys=True))
+            print(json.dumps(_public_status_json(remote_result), sort_keys=True))
         else:
                 print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
                       f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
         return
     inst = args.resolved_instance
     if getattr(args, "json", False):
-        print(json.dumps(_status_json_payload(cfg, inst), sort_keys=True, default=str))
+        print(json.dumps(_public_status_json(_status_json_payload(cfg, inst)),
+                         sort_keys=True, default=str))
         return
     owner = _core().registry_find_instance(inst)
     runtime_data = None
@@ -223,6 +225,32 @@ def cmd_status(cfg, args) -> None:
     # no bridge — Tools → Sandbox Snapshots would fail to connect).
     if not _is_herd_instance(inst) and _bridge_token_for(inst):
         _ensure_bridge_server()
+
+
+_STATUS_SENSITIVE_KEY = re.compile(
+    r"(?:login_url|token|password|passphrase|secret|credential|cookie|authorization)",
+    re.IGNORECASE,
+)
+_STATUS_AUTOLOGIN_VALUE = re.compile(
+    r"(?i)(sandbox_autologin=)[^&#\s\"']*",
+)
+
+
+def _public_status_json(value):
+    """Copy status data while omitting credential-like fields for JSON output."""
+    if isinstance(value, Mapping):
+        return {
+            key: _public_status_json(child)
+            for key, child in value.items()
+            if not _STATUS_SENSITIVE_KEY.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_public_status_json(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_public_status_json(child) for child in value)
+    if isinstance(value, str):
+        return _STATUS_AUTOLOGIN_VALUE.sub(r"\1[REDACTED]", value)
+    return value
 
 
 def _status_json_payload(cfg, inst: str) -> dict:

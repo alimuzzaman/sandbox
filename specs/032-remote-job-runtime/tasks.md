@@ -438,7 +438,7 @@ feature requirements rather than treated as documentation-only follow-up.
 ## Phase 11: Outstanding live measurement proofs
 
 - [ ] T156 [US1/US2] On an approved disposable provisioned remote, run 100 controlled caller-disconnect/reconnect submissions and retain only sanitized job IDs, terminal-or-reconciled lifecycle counts, and cursor duplicate results to prove SC-002 and SC-003.
-- [ ] T157 [US2] On an approved reachable provisioned remote, measure active-job status latency and retain sanitized lifecycle/liveness/deadline/last-activity evidence proving the SC-004 five-second target.
+- [X] T157 [US2] On an approved reachable provisioned remote, measure active-job status latency and retain sanitized lifecycle/liveness/deadline/last-activity evidence proving the SC-004 five-second target.
 
 ## Phase 12: Convergence — 2026-08-13 (27-feedback jobs)
 

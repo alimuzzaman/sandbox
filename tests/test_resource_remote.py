@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 import unittest
 
@@ -237,6 +238,28 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         snapshot = adapter.observe(thorough=True, budget_seconds=2)
         self.assertIsNone(snapshot.capacity)
         self.assertEqual(snapshot.category_outcomes[0]["status"], "timed_out")
+        self.assertEqual(len(calls), 1)
+
+    def test_remote_transport_timeout_exception_is_structured_partial_evidence(self):
+        calls = []
+
+        def ssh(_remote, command, *, input_data=None, timeout=0):
+            calls.append(command)
+            raise subprocess.TimeoutExpired(("ssh", "fixture"), timeout)
+
+        adapter = RemoteResourceAdapter(
+            "remote-a",
+            remote_lookup=lambda _name: {"ssh": "host", "provisioned": True},
+            ssh_process=ssh,
+            clock=lambda: NOW,
+        )
+
+        snapshot = adapter.observe(thorough=True, budget_seconds=2)
+
+        self.assertIsNone(snapshot.capacity)
+        self.assertEqual(snapshot.category_outcomes, ({
+            "category": "remote_probe", "status": "timed_out",
+        },))
         self.assertEqual(len(calls), 1)
 
     def test_remote_timeout_retains_delivered_valid_partial_payload(self):

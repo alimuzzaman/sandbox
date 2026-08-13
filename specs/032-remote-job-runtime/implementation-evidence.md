@@ -1159,3 +1159,18 @@ secrets, credential-bearing SSH targets, or unredacted project output.
 - This closes T162. It is one live acknowledgement/replay proof, not the
   separately open 100-disconnect measurement (T156) or status-latency study
   (T157).
+
+## Active status latency measurement — 2026-08-13
+
+- A bounded 12-second remote job produced five independent `job-status` reads
+  through `scaleway-sandbox`. Observed end-to-end latencies were 3.179, 2.551,
+  3.050, 2.845, and 2.671 seconds; maximum was 3.179 seconds and every sample
+  remained below SC-004's five-second target.
+- The first three samples reported `running`/`active` with a 30-second explicit
+  deadline. The final two reported `succeeded`/`terminal`, exit code 0. The
+  retained heartbeat recorded child observation, last activity, last progress,
+  supervisor, and metrics timestamps; no path, command output, credential, or
+  host address is retained in this evidence.
+- Job `afb859d68372daae541e8b410fb5e187` reached its authoritative terminal
+  state. This closes T157 for the selected reachable remote; T156 remains a
+  separate controlled 100-disconnect requirement.

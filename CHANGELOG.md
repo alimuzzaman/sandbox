@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.2] — 2026-08-13
+
+### Fixed
+- Remote resource observation now converts a client-side SSH timeout into
+  structured `timed_out` partial evidence instead of leaking a traceback or
+  retrying an ambiguous probe.
+
 ## [0.2.1] — 2026-08-13
 
 ### Fixed

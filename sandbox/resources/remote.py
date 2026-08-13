@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from typing import Callable
 
 from sandbox.services.process import ProcessResult
@@ -2135,15 +2136,21 @@ class RemoteResourceAdapter:
             execute = ssh_process
         else:
             execute = self._ssh_process
-        result = execute(
-            entry,
-            (
-                'sandbox_runtime="${SANDBOX_HOME:-$HOME/sandbox}/sb-src"; '
-                'PYTHONPATH="$sandbox_runtime" python3 -'
-            ),
-            input_data=_program(request),
-            timeout=max(int(timeout), 1),
-        )
+        try:
+            result = execute(
+                entry,
+                (
+                    'sandbox_runtime="${SANDBOX_HOME:-$HOME/sandbox}/sb-src"; '
+                    'PYTHONPATH="$sandbox_runtime" python3 -'
+                ),
+                input_data=_program(request),
+                timeout=max(int(timeout), 1),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
+            return ProcessResult(tuple(exc.cmd) if isinstance(exc.cmd, (list, tuple)) else ("ssh",),
+                                 124, stdout, stderr)
         return ProcessResult(
             tuple(getattr(result, "args", getattr(result, "argv", ("ssh",)))),
             int(result.returncode),

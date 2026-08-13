@@ -316,7 +316,7 @@ T001-T044.
 - [ ] T048 [US1/US2] Add constrained-pool collision/exhaustion and recovery
   coverage for `822b9323`; assert stable capacity errors, bounded retries, and
   no automatic deletion or disk-capacity misclassification.
-- [ ] T049 [US2] Add remote timeout/stale-control observation coverage for
+- [X] T049 [US2] Add remote timeout/stale-control observation coverage for
   `78aaf583`; assert structured partial/unavailable evidence, no traceback or
   false success, and a required fresh rescan before planning.
 - [x] T050 [US1/US6] Add the `6bc4c6d5` consumer regression proving resource

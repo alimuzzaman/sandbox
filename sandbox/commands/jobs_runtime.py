@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -133,7 +135,9 @@ def configure_output_parser(parser) -> None:
 
 def configure_list_parser(parser) -> None:
     parser.add_argument("--limit", type=int, default=50)
-    parser.add_argument("--project-dir")
+    project = parser.add_mutually_exclusive_group()
+    project.add_argument("--project-dir")
+    project.add_argument("--project-identity", help=argparse.SUPPRESS)
     parser.add_argument("--workspace")
     parser.add_argument("--active-only", action="store_true")
     parser.add_argument("--remote")
@@ -335,19 +339,23 @@ def cmd_job_output(_cfg, args) -> None:
 
 
 def cmd_job_list(_cfg, args) -> None:
+    project_identity = getattr(args, "project_identity", None)
+    if project_identity is not None and not re.fullmatch(r"[a-f0-9]{64}", project_identity):
+        raise ValueError("project identity must be a 64-character lowercase SHA-256 digest")
+    if args.project_dir:
+        project_identity = hashlib.sha256(
+            str(Path(args.project_dir).expanduser().resolve()).encode()).hexdigest()
     if args.remote:
         from sandbox.core import _remote
         from sandbox.transports.remote_jobs import RemoteJobTransport
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).list(args.remote, limit=args.limit,
-                project_dir=args.project_dir, workspace=args.workspace, active_only=args.active_only)
+                project_identity=project_identity, workspace=args.workspace, active_only=args.active_only)
         result = result.get("jobs", result)
     else:
-        from pathlib import Path
         query = {"limit": args.limit}
-        if args.project_dir:
-            query["project_identity"] = hashlib.sha256(
-                str(Path(args.project_dir).expanduser().resolve()).encode()).hexdigest()
+        if project_identity:
+            query["project_identity"] = project_identity
         if args.workspace:
             query["workspace_label"] = args.workspace
         result = durable_job_dependencies()["job_service"].list(query)

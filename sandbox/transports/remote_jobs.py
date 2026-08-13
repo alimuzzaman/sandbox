@@ -318,11 +318,11 @@ class RemoteJobTransport:
                     "health": "unreachable", "target": {"kind": "remote", "remote": remote_name},
                     "error": str(exc)}
 
-    def list(self, remote_name: str, *, limit: int = 50, project_dir: str | None = None,
+    def list(self, remote_name: str, *, limit: int = 50, project_identity: str | None = None,
              workspace: str | None = None, active_only: bool = False) -> dict:
         args = ["job-list", "--limit", str(limit)]
-        if project_dir:
-            args += ["--local", "--project-dir", project_dir]
+        if project_identity:
+            args += ["--project-identity", project_identity]
         if workspace:
             args += ["--workspace", workspace]
         if active_only:

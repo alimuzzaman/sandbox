@@ -28,6 +28,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Workspace migration is metadata-only and cannot authorize workspace destruction,
   network cleanup, or ambiguous ownership adoption.
 
+### Fixed
+- `job-list --active-only` now applies the active-lifecycle predicate before the
+  bounded page, preventing older active jobs from disappearing behind newer
+  terminal records.
+
 ## [Unreleased] — v1.0.0 target
 
 ### Added

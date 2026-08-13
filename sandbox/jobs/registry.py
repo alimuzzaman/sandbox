@@ -462,7 +462,7 @@ class JobRepository:
 
     def list(self, *, limit: int = 50, project_identity: str | None = None,
              workspace_label: str | None = None, lifecycle: str | None = None,
-             kind: str | None = None,
+             kind: str | None = None, active_only: bool = False,
              cursor_job_id: str | None = None) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
             raise ValueError("job list limit must be between 1 and 200")
@@ -477,6 +477,8 @@ class JobRepository:
         if lifecycle is not None:
             clauses.append("lifecycle=?")
             values.append(lifecycle)
+        if active_only:
+            clauses.append("lifecycle IN ('accepted','queued','running','cancelling')")
         category = kind
         if category is not None:
             clauses.append("kind=?")

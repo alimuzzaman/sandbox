@@ -79,6 +79,26 @@ class JobCliTests(unittest.TestCase):
                 cmd_job_list(None, args)
             dependencies.assert_not_called()
 
+    def test_local_active_job_list_filters_at_the_repository_boundary(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_list_parser(parser)
+        args = parser.parse_args(["--active-only", "--json"])
+        captured = []
+        output = StringIO()
+        service = SimpleNamespace(
+            list=lambda query: captured.append(query) or [{
+                "job_id": "a" * 32, "lifecycle": "running",
+                "workspace_label": "unit",
+            }],
+        )
+        with patch(
+                "sandbox.commands.jobs_runtime.durable_job_dependencies",
+                return_value={"target_service": None, "job_service": service}), \
+                redirect_stdout(output):
+            cmd_job_list(None, args)
+        self.assertEqual(captured, [{"limit": 50, "active_only": True}])
+        self.assertEqual(len(json.loads(output.getvalue())["jobs"]), 1)
+
     def test_start_parser_and_detached_acceptance_preserve_explicit_argv_context(self):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

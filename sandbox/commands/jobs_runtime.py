@@ -439,6 +439,8 @@ def cmd_job_list(_cfg, args) -> None:
             query["kind"] = category
         if cursor_job_id:
             query["cursor_job_id"] = cursor_job_id
+        if active_only:
+            query["active_only"] = True
         result = dependencies["job_service"].list(query)
     # The application service returns a list while remote control returns a
     # bounded JobPage object. Normalize both at this adapter boundary so the

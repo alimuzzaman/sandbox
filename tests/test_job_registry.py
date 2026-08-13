@@ -55,6 +55,15 @@ class JobRegistryTests(unittest.TestCase):
         reopened = self.repository()
         self.assertEqual(reopened.get(first["job_id"])["lifecycle"], "accepted")
 
+    def test_active_only_filters_before_the_bounded_page(self):
+        repo = self.repository()
+        active, _ = repo.accept(submission("active-old"))
+        terminal, _ = repo.accept(submission("terminal-new"))
+        repo.transition(terminal["job_id"], "running")
+        repo.transition(terminal["job_id"], "succeeded", exit_code=0)
+        rows = repo.list(limit=1, active_only=True)
+        self.assertEqual([item["job_id"] for item in rows], [active["job_id"]])
+
     def test_resource_index_exposes_exact_workspace_ownership_evidence(self):
         from sandbox.jobs.registry import read_resource_index
 

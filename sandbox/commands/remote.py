@@ -17,7 +17,7 @@ import sandbox.core._remote as sr
 # independent registry, never here (see _remote.py's module docstring).
 
 def cmd_remote(cfg, args) -> None:
-    """`./sb remote <add|list|provision|up|down|remove|set-origin|docker-pool> [name] [ssh_url] [--json]`
+    """`./sb remote <add|list|provision|up|down|remove|set-origin|docker-pool|domains> [name] [ssh_url] [--json]`
     -- register and manage remote VPS targets. See docs/remote-hosting.md."""
     action = args.action
     as_json = bool(getattr(args, "json", False))
@@ -30,9 +30,31 @@ def cmd_remote(cfg, args) -> None:
         "remove": _cmd_remove,
         "set-origin": _cmd_set_origin,
         "docker-pool": _cmd_docker_pool,
+        "domains": _cmd_domains,
         "service": _cmd_service,
     }
     dispatch[action](args, as_json)
+
+
+def _cmd_domains(args, as_json: bool) -> None:
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        data = sr.remote_domain_inventory(entry)
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        data = {"ok": False, "code": "remote_domain_inventory_failed",
+                "message": sr.redact_ssh_connection(str(exc), entry)}
+    if as_json:
+        print(json.dumps(data, sort_keys=True))
+        if not data.get("ok"): raise SystemExit(1)
+        return
+    if not data.get("ok"):
+        die(data.get("message", "remote domain inventory failed"))
+    for item in data["domains"]:
+        owners = ", ".join(item["owners"]) or "unattributed"
+        print(f"{item['domain']}  ({owners})")
 
 
 def _cmd_docker_pool(args, as_json: bool) -> None:

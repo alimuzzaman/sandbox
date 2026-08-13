@@ -1536,6 +1536,35 @@ json.load(open(path))
             self.assertEqual(json.loads(config.read_text()), {"log-driver": "json-file"})
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
+
+class TestRemoteDomainInventory(unittest.TestCase):
+    @patch("sandbox.core._remote.ssh_run")
+    def test_inventory_is_bounded_and_secret_free(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "count": 1, "domains": [{
+                "domain": "example.com", "owners": ["site-production"],
+                "sources": ["instance_registry", "caddy_route"],
+                "statuses": ["ready"],
+            }],
+        }))
+        result = sr.remote_domain_inventory({
+            "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
+        })
+        self.assertEqual(result["domains"][0]["domain"], "example.com")
+        command = mock_ssh_run.call_args.args[1]
+        self.assertIn("sudo -n python3", command)
+        self.assertNotIn("registered-target", command)
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_inventory_rejects_unknown_fields(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(stdout=json.dumps({
+            "ok": True, "count": 0, "domains": [], "secret": "no",
+        }))
+        with self.assertRaisesRegex(RuntimeError, "invalid envelope"):
+            sr.remote_domain_inventory({
+                "ssh": "registered-target", "sb_path": "/home/alim/sandbox/sb-src/sb",
+            })
+
     @patch("sandbox.core._remote.remote_mcp_service_status")
     @patch("sandbox.core._remote.check_reachable", return_value=True)
     @patch("urllib.request.build_opener")

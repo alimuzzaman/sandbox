@@ -1905,6 +1905,79 @@ def remote_docker_pool(remote: dict, *, confirm: bool = False,
     return payload
 
 
+def remote_domain_inventory(remote: dict, *, timeout: int = 60) -> dict:
+    """Return a bounded, secret-free domain inventory for one registered host."""
+    import base64
+    runtime_root = str(PurePosixPath(remote_sb_path(remote)).parents[1])
+    program = f'''import json, pathlib, re, urllib.parse
+ROOT = pathlib.Path({runtime_root!r})
+rows = {{}}
+def add(domain, owner, source, status=None):
+    if not isinstance(domain, str): return
+    domain = domain.strip().lower().rstrip(".")
+    if domain.startswith("*."): domain = domain[2:]
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", domain): return
+    item = rows.setdefault(domain, {{"domain": domain, "owners": set(), "sources": set(), "statuses": set()}})
+    if isinstance(owner, str) and owner: item["owners"].add(owner[:120])
+    item["sources"].add(source)
+    if isinstance(status, str) and status: item["statuses"].add(status[:40])
+registry = ROOT / "runtime" / "registry.json"
+try:
+    data = json.loads(registry.read_text())
+except Exception:
+    data = {{}}
+instances = data.get("instances") if isinstance(data, dict) else {{}}
+if isinstance(instances, dict):
+    for key, record in instances.items():
+        if not isinstance(record, dict): continue
+        owner = record.get("instance") or key
+        add(record.get("domain"), owner, "instance_registry", record.get("status"))
+        url = record.get("url")
+        if isinstance(url, str):
+            try: add(urllib.parse.urlsplit(url).hostname, owner, "instance_registry", record.get("status"))
+            except ValueError: pass
+caddy = pathlib.Path("/etc/caddy/conf.d")
+if caddy.is_dir():
+    for path in caddy.glob("sandbox-*.caddy"):
+        owner = path.stem[:120]
+        try: text = path.read_text()
+        except Exception: continue
+        for line in text.splitlines():
+            match = re.match(r"^\\s*(?:https?://)?(\\*\\.)?([a-zA-Z0-9.-]+)(?::\\d+)?(?:,|\\s*\\{{)", line)
+            if match: add(match.group(2), owner, "caddy_route", "configured")
+output = []
+for domain in sorted(rows):
+    item = rows[domain]
+    output.append({{"domain": domain, "owners": sorted(item["owners"]),
+                   "sources": sorted(item["sources"]), "statuses": sorted(item["statuses"])}})
+print(json.dumps({{"ok": True, "domains": output, "count": len(output)}}, sort_keys=True))
+'''
+    encoded = base64.b64encode(program.encode()).decode()
+    command = "sudo -n python3 -c " + shlex.quote(
+        "import base64;exec(base64.b64decode(" + repr(encoded) + "))")
+    result = ssh_run(remote, command, timeout=timeout)
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("remote domain inventory returned invalid output") from exc
+    if result.returncode != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError("remote domain inventory failed")
+    if set(payload) != {"ok", "domains", "count"} or not isinstance(payload["domains"], list):
+        raise RuntimeError("remote domain inventory returned an invalid envelope")
+    if payload["count"] != len(payload["domains"]) or payload["count"] > 1000:
+        raise RuntimeError("remote domain inventory returned an invalid count")
+    for item in payload["domains"]:
+        if not isinstance(item, dict) or set(item) != {"domain", "owners", "sources", "statuses"}:
+            raise RuntimeError("remote domain inventory returned an invalid record")
+        if not isinstance(item["domain"], str) or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", item["domain"]):
+            raise RuntimeError("remote domain inventory returned an invalid domain")
+        if not all(isinstance(item[field], list) and all(isinstance(value, str) for value in item[field])
+                   for field in ("owners", "sources", "statuses")):
+            raise RuntimeError("remote domain inventory returned invalid metadata")
+    return payload
+
+
 def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -> dict:
     """Perform the supported authenticated, secret-safe remote probe.
 

@@ -482,11 +482,12 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
              "up/down: start/stop the remote MCP server; docker-pool: plan/apply "
-             "the fixed /24 daemon address pools; remove: forget a remote "
+             "the fixed /24 daemon address pools; domains: list configured "
+             "instance and hosted-route domains; remove: forget a remote "
              "locally (never touches the VPS itself)")
     remote_p.add_argument("name", nargs="?", default=None,
         help="remote name (required for every action except 'list')")

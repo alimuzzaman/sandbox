@@ -195,6 +195,11 @@ From any configured project directory, run:
 sb guide --project-dir .
 ```
 
+If an interrupted first bootstrap left an incomplete `.cli-venv` and the next
+invocation reports `FileExistsError`, rerun the command: the CLI recreates only
+that generated, incomplete directory. A file or symlink at that location is
+left untouched and must be removed deliberately by the operator.
+
 Use `--json` when a structured command catalog is useful. The guide is runtime
 aware: generic Compose projects receive generic lifecycle and execution
 commands; WordPress projects receive WordPress commands.

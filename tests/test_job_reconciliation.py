@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 from sandbox.application.job_service import JobService
 from sandbox.application.context import durable_job_dependencies
-from sandbox.jobs.models import JobSubmission, SourceIdentity
+from sandbox.application.target_service import TargetResolutionError
+from sandbox.jobs.models import JobSubmission, SourceIdentity, TargetRequest
 from sandbox.jobs.process import ProcessIdentity
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
@@ -130,3 +131,62 @@ class JobReconciliationTests(unittest.TestCase):
             self.addCleanup(dependencies["job_service"].repository.close)
 
         reconcile.assert_called_once_with()
+
+    def test_composed_target_service_uses_one_configured_remote_and_preserves_explicit_precedence(self):
+        import sandbox_core as sc
+
+        remotes = {"alpha": {"provisioned": True}}
+        def lookup(name):
+            if name is None:
+                raise AssertionError("name lookup cannot enumerate remotes")
+            return remotes.get(name)
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.core._paths.RUNTIME_DIR", Path(temp)), \
+                patch.object(sc, "load_project_config", return_value={
+                    "root": "/tmp/project", "runtime": {"default": "local"},
+                }), \
+                patch("sandbox.core._remote.list_remotes", return_value=remotes), \
+                patch("sandbox.core._remote.get_remote", side_effect=lookup), \
+                patch.object(JobService, "reconcile_startup",
+                             return_value={"ok": True, "interrupted": [],
+                                           "released_leases": []}):
+            dependencies = durable_job_dependencies()
+            self.addCleanup(dependencies["job_service"].repository.close)
+            service = dependencies["target_service"]
+
+            inferred = service.resolve(TargetRequest("/tmp/project"))
+            explicit_local = service.resolve(TargetRequest("/tmp/project", local=True))
+            explicit_remote = service.resolve(TargetRequest("/tmp/project", remote="alpha"))
+
+        self.assertEqual((inferred.kind, inferred.remote_name), ("remote", "alpha"))
+        self.assertEqual(inferred.sources["remote_selection"], "single-configured")
+        self.assertEqual((explicit_local.kind, explicit_local.remote_name), ("local", None))
+        self.assertEqual(explicit_local.sources["remote_selection"], "explicit")
+        self.assertEqual((explicit_remote.kind, explicit_remote.remote_name), ("remote", "alpha"))
+        self.assertEqual(explicit_remote.sources["remote_selection"], "explicit")
+
+    def test_composed_target_service_fails_closed_on_ambiguous_remote_catalog(self):
+        import sandbox_core as sc
+
+        remotes = {
+            "alpha": {"provisioned": True},
+            "beta": {"provisioned": True},
+        }
+        def lookup(name):
+            if name is None:
+                raise AssertionError("name lookup cannot enumerate remotes")
+            return remotes.get(name)
+        with tempfile.TemporaryDirectory() as temp, \
+                patch("sandbox.core._paths.RUNTIME_DIR", Path(temp)), \
+                patch.object(sc, "load_project_config", return_value={
+                    "root": "/tmp/project", "runtime": {"default": "local"},
+                }), \
+                patch("sandbox.core._remote.list_remotes", return_value=remotes), \
+                patch("sandbox.core._remote.get_remote", side_effect=lookup), \
+                patch.object(JobService, "reconcile_startup",
+                             return_value={"ok": True, "interrupted": [],
+                                           "released_leases": []}):
+            dependencies = durable_job_dependencies()
+            self.addCleanup(dependencies["job_service"].repository.close)
+            with self.assertRaisesRegex(TargetResolutionError, "multiple configured remotes"):
+                dependencies["target_service"].resolve(TargetRequest("/tmp/project"))

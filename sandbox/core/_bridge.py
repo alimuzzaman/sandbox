@@ -186,7 +186,19 @@ def _bridge_handle(method: str, instance: str, subpath: str,
             return 400, {"ok": False, "error": "invalid snapshot name"}
         if not (snapshots_dir(instance) / name).exists():
             return 404, {"ok": False, "error": "no such snapshot"}
-        ns = _types.SimpleNamespace(resolved_instance=instance, name=name)
+        # Restoring drops and recreates the current database.  The dashboard
+        # bridge is a mutation boundary, so an explicit boolean acknowledgement
+        # is required before accepting the asynchronous job; a prior prompt or
+        # caller identity must never imply consent.
+        if body.get("confirm") is not True:
+            return 400, {
+                "ok": False,
+                "error": "confirmation_required",
+                "reason": "restore requires confirm=true",
+            }
+        ns = _types.SimpleNamespace(
+            resolved_instance=instance, name=name, yes=True, confirm=True,
+        )
         jid = _start_job(f"restore {name}", lambda: cmd_restore(cfg, ns))
         return 202, {"ok": True, "job_id": jid, "name": name}
 

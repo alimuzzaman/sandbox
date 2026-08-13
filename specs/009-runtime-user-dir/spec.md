@@ -243,3 +243,26 @@ references the old base.
   environment shims are regenerated like other baked artifacts.
 - Removal of any legacy in-repo path handling follows the project's parity-before-removal
   rule: old-location reads are kept as a fallback until the migrated path is proven.
+
+## Convergence amendment — 2026-08-13 (PHP extension build state)
+
+The WordPress PHP-extension requirement is project configuration, but the generated
+build context and its provenance are machine state. This amendment keeps that state
+inside the same swappable base and does not change the configuration-home placement
+decision in Spec 042.
+
+- Extension build contexts and recreatable caches MUST live below
+  `$SANDBOX_HOME/runtime/build/php-extensions/<content-digest>/`; they MUST NOT be
+  written into a checkout, a tracked spec, or a project-owned source directory.
+- The extension cache key MUST include the normalized requirement document, immutable
+  profile/catalog revision, parent image digest, PHP version, web-server flavor,
+  platform, and architecture. A change to any input MUST select a different digest.
+- Cache entries MUST record only non-secret source/artifact provenance, resolved image
+  digests, package/artifact versions, and last observations. They MUST be safe to
+  recreate or discard during base relocation; no cache entry may be treated as the
+  source of truth for project data.
+- Relocation MUST move pure metadata safely and regenerate path-bearing build contexts
+  for the new base. It MUST preserve the existing database volumes, uploads, snapshots,
+  and project files; extension reconciliation is limited to web/runtime artifacts.
+- The CLI and MCP processes MUST derive this path from the same active base, and cache
+  diagnostics MUST redact credentials, tokens, and private source paths.

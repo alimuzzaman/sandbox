@@ -44,7 +44,11 @@ OVERRIDE_BASENAMES = (
     "sandbox.config.override.yaml",
 )
 WPENV_BASENAMES = (".wp-env.json",)
-ROOT_MARKERS = CONFIG_BASENAMES + WPENV_BASENAMES + (".git",)
+# The conventional project-local config home is also a root marker so nested
+# invocations discover the same project even when the repository has no .git
+# checkout metadata (for example a source archive or copied fixture).
+CONFIG_SUBDIRECTORY = (".config", "sandbox")
+ROOT_MARKERS = CONFIG_BASENAMES + WPENV_BASENAMES + (".git", ".config/sandbox")
 
 # Per-label config layer (multi-instance-per-root, docs/multi-instance-spec.md):
 # sandbox.config.<label>.json optionally sits ABOVE sandbox.config.override.json
@@ -61,6 +65,12 @@ def _label_config_basenames(label: str) -> tuple[str, ...]:
     return (f"sandbox.config.{label}.json",
             f"sandbox.config.{label}.yml",
             f"sandbox.config.{label}.yaml")
+
+
+def _project_config_home(root: Path) -> Path:
+    """Select the one authoritative project-local config home."""
+    from sandbox.config.descriptors import config_home
+    return config_home(root)
 
 # User-global config: applies to every project on this machine. Honors
 # XDG_CONFIG_HOME; overridable for tests via SANDBOX_USER_CONFIG (a file path).
@@ -150,6 +160,14 @@ def find_project_root(start) -> Path:
         )
     cur = start
     while True:
+        # A descriptor below the conventional project-local home belongs to
+        # its containing project root, not to ``.config/sandbox`` itself.
+        # Resolve this before the generic marker check so nested invocations
+        # use the same root as invocations from the checkout root.
+        if (cur.name == CONFIG_SUBDIRECTORY[-1]
+                and cur.parent.name == CONFIG_SUBDIRECTORY[-2]
+                and any((cur / m).exists() for m in CONFIG_BASENAMES)):
+            return cur.parent.parent
         if any((cur / m).exists() for m in ROOT_MARKERS):
             return cur
         if cur.parent == cur:
@@ -535,7 +553,8 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
     """
     root = find_project_root(project_dir)
 
-    native = _first_existing(root, CONFIG_BASENAMES)
+    config_home = _project_config_home(root)
+    native = _first_existing(config_home, CONFIG_BASENAMES)
     if native:
         native_doc = _load_doc(native)
         source = native.name
@@ -547,13 +566,13 @@ def _load_project_config_legacy(project_dir, label: str | None = None) -> dict:
         else:
             native_doc, source = {}, "defaults"
 
-    override_path = _first_existing(root, OVERRIDE_BASENAMES)
+    override_path = _first_existing(config_home, OVERRIDE_BASENAMES)
     override_doc = _load_doc(override_path) if override_path else {}
 
     label_path = None
     label_doc: dict = {}
     if label and label != "default" and _LABEL_RE.match(label):
-        label_path = _first_existing(root, _label_config_basenames(label))
+        label_path = _first_existing(config_home, _label_config_basenames(label))
         if label_path:
             label_doc = _load_doc(label_path)
 

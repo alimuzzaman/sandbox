@@ -7,6 +7,51 @@ from typing import Any
 from sandbox.runtimes.base import OperationRequest
 
 
+def resolve_project_identity(
+    project_dir: str | Path,
+    *,
+    label: str | None = None,
+    remote: str | None = None,
+) -> dict:
+    """Resolve the canonical kind-neutral project identity for all transports.
+
+    CLI and MCP composition roots call this wrapper instead of reproducing
+    project-root hashing or plugin-slug inference.  The normalized descriptor
+    remains the source of truth; registry metadata is additive and never
+    changes the identity for a given root/label.
+    """
+    import sandbox_core as sc
+    from sandbox.config.facade import project_identity
+
+    descriptor = sc.load_project_config(str(Path(project_dir).expanduser().resolve()), label=label)
+    identity = project_identity(descriptor, label=label, remote=remote)
+    try:
+        records = sc.registry_list_for_root(identity["canonical_root"])
+    except Exception:
+        records = []
+    selected = None
+    selected_label = identity["label"]
+    if label is not None:
+        selected = next((record for record in records if record.get("label") == label), None)
+    elif records:
+        if len(records) == 1:
+            selected = records[0]
+        else:
+            selected = next((record for record in records if record.get("is_default")), None)
+            if selected is not None:
+                selected_label = selected.get("label", selected_label)
+    if selected:
+        identity = {
+            **identity,
+            "label": selected_label,
+            "instance": selected.get("instance"),
+            "status": selected.get("status"),
+            "adapter": selected.get("adapter") or identity["adapter"],
+            "capabilities": tuple(selected.get("capabilities") or identity["capabilities"]),
+        }
+    return identity
+
+
 @dataclass(frozen=True)
 class ApplicationDependencies:
     """Concrete dependencies are assembled at transport composition roots."""
@@ -599,7 +644,24 @@ def runtime_service(cfg):
 
     def status(request: OperationRequest):
         entry = sc.registry_get(request.project_root, label=request.label)
-        return {"ok": entry is not None, **(entry or {})}
+        identity = resolve_project_identity(
+            request.project_root, label=request.label,
+        )
+        # Registry state is a snapshot, not a live health claim.  Preserve the
+        # historical fields while surfacing the identity and observation
+        # boundary to callers; live adapters perform their own bounded probe.
+        return {
+            "ok": entry is not None,
+            **(entry or {}),
+            "identity": identity["identity"],
+            "canonical_root": identity["canonical_root"],
+            "display_name": identity["display_name"],
+            "kind": identity["kind"],
+            "label": identity["label"],
+            "adapter": identity["adapter"],
+            "capabilities": identity["capabilities"],
+            "observation": {"source": "registry", "freshness": "snapshot"},
+        }
 
     dependencies = runtime_neutral_dependencies(
         registry=sc, allowed_roots=(core.ROOT, core.BASE),
@@ -832,7 +894,7 @@ def durable_job_dependencies():
     from sandbox.application.workspace_service import WorkspaceService
     from sandbox.config.runtime import BUILTIN_EXECUTION_PROFILES, BUILTIN_OUTPUT_PROFILES
     from sandbox.core._paths import RUNTIME_DIR
-    from sandbox.core._remote import get_remote
+    from sandbox.core._remote import get_remote, list_remotes
     from sandbox.jobs.manifest import builtin_job_component_registry
     from sandbox.jobs.process import capture_process_identity
     from sandbox.jobs.registry import JobRepository
@@ -850,7 +912,8 @@ def durable_job_dependencies():
         process_identity=capture_process_identity, clock=time, profiles=profiles,
     )
     target = TargetService(
-        config_loader=sc.load_project_config, remote_lookup=get_remote)
+        config_loader=sc.load_project_config, remote_lookup=get_remote,
+        remote_list=list_remotes)
     scheduler = JobScheduler(repository)
     workspace = WorkspaceService(
         target, storage, _remote_workspace_control, scheduler)

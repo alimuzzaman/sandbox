@@ -403,6 +403,7 @@ class StorageScan:
     drift: dict | None = None
     deep_attribution: Any | None = None
     capacity_scope_id: str | None = None
+    capacity_pressure: dict | None = None
 
     def __post_init__(self) -> None:
         if self.capacity is not None:
@@ -472,6 +473,7 @@ class StorageScan:
             "completeness": self.status,
             "capacity": self.capacity,
             "capacity_scope_id": self.capacity_scope_id,
+            "capacity_pressure": self.capacity_pressure,
             "summary": {
                 "attributed_bytes": self.attributed_bytes,
                 "unknown_bytes": self.unknown_bytes,

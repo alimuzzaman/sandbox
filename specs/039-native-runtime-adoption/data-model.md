@@ -92,3 +92,33 @@ Records owned object type/identity, expected last-applied digest, observed diges
 available, drift/unavailability reason, and retry state without database passwords,
 credential bytes, or foreign file content.
 
+## PhpExtensionRequirement
+
+| Field | Type | Rules |
+|---|---|---|
+| `profile` | string/null | `null` or immutable `wordpress@1`; unknown profiles fail before mutation |
+| `extensions` | map | Canonical extension name → `{state, version?}` |
+| `state` | enum | `enabled` or `disabled`; input `true`/string/`false` normalizes to this form |
+| `version` | string/null | Exact version, `X.Y.*`, or `php`; only enabled requirements may carry one |
+| `catalog_revision` | string | Checked-in profile/catalog revision selected by the resolver |
+| `normalized_digest` | digest | Requirement/profile/image/PHP/server/platform/architecture fingerprint |
+
+The immutable `wordpress@1` expansion requires `curl`, `dom`, `exif`, `fileinfo`,
+`hash`, `json`, `mbstring`, `mysqli`, `openssl`, `pcre`, `xml`, and at least one of
+`gd`/`imagick`; `intl`, `sodium`, `zip`, and `opcache` are recommended warnings.
+
+## PhpExtensionResolution
+
+| Field | Type | Rules |
+|---|---|---|
+| `requested` | object | Normalized requirements and profile revision |
+| `parent_image` | digest/object | Validated official image identity or validate-only observation |
+| `artifact_provenance` | list | Exact package/artifact/image identities; no secrets or arbitrary inputs |
+| `cache_path` | absolute path | `$SANDBOX_HOME/runtime/build/php-extensions/<digest>/` only |
+| `planes` | map | Fresh web, WP-CLI, bounded exec, PHPUnit observations |
+| `state` | enum | `ready`, `blocked`, `unsupported`, `version_mismatch`, `plane_drift`, `unavailable` |
+| `mutated` | boolean | False for validation-only/refusal/failing preflight results |
+
+The resolution digest is content-addressed and changes whenever any input that can
+alter an extension artifact or observation changes. Runtime-reported module versions
+and package/artifact versions are retained as distinct fields.

@@ -194,3 +194,19 @@ on the same engine.
 - [x] T032 Invoke one guarded automatic migration for an empty destination on an ordinary first command, while refusing conflicts and leaving read-only/finalization paths safe per FR-007 and C3 (missing).
 - [x] T033 Add fixture-driven migration safety coverage and document the persisted selection/automatic migration behavior per SC-004/SC-006/SC-007 (missing).
 - [x] T034 Restore the documented `sb migrate --dry-run`/guarded `--force` contract without allowing either flag to merge conflicting state per C3 (missing).
+
+## Phase 9: Convergence — 2026-08-13 (PHP extension cache/provenance)
+
+These tasks are intentionally open. They describe the base/path obligations for the
+PHP extension feature; they do not claim that the feature is implemented.
+
+- [x] T035 Add fixture coverage proving identical PHP-extension requirements resolve to
+  `$SANDBOX_HOME/runtime/build/php-extensions/<digest>/`, while a changed profile,
+  catalog, parent image digest, PHP version, server flavor, platform, or architecture
+  yields a new digest and never writes into the checkout.
+- [ ] T036 Verify relocation and automatic migration move extension metadata without
+  moving database volumes, uploads, snapshots, or project files, then regenerate every
+  path-bearing build context under the destination base.
+- [ ] T037 Add CLI/MCP parity and redaction tests for extension cache/provenance status;
+  output MUST contain no secrets or private source contents and MUST remain safe when
+  an entry is missing, stale, or discarded.

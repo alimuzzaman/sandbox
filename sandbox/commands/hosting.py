@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 import urllib.parse
 from getpass import getpass
+from pathlib import Path
 
 from sandbox.core import die, info, ok
 from sandbox.registry import register
@@ -428,7 +429,12 @@ def _verify_remote_health(entry: dict, runtime: dict) -> None:
     )
 
 
-def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> None:
+def _verify_edge(
+    routes: list[dict],
+    *,
+    basic_auth_enabled: bool = False,
+    basic_auth_credentials: tuple[str, str] | None = None,
+) -> None:
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         """Treat a redirect response as a successful reachable route.
 
@@ -443,10 +449,11 @@ def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> Non
     for route in routes:
         if route["hostname"].startswith("*."):
             continue
-        request = urllib.request.Request(
-            f"https://{route['hostname']}/", method="GET",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)"},
-        )
+        endpoint = f"https://{route['hostname']}/"
+        request_headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; Sandbox hosting verification)",
+        }
+        request = urllib.request.Request(endpoint, method="GET", headers=request_headers)
         last_error = None
         # Cloudflare can need several minutes to activate edge certificates after
         # proxying a previously DNS-only alias for the first time.
@@ -466,7 +473,45 @@ def _verify_edge(routes: list[dict], *, basic_auth_enabled: bool = False) -> Non
                 last_error = exc
             time.sleep(10)
         if last_error:
-            raise RuntimeError(f"edge verification failed for {route['hostname']}: {last_error}")
+            # Do not stringify an exception carrying a request object: some
+            # urllib implementations include its headers in ``repr``.  The
+            # public error is intentionally bounded and credential-free.
+            detail = (
+                f"HTTP {getattr(last_error, 'code', 'error')}"
+                if isinstance(last_error, urllib.error.HTTPError)
+                else "route unavailable"
+            )
+            raise RuntimeError(
+                f"edge verification failed for {route['hostname']}: {detail}"
+            )
+        if basic_auth_credentials and route.get("mode") == "serve":
+            username, password = basic_auth_credentials
+            if not isinstance(username, str) or not isinstance(password, str):
+                raise RuntimeError("Basic Auth verification credentials are unavailable")
+            # The credential is obtained only through _secret_status() (the
+            # registered personal secret broker) and exists in memory for this
+            # request.  It is never part of a URL, subprocess argv, or log.
+            encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+            auth_request = urllib.request.Request(
+                endpoint,
+                method="GET",
+                headers={**request_headers, "Authorization": f"Basic {encoded}"},
+            )
+            auth_error = None
+            try:
+                with opener.open(auth_request, timeout=15) as response:
+                    if 200 <= response.status < 400:
+                        auth_error = None
+                    else:
+                        auth_error = f"HTTP {response.status}"
+            except urllib.error.HTTPError as exc:
+                auth_error = f"HTTP {exc.code}"
+            except Exception:
+                auth_error = "route unavailable"
+            if auth_error:
+                raise RuntimeError(
+                    f"authenticated edge verification failed for {route['hostname']}: {auth_error}"
+                )
 
 
 def _validate_apply_source(validated: dict) -> str:
@@ -502,7 +547,19 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
     client = cloudflare.Client()
     home = remote.resolve_sandbox_home(entry)
     target = _ensure_host_source(entry, home, validated["project"])
-    sha = remote.push_commits(entry, validated["project_root"], target, branch)
+    manifest_root = validated.get("manifest_root")
+    source_root = validated.get("source_root")
+    nested_source = (
+        bool(validated.get("source_root_nested"))
+        or (
+            source_root and manifest_root
+            and Path(source_root).resolve() != Path(manifest_root).resolve()
+        )
+    )
+    sha = remote.push_commits(
+        entry, validated["project_root"], target, branch,
+        source_root=source_root if nested_source else None,
+    )
     remote.reset_target_to(entry, target, sha)
     diff, untracked = remote.capture_uncommitted(validated["project_root"])
     remote.apply_uncommitted(entry, target, validated["project_root"], diff, untracked)
@@ -574,7 +631,15 @@ def _apply_host(validated: dict, entry: dict, remote_name: str, runtime: dict,
             previous = next((record for record in all_records if record.get("type") == kind), None)
             created = client.upsert_address(zone["id"], hostname, wanted["address"], proxied=True)
             changes.append({"zone_id": zone["id"], "previous": previous, "created_id": created.get("id")})
-        _verify_edge(validated["routes"], basic_auth_enabled=bool(validated.get("basic_auth")))
+        basic_credentials = None
+        if validated.get("basic_auth"):
+            auth = validated["basic_auth"]
+            basic_credentials = (auth["username"], secret_values[auth["password_secret"]])
+        _verify_edge(
+            validated["routes"],
+            basic_auth_enabled=bool(validated.get("basic_auth")),
+            basic_auth_credentials=basic_credentials,
+        )
         state["hosts"][key] = {"loopback_port": runtime["loopback_port"], "compose_project": runtime["compose_project"],
                                "certificate": certificate, "records": changes, "commit": sha,
                                "caddy_name": caddy_name}
@@ -637,6 +702,11 @@ def cmd_host(cfg, args) -> None:
             print(result["url"])
         return
     plan = hosting.desired_plan(validated, entry.get("origin_ipv4"), entry.get("origin_ipv6"))
+    # Host operations currently require an explicit remote.  Surface that
+    # choice in both plan and apply evidence so a future inferred-target path
+    # cannot silently change machines.
+    plan["remote"] = args.remote
+    plan["remote_selection"] = "explicit"
     plan["runtime"] = hosting.desired_runtime(validated, args.remote, state)
     plan["runtime"]["records"] = plan["records"]
     _, missing = _secret_status(validated)
@@ -662,7 +732,7 @@ def cmd_host(cfg, args) -> None:
     except (hosting.HostingError, cloudflare.CloudflareError, RuntimeError,
             subprocess.SubprocessError, OSError) as exc:
         die(str(exc))
-    ok(f"applied {validated['project']} / {validated['environment']} to {args.remote}")
+    ok(f"applied {validated['project']} / {validated['environment']} to {args.remote} (remote_selection=explicit)")
 
 
 register({"host": cmd_host})

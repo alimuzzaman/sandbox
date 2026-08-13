@@ -102,6 +102,21 @@ def validate_job_id(value: object) -> str:
     return value
 
 
+def validate_ack_job_id(value: object, *, label: str = "job id") -> str:
+    """Validate an acknowledgement identity without accepting a blank placeholder.
+
+    Remote controllers may use a legacy short identifier in test doubles or while
+    replaying an old record, so this boundary intentionally requires a bounded
+    non-empty string rather than imposing the local repository's 16/32-hex shape.
+    Local repository rows continue to use :func:`validate_job_id`.
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        raise ValueError(f"{label} is missing or invalid")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{label} is missing or invalid")
+    return value
+
+
 def validate_argv(value: object) -> tuple[str, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
         raise ValueError("command must be a non-empty argv list")
@@ -272,6 +287,15 @@ class ResolvedTarget:
         if self.kind not in {"local", "remote"}:
             raise ValueError("target kind is invalid")
         _safe_name(self.workspace_label, "workspace label")
+
+    def context(self) -> dict[str, Any]:
+        """Return the canonical project/workspace context for detached callers."""
+        return {
+            "project_dir": self.project_root,
+            "workspace": self.workspace_label,
+            "target": {"kind": self.kind, "remote": self.remote_name},
+            "namespace": self.namespace,
+        }
 
 
 @dataclass(frozen=True)

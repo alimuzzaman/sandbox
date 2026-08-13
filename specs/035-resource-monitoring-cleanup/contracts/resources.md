@@ -222,3 +222,52 @@ the client is told to rescan rather than replay automatically.
 
 Additional codes may be added compatibly. Existing meanings cannot be silently
 redefined.
+
+## Convergence amendment — 2026-08-13: network lifecycle and parser boundary
+
+The following additive fields and error semantics close feedback `a813480b`,
+`bf05eeb9`, `0fac3b07`, `822b9323`, `78aaf583`, and consumer feedback
+`6bc4c6d5`.
+
+### Network observation
+
+When the selected provider can observe networks, `status` MAY add a bounded
+`networks` collection. Each item has:
+
+```json
+{
+  "network_id": "opaque-id",
+  "display_name": "safe-name",
+  "owner": {"kind": "sandbox|foreign|unknown", "id": "opaque-id"},
+  "lifecycle": "active|idle|orphaned|indeterminate",
+  "active_references": {"containers": 1, "leases": 1, "jobs": 0},
+  "allocation": {"state": "allocated|available|exhausted|unknown", "pool": "safe-id"},
+  "capacity_accounted": false,
+  "cleanup_eligible": false,
+  "evidence": [{"kind": "bounded-reference", "quality": "high"}]
+}
+```
+
+`cleanup_eligible` is true only for positively Sandbox-owned, inactive,
+revalidated networks with no active container, lease, or job reference. Active,
+foreign, unknown, and indeterminate values are exclusions, not candidates.
+Network allocation and release are idempotent against the same owner/workspace
+identity; a failed release remains an explicit lifecycle outcome.
+
+### Capacity and remote observation
+
+Address-pool exhaustion uses stable code `network_pool_exhausted` and reports
+bounded counts/identities, not raw daemon traces. A collision uses
+`network_allocation_conflict`. Remote timeout/unreachable observation uses the
+existing `remote_unreachable` or `measurement_unavailable` code with
+`status:"partial"` and a category outcome; it never produces an empty-success
+or deletion-ready result. Automatic network deletion and broad prune are outside
+this contract.
+
+### Job-list consumer rule
+
+Resource monitoring consumes the Spec 032 job-list service/parser directly. The
+wire shape remains the top-level page (`jobs`, cursor, and bounded counts), not a
+`.data` envelope. A malformed or nested response is a parser error and leaves
+network lifecycle state `indeterminate`; the resource consumer must not invent a
+second decoder.

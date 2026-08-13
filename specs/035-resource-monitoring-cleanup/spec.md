@@ -420,3 +420,45 @@ semantics, and outcomes.
   presentation aids and may be rounded.
 - A plan validity window is short enough to limit stale evidence and is always
   followed by per-candidate revalidation.
+
+## Convergence amendment — 2026-08-13 (27-feedback network lifecycle)
+
+This dated section tightens the read-only network accounting and lifecycle
+boundary without authorizing broad Docker pruning. It maps
+`a813480b`, `bf05eeb9`, `0fac3b07`, `822b9323`, `78aaf583`, and the shared
+`6bc4c6d5` decoder issue (whose canonical contract lives in Spec 032).
+
+### Normative requirements
+
+- **FR-012**: Network observations MUST use one lifecycle model with stable
+  identity, owner evidence, active references, workspace/job references,
+  allocation state, and last observation. Allocation, reconciliation, planning,
+  and cleanup MUST consume that model rather than independently guessing from a
+  name (`a813480b`).
+- **FR-013**: Create/stop/destroy/recreate cycles MUST be idempotent and bounded:
+  a stopped or destroyed Sandbox-owned workspace releases only its own network
+  after no active lease/container/job reference remains; repeated cycles MUST not
+  create orphan or duplicate allocations (`bf05eeb9`).
+- **FR-014**: Active, foreign, unattributed, or indeterminate networks MUST be
+  excluded from cleanup. A candidate can be planned only with positive Sandbox
+  ownership plus current inactive evidence; the plan/apply path MUST never delete
+  an active or foreign network (`0fac3b07`).
+- **FR-015**: Address-pool exhaustion or allocation collision MUST produce a
+  structured capacity/unavailable result containing bounded observations and a
+  recovery hint. It MUST not auto-delete networks, retry indefinitely, or claim
+  that disk capacity remediation solved address exhaustion (`822b9323`).
+- **FR-016**: A remote inventory timeout, stale control record, or missing
+  observation MUST become `partial`/`unavailable` evidence with a bounded error;
+  it MUST not leak a traceback or turn missing evidence into a deletion
+  candidate. A subsequent rescan is required before any plan (`78aaf583`).
+- **FR-017**: Resource-monitoring consumers MUST use the Spec 032 feature-owned
+  top-level job-list decoder and MUST reject malformed or nested `.data` shapes;
+  they MUST not add a second parser (`6bc4c6d5`).
+
+### Acceptance evidence required before closing this amendment
+
+The fixture matrix MUST cover constrained-pool allocation, repeated
+create/stop/destroy, active and foreign networks, collision, exhaustion and
+recovery, remote observation timeout, and top-level job-list decoding. All
+checks are read-only unless an already-authorized exact cleanup plan is under
+test; no broad prune or automatic retention deletion is implied.

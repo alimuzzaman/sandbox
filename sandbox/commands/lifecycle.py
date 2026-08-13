@@ -30,6 +30,7 @@ from sandbox.core import (
     proxy_available, resolve_instances, run, save_local_app_password,
     save_local_autologin_token, save_local_bridge_token, site_url, snapshots_dir,
     runtime_health_lines, wp_dir, wpcli,
+    php_extension_status,
 )
 
 from sandbox.registry import register
@@ -37,6 +38,11 @@ from sandbox.application.context import (
     preflight_instance_capability, runtime_service, wordpress_runtime_dependencies,
 )
 from sandbox.runtimes.base import OperationError, OperationRequest
+
+
+def _target_is_remote(target) -> bool:
+    """Return whether target resolution selected the remote adapter."""
+    return getattr(target, "kind", None) == "remote"
 
 
 
@@ -66,6 +72,17 @@ def cmd_up(cfg: dict, args) -> None:
     compose("up", "-d", "--remove-orphans",
             *_web_services(inst_cfg.get("server", "nginx")),
             instance=inst)
+    if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
+        # Verify the image that just started before any project/WP wiring is
+        # allowed to run.  The probe is standalone PHP and does not touch the
+        # database or uploads; a drift/missing/version error is therefore a
+        # safe, actionable startup failure rather than a half-provisioned site.
+        extension_status = php_extension_status(inst_cfg, instance=inst)
+        if extension_status and extension_status.get("drift", {}).get("state") != "ready":
+            issues = extension_status.get("drift", {}).get("issues") or []
+            detail = issues[0].get("message", "PHP extension planes are not verified") \
+                if isinstance(issues[0], dict) else "PHP extension planes are not verified"
+            die(f"PHP extension verification blocked: {detail}")
     # Re-assert the mail-capture mu-plugin on every up so it survives
     # down/up and any wp-content reset. Cheap + idempotent; only touches the
     # shared runtime bind-mount, which exists for any provisioned instance.
@@ -150,10 +167,13 @@ def cmd_status(cfg, args) -> None:
         if getattr(args, "json", False):
             print(json.dumps(remote_result, sort_keys=True))
         else:
-            print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
-                  f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
+                print(f"{remote_result.get('label', getattr(args, 'workspace', 'default'))}: "
+                      f"{remote_result.get('status', remote_result.get('code', 'unknown'))}")
         return
     inst = args.resolved_instance
+    if getattr(args, "json", False):
+        print(json.dumps(_status_json_payload(cfg, inst), sort_keys=True, default=str))
+        return
     owner = _core().registry_find_instance(inst)
     runtime_data = None
     if owner and owner.get("kind") == "compose":
@@ -204,6 +224,66 @@ def cmd_status(cfg, args) -> None:
     if not _is_herd_instance(inst) and _bridge_token_for(inst):
         _ensure_bridge_server()
 
+
+def _status_json_payload(cfg, inst: str) -> dict:
+    """Return one bounded, machine-readable status document.
+
+    The human status path intentionally has progress output and health hints.
+    Keep the JSON path independent so Docker's command banner, focus hints,
+    and bridge reconciliation can never corrupt a parser's single document.
+    """
+    owner = _core().registry_find_instance(inst) or {}
+    if owner.get("kind") == "compose":
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner.get("root", ""), "status", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            return {"ok": False, "instance": inst,
+                    "error": {"code": result.code, "message": result.message}}
+        return {"ok": bool(result.ok), "instance": inst, "kind": "compose",
+                **dict(result.data)}
+
+    runtime_data = None
+    runtime_error = None
+    if owner.get("root"):
+        result = runtime_service(cfg).invoke(OperationRequest(
+            owner["root"], "status", label=owner.get("label", "default")))
+        if isinstance(result, OperationError):
+            runtime_error = {"code": result.code, "message": result.message}
+        else:
+            runtime_data = dict(result.data)
+
+    instance_cfg = (resolve_instances(cfg).get(inst) or {})
+    containers = []
+    if not _is_herd_instance(inst) and instance_cfg:
+        ps = compose("ps", "--format", "json", instance=inst,
+                     check=False, capture=True)
+        for line in (getattr(ps, "stdout", "") or "").splitlines():
+            try:
+                containers.append(json.loads(line))
+            except (TypeError, ValueError):
+                continue
+    reachable = _instance_reachable(owner) if owner else False
+    fallback_url = site_url(instance_cfg) if instance_cfg else None
+    payload = {
+        "ok": bool(runtime_data is not None or reachable),
+        "instance": inst,
+        "kind": "wordpress",
+        "label": owner.get("label", "default"),
+        "root": owner.get("root"),
+        "url": owner.get("url") or instance_cfg.get("url") or fallback_url,
+        "server": instance_cfg.get("server", owner.get("server", "nginx")),
+        "reachable": reachable,
+        "containers": containers,
+    }
+    if runtime_data is not None:
+        payload["runtime"] = runtime_data
+    if runtime_error is not None:
+        payload["error"] = runtime_error
+    extension_data = php_extension_status(instance_cfg, instance=inst)
+    if extension_data is not None:
+        payload["php_extensions"] = extension_data
+    return payload
+
 def cmd_logs(cfg, args) -> None:
     remote_result = _remote_lifecycle(cfg, args, "logs")
     if remote_result is not None:
@@ -244,7 +324,7 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         if exc.code == "invalid_project" and not remote_name and not getattr(args, "local", False):
             return None
         die(f"{exc.code}: {exc}")
-    if target.kind != "remote":
+    if not _target_is_remote(target):
         return None
     remote = target.remote or _remote.get_remote(target.remote_name)
     if action == "ensure":
@@ -565,6 +645,25 @@ def cmd_doctor(cfg, args) -> None:
               "inspect ./sb status and native recovery state before running payloads")
         for line in runtime_health_lines(runtime_data):
             info("  " + line)
+
+    # PHP extension intent is checked independently of WordPress bootstrap.
+    # A configured project must show desired state and all four observation
+    # planes; unavailable observations are an honest doctor failure rather than
+    # an implicit pass based on a stale cache.
+    extension_data = php_extension_status(inst_cfg, instance=inst)
+    if extension_data is not None:
+        print("\nPHP extensions:")
+        desired = extension_data.get("desired", {})
+        check("extension declaration resolved",
+              bool(desired.get("digest")) and
+              extension_data.get("drift", {}).get("state") != "blocked",
+              hint="fix the phpExtensions profile/requirements in the project config")
+        observed = extension_data.get("observed", {})
+        missing_planes = [plane for plane in ("web", "cli", "exec", "phpunit")
+                          if (observed.get(plane) or {}).get("state") != "ready"]
+        check("fresh PHP observations (web/cli/exec/phpunit)", not missing_planes,
+              hint=("run a supported extension probe/materialization step; "
+                    f"unavailable planes: {', '.join(missing_planes)}"))
 
     print("\nContainers:")
     ps = compose("ps", "--format", "json", instance=inst,

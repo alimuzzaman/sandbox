@@ -30,6 +30,7 @@ $SANDBOX_HOME/
 │   ├── proxy/{certs,Caddyfile,proxy.yml}
 │   ├── herd-shims/<instance>/   # herd php PATH shims
 │   ├── .venv-tools/             # tools venv (recreated, never moved)
+│   ├── build/php-extensions/<digest>/ # recreatable, content-addressed extension contexts
 │   ├── wp-cli.phar              # shared built-in wp-cli
 │   └── registry.json            # project-root → instance map (authoritative)
 ├── config.json                  # user-global config (was ~/.config/sandbox/config.json)

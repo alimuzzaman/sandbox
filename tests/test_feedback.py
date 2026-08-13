@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import io
 import importlib.util
 import json
 from pathlib import Path
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from sandbox.feedback.service import FeedbackService, FeedbackStore
 
@@ -83,6 +87,195 @@ class TestFeedbackService(unittest.TestCase):
         self.assertFalse(limit["ok"])
         self.assertEqual(limit["error"]["code"], "invalid_feedback")
 
+    def test_regression_f90c671_invalid_count_is_independent_of_display_limit(self):
+        self.assertTrue(self.service.submit("valid")["ok"])
+        # Sorts after the valid record, so the old implementation stopped
+        # before seeing it when limit=1.
+        (self.root / "feedback" / "000-invalid.json").write_text("not-json", encoding="utf-8")
+
+        payload = self.service.list(1)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["count"], 1)
+        self.assertEqual(payload["data"]["invalid_record_count"], 1)
+
+    def test_regression_f90c671_explicit_invalid_limits_fail_before_reading(self):
+        for invalid in (0, -1, 101, True, False, "1"):
+            with self.subTest(limit=invalid):
+                payload = self.service.list(invalid)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "invalid_feedback")
+
+    def test_regression_untrusted_legacy_keys_are_not_disclosed_by_reads(self):
+        tampered = {
+            "schema_version": 1,
+            "feedback_id": "a" * 32,
+            "created_at": "2026-08-13T00:00:00Z",
+            "category": "bug",
+            "severity": "high",
+            "source": "agent",
+            "summary": "safe summary",
+            "details": "safe details",
+            "reference": "safe reference",
+            "remote": None,
+            "project": {
+                "identity": "b" * 64,
+                "name": "fixture",
+                "legacy_nested": {"password": "PROJECT-NESTED-PASSWORD"},
+            },
+            "redacted": False,
+            "trust": "untrusted_data",
+            "unknown_top_level": "TOP-LEVEL-SECRET",
+            "legacy_nested": {"token": "TOP-LEVEL-NESTED-TOKEN"},
+        }
+        path = self.root / "feedback"
+        path.mkdir()
+        record_path = path / ("20260813T000000Z-" + "a" * 32 + ".json")
+        record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+        listed = self.service.list(20)
+        shown = self.service.show("a" * 32)
+        detailed = self.service.detail("a" * 32)
+        exported = self.service.export(20)
+
+        self.assertTrue(listed["ok"])
+        self.assertTrue(shown["ok"])
+        self.assertTrue(exported["ok"])
+        for payload in (listed, shown, detailed):
+            feedback = payload["data"]["feedback"]
+            if isinstance(feedback, list):
+                self.assertEqual(len(feedback), 1)
+                feedback = feedback[0]
+            self.assertNotIn("unknown_top_level", feedback)
+            self.assertNotIn("legacy_nested", feedback)
+            self.assertNotIn("legacy_nested", feedback["project"])
+            rendered = json.dumps(payload)
+            for secret in ("TOP-LEVEL-SECRET", "TOP-LEVEL-NESTED-TOKEN", "PROJECT-NESTED-PASSWORD"):
+                self.assertNotIn(secret, rendered)
+        self.assertNotIn("unknown_top_level", exported["data"]["content"])
+        self.assertNotIn("legacy_nested", exported["data"]["content"])
+        for secret in ("TOP-LEVEL-SECRET", "TOP-LEVEL-NESTED-TOKEN", "PROJECT-NESTED-PASSWORD"):
+            self.assertNotIn(secret, exported["data"]["content"])
+        self.assertEqual(record_path.read_text(encoding="utf-8"), json.dumps(tampered))
+
+        from sandbox.commands.feedback import _emit
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _emit(listed, True)
+        self.assertNotIn("unknown_top_level", output.getvalue())
+        self.assertNotIn("TOP-LEVEL-SECRET", output.getvalue())
+
+    def test_regression_81f43e6f_provider_tokens_and_basic_auth_are_redacted(self):
+        payload = self.service.submit(
+            "AKIAIOSFODNN7EXAMPLE xoxb-123456789012-123456789012-abc",
+            details=(
+                "sk_live_ABCDEFGHIJKLMNOPQRST AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 "
+                "Bearer eyJhbGciOiJIUzI1NiJ9 https://alice:secret@example.com"
+            ),
+        )
+
+        self.assertTrue(payload["ok"])
+        record_json = json.dumps(payload["data"]["feedback"])
+        for secret in (
+            "AKIAIOSFODNN7EXAMPLE", "xoxb-123456789012-123456789012-abc",
+            "sk_live_ABCDEFGHIJKLMNOPQRST", "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+            "eyJhbGciOiJIUzI1NiJ9", "alice:secret",
+        ):
+            self.assertNotIn(secret, record_json)
+        self.assertTrue(payload["data"]["feedback"]["redacted"])
+
+    def test_regression_2b080bf5_project_context_is_explicit_and_export_is_path_free(self):
+        submitted = self.service.submit("explicit", project_dir=str(self.project))
+        self.assertTrue(submitted["ok"])
+        record = submitted["data"]["feedback"]
+        self.assertEqual(record["project"]["name"], "plugin-project")
+
+        exported = self.service.export(10)
+
+        self.assertTrue(exported["ok"])
+        self.assertNotIn(str(self.project), exported["data"]["content"])
+        self.assertEqual(exported["data"]["feedback"][0]["project"]["name"], "plugin-project")
+
+    def test_regression_ad190c71_filters_cursor_show_and_bounded_export(self):
+        first = self.service.submit("bug one", category="bug", severity="high", source="worker")
+        self.assertTrue(first["ok"])
+        second_service = FeedbackService(
+            self.service.store,
+            clock=lambda: datetime(2026, 8, 12, 8, 31, tzinfo=timezone.utc),
+        )
+        second = second_service.submit("idea two", category="idea", severity="low", source="worker")
+        self.assertTrue(second["ok"])
+
+        filtered = self.service.list(1, category="bug")
+        self.assertEqual([item["summary"] for item in filtered["data"]["feedback"]], ["bug one"])
+        self.assertFalse(filtered["data"]["has_more"])
+        self.assertTrue(self.service.show(first["data"]["feedback"]["feedback_id"])["ok"])
+        page = self.service.list(1)
+        self.assertTrue(page["data"]["has_more"])
+        resumed = self.service.list(1, page["data"]["next_cursor"])
+        self.assertEqual([item["summary"] for item in resumed["data"]["feedback"]], ["bug one"])
+        exported = self.service.export(1, max_bytes=100_000)
+        self.assertTrue(exported["ok"])
+        self.assertLessEqual(exported["data"]["bytes"], 100_000)
+
+    def test_regression_retention_and_prune_never_delete_without_confirmation(self):
+        old_service = FeedbackService(
+            self.service.store,
+            clock=lambda: datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+        old = old_service.submit("old")
+        self.assertTrue(old["ok"])
+        retained_path = next((self.root / "feedback").glob("*.json"))
+
+        planned = self.service.prune(retention_days=0)
+
+        self.assertTrue(planned["ok"])
+        self.assertEqual(planned["data"]["deleted"], 0)
+        self.assertTrue(retained_path.exists())
+
+        applied = self.service.prune(retention_days=0, confirm=True)
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["data"]["deleted"], 0)
+        self.assertEqual(applied["data"]["deletion"], "disabled_append_only")
+        self.assertTrue(retained_path.exists())
+
+    def test_regression_cli_and_mcp_do_not_infer_different_project_contexts(self):
+        import importlib.util
+        from sandbox.commands import feedback as cli_feedback
+
+        class Service:
+            def __init__(self):
+                self.kwargs = None
+
+            def submit(self, _summary, **kwargs):
+                self.kwargs = kwargs
+                return {"ok": True, "action": "submit", "status": "recorded", "data": {"feedback": {}}}
+
+        cli_service = Service()
+        args = SimpleNamespace(
+            action="submit", summary="same", details="", category=None, severity=None,
+            source=None, project_dir=None, project_name=None, remote=None, reference="",
+            json=True,
+        )
+        with patch.object(cli_feedback, "feedback_service", return_value=cli_service):
+            cli_feedback.cmd_feedback(None, args)
+
+        path = ROOT / "mcp" / "wp-server" / "tools" / "feedback.py"
+        spec = importlib.util.spec_from_file_location("feedback_tool_context_parity", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        mcp_service = Service()
+        module._service_factory = lambda: mcp_service
+        module.feedback_submit("same")
+
+        self.assertIsNone(cli_service.kwargs["project_dir"])
+        self.assertIsNone(mcp_service.kwargs["project_dir"])
+        self.assertEqual(
+            cli_service.kwargs.get("project_name"),
+            mcp_service.kwargs.get("project_name"),
+        )
+
 
 class TestFeedbackMcpAdapter(unittest.TestCase):
     def test_adapter_registers_and_delegates_to_shared_service(self):
@@ -133,6 +326,52 @@ class TestFeedbackMcpAdapter(unittest.TestCase):
         self.assertTrue(module.feedback_list(5)["ok"])
         self.assertEqual(service.calls[0][0:2], ("submit", "finding"))
         self.assertEqual(service.calls[1], ("list", 5))
+
+    def test_regression_untrusted_legacy_keys_are_not_disclosed_by_mcp_reads(self):
+        path = ROOT / "mcp" / "wp-server" / "tools" / "feedback.py"
+        spec = importlib.util.spec_from_file_location("feedback_tool_read_safety", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = FeedbackStore(root / "feedback")
+            store.root.mkdir()
+            feedback_id = "c" * 32
+            (store.root / ("20260813T000000Z-" + feedback_id + ".json")).write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "feedback_id": feedback_id,
+                    "created_at": "2026-08-13T00:00:00Z",
+                    "category": "bug",
+                    "severity": "high",
+                    "source": "agent",
+                    "summary": "safe",
+                    "details": "safe",
+                    "reference": "",
+                    "remote": None,
+                    "project": {"identity": "d" * 64, "name": "fixture", "extra": {"secret": "MCP-NESTED-SECRET"}},
+                    "redacted": False,
+                    "trust": "untrusted_data",
+                    "legacy": {"api_key": "MCP-TOP-SECRET"},
+                }),
+                encoding="utf-8",
+            )
+            service = FeedbackService(store)
+            module._service_factory = lambda: service
+
+            listed = module.feedback_list(20)
+            shown = module.feedback_list(action="show", feedback_id=feedback_id)
+            detailed = module.feedback_list(action="detail", feedback_id=feedback_id)
+            exported = module.feedback_list(action="export", limit=20)
+
+            for payload in (listed, shown, detailed, exported):
+                rendered = json.dumps(payload)
+                self.assertNotIn("MCP-TOP-SECRET", rendered)
+                self.assertNotIn("MCP-NESTED-SECRET", rendered)
+                self.assertNotIn('"legacy"', rendered)
+                self.assertNotIn('"extra"', rendered)
 
 
 if __name__ == "__main__":

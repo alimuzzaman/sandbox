@@ -236,3 +236,47 @@ policy/state. `child_outcomes_truncated` signals omitted references. Full curren
 difference, output, and cleanup detail remains inspectable through `children`; terminal rows
 and aggregate membership remain immutable.
 
+## Convergence amendment — 2026-08-13: acceptance and list identity
+
+The following wire rules are normative and retain the existing top-level list
+shape. They close feedback `79d775b4`, `b027d2ab`, `3da039b4`, `343d1a5a`, and
+`6bc4c6d5`.
+
+### Accepted submission
+
+`submit(...) -> JobAccepted` MUST persist the durable row before returning:
+
+```json
+{
+  "ok": true,
+  "status": "accepted",
+  "job_id": "opaque-nonempty-id",
+  "target": {"kind": "local|remote", "name": "safe-name"},
+  "workspace": {"label": "safe-label", "identity": "opaque-id"},
+  "source": {"kind": "working_tree|commit", "identity": "opaque-id"},
+  "error": null
+}
+```
+
+Rejected submission returns `ok:false`, `status:"rejected"`, a stable safe
+`error.code`, and no `job_id`; it exits nonzero at the CLI boundary. An empty,
+undecodable, or transport-lost acknowledgement is an explicit
+`acceptance_unknown` failure and is never rendered as accepted.
+
+### Canonical lookup and proof context
+
+Every control operation receives the returned `job_id` and resolves its target,
+workspace, source, and parent context from the durable row. A caller-provided
+label or process ID can narrow an observation but cannot replace the canonical
+identity. The accepted row stores the guide-resolved proof checkout/source
+identity and detached workers consume that stored value, not the submitter's
+later current directory.
+
+### Job-list decoder
+
+`list(...) -> JobPage` is the sole decoder owner. Its success payload remains a
+top-level object containing the page fields (`jobs`, `next_cursor`, and bounded
+counts as applicable), not `{ "data": { ... } }`. CLI, MCP, monitoring, and
+network consumers MUST call this decoder and MUST reject malformed envelopes
+without guessing another shape. The decoder is tolerant only of additive fields;
+it MUST NOT silently reinterpret a nested or unrelated response.

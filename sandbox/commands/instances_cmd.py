@@ -32,6 +32,11 @@ from sandbox.application.context import (
 from sandbox.runtimes.base import OperationError, OperationRequest
 
 
+def _is_wordpress_project(config: dict) -> bool:
+    """Return whether a resolved descriptor uses the WordPress schema."""
+    return config.get("kind") == "wordpress"
+
+
 
 def cmd_focus(cfg, args) -> None:
     inst = args.resolved_instance
@@ -224,6 +229,11 @@ def cmd_init(cfg, args) -> None:
         # The resolved pconf already carries the canonical schema (defaults
         # merged, .wp-env.json mapped). Persist exactly the schema keys.
         data = {k: pconf.get(k, v) for k, v in sc.DEFAULTS.items()}
+        # New WordPress scaffolds opt into the reviewed profile explicitly.
+        # Keep existing descriptors (including --force regeneration) unchanged
+        # when they omitted the field; generic Compose returns above.
+        if _is_wordpress_project(pconf) and not has_native:
+            data["phpExtensions"] = {"profile": "wordpress@1"}
         if base_source == "defaults":
             # Defaults use the canonical map so Query Monitor can be declared
             # installed-but-inactive. Add this checkout under its real slug at

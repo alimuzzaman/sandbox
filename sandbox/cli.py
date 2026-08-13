@@ -80,6 +80,51 @@ def _implied_project_dir(instance: str | None, label: str | None):
     return None, None
 
 
+def _global_label_before_subcommand(argv: list[str]) -> str | None:
+    """Recover a global ``--label`` that argparse subparser defaults may hide.
+
+    A few historical subparsers own a semantic label option.  For the common
+    instance-routing commands the top-level spelling must remain valid before
+    the command as well as after it; parse the unambiguous pre-command token
+    here and restore it after argparse has composed the namespace.
+    """
+    command_names = set(COMMANDS) | {"apply"}
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token == "--label" and index + 1 < len(argv):
+            # The next token is the option value, even when it happens to
+            # share a command name (e.g. ``--label status ensure``).
+            return argv[index + 1]
+        if token.startswith("--label="):
+            return token.split("=", 1)[1]
+        if token in command_names:
+            break
+        index += 1
+    return None
+
+
+def _explicit_global_label(argv: list[str]) -> str | None:
+    """Return a parser-level label supplied before passthrough arguments.
+
+    ``argparse.REMAINDER`` commands (notably ``wp`` and ``test``) may carry a
+    child command's own ``--label`` after ``--``.  Stop at that delimiter so
+    child arguments cannot be mistaken for Sandbox instance-selection intent.
+    Semantic labels owned by ``domains``/``native``/``vrdiff`` are filtered by
+    the caller; this helper only answers whether the global spelling appeared.
+    """
+    for index, token in enumerate(argv):
+        if token == "--":
+            break
+        if token == "--label" and index + 1 < len(argv):
+            return argv[index + 1]
+        if token.startswith("--label="):
+            return token.split("=", 1)[1]
+    return None
+
+
 def main(*, invocation_started_monotonic: float | None = None):
     if invocation_started_monotonic is None:
         invocation_started_monotonic = time.monotonic()
@@ -123,7 +168,7 @@ Per-project (each plugin carries its own sandbox.config.json):
              "config (constants/plugins/themes/multisite) without dropping the DB")
     ap.add_argument("--json", action="store_true",
         help="print the reconciled instance record as JSON (for the MCP server)")
-    ap.add_argument("--label", default=None,
+    ap.add_argument("--label", default=argparse.SUPPRESS,
         help="which of --project-dir's instances to reconcile, when it owns "
              "more than one (multi-instance-per-root); default: the sole/"
              "default instance")
@@ -233,6 +278,8 @@ Per-project (each plugin carries its own sandbox.config.json):
 
     re_ = sub.add_parser("restore", help="Restore a saved snapshot")
     re_.add_argument("name")
+    re_.add_argument("--yes", action="store_true",
+                     help="confirm dropping the current DB before restore")
 
     sub.add_parser("snapshots", help="List saved snapshots")
 
@@ -300,7 +347,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="declared Compose mode, or WordPress auto/unit/integration/matrix")
     ts.add_argument("--project-dir", dest="project_dir", default=None,
         help="project directory (default: current directory)")
-    ts.add_argument("--label", default=None,
+    ts.add_argument("--label", default=argparse.SUPPRESS,
         help="which of --project-dir's instances to test, when it owns more "
              "than one (multi-instance-per-root, e.g. a CI matrix cell); "
              "default: the sole/default instance")
@@ -467,6 +514,8 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="project to deploy (default: current directory)")
     deploy_p.add_argument("--remote", dest="remote", required=True,
         help="which registered, provisioned remote to deploy to")
+    deploy_p.add_argument("--source-ref", dest="source_ref", default=None,
+        help="immutable commit SHA or named ref to deploy; resolves before any remote mutation")
     deploy_p.add_argument("--ensure", action="store_true",
         help="after deploying, boot/refresh the remote project instance")
     deploy_p.add_argument("--expose", action="store_true",
@@ -572,7 +621,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="project directory (default: current directory)")
     en.add_argument("--json", action="store_true",
         help="print the instance record as JSON (for the MCP server)")
-    en.add_argument("--label", default=None,
+    en.add_argument("--label", default=argparse.SUPPRESS,
         help="target an ADDITIONAL instance for this project root "
              "(multi-instance-per-root), e.g. 'qa' or 'php81'; default: the "
              "project's default instance. Minting a brand-new label needs --create.")
@@ -760,7 +809,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         if not any(a.option_strings == ["--label"] for a in sp_parser._actions):
             sp_parser.add_argument("--label", default=argparse.SUPPRESS)
 
-    args = p.parse_args()
+    raw_argv = list(sys.argv[1:])
+    args = p.parse_args(raw_argv)
+    pre_command_label = _global_label_before_subcommand(raw_argv)
+    if pre_command_label is not None and args.cmd not in {"domains", "native", "vrdiff"}:
+        args.label = pre_command_label
     if not args.cmd:
         p.print_help()
         return
@@ -829,6 +882,7 @@ Per-project (each plugin carries its own sandbox.config.json):
         PROJECT_ROUTED = PROJECT_ROUTED | {"apply"}
     if args.cmd in {"status", "logs"} and getattr(args, "project_dir", None):
         PROJECT_ROUTED = PROJECT_ROUTED | {args.cmd}
+
     # Instance-scoped commands operate on ONE instance and require resolution.
     # Everything else is registry-wide/global (instances, dashboard, web, setup,
     # global, uninstall, domains, …) or takes its own name/project arg, so an
@@ -839,6 +893,40 @@ Per-project (each plugin carries its own sandbox.config.json):
         "xdebug", "introspect", "secure", "server", "focus", "claude", "onboard",
         "abilities", "job", "jobs", "dump", "qm", "reset", "exec",
     }
+
+    # An explicitly supplied instance label is intent, not a hint.  Resolve it
+    # against the canonical project registry before dispatch so a typo cannot
+    # silently fall back to ``default`` (or another label).  Remote workspace
+    # labels and the domain/native/vrdiff semantic labels are separate
+    # contracts, and ``ensure --create`` is the one deliberate minting path.
+    explicit_label = _explicit_global_label(raw_argv)
+    label_routed = args.cmd in INSTANCE_SCOPED or args.cmd in PROJECT_ROUTED
+    semantic_label_command = args.cmd in {"domains", "native", "vrdiff"}
+    explicit_instance = bool(getattr(args, "instance", None))
+    remote_target = bool(getattr(args, "remote", None))
+    allow_label_creation = args.cmd == "ensure" and bool(getattr(args, "create", False))
+    if (
+        explicit_label is not None
+        and label_routed
+        and not semantic_label_command
+        and not explicit_instance
+        and not remote_target
+        and not allow_label_creation
+    ):
+        label_project_dir = getattr(args, "project_dir", None) or Path.cwd()
+        try:
+            label_root = str(_core().find_project_root(label_project_dir))
+        except Exception:
+            label_root = None
+        if label_root is not None:
+            labels = _core().registry_list_for_root(label_root)
+            if not any(item.get("label") == explicit_label for item in labels):
+                known = ", ".join(str(item.get("label")) for item in labels) or "none"
+                die(
+                    f"label_not_found: no instance labelled '{explicit_label}' for "
+                    f"{label_root} (existing labels: {known})",
+                    2,
+                )
     direct_instance_exec = args.cmd == "exec" and bool(getattr(args, "in_instance", False))
     durable_exec = args.cmd == "exec" and bool(
         getattr(args, "local", False) or getattr(args, "remote", None) or getattr(args, "detach", False)

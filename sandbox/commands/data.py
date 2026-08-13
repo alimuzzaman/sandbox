@@ -153,6 +153,39 @@ def capture_install_snapshots(inst: str, force: bool = False) -> None:
     capture_install_baseline(inst, force=force)
     capture_install_full_snapshot(inst, force=force)
 
+
+def _confirmation_requested(args) -> bool:
+    """Return whether the caller explicitly acknowledged a destructive action.
+
+    ``--yes`` is the established CLI spelling.  ``confirm`` is also accepted
+    here so callers that already use the command-layer confirmation convention
+    can opt in without weakening the default interactive guard.
+    """
+    return bool(getattr(args, "yes", False) or getattr(args, "confirm", False))
+
+
+def _confirm_destructive_action(inst: str, target: str, args, *, action: str) -> bool:
+    """Require an explicit acknowledgement before dropping and importing DB data.
+
+    A non-interactive caller must provide an explicit confirmation flag.  A
+    terminal caller gets the same default-deny prompt used by reset; cancelling
+    or closing the prompt returns before any DB command is dispatched.
+    """
+    if _confirmation_requested(args):
+        return True
+    if not bool(getattr(sys.stdin, "isatty", lambda: False)()):
+        die(f"{action} requires --yes when stdin is not interactive")
+    try:
+        answer = input(
+            f"This drops the current DB for '{inst}' and restores the {target}. "
+            "Continue? [y/N] "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("y", "yes")
+
+
 def cmd_restore(cfg, args) -> None:
     inst = args.resolved_instance
     error = preflight_instance_capability(cfg, inst, "wordpress.restore")
@@ -169,6 +202,9 @@ def cmd_restore(cfg, args) -> None:
                 None)
     if name is None:
         die(f"no snapshot '{args.name}' under {snap_root}")
+    if not _confirm_destructive_action(inst, f"snapshot '{name}'", args,
+                                       action="restore"):
+        return
     _restore_snapshot(inst, snap_root, name)
     ok(f"Restored snapshot '{name}'.")
 
@@ -216,11 +252,9 @@ def cmd_reset(cfg, args) -> None:
     if not (baseline / "db.sql").exists():
         die("no @install baseline for this instance. Create one with "
             "`./sb reset --rebaseline` (captures the current DB as the baseline).")
-    if not getattr(args, "yes", False):
-        ans = input(f"This drops the current DB for '{inst}' and restores the "
-                    f"post-install baseline. Continue? [y/N] ").strip().lower()
-        if ans != "y":
-            return
+    if not _confirm_destructive_action(inst, "post-install baseline", args,
+                                       action="reset"):
+        return
     _restore_snapshot(inst, snap_root, _BASELINE_DIR)
     ok("Reset to the post-install baseline (uploads untouched).")
 

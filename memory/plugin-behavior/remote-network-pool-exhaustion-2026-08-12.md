@@ -72,15 +72,22 @@ verified at the time it was recorded.
   self-test retained three unrelated baseline failures: macOS temporary-path
   normalization and the existing `fix`/`snapshot` built-in skill mirror mismatches.
   No remote test rerun was attempted because network capacity was not remediated.
+- 2026-08-13T08:01:10Z — The scheduled read-only check observed 31 managed
+  user-defined networks, all classified `active`, and one active durable job. Network
+  inventory completed, but the overall fast inventory remained `partial` with low
+  confidence because container, image, build-cache, deploy-worktree, runtime, and job
+  artifact categories timed out. Both declared commands exited successfully. The
+  observation was recorded as high-severity feedback
+  `600d2def1a44dde2e811a79e01b9aa25`; no cleanup, deployment, workspace destruction,
+  or daemon change was attempted.
 
 ## Current diagnosis
 
 The immediate failure is caused by network lifecycle/capacity, not the plugin test or
-the remote checkout revision. Sandbox has consumed nearly all of the daemon's
-allocatable user-defined network slots with connected Compose networks. Several are
-persistent workspace projects, so a normal stale-resource plan correctly refuses to
-remove them. The safe remediation requires a separate ownership/liveness review of
-the attached workspace containers and an explicit decision to destroy selected
-retained workspaces, or an independently reviewed Docker daemon address-pool change.
-Updating the remote checkout would not release a subnet and must remain a separate
-decision.
+the remote checkout revision. The latest check found 31 connected, active managed
+networks and one active durable job. A normal stale-resource plan correctly refuses to
+remove active networks. The safe remediation therefore still requires an exact
+ownership/liveness review after the active job reaches a terminal state, followed by
+an explicit decision to destroy selected retained workspaces, or an independently
+reviewed Docker daemon address-pool change. Updating the remote checkout would not
+release a subnet and must remain a separate decision.

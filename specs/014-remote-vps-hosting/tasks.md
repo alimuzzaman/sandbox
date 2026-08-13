@@ -210,3 +210,20 @@ Task: "Unit test: provisioning idempotency in tests/test_remote.py"
 ## Phase 7: Convergence
 
 - [x] T045 Pin the MCP SDK to the verified FastMCP v1 transport contract and add a fresh-venv compatibility test per FR-018 (partial).
+
+## Phase 8: Convergence — 2026-08-13 (27-feedback hosting)
+
+These tasks remain open and do not alter earlier task completion markers.
+
+- [x] T046 [US1/US3] Add a supported authenticated remote verification probe
+  regression for `00b1e17e`; assert safe identity/revision output, redaction of
+  tokens/Basic Auth userinfo/headers, and bounded auth-unavailable errors.
+- [x] T047 [US2] Add immutable `--source-ref` commit/ref tests for `3b9a2170`
+  covering full-SHA resolution, named-ref pinning, dirty-tree refusal, and no
+  remote mutation on unresolved or ambiguous source.
+- [x] T048 [US2/US3] Add nested-manifest fixtures for `8291ab9c` proving the
+  manifest parent is the Compose/source root, all paths stay inside the project,
+  and outer checkout paths are not accidentally used.
+- [x] T049 [US1/US2/US3] Add remote-selection precedence/status/guide tests for
+  `647f6478`: explicit flag wins, inferred target is allowed only when unique,
+  ambiguity fails, and every result surfaces the chosen source without secrets.

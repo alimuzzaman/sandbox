@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sandbox.jobs.models import (ArtifactQuery, JobSubmission, OutputProfile, OutputQuery, SourceIdentity,
-                                 output_profile_from_definition)
+                                 Health, output_profile_from_definition, validate_job_id)
 from sandbox.jobs.output import JobOutputStore, present_output
 from sandbox.jobs.health import classify
 from sandbox.jobs.models import Lifecycle
@@ -153,9 +153,25 @@ class JobService:
 
     @staticmethod
     def _accepted(row: dict, *, replay: bool) -> dict:
-        result = {"ok": True, "job_id": row["job_id"], "status": "accepted", "kind": row["kind"],
+        try:
+            job_id = validate_job_id(row.get("job_id"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            # A durable acceptance without a repository identity cannot be
+            # resumed, observed, or safely replayed. Fail at the boundary
+            # rather than returning a misleading accepted response.
+            raise RuntimeError("supervisor_acceptance_missing_job_id") from exc
+        source = {
+            "identity": row.get("source_identity"),
+            "commit": row.get("source_commit"),
+            "dirty_digest": row.get("source_dirty_digest"),
+        }
+        if not isinstance(source["identity"], str) or not source["identity"]:
+            raise RuntimeError("supervisor_acceptance_missing_source_identity")
+        source["dirty"] = bool(source["dirty_digest"])
+        result = {"ok": True, "job_id": job_id, "status": "accepted", "kind": row["kind"],
                 "target": {"kind": row["target_kind"], "remote": row["remote_name"]},
                 "workspace": row["workspace_label"], "output_profile": row["output_profile"],
+                "source": source,
                 "deadline": {"seconds": row["deadline_seconds"], "source": row["deadline_source"]},
                 "idempotent_replay": replay}
         if row.get("lifecycle") == Lifecycle.QUEUED.value:
@@ -197,6 +213,15 @@ class JobService:
             if self.scheduler is not None and snapshot["lifecycle"] in {"accepted", "queued", "running", "cancelling"}:
                 self.scheduler.renew(job_id, deadline_seconds=snapshot["deadline_seconds"])
             health, evidence = classify(snapshot)
+            # A fast child can disappear between the classifier's PID probe and
+            # its supervisor's terminal transition. If the recorded supervisor
+            # still owns its identity, retain ACTIVE/finalizing evidence and let
+            # that supervisor publish the authoritative exit code instead of
+            # manufacturing an orphaned interruption.
+            if health in {Health.ORPHANED, Health.PROCESS_MISSING} and self._supervisor_is_owned(snapshot):
+                health = Health.ACTIVE
+                evidence = {**evidence, "child_alive": False,
+                            "reasons": ["recorded child exited while its verified supervisor finalizes the result"]}
             if snapshot["lifecycle"] not in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
                 self.repository.set_health(job_id, health, evidence)
                 interruption_reasons = {
@@ -223,6 +248,24 @@ class JobService:
         if self.scheduler is not None and snapshot["lifecycle"] in {item.value for item in (Lifecycle.SUCCEEDED, Lifecycle.FAILED, Lifecycle.TIMED_OUT, Lifecycle.CANCELLED, Lifecycle.INTERRUPTED)}:
             self.scheduler.release(job_id)
         return snapshot
+
+    @staticmethod
+    def _supervisor_is_owned(snapshot: dict) -> bool:
+        process = snapshot.get("process") or {}
+        pid = process.get("supervisor_pid")
+        start = process.get("supervisor_start_identity")
+        boot = process.get("host_boot_id")
+        nonce = process.get("supervisor_nonce_hash")
+        if not pid or not start or not boot or not nonce:
+            return False
+        observed = capture_process_identity(int(pid))
+        if observed is None:
+            return False
+        expected = ProcessIdentity(boot, int(pid), start, nonce)
+        observed = ProcessIdentity(observed.host_boot_id, observed.pid,
+                                   observed.start_identity, nonce,
+                                   observed.process_group_id)
+        return verify_process_identity(expected, observed)
 
     def _get_parent(self, snapshot: dict) -> dict:
         """Reconcile original aggregate members; expose retries separately."""
@@ -735,7 +778,7 @@ class JobService:
             if submission.workspace_mode != "isolated":
                 raise ValueError("matrix children require isolated workspaces")
             accepted.append(self.submit(replace(submission, parent_job_id=parent_row["job_id"])))
-        return {"ok": True, "kind": "matrix", "parent_job_id": parent_row["job_id"],
+        return {"ok": True, "status": "accepted", "kind": "matrix", "parent_job_id": parent_row["job_id"],
                 "children": accepted, "summary": {"submitted": len(accepted)}}
 
     @staticmethod

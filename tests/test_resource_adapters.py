@@ -416,6 +416,65 @@ class TestLocalResourceAdapter(unittest.TestCase):
         self.assertEqual(volume.size_bytes, 4096 * 1024)
         self.assertIn("compose_project_label", volume.evidence)
 
+    def test_network_lifecycle_requires_live_evidence_and_preserves_foreign_rows(self):
+        networks = [
+            {
+                "Id": "managed-idle",
+                "Name": "sandbox-fixture_default",
+                "Labels": {"com.docker.compose.project": "sandbox-fixture"},
+                "Containers": {},
+            },
+            {
+                "Id": "managed-active",
+                "Name": "sandbox-fixture_active",
+                "Labels": {"com.docker.compose.project": "sandbox-fixture"},
+                "Containers": {"container": {}},
+            },
+            {
+                "Id": "foreign-active",
+                "Name": "customer-net",
+                "Labels": {"com.docker.compose.project": "customer"},
+                "Containers": {"container": {}},
+            },
+            {
+                "Id": "unattributed-idle",
+                "Name": "unattributed-net",
+                "Labels": {},
+                "Containers": {},
+            },
+        ]
+        runner = FakeRunner({
+            ("docker", "ps", "-aq"): response(""),
+            ("docker", "volume", "ls", "-q"): response(""),
+            ("docker", "network", "ls", "-q"): response(
+                "managed-idle\nmanaged-active\nforeign-active\n"
+                "unattributed-idle\n",
+            ),
+            ("docker", "network", "inspect"): response(json.dumps(networks)),
+            ("docker", "image", "ls", "-q"): response(""),
+            ("docker", "buildx", "du"): response(""),
+        })
+        adapter = LocalResourceAdapter(
+            self.home, runner=runner, clock=lambda: NOW, host_root=self.home,
+        )
+        observed = {
+            item.locator: item
+            for item in adapter.observe(thorough=False, budget_seconds=30).resources
+            if item.kind == "network"
+        }
+        self.assertEqual(observed["managed-idle"].classification, "unverified")
+        self.assertEqual(observed["managed-idle"].reclaimable_bytes, 0)
+        self.assertEqual(observed["managed-active"].classification, "active")
+        self.assertEqual(observed["foreign-active"].owner_kind, "foreign")
+        self.assertEqual(observed["foreign-active"].classification, "active")
+        self.assertEqual(observed["unattributed-idle"].owner_kind, "unmanaged")
+        self.assertEqual(observed["unattributed-idle"].classification, "unmanaged")
+        self.assertTrue(all(not item.capacity_accounted for item in observed.values()))
+        self.assertFalse(any(
+            command[:3] == ("docker", "network", "rm")
+            for command, _timeout in runner.calls
+        ))
+
     def test_adapter_contains_no_broad_prune_command(self):
         source = Path(__file__).parent.parent.joinpath(
             "sandbox/resources/adapters.py",

@@ -116,6 +116,22 @@ def _emit(payload: dict, as_json: bool) -> None:
             f"  reclaimable {_human_bytes(summary.get('reclaimable_bytes'))}; "
             f"unknown {_human_bytes(summary.get('unknown_bytes'))}"
         )
+        pressure = data.get("capacity_pressure") or {}
+        if pressure:
+            recovery = pressure.get("recovery") or {}
+            print(
+                "  network capacity pressure: "
+                f"{pressure.get('level', 'unknown')} "
+                f"({pressure.get('managed_user_defined_network_count', 'unknown')} "
+                "managed user-defined networks; "
+                f"threshold {pressure.get('threshold', 'unknown')}; "
+                f"confidence {pressure.get('confidence', 'unknown')})"
+            )
+            if recovery.get("code") or recovery.get("guidance"):
+                print(
+                    f"  network recovery ({recovery.get('code') or 'monitoring'}): "
+                    f"{recovery.get('guidance', 'none')}"
+                )
         for item in (summary.get("owners") or ())[:5]:
             print(
                 f"  owner {_human_bytes(item.get('measured_bytes')):>12} "

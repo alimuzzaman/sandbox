@@ -6,7 +6,11 @@ import inspect
 import math
 import secrets
 
-from .attribution import CoverageObservation, apply_cleanup_guidance
+from .attribution import (
+    CoverageObservation,
+    apply_cleanup_guidance,
+    network_capacity_pressure,
+)
 from .models import (
     CleanupCandidate,
     CleanupItemOutcome,
@@ -208,6 +212,7 @@ class ResourceService:
                 drift=snapshot.drift,
                 deep_attribution=deep_attribution,
                 capacity_scope_id=getattr(snapshot, "capacity_scope_id", None),
+                capacity_pressure=None,
             )
         if snapshot.capacity is None:
             if request.is_cancelled():
@@ -314,6 +319,12 @@ class ResourceService:
                 "capacity_accounting_overage_bytes": raw_attributed - used,
                 "reason": "filesystem_accounting_overlap_or_sparse_storage",
             }
+        network_outcome = next((
+            str(item.get("status"))
+            for item in category_outcomes
+            if isinstance(item, dict)
+            and item.get("category") == "docker_networks"
+        ), "unavailable")
         return StorageScan(
             scan_id=secrets.token_hex(16),
             target=target,
@@ -332,6 +343,10 @@ class ResourceService:
             drift=drift,
             deep_attribution=deep_attribution,
             capacity_scope_id=capacity_scope_id,
+            capacity_pressure=network_capacity_pressure(
+                snapshot.resources,
+                inventory_status=network_outcome,
+            ),
         )
 
     def status(

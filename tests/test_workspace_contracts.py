@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from sandbox.application.context import _remote_workspace_control
+from sandbox.application.context import resolve_project_identity
+from sandbox.application.target_service import TargetService, TargetResolutionError
+from sandbox.jobs.models import TargetRequest
 from sandbox.commands.workspaces import cmd_workspace, configure_parser
 
 
@@ -119,3 +122,37 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([submission.workspace_label for submission in captured], ["unit", "integration"])
         self.assertTrue(all(submission.workspace_mode == "isolated" for submission in captured))
+
+    def test_shared_project_identity_is_kind_neutral_and_stable(self):
+        from sandbox.config.facade import project_identity
+
+        descriptor = {
+            "root": "/tmp/example.site",
+            "kind": "compose",
+            "display_name": "Example.Site",
+        }
+        first = project_identity(descriptor, label="qa", remote="myvps")
+        second = project_identity(descriptor, label="qa", remote="myvps")
+        self.assertEqual(first, second)
+        self.assertEqual(first["canonical_root"], first["root"])
+        self.assertEqual(first["display_name"], "Example.Site")
+        self.assertEqual(first["kind"], "compose")
+        self.assertNotIn("plugin", first["runtime_id"])
+
+    def test_target_selection_surfaces_explicit_precedence_and_ambiguity(self):
+        config = lambda _path: {
+            "root": "/tmp/project", "kind": "compose",
+            "runtime": {"default": "local", "remote": None, "workspace": "default"},
+        }
+        remotes = {
+            "alpha": {"provisioned": True},
+            "beta": {"provisioned": True},
+        }
+        service = TargetService(config_loader=config, remote_lookup=lambda name: remotes.get(name),
+                                remote_list=lambda: remotes)
+        with self.assertRaisesRegex(TargetResolutionError, "multiple configured remotes"):
+            service.resolve(TargetRequest("/tmp/project"))
+        selected = service.resolve(TargetRequest("/tmp/project", remote="beta"))
+        self.assertEqual(selected.remote_name, "beta")
+        self.assertEqual(selected.sources["remote_selection"], "explicit")
+        self.assertEqual(selected.sources["canonical_root"], str(Path("/tmp/project").resolve()))

@@ -134,7 +134,7 @@ class TestRunResult:
 test_calls = []
 wp_tools.subprocess.run = lambda cmd, **kwargs: test_calls.append([cmd, kwargs]) or TestRunResult()
 print("TEST_MODE_FORWARD", json.dumps(wp_tools.run_tests(
-    _probe_project, mode="unit", phpunit_args="--filter Example")))
+    _probe_project, mode="unit", phpunit_args="--filter Example", local=True)))
 print("TEST_MODE_CALL", json.dumps(test_calls))
 rejection = {"ok": False, "error": "blocked before side effects"}
 wp_side_effects = []

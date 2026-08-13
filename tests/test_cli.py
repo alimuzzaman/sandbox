@@ -8,6 +8,10 @@ import os
 import json
 import subprocess
 import unittest
+from types import SimpleNamespace
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +84,63 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(guide["mode"], "cli-first")
         self.assertEqual(guide["project_kind"], "compose")
         self.assertIn("sandbox-cli", guide["skill"])
+
+    def test_guide_catalog_covers_public_registry_with_explicit_exclusions(self):
+        r = run_sb("guide", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        guide = json.loads(r.stdout)
+        from sandbox.commands.manifest import load_builtin_commands
+        from sandbox.registry import COMMAND_SPECS
+        load_builtin_commands()
+        names = {item["name"] for item in guide["command_catalog"]}
+        exclusions = set(guide["command_catalog_exclusions"])
+        self.assertEqual(names | exclusions, set(COMMAND_SPECS.names()))
+        self.assertTrue(names)
+
+    def test_guide_falls_back_to_module_invocation_without_wrapper(self):
+        import sandbox.commands.runtime as runtime
+        from types import SimpleNamespace
+        from unittest import mock
+
+        with mock.patch.object(runtime.Path, "cwd", return_value=Path("/tmp/no-sb-wrapper")), \
+                mock.patch.object(runtime.Path, "exists", return_value=False), \
+                mock.patch.object(runtime.shutil, "which", return_value=None), \
+                mock.patch.object(runtime.sys, "argv", ["/tmp/no-sb-wrapper/sandbox-cli"]):
+            self.assertIn("-m sandbox.cli", runtime._guide_invocation())
+
+    def test_global_label_before_subcommand_is_preserved(self):
+        import sandbox.cli as cli
+        self.assertEqual(cli._global_label_before_subcommand(
+            ["--label", "qa", "status", "--json"]), "qa")
+
+    def test_restore_help_exposes_explicit_noninteractive_confirmation(self):
+        r = run_sb("restore", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--yes", r.stdout)
+
+    def test_deploy_help_exposes_immutable_source_ref(self):
+        r = run_sb("deploy", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--source-ref", r.stdout)
+
+    def test_wp_payload_stdout_is_clean_and_diagnostics_use_stderr(self):
+        import sandbox.commands.wp as command
+
+        args = SimpleNamespace(
+            resolved_instance="fixture", passthrough=["option", "get", "siteurl"],
+            run_async=False,
+        )
+        out, err = StringIO(), StringIO()
+        result = SimpleNamespace(returncode=0, stdout="https://example.test\n",
+                                 stderr="docker compose: selected wp service\n")
+        with mock.patch.object(command, "preflight_instance_capability", return_value=None), \
+                mock.patch.object(command, "wpcli", return_value=result) as wpcli, \
+                redirect_stdout(out), redirect_stderr(err):
+            command.cmd_wp({}, args)
+        wpcli.assert_called_once_with(["option", "get", "siteurl"],
+                                      instance="fixture", check=False, capture=True)
+        self.assertEqual(out.getvalue(), "https://example.test\n")
+        self.assertIn("docker compose", err.getvalue())
 
     def test_exec_requires_an_instance_outside_a_project(self):
         r = run_sb("exec", "--", "echo", "hello")

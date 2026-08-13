@@ -106,6 +106,43 @@ class CancellationAwareAdapter(FakeAdapter):
         )
 
 
+class NetworkPressureAdapter(FakeAdapter):
+    def __init__(self, count, **kwargs):
+        networks = tuple(
+            observation(
+                f"network-{index}",
+                kind="network",
+                classification="active",
+                size_bytes=0,
+                owner_kind="project",
+                owner_id=f"sandbox-project-{index}",
+                locator=f"network-{index}",
+                capacity_accounted=False,
+            )
+            for index in range(count)
+        )
+        super().__init__(networks, **kwargs)
+
+    def observe(self, *, thorough, budget_seconds, progress=None, focus=None,
+                deep=False):
+        snapshot = super().observe(
+            thorough=thorough,
+            budget_seconds=budget_seconds,
+            progress=progress,
+            focus=focus,
+            deep=deep,
+        )
+        return ProviderSnapshot(
+            snapshot.target,
+            snapshot.capacity,
+            snapshot.resources,
+            ({"category": "docker_networks", "status": "complete"},),
+            snapshot.drift,
+            snapshot.deep_attribution,
+            snapshot.capacity_scope_id,
+        )
+
+
 class TestResourceService(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -151,6 +188,36 @@ class TestResourceService(unittest.TestCase):
             "sandbox:sandbox",
         )
         self.assertNotIn("hunter2", str(payload))
+
+    def test_capacity_pressure_is_additive_and_thresholded(self):
+        for count, level, code in (
+            (23, "low", None),
+            (24, "medium", "network_capacity_pressure"),
+            (28, "high", "network_pool_exhausted"),
+        ):
+            with self.subTest(count=count):
+                payload = self.service(NetworkPressureAdapter(count)).status(
+                    budget_seconds=15,
+                )
+                self.assertTrue(payload["ok"])
+                pressure = payload["data"]["capacity_pressure"]
+                self.assertEqual(pressure["level"], level)
+                self.assertEqual(
+                    pressure["managed_user_defined_network_count"], count,
+                )
+                self.assertEqual(pressure["threshold"], 28)
+                self.assertEqual(pressure["recovery"]["code"], code)
+                self.assertFalse(pressure["recovery"]["automatic_cleanup"])
+                self.assertNotIn("network_pool_exhausted", str(payload["error"]))
+
+    def test_pressure_guidance_never_implies_active_network_cleanup(self):
+        payload = self.service(NetworkPressureAdapter(31)).status(
+            budget_seconds=15,
+        )
+        guidance = payload["data"]["capacity_pressure"]["recovery"]["guidance"]
+        self.assertIn("workspace destroy", guidance)
+        self.assertIn("rescan", guidance)
+        self.assertIn("Do not delete active", guidance)
 
     def test_secret_corpus_is_redacted_from_status(self):
         item = observation(

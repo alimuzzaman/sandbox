@@ -324,6 +324,43 @@ def _run_tests_unit(inst: str, root: str, tools: dict, extra: list) -> int:
     return getattr(r, "returncode", 1)
 
 
+def _run_php_extension_probe(inst: str, argv: tuple[str, ...], *, timeout: float = 5):
+    """Run the standalone PHP probe in the resolved PHPUnit execution plane.
+
+    This deliberately shares the same ``wpcli`` image/runtime adapter used by
+    the test runner, but invokes PHP directly with ``-r``.  It does not mount a
+    project, load WordPress, create a test database, or execute PHPUnit itself;
+    the plane is therefore useful for proving the PHP binary used by tests
+    without turning a status check into a test run.
+    """
+    if not isinstance(argv, tuple) or not argv or any(
+            not isinstance(item, str) or not item or "\x00" in item for item in argv):
+        raise ValueError("PHP extension probe argv is invalid")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError("PHP extension probe timeout is invalid")
+
+    # Managed runtimes own their test execution image and must never fall
+    # through to a host/Docker command.  The existing gate returns the same
+    # bounded result shape used by the PHPUnit runner.
+    gateway = _managed_execution_gate(
+        inst, "test", "phpunit", argv, timeout=max(1, int(timeout)),
+    )
+    if gateway is not None:
+        return gateway
+
+    # ``argv[0]`` is the trusted PHP executable selected by the probe builder;
+    # ``--entrypoint php`` supplies it in the image, so it must not be repeated
+    # as a command argument.  No shell, project mount, or WP test environment
+    # is involved.
+    try:
+        return compose(
+            "run", "--rm", "--no-deps", "--entrypoint", "php", "wpcli",
+            *argv[1:], instance=inst, check=False, capture=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _types.SimpleNamespace(returncode=124, stdout="", stderr="process timed out")
+
+
 def _provision_test_harness(inst: str, pconf: dict) -> dict:
     """Provision (cached) the external WP test harness for `inst`: the WP suite
     at the project's wpVersion, phpunit + composer phars + polyfills, the

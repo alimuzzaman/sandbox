@@ -4,9 +4,84 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+from collections.abc import Mapping
 
 from sandbox.isolation.models import canonical_digest
+
+
+def validate_extension_package_allowlist(package_plan, *, catalog=None):
+    """Validate catalog-derived PHP extension rows before helper staging.
+
+    The fixed native helper already validates the ordinary package transaction
+    schema.  This additional control-plane check binds the extension metadata
+    to the same immutable catalog and ensures a project cannot smuggle an APT
+    package, repository, PECL artifact, or source-build instruction through an
+    otherwise valid image row.  It is deliberately side-effect free and raises
+    ``ValueError`` on any unsafe shape.
+    """
+    if catalog is None:
+        from sandbox.php_extensions.catalog import DEFAULT_CATALOG
+        catalog = DEFAULT_CATALOG
+    rows = getattr(package_plan, "image_packages", None)
+    if rows is None and isinstance(package_plan, Mapping):
+        rows = package_plan.get("image_packages")
+    if not isinstance(rows, (tuple, list)):
+        raise ValueError("managed package plan image rows are invalid")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("managed package plan image row is invalid")
+        metadata = row.get("php_extensions")
+        if metadata is None:
+            continue
+        if (not isinstance(metadata, (tuple, list))
+                or row.get("extension_provenance") != "official-distribution"
+                or row.get("extension_catalog") != catalog.digest):
+            raise ValueError("managed PHP extension package provenance is invalid")
+        package = row.get("name")
+        if not isinstance(package, str) or not re.fullmatch(r"php[0-9]+\.[0-9]+-[a-z0-9-]+", package):
+            raise ValueError("managed PHP extension package name is invalid")
+        match = re.match(r"^php(?P<minor>[0-9]+\.[0-9]+)-", package)
+        php_minor = match.group("minor") if match else ""
+        for item in metadata:
+            if not isinstance(item, Mapping):
+                raise ValueError("managed PHP extension package evidence is invalid")
+            allowed = {"name", "state", "version", "package", "package_version",
+                       "catalog_digest", "source"}
+            if set(item) != allowed:
+                raise ValueError("managed PHP extension package evidence is invalid")
+            name = item.get("name")
+            if not isinstance(name, str) or name in seen:
+                raise ValueError("managed PHP extension package identity is invalid")
+            seen.add(name)
+            if (item.get("state") != "enabled"
+                    or item.get("package") != package
+                    or item.get("package_version") != row.get("version")
+                    or item.get("catalog_digest") != catalog.digest
+                    or item.get("source") != "official-distribution"):
+                raise ValueError("managed PHP extension package provenance is invalid")
+            try:
+                recipe = catalog.recipe(name)
+            except Exception as exc:
+                raise ValueError("managed PHP extension is not in the allowlist") from exc
+            expected = (recipe.package_template.format(php_minor=php_minor)
+                        if recipe.package_template is not None
+                        else f"php{php_minor}-common")
+            if expected != package:
+                raise ValueError("managed PHP extension package mapping is invalid")
+    return True
+
+
+class ManagedExtensionAllowlist:
+    """Small injectable seam for callers that stage package plans."""
+
+    def __init__(self, *, catalog=None):
+        self.catalog = catalog
+
+    def validate(self, package_plan):
+        return validate_extension_package_allowlist(package_plan, catalog=self.catalog)
 
 
 class ManagedMachineExecutor:

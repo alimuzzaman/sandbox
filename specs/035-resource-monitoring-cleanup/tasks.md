@@ -298,3 +298,27 @@ T037: Update exact MCP manifest tests in tests/test_mcp_composition.py and tests
 - Tests precede implementation within each story.
 - Existing `sb cache` remains compatible.
 - No task authorizes deployment, release, or cleanup of permanent resources.
+
+## Phase 10: Convergence — 2026-08-13 (27-feedback network lifecycle)
+
+These tasks are intentionally open and do not change the completion state of
+T001-T044.
+
+- [ ] T045 [US1/US5] Add the canonical network lifecycle model regression for
+  `a813480b`, covering owner identity, active references, allocation/release,
+  reconciliation, and one authoritative state across status, plan, and apply.
+- [ ] T046 [US3/US5] Add repeated create/stop/destroy/recreate fixture coverage
+  for `bf05eeb9` proving idempotence, no orphan/duplicate growth, and release
+  only after leases, containers, and jobs are inactive.
+- [x] T047 [US3/US5] Add active/foreign/unattributed network protection cases for
+  `0fac3b07`; each must remain an explicit exclusion before and after a plan
+  revalidation and must not be deleted by an exact cleanup apply.
+- [ ] T048 [US1/US2] Add constrained-pool collision/exhaustion and recovery
+  coverage for `822b9323`; assert stable capacity errors, bounded retries, and
+  no automatic deletion or disk-capacity misclassification.
+- [ ] T049 [US2] Add remote timeout/stale-control observation coverage for
+  `78aaf583`; assert structured partial/unavailable evidence, no traceback or
+  false success, and a required fresh rescan before planning.
+- [x] T050 [US1/US6] Add the `6bc4c6d5` consumer regression proving resource
+  monitoring uses the Spec 032 top-level job-list decoder and rejects a nested
+  `.data` response without changing network state.

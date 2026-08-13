@@ -186,3 +186,37 @@ A project can recommend remote execution by default while retaining a clearly vi
 - The first remote CI release runs on one selected Linux remote host. It supports compatible workflow behavior and rejects known semantic differences unless accepted; it does not promise GitHub-hosted runner fidelity, cross-host scheduling, autoscaling, or non-Linux runners.
 - Production deployment, publishing, release hosting, and destructive remote cleanup remain outside the default execution scope and require separately authorized behavior.
 - Complete output means complete after mandatory secret redaction and before an explicitly reported storage or retention limit.
+
+## Convergence amendment — 2026-08-13 (27-feedback jobs and list contract)
+
+This dated amendment preserves the original requirements and makes the accepted
+job identity and transport boundary explicit. It maps feedback `79d775b4`,
+`b027d2ab`, `3da039b4`, `343d1a5a`, and `6bc4c6d5` to this feature; the network
+consumer rule is repeated in the Resource Monitoring amendment.
+
+### Normative requirements
+
+- **FR-042**: A submission MUST durably create the job record before reporting
+  acceptance and MUST return a non-empty canonical `job_id`, target identity,
+  workspace label, and source/proof identity. A transport that cannot decode
+  this acknowledgement MUST fail explicitly and MUST NOT claim detached
+  execution (`79d775b4`, `3da039b4`, `343d1a5a`).
+- **FR-043**: Status, output, metrics, cancellation, retry, and cleanup MUST
+  resolve the durable record by its canonical `job_id` plus the stored target
+  context. Label-only or process-only lookup MUST NOT control or report a
+  different job (`79d775b4`).
+- **FR-044**: Any checkout, commit, or source directory resolved by guide or
+  preflight MUST be persisted in the accepted job's bounded submission snapshot
+  and used by detached execution. A later caller working-directory change MUST
+  not change the proof checkout (`b027d2ab`).
+- **FR-045**: The public `job-list` response remains top-level. It MUST be
+  decoded by one feature-owned contract parser; consumers MUST NOT require an
+  invented `.data` wrapper or maintain a second incompatible decoder
+  (`6bc4c6d5`).
+
+### Acceptance evidence required before closing this amendment
+
+The job acceptance matrix MUST exercise local and remote submission, immediate
+ID visibility, control by that ID after reconnect, guide-resolved proof checkout,
+and both accepted and failed acknowledgements. Each case records its feedback ID,
+request/transport identity, and safe terminal evidence without credentials.

@@ -127,7 +127,37 @@ class TestBridgeHandle(unittest.TestCase):
 
     def test_restore_valid_202(self):
         self._mksnap("keep")
-        self.assertEqual(self.call("POST", "/restore", {"name": "keep"})[0], 202)
+        self.assertEqual(self.call("POST", "/restore", {"name": "keep"})[0], 400)
+
+    def test_restore_requires_explicit_confirmation_before_job_acceptance(self):
+        self._mksnap("keep")
+        code, payload = self.call("POST", "/restore", {
+            "name": "keep", "confirm": False,
+        })
+        self.assertEqual(code, 400)
+        self.assertEqual(payload["error"], "confirmation_required")
+
+    def test_restore_confirmed_202_propagates_confirmation_to_command(self):
+        self._mksnap("keep")
+        captured = []
+
+        def start(label, fn):
+            captured.append((label, fn))
+            return "job-1"
+
+        with mock.patch.object(bridge, "_start_job", start), \
+                mock.patch("sandbox.commands.data.cmd_restore") as restore:
+            code, payload = self.call("POST", "/restore", {
+                "name": "keep", "confirm": True,
+            })
+        self.assertEqual(code, 202)
+        self.assertEqual(payload["job_id"], "job-1")
+        self.assertEqual(len(captured), 1)
+        captured[0][1]()
+        restore.assert_called_once()
+        args = restore.call_args.args[1]
+        self.assertTrue(args.yes)
+        self.assertTrue(args.confirm)
 
     # --- delete ---
     def test_delete_traversal_400(self):

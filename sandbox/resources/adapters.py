@@ -639,26 +639,50 @@ class LocalResourceAdapter:
             network_id = network.get("Id")
             if not isinstance(network_id, str) or not network_id:
                 continue
-            owner = self._compose_owner(network.get("Labels"))
-            if not owner:
+            network_name = str(network.get("Name") or network_id)
+            # Docker's predefined bridge/host/none networks are not
+            # Sandbox-managed user-defined allocations.  Keep the inventory
+            # focused on networks for which lifecycle evidence is meaningful.
+            if network_name in {"bridge", "host", "none"}:
                 continue
+            owner = self._compose_owner(network.get("Labels"))
             active = bool(network.get("Containers"))
+            if owner:
+                owner_kind, owner_id = "project", owner
+                classification = (
+                    "active" if active else
+                    "retained" if owner in protected_projects else
+                    # A stopped job/container is not proof that a network is
+                    # stale.  Keep inactive networks unverified until an
+                    # explicit lifecycle reference confirms release.
+                    "unverified"
+                )
+                evidence = ("compose_project_label",)
+                if not active and classification == "unverified":
+                    evidence += ("network_liveness_unverified",)
+                references = (
+                    ("connected_container",) if active else
+                    ("instance_registry",) if owner in protected_projects else ()
+                )
+            else:
+                labels = network.get("Labels")
+                owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
+                    "com.docker.compose.project"
+                ) else "unmanaged"
+                owner_id = None
+                classification = "active" if active else "unmanaged"
+                evidence = ("ownership_unverified",)
+                references = ("connected_container",) if active else ()
             resources.append(ResourceObservation(
                 resource_id=_resource_id("network", network_id),
                 kind="network", locator=network_id,
-                display_name=str(network.get("Name") or network_id),
-                owner_kind="project", owner_id=owner,
-                classification=(
-                    "active" if active else
-                    "retained" if owner in protected_projects else
-                    "disposable_cache"
-                ),
+                display_name=network_name,
+                owner_kind=owner_kind, owner_id=owner_id,
+                classification=classification,
                 size_state="measured", size_bytes=0, reclaimable_bytes=0,
-                references=(
-                    ("connected_container",) if active else
-                    ("instance_registry",) if owner in protected_projects else ()
-                ),
-                evidence=("compose_project_label",),
+                capacity_accounted=False,
+                references=references,
+                evidence=evidence,
             ))
         used_images = {
             str(container.get("Image"))
@@ -1047,10 +1071,11 @@ class LocalResourceAdapter:
                 "timed_out" if result.returncode == 124 else "failed"
             )
         elif candidate.kind == "network":
-            result = self._run(("docker", "network", "rm", candidate.locator), 60)
-            status = "removed" if result.returncode == 0 else (
-                "timed_out" if result.returncode == 124 else "failed"
-            )
+            # Network lifecycle state is intentionally diagnostic-only until
+            # leases, containers, and jobs have an explicit release record.
+            # Never turn a stale plan or a forged candidate into direct Docker
+            # network deletion.
+            status = "failed"
         elif candidate.kind == "image":
             result = self._run(("docker", "image", "rm", candidate.locator), 60)
             status = "removed" if result.returncode == 0 else (

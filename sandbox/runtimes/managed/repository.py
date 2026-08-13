@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Mapping
 import copy
 import fcntl
 import json
@@ -96,6 +97,57 @@ class NativeRepository:
             if prior and prior.get("owner") != value.get("owner"):
                 raise ValueError("foreign native ownership collision")
             state[section][identity] = value
+
+    def put_package_plan(self, machine_id, *, owner, plan):
+        """Persist one exact package/extension approval receipt.
+
+        The receipt is optional machine-local state; package planning itself
+        remains read-only.  A later apply can compare the stored simulation
+        and extension digests and refuse stale approval without consulting
+        arbitrary state JSON or mutating a host package manager.
+        """
+        if not isinstance(machine_id, str) or not isinstance(owner, Mapping):
+            raise ValueError("native package ownership identity is invalid")
+        if hasattr(plan, "to_dict") and callable(plan.to_dict):
+            value = plan.to_dict()
+        elif isinstance(plan, Mapping):
+            value = dict(plan)
+        else:
+            raise ValueError("native package plan is invalid")
+        simulation_digest = value.get("simulation_digest")
+        if not isinstance(simulation_digest, str) or len(simulation_digest) != 64:
+            raise ValueError("native package simulation digest is invalid")
+        extension = value.get("php_extensions")
+        if extension is not None:
+            if not isinstance(extension, Mapping):
+                raise ValueError("native PHP extension plan is invalid")
+            extension_digest = extension.get("digest")
+            if not isinstance(extension_digest, str) or len(extension_digest) != 64:
+                raise ValueError("native PHP extension plan digest is invalid")
+        else:
+            extension_digest = None
+        record = {
+            "owner": copy.deepcopy(dict(owner)), "machine_id": machine_id,
+            "simulation_digest": simulation_digest,
+            "extension_digest": extension_digest,
+        }
+        record["last_applied"] = canonical_digest(record)
+        with self.transaction() as state:
+            prior = state["packages"].get(machine_id)
+            if prior is not None and prior.get("owner") != record["owner"]:
+                raise ValueError("foreign native package ownership collision")
+            state["packages"][machine_id] = record
+        return copy.deepcopy(record)
+
+    def package_record(self, machine_id, *, owner=None):
+        """Return a detached package approval receipt, if one exists."""
+        with self._lock():
+            record = self._read()["packages"].get(machine_id)
+            if record is None:
+                return None
+            if owner is not None and record.get("owner") != owner:
+                raise ValueError("foreign native package ownership collision")
+            return copy.deepcopy(record)
 
     def remove_if_unchanged(self, section, identity, observed):
         with self.transaction() as state:

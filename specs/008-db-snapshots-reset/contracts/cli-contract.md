@@ -32,3 +32,25 @@
 - reset is destructive: CLI confirm unless `--yes`; MCP requires `confirm=true`.
 - herd instances: snapshots/reset unsupported in v1 — emit the existing herd notice.
 - New MCP tool(s) ⇒ Claude Code restart (gotcha #4).
+
+## Convergence amendment — 2026-08-13: restore confirmation
+
+Named restore is a destructive operation and has one confirmation contract:
+
+```text
+./sb restore NAME [--yes] [--json]
+```
+
+- Noninteractive CLI calls without `--yes` return a nonzero structured
+  `confirmation_required` error before invoking `db reset`, import, or archive
+  extraction. Interactive calls use a default-deny prompt; anything other than an
+  explicit affirmative answer returns without mutation.
+- The MCP/bridge equivalent carries `confirm=true` in addition to its existing
+  authorization/nonce boundary. `confirm=false`, missing confirmation, or a
+  stale/invalid request is refused before provider dispatch.
+- A successful response names only the safe instance and snapshot identifiers,
+  confirmation mode, and bounded outcome. It never includes command lines,
+  credentials, or snapshot contents.
+
+This closes feedback `adde58a6`; the protected `@install` baseline remains a
+separate reset target and cannot be made an ordinary restore/delete target.

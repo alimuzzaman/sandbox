@@ -268,3 +268,39 @@ operations available for a local instance (a WP-CLI command, a log read, a scree
   instances) is the same regardless of the underlying transport, security boundary, or
   co-location strategy chosen to implement it — those are planning-level decisions, not
   part of this specification.
+
+## Convergence amendment — 2026-08-13 (27-feedback hosting)
+
+This dated amendment retains the existing explicit-remote safety model and maps
+feedback `00b1e17e`, `3b9a2170`, `8291ab9c`, and `647f6478`.
+
+### Normative requirements
+
+- **FR-019**: A provisioned remote MUST expose a supported authenticated,
+  secret-safe verification probe. The probe uses the stored transport through
+  the owning adapter, returns only remote identity, endpoint/revision health,
+  status code, and bounded timing, and MUST NOT print bearer tokens, SSH
+  credentials, Basic Auth URLs, or credential-bearing headers (`00b1e17e`).
+- **FR-020**: Deploy MUST support an explicit immutable source selector (full
+  commit SHA or a named ref resolved to a full SHA before transfer). The result
+  records the requested ref and resolved SHA; a dirty working tree cannot be
+  silently combined with an immutable source. A failed resolution aborts before
+  any remote mutation (`3b9a2170`).
+- **FR-021**: When a Compose/instance manifest is nested, Sandbox MUST resolve
+  its canonical source root as the manifest's validated parent (or declared
+  project root), use that same root for Compose paths and deployment, and reject
+  path escapes. The directory containing a caller's outer checkout MUST NOT
+  replace the manifest root by accident (`8291ab9c`).
+- **FR-022**: Remote selection precedence MUST be explicit and surfaced in guide,
+  status, and deploy results: per-invocation `--remote` wins; otherwise an
+  operation/profile-resolved target may be used only when exactly one target is
+  eligible; ambiguous or unavailable candidates fail with a stable error. The
+  deploy command retains its existing requirement for explicit `--remote`
+  (`647f6478`).
+
+### Acceptance evidence required before closing this amendment
+
+The hosting matrix MUST cover authenticated verification with redaction
+assertions, immutable commit/ref deploys and dirty-tree refusal, nested manifest
+source roots, ambiguous/explicit remote selection, and output showing the
+resolved remote/source identity. No verification case may disclose credentials.

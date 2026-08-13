@@ -74,3 +74,12 @@ adapter's `exec` operation and avoids a second process transport.
 - [data-model.md](data-model.md)
 - [contracts/cli-first-operation.md](contracts/cli-first-operation.md)
 - [quickstart.md](quickstart.md)
+
+## Plan amendment — 2026-08-13 (PHP extension CLI/reporting)
+
+Keep extension normalization and runtime mutation out of the CLI command module. The
+CLI owns only initialization intent, canonical JSON/text rendering, and explicit
+failure/reporting. `sb init` writes a reviewable WordPress profile for new projects;
+status/doctor consume a structured resolver result and never infer readiness from a
+single plane. Generic Compose refusal and omission compatibility are tested before
+any live runtime operation.

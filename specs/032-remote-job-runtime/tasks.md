@@ -439,3 +439,24 @@ feature requirements rather than treated as documentation-only follow-up.
 
 - [ ] T156 [US1/US2] On an approved disposable provisioned remote, run 100 controlled caller-disconnect/reconnect submissions and retain only sanitized job IDs, terminal-or-reconciled lifecycle counts, and cursor duplicate results to prove SC-002 and SC-003.
 - [ ] T157 [US2] On an approved reachable provisioned remote, measure active-job status latency and retain sanitized lifecycle/liveness/deadline/last-activity evidence proving the SC-004 five-second target.
+
+## Phase 12: Convergence — 2026-08-13 (27-feedback jobs)
+
+These tasks remain open. They are implementation and regression gates for the
+dated contract amendment; no prior task is reclassified as complete.
+
+- [x] T158 [US1] Add a local and remote submission regression for `79d775b4` that
+  asserts durable creation precedes acknowledgement and that status/control by
+  the returned canonical job ID cannot fall back to a label or process lookup.
+- [x] T159 [US1] Add a detached-execution regression for `b027d2ab` proving the
+  guide-resolved checkout/source identity is persisted in the accepted snapshot
+  and remains the execution source after the caller changes directory.
+- [x] T160 [US1] Add transport regressions for `3da039b4` and `343d1a5a` covering
+  a non-empty decoded accepted ID plus explicit nonzero rejection for empty,
+  malformed, or failed remote `job-start` acknowledgements.
+- [x] T161 [US1/US5] Add the shared job-list contract regression for `6bc4c6d5`:
+  parse the existing top-level page, reject a duplicate `.data`-expecting decoder,
+  and prove monitor/CLI/MCP consumers use the feature-owned parser.
+- [ ] T162 [US1] Record focused and remote acceptance evidence for T158-T161 in
+  `implementation-evidence.md` with safe job/source identities and no secret or
+  credential material.

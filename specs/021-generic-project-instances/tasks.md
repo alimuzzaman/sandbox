@@ -214,3 +214,33 @@ Foundation -> US1 MVP -> US2 operations -> US4 extension seam
 ## Task Format Validation
 
 All implementation lines use `- [ ] TNNN`, story-phase tasks include `[USN]`, parallel markers are limited to non-overlapping paths, and each task names a concrete file or evidence artifact.
+
+## Phase 8: Convergence — 2026-08-13 (27-feedback identity/state)
+
+These tasks remain open; no previous checkbox is reclassified as complete.
+
+- [x] T058 [US1/US4] Add generic, WordPress, nested-root, label, and remote
+  identity fixtures for `cf5e49ed`; assert the resolver does not require a
+  plugin slug or plugin-shaped manifest and preserves one stable identity.
+- [x] T059 [US1/US4] Add CLI/MCP parity tests for `2b080bf5` proving both
+  adapters call the shared identity resolver and return equivalent root, kind,
+  label, adapter, and capability fields.
+- [ ] T060 [US2/US4] Add live-state/session-refresh tests for `108318d9`: mutate
+  plugin/runtime state between observations, assert the next session reflects
+  current state, and reject stale cache as current without explicit refresh.
+
+## Phase 9: Convergence — 2026-08-13 (PHP extension requirements)
+
+These tasks are open follow-up work and intentionally do not reclassify any prior
+checkbox as complete.
+
+- [x] T061 [US1] Add WordPress config/model regressions for omitted `phpExtensions`,
+  shorthand/canonical normalization, immutable `wordpress@1` required/recommended
+  sets, exact/`X.Y.*`/`php` constraints, unknowns, and profile conflicts in the
+  project-config contract fixtures.
+- [x] T062 [US1/US2] Add a generic Compose negative test proving a present
+  `phpExtensions` field fails before image, package, database, or filesystem mutation;
+  omission must retain the existing Compose behavior.
+- [x] T063 [US2/US4] Add cache/provenance and four-plane (web, WP-CLI, bounded exec,
+  PHPUnit) readiness fixtures, including digest invalidation and preservation of
+  database volumes, uploads, snapshots, and project files on apply.

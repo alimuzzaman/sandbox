@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Mapping
 import types as _types
 from contextlib import contextmanager
 import io
@@ -102,8 +103,7 @@ def _web_apache(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     """The original single-service Apache + mod_php web tier (default).
     Kept byte-identical to the pre-multi-server template so existing
     instances regenerate unchanged."""
-    image = _web_image("apache", inst_cfg.get("php_version"),
-                       inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
+    image = _instance_web_image("apache", inst_cfg)
     return f"""  wp:
     image: {image}
     # Reach the host `sb web` snapshot bridge from in-container PHP
@@ -165,8 +165,7 @@ def _web_nginx(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     reverse-proxies .php to wp:9000. nginx-sandbox.conf carries the WP
     front-controller rewrite (permalinks + /wp-json/ both fall through to
     index.php). Default image is Apache-specific, so pin the fpm flavor here."""
-    fpm_image = _web_image("nginx", inst_cfg.get("php_version"),
-                           inst_cfg.get("wp_version"), inst_cfg.get("wordpress_image"))
+    fpm_image = _instance_web_image("nginx", inst_cfg)
     return f"""  wp:
     image: {fpm_image}
     extra_hosts:                       # reach the host `sb web` snapshot bridge
@@ -262,7 +261,7 @@ def _wpcli_service(instance: str, inst_cfg: dict, plugins_host: Path) -> str:
     rt = _server_runtime(inst_cfg["server"])
     docroot = rt["docroot"]
     return f"""  wpcli:
-    image: {inst_cfg["wpcli_image"]}
+    image: {_instance_wpcli_image(inst_cfg)}
     depends_on:
       - wp
     user: "{rt["uid"]}"
@@ -445,7 +444,8 @@ def write_compose_files(cfg: dict) -> None:
 
 
 def compose(*args: str, instance: str,
-            check: bool = True, capture: bool = False):
+            check: bool = True, capture: bool = False,
+            timeout: float | None = None):
     """Run `docker compose` against one instance's stack.
 
     Uses the per-instance project name (-p sandbox-<instance>) and
@@ -463,7 +463,7 @@ def compose(*args: str, instance: str,
          # server config mounts.
          "--project-directory", str(ROOT),
          *args],
-        check=check, capture=capture,
+        check=check, capture=capture, timeout=timeout,
     )
 
 
@@ -525,7 +525,8 @@ def _wp_has_builtin_cli(instance: str) -> bool:
 
 
 def wpcli(args: list[str], instance: str,
-          check: bool = True, capture: bool = False):
+          check: bool = True, capture: bool = False,
+          timeout: float | None = None):
     """Run wp-cli against an instance. Herd runs the HOST wp with --path; Docker
     runs the **built-in** wp (a host wp-cli.phar bind-mounted into the always-running
     `wp` container) via `exec -u www-data` — no per-call container. Falls back to the
@@ -539,7 +540,7 @@ def wpcli(args: list[str], instance: str,
         # phar's default `php` — so plugin code, migrations, and `wp eval`
         # execute on the same PHP the web tier serves.
         return run([*_herd_wp_cmd(instance), f"--path={wp_dir(instance)}", *args],
-                   check=check, capture=capture)
+                   check=check, capture=capture, timeout=timeout)
     # `wp db ...` shells out to the mysql/mysqldump client binary, which the fpm
     # (nginx) web image does NOT ship — only the dedicated `wpcli` service image
     # does. Route DB subcommands to that service so db query/reset/import/etc.
@@ -550,9 +551,11 @@ def wpcli(args: list[str], instance: str,
         # exec into the running web container as www-data (uid 33) so files stay
         # www-data-owned and no --allow-root is needed; same PHP the site serves.
         return compose("exec", "-u", "www-data", "-T", "wp", "wp", *args,
-                       instance=instance, check=check, capture=capture)
+                       instance=instance, check=check, capture=capture,
+                       timeout=timeout)
     return compose("run", "--rm", "wpcli", *args,
-                   instance=instance, check=check, capture=capture)
+                   instance=instance, check=check, capture=capture,
+                   timeout=timeout)
 
 
 def _managed_execution_gate(instance: str, capability: str, entry_path: str, argv: tuple[str, ...],
@@ -768,6 +771,689 @@ def _web_image(server: str, php=None, wp=None, explicit=None) -> str:
     if php:
         return f"wordpress:php{php}{fpm}"
     return "wordpress:php8.3-fpm" if server == "nginx" else "wordpress:latest"
+
+
+def _extension_plan_requirements(requirements):
+    """Return a detached plan input with the profile's safe image fallback.
+
+    ``wordpress@1`` requires an image capability, but intentionally does not
+    force a project to name GD or Imagick.  Until a fresh observation exists,
+    the official child-image path uses the catalogued GD recipe.  Explicitly
+    disabling GD leaves the profile unsatisfied (and therefore fails closed)
+    instead of silently overriding user intent.  No package, URL, or command
+    from the project config can enter this mapping.
+    """
+    if hasattr(requirements, "to_dict") and callable(requirements.to_dict):
+        requirements = requirements.to_dict()
+    if not isinstance(requirements, dict):
+        requirements = dict(requirements)
+    result = {
+        str(key): value for key, value in requirements.items()
+        if key in {"profile", "extensions"}
+    }
+    extensions = result.get("extensions", {})
+    if not isinstance(extensions, dict):
+        extensions = dict(extensions)
+    else:
+        extensions = dict(extensions)
+    profile = result.get("profile")
+    if profile == "wordpress@1":
+        # A raw scaffold intentionally contains only the immutable profile.
+        # Expand its required assertions here as well as in the config model,
+        # so direct callers and older persisted blocks do not fail with a
+        # misleading ``profile_required_missing`` error before Docker starts.
+        for required in (
+                "curl", "dom", "exif", "fileinfo", "hash", "json", "mbstring",
+                "mysqli", "openssl", "pcre", "xml"):
+            extensions.setdefault(required, True)
+    gd = extensions.get("gd")
+    imagick = extensions.get("imagick")
+    if profile == "wordpress@1" and gd is None and imagick is None:
+        extensions["gd"] = True
+    elif profile == "wordpress@1" and gd is None and imagick is False:
+        # The profile cannot be satisfied by the unsupported Imagick path;
+        # retain the explicit disable so the resolver returns missing_capability.
+        pass
+    result["extensions"] = extensions
+    return result
+
+
+def _instance_extension_plan(inst_cfg: dict, server: str, *, requirements=None,
+                             parent_digests=None):
+    """Return a pure PHP-extension child-image plan when one is requested.
+
+    Image digest resolution is deliberately an input to the planner.  The
+    normal Compose path has no extension requirements and remains byte-for-
+    byte compatible; opting in without a resolved digest fails before a
+    generated Compose file can point at an unverifiable child image.
+    """
+    requirements = (requirements if requirements is not None else
+                    inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")))
+    if requirements in (None, {}, {"extensions": {}}):
+        return None
+    requirements = _extension_plan_requirements(requirements)
+    from sandbox.php_extensions.compose_builder import plan_compose_extension_images
+
+    parent_image = _web_image(
+        server, inst_cfg.get("php_version"), inst_cfg.get("wp_version"),
+        inst_cfg.get("wordpress_image"),
+    )
+    wpcli_image = inst_cfg.get("wpcli_image") or _cli_image(inst_cfg.get("php_version"))
+    if parent_digests is None:
+        parent_digests = inst_cfg.get("php_extension_parent_digests")
+        if not isinstance(parent_digests, dict):
+            parent_digests = inst_cfg.get("phpExtensionParentDigests")
+    parent_digest = (
+        inst_cfg.get("php_extension_parent_digest")
+        or inst_cfg.get("phpExtensionParentDigest")
+        or inst_cfg.get("wordpress_image_digest")
+        or inst_cfg.get("wordpressImageDigest")
+        or ((parent_digests or {}).get("web") if isinstance(parent_digests, dict) else None)
+    )
+    wpcli_parent_digest = (
+        inst_cfg.get("wpcli_image_digest")
+        or inst_cfg.get("wpcliImageDigest")
+        or ((parent_digests or {}).get("wpcli") if isinstance(parent_digests, dict) else None)
+    )
+    # A digest embedded in an image reference remains valid; otherwise the
+    # planner emits a clear preflight error instead of inventing a fingerprint.
+    return plan_compose_extension_images(
+        requirements,
+        parent_image=parent_image,
+        wpcli_image=wpcli_image,
+        parent_digest=parent_digest,
+        wpcli_parent_digest=wpcli_parent_digest,
+        server=server,
+        php_version=inst_cfg.get("php_version"),
+        platform=inst_cfg.get("platform"),
+        architecture=inst_cfg.get("architecture") or inst_cfg.get("arch"),
+        expected_digest=inst_cfg.get("php_extension_digest") or inst_cfg.get("phpExtensionDigest"),
+    )
+
+
+_PHP_EXTENSION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
+_PHP_EXTENSION_PARENT_RE = re.compile(
+    r"^(?P<repo>wordpress)(?::(?P<tag>[a-z0-9][a-z0-9._-]*))?"
+    r"(?:@(?P<digest>sha256:[0-9a-f]{64}))?$", re.IGNORECASE,
+)
+
+
+def _parent_image_reference(image: str, *, role: str, server: str) -> tuple[str, str | None]:
+    """Validate a parent reference before any pull/inspect side effect."""
+    if role == "web" and server not in {"apache", "nginx"}:
+        raise ValueError(
+            f"phpExtensions child-image provisioning supports official Apache/nginx only; "
+            f"{server!r} is validate-only"
+        )
+    if not isinstance(image, str) or not image.strip():
+        raise ValueError(f"phpExtensions {role} parent image is missing")
+    match = _PHP_EXTENSION_PARENT_RE.fullmatch(image.strip())
+    if not match:
+        raise ValueError(
+            f"phpExtensions {role} parent image must be an official wordpress image"
+        )
+    tag = match.group("tag") or "latest"
+    if role == "wpcli":
+        if not tag.startswith("cli"):
+            raise ValueError("phpExtensions wpcli parent image must be wordpress:cli")
+    elif server == "nginx" and not tag.endswith("-fpm"):
+        raise ValueError("phpExtensions nginx parent image must be official wordpress FPM")
+    elif server == "apache" and tag.startswith("cli"):
+        raise ValueError("phpExtensions Apache parent image cannot be wordpress:cli")
+    return image.strip(), match.group("digest")
+
+
+def _repo_digest_for_image(image: str, output: str) -> str | None:
+    """Extract a registry digest from bounded ``docker image inspect`` output."""
+    candidates: list[str] = []
+    try:
+        parsed = json.loads(output or "")
+        if isinstance(parsed, list):
+            candidates.extend(str(item) for item in parsed if isinstance(item, str))
+        elif isinstance(parsed, str):
+            candidates.append(parsed)
+    except (TypeError, ValueError):
+        candidates.extend((output or "").splitlines())
+    image_repo = image.split("@", 1)[0].lower()
+    # Official references in this feature have no registry port; the tag is
+    # not part of RepoDigests (``wordpress:cli-php8.3`` -> ``wordpress@...``).
+    if ":" in image_repo.rsplit("/", 1)[-1]:
+        image_repo = image_repo.rsplit(":", 1)[0]
+    for candidate in candidates:
+        candidate = candidate.strip().strip('"')
+        if "@" not in candidate:
+            continue
+        repo, digest = candidate.rsplit("@", 1)
+        repo = repo.lower()
+        if repo.startswith("docker.io/"):
+            repo = repo.removeprefix("docker.io/")
+        if repo.startswith("index.docker.io/"):
+            repo = repo.removeprefix("index.docker.io/")
+        if repo.startswith("registry-1.docker.io/"):
+            repo = repo.removeprefix("registry-1.docker.io/")
+        repo = repo.removeprefix("library/")
+        if repo in {image_repo, "docker.io/library/" + image_repo,
+                    "index.docker.io/library/" + image_repo,
+                    "registry-1.docker.io/library/" + image_repo} \
+                and _PHP_EXTENSION_DIGEST_RE.fullmatch(digest):
+            return digest.lower()
+    return None
+
+
+def _resolve_php_extension_parent_digest(image: str, *, role: str, server: str,
+                                         provided: str | None = None,
+                                         timeout: float = 60) -> str:
+    """Resolve a trusted official image digest using the bounded Docker adapter.
+
+    Existing adapter-produced digests are reusable only when structurally
+    valid.  A new scaffold has no hidden digest requirement: it resolves a
+    local image or performs one bounded pull, then inspects the registry digest.
+    """
+    image, embedded = _parent_image_reference(image, role=role, server=server)
+    if provided is not None:
+        if not isinstance(provided, str) or not _PHP_EXTENSION_DIGEST_RE.fullmatch(provided):
+            raise ValueError(f"phpExtensions {role} parent digest is invalid")
+        return provided.lower()
+    if embedded:
+        return embedded.lower()
+
+    def inspect():
+        return run(
+            ["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image],
+            check=False, capture=True, timeout=timeout,
+        )
+
+    result = inspect()
+    digest = _repo_digest_for_image(image, getattr(result, "stdout", "")) \
+        if getattr(result, "returncode", 1) == 0 else None
+    if digest:
+        return digest
+    pull = run(["docker", "pull", image], check=False, capture=True, timeout=timeout)
+    if getattr(pull, "returncode", 1) != 0:
+        detail = (getattr(pull, "stderr", "") or getattr(pull, "stdout", "") or "").strip()
+        raise ValueError(
+            f"phpExtensions {role} parent image could not be pulled: {detail[:400]}"
+        )
+    result = inspect()
+    digest = _repo_digest_for_image(image, getattr(result, "stdout", "")) \
+        if getattr(result, "returncode", 1) == 0 else None
+    if not digest:
+        raise ValueError(
+            f"phpExtensions {role} parent image has no trusted repository digest"
+        )
+    return digest
+
+
+_PHP_EXTENSION_LABEL_DIGEST = "org.sandbox.php-extensions.digest"
+_PHP_EXTENSION_LABEL_ROLE = "org.sandbox.php-extensions.role"
+_PHP_EXTENSION_LABEL_PROVENANCE = "org.sandbox.php-extensions.provenance"
+
+
+def _extension_image_receipt(
+    image: str,
+    *,
+    expected_digest: str,
+    expected_role: str,
+    expected_provenance: str,
+    timeout: float,
+) -> dict[str, str] | None:
+    """Return a verified receipt for a Sandbox-owned child image tag.
+
+    A successful ``docker image inspect`` is not enough: a mutable tag may
+    point at an unrelated image after a cleanup or manual retag.  The image
+    must carry the digest, role, and immutable catalog/provenance labels
+    emitted by :func:`materialize_compose_extension_context`'s Dockerfile.
+    ``None`` means missing, malformed, or mismatched and is intentionally
+    treated as a cache miss by the bounded build lifecycle.
+    """
+    result = run(
+        ["docker", "image", "inspect", "--format", "{{json .}}", image],
+        check=False, capture=True, timeout=timeout,
+    )
+    if getattr(result, "returncode", 1) != 0:
+        return None
+    raw = (getattr(result, "stdout", "") or "").strip()
+    try:
+        document = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(document, list):
+        document = document[0] if document else None
+    if not isinstance(document, Mapping):
+        return None
+    labels = document.get("Config")
+    labels = labels.get("Labels") if isinstance(labels, Mapping) else None
+    if not isinstance(labels, Mapping):
+        # A few Docker-compatible adapters expose the flattened key in their
+        # inspect document; accepting it keeps this verification adapter
+        # portable without weakening the exact label comparisons.
+        labels = document.get("Config.Labels")
+    if not isinstance(labels, Mapping):
+        return None
+    observed = {
+        "digest": str(labels.get(_PHP_EXTENSION_LABEL_DIGEST, "")).lower(),
+        "role": str(labels.get(_PHP_EXTENSION_LABEL_ROLE, "")),
+        "provenance": str(labels.get(_PHP_EXTENSION_LABEL_PROVENANCE, "")).lower(),
+    }
+    if (observed["digest"] != str(expected_digest).lower()
+            or observed["role"] != expected_role
+            or observed["provenance"] != str(expected_provenance).lower()):
+        return None
+    image_id = document.get("Id") or document.get("ID") or document.get("id")
+    return {
+        "image": image,
+        "image_id": str(image_id) if image_id else "",
+        **observed,
+    }
+
+
+def _extension_image_exists(image: str, *, timeout: float) -> bool:
+    """Compatibility existence check for callers outside the build seam."""
+    result = run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+        check=False, capture=True, timeout=timeout,
+    )
+    return getattr(result, "returncode", 1) == 0 and bool(
+        (getattr(result, "stdout", "") or "").strip()
+    )
+
+
+def _build_php_extension_images(plan, *, timeout: float = 900) -> dict[str, str]:
+    """Build both child images through Sandbox's bounded Docker command adapter."""
+    from sandbox.php_extensions.compose_builder import materialize_compose_extension_context
+
+    context = materialize_compose_extension_context(plan)
+    built: dict[str, str] = {}
+    expected_provenance = str(plan.web.provenance.get("recipe_catalog_digest", ""))
+    if not expected_provenance:
+        raise ValueError("phpExtensions plan is missing catalog provenance")
+    for image_plan, dockerfile in (
+            (plan.web, context / "Dockerfile.web"),
+            (plan.wpcli, context / "Dockerfile.wpcli")):
+        receipt = _extension_image_receipt(
+            image_plan.image,
+            expected_digest=plan.digest,
+            expected_role=image_plan.role,
+            expected_provenance=expected_provenance,
+            timeout=min(timeout, 60),
+        )
+        if receipt is None:
+            result = run(
+                ["docker", "build", "--quiet", "--file", str(dockerfile),
+                 "--tag", image_plan.image, str(context)],
+                check=False, capture=True, timeout=timeout,
+            )
+            if getattr(result, "returncode", 1) != 0:
+                detail = (getattr(result, "stderr", "") or
+                          getattr(result, "stdout", "") or "").strip()
+                raise ValueError(
+                    f"phpExtensions {image_plan.role} child image build failed: {detail[:500]}"
+                )
+            receipt = _extension_image_receipt(
+                image_plan.image,
+                expected_digest=plan.digest,
+                expected_role=image_plan.role,
+                expected_provenance=expected_provenance,
+                timeout=min(timeout, 60),
+            )
+        if receipt is None:
+            raise ValueError(
+                f"phpExtensions {image_plan.role} child image lacks the expected "
+                "Sandbox digest/role/provenance labels after build"
+            )
+        built[image_plan.role] = image_plan.image
+    return built
+
+
+def prepare_php_extension_runtime(inst_cfg: dict, server: str | None = None,
+                                  *, timeout: float = 900) -> dict | None:
+    """Resolve, materialize, and build an opted-in official child-image pair.
+
+    The returned data is safe to persist in the instance block.  Omitted
+    ``phpExtensions`` returns ``None`` without inspecting Docker.  Custom
+    images/LiteSpeed are rejected before a pull/build; only the reviewed
+    official Apache/nginx path reaches Docker.
+    """
+    requirements = inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions"))
+    if requirements is None:
+        return None
+    server = (server or inst_cfg.get("server") or "nginx").strip().lower()
+    effective = _extension_plan_requirements(requirements)
+    # Validate the immutable catalog and provisioning boundary before deriving
+    # parent images or invoking even a read-only Docker inspect.  In
+    # particular, v1's observation-only imagick/xdebug requests must fail
+    # without a pull, materialized context, or build side effect.
+    from sandbox.php_extensions.compose_builder import normalize_requirements
+    normalize_requirements(effective)
+    parent_image = _web_image(
+        server, inst_cfg.get("php_version"), inst_cfg.get("wp_version"),
+        inst_cfg.get("wordpress_image"),
+    )
+    wpcli_image = inst_cfg.get("wpcli_image") or _cli_image(inst_cfg.get("php_version"))
+    existing = inst_cfg.get("php_extension_parent_digests")
+    if not isinstance(existing, dict):
+        existing = inst_cfg.get("phpExtensionParentDigests")
+    existing_images = inst_cfg.get("php_extension_parent_images")
+    if not isinstance(existing_images, dict):
+        existing_images = {}
+    web_provided = ((existing or {}).get("web")
+                    if existing_images.get("web") == parent_image
+                    else None)
+    cli_provided = ((existing or {}).get("wpcli")
+                    if existing_images.get("wpcli") == wpcli_image
+                    else None)
+    parent_digests = {
+        "web": _resolve_php_extension_parent_digest(
+            parent_image, role="web", server=server,
+            provided=web_provided,
+            timeout=min(timeout, 120),
+        ),
+        "wpcli": _resolve_php_extension_parent_digest(
+            wpcli_image, role="wpcli", server=server,
+            provided=cli_provided,
+            timeout=min(timeout, 120),
+        ),
+    }
+    preflight = php_extension_preflight(
+        {**inst_cfg, "php_extensions": effective,
+         "php_extension_parent_digests": parent_digests},
+        server,
+    )
+    plan = _instance_extension_plan(
+        {**inst_cfg, "php_extensions": effective,
+         "php_extension_parent_digests": parent_digests},
+        server, requirements=effective, parent_digests=parent_digests,
+    )
+    if plan is None:
+        raise ValueError("phpExtensions child-image plan was unexpectedly empty")
+    built = _build_php_extension_images(plan, timeout=timeout)
+    return {
+        "plan": plan,
+        "preflight": preflight,
+        "parent_digests": parent_digests,
+        "built_images": built,
+    }
+
+
+def _persist_php_extension_runtime(block: dict, prepared: dict) -> None:
+    """Attach only adapter-produced identity to an instance block."""
+    plan = prepared["plan"]
+    block["php_extension_parent_digests"] = dict(prepared["parent_digests"])
+    block["php_extension_parent_images"] = {
+        "web": plan.web.parent_image,
+        "wpcli": plan.wpcli.parent_image,
+    }
+    block["php_extension_digest"] = plan.digest
+    block["platform"] = plan.platform
+    block["architecture"] = plan.architecture
+
+
+def php_extension_preflight(inst_cfg: dict, server: str | None = None,
+                            *, parent_digests: Mapping[str, str] | None = None) -> dict | None:
+    """Validate extension intent and return a deterministic build/readiness plan.
+
+    This is intentionally side-effect free.  It resolves the immutable catalog
+    and, when the caller has supplied trusted parent digests, computes the
+    child-image plan.  A missing digest is an actionable preflight block rather
+    than an invented fingerprint or an implicit Docker build.
+    """
+    requirements = inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions"))
+    if requirements is None:
+        return None
+    from sandbox.php_extensions.service import PhpExtensionService
+
+    effective = _extension_plan_requirements(requirements)
+    service = PhpExtensionService()
+    resolution = service.resolve(effective)
+    # A profile-only declaration is satisfiable by the reviewed GD child-image
+    # fallback above.  Any other catalog failure blocks before state/runtime
+    # mutation and preserves its stable issue code in the message.
+    if not resolution.ok:
+        issues = [issue for issue in resolution.issues
+                  if issue.code != "missing_capability"]
+        if issues:
+            issue = issues[0]
+            raise ValueError(f"phpExtensions preflight blocked ({issue.code}): {issue.message}")
+        if not (effective.get("profile") == "wordpress@1" and
+                effective.get("extensions", {}).get("gd") is True):
+            issue = resolution.issues[0] if resolution.issues else None
+            raise ValueError(
+                "phpExtensions preflight blocked (missing_capability): "
+                f"{issue.message if issue else 'WordPress requires GD or Imagick'}"
+            )
+        # Re-resolve after the deterministic GD fallback so status/readiness
+        # carries the same effective requirement set as the image planner.
+        resolution = service.resolve(effective)
+    plan_cfg = inst_cfg
+    if parent_digests is not None:
+        plan_cfg = {**inst_cfg, "php_extension_parent_digests": dict(parent_digests)}
+    plan = _instance_extension_plan(plan_cfg, server or inst_cfg.get("server", "nginx"),
+                                    requirements=effective,
+                                    parent_digests=parent_digests)
+    return {
+        "resolution": resolution.to_dict(),
+        "requirements": effective,
+        "plan": plan.as_dict() if plan is not None else None,
+        "readiness": "ready" if plan is not None else "validate_only",
+    }
+
+
+_PHP_EXTENSION_PLANES = ("web", "cli", "exec", "phpunit")
+
+
+def _php_probe_runner(instance: str, plane: str):
+    """Return one adapter-owned runner for the standalone PHP payload.
+
+    Every branch remains argv-only and uses the already generated Compose/test
+    execution service.  In particular, none of these commands invokes ``wp``
+    or mounts a project, so a status/doctor check cannot bootstrap WordPress or
+    mutate its database/uploads.
+    """
+    from sandbox.php_extensions.probe import ProbeResult, ProbeError
+
+    if plane not in _PHP_EXTENSION_PLANES:
+        raise ValueError(f"unknown PHP extension probe plane: {plane}")
+
+    class _Runner:
+        def run(self, argv, *, timeout=None):
+            try:
+                if plane == "phpunit":
+                    # The test helper owns the resolved PHPUnit image/native
+                    # adapter and applies the same finite timeout contract.
+                    from sandbox.core._tests import _run_php_extension_probe
+                    return _run_php_extension_probe(
+                        instance, tuple(argv), timeout=timeout or 5,
+                    )
+                if _is_herd_instance(instance):
+                    # Herd has no web/wpcli containers.  Do not silently run a
+                    # host PHP binary and label it as a container plane.
+                    return _types.SimpleNamespace(
+                        returncode=1, stdout="", stderr="PHP probe plane unavailable: no container",
+                    )
+                # ``argv[0]`` is the trusted PHP binary.  The cli/exec one-shot
+                # services set ``--entrypoint php``, so only the remaining
+                # arguments are passed to Compose.
+                if plane == "web":
+                    command = ("exec", "-T", "wp", *tuple(argv))
+                elif plane == "cli":
+                    command = ("run", "--rm", "--no-deps", "--entrypoint", "php",
+                               "wpcli", *tuple(argv)[1:])
+                else:  # bounded exec plane: one-shot web service, no WP code.
+                    command = ("run", "--rm", "--no-deps", "--entrypoint", "php",
+                               "wp", *tuple(argv)[1:])
+                return compose(*command, instance=instance, check=False,
+                               capture=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return _types.SimpleNamespace(
+                    returncode=124, stdout="", stderr="process timed out",
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                # ``run_probe`` turns a non-zero bounded result into a
+                # structured failure; preserve only a short safe reason.
+                return _types.SimpleNamespace(
+                    returncode=1, stdout="", stderr=str(exc)[:4096],
+                )
+
+    return _Runner()
+
+
+def php_extension_probe(instance: str, requirements: object, *,
+                        timeout: float = 5):
+    """Probe all available PHP execution planes for one running instance.
+
+    The return value is ``{plane: ProbeResult}``, ready for
+    :meth:`PhpExtensionService.verify`.  A missing container is represented as
+    a failed/unavailable probe, never as a synthetic successful observation.
+    """
+    from sandbox.php_extensions.probe import (
+        ProbeError, ProbeResult, probe_all_planes,
+    )
+
+    if not isinstance(instance, str) or not instance:
+        raise ValueError("PHP extension probe instance is invalid")
+    if _is_herd_instance(instance):
+        return {
+            plane: ProbeResult(
+                False, plane,
+                errors=(ProbeError(
+                    "probe_unavailable",
+                    "PHP extension probe plane unavailable for host-served instance",
+                    plane=plane,
+                ),),
+            )
+            for plane in _PHP_EXTENSION_PLANES
+        }
+    return probe_all_planes(
+        {plane: _php_probe_runner(instance, plane) for plane in _PHP_EXTENSION_PLANES},
+        requirements, timeout=timeout,
+    )
+
+
+def _unprobed_php_extension_status(resolution, *, reason: str) -> dict:
+    """Render the backwards-compatible no-instance status envelope."""
+    observed = {
+        plane: {"state": "unavailable", "reason": {
+            "code": "not_probed", "message": reason,
+        }} for plane in _PHP_EXTENSION_PLANES
+    }
+    issues = [issue.to_dict() for issue in resolution.issues]
+    return {
+        "desired": {
+            "profile": resolution.profile,
+            "catalog": resolution.catalog,
+            "requirements": [dict(item) for item in resolution.requirements],
+            "digest": resolution.digest,
+        },
+        "observed": observed,
+        "drift": {"state": "unknown" if resolution.ok else "blocked", "issues": issues},
+        "staleness": {"state": "stale", "reason": reason},
+    }
+
+
+def _php_observed_row(result) -> dict:
+    """Reduce one ProbeResult to a secret-free status row."""
+    observation = result.observation
+    if observation is None:
+        code = result.errors[0].code if result.errors else "probe_failed"
+        message = result.errors[0].message if result.errors else "PHP extension probe failed"
+        stderr = (getattr(result, "stderr", "") or "").lower()
+        unavailable_markers = (
+            "not running", "no such service", "no such container",
+            "cannot connect", "connection refused", "container unavailable",
+        )
+        state = ("unavailable" if code == "probe_unavailable"
+                 or any(marker in stderr for marker in unavailable_markers)
+                 else "error")
+        return {"state": state, "reason": {"code": code, "message": message}}
+    rows = {
+        item.name: {"enabled": item.enabled, "version": item.version}
+        for item in observation.extensions
+    }
+    result_row = {
+        "state": "ready" if result.ok else "drift",
+        "php_version": observation.php_version,
+        "sapi": observation.sapi,
+        "extensions": rows,
+    }
+    if result.errors:
+        result_row["errors"] = [error.to_dict() for error in result.errors]
+    return result_row
+
+
+def php_extension_status(inst_cfg: dict, *, instance: str | None = None,
+                         timeout: float = 5) -> dict | None:
+    """Build a secret-free status envelope using fresh standalone probes.
+
+    ``instance=None`` intentionally retains the old no-probe behavior for
+    callers that only have a config document.  Lifecycle status/doctor passes
+    the resolved instance name, which enables all four bounded planes and
+    compares them through the canonical probe/service layer.
+    """
+    requirements = inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions"))
+    if requirements is None:
+        return None
+    from sandbox.php_extensions.service import PhpExtensionService
+
+    effective = _extension_plan_requirements(requirements)
+    service = PhpExtensionService()
+    resolution = service.resolve(effective)
+    if instance is None:
+        return _unprobed_php_extension_status(
+            resolution, reason="instance was not supplied to the lifecycle probe",
+        )
+    if not resolution.ok:
+        return _unprobed_php_extension_status(
+            resolution, reason="PHP extension declaration is invalid or incomplete",
+        )
+
+    probes = php_extension_probe(instance, effective, timeout=timeout)
+    verification = service.verify(effective, probes)
+    observed = {plane: _php_observed_row(probes[plane])
+                for plane in _PHP_EXTENSION_PLANES}
+    fresh = all(result.observation is not None for result in probes.values())
+    unavailable = [plane for plane, result in probes.items()
+                   if result.observation is None and any(
+                       error.code == "probe_unavailable" for error in result.errors)]
+    if verification.ok:
+        drift_state = "ready"
+    elif unavailable or not fresh:
+        drift_state = "unknown"
+    else:
+        drift_state = "drift"
+    return {
+        "desired": {
+            "profile": resolution.profile,
+            "catalog": resolution.catalog,
+            "requirements": [dict(item) for item in resolution.requirements],
+            "digest": resolution.digest,
+        },
+        "observed": observed,
+        "drift": {
+            "state": drift_state,
+            "issues": [error.to_dict() for error in verification.errors],
+        },
+        "staleness": {
+            "state": "fresh" if fresh else "stale",
+            "reason": ("all four PHP planes observed in this check"
+                       if fresh else "one or more PHP planes were unavailable"),
+        },
+        "verification": verification.to_dict(),
+    }
+
+
+def _instance_web_image(server: str, inst_cfg: dict) -> str:
+    parent = _web_image(
+        server, inst_cfg.get("php_version"), inst_cfg.get("wp_version"),
+        inst_cfg.get("wordpress_image"),
+    )
+    plan = _instance_extension_plan(inst_cfg, server)
+    return plan.web.image if plan else parent
+
+
+def _instance_wpcli_image(inst_cfg: dict) -> str:
+    parent = inst_cfg["wpcli_image"]
+    plan = _instance_extension_plan(inst_cfg, inst_cfg.get("server", "nginx"))
+    return plan.wpcli.image if plan else parent
 
 
 def _cli_image(php=None) -> str:

@@ -18,6 +18,25 @@ class Policy:
 
 
 class TestManagedServices(unittest.TestCase):
+    def test_extension_contract_is_rendered_inside_digest_bound_service_files(self):
+        from sandbox.php_extensions.catalog import DEFAULT_CATALOG
+        from sandbox.runtimes.managed.models import ManagedPhpExtensionPlan, PhpExtensionPackage
+        from sandbox.runtimes.managed.services import ManagedServiceCompiler
+
+        extension = PhpExtensionPackage(
+            "gd", "php8.3-gd", "8.3.6", catalog_digest=DEFAULT_CATALOG.digest,
+        )
+        plan = ManagedPhpExtensionPlan(
+            "8.3", None, ({"name": "gd", "state": "enabled", "version": None},),
+            (extension,), DEFAULT_CATALOG.digest,
+        )
+        result = ManagedServiceCompiler().compile(Policy(), php_extensions=plan)
+        document = result["files"]["/etc/sandbox-native/php-extensions.json"]
+        self.assertIn(plan.digest, document)
+        self.assertEqual(result["php_extensions_digest"], plan.digest)
+        self.assertEqual(result["file_digests"]["/etc/sandbox-native/php-extensions.json"],
+                         __import__("hashlib").sha256(document.encode()).hexdigest())
+
     def test_nginx_stack_is_wholly_inside_guest_and_database_has_no_network(self):
         from sandbox.runtimes.managed.services import ManagedServiceCompiler
         result = ManagedServiceCompiler().compile(Policy(), web_server="nginx")

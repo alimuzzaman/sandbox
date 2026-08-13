@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Callable
 
-from .descriptors import _load_mapping
+from .descriptors import config_home, config_layer, primary_config, _load_mapping
 from .domains import raw_domain_layer
 from .secrets import merge_secret_layers, raw_secret_layer
 from .wordpress_runtime import raw_wordpress_runtime_layer
 
 
 _TEST_SUITES = frozenset(("auto", "unit", "integration"))
+_SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 class WordPressSchemaProvider:
@@ -20,9 +22,8 @@ class WordPressSchemaProvider:
 
     def resolve(self, root, *, label=None) -> dict:
         root = Path(root)
-        project_path = next((root / name for name in (
-            "sandbox.config.json", "sandbox.config.yml", "sandbox.config.yaml",
-        ) if (root / name).exists()), None)
+        home = config_home(root)
+        project_path = primary_config(root)
         project_document = _load_mapping(project_path) if project_path is not None else {}
         project_domains = raw_domain_layer(project_document)
         project_runtime = raw_wordpress_runtime_layer(project_document)
@@ -30,15 +31,18 @@ class WordPressSchemaProvider:
         machine_domains = {}
         machine_runtime = {}
         machine_secrets = {}
+        safe_label = isinstance(label, str) and bool(_SAFE_LABEL.fullmatch(label))
+        label_names = tuple(
+            f"sandbox.config.{label}{suffix}"
+            for suffix in (".json", ".yml", ".yaml")
+        ) if safe_label else ()
         for path in (
-            next((root / name for name in (
+            config_layer(root, (
                 "sandbox.config.override.json", "sandbox.config.override.yml",
                 "sandbox.config.override.yaml",
-            ) if (root / name).exists()), None),
-            next((root / f"sandbox.config.{label}{suffix}"
-                  for suffix in (".json", ".yml", ".yaml")
-                  if label and label != "default" and
-                  (root / f"sandbox.config.{label}{suffix}").exists()), None),
+            ), home=home),
+            config_layer(root, label_names, home=home)
+            if safe_label and label != "default" else None,
         ):
             if path is not None:
                 document = _load_mapping(path)

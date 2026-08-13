@@ -17,6 +17,104 @@ def _frozen(value, label):
 
 
 @dataclass(frozen=True)
+class PhpExtensionPackage:
+    """One catalog-resolved PHP extension package in a managed image.
+
+    The project asks for a capability (for example ``gd``), never an APT
+    package.  This record is produced only after the managed adapter resolves
+    that capability through its immutable catalog and the configured signed
+    APT simulator.  Keeping the catalog digest and source on every row makes
+    the package transaction self-describing without adding a new privileged
+    verb or accepting package metadata from a project.
+    """
+
+    extension: str
+    package: str
+    package_version: str
+    state: str = "enabled"
+    version_constraint: str | None = None
+    catalog_digest: str = ""
+    source: str = "official-distribution"
+
+    def __post_init__(self):
+        if not isinstance(self.extension, str) or not self.extension:
+            raise ValueError("managed PHP extension name is invalid")
+        if (not isinstance(self.package, str)
+                or not self.package.startswith("php")
+                or not isinstance(self.package_version, str)
+                or not self.package_version):
+            raise ValueError("managed PHP extension package is invalid")
+        if self.state != "enabled":
+            raise ValueError("managed PHP extension package state is invalid")
+        if self.source != "official-distribution":
+            raise ValueError("managed PHP extension package source is invalid")
+        if (not isinstance(self.catalog_digest, str)
+                or not self.catalog_digest.startswith("sha256:")
+                or len(self.catalog_digest) != 71):
+            raise ValueError("managed PHP extension catalog digest is invalid")
+
+    def to_dict(self):
+        value = {
+            "name": self.extension,
+            "package": self.package,
+            "package_version": self.package_version,
+            "state": self.state,
+            "catalog_digest": self.catalog_digest,
+            "source": self.source,
+        }
+        if self.version_constraint is not None:
+            value["version_constraint"] = self.version_constraint
+        return value
+
+
+@dataclass(frozen=True)
+class ManagedPhpExtensionPlan:
+    """Digest-bound, read-only resolution of normalized PHP requirements."""
+
+    php_version: str
+    profile: str | None
+    requirements: tuple[Mapping[str, Any], ...]
+    packages: tuple[PhpExtensionPackage, ...]
+    catalog_digest: str
+    digest: str = ""
+
+    def __post_init__(self):
+        if (not isinstance(self.php_version, str)
+                or not self.php_version.startswith("8.")):
+            raise ValueError("managed PHP version is unsupported")
+        if (not isinstance(self.catalog_digest, str)
+                or not self.catalog_digest.startswith("sha256:")
+                or len(self.catalog_digest) != 71):
+            raise ValueError("managed PHP extension catalog digest is invalid")
+        object.__setattr__(self, "requirements", tuple(
+            _frozen(value, "PHP extension requirement")
+            for value in self.requirements
+        ))
+        object.__setattr__(self, "packages", tuple(self.packages))
+        basis = {
+            "php_version": self.php_version,
+            "profile": self.profile,
+            "requirements": [dict(value) for value in self.requirements],
+            "packages": [value.to_dict() for value in self.packages],
+            "catalog_digest": self.catalog_digest,
+        }
+        expected = canonical_digest(basis)
+        if self.digest and self.digest != expected:
+            raise ValueError("managed PHP extension plan digest is invalid")
+        object.__setattr__(self, "digest", expected)
+
+    def to_dict(self):
+        return {
+            "php_version": self.php_version,
+            "profile": self.profile,
+            "requirements": [dict(value) for value in self.requirements],
+            "packages": [value.to_dict() for value in self.packages],
+            "catalog_digest": self.catalog_digest,
+            "digest": self.digest,
+        }
+
+
+@dataclass(frozen=True)
 class PackageTransactionPlan:
     matrix_id: str
     host_packages: tuple[Mapping[str, Any], ...]

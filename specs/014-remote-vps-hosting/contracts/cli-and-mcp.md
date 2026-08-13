@@ -122,3 +122,55 @@ to check" (near-always the project's own, a good default), "which remote to use"
 single obviously-correct default even for one project (a developer might deploy the same
 project to different VPSes for different reasons), so requiring an explicit choice every
 time is the safer, clearer default here.
+
+## Convergence amendment — 2026-08-13: verification, source, and selection
+
+### Authenticated verification
+
+The local adapter exposes a read-only verification operation (CLI may present it
+as `./sb remote verify NAME [--json]`; equivalent existing status surfaces may
+delegate to the same service). It sends the stored credential through the
+supported transport and returns a safe envelope:
+
+```json
+{
+  "ok": true,
+  "remote": "name",
+  "authenticated": true,
+  "endpoint": {"scheme": "https", "host": "safe-host"},
+  "revision": "opaque-or-short-sha",
+  "error": null
+}
+```
+
+Tokens, SSH targets with credentials, Basic Auth userinfo, authorization
+headers, and raw transport traces are forbidden in stdout, stderr, JSON, and
+exceptions. Authentication failure is a bounded `remote_auth_failed` result;
+missing capability is `auth_verification_unavailable`, not an invitation to
+reveal or copy the credential.
+
+### Immutable deploy source
+
+`sb deploy` MUST accept `--source-ref REF` (full SHA or named ref). The adapter
+resolves `REF` to a full immutable commit before the first remote mutation,
+records both values, and rejects a missing ref or dirty-tree combination with a
+nonzero `source_not_immutable` result. The existing working-tree deploy remains
+available only through its explicit path and never silently falls back from a
+failed immutable resolution.
+
+### Nested manifest root
+
+Manifest resolution returns both `manifest_path` and `source_root`. Compose,
+file transfer, generated runtime paths, and result evidence use `source_root`
+derived from the validated manifest location; all paths must remain within the
+canonical project root. A nested manifest cannot be parsed successfully and
+then deployed from an unrelated checkout parent.
+
+### Selection precedence and surfaced result
+
+For operations that permit target inference, precedence is: explicit
+`--remote`, an operation/profile-resolved target, then a single eligible
+configured target. Zero or multiple eligible targets fail rather than silently
+switching machines. `deploy` continues to require explicit `--remote`. Every
+human and JSON result includes the selected remote name and source of selection
+(`explicit`, `profile`, or `single-configured`) without secret fields.

@@ -43,6 +43,8 @@ import urllib.error
 import urllib.request
 import re
 import subprocess
+import time
+from pathlib import PurePosixPath
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -103,7 +105,40 @@ def get_remote(name: str) -> dict | None:
     return _remote_block().get(name)
 
 
-def deploy_exact_working_tree(remote: dict, project_root: str | Path) -> dict:
+def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
+    """Resolve a named ref to one full commit before any remote mutation.
+
+    Immutable deploys intentionally reject every local dirty layer.  The
+    caller can therefore prove that the transferred source is exactly the
+    resolved commit and that a failed resolution never contacted the remote.
+    """
+    root = Path(project_root).resolve()
+    if not isinstance(source_ref, str) or not source_ref.strip() or "\x00" in source_ref:
+        raise ValueError("source_ref is invalid")
+    requested = source_ref.strip()
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{requested}^{{commit}}"],
+        cwd=str(root), capture_output=True, text=True, check=False,
+    )
+    commit = (resolved.stdout or "").strip().lower()
+    if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("source_ref could not be resolved to a full commit")
+    diff_text, untracked = capture_uncommitted(root)
+    if diff_text.strip() or untracked:
+        raise ValueError(
+            "source_ref requires a clean working tree; immutable source was not combined "
+            "with local changes"
+        )
+    return commit
+
+
+def deploy_exact_working_tree(
+    remote: dict,
+    project_root: str | Path,
+    *,
+    source_ref: str | None = None,
+    source_root: str | Path | None = None,
+) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
     This is the reusable deploy primitive for remote jobs.  It intentionally
@@ -111,17 +146,29 @@ def deploy_exact_working_tree(remote: dict, project_root: str | Path) -> dict:
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     target = ensure_deploy_repo(remote, root)
-    branch = current_branch(root)
-    pushed_sha = push_commits(remote, root, target, branch)
+    branch = current_branch(root) if resolved_source is None else None
+    pushed_sha = push_commits(
+        remote, root, target, branch,
+        source_ref=source_ref, resolved_sha=resolved_source,
+        source_root=source_root,
+    )
     reset_target_to(remote, target, pushed_sha)
-    diff_text, untracked = capture_uncommitted(root)
-    applied = apply_uncommitted(remote, target, root, diff_text, untracked)
+    diff_text, untracked = (capture_uncommitted(root) if resolved_source is None else ("", []))
+    applied = apply_uncommitted(remote, target, root, diff_text, untracked) if resolved_source is None else 0
     dirty = hashlib.sha256((diff_text + "\n" + "\n".join(sorted(untracked))).encode()).hexdigest()
     identity = hashlib.sha256(f"{pushed_sha}:{dirty}:{target}".encode()).hexdigest()
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
-            "uncommitted_files_applied": applied}
+            "uncommitted_files_applied": applied,
+            "source_ref": source_ref,
+            # For a nested immutable deploy the pushed commit is the
+            # source-root subtree artifact; retain the user's resolved ref as
+            # the provenance identity rather than replacing it with the
+            # synthetic tree SHA.
+            "resolved_commit": resolved_source or pushed_sha,
+            "source_immutable": resolved_source is not None}
 
 
 def put_remote(name: str, **fields) -> dict:
@@ -840,12 +887,101 @@ def current_branch(project_root) -> str:
     return branch
 
 
-def push_commits(remote: dict, project_root, target_path: str, branch: str) -> str:
-    """git push HEAD to the deploy-target repo over SSH -- works even for a
-    branch never pushed anywhere else (spec FR-008), since this is a direct
-    git-to-git push over the SAME SSH connection already registered, not
-    dependent on GitHub/origin at all. Returns the pushed commit SHA."""
+def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Path]:
+    """Create the committed tree containing only ``source_root``.
+
+    A Git commit made in an outer checkout always carries the outer tree.  A
+    nested hosting manifest must instead push a deterministic subtree commit,
+    while the dirty overlay remains relative to the same source root.  Git's
+    subtree splitter preserves the source-root history, so a normal mutable
+    branch remains fast-forwardable and an immutable source-ref maps to a
+    stable SHA-derived artifact without force-pushing.
+    """
+    source = Path(source_root).resolve()
+    result = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    checkout = (result.stdout or "").strip()
+    if result.returncode != 0 or not checkout:
+        raise RuntimeError("could not determine the Git checkout for source_root")
+    checkout_path = Path(checkout).resolve()
+    try:
+        relative = source.relative_to(checkout_path)
+    except ValueError as exc:
+        raise ValueError("source_root must stay within the Git checkout") from exc
+    if not relative.parts:
+        return commit, checkout_path
+    prefix = PurePosixPath(*relative.parts).as_posix()
+    split = subprocess.run(
+        ["git", "subtree", "split", f"--prefix={prefix}", commit],
+        cwd=str(checkout_path), capture_output=True, text=True, check=False,
+    )
+    split_sha = next(
+        (line.strip().lower() for line in reversed((split.stdout or "").splitlines())
+         if re.fullmatch(r"[0-9a-fA-F]{40}", line.strip())),
+        None,
+    )
+    if split.returncode != 0 or split_sha is None:
+        detail = (split.stderr or split.stdout or "").strip()[:500]
+        raise RuntimeError(f"could not create source-root commit: {detail}")
+    return split_sha, checkout_path
+
+
+def push_commits(
+    remote: dict,
+    project_root,
+    target_path: str,
+    branch: str | None,
+    *,
+    source_ref: str | None = None,
+    resolved_sha: str | None = None,
+    source_root: str | Path | None = None,
+) -> str:
+    """Push the committed source artifact to the deploy-target repo.
+
+    A normal project pushes ``HEAD`` directly.  When ``source_root`` is a
+    nested checkout path, Git subtree creates a commit whose root is exactly
+    that directory before the push; dirty files are applied separately by the
+    caller.  Both paths use the same registered SSH transport and never route
+    through another Git remote.
+    """
     push_url = git_ssh_url(remote, target_path)
+    source_commit = resolved_sha
+    push_cwd = Path(project_root)
+    if source_root is not None and source_commit is None:
+        head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root), capture_output=True, text=True, check=False,
+        )
+        source_commit = (head_res.stdout or "").strip().lower()
+        if head_res.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+            raise RuntimeError("could not resolve the committed source tree")
+    if source_ref is not None:
+        commit = resolved_sha or resolve_source_ref(project_root, source_ref)
+        if not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError("source_ref did not resolve to a full commit")
+        # A SHA-derived ref is immutable by construction: repeated deploys
+        # address the same object and never move a user-named branch.
+        destination = f"refs/heads/sandbox-source-{commit}"
+        source_spec = f"{commit}:{destination}"
+        source_commit = commit
+        resolved_sha = commit
+    else:
+        if not isinstance(branch, str) or not branch.strip():
+            raise ValueError("deploy branch is required for a working-tree source")
+        source_spec = f"HEAD:refs/heads/{branch}"
+    if source_root is not None:
+        tree_commit, push_cwd = _source_tree_commit(project_root, source_root, source_commit or "")
+        # A subtree commit cannot update a branch previously seeded with the
+        # full outer checkout: Git correctly rejects that non-fast-forward
+        # update, and force-pushing would destroy an existing deploy history.
+        # Every nested source therefore gets its own immutable tree-SHA ref,
+        # regardless of whether the caller selected a mutable branch or an
+        # immutable source_ref.  The checked-out target is reset to the
+        # returned subtree SHA below.
+        destination = f"refs/heads/sandbox-source-{tree_commit}"
+        source_spec = f"{tree_commit}:{destination}"
     try:
         _ensure_ssh_control_dir()
     except OSError:
@@ -855,8 +991,8 @@ def push_commits(remote: dict, project_root, target_path: str, branch: str) -> s
     env = os.environ.copy()
     env["GIT_SSH_COMMAND"] = git_ssh
     res = subprocess.run(
-        ["git", "push", push_url, f"HEAD:refs/heads/{branch}"],
-        cwd=str(project_root), env=env, capture_output=True, text=True,
+        ["git", "push", push_url, source_spec],
+        cwd=str(push_cwd), env=env, capture_output=True, text=True,
         timeout=120, check=False,
     )
     if res.returncode != 0:
@@ -864,11 +1000,15 @@ def push_commits(remote: dict, project_root, target_path: str, branch: str) -> s
             f"git push to remote failed: "
             f"{(res.stderr or res.stdout or '').strip()[:1000]}"
         )
+    if source_ref is not None:
+        return tree_commit if source_root is not None else resolved_sha  # already validated as a full SHA above
+    if source_root is not None:
+        return tree_commit
     sha_res = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
-    return (sha_res.stdout or "").strip()
+    return (sha_res.stdout or "").strip().lower()
 
 
 def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
@@ -909,19 +1049,33 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
     testing). Without `=all`, a new file inside a new untracked directory
     would be silently skipped entirely by apply_uncommitted's
     `local_path.is_file()` check (a directory is never a file)."""
+    # `--relative` is essential for a source root nested below the Git
+    # checkout.  Without it Git emits paths such as `site/compose.yml` while
+    # callers treat `project_root` (the site directory) as the transfer root,
+    # causing a second `site/` prefix on the remote and silently missing files
+    # when the target is expected to be the declared source root.
     diff_res = subprocess.run(
-        ["git", "diff", "HEAD"],
+        ["git", "diff", "--relative", "HEAD"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
     diff_text = diff_res.stdout or ""
     status_res = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        ["git", "status", "--short", "--untracked-files=all"],
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
-    untracked = [
-        line[3:] for line in (status_res.stdout or "").splitlines()
-        if line.startswith("??")
-    ]
+    untracked = []
+    for line in (status_res.stdout or "").splitlines():
+        if not line.startswith("??"):
+            continue
+        relative = line[3:].strip()
+        # `git status --short` can still report untracked siblings as
+        # `../name` when the declared source root is nested in the checkout.
+        # They are outside the transfer root and must not be copied (nor later
+        # rejected as unsafe paths by apply_uncommitted).
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts:
+            continue
+        untracked.append(relative)
     return diff_text, untracked
 
 
@@ -941,7 +1095,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
     deleted: list[str] = []
     if diff_text.strip():
         changed_res = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"],
+            ["git", "diff", "--name-only", "--relative", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
         if changed_res.returncode != 0:
@@ -950,7 +1104,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
                 f"{(changed_res.stderr or changed_res.stdout or '').strip()[:500]}"
             )
         deleted_res = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=D", "HEAD"],
+            ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
             cwd=str(project_root), capture_output=True, text=True, check=False,
         )
         if deleted_res.returncode != 0:
@@ -1131,6 +1285,67 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
     return payload
+
+
+def verify_remote(remote: dict, *, name: str | None = None, timeout: int = 10) -> dict:
+    """Perform the supported authenticated, secret-safe remote probe.
+
+    Only the recorded control transport is used.  The bearer token remains in
+    the in-memory request header and is never included in the returned
+    envelope, exception text, or a subprocess argument.  This helper is
+    intentionally read-only and bounded so a CLI/MCP adapter can surface the
+    same evidence without opening an SSH shell.
+    """
+    if not isinstance(remote, dict):
+        raise ValueError("remote verification target is invalid")
+    base = remote.get("control_url")
+    token = remote.get("bearer_token")
+    if not isinstance(base, str) or not base.strip():
+        raise RuntimeError("auth_verification_unavailable: control endpoint is unavailable")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("auth_verification_unavailable: stored authentication is unavailable")
+    parsed = urlsplit(base.strip())
+    if (parsed.scheme not in {"https", "http"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise RuntimeError("auth_verification_unavailable: control endpoint is invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("auth_verification_unavailable: control endpoint is invalid") from exc
+    endpoint = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/mcp", "", ""))
+    request = urllib.request.Request(
+        endpoint,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"},
+    )
+    started = time.monotonic()
+    status = None
+    authenticated = False
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(response.status)
+            authenticated = status in {200, 204, 400, 405, 406}
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        authenticated = status in {200, 204, 400, 405, 406}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RuntimeError("remote_auth_failed: authenticated control probe was unavailable")
+    elapsed = min(max(time.monotonic() - started, 0.0), float(timeout))
+    service = remote.get("mcp_service") if isinstance(remote.get("mcp_service"), dict) else {}
+    revision = service.get("runtime_revision") if isinstance(service.get("runtime_revision"), str) else None
+    safe_endpoint = {"scheme": parsed.scheme, "host": parsed.hostname}
+    if port is not None:
+        safe_endpoint["port"] = port
+    return {
+        "ok": authenticated,
+        "remote": name,
+        "authenticated": authenticated,
+        "endpoint": safe_endpoint,
+        "revision": revision,
+        "status": status,
+        "elapsed_seconds": elapsed,
+        "error": None if authenticated else "remote_auth_failed",
+    }
 
 
 def remote_mcp_service_status(remote: dict) -> dict:

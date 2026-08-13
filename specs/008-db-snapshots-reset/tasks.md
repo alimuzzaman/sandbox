@@ -103,3 +103,17 @@ full/db snapshot"):
 - [ ] T019 Dispatch the dashboard’s reset operation through `cmd_reset` with its explicit confirmed arguments and add focused coverage, per FR-008 (missing).
 - [ ] T020 Add the MCP `snapshot` tool with `db_only` support, register it in the data manifest, and cover its capability and CLI forwarding behavior per FR-009 (missing).
 - [ ] T021 Update the Spec 008 contract, quickstart, snapshot skill, and focused tests to describe and verify the corrected baseline, DB-only overwrite, dashboard, and MCP semantics per Constitution V (partial).
+
+## Phase 9: Convergence — 2026-08-13 (27-feedback restore safety)
+
+These tasks remain open; no prior task is marked complete by this amendment.
+
+- [x] T022 [US4] Add a noninteractive named-restore regression for `adde58a6`
+  proving missing confirmation fails before any database reset/import or archive
+  extraction and returns the stable refusal code.
+- [x] T023 [US4] Add interactive-cancel and explicit-confirmation tests covering
+  CLI, MCP, and bridge/dashboard callers; cancellation must preserve state and
+  confirmation must dispatch exactly the requested snapshot.
+- [ ] T024 [US4] Reconcile `contracts/cli-contract.md`, quickstart, and the
+  command/MCP interface fixtures with the one confirmation contract, including
+  safe JSON/error output and no secret or snapshot-content disclosure.

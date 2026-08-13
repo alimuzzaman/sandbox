@@ -78,3 +78,18 @@ Existing behavior remains supported. All `secrets` actions bypass unrelated runt
 The transport-neutral service exposes bounded codes including:
 
 `source_unknown`, `source_unsafe`, `source_too_large`, `source_changed`, `syntax_unsupported`, `duplicate_key`, `key_invalid`, `key_missing`, `mode_requires_one_key`, `mask_denied`, `profile_unknown`, `shape_failed`, `audit_unavailable`, `destination_denied`, `command_invalid`, `command_timed_out`, `output_truncated`, `revision_conflict`, `intent_conflict`, `input_invalid`, `tty_required`, and `confirmation_failed`.
+
+## Convergence amendment — 2026-08-13: shared redaction boundary
+
+Before human or JSON rendering, every CLI result and child-process diagnostic
+passes through the shared redaction policy. It removes bearer/API assignment
+values, common provider token prefixes, private-key markers, and credentials in
+URL userinfo or token-like query values. A safe URL may retain scheme, host,
+path, and approved non-sensitive query names; it must never retain Basic Auth
+userinfo or a credential-bearing query value.
+
+Redaction applies to stdout, stderr, exception chains, command/argv summaries,
+feedback references, and remote-verification diagnostics. If a value cannot be
+classified safely, the field is omitted or replaced with a stable redaction
+marker and the operation fails closed. `--json` and human modes have identical
+disclosure; no raw traceback bypass is permitted. This closes `81f43e6f`.

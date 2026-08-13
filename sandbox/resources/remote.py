@@ -1096,6 +1096,9 @@ def deep_attribution(capacity, managed_roots=()):
         },
     }
 
+__JOB_LIST_PARSER__
+
+
 def lifecycle_evidence():
     protected_paths = {}
     protected_projects = set()
@@ -1156,6 +1159,7 @@ def lifecycle_evidence():
     jobs_ok = True
     artifacts_complete = True
     job_index = None
+    job_list_error = None
     try:
         from sandbox.jobs.registry import read_resource_index
 
@@ -1169,20 +1173,23 @@ def lifecycle_evidence():
         if code == 0:
             try:
                 payload = json.loads(out)
-                rows = payload.get("jobs")
-                if not isinstance(rows, list):
-                    raise ValueError
+                rows = parse_job_list_payload(payload)
                 job_index = {"jobs": rows, "artifacts": []}
                 artifacts_complete = False
                 if len(rows) >= 200:
                     jobs_ok = False
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as exc:
                 job_index = None
+                job_list_error = str(exc)
     if job_index is None:
         jobs = []
         artifacts = []
         jobs_ok = False
-        outcomes.append({"category": "job_registry", "status": "unavailable"})
+        outcomes.append({
+            "category": "job_registry",
+            "status": "unavailable",
+            "reason": "job_list_invalid_shape" if job_list_error else None,
+        })
     else:
         jobs = list(job_index.get("jobs") or ())
         artifacts = list(job_index.get("artifacts") or ())
@@ -1487,32 +1494,47 @@ def scan():
         ))
     for network in inventory["networks"]:
         network_id = network.get("Id")
+        network_name = str(network.get("Name") or network_id or "")
+        if network_name in {"bridge", "host", "none"}:
+            continue
         project = owner(network.get("Labels"))
-        if not isinstance(network_id, str) or not network_id or not project:
+        if not isinstance(network_id, str) or not network_id:
             continue
         if targeted and (
             target_kind != "network" or target_locator != network_id
         ):
             continue
         active = bool(network.get("Containers"))
-        classification = (
-            "active" if active else
-            "retained" if project in active_projects else
-            "retained" if project in protected_projects else
-            "disposable_cache" if lifecycle_complete else
-            "unverified"
-        )
+        if project:
+            owner_kind, owner_id = "project", project
+            classification = (
+                "active" if active else
+                "retained" if project in active_projects else
+                "retained" if project in protected_projects else
+                # A stopped job is not sufficient evidence that its network
+                # is stale; require an explicit lifecycle release signal.
+                "unverified"
+            )
+            evidence = ("compose_project_label",)
+            if not active and classification == "unverified":
+                evidence += ("network_liveness_unverified",)
+            references = ("connected_container",) if active else (
+                "live_compose_project",) if project in active_projects else (
+                "instance_or_job_registry",) if project in protected_projects else ()
+        else:
+            labels = network.get("Labels")
+            owner_kind = "foreign" if isinstance(labels, dict) and labels.get(
+                "com.docker.compose.project"
+            ) else "unmanaged"
+            owner_id = None
+            classification = "active" if active else "unmanaged"
+            evidence = ("ownership_unverified",)
+            references = ("connected_container",) if active else ()
         resources.append(observation(
-            "network", network_id, str(network.get("Name") or network_id),
-            "project", project, classification,
-            "measured", 0, 0, ("connected_container",) if active else (),
-            (
-                ("compose_project_label",)
-                if active or project in protected_projects else
-                ("compose_project_label", "registry_and_job_absence")
-                if lifecycle_complete else
-                ("compose_project_label", "lifecycle_evidence_unavailable")
-            ),
+            "network", network_id, network_name,
+            owner_kind, owner_id, classification,
+            "measured", 0, 0, references, evidence,
+            capacity_accounted=False,
         ))
     used_images = {
         str(container.get("Image"))
@@ -1789,6 +1811,14 @@ def inside(path, root):
 def remove():
     kind = REQUEST.get("kind")
     locator = str(REQUEST.get("locator") or "")
+    if kind == "network":
+        # A network locator alone cannot prove inactive leases, containers, or
+        # jobs.  Keep network recovery in the confirmation-gated workspace
+        # lifecycle and refuse direct deletion from resource cleanup.
+        return {
+            "status": "failed",
+            "reason": "network_lifecycle_revalidation_required",
+        }
     if kind in {"download_cache", "job_artifact", "worktree", "runtime"}:
         path = Path(locator)
         allowed = inside(path, RUNTIME) or inside(path, DEPLOY)
@@ -1841,9 +1871,32 @@ except Exception as exc:
 """
 
 
+def parse_job_list_payload(payload: dict) -> list[dict]:
+    """Decode the canonical top-level job-list response.
+
+    ``_program`` injects this exact function source into the isolated remote
+    probe, keeping the host and remote consumers on one parser contract.
+    """
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("job-list response must be a top-level ok object")
+    if "data" in payload:
+        raise ValueError("job-list response must expose top-level jobs")
+    rows = payload.get("jobs")
+    if not isinstance(rows, list):
+        raise ValueError("job-list response jobs must be a top-level list")
+    if not all(isinstance(item, dict) for item in rows):
+        raise ValueError("job-list response jobs must contain objects")
+    return rows
+
+
 def _program(request: dict) -> str:
+    import inspect
+
     encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
-    return _REMOTE_PROGRAM.replace("__REQUEST__", repr(encoded))
+    parser_source = inspect.getsource(parse_job_list_payload)
+    return _REMOTE_PROGRAM.replace("__JOB_LIST_PARSER__", parser_source).replace(
+        "__REQUEST__", repr(encoded),
+    )
 
 
 def _observation(value: dict) -> ResourceObservation:

@@ -9,6 +9,8 @@ import re
 import shlex
 from typing import Any, Callable
 
+from sandbox.jobs.models import validate_ack_job_id
+
 
 class RemoteJobTransportError(RuntimeError):
     pass
@@ -18,6 +20,7 @@ _REMOTE_SECRET = re.compile(
     r"(?i)\b(bearer|token|password|secret|api[_-]?key|authorization)\b(?:\s*[:=]\s*|\s+)[^\s]+"
 )
 _URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@")
+_MAX_REMOTE_JSON_BYTES = 1_048_576
 
 
 def _safe_remote_detail(value: object, *, limit: int = 512) -> str:
@@ -30,7 +33,11 @@ def _safe_remote_detail(value: object, *, limit: int = 512) -> str:
 
 
 def _last_json(text: str) -> dict | None:
+    if not isinstance(text, str) or len(text.encode("utf-8", errors="replace")) > _MAX_REMOTE_JSON_BYTES:
+        return None
     for line in reversed((text or "").splitlines()):
+        if len(line.encode("utf-8", errors="replace")) > _MAX_REMOTE_JSON_BYTES:
+            continue
         try:
             value = json.loads(line)
         except json.JSONDecodeError:
@@ -38,6 +45,57 @@ def _last_json(text: str) -> dict | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def _error_detail(payload: dict | None, result: object) -> str:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("detail") or error.get("code")
+            if isinstance(message, str) and message.strip():
+                return _safe_remote_detail(message)
+        elif isinstance(error, str) and error.strip():
+            return _safe_remote_detail(error)
+    for field in ("stderr", "stdout"):
+        detail = getattr(result, field, "")
+        if isinstance(detail, str) and detail.strip():
+            safe = _safe_remote_detail(detail)
+            if safe:
+                return safe
+    return f"remote exit code {getattr(result, 'returncode', 1)}"
+
+
+def _require_submission_ack(payload: object, *, aggregate: bool = False) -> dict:
+    """Require an explicit accepted acknowledgement with a durable identity."""
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("remote acceptance acknowledgement is not successful")
+    if aggregate:
+        validate_ack_job_id(payload.get("parent_job_id"), label="parent job id")
+        children = payload.get("children", ())
+        if not isinstance(children, list):
+            raise ValueError("remote acceptance acknowledgement has invalid children")
+        for child in children:
+            if not isinstance(child, dict):
+                raise ValueError("remote acceptance acknowledgement has invalid child")
+            validate_ack_job_id(child.get("job_id"), label="child job id")
+    else:
+        validate_ack_job_id(payload.get("job_id"))
+    status = payload.get("status")
+    if status != "accepted":
+        raise ValueError("remote acceptance acknowledgement is missing status=accepted")
+    return payload
+
+
+def _decode_job_page(payload: object) -> dict:
+    """Decode the feature-owned top-level list envelope exactly once."""
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("job-list response must be a top-level ok object")
+    if "data" in payload:
+        raise ValueError("job-list response must expose top-level jobs")
+    rows = payload.get("jobs")
+    if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+        raise ValueError("job-list response jobs must be a top-level list of objects")
+    return payload
 
 
 def workspace_refresh_command(source_path: str, workspace_path: str) -> str:
@@ -115,6 +173,7 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote transport requires a remote submission")
         remote = self._execution_remote(submission.remote_name)
         deployed = self.deploy(remote, submission.project_root)
+        self._validate_deployment(deployed)
         return self._submit_deployed(remote, deployed, submission)
 
     def submit_many(self, submissions: list) -> dict:
@@ -134,6 +193,7 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("remote matrix children must share one remote and project")
         remote = self._execution_remote(first.remote_name)
         deployed = self.deploy(remote, first.project_root)
+        self._validate_deployment(deployed)
         plan = []
         for item in submissions:
             workspace_path = self._prepare_workspace(remote, deployed["target_path"], item.workspace_label)
@@ -144,6 +204,7 @@ class RemoteJobTransport:
             if argv[:1] == ["sb"]:
                 argv[0] = self.remote_sb_path(remote)
             plan.append({"kind": item.kind, "workspace": item.workspace_label, "project_dir": workspace_path,
+                 "project_identity": item.project_identity,
                  "argv": argv,
                  "timeout": item.deadline_seconds, "workspace_mode": item.workspace_mode,
                  "cwd_relative": item.cwd_relative, "execution_profile": item.execution_profile,
@@ -158,27 +219,27 @@ class RemoteJobTransport:
                             "dirty_digest": deployed.get("dirty_digest")}})
         encoded = base64.b64encode(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).decode()
         args = ["job-matrix", "--local", "--project-dir", deployed["target_path"],
+                "--project-identity", first.project_identity,
                 "--timeout", str(max(item.deadline_seconds for item in submissions)),
                 "--output-profile", first.output_profile, "--spec-json", encoded, "--json"]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
-        if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
-            detail = ""
-            if isinstance(payload, dict):
-                error = payload.get("error")
-                if isinstance(error, dict) and isinstance(error.get("message"), str):
-                    detail = _safe_remote_detail(error["message"])
-            if not detail:
-                stderr = getattr(result, "stderr", "")
-                if isinstance(stderr, str) and stderr.strip():
-                    detail = _safe_remote_detail(stderr)
-                else:
-                    detail = f"remote exit code {getattr(result, 'returncode', 1)}"
-            raise RemoteJobTransportError(f"remote matrix acceptance failed: {detail}")
+        if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
+            raise RemoteJobTransportError(
+                f"remote matrix acceptance failed: {_error_detail(payload, result)}")
+        # Matrix controllers predating the explicit status field remain readable;
+        # identity and successful acknowledgement are still mandatory. New
+        # controllers include status=accepted, just like job-start.
+        try:
+            if payload.get("status") is not None and payload.get("status") != "accepted":
+                raise ValueError("remote acceptance acknowledgement is missing status=accepted")
+            _require_submission_ack({**payload, "status": "accepted"}, aggregate=True)
+        except ValueError as exc:
+            raise RemoteJobTransportError(f"remote matrix acceptance failed: {exc}") from exc
         return {**payload, "target": {"kind": "remote", "remote": first.remote_name,
                                         "workspace": first.workspace_label},
-                "source": {"identity": deployed["identity"], "commit": deployed["commit"],
-                 "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
+                "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
+                 "dirty": bool(deployed.get("dirty")), "dirty_digest": deployed.get("dirty_digest")},
                 "workspace_path": deployed["target_path"]}
 
     def _prepare_workspace(self, remote: dict, source_path: str, label: str) -> str:
@@ -199,13 +260,36 @@ class RemoteJobTransport:
                 "remote workspace preparation failed" + (f": {detail}" if detail else ""))
         return workspace_path
 
+    @staticmethod
+    def _validate_deployment(deployed: object) -> None:
+        if not isinstance(deployed, dict):
+            raise RemoteJobTransportError("remote deployment did not return checkout metadata")
+        for key in ("target_path", "identity"):
+            value = deployed.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise RemoteJobTransportError(f"remote deployment metadata is missing {key}")
+
     def _submit_deployed(self, remote: dict, deployed: dict, submission) -> dict:
         # Stable request ID lets the remote durable repository replay an uncertain
         # SSH submission safely after a control-plane timeout.
         workspace_path = self._prepare_workspace(remote, deployed["target_path"], submission.workspace_label)
         args = ["job-start", "--local", "--project-dir", workspace_path,
+                "--project-identity", submission.project_identity,
                 "--workspace", submission.workspace_label, "--timeout", str(submission.deadline_seconds),
-                "--output-profile", submission.output_profile, "--source-identity", deployed["identity"]]
+                "--cwd-relative", submission.cwd_relative,
+                "--output-profile", submission.output_profile, "--profile", submission.execution_profile,
+                "--source-identity", deployed["identity"]]
+        if submission.stall_seconds != 300:
+            args += ["--stall-seconds", str(submission.stall_seconds)]
+        if submission.cancel_on_stall:
+            args.append("--cancel-on-stall")
+        # The deployed checkout is the source of truth for detached execution.
+        # Never let a caller's pre-deploy metadata overwrite the exact tree
+        # identity that was just staged on the controller.
+        if deployed.get("commit") is not None:
+            args += ["--source-commit", str(deployed["commit"])]
+        if deployed.get("dirty_digest") is not None:
+            args += ["--source-dirty-digest", str(deployed["dirty_digest"])]
         if submission.request_id:
             args += ["--request-id", submission.request_id]
         argv = list(submission.argv)
@@ -248,12 +332,17 @@ class RemoteJobTransport:
         args += ["--json", "--", *argv]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
-        if getattr(result, "returncode", 1) != 0 or not payload or not payload.get("ok"):
-            raise RemoteJobTransportError("remote job acceptance failed")
+        if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
+            raise RemoteJobTransportError(
+                f"remote job acceptance failed: {_error_detail(payload, result)}")
+        try:
+            _require_submission_ack(payload)
+        except ValueError as exc:
+            raise RemoteJobTransportError(f"remote job acceptance failed: {exc}") from exc
         return {**payload, "target": {"kind": "remote", "remote": submission.remote_name,
                                         "workspace": submission.workspace_label},
-                "source": {"identity": deployed["identity"], "commit": deployed["commit"],
-                 "dirty": deployed["dirty"], "dirty_digest": deployed["dirty_digest"]},
+                "source": {"identity": deployed["identity"], "commit": deployed.get("commit"),
+                 "dirty": bool(deployed.get("dirty")), "dirty_digest": deployed.get("dirty_digest")},
                 "deadline": payload.get("deadline", {"seconds": submission.deadline_seconds,
                                                        "source": submission.deadline_source}),
                 "workspace_path": workspace_path}
@@ -292,8 +381,9 @@ class RemoteJobTransport:
             args += ["--wait-seconds", str(wait_seconds)]
         result = self.ssh_run(remote, self._remote_command(remote, args), timeout=25)
         payload = _last_json(getattr(result, "stdout", ""))
-        if getattr(result, "returncode", 1) != 0 or not payload:
-            raise RemoteJobTransportError("remote output read failed")
+        if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
+            raise RemoteJobTransportError(
+                f"remote output read failed: {_error_detail(payload, result)}")
         return payload
 
     def control(self, remote_name: str, argv: list[str], *, timeout: int = 25) -> dict:
@@ -303,8 +393,9 @@ class RemoteJobTransport:
             raise RemoteJobTransportError("unknown or unprovisioned remote")
         result = self.ssh_run(remote, self._remote_command(remote, [*argv, "--json"]), timeout=timeout)
         payload = _last_json(getattr(result, "stdout", ""))
-        if getattr(result, "returncode", 1) != 0 or not payload:
-            raise RemoteJobTransportError("remote job control operation failed")
+        if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
+            raise RemoteJobTransportError(
+                f"remote job control operation failed: {_error_detail(payload, result)}")
         return payload
 
     def status(self, remote_name: str, job_id: str) -> dict:
@@ -319,15 +410,30 @@ class RemoteJobTransport:
                     "error": str(exc)}
 
     def list(self, remote_name: str, *, limit: int = 50, project_dir: str | None = None,
-             workspace: str | None = None, active_only: bool = False) -> dict:
+             project_identity: str | None = None, workspace: str | None = None,
+             active_only: bool = False) -> dict:
         args = ["job-list", "--limit", str(limit)]
-        if project_dir:
-            args += ["--local", "--project-dir", project_dir]
+        # `job-list` is already running on the selected controller. Passing
+        # `--local` made the remote parser reject the request, while a client
+        # checkout path is not meaningful on that host. Use the canonical
+        # project identity filter instead; callers may supply a resolved identity
+        # directly or retain the path-derived identity for local parity.
+        if project_identity:
+            args += ["--project-identity", project_identity]
+        elif project_dir:
+            import hashlib
+            from pathlib import Path
+            identity = hashlib.sha256(
+                str(Path(project_dir).expanduser().resolve()).encode()).hexdigest()
+            args += ["--project-identity", identity]
         if workspace:
             args += ["--workspace", workspace]
         if active_only:
             args.append("--active-only")
-        return self.control(remote_name, args)
+        try:
+            return _decode_job_page(self.control(remote_name, args))
+        except ValueError as exc:
+            raise RemoteJobTransportError(str(exc)) from exc
 
     def cancel(self, remote_name: str, job_id: str, *, force: bool = False) -> dict:
         args = ["job-cancel", job_id]

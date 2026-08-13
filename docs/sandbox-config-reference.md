@@ -390,6 +390,48 @@ one, so resolving the `php<MM>` binary from the pin is what makes `sb wp …`,
 `sb test`, and the MCP `wp_cli`/`wp_exec` honor `phpVersion`. Unpinned (or a PHP
 Herd doesn't ship) falls back to the default host `php` rather than aborting.
 
+### WordPress PHP extension requirements
+
+New WordPress scaffolds declare the immutable `wordpress@1` profile. Existing
+projects that omit `phpExtensions` retain their previous images and behavior.
+
+```json
+{
+  "phpVersion": "8.3",
+  "phpExtensions": {
+    "profile": "wordpress@1",
+    "extensions": {
+      "gd": true,
+      "intl": "8.3.*"
+    }
+  }
+}
+```
+
+Values may be `true`, `false`, an exact/`X.Y.*`/`php` version constraint, or
+`{"state":"enabled|disabled","version":"..."}`. Unknown extensions and
+unsupported provisioning/disable requests fail before the runtime is changed.
+`wordpress@1` asserts curl, DOM, Exif, Fileinfo, Hash, JSON, Mbstring, MySQLi,
+OpenSSL, PCRE, and XML, and selects the allowlisted GD child-image recipe when
+neither GD nor Imagick is named. Sandbox pins official WordPress web and WP-CLI
+parents by registry digest, builds content-addressed child images below
+`$SANDBOX_HOME/runtime/build/php-extensions/`, and verifies the requirement in
+web, WP-CLI, bounded-exec, and PHPUnit planes.
+
+Compose auto-provisioning is deliberately narrow in v1. GD, Intl, Zip, and the
+other checked-in core recipes are supported for official Apache/nginx parents.
+Imagick and Xdebug are observation-only for Compose: if requested but absent,
+Sandbox returns `unsupported_provisioning` rather than invoking PECL or accepting
+a package/URL. Managed-native may resolve Imagick only through its separately
+approved signed-APT package plan. Generic Compose, LiteSpeed, Herd, Valet, custom
+images, arbitrary packages, URLs, Dockerfiles, shell fragments, and unknown/global
+INI mutation are never auto-modified by this field.
+
+`sb status --json` and `sb doctor` report desired constraints, parent/build
+provenance, every observed plane, drift, and staleness. `sb apply` rebuilds only
+the WordPress web tier (`wp` plus nginx when selected); DB, Mailpit, uploads,
+snapshots, and project files are preserved.
+
 ## Host driver (`server: "herd"`)
 
 `server: "herd"` provisions the instance on **host PHP via Laravel Herd + host

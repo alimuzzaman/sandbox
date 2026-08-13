@@ -573,6 +573,10 @@ def _web_do_action(payload: dict) -> dict:
     if action in OPS:
         if not name:
             return {"ok": False, "output": "missing instance"}
+        if action == "restore" and payload.get("confirm") is not True:
+            # Refuse synchronously so callers cannot receive an accepted job
+            # whose worker later fails the same destructive-action gate.
+            return {"ok": False, "output": "restore requires confirm=true"}
         ns_base = {"resolved_instance": name}
 
         def run_op():
@@ -606,7 +610,8 @@ def _web_do_action(payload: dict) -> dict:
                 snap = (payload.get("name") or "").strip()
                 if not snap:
                     print("missing snapshot name"); return False
-                cmd_restore(cfg, _types.SimpleNamespace(name=snap, **ns_base))
+                cmd_restore(cfg, _types.SimpleNamespace(
+                    name=snap, yes=True, confirm=True, **ns_base))
             elif action == "reset":
                 if not payload.get("confirm"):
                     print("reset requires confirm=true"); return False

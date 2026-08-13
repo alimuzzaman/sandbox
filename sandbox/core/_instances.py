@@ -1,17 +1,42 @@
 from __future__ import annotations
 import argparse
+import copy
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
 import io
 import threading
 from contextlib import redirect_stdout, redirect_stderr
+
+
+def _json_safe_php_extensions(value):
+    """Detach a normalized extension model at the state-file boundary.
+
+    ``PhpExtensionsConfig`` intentionally exposes immutable mapping proxies and
+    typed requirement objects.  The instance state is YAML/JSON persisted and
+    must contain only ordinary scalar/list/dict values.  Keep this helper
+    local to the instance boundary so the config model remains immutable and
+    the omitted-field path does not gain a synthetic key.
+    """
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        value = value.to_dict()
+    elif hasattr(value, "as_dict") and callable(value.as_dict):
+        value = value.as_dict()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_php_extensions(item)
+                for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe_php_extensions(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    raise TypeError("phpExtensions contains a non-serializable value")
 
 
 def resolve_instances(cfg: dict) -> dict[str, dict]:
@@ -48,7 +73,7 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
         wpcli_image = (wpcli_explicit
                        if wpcli_explicit and wpcli_explicit != "wordpress:cli"
                        else _cli_image(php_version))
-        return {
+        resolved = {
             "wordpress_port": inst.get("wordpress_port",
                                        runtime.get("wordpress_port", 8088)),
             "db_port": inst.get("db_port",
@@ -87,6 +112,29 @@ def resolve_instances(cfg: dict) -> dict[str, dict]:
             "multisite": inst.get("multisite",
                                   runtime.get("multisite", False)),
         }
+        # ``phpExtensions`` is an additive WordPress-only capability.  Keep
+        # the legacy resolved shape byte-compatible when it is omitted; when
+        # present, carry only the detached JSON/YAML-safe mapping persisted by
+        # ``_build_instance_block`` (never the immutable config model itself).
+        extension_requirements = inst.get(
+            "php_extensions", runtime.get("php_extensions"))
+        if extension_requirements is None:
+            extension_requirements = inst.get(
+                "phpExtensions", runtime.get("phpExtensions"))
+        if extension_requirements is not None:
+            resolved["php_extensions"] = _json_safe_php_extensions(
+                extension_requirements)
+        # Trusted, adapter-produced extension plan inputs are optional state;
+        # preserve them only when present so the omission path remains exactly
+        # the historical resolved mapping.
+        for extension_key in (
+                "php_extension_parent_digest", "php_extension_parent_digests",
+                "php_extension_parent_images", "php_extension_digest", "wpcli_image_digest", "platform",
+                "architecture"):
+            value = inst.get(extension_key, runtime.get(extension_key))
+            if value is not None:
+                resolved[extension_key] = _json_safe_php_extensions(value)
+        return resolved
 
     # Per-project model: the authoritative instance list is the on-disk registry
     # (project root -> instance). Per-instance config is pulled from the merged
@@ -261,8 +309,39 @@ def _cwd_instance(label: str | None = None) -> str | None:
         root = sc.find_project_root(Path.cwd())
     except Exception:
         return None
-    entry = sc.registry_get(str(root), label=label)
+    entry = resolve_registered_instance(str(root), label=label)
     return entry.get("instance") if entry else None
+
+
+def resolve_registered_instance(project_dir: str | Path, label: str | None = None) -> dict | None:
+    """Resolve one registry record from a project directory, with guidance.
+
+    This is the kind-neutral lookup seam used by CLI/MCP composition roots.  It
+    canonicalizes a nested caller path through the same project-root finder as
+    configuration, then selects an exact label.  A root with more than one
+    record is never guessed when no default identity is available; the error
+    names every label and gives the concrete ``--label``/``label=`` remedy.
+    """
+    sc = _core()
+    try:
+        root = sc.find_project_root(project_dir)
+    except Exception:
+        root = Path(project_dir).expanduser().resolve()
+    records = list(sc.registry_list_for_root(str(root)))
+    if label is not None:
+        return next((record for record in records if record.get("label") == label), None)
+    if not records:
+        return None
+    if len(records) == 1:
+        return records[0]
+    default = next((record for record in records if record.get("is_default")), None)
+    if default is not None:
+        return default
+    labels = ", ".join(str(record.get("label")) for record in records)
+    raise sc.ConfigError(
+        f"project {root} has multiple registered instances ({labels}); "
+        "pass an exact --label (or label=) to select one"
+    )
 
 
 def _git_branch(root: str) -> str | None:
@@ -471,6 +550,26 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
         block["php_version"] = str(php_v)
     if wp_v:
         block["wp_version"] = str(wp_v)
+    # Persist the normalized, immutable project declaration as a detached
+    # ordinary mapping.  The explicit presence check is important: omission
+    # preserves the historical instance block and therefore its compose
+    # output, cache identity, and readiness behavior exactly.
+    if "phpExtensions" in pconf and pconf.get("phpExtensions") is not None:
+        block["php_extensions"] = _json_safe_php_extensions(
+            pconf.get("phpExtensions"))
+    # Re-use only the previous adapter-produced identities.  These are not
+    # project inputs and are never invented here; retaining them lets an
+    # explicitly materialized child-image plan survive a later apply while a
+    # changed requirement naturally invalidates it via the planner digest.
+    _previous_block = _local_yaml().get("instances", {}).get(name, {})
+    for _extension_key in (
+            "php_extension_parent_digest", "php_extension_parent_digests",
+            "php_extension_parent_images", "php_extension_digest", "wpcli_image_digest", "platform",
+            "architecture"):
+        if (_previous_block.get(_extension_key) is not None and
+                _extension_key not in block):
+            block[_extension_key] = _json_safe_php_extensions(
+                _previous_block[_extension_key])
     # Project wp-config constants + multisite flag live in the instance
     # block so compose regeneration (every `sb` invocation) keeps rendering
     # them into WORDPRESS_CONFIG_EXTRA — that's what survives down/up.
@@ -722,6 +821,17 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
 
         block = _build_instance_block(cfg, name, root, pconf, ports, server)
 
+        # Resolve, materialize, and build extension images before writing
+        # sandbox.local.yml, generating Compose, or booting a container.  A
+        # fresh scaffold resolves trusted official parent digests through the
+        # bounded Docker adapter; no hidden digest input is required.
+        try:
+            _prepared_extensions = prepare_php_extension_runtime(block, server)
+            if _prepared_extensions is not None:
+                _persist_php_extension_runtime(block, _prepared_extensions)
+        except (TypeError, ValueError) as exc:
+            raise sc.ConfigError(str(exc)) from exc
+
         local = _local_yaml()
         local.setdefault("instances", {})[name] = block
         _write_local_yaml(local)
@@ -758,6 +868,18 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         # installation, otherwise the first ensure fails before repair starts.
         if server != "herd":
             _wait_http(ports["wordpress_port"])
+            if block.get("php_extensions") is not None:
+                extension_status = php_extension_status(
+                    resolve_instances(cfg)[name], instance=name,
+                )
+                drift = (extension_status or {}).get("drift", {})
+                if drift.get("state") != "ready":
+                    issues = drift.get("issues") or []
+                    detail = (issues[0].get("message")
+                              if issues and isinstance(issues[0], dict)
+                              else "PHP extension planes are not verified")
+                    raise sc.ConfigError(
+                        f"PHP extension verification blocked after ensure: {detail}")
         if secured:
             _auto_heal_wp_url(name)
         # Multisite goes live only when the web tier reboots WITH the MULTISITE
@@ -866,31 +988,106 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
 
         # Detect whether multisite is being turned on now (was off in the live
         # block) so we can run the convert after the recreate.
-        prev_block = (_local_yaml().get("instances", {}).get(name, {}))
+        prior_local = _local_yaml()
+        prev_block = (prior_local.get("instances", {}).get(name, {}))
         prev_ms = _multisite_mode(prev_block)
+        rollback_snapshot = _capture_apply_rollback_state(
+            name, cfg, existing, prior_local, prev_block,
+        )
 
-        # 1. Rewrite the instance block from the current config.
+        # 1. Rewrite the instance block from the current config, then resolve
+        # and build opted-in extension images before persisting it. A failed
+        # parent pull/build therefore cannot touch the running stack.
         block = _build_instance_block(cfg, name, root, pconf, ports, server)
-        local = _local_yaml()
-        local.setdefault("instances", {})[name] = block
-        _write_local_yaml(local)
+        try:
+            _prepared_extensions = prepare_php_extension_runtime(block, server)
+            if _prepared_extensions is not None:
+                _persist_php_extension_runtime(block, _prepared_extensions)
+        except (TypeError, ValueError) as exc:
+            # Do not rewrite the instance block or touch the running stack when
+            # extension intent cannot be resolved/materialized safely.
+            raise sc.ConfigError(str(exc)) from exc
+        # Persisted state and Compose generation are part of the same
+        # transaction boundary as the later web reconcile.  A failure in
+        # either loader/generator after local YAML was written must restore the
+        # exact prior state before surfacing the error.
+        try:
+            local = _local_yaml()
+            local.setdefault("instances", {})[name] = block
+            _write_local_yaml(local)
 
-        # 2. Regenerate compose + recreate the web tier in place (no DB drop).
-        #    herd has no web tier to recreate — constants are literal in the
-        #    host wp-config, so re-pin them instead.
-        cfg = load_config()
-        write_compose_files(cfg)
-        inst_cfg = resolve_instances(cfg)[name]
-        info(f"apply_config: reconciling '{name}' in place (no data loss)…")
+            # 2. Regenerate compose + recreate the web tier in place (no DB
+            # drop). Herd has no web tier to recreate; its branch only re-pins
+            # host configuration below.
+            cfg = load_config()
+            write_compose_files(cfg)
+            inst_cfg = resolve_instances(cfg)[name]
+            info(f"apply_config: reconciling '{name}' in place (no data loss)…")
+        except Exception as exc:
+            rollback = _restore_apply_rollback_state(
+                rollback_snapshot, name, runtime_touched=False,
+            )
+            detail = str(exc)[:500]
+            if rollback["ok"]:
+                raise sc.ConfigError(
+                    f"apply failed before web reconcile: {detail}; "
+                    "rollback=succeeded (prior state and Compose artifact restored)"
+                ) from exc
+            rollback_detail = "; ".join(rollback.get("errors") or ())
+            raise sc.ConfigError(
+                f"apply failed before web reconcile: {detail}; "
+                f"rollback=failed ({rollback_detail}); manual recovery required"
+            ) from exc
         if server == "herd":
             _pin_wp_constants_in_config(name, inst_cfg)
             if wp_dir(name).exists():
                 _remove_obsolete_builder_authoring_assets(name)
         else:
-            compose("up", "-d", "--force-recreate",
-                    *_web_services(inst_cfg.get("server", "nginx")),
-                    instance=name, check=False)
-            _wait_http(ports["wordpress_port"])
+            # Apply owns only the PHP/web tier. ``_web_services`` also names
+            # DB and Mailpit for a full boot; using it here (and allowing
+            # dependency recreation) needlessly restarts stateful services.
+            # Both selected web services are explicit, so ``--no-deps`` keeps
+            # the database and mail capture containers untouched.
+            _apply_services = ["wp"]
+            if inst_cfg.get("server", "nginx") == "nginx":
+                _apply_services.append("nginx")
+            try:
+                result = compose("up", "-d", "--no-deps", "--force-recreate",
+                                 *_apply_services,
+                                 instance=name, check=False)
+                returncode = getattr(result, "returncode", 0)
+                if returncode not in (None, 0):
+                    detail = (getattr(result, "stderr", "") or
+                              getattr(result, "stdout", "") or
+                              f"exit {returncode}").strip()
+                    raise RuntimeError(f"web reconcile failed: {detail[:240]}")
+                if not _wait_http(ports["wordpress_port"]):
+                    raise RuntimeError("web reconcile did not become reachable")
+                if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
+                    extension_status = php_extension_status(inst_cfg, instance=name)
+                    drift = (extension_status or {}).get("drift", {})
+                    if drift.get("state") != "ready":
+                        issues = drift.get("issues") or []
+                        detail = (issues[0].get("message")
+                                  if issues and isinstance(issues[0], dict)
+                                  else "PHP extension planes are not verified")
+                        raise RuntimeError(
+                            f"PHP extension verification blocked: {detail}")
+            except Exception as exc:
+                rollback = _restore_apply_rollback_state(
+                    rollback_snapshot, name,
+                )
+                detail = str(exc)[:500]
+                if rollback["ok"]:
+                    raise sc.ConfigError(
+                        f"apply failed after web reconcile: {detail}; "
+                        "rollback=succeeded (prior state and web runtime restored)"
+                    ) from exc
+                rollback_detail = "; ".join(rollback.get("errors") or ())
+                raise sc.ConfigError(
+                    f"apply failed after web reconcile: {detail}; "
+                    f"rollback=failed ({rollback_detail}); manual recovery required"
+                ) from exc
             # Re-assert the SSL + mail mu-plugins (recreate may have reset
             # nothing, but keep them guaranteed-present like cmd_up does).
             if wp_dir(name).exists():
@@ -952,6 +1149,98 @@ def _instance_running(name: str) -> bool:
         if row.get("Service") == "wp" and row.get("State") == "running":
             return True
     return False
+
+
+def _capture_apply_rollback_state(name: str, cfg: dict, existing: dict,
+                                  local: dict, prev_block: dict) -> dict:
+    """Capture every controller-owned input needed for an in-place rollback.
+
+    The snapshot is deliberately taken before ``sandbox.local.yml`` is
+    rewritten or a web container is recreated.  It contains the previous
+    resolved runtime inputs (including extension-image identities), the exact
+    persisted local document, and the generated Compose artifact.  Database,
+    uploads, and Mailpit are not touched or copied: apply owns only the web
+    service set and rollback uses ``--no-deps`` as well.
+    """
+    prior_cfg = cfg
+    try:
+        prior_cfg = load_config()
+    except Exception:
+        # The caller's already-resolved cfg is the safest fallback if the
+        # machine-level config is temporarily unreadable.
+        prior_cfg = cfg
+    try:
+        prior_runtime = resolve_instances(prior_cfg).get(name)
+    except Exception:
+        prior_runtime = None
+    compose_path = compose_file(name)
+    compose_exists = compose_path.is_file()
+    compose_bytes = compose_path.read_bytes() if compose_exists else None
+    return {
+        "local": copy.deepcopy(local),
+        "compose_path": compose_path,
+        "compose_exists": compose_exists,
+        "compose_bytes": compose_bytes,
+        "runtime": copy.deepcopy(prior_runtime or prev_block or {}),
+        "registry": copy.deepcopy(existing),
+    }
+
+
+def _restore_apply_rollback_state(snapshot: dict, name: str,
+                                  *, runtime_touched: bool = True) -> dict:
+    """Restore persisted/runtime artifacts and reconcile only old web services.
+
+    Each restoration step is attempted independently so a failed state-file
+    write does not suppress a best-effort runtime recovery.  The returned
+    envelope is safe to include in a stable operator error and explicitly
+    distinguishes a complete rollback from a partial/failed one.
+    """
+    errors: list[str] = []
+    try:
+        _write_local_yaml(copy.deepcopy(snapshot["local"]))
+    except Exception as exc:
+        errors.append(f"persisted state restore failed: {str(exc)[:240]}")
+
+    compose_path = snapshot["compose_path"]
+    try:
+        if snapshot["compose_exists"]:
+            compose_path.parent.mkdir(parents=True, exist_ok=True)
+            compose_path.write_bytes(snapshot["compose_bytes"] or b"")
+        elif compose_path.exists():
+            compose_path.unlink()
+    except Exception as exc:
+        errors.append(f"Compose artifact restore failed: {str(exc)[:240]}")
+
+    runtime = snapshot.get("runtime") or {}
+    old_server = runtime.get("server", "nginx")
+    if runtime_touched and old_server != "herd":
+        services = ["wp"]
+        if old_server == "nginx":
+            services.append("nginx")
+        try:
+            result = compose("up", "-d", "--no-deps", "--force-recreate",
+                             *services, instance=name, check=False,
+                             capture=True)
+            returncode = getattr(result, "returncode", 0)
+            if returncode not in (None, 0):
+                detail = (getattr(result, "stderr", "") or
+                          getattr(result, "stdout", "") or
+                          f"exit {returncode}").strip()
+                errors.append(f"runtime rollback failed: {detail[:240]}")
+            elif runtime.get("wordpress_port") and not _wait_http(
+                    runtime["wordpress_port"]):
+                errors.append("runtime rollback failed: restored web tier did not become reachable")
+        except Exception as exc:
+            errors.append(f"runtime rollback failed: {str(exc)[:240]}")
+
+    if errors:
+        return {"ok": False, "state": "rollback_incomplete", "errors": errors}
+    return {
+        "ok": True,
+        "state": "rolled_back" if runtime_touched else "state_and_artifact_restored",
+        "runtime_restored": bool(runtime_touched and old_server != "herd"),
+        "errors": [],
+    }
 def registry_all() -> dict:
     """Compatibility facade for the typed project registry."""
     import sandbox_core as sc

@@ -44,3 +44,13 @@ MCP may gain out-of-band update preparation, registered-reference copy, or gener
   source's `mcpModes`.
 - A scoped service factory binds `project_dir` to the configured MCP project root when one exists.
 - Every request records intent before source processing and outcome afterward.
+
+## Convergence amendment — 2026-08-13: MCP redaction parity
+
+MCP responses, tool errors, progress metadata, and audit outcomes use the same
+redaction service as the CLI. Bearer/API forms, provider-prefixed tokens,
+Basic Auth URL userinfo, token query values, nested exception text, and child
+output are removed before serialization. An unclassified credential-bearing
+field is omitted and the call fails closed; MCP must not expose a raw traceback
+or rely on the caller to redact. Equivalent CLI/MCP requests therefore have the
+same safe fields and omissions (`81f43e6f`).

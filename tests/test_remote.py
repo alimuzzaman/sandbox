@@ -18,6 +18,7 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -377,6 +378,41 @@ class TestRemoteDiagnostics(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "bearer token"):
             sr.remote_diagnostics({"control_url": "https://control.example.test"})
 
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_verify_remote_returns_safe_authenticated_envelope(self, urlopen):
+        response = MagicMock(status=400)
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        token = "super-secret-token"
+        result = sr.verify_remote({
+            "control_url": "https://control.example.test",
+            "bearer_token": token,
+            "mcp_service": {"runtime_revision": "abc123"},
+        }, name="myvps")
+        self.assertTrue(result["authenticated"])
+        self.assertEqual(result["endpoint"], {"scheme": "https", "host": "control.example.test"})
+        self.assertEqual(result["revision"], "abc123")
+        self.assertNotIn(token, json.dumps(result))
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), f"Bearer {token}")
+
+    @patch("sandbox.core._remote.urllib.request.urlopen")
+    def test_verify_remote_redacts_auth_failure_and_userinfo(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://control.example.test/mcp", 401, "Unauthorized", {}, None,
+        )
+        result = sr.verify_remote({
+            "control_url": "https://control.example.test",
+            "bearer_token": "secret-token",
+        })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "remote_auth_failed")
+        with self.assertRaisesRegex(RuntimeError, "auth_verification_unavailable"):
+            sr.verify_remote({
+                "control_url": "https://user:password@control.example.test",
+                "bearer_token": "secret-token",
+            })
+
 
 class TestCheckReachable(unittest.TestCase):
     @patch("subprocess.run")
@@ -433,6 +469,143 @@ class TestDeployTargetPath(unittest.TestCase):
 
 
 class TestPushCommits(unittest.TestCase):
+    def test_nested_source_root_pushes_subtree_without_outer_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-secret.txt").write_text("must stay outside\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "site/compose.yml", "outer-secret.txt"],
+                           cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "initial",
+            ], cwd=outer, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            (source / "dirty.yml").write_text("services: {}\n")
+            push_calls = []
+            real_run = sr.subprocess.run
+
+            def run(*args, **kwargs):
+                argv = args[0]
+                if argv[:2] == ["git", "push"]:
+                    push_calls.append(argv)
+                    return _completed(returncode=0)
+                return real_run(*args, **kwargs)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr.subprocess, "run", side_effect=run):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", "main",
+                    source_root=source,
+                )
+
+            self.assertEqual(len(push_calls), 1)
+            source_spec = push_calls[0][-1]
+            self.assertTrue(source_spec.startswith(
+                f"{pushed}:refs/heads/sandbox-source-{pushed}"
+            ))
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", pushed],
+                cwd=outer, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(committed, ["compose.yml"])
+            self.assertNotIn("outer-secret.txt", committed)
+
+    def test_nested_source_ref_keeps_immutable_ref_and_subtree_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-only.txt").write_text("outside\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "."], cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "initial",
+            ], cwd=outer, check=True)
+            source_ref = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            push_calls = []
+            real_run = sr.subprocess.run
+
+            def run(*args, **kwargs):
+                argv = args[0]
+                if argv[:2] == ["git", "push"]:
+                    push_calls.append(argv)
+                    return _completed(returncode=0)
+                return real_run(*args, **kwargs)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr.subprocess, "run", side_effect=run):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", None,
+                    source_ref="HEAD", resolved_sha=source_ref, source_root=source,
+                )
+
+            self.assertEqual(len(push_calls), 1)
+            self.assertIn(f"refs/heads/sandbox-source-{pushed}", push_calls[0][-1])
+            self.assertNotEqual(pushed, source_ref)
+            committed = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", pushed],
+                cwd=outer, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(committed, ["compose.yml"])
+
+    def test_nested_source_root_avoids_preseeded_full_tree_branch(self):
+        """A legacy full-tree branch must survive nested subtree deployment."""
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory)
+            source = outer / "site"
+            source.mkdir()
+            (source / "compose.yml").write_text("services: {}\n")
+            (outer / "outer-only.txt").write_text("legacy outer file\n")
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            subprocess.run(["git", "add", "."], cwd=outer, check=True)
+            subprocess.run([
+                "git", "-c", "user.email=sandbox@example.test", "-c", "user.name=Sandbox",
+                "commit", "-qm", "legacy full tree",
+            ], cwd=outer, check=True)
+            full_tree_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=outer,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            bare = outer / "target.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+            subprocess.run([
+                "git", "push", str(bare), f"{full_tree_sha}:refs/heads/main",
+            ], cwd=outer, check=True, capture_output=True, text=True)
+
+            with tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(sr, "RUNTIME_DIR", Path(runtime)), \
+                 patch.object(sr, "git_ssh_url", return_value=str(bare)):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, source, "/srv/deploy/example-site", "main",
+                    source_root=source,
+                )
+
+            main_names = subprocess.run(
+                ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", "refs/heads/main"],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            staging_ref = f"refs/heads/sandbox-source-{pushed}"
+            staged_names = subprocess.run(
+                ["git", "--git-dir", str(bare), "ls-tree", "-r", "--name-only", staging_ref],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(main_names, ["outer-only.txt", "site/compose.yml"])
+            self.assertEqual(staged_names, ["compose.yml"])
+
     @patch("subprocess.run")
     def test_pushes_head_to_the_correct_branch_and_url(self, mock_run):
         # first call: git push; second call: git rev-parse HEAD
@@ -523,6 +696,35 @@ class TestPushCommits(unittest.TestCase):
                          "/home/ubuntu/sandbox/deploy-src/proj", "wip-branch")
         push_args = mock_run.call_args_list[0][0][0]
         self.assertNotIn("origin", push_args)
+
+    @patch("subprocess.run")
+    def test_source_ref_resolves_full_sha_and_rejects_dirty_tree(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="A" * 40 + "\n"),
+            _completed(returncode=0, stdout="diff --git a/x b/x\n"),
+            _completed(returncode=0, stdout=""),
+        ]
+        with self.assertRaisesRegex(ValueError, "clean working tree"):
+            sr.resolve_source_ref("/local/proj", "refs/tags/v1")
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertTrue(all("commit" not in " ".join(map(str, call.args[0]))
+                            for call in mock_run.call_args_list[1:]))
+
+    @patch("subprocess.run")
+    def test_source_ref_push_uses_sha_derived_immutable_destination(self, mock_run):
+        sha = "b" * 40
+        mock_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as runtime:
+            with patch.object(sr, "RUNTIME_DIR", Path(runtime)):
+                pushed = sr.push_commits(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/local/proj", "/srv/deploy/proj",
+                    None, source_ref="refs/tags/v1", resolved_sha=sha,
+                )
+        self.assertEqual(pushed, sha)
+        push_args = mock_run.call_args_list[0].args[0]
+        self.assertIn(f"{sha}:refs/heads/sandbox-source-{sha}", push_args)
+        self.assertNotIn("git commit", " ".join(push_args))
+        self.assertNotIn("git stash", " ".join(push_args))
 
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):

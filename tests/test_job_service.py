@@ -17,7 +17,8 @@ class JobServiceTests(unittest.TestCase):
             repository = JobRepository(Path(temp) / "registry.sqlite")
             service = JobService(repository, JobStorage(temp, free_disk_reserve=0), None)
             service._launch(Path(temp) / "descriptor.json")
-            self.assertEqual(Path(launch.call_args.kwargs["cwd"]).name, "sandbox")
+            package_root = Path(__file__).resolve().parents[1]
+            self.assertEqual(Path(launch.call_args.kwargs["cwd"]).resolve(), package_root)
             repository.close()
 
     def test_acceptance_precedes_launcher_and_idempotency_replays(self):

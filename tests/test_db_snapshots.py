@@ -58,6 +58,129 @@ class TestSnapshotCapture(unittest.TestCase):
             self.assertIn("named", rendered)
 
 
+class TestRestoreConfirmation(unittest.TestCase):
+    @staticmethod
+    def _args(**kwargs):
+        return SimpleNamespace(resolved_instance="inst", name="fixture", **kwargs)
+
+    @staticmethod
+    def _snapshot(root):
+        target = root / "fixture"
+        target.mkdir()
+        (target / "db.sql").write_text("fixture db")
+
+    def test_noninteractive_restore_requires_confirmation_before_db_reset(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._snapshot(root)
+            args = self._args()
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "compose") as compose, \
+                    mock.patch.object(data, "run") as run, \
+                    mock.patch.object(data, "die", side_effect=RuntimeError(
+                        "restore requires --yes when stdin is not interactive")), \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=False), \
+                    mock.patch("builtins.input") as prompt:
+                with self.assertRaisesRegex(RuntimeError, "restore requires --yes"):
+                    data.cmd_restore({}, args)
+
+            prompt.assert_not_called()
+            compose.assert_not_called()
+            run.assert_not_called()
+            self.assertEqual((root / "fixture" / "db.sql").read_text(), "fixture db")
+
+    def test_interactive_restore_cancel_preserves_db_and_uploads(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._snapshot(root)
+            args = self._args()
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "compose") as compose, \
+                    mock.patch.object(data, "run") as run, \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", return_value="n"):
+                data.cmd_restore({}, args)
+
+            compose.assert_not_called()
+            run.assert_not_called()
+            self.assertEqual((root / "fixture" / "db.sql").read_text(), "fixture db")
+
+    def test_interactive_restore_confirmation_accepts_and_dispatches(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._snapshot(root)
+            args = self._args()
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "compose") as compose, \
+                    mock.patch.object(data, "run") as run, \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", return_value="yes") as prompt:
+                data.cmd_restore({}, args)
+
+            prompt.assert_called_once()
+            compose.assert_any_call("run", "--rm", "wpcli", "db", "reset", "--yes",
+                                    instance="inst")
+            compose.assert_any_call("run", "--rm", "-v", f"{root}:/snapshots",
+                                    "wpcli", "db", "import", "/snapshots/fixture/db.sql",
+                                    instance="inst")
+            run.assert_not_called()
+
+    def test_restore_yes_bypasses_prompt_and_dispatches_reset_then_import(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._snapshot(root)
+            args = self._args(yes=True)
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "compose") as compose, \
+                    mock.patch.object(data, "run") as run, \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=False), \
+                    mock.patch("builtins.input") as prompt:
+                data.cmd_restore({}, args)
+
+            prompt.assert_not_called()
+            compose.assert_any_call("run", "--rm", "wpcli", "db", "reset", "--yes",
+                                    instance="inst")
+            compose.assert_any_call("run", "--rm", "-v", f"{root}:/snapshots",
+                                    "wpcli", "db", "import", "/snapshots/fixture/db.sql",
+                                    instance="inst")
+            run.assert_not_called()
+
+    def test_restore_accepts_existing_confirm_attribute_as_alias(self):
+        from sandbox.commands import data
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._snapshot(root)
+            args = self._args(confirm=True)
+            with mock.patch.object(data, "preflight_instance_capability", return_value=None), \
+                    mock.patch.object(data, "snapshots_dir", return_value=root), \
+                    mock.patch.object(data, "_is_herd_instance", return_value=False), \
+                    mock.patch.object(data, "compose") as compose, \
+                    mock.patch.object(data, "run"), \
+                    mock.patch.object(data.sys.stdin, "isatty", return_value=False), \
+                    mock.patch("builtins.input") as prompt:
+                data.cmd_restore({}, args)
+
+            prompt.assert_not_called()
+            self.assertTrue(compose.called)
+
+
 class TestDashboardResetDispatch(unittest.TestCase):
     def test_reset_dispatches_confirmed_reset_command(self):
         import sandbox.core._dash as dashboard

@@ -254,3 +254,37 @@ An agent receives a detailed operational skill that orders safe inspection, vali
 - Live provider validation, external secret managers, arbitrary remote command execution, mixed configuration documents, multiline secret updates, private-key updates, and perfect memory zeroization are outside v1.
 - A child process selected for local use is trusted by the caller; output redaction cannot make a malicious recipient safe.
 - Exact user-facing command names and structured field names may be finalized during planning provided they preserve these observable behavior and disclosure boundaries.
+
+## Convergence amendment — 2026-08-13 (27-feedback redaction corpus)
+
+Feedback `81f43e6f` identified gaps in common token forms and credentials
+embedded in URLs. This amendment is additive to the existing least-disclosure
+policy and does not authorize reading a source or revealing a value.
+
+### Normative requirements
+
+- **FR-065**: Redaction MUST cover bearer/API credentials in headers and text,
+  assignment forms such as `token=`, `password=`, `api_key=`, and common provider
+  token prefixes (including GitHub, OpenAI-style, Slack-style, and comparable
+  opaque tokens) before data reaches stdout, stderr, JSON, audit, feedback,
+  telemetry, exception chains, or durable files.
+- **FR-066**: URLs containing userinfo or credential query parameters MUST be
+  normalized before display or persistence: remove or replace the user/password
+  component and redact token-like query values while retaining only safe scheme,
+  host, path, and non-sensitive query names where policy permits. A Basic Auth
+  URL MUST never be emitted verbatim (`81f43e6f`).
+- **FR-067**: The same redaction service and corpus MUST be used by CLI, MCP,
+  feedback, job output, remote verification, and child-process error paths. A
+  failure in redaction is fail-closed for the affected output; it MUST NOT fall
+  back to raw exception or command rendering.
+- **FR-068**: Redaction tests MUST assert complete-value absence and safe
+  handling of nested exceptions, serialized argv, URLs, and mixed case/spacing;
+  partial masking MUST NOT be treated as proof that a high-entropy credential is
+  safe.
+
+### Acceptance evidence required before closing this amendment
+
+The corpus MUST include bearer/API assignment variants, provider prefixes,
+Basic Auth URLs, token query strings, nested exception/traceback output, and
+CLI/MCP/feedback/remote-probe surfaces. Evidence records only pattern names and
+pass/fail counts, never fixture values.

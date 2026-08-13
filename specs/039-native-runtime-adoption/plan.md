@@ -180,3 +180,15 @@ three WordPress backends honestly.
 ## Complexity Tracking
 
 No constitution violations require justification.
+
+## Plan amendment — 2026-08-13 (PHP extension provisioning)
+
+Extend the existing WordPress runtime selection and managed package transaction rather
+than adding a second provisioning path. The implementation order is: parse and
+normalize the additive field; validate the immutable profile/catalog and reject all
+unknowns before side effects; probe the four execution planes; then choose the
+allowlisted official-image child build or the signed-APT managed-native plan. Custom,
+LiteSpeed, Herd, and Valet remain validation-only, and generic Compose is an explicit
+v1 refusal. Every package/image result is digest-bound and TTY-approved where the
+managed-native plan mutates state. Reconcile only web/runtime artifacts and retain
+database/uploads/snapshots/project files.

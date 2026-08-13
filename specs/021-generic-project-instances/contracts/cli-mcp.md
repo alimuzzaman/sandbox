@@ -49,3 +49,16 @@ All lifecycle returns include `kind`, `adapter`, and `capabilities`. Existing Wo
 - Existing WordPress project calls produce the same values and side effects.
 - Tool descriptions change from “WordPress instance” to “project instance” only for kind-neutral tools; WordPress-only tools stay explicit.
 - MCP server bootstrap loads tool groups through one package-owned loader; this does not permit project-supplied tool modules.
+
+## Convergence amendment — 2026-08-13: identity parity and state freshness
+
+CLI and MCP lifecycle calls resolve one canonical project identity before
+dispatch. Equivalent requests MUST expose byte-equivalent `identity`, canonical
+root, label, kind, adapter, and capabilities (apart from presentation-only
+fields). A plugin-shaped fallback is not permitted for generic projects.
+
+Every status/state response includes an observation timestamp and generation (or
+an explicit `stale:true` marker). A new session or mutation invalidates prior
+state; `status --refresh` bypasses the cache. The adapters must not report a
+plugin active/inactive state from an old session as current. These rules close
+`cf5e49ed`, `2b080bf5`, and `108318d9`.

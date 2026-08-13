@@ -330,3 +330,18 @@ T051 operator guide
   `c14205a9-eb80-4189-821c-e40d8f3cde8d` sealed 21/21 worklist rows across
   seven surfaces with zero findings. Implementation commit `6b4c060` was pushed
   to `origin/latest` before this evidence-only closeout.
+
+## Phase 12: Convergence — 2026-08-13 (27-feedback redaction)
+
+These tasks remain open and do not revise the prior evidence or completion
+markers.
+
+- [x] T075 [US1/US2/US6] Add the `81f43e6f` synthetic redaction corpus for
+  bearer/API assignments, common provider prefixes, Basic Auth URL userinfo,
+  token query parameters, mixed case/spacing, and nested exception chains.
+- [ ] T076 [US2/US6] Prove the shared redaction service is applied consistently
+  to CLI, MCP, feedback, remote verification, job output, and child stderr;
+  assert no raw traceback or command/URL bypass remains.
+- [ ] T077 [US1/US6] Record only pattern names and aggregate pass/fail counts in
+  implementation evidence, run `git diff --check` and focused secret suites,
+  and retain the no-real-secret fixture boundary.

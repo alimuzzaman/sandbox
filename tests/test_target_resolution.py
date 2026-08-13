@@ -8,7 +8,8 @@ class TargetResolutionTests(unittest.TestCase):
         config = {"root": "/tmp/project", "runtime": runtime or {"default": "local"}}
         remotes = remotes or {}
         return TargetService(config_loader=lambda _root: config,
-                             remote_lookup=lambda name: remotes.get(name))
+                             remote_lookup=lambda name: remotes.get(name),
+                             remote_list=lambda: remotes)
 
     def test_explicit_local_beats_configured_remote(self):
         from sandbox.jobs.models import TargetRequest
@@ -48,6 +49,24 @@ class TargetResolutionTests(unittest.TestCase):
         target = self.service().resolve(TargetRequest("/tmp/project"))
         self.assertEqual(target.kind, "local")
         self.assertTrue(target.namespace.startswith("local:"))
+
+    def test_one_configured_remote_is_inferred_through_the_catalog_callback(self):
+        from sandbox.jobs.models import TargetRequest
+
+        target = self.service(remotes={"vps": {"provisioned": True}}).resolve(
+            TargetRequest("/tmp/project"))
+        self.assertEqual((target.kind, target.remote_name), ("remote", "vps"))
+        self.assertEqual(target.sources["remote_selection"], "single-configured")
+
+    def test_ambiguous_configured_remotes_fail_closed(self):
+        from sandbox.application.target_service import TargetResolutionError
+        from sandbox.jobs.models import TargetRequest
+
+        service = self.service(remotes={
+            "alpha": {"provisioned": True}, "beta": {"provisioned": True},
+        })
+        with self.assertRaisesRegex(TargetResolutionError, "multiple configured remotes"):
+            service.resolve(TargetRequest("/tmp/project"))
 
     def test_invalid_combinations_unknown_unprovisioned_and_capability_fail(self):
         from sandbox.application.target_service import TargetResolutionError

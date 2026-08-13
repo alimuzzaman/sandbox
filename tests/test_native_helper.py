@@ -1386,6 +1386,27 @@ class TestNativeHelper(unittest.TestCase):
         self.assertEqual(curl[-1], "http://10.203.0.2:8080/")
         self.assertNotIn("--insecure", curl)
 
+    def test_managed_php_extension_allowlist_rejects_foreign_package_metadata(self):
+        from sandbox.php_extensions.catalog import DEFAULT_CATALOG
+        from sandbox.runtimes.managed.helper import validate_extension_package_allowlist
+
+        row = {
+            "name": "php8.3-gd", "version": "8.3.6", "action": "install", "scope": "image",
+            "php_extensions": [{
+                "name": "gd", "state": "enabled", "version": None,
+                "package": "php8.3-gd", "package_version": "8.3.6",
+                "catalog_digest": DEFAULT_CATALOG.digest,
+                "source": "official-distribution",
+            }],
+            "extension_catalog": DEFAULT_CATALOG.digest,
+            "extension_provenance": "official-distribution",
+        }
+        plan = type("PackagePlan", (), {"image_packages": (row,)})()
+        self.assertTrue(validate_extension_package_allowlist(plan))
+        row["php_extensions"][0]["package"] = "apt-foreign"
+        with self.assertRaises(ValueError):
+            validate_extension_package_allowlist(plan)
+
     def test_partial_service_activation_is_stopped_and_masked(self):
         helper = module(); optional = []
         units = ("mariadb.service", "php8.3-fpm.service", "nginx.service", "cron.service")

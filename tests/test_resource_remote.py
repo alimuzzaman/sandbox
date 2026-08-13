@@ -4,7 +4,11 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from sandbox.resources.remote import RemoteResourceAdapter, _program
+from sandbox.resources.remote import (
+    RemoteResourceAdapter,
+    _program,
+    parse_job_list_payload,
+)
 from sandbox.services.process import ProcessResult
 from tests.resource_fixtures import NOW
 from tests.resource_fixtures import deep_attribution
@@ -98,6 +102,26 @@ class TestRemoteResourceAdapter(unittest.TestCase):
         self.assertNotIn("docker volume prune", program)
         self.assertNotIn("sqlite3.connect", program)
         self.assertNotIn("registry.read_text", program)
+
+    def test_job_list_consumer_accepts_only_top_level_ok_jobs(self):
+        self.assertEqual(parse_job_list_payload({"ok": True, "jobs": []}), [])
+        with self.assertRaisesRegex(ValueError, "top-level jobs"):
+            parse_job_list_payload({"ok": True, "data": {"jobs": []}})
+        with self.assertRaisesRegex(ValueError, "top-level list"):
+            parse_job_list_payload({"ok": True, "jobs": {}})
+        with self.assertRaisesRegex(ValueError, "top-level ok"):
+            parse_job_list_payload({"ok": False, "jobs": []})
+
+    def test_remote_program_embeds_strict_job_list_parser(self):
+        namespace = self._probe_namespace()
+        self.assertEqual(
+            namespace["parse_job_list_payload"]({"ok": True, "jobs": []}),
+            [],
+        )
+        with self.assertRaisesRegex(ValueError, "top-level jobs"):
+            namespace["parse_job_list_payload"]({
+                "ok": True, "data": {"jobs": []},
+            })
 
     def test_remote_deep_probe_is_read_only_and_uses_installed_tool_fallbacks(self):
         program = _program({

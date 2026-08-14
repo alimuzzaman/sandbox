@@ -423,12 +423,21 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(lifecycle, "cmd_install", side_effect=lambda *_a, **_k: events.append("install")))
             stack.enter_context(patch.object(instances, "_wait_http"))
             stack.enter_context(patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}))
-            stack.enter_context(patch.object(instances, "_wire_project_plugins"))
-            stack.enter_context(patch.object(instances, "_wire_project_themes"))
+            stack.enter_context(patch.object(
+                instances, "_wire_project_plugins",
+                side_effect=lambda *_a, **_k: events.append("plugins"),
+            ))
+            stack.enter_context(patch.object(
+                instances, "_wire_project_themes",
+                side_effect=lambda *_a, **_k: events.append("themes"),
+            ))
             stack.enter_context(patch.object(instances, "_multisite_mode", return_value=False))
             stack.enter_context(patch.object(instances, "_proxy_sudoers_installed", return_value=False))
             stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
-            stack.enter_context(patch.object(data_commands, "capture_install_snapshots"))
+            capture = stack.enter_context(patch.object(
+                data_commands, "capture_install_snapshots",
+                side_effect=lambda *_a, **_k: events.append("snapshots"),
+            ))
             stack.enter_context(patch.object(instances, "info"))
             # A few legacy helpers invoke the CLI entrypoint when their
             # dependency discovery is not stubbed. Keep the harness argv
@@ -441,6 +450,52 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertLess(events.index("prepare"), events.index("up"))
         self.assertLess(events.index("persist"), events.index("compose-file"))
         self.assertLess(events.index("compose-file"), events.index("up"))
+        self.assertLess(events.index("install"), events.index("plugins"))
+        self.assertLess(events.index("plugins"), events.index("themes"))
+        self.assertLess(events.index("themes"), events.index("snapshots"))
+        capture.assert_called_once_with("fixture")
+
+    def test_ready_ensure_does_not_recapture_install_snapshots(self):
+        """The ready fast path must preserve existing install restore points."""
+        import sandbox.core._instances as instances
+        import sandbox.commands.data as data_commands
+
+        root = Path(tempfile.mkdtemp(prefix="sb-install-snapshot-idempotency-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        existing = {
+            "instance": "fixture", "label": "default", "status": "ready",
+            "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
+            "server": "nginx", "url": "https://fixture.tst",
+        }
+
+        class FakeCore:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_project, label=None):
+                return {"root": str(root), "server": "nginx"}
+
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return existing
+
+            @staticmethod
+            @contextmanager
+            def project_lock(_root):
+                yield
+
+        with patch.object(instances, "_core", return_value=FakeCore()), \
+                patch.object(instances, "_resolve_port_conflicts", return_value={}), \
+                patch.object(instances, "resolve_instances", return_value={"fixture": existing}), \
+                patch.object(instances, "_instance_reachable", return_value=True), \
+                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "_auto_heal_wp_url"), \
+                patch.object(instances, "_refresh_registered_url", return_value=existing), \
+                patch.object(data_commands, "capture_install_snapshots") as capture:
+            result = instances.ensure_instance({}, str(root))
+
+        self.assertEqual(result, existing)
+        capture.assert_not_called()
 
     def test_apply_failed_verification_restores_state_compose_and_web_runtime(self):
         """A failed four-plane gate rolls back only the web tier.

@@ -50,7 +50,7 @@ provisioned mu-plugin under each instance's `wp-content/mu-plugins/`.
 **Goal**: external clients connect to the instance endpoint; discovery includes Sandbox guidance.
 **Independent test**: run connect helper, paste config into a fresh client, list + call an ability.
 
-- [~] T012 [US2] (DEFERRED — accepted) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. The bundled adapter already provides discovery + each ability ships its own description; appending env instructions is a cosmetic enrichment with no functional gap, intentionally left for later.
+- [ ] T012 [US2] (DEFERRED — accepted; not started) Override `mcp-adapter/discover-abilities` to append Sandbox env instructions. The bundled adapter already provides discovery + each ability ships its own description; appending env instructions is a cosmetic enrichment with no functional gap, intentionally left for later.
 - [x] T013 [US2] Implement the MCP-connect helper as **`./sb abilities connect`** (the `connect` command name was already taken by fluentboards/github). **DONE + verified**: prints the `/wp-json/sandbox/mcp` endpoint + a paste-ready mcp-remote client config; per the secrets rule it points to `instances.<inst>.app_password` in sandbox.local.yml rather than echoing the secret.
 - [~] T014 [US2] Partially verified: /wp-json/sandbox/mcp route live, unauth tools/list → 401 (transport + auth gate confirmed). Full external-client handshake (paste config into Cursor/Claude Desktop) is a manual follow-up.
 

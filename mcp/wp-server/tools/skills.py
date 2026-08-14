@@ -73,14 +73,13 @@ def _error_payload(result: dict, slug: str) -> dict:
 
 
 def _written_record(result: dict, project_dir: str, *, existing: bool,
-                    on_conflict: str, slug: str) -> dict:
+                    slug: str) -> dict:
     """Return a contract-complete write response from the CLI result."""
     match = re.search(r"wrote skill '([^']+)' \(([^)]+)\) → (.+)$", result["output"])
     actual_slug = match.group(1) if match else slug
     record = _catalog(project_dir).get(actual_slug)
-    payload = {"ok": True, "action": "updated" if existing else "created", "slug": actual_slug}
-    if existing and on_conflict == "rename":
-        payload["action"] = "renamed"
+    action = "renamed" if actual_slug != slug else ("updated" if existing else "created")
+    payload = {"ok": True, "action": action, "slug": actual_slug}
     if record:
         payload.update(_record_payload(actual_slug, record))
     elif match:
@@ -128,8 +127,7 @@ def skill_write(title: str, description: str, body: str = "",
     result = _sb_skill(*args, project_dir=project_dir, body=body)
     if not result["ok"]:
         return _error_payload(result, slug)
-    return _written_record(result, project_dir, existing=existing,
-                           on_conflict=on_conflict, slug=slug)
+    return _written_record(result, project_dir, existing=existing, slug=slug)
 
 
 @mcp.tool()

@@ -118,6 +118,26 @@ class SkillAuthoringConvergenceTests(unittest.TestCase):
             self.assertIn("fix-2", listed.stdout)
             self.assertIn("fix", listed.stdout)
 
+    @unittest.skipIf(skills is None, "MCP server dependencies are not installed")
+    def test_mcp_project_rename_reports_the_selected_cross_source_slug(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / "sandbox.config.json").write_text("{}\n")
+
+            payload = skills.skill_write(
+                "Fix", "project-specific fix", "# project fix\n",
+                on_conflict="rename", project_dir=str(project),
+            )
+
+            expected = project.resolve() / ".claude" / "skills" / "fix-2" / "SKILL.md"
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "renamed")
+            self.assertEqual(payload["slug"], "fix-2")
+            self.assertEqual(payload["source"], "project")
+            self.assertEqual(payload["scope"], "project")
+            self.assertEqual(Path(payload["path"]).resolve(), expected.resolve())
+            self.assertTrue(expected.is_file())
+
     def test_cli_uses_its_cwd_as_the_project_and_hides_disabled_skills(self):
         with tempfile.TemporaryDirectory() as temp:
             project = Path(temp)

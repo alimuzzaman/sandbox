@@ -425,6 +425,15 @@ class TestRestoreConfirmation(unittest.TestCase):
 
 
 class TestDashboardResetDispatch(unittest.TestCase):
+    def test_wp_admin_template_routes_reset_with_explicit_confirmation(self):
+        from sandbox.core import _paths
+
+        template = _paths._SNAPSHOT_MU_TEMPLATE
+        self.assertIn("} elseif ( 'reset' === $op ) {", template)
+        self.assertIn("'1' === sanitize_text_field", template)
+        self.assertIn("'POST', '/reset', array( 'confirm' => $confirm )", template)
+        self.assertIn("call('reset',{confirm:1})", template)
+
     def test_reset_dispatches_confirmed_reset_command(self):
         import sandbox.core._dash as dashboard
 

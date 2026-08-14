@@ -81,5 +81,8 @@ These tasks remain unchecked until implementation and live proof are complete.
 - [ ] T024 [US1/US2] Add status/doctor text and JSON fixtures for canonical extension
   state, profile/catalog revision, digest, safe provenance, and web/WP-CLI/exec/PHPUnit
   observations, including each structured failure class and one-document stdout.
+  PARTIAL 2026-08-14: non-live constructor, status/doctor text+JSON, stable exits,
+  remote nonzero forwarding, safe-output fixtures, and documentation are implemented;
+  task remains open pending the required live four-plane runtime proof.
 - [x] T025 [US1] Add generic Compose refusal and secret-safe stdout/stderr tests for a
   present `phpExtensions` field before any image/package/runtime side effect.

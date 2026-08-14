@@ -614,7 +614,10 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         self.assertTrue(any(command[command.index("--entrypoint") + 2] == "wp"
                             for command in commands if "--entrypoint" in command))
         self.assertEqual({call[1]["timeout"] for call in calls}, {2})
-        self.assertTrue(result["verification"]["comparison"]["ok"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["desired"]["catalog"]["revision"], 1)
+        self.assertIn("resolution_digest", result["desired"])
         self.assertEqual(result["staleness"]["state"], "fresh")
         self.assertEqual(result["drift"]["state"], "ready")
         # The payload is fixed PHP source and does not load WordPress/project
@@ -647,6 +650,93 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                             for row in result["observed"].values()))
         self.assertEqual(result["drift"]["state"], "unknown")
 
+    def test_status_does_not_forward_untrusted_probe_dimensions(self):
+        import sandbox.core._docker as docker
+
+        document = json.loads(_probe_document())
+        document["php_version"] = "https://user:pass@example.invalid/private"
+        document["sapi"] = "cli; sh -c secret"
+        document["extensions"]["gd"]["version"] = "/private/context/path"
+
+        def fake_compose(*_args, **_kwargs):
+            return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
+
+        with patch.object(docker, "_is_herd_instance", return_value=False), \
+                patch.object(docker, "compose", side_effect=fake_compose), \
+                patch("sandbox.core._tests.compose", side_effect=fake_compose), \
+                patch("sandbox.core._tests._managed_execution_gate", return_value=None):
+            report = docker.php_extension_status(
+                {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+
+        output = json.dumps(report)
+        self.assertNotIn("example.invalid", output)
+        self.assertNotIn("sh -c", output)
+        self.assertNotIn("/private/", output)
+        for row in report["observed"].values():
+            self.assertIsNone(row["php_version"])
+            self.assertIsNone(row["sapi"])
+            self.assertIsNone(row["extensions"]["gd"]["version"])
+
+    def test_status_redacts_provider_corpus_across_every_public_string_boundary(self):
+        import sandbox.core._docker as docker
+        from tests.redaction_corpus import AWS, GITHUB, GOOGLE, OPENAI, SLACK
+        from sandbox.php_extensions.probe import (
+            ExtensionObservation, PlaneObservation, ProbeError, ProbeResult,
+        )
+
+        probes = {}
+        for plane in ("web", "cli", "exec", "phpunit"):
+            observation = PlaneObservation(
+                plane, GITHUB,
+                (ExtensionObservation("gd", True, SLACK, plane),),
+                sapi=OPENAI,
+            )
+            probes[plane] = ProbeResult(
+                False, plane, observation=observation,
+                errors=(ProbeError("version_mismatch", "raw provider failure",
+                                   plane=plane, extension="gd",
+                                   expected=AWS, observed=GOOGLE),),
+            )
+        with patch.object(docker, "php_extension_probe", return_value=probes):
+            report = docker.php_extension_status(
+                {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+
+        output = json.dumps(report)
+        for forbidden in (AWS, GITHUB, GOOGLE, OPENAI, SLACK):
+            self.assertNotIn(forbidden, output)
+        self.assertEqual(report["desired"]["requirements"][0]["name"], "gd")
+        self.assertEqual(report["issues"][0]["code"], "version_mismatch")
+
+        profile = docker.php_extension_status({
+            "php_extensions": {"profile": GITHUB, "extensions": {"gd": True}},
+        })
+        self.assertNotIn(GITHUB, json.dumps(profile))
+
+    def test_status_omits_cache_recipe_ids_not_present_in_immutable_catalog(self):
+        import sandbox.core._docker as docker
+        from tests.redaction_corpus import GITHUB
+
+        digest = "sha256:" + "a" * 64
+        receipt = {
+            "state": "ready",
+            "provenance": {
+                "digest": digest,
+                "recipe_catalog_digest": "sha256:" + "b" * 64,
+                "parent_digests": {"web": "sha256:" + "c" * 64,
+                                   "wpcli": "sha256:" + "d" * 64},
+                "recipe_ids": [GITHUB],
+            },
+        }
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            report = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertNotIn("build_digest", report["desired"])
+        self.assertEqual(report["provenance"], {"state": "stale"})
+        self.assertNotIn(GITHUB, json.dumps(report))
+
     def test_status_blocks_version_mismatch_and_plane_drift(self):
         import sandbox.core._docker as docker
 
@@ -671,11 +761,85 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 instance="fixture", timeout=1,
             )
 
-        codes = {item["code"] for item in result["drift"]["issues"]}
+        codes = {item["code"] for item in result["issues"]}
         self.assertIn("version_mismatch", codes)
         self.assertIn("plane_drift", codes)
         self.assertEqual(result["staleness"]["state"], "fresh")
         self.assertEqual(result["drift"]["state"], "drift")
+
+    def test_status_constructor_emits_only_stable_failure_codes_and_safe_fields(self):
+        import sandbox.core._docker as docker
+        from sandbox.php_extensions.probe import ProbeError, ProbeResult
+
+        cases = {
+            "missing": ProbeError("missing", "raw missing output", plane="web",
+                                  extension="gd"),
+            "version_mismatch": ProbeError("version_mismatch", "raw mismatch", plane="cli",
+                                           extension="gd", expected="2.3.*", observed="3.0.0"),
+            "version_unobservable": ProbeError("version_unobservable", "raw unavailable", plane="exec",
+                                               extension="gd", expected="2.3.*"),
+            "unsupported_provisioning": ProbeError("unsupported_provisioning", "raw package detail",
+                                                   plane="phpunit", extension="xdebug"),
+            "unsupported_disable": ProbeError("unsupported_disable", "raw ini detail",
+                                              plane="web", extension="gd"),
+            "plane_drift": ProbeError("plane_drift", "raw plane output", plane="cli",
+                                      extension="gd"),
+        }
+        for expected, issue in cases.items():
+            probes = {plane: ProbeResult(False, plane, errors=(
+                issue if plane == issue.plane else ProbeError(
+                    "probe_unavailable", "raw stderr", plane=plane),
+            ), stderr="secret://context/path --shell") for plane in
+                ("web", "cli", "exec", "phpunit")}
+            with self.subTest(code=expected), \
+                    patch.object(docker, "php_extension_probe", return_value=probes):
+                report = docker.php_extension_status(
+                    {"php_extensions": {"extensions": {"gd": True}}}, instance="fixture")
+                codes = {row["code"] for row in report["issues"]}
+                self.assertIn(expected, codes)
+                output = json.dumps(report)
+                self.assertNotIn("raw ", output)
+                self.assertNotIn("secret://", output)
+                self.assertNotIn("--shell", output)
+                self.assertEqual(report["exit_code"], 1)
+
+    def test_status_exposes_build_digest_only_for_complete_safe_read_only_receipt(self):
+        import sandbox.core._docker as docker
+
+        digest = "sha256:" + "a" * 64
+        receipt = {
+            "state": "ready",
+            "provenance": {
+                "digest": digest,
+                "recipe_catalog_digest": "sha256:" + "b" * 64,
+                "parent_digests": {"web": "sha256:" + "c" * 64,
+                                   "wpcli": "sha256:" + "d" * 64},
+                "recipe_ids": ["php-gd"],
+                "parent_images": {"web": "https://user:pass@example.invalid/private"},
+                "context_path": "/private/project/path",
+                "commands": ["sh", "-c", "secret"],
+            },
+        }
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            report = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertEqual(report["desired"]["build_digest"], digest)
+        output = json.dumps(report)
+        self.assertNotIn("example.invalid", output)
+        self.assertNotIn("context_path", output)
+        self.assertNotIn("commands", output)
+
+        receipt["provenance"].pop("recipe_catalog_digest")
+        with patch("sandbox.php_extensions.compose_builder.extension_cache_status",
+                   return_value=receipt):
+            incomplete = docker.php_extension_status({
+                "php_extensions": {"extensions": {"gd": True}},
+                "php_extension_digest": digest,
+            })
+        self.assertNotIn("build_digest", incomplete["desired"])
 
     def test_new_wordpress_init_emits_explicit_profile(self):
         import sandbox.commands.instances_cmd as command

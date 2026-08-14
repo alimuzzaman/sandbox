@@ -1248,6 +1248,20 @@ def php_extension_preflight(inst_cfg: dict, server: str | None = None,
 
 
 _PHP_EXTENSION_PLANES = ("web", "cli", "exec", "phpunit")
+_PHP_EXTENSION_FAILURE_CODES = frozenset({
+    "missing", "version_mismatch", "version_unobservable",
+    "unsupported_provisioning", "unsupported_disable", "plane_drift",
+})
+_PHP_EXTENSION_ISSUE_MESSAGES = {
+    "missing": "required PHP extension is missing",
+    "version_mismatch": "PHP extension version does not match the requirement",
+    "version_unobservable": "PHP extension version cannot be observed",
+    "unsupported_provisioning": "PHP extension provisioning is unsupported",
+    "unsupported_disable": "disabling this PHP extension is unsupported",
+    "plane_drift": "PHP extension observations differ between execution planes",
+}
+_PHP_EXTENSION_SAFE_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@|*-]{0,127}$")
+_PHP_EXTENSION_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _php_probe_runner(instance: str, plane: str):
@@ -1338,24 +1352,75 @@ def php_extension_probe(instance: str, requirements: object, *,
     )
 
 
-def _unprobed_php_extension_status(resolution, *, reason: str) -> dict:
-    """Render the backwards-compatible no-instance status envelope."""
-    observed = {
-        plane: {"state": "unavailable", "reason": {
-            "code": "not_probed", "message": reason,
-        }} for plane in _PHP_EXTENSION_PLANES
+def _canonical_php_extension_issue(issue: object) -> dict:
+    """Reduce a resolver/probe issue to the public stable failure vocabulary."""
+    raw = issue.to_dict() if hasattr(issue, "to_dict") else issue
+    raw = raw if isinstance(raw, Mapping) else {}
+    code = str(raw.get("code", "plane_drift"))
+    aliases = {
+        "missing_capability": "missing",
+        "profile_required_missing": "missing",
+        "profile_required_disabled": "missing",
     }
-    issues = [issue.to_dict() for issue in resolution.issues]
-    return {
-        "desired": {
-            "profile": resolution.profile,
-            "catalog": resolution.catalog,
-            "requirements": [dict(item) for item in resolution.requirements],
-            "digest": resolution.digest,
-        },
-        "observed": observed,
-        "drift": {"state": "unknown" if resolution.ok else "blocked", "issues": issues},
-        "staleness": {"state": "stale", "reason": reason},
+    code = aliases.get(code, code)
+    if code not in _PHP_EXTENSION_FAILURE_CODES:
+        code = "plane_drift"
+    result = {"code": code, "message": _PHP_EXTENSION_ISSUE_MESSAGES[code]}
+    for key in ("plane", "extension", "expected", "observed"):
+        value = raw.get(key)
+        if value is not None and _PHP_EXTENSION_SAFE_VALUE.fullmatch(str(value)):
+            result[key] = str(value)
+    return result
+
+
+def _canonical_php_extension_issues(issues: object) -> list[dict]:
+    rows: list[dict] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for issue in issues or ():
+        row = _canonical_php_extension_issue(issue)
+        identity = tuple(sorted((key, str(value)) for key, value in row.items()
+                                if key != "message"))
+        if identity not in seen:
+            seen.add(identity)
+            rows.append(row)
+    return rows
+
+
+def _php_extension_build_receipt(inst_cfg: Mapping[str, object]) -> tuple[str | None, dict]:
+    """Return only complete, allow-listed read-only build provenance."""
+    digest = inst_cfg.get("php_extension_digest", inst_cfg.get("phpExtensionDigest"))
+    if not isinstance(digest, str) or not _PHP_EXTENSION_DIGEST.fullmatch(digest.lower()):
+        return None, {"state": "unavailable"}
+    from sandbox.php_extensions.compose_builder import RECIPES, extension_cache_status
+
+    receipt = extension_cache_status(digest.lower())
+    provenance = receipt.get("provenance") if isinstance(receipt, Mapping) else None
+    if receipt.get("state") != "ready" or not isinstance(provenance, Mapping):
+        return None, {"state": "stale"}
+    parent_digests = provenance.get("parent_digests")
+    recipe_digest = provenance.get("recipe_catalog_digest")
+    recipe_ids = provenance.get("recipe_ids")
+    trusted_recipe_ids = {recipe.recipe_id for recipe in RECIPES.values()}
+    complete = (
+        provenance.get("digest") == digest.lower()
+        and isinstance(recipe_digest, str)
+        and _PHP_EXTENSION_DIGEST.fullmatch(recipe_digest.lower())
+        and isinstance(parent_digests, Mapping)
+        and set(parent_digests) == {"web", "wpcli"}
+        and all(isinstance(value, str) and _PHP_EXTENSION_DIGEST.fullmatch(value.lower())
+                for value in parent_digests.values())
+        and isinstance(recipe_ids, list)
+        and all(isinstance(value, str) and value in trusted_recipe_ids
+                for value in recipe_ids)
+    )
+    if not complete:
+        return None, {"state": "stale"}
+    return digest.lower(), {
+        "state": "ready",
+        "recipe_catalog_digest": recipe_digest.lower(),
+        "parent_digests": {role: str(parent_digests[role]).lower()
+                           for role in ("web", "wpcli")},
+        "recipe_ids": list(recipe_ids),
     }
 
 
@@ -1363,90 +1428,150 @@ def _php_observed_row(result) -> dict:
     """Reduce one ProbeResult to a secret-free status row."""
     observation = result.observation
     if observation is None:
-        code = result.errors[0].code if result.errors else "probe_failed"
-        message = result.errors[0].message if result.errors else "PHP extension probe failed"
         stderr = (getattr(result, "stderr", "") or "").lower()
         unavailable_markers = (
             "not running", "no such service", "no such container",
             "cannot connect", "connection refused", "container unavailable",
         )
+        code = result.errors[0].code if result.errors else "probe_failed"
         state = ("unavailable" if code == "probe_unavailable"
                  or any(marker in stderr for marker in unavailable_markers)
                  else "error")
-        return {"state": state, "reason": {"code": code, "message": message}}
-    rows = {
-        item.name: {"enabled": item.enabled, "version": item.version}
-        for item in observation.extensions
-    }
+        return {"state": state, "issues": _canonical_php_extension_issues(result.errors)}
+    rows = {}
+    safe_dimensions = True
+    for item in observation.extensions:
+        if not _PHP_EXTENSION_SAFE_VALUE.fullmatch(item.name):
+            safe_dimensions = False
+            continue
+        version = (item.version if item.version is None or
+                   _PHP_EXTENSION_SAFE_VALUE.fullmatch(item.version) else None)
+        if version is None and item.version is not None:
+            safe_dimensions = False
+        rows[item.name] = {"enabled": item.enabled, "version": version}
+    php_version = (observation.php_version
+                   if observation.php_version and
+                   _PHP_EXTENSION_SAFE_VALUE.fullmatch(observation.php_version)
+                   else None)
+    sapi = (observation.sapi if observation.sapi and
+            _PHP_EXTENSION_SAFE_VALUE.fullmatch(observation.sapi) else None)
+    safe_dimensions = bool(safe_dimensions and php_version and sapi)
     result_row = {
-        "state": "ready" if result.ok else "drift",
-        "php_version": observation.php_version,
-        "sapi": observation.sapi,
+        "state": "ready" if result.ok and safe_dimensions else "drift",
+        "php_version": php_version,
+        "sapi": sapi,
         "extensions": rows,
     }
-    if result.errors:
-        result_row["errors"] = [error.to_dict() for error in result.errors]
+    row_issues = list(result.errors)
+    if not safe_dimensions:
+        row_issues.append({"code": "plane_drift", "plane": result.plane})
+    if row_issues:
+        result_row["issues"] = _canonical_php_extension_issues(row_issues)
     return result_row
 
 
 def php_extension_status(inst_cfg: dict, *, instance: str | None = None,
                          timeout: float = 5) -> dict | None:
-    """Build a secret-free status envelope using fresh standalone probes.
-
-    ``instance=None`` intentionally retains the old no-probe behavior for
-    callers that only have a config document.  Lifecycle status/doctor passes
-    the resolved instance name, which enables all four bounded planes and
-    compares them through the canonical probe/service layer.
-    """
+    """Construct the single canonical, secret-free PHP-extension report."""
     requirements = inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions"))
     if requirements is None:
         return None
+    from sandbox.php_extensions.catalog import DEFAULT_CATALOG
     from sandbox.php_extensions.service import PhpExtensionService
 
     effective = _extension_plan_requirements(requirements)
     service = PhpExtensionService()
     resolution = service.resolve(effective)
-    if instance is None:
-        return _unprobed_php_extension_status(
-            resolution, reason="instance was not supplied to the lifecycle probe",
-        )
-    if not resolution.ok:
-        return _unprobed_php_extension_status(
-            resolution, reason="PHP extension declaration is invalid or incomplete",
-        )
+    build_digest, provenance = _php_extension_build_receipt(inst_cfg)
+    desired = {
+        "profile": (resolution.profile if isinstance(resolution.profile, str) and
+                    _PHP_EXTENSION_SAFE_VALUE.fullmatch(resolution.profile) else None),
+        "catalog": {"revision": DEFAULT_CATALOG.schema_version,
+                    "digest": resolution.catalog},
+        "requirements": [dict(item) for item in resolution.requirements],
+        "resolution_digest": resolution.digest,
+    }
+    if build_digest is not None:
+        desired["build_digest"] = build_digest
 
-    probes = php_extension_probe(instance, effective, timeout=timeout)
-    verification = service.verify(effective, probes)
-    observed = {plane: _php_observed_row(probes[plane])
-                for plane in _PHP_EXTENSION_PLANES}
-    fresh = all(result.observation is not None for result in probes.values())
-    unavailable = [plane for plane, result in probes.items()
-                   if result.observation is None and any(
-                       error.code == "probe_unavailable" for error in result.errors)]
-    if verification.ok:
-        drift_state = "ready"
-    elif unavailable or not fresh:
-        drift_state = "unknown"
-    else:
-        drift_state = "drift"
-    return {
-        "desired": {
-            "profile": resolution.profile,
-            "catalog": resolution.catalog,
-            "requirements": [dict(item) for item in resolution.requirements],
-            "digest": resolution.digest,
-        },
+    probes = None
+    verification = None
+    if instance is not None and resolution.ok:
+        probes = php_extension_probe(instance, effective, timeout=timeout)
+        verification = service.verify(effective, probes)
+    observed = {
+        plane: (_php_observed_row(probes[plane]) if probes is not None
+                else {"state": "unavailable", "issues": [{
+                    "code": "plane_drift",
+                    "message": _PHP_EXTENSION_ISSUE_MESSAGES["plane_drift"],
+                    "plane": plane,
+                }]})
+        for plane in _PHP_EXTENSION_PLANES
+    }
+    fresh = bool(probes) and all(result.observation is not None
+                                 for result in probes.values())
+    raw_issues = list(resolution.issues)
+    if verification is not None:
+        raw_issues.extend(verification.errors)
+        # Observation-only recipes are valid assertions. They become an
+        # unsupported-provisioning failure only when the fresh probe proves
+        # the requested extension is absent.
+        missing = {error.extension for error in verification.errors
+                   if error.code == "missing" and error.extension}
+        for name in sorted(missing):
+            try:
+                recipe = DEFAULT_CATALOG.recipe(name)
+            except Exception:
+                continue
+            if not recipe.provisionable:
+                raw_issues.append({"code": "unsupported_provisioning",
+                                   "extension": name})
+    elif not resolution.issues:
+        raw_issues.extend({"code": "plane_drift", "plane": plane}
+                          for plane in _PHP_EXTENSION_PLANES)
+    for row in observed.values():
+        raw_issues.extend(row.get("issues", ()))
+    issues = _canonical_php_extension_issues(raw_issues)
+    unavailable = any(row["state"] in {"unavailable", "error"}
+                      for row in observed.values())
+    report_ok = (resolution.ok and verification is not None and verification.ok
+                 and all(row["state"] == "ready" for row in observed.values()))
+    readiness = ("ready" if report_ok else
+                 "blocked" if not resolution.ok else
+                 "unavailable" if unavailable else "blocked")
+    drift_state = "ready" if report_ok else ("unknown" if unavailable else "drift")
+    report = {
+        "ok": report_ok,
+        "exit_code": 0 if report_ok else 1,
+        "desired": desired,
+        "provenance": provenance,
         "observed": observed,
-        "drift": {
-            "state": drift_state,
-            "issues": [error.to_dict() for error in verification.errors],
-        },
+        "readiness": {"state": readiness},
         "staleness": {
             "state": "fresh" if fresh else "stale",
-            "reason": ("all four PHP planes observed in this check"
-                       if fresh else "one or more PHP planes were unavailable"),
+            "reason": ("all_four_planes_observed" if fresh
+                       else "one_or_more_planes_unavailable"),
         },
-        "verification": verification.to_dict(),
+        "drift": {"state": drift_state},
+        "issues": issues,
+    }
+    from sandbox.services.redaction import redact_structure
+
+    public = redact_structure(report)
+    if isinstance(public, Mapping):
+        return dict(public)
+    return {
+        "ok": False,
+        "exit_code": 1,
+        "desired": {},
+        "provenance": {"state": "unavailable"},
+        "observed": {plane: {"state": "unavailable"}
+                     for plane in _PHP_EXTENSION_PLANES},
+        "readiness": {"state": "unavailable"},
+        "staleness": {"state": "stale", "reason": "redaction_failed"},
+        "drift": {"state": "unknown"},
+        "issues": [{"code": "plane_drift",
+                    "message": _PHP_EXTENSION_ISSUE_MESSAGES["plane_drift"]}],
     }
 
 

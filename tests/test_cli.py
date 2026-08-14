@@ -140,6 +140,11 @@ class TestResolutionGate(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--yes", r.stdout)
 
+    def test_doctor_help_exposes_machine_readable_report(self):
+        r = run_sb("doctor", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--json", r.stdout)
+
     def test_deploy_help_exposes_immutable_source_ref(self):
         r = run_sb("deploy", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)

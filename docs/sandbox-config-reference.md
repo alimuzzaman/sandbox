@@ -427,8 +427,22 @@ approved signed-APT package plan. Generic Compose, LiteSpeed, Herd, Valet, custo
 images, arbitrary packages, URLs, Dockerfiles, shell fragments, and unknown/global
 INI mutation are never auto-modified by this field.
 
-`sb status --json` and `sb doctor` report desired constraints, parent/build
-provenance, every observed plane, drift, and staleness. `sb apply` rebuilds only
+`sb status` / `sb status --json` and `sb doctor` / `sb doctor --json` use the
+same canonical extension report and process result. JSON mode writes exactly one
+document to stdout and exits nonzero after emitting it when an extension check
+fails; a valid nonzero remote status document is forwarded with the same result.
+The report includes the profile, catalog revision/digest, canonical requirements,
+resolution digest, every web/WP-CLI/bounded-exec/PHPUnit observation, readiness,
+drift, and staleness. A build digest appears only when its read-only cache receipt
+is complete. Provenance is limited to recipe-catalog and parent digests plus
+allowlisted recipe IDs; raw probe stdout/stderr, context paths, image URLs,
+commands, shell fragments, and unrelated or arbitrary project values are never
+reported.
+
+Extension failures use the stable codes `missing`, `version_mismatch`,
+`version_unobservable`, `unsupported_provisioning`, `unsupported_disable`, and
+`plane_drift`. Projects that omit `phpExtensions` retain the legacy status shape.
+`sb apply` rebuilds only
 the WordPress web tier (`wp` plus nginx when selected); DB, Mailpit, uploads,
 snapshots, and project files are preserved.
 Status JSON omits credential-like fields and redacts `sandbox_autologin` values.

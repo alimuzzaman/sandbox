@@ -137,6 +137,15 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         return json.loads(output.getvalue())
 
+    def _capture_failed_status(self, commands, cfg, args, expected=1):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), \
+                self.assertRaises(SystemExit) as raised:
+            commands.cmd_status(cfg, args)
+        self.assertEqual(raised.exception.code, expected)
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        return json.loads(output.getvalue())
+
     def test_status_json_sanitizer_removes_sensitive_keys_and_redacts_assignment(self):
         from sandbox.commands.lifecycle import _public_status_json
 
@@ -200,6 +209,8 @@ class TestStatusJsonRedaction(unittest.TestCase):
             payload["runtime"]["nested"]["message"],
             "resume at ?sandbox_autologin=[REDACTED]&view=diagnostics",
         )
+        self.assertNotIn("php_extensions", payload)
+        self.assertNotIn("exit_code", payload)
 
     def test_status_json_redacts_generic_compose_runtime_data(self):
         import sandbox.commands.lifecycle as commands
@@ -248,6 +259,83 @@ class TestStatusJsonRedaction(unittest.TestCase):
             payload["output"],
             "https://remote.fixture.test/?sandbox_autologin=[REDACTED]&next=status",
         )
+
+    def test_status_text_redacts_remote_extension_report(self):
+        import sandbox.commands.lifecycle as commands
+
+        marker = "github_pat_" + "fixturecredentialvalue1234567890"
+        remote_result = {
+            "ok": True,
+            "status": "ready",
+            "php_extensions": {
+                "ok": True,
+                "desired": {"profile": "default", "catalog": {}},
+                "observed": {"web": {"state": "ready", "php_version": marker}},
+                "issues": [{"code": "plane_drift", "message": marker}],
+            },
+        }
+        args = types.SimpleNamespace(json=False, resolved_instance="fixture", workspace="default")
+        output = io.StringIO()
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_status({}, args)
+
+        self.assertNotIn(marker, output.getvalue())
+        self.assertIn("[REDACTED]", output.getvalue())
+
+    def test_status_json_emits_one_document_before_matching_extension_exit(self):
+        import sandbox.commands.lifecycle as commands
+
+        remote_result = {
+            "ok": False,
+            "exit_code": 1,
+            "php_extensions": {"ok": False, "exit_code": 1,
+                               "issues": [{"code": "missing"}]},
+        }
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result):
+            payload = self._capture_failed_status(commands, {}, self._status_args())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["exit_code"], 1)
+        self.assertEqual(payload["php_extensions"]["issues"][0]["code"], "missing")
+
+    def test_status_json_fails_closed_on_inconsistent_remote_zero_exit(self):
+        import sandbox.commands.lifecycle as commands
+
+        remote_result = {
+            "ok": False,
+            "exit_code": 0,
+            "php_extensions": {"ok": False, "exit_code": 0,
+                               "issues": [{"code": "plane_drift"}]},
+        }
+        with mock.patch.object(commands, "_remote_lifecycle", return_value=remote_result):
+            payload = self._capture_failed_status(commands, {}, self._status_args())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["exit_code"], 1)
+
+    def test_remote_nonzero_valid_status_json_is_forwarded(self):
+        import sandbox.commands.lifecycle as commands
+        import sandbox.core._remote as remote
+
+        document = {"ok": False, "exit_code": 1,
+                    "php_extensions": {"ok": False, "exit_code": 1,
+                                       "issues": [{"code": "plane_drift"}]}}
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        result = types.SimpleNamespace(returncode=1, stdout=json.dumps(document), stderr="")
+        args = types.SimpleNamespace(remote="fixture-remote", local=False,
+                                     project_dir="/tmp/project", workspace="default")
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "remote_workspace_path", return_value="/srv/project"), \
+                mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result):
+            forwarded = commands._remote_lifecycle({}, args, "status")
+        self.assertFalse(forwarded["ok"])
+        self.assertEqual(forwarded["exit_code"], 1)
+        self.assertEqual(forwarded["php_extensions"], document["php_extensions"])
 
 if __name__ == "__main__":
     unittest.main()

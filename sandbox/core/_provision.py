@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import types as _types
 from contextlib import contextmanager
@@ -156,6 +157,56 @@ def _write_abilities_muplugin(instance: str) -> None:
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(payload, dest)
+    _write_abilities_context(instance)
+
+
+_ABILITIES_FOCUS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,190}$")
+
+
+def _write_abilities_context(instance: str) -> None:
+    """Atomically synchronize the non-secret in-instance discovery context.
+
+    Focus commands can run before an instance is provisioned.  Do not create
+    the mu-plugin tree from that path: the ordinary abilities writer owns the
+    payload lifecycle, and this helper updates context only after its loader
+    exists.  The generated document intentionally contains one validated slug
+    (or null), never paths, URLs, tokens, or arbitrary focus-file content.
+    """
+    mu_dir = wp_dir(instance) / "wp-content" / "mu-plugins"
+    if not (mu_dir / "00-sandbox-abilities.php").is_file():
+        return
+
+    focused: str | None = None
+    focus = focus_file(instance)
+    if focus.is_file():
+        try:
+            candidate = focus.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            candidate = ""
+        if _ABILITIES_FOCUS_RE.fullmatch(candidate):
+            focused = candidate
+
+    destination = mu_dir / "sandbox-abilities-context.json"
+    serialized = json.dumps(
+        {"focused_plugin": focused}, sort_keys=True, separators=(",", ":")
+    ) + "\n"
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=mu_dir, prefix=".sandbox-abilities-context.",
+            suffix=".tmp", delete=False,
+        ) as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = handle.name
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 _ONDEMAND_MU_TEMPLATE = r'''<?php

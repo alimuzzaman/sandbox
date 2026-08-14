@@ -22,7 +22,7 @@ from sandbox.core import (
     collect_instance_rows, compose, compose_file, die, ensure_instance, ensure_pyyaml,
     focus_file, info, load_config, ok, proxy_available, regen_caddyfile,
     reload_proxy, resolve_instances, snapshots_dir, valet_proxy_remove, wp_dir,
-    wpcli,
+    wpcli, _write_abilities_context,
 )
 
 from sandbox.registry import register
@@ -44,6 +44,7 @@ def cmd_focus(cfg, args) -> None:
     if args.clear:
         if ff.exists():
             ff.unlink()
+        _write_abilities_context(inst)
         ok("Cleared plugin focus")
         return
     if not args.slug:
@@ -66,16 +67,19 @@ def cmd_focus(cfg, args) -> None:
             if other == inst:
                 continue
             try:
-                if fp.read_text().strip() == args.slug:
-                    fp.unlink()
-                    stolen.append(other)
+                matches = fp.read_text().strip() == args.slug
             except OSError:
-                pass
+                continue
+            if matches:
+                fp.unlink()
+                _write_abilities_context(other)
+                stolen.append(other)
         if stolen:
             info(f"moved focus of '{args.slug}' here from: "
                  f"{', '.join(stolen)}")
 
     ff.write_text(args.slug)
+    _write_abilities_context(inst)
     ok(f"Focused plugin: {args.slug}")
 
 def cmd_ensure(cfg, args) -> None:

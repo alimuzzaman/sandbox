@@ -15,7 +15,8 @@ A named, discoverable WP capability registered via `wp_register_ability('sandbox
 | annotations | `readonly`, `destructive`, `idempotent` |
 
 Set: `execute-php`, `read-file`, `write-file`, `edit-file`, `list-directory`, plus
-the `mcp-adapter/discover-abilities` override.
+the adapter-provided `mcp-adapter/discover-abilities` tool with Sandbox-scoped result
+enrichment.
 
 Annotation matrix: `execute-php` → destructive, not readonly, not idempotent;
 `write/edit-file` → destructive; `read-file`/`list-directory` → readonly + idempotent.
@@ -38,6 +39,18 @@ and the endpoint exposes no abilities.
 | auth | Application Password (Basic), gated on `is_ssl() \|\| WP_ENVIRONMENT_TYPE=local` |
 
 Derived from the registry + `sandbox.local.yml`; emitted by `./sb connect`.
+
+## Discovery environment context
+
+The host atomically writes `sandbox-abilities-context.json` beside the provisioned
+mu-plugin only after the abilities payload exists. Its entire schema is
+`{"focused_plugin": <validated-plugin-slug-or-null>}`. Provisioning, focus, focus
+clear, and stolen-focus transitions synchronize it. The in-instance loader derives
+the safe base URL from `home_url()` and adds the runtime-neutral snapshot reminder at
+response time, so paths, credentials, tokens, and arbitrary focus text are never
+persisted in the context document. The Sandbox MCP server's transport callback
+requires an authenticated `manage_options` user; no global adapter capability filter
+is installed.
 
 ## Sandbox-code folder + safe-mode marker
 

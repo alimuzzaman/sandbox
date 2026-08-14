@@ -40,11 +40,27 @@ Run PHP in the live WordPress runtime.
 
 ## Discovery
 
-The bundled adapter supplies standard MCP tool discovery for the registered
-`sandbox/*` abilities. Sandbox-specific environment guidance is intentionally not
-returned by discovery in the current implementation; use `./sb abilities status`
-for the endpoint and enable-state reminder, and the normal Sandbox context tools
-for focused-plugin and snapshot information.
+The Sandbox server exposes the adapter's `mcp-adapter/discover-abilities` tool.
+Its ordinary `abilities` list is returned unchanged, with one additional bounded
+object:
+
+```json
+{
+  "sandbox_environment": {
+    "focused_plugin": "plugin-slug-or-null",
+    "instance_url": "https://instance.test/",
+    "snapshot_reminder": "Before destructive changes, use the supported Sandbox snapshot workflow."
+  }
+}
+```
+
+The host writes only a validated focused-plugin slug (or `null`) to the in-instance
+context document. WordPress rebuilds `instance_url` from `home_url()` while dropping
+userinfo, query, and fragment data. Enrichment is scoped to the `sandbox` MCP server;
+other servers, other tools, malformed discovery results, and explicit failure/error
+envelopes are unchanged. The Sandbox server supplies the adapter's public
+transport-permission callback, which requires an authenticated user with
+`manage_options` without changing permissions on unrelated adapter servers.
 
 ## Errors
 

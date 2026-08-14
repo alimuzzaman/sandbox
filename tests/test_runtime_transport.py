@@ -36,6 +36,99 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(service.requests[0].operation, "ensure")
 
+    def test_cli_ensure_json_redacts_typed_operation_error(self):
+        import sandbox.commands.instances_cmd as commands
+
+        service = RejectingService()
+        service.invoke = mock.Mock(return_value=OperationError(
+            code="unsupported_capability",
+            message="password=operation-error-password",
+            project_kind="test",
+            requested_capability="ensure",
+        ))
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=True)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as raised:
+            commands.cmd_ensure({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload, {
+            "ok": False,
+            "error": {
+                "code": "unsupported_capability",
+                "message": "password=[REDACTED]",
+            },
+        })
+        self.assertNotIn("operation-error-password", stdout.getvalue())
+
+    def test_cli_ensure_json_redacts_config_error(self):
+        import sandbox.commands.instances_cmd as commands
+
+        class FixtureConfigError(Exception):
+            pass
+
+        service = mock.Mock()
+        service.invoke.side_effect = FixtureConfigError(
+            "authorization=Bearer config-error-authorization")
+        core = types.SimpleNamespace(ConfigError=FixtureConfigError)
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=True)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(commands, "_core", return_value=core), \
+                mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit) as raised:
+            commands.cmd_ensure({}, args)
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload, {
+            "ok": False,
+            "error": {
+                "code": "config_error",
+                "message": "authorization=[REDACTED]",
+            },
+        })
+        self.assertNotIn("config-error-authorization", stdout.getvalue())
+
+    def test_cli_ensure_human_errors_are_redacted(self):
+        import sandbox.commands.instances_cmd as commands
+
+        operation_service = mock.Mock()
+        operation_service.invoke.return_value = OperationError(
+            code="unsupported_capability",
+            message="password=human-operation-password",
+        )
+        config_service = mock.Mock()
+        config_service.invoke.side_effect = RuntimeError(
+            "authorization=Bearer human-config-authorization")
+        cases = (
+            (operation_service, "human-operation-password"),
+            (config_service, "human-config-authorization"),
+        )
+        for service, secret in cases:
+            args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                         create=False, json=False, local=True)
+            stderr = io.StringIO()
+            with self.subTest(secret=secret), \
+                    mock.patch.object(commands, "_core", return_value=types.SimpleNamespace(
+                        ConfigError=RuntimeError)), \
+                    mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                commands.cmd_ensure({}, args)
+            self.assertNotIn(secret, stderr.getvalue())
+            self.assertIn("[REDACTED]", stderr.getvalue())
+
     def test_cli_apply_rejects_before_legacy_apply(self):
         import sandbox.commands.config_setup as commands
 
@@ -48,7 +141,7 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         legacy.assert_not_called()
         self.assertEqual(service.requests[0].operation, "apply")
 
-    def test_cli_ensure_json_never_prints_autologin_secret(self):
+    def test_cli_ensure_json_redacts_local_instance_credentials(self):
         import sandbox.commands.instances_cmd as commands
         from sandbox.runtimes.base import OperationResult
 
@@ -61,6 +154,8 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                         "url": "https://fixture.tst",
                         "login_url": "https://fixture.tst/?sandbox_autologin=login-token",
                         "autologin_token": "raw-token",
+                        "password": "raw-password",
+                        "authorization": "Bearer raw-authorization",
                     },
                 )
 
@@ -71,10 +166,118 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
                               return_value=SuccessfulService()), \
                 contextlib.redirect_stdout(output):
             commands.cmd_ensure({}, args)
-        self.assertNotIn("raw-token", output.getvalue())
-        self.assertNotIn("autologin_token", output.getvalue())
-        self.assertIn("login_url", output.getvalue())
-        self.assertIn("https://fixture.tst", output.getvalue())
+        serialized = output.getvalue()
+        self.assertEqual(len(serialized.splitlines()), 1)
+        payload = json.loads(serialized)
+        self.assertEqual(payload["url"], "https://fixture.tst")
+        self.assertEqual(
+            payload["login_url"],
+            "https://fixture.tst/?sandbox_autologin=%5BREDACTED%5D",
+        )
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertEqual(payload["password"], "[REDACTED]")
+        self.assertEqual(payload["authorization"], "[REDACTED]")
+        for secret in ("login-token", "raw-token", "raw-password", "raw-authorization"):
+            self.assertNotIn(secret, serialized)
+
+    def test_cli_ensure_json_redacts_remote_credentials(self):
+        import sandbox.commands.instances_cmd as commands
+
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=False)
+        remote_result = {
+            "ok": True,
+            "url": "https://remote.fixture.tst",
+            "login_url": "https://remote.fixture.tst/?sandbox_autologin=remote-login",
+            "autologin_token": "remote-token",
+            "nested": {"password": "remote-password", "state": "ready"},
+        }
+        output = io.StringIO()
+        with mock.patch("sandbox.commands.lifecycle._remote_lifecycle",
+                        return_value=remote_result), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_ensure({}, args)
+
+        serialized = output.getvalue()
+        self.assertEqual(len(serialized.splitlines()), 1)
+        payload = json.loads(serialized)
+        self.assertEqual(payload["url"], "https://remote.fixture.tst")
+        self.assertEqual(payload["nested"]["state"], "ready")
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertEqual(payload["nested"]["password"], "[REDACTED]")
+        self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        for secret in ("remote-login", "remote-token", "remote-password"):
+            self.assertNotIn(secret, serialized)
+
+    def test_cli_ensure_json_redacts_managed_native_success_credentials(self):
+        import sandbox.commands.instances_cmd as commands
+
+        service = mock.Mock()
+        service.invoke.return_value = OperationResult(
+            True, "ensure", "/tmp/project", "wordpress", {
+                "ok": True,
+                "state": "ready",
+                "backend": {"address": "127.0.0.1", "port": 3306,
+                            "password": "native-password"},
+                "login_url": "https://native.fixture.tst/?sandbox_autologin=native-login",
+                "autologin_token": "native-token",
+            },
+        )
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=True)
+        output = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_ensure({}, args)
+
+        serialized = output.getvalue()
+        self.assertEqual(len(serialized.splitlines()), 1)
+        payload = json.loads(serialized)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["state"], "ready")
+        self.assertEqual(payload["backend"]["address"], "127.0.0.1")
+        self.assertEqual(payload["backend"]["password"], "[REDACTED]")
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        for secret in ("native-password", "native-login", "native-token"):
+            self.assertNotIn(secret, serialized)
+
+    def test_cli_ensure_json_redacts_structured_failure_and_stderr(self):
+        import sandbox.commands.instances_cmd as commands
+
+        service = mock.Mock()
+        service.invoke.return_value = OperationResult(
+            False, "ensure", "/tmp/project", "wordpress", {
+                "ok": False,
+                "reason": {
+                    "code": "provision_failed",
+                    "message": "password=failure-password",
+                    "failed_after": ["database"],
+                },
+                "login_url": "https://failure.fixture.tst/?sandbox_autologin=failure-login",
+                "authorization": "Bearer failure-authorization",
+            },
+        )
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=True)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                self.assertRaises(SystemExit):
+            commands.cmd_ensure({}, args)
+
+        serialized = stdout.getvalue()
+        self.assertEqual(len(serialized.splitlines()), 1)
+        payload = json.loads(serialized)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"]["code"], "provision_failed")
+        self.assertEqual(payload["reason"]["message"], "password=[REDACTED]")
+        self.assertEqual(payload["authorization"], "[REDACTED]")
+        self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+        combined = serialized + stderr.getvalue()
+        for secret in ("failure-password", "failure-login", "failure-authorization"):
+            self.assertNotIn(secret, combined)
 
     def test_registered_generic_instance_can_use_generated_long_runtime_id(self):
         import sandbox.commands.instances_cmd as commands
@@ -165,7 +368,7 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertNotIn("accessToken", payload["nested"])
         self.assertEqual(
             payload["nested"]["detail"],
-            "open https://fixture.test/?sandbox_autologin=[REDACTED]&view=health",
+            "open https://fixture.test/?sandbox_autologin=%5BREDACTED%5D&view=health",
         )
 
     def test_status_json_redacts_nested_wordpress_runtime_data(self):
@@ -235,7 +438,7 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertNotIn("session_cookie", payload)
         self.assertEqual(
             payload["diagnostics"],
-            ["https://compose.fixture.test/?sandbox_autologin=[REDACTED]#details"],
+            ["https://compose.fixture.test/?sandbox_autologin=%5BREDACTED%5D"],
         )
 
     def test_status_json_redacts_remote_result(self):
@@ -257,7 +460,7 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertNotIn("authorization", payload)
         self.assertEqual(
             payload["output"],
-            "https://remote.fixture.test/?sandbox_autologin=[REDACTED]&next=status",
+            "https://remote.fixture.test/?sandbox_autologin=%5BREDACTED%5D&next=status",
         )
 
     def test_status_text_redacts_remote_extension_report(self):

@@ -50,8 +50,8 @@ _PROVIDER_SECRET = re.compile(
 )
 _URL = re.compile(r"(?i)\bhttps?://[^\s<>'\"]+")
 _SENSITIVE_QUERY_NAME = re.compile(
-    r"(?i)(?:access[_-]?token|auth|authorization|credential|key|password|"
-    r"passphrase|secret|signature|sig|token|api[_-]?key)s?$"
+    r"(?i)(?:^sandbox_autologin$|(?:access[_-]?token|auth|authorization|credential|key|"
+    r"password|passphrase|secret|signature|sig|token|api[_-]?key)s?$)"
 )
 _SENSITIVE_FLAG = re.compile(
     r"(?i)^--?(?:authorization|cookie|credential|password|passphrase|secret|token|"

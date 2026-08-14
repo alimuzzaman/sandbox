@@ -48,6 +48,20 @@ class SharedRedactionTests(unittest.TestCase):
         self.assertIn("mode=safe", rendered)
         self.assertIn("token=%5BREDACTED%5D", rendered)
 
+    def test_url_redacts_exact_sandbox_autologin_query_only(self):
+        rendered = redact_url(
+            "https://example.test/wp-admin/?sandbox_autologin=fixture-login"
+            "&public_sandbox_autologin=prefix-public"
+            "&sandbox_autologin_hint=suffix-public&mode=safe"
+        )
+        self.assertEqual(
+            rendered,
+            "https://example.test/wp-admin/?sandbox_autologin=%5BREDACTED%5D"
+            "&public_sandbox_autologin=prefix-public"
+            "&sandbox_autologin_hint=suffix-public&mode=safe",
+        )
+        self.assertNotIn("fixture-login", rendered)
+
     def test_structure_and_exception_chains_are_recursive(self):
         outcomes = {
             case.name: not _contains_fixture(redact_structure(case.value), case.forbidden)

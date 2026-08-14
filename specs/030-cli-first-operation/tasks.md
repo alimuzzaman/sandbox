@@ -78,11 +78,14 @@ These tasks remain unchecked until implementation and live proof are complete.
 - [x] T023 [US1] Add `sb init` regressions proving new WordPress projects emit a
   reviewable `wordpress@1`/no-profile choice, while existing projects with omitted
   `phpExtensions` retain exact legacy configuration and output.
-- [ ] T024 [US1/US2] Add status/doctor text and JSON fixtures for canonical extension
+- [x] T024 [US1/US2] Add status/doctor text and JSON fixtures for canonical extension
   state, profile/catalog revision, digest, safe provenance, and web/WP-CLI/exec/PHPUnit
   observations, including each structured failure class and one-document stdout.
-  PARTIAL 2026-08-14: non-live constructor, status/doctor text+JSON, stable exits,
-  remote nonzero forwarding, safe-output fixtures, and documentation are implemented;
-  task remains open pending the required live four-plane runtime proof.
+  DONE 2026-08-14: constructor, status/doctor text+JSON, stable exits, remote nonzero
+  forwarding, safe-output fixtures, and documentation are implemented. A supported
+  local WordPress instance then reported ready web/WP-CLI/exec/PHPUnit observations
+  with no extension issues through both `sb status --json` and `sb doctor --json`;
+  doctor emitted one parseable document and truthfully retained its unrelated
+  overall nonzero result.
 - [x] T025 [US1] Add generic Compose refusal and secret-safe stdout/stderr tests for a
   present `phpExtensions` field before any image/package/runtime side effect.

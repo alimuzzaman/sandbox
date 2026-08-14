@@ -30,11 +30,24 @@ from sandbox.application.context import (
     domain_service, ingress_service, runtime_service, wordpress_runtime_service,
 )
 from sandbox.runtimes.base import OperationError, OperationRequest
+from sandbox.services.redaction import redact_structure, redact_text
 
 
 def _is_wordpress_project(config: dict) -> bool:
     """Return whether a resolved descriptor uses the WordPress schema."""
     return config.get("kind") == "wordpress"
+
+
+def _print_ensure_json(document: object, *, sort_keys: bool = False,
+                       compact: bool = False) -> None:
+    """Emit one fail-closed public JSON document for ``sb ensure --json``."""
+    separators = (",", ":") if compact else None
+    print(json.dumps(
+        redact_structure(document),
+        sort_keys=sort_keys,
+        separators=separators,
+        default=str,
+    ))
 
 
 
@@ -90,7 +103,7 @@ def cmd_ensure(cfg, args) -> None:
         from sandbox.commands.lifecycle import _remote_lifecycle
         remote_result = _remote_lifecycle(cfg, args, "ensure")
         if remote_result is not None and getattr(args, "json", False):
-            print(json.dumps(remote_result, sort_keys=True))
+            _print_ensure_json(remote_result, sort_keys=True)
         elif remote_result is not None:
             print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
         if remote_result is not None:
@@ -107,9 +120,22 @@ def cmd_ensure(cfg, args) -> None:
             arguments={"create": create},
         ))
     except sc.ConfigError as e:
-        die(str(e))
+        message = str(e)
+        if getattr(args, "json", False):
+            _print_ensure_json({
+                "ok": False,
+                "error": {"code": "config_error", "message": message},
+            }, compact=True)
+            raise SystemExit(1)
+        die(redact_text(message))
     if isinstance(result, OperationError):
-        die(result.message)
+        if getattr(args, "json", False):
+            _print_ensure_json({
+                "ok": False,
+                "error": {"code": result.code, "message": result.message},
+            }, compact=True)
+            raise SystemExit(1)
+        die(redact_text(result.message))
     entry = dict(result.data)
     if not isinstance(entry, dict) or "instance" not in entry:
         # A runtime that refuses returns its own typed result, not an instance
@@ -124,7 +150,7 @@ def cmd_ensure(cfg, args) -> None:
         # working instance is worse than useless.
         if isinstance(entry, dict) and entry.get("ok"):
             if getattr(args, "json", False):
-                print(json.dumps(entry, separators=(",", ":"), default=str))
+                _print_ensure_json(entry, compact=True)
             else:
                 backend = entry.get("backend") or {}
                 where = (f"{backend.get('address')}:{backend.get('port')}"
@@ -137,7 +163,7 @@ def cmd_ensure(cfg, args) -> None:
         # from any other, so emit the whole payload under --json and the
         # message plus the completed steps otherwise.
         if getattr(args, "json", False):
-            print(json.dumps(entry, separators=(",", ":"), default=str))
+            _print_ensure_json(entry, compact=True)
         message = reason.get("message") if isinstance(reason, dict) else None
         failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
         summary = f"instance is not ready: {code or detail or 'no reason reported'}"
@@ -145,13 +171,11 @@ def cmd_ensure(cfg, args) -> None:
             summary += f": {message}"
         if failed_after:
             summary += f" (completed: {', '.join(str(step) for step in failed_after)})"
-        die(summary)
+        die(redact_text(summary))
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
         # parse it past any boot/progress output above.
-        public_entry = dict(entry)
-        public_entry.pop("autologin_token", None)
-        print(json.dumps(public_entry))
+        _print_ensure_json(entry)
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")

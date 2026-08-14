@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from sandbox.services.redaction import require_safe_argv
+
 from .models import Health, JobSubmission, Lifecycle, new_job_id, validate_job_id, validate_transition
 
 
@@ -394,6 +396,9 @@ class JobRepository:
         return dict(row) if row is not None else None
 
     def accept(self, submission: JobSubmission) -> tuple[dict[str, Any], bool]:
+        # Persisted argv is later executed verbatim. Refuse credential-bearing
+        # forms instead of redacting them into a different command.
+        require_safe_argv(submission.argv)
         digest = submission.canonical_digest()
         now = _now()
         with self.transaction(immediate=True) as connection:

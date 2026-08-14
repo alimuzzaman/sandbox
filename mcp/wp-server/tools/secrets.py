@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from sandbox.secrets import SecretBrokerError
+from sandbox.services.redaction import redact_structure
 
 
 _service_factory = None
@@ -15,9 +16,14 @@ def _service(project_dir: str):
 
 def _safe(callable_):
     try:
-        return callable_()
+        result = redact_structure(callable_())
+        return result if isinstance(result, dict) else {
+            "ok": False,
+            "error": {"code": "redaction_failed", "message": "secret operation failed", "retryable": False},
+        }
     except SecretBrokerError as exc:
-        return {"ok": False, "error": exc.as_dict()}
+        result = redact_structure({"ok": False, "error": exc.as_dict()})
+        return result if isinstance(result, dict) else {"ok": False, "error": {"code": "redaction_failed"}}
     except Exception:
         return {
             "ok": False,

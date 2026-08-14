@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from sandbox.registry import CommandSpec, register_specs
+from sandbox.services.redaction import redact_structure
 from sandbox.secrets import SecretBrokerError
 from sandbox.secrets.context import build_secret_service
 from sandbox.secrets.models import MAX_VALUE_BYTES
@@ -94,6 +95,9 @@ def _service(project_dir: str):
 
 
 def _emit(payload: dict, as_json: bool) -> None:
+    payload = redact_structure(payload)
+    if not isinstance(payload, dict):
+        payload = {"ok": False, "operation": "secrets", "error": "redaction_failed"}
     if as_json:
         print(json.dumps(payload, sort_keys=True))
         return
@@ -167,7 +171,8 @@ def _migrate(args) -> None:
         moved = _secrets.migrate_zshrc()
         cloudflare_migrated = _cloudflare.migrate_legacy_token()
     except _secrets.SecretError as exc:
-        die(str(exc))
+        from sandbox.services.redaction import redact_text
+        die(redact_text(str(exc)))
     result = {"ok": True, "file": str(_secrets.secret_file()), "migrated": sorted(moved),
               "cloudflare_migrated": cloudflare_migrated}
     if args.json:

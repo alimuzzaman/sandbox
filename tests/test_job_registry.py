@@ -55,6 +55,57 @@ class JobRegistryTests(unittest.TestCase):
         reopened = self.repository()
         self.assertEqual(reopened.get(first["job_id"])["lifecycle"], "accepted")
 
+    def test_credential_like_argv_is_refused_before_any_submission_persistence(self):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        repo = self.repository()
+        item = JobSubmission(
+            kind="test", project_root="/tmp/project", project_identity="project-1",
+            target_kind="local", workspace_label="default",
+            argv=("tool", "--api-key", "synthetic-candidate-value"),
+            deadline_seconds=60, request_id="unsafe-request",
+            source=SourceIdentity("sha256:source"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "credential-like material"):
+            repo.accept(item)
+        self.assertEqual(repo.connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+
+    def test_safe_url_argv_is_persisted_verbatim_while_credential_urls_are_refused(self):
+        from sandbox.jobs.models import JobSubmission, SourceIdentity
+
+        repo = self.repository()
+        safe_url = "https://example.test/path?next=a%2Fb#safe-section"
+        safe = JobSubmission(
+            kind="test", project_root="/tmp/project", project_identity="project-1",
+            target_kind="local", workspace_label="default", argv=("tool", safe_url),
+            deadline_seconds=60, request_id="safe-url",
+            source=SourceIdentity("sha256:source"),
+        )
+        row, _ = repo.accept(safe)
+        self.assertEqual(repo.submission_snapshot(row["job_id"])["argv"], ["tool", safe_url])
+
+        unsafe_urls = (
+            "https://fixture-user:fixture-password@example.test/path",
+            "https://example.test/path?token=fixture-value",
+        )
+        outcomes = []
+        for index, unsafe_url in enumerate(unsafe_urls):
+            item = JobSubmission(
+                kind="test", project_root="/tmp/project", project_identity="project-1",
+                target_kind="local", workspace_label="default", argv=("tool", unsafe_url),
+                deadline_seconds=60, request_id=f"unsafe-url-{index}",
+                source=SourceIdentity("sha256:source"),
+            )
+            try:
+                repo.accept(item)
+            except ValueError:
+                outcomes.append(True)
+            else:
+                outcomes.append(False)
+        self.assertTrue(all(outcomes))
+        self.assertEqual(repo.connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+
     def test_active_only_filters_before_the_bounded_page(self):
         repo = self.repository()
         active, _ = repo.accept(submission("active-old"))

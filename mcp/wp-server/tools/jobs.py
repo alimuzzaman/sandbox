@@ -73,8 +73,8 @@ def _submit_explicit_job(command: list[str], project_dir: str, *, local: bool = 
                 ssh_run=_remote.ssh_run, remote_lookup=_remote.get_remote,
                 remote_sb_path=_remote.remote_sb_path).submit(submission)
         return _job_service.submit(submission)
-    except Exception as exc:
-        return {"ok": False, "code": "supervisor_launch_failed", "error": str(exc)}
+    except Exception:
+        return {"ok": False, "code": "supervisor_launch_failed", "error": "job submission failed"}
 
 
 def job_start(command: list[str], project_dir: str, *, local: bool = False,
@@ -116,7 +116,8 @@ def job_matrix(command: list[str], workspaces: list[str], project_dir: str, *,
                 remote_sb_path=_remote.remote_sb_path).submit_many(submissions)
         return _job_service.submit_matrix(submissions)
     except Exception as exc:
-        return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"), "error": str(exc)}
+        return {"ok": False, "code": getattr(exc, "code", "matrix_submission_failed"),
+                "error": "job matrix submission failed"}
 
 
 def job_status(job_id: str, *, remote: str | None = None) -> dict:

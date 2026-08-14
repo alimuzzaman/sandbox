@@ -50,6 +50,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._config import ensure_pyyaml, _local_yaml
 from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
+from sandbox.services.redaction import redact_structure, redact_text
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
@@ -261,7 +262,15 @@ def redact_ssh_connection(value: str, remote: dict | None = None) -> str:
     if remote and remote.get("ssh"):
         text = text.replace(str(remote["ssh"]), "[redacted SSH target]")
         text = text.replace(f"ssh://{remote['ssh']}", "[redacted SSH target]")
-    return _SSH_CONNECTION_RE.sub("[redacted SSH target]", text)
+    return redact_text(_SSH_CONNECTION_RE.sub("[redacted SSH target]", text))
+
+
+def _safe_remote_diagnostic(result, remote: dict | None = None, *, limit: int = 1000) -> str:
+    """Bound and sanitize injected runner diagnostics without raw fallback."""
+    value = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return redact_ssh_connection(value, remote)[-limit:]
 
 
 def parse_ssh_target(ssh_value: str) -> dict:
@@ -563,7 +572,7 @@ def resolve_sandbox_home(remote: dict) -> str:
     if res.returncode != 0 or not (res.stdout or "").strip():
         raise RuntimeError(
             f"could not resolve $SANDBOX_HOME on remote: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return res.stdout.strip()
 
@@ -626,7 +635,7 @@ def ensure_deploy_repo(remote: dict, project_root) -> str:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not prepare deploy-target repo on remote: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return target
 
@@ -641,7 +650,8 @@ def _last_json(stdout: str) -> dict | None:
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict):
-            return data
+            sanitized = redact_structure(data)
+            return sanitized if isinstance(sanitized, dict) else None
     return None
 
 
@@ -687,7 +697,7 @@ def ensure_remote_instance(remote: dict, target_path: str, label: str | None = N
     if res.returncode != 0 or not data:
         raise RuntimeError(
             f"could not ensure remote instance: "
-            f"{(res.stderr or res.stdout or '').strip()[:2000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=2000)}"
         )
     return data
 
@@ -726,7 +736,7 @@ def reconcile_remote_instance(remote: dict, target_path: str,
     if res.returncode != 0 or not data:
         raise RuntimeError(
             "could not reconcile remote instance: "
-            f"{(res.stderr or res.stdout or '').strip()[:2000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=2000)}"
         )
     return data
 
@@ -755,7 +765,7 @@ def activate_remote_plugin(remote: dict, target_path: str, instance: str,
     if res.returncode != 0:
         raise RuntimeError(
             f"could not activate remote plugin {plugin_slug}: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -872,7 +882,7 @@ def configure_instance_https_route(remote: dict, domain: str, port: int) -> None
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure remote instance HTTPS route: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -891,7 +901,7 @@ def remove_instance_https_route(remote: dict, domain: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not remove remote instance HTTPS route: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -904,7 +914,7 @@ def delete_remote_instance(remote: dict, instance_name: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not delete remote Sandbox instance: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -926,7 +936,7 @@ def delete_remote_instance_for_label(remote: dict, target_path: str, label: str)
     if res.returncode != 0 or not isinstance(data, dict):
         raise RuntimeError(
             "could not list remote instances for preview rollback: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
     rows = data.get("instances")
     if not isinstance(rows, list):
@@ -954,7 +964,7 @@ def set_remote_instance_url(remote: dict, target_path: str, url: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not set remote instance URL: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 
@@ -1010,7 +1020,7 @@ def _source_tree_commit(project_root, source_root, commit: str) -> tuple[str, Pa
         None,
     )
     if split.returncode != 0 or split_sha is None:
-        detail = (split.stderr or split.stdout or "").strip()[:500]
+        detail = _safe_remote_diagnostic(split, limit=500)
         raise RuntimeError(f"could not create source-root commit: {detail}")
     return split_sha, checkout_path
 
@@ -1085,7 +1095,7 @@ def push_commits(
     if res.returncode != 0:
         raise RuntimeError(
             f"git push to remote failed: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
     if source_ref is not None:
         return tree_commit if source_root is not None else resolved_sha  # already validated as a full SHA above
@@ -1117,7 +1127,7 @@ def reset_target_to(remote: dict, target_path: str, sha: str) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not reset the VPS working tree to {sha}: "
-            f"{(res.stderr or res.stdout or '').strip()[:500]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=500)}"
         )
 
 
@@ -1218,7 +1228,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if changed_res.returncode != 0:
             raise RuntimeError(
                 f"could not list changed tracked files: "
-                f"{(changed_res.stderr or changed_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(changed_res, limit=500)}"
             )
         deleted_res = subprocess.run(
             ["git", "diff", "--name-only", "--relative", "--diff-filter=D", "HEAD"],
@@ -1227,7 +1237,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if deleted_res.returncode != 0:
             raise RuntimeError(
                 f"could not list deleted tracked files: "
-                f"{(deleted_res.stderr or deleted_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(deleted_res, limit=500)}"
             )
         changed_names = [n for n in (changed_res.stdout or "").splitlines() if n.strip()]
         deleted = [n for n in (deleted_res.stdout or "").splitlines() if n.strip()]
@@ -1251,7 +1261,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if rm_res.returncode != 0:
             raise RuntimeError(
                 "could not remove deleted files on remote: "
-                f"{(rm_res.stderr or rm_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(rm_res, remote, limit=500)}"
             )
         applied += len(deleted)
 
@@ -1269,7 +1279,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if tar_res.returncode != 0:
             raise RuntimeError(
                 "could not package dirty files: "
-                f"{(tar_res.stderr or b'').decode(errors='replace').strip()[:500]}"
+                f"{_safe_remote_diagnostic(tar_res, limit=500)}"
             )
         extract = (
             f"mkdir -p -- {shlex.quote(target_path)} && "
@@ -1280,7 +1290,7 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         if copy_res.returncode != 0:
             raise RuntimeError(
                 "could not transfer dirty files: "
-                f"{(copy_res.stderr or copy_res.stdout or '').strip()[:500]}"
+                f"{_safe_remote_diagnostic(copy_res, remote, limit=500)}"
             )
         applied += len(existing)
     return applied
@@ -1416,7 +1426,10 @@ def remote_diagnostics(remote: dict, *, timeout: int = 10) -> dict:
         raise RuntimeError("remote diagnostics endpoint is unreachable") from exc
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError("remote diagnostics returned an invalid payload")
-    return payload
+    sanitized = redact_structure(payload)
+    if not isinstance(sanitized, dict):
+        raise RuntimeError("remote diagnostics redaction failed")
+    return sanitized
 
 
 REMOTE_DOCKER_ADDRESS_POOLS = (
@@ -2316,7 +2329,7 @@ def migrate_remote_mcp_service(remote: dict, bind: str, port: int, token: str,
     if res.returncode != 0:
         if res.returncode in {42, 43}:
             raise RuntimeError("remote_service_ownership_unknown")
-        detail = redact_ssh_connection((res.stderr or res.stdout or "").strip()[:500], remote)
+        detail = _safe_remote_diagnostic(res, remote, limit=500)
         if detail:
             raise RuntimeError(f"could not install the remote MCP service: {detail}")
         raise RuntimeError("could not install the remote MCP service")
@@ -2331,7 +2344,7 @@ def resolve_tailscale_ip(remote: dict) -> str:
     if res.returncode != 0 or not ip:
         raise RuntimeError(
             f"could not resolve a Tailscale IP on the remote -- is Tailscale "
-            f"installed and joined? {(res.stderr or res.stdout or '').strip()[:500]}"
+            f"installed and joined? {_safe_remote_diagnostic(res, remote, limit=500)}"
         )
     return ip
 
@@ -2347,7 +2360,7 @@ def configure_https_proxy(remote: dict, public_host: str, port: int) -> None:
     if res.returncode != 0:
         raise RuntimeError(
             f"could not configure HTTPS control proxy: "
-            f"{(res.stderr or res.stdout or '').strip()[:1000]}"
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
         )
 
 

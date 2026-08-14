@@ -126,3 +126,31 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(state["termination_reason"], "output_storage_failed")
             self.assertEqual(state["output_completeness"], "write_failed")
             repository.close()
+
+    def test_supervisor_failure_persists_only_redacted_bounded_detail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = JobRepository(Path(temp) / "registry.sqlite")
+            row, _ = repository.accept(JobSubmission(
+                "test", temp, "p", "local", "supervisor-redaction",
+                ("/bin/true",), 20, SourceIdentity("source"),
+            ))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            descriptor = {
+                "job_id": row["job_id"], "registry_path": str(repository.path),
+                "runtime_dir": str(storage.root.parent), "argv": ["/bin/true"],
+                "cwd": temp, "deadline_seconds": 20, "cancel_grace_seconds": 1,
+                "nonce_hash": "0" * 64, "environment": None,
+                "execution_runtime": "host",
+            }
+            descriptor_path = Path(temp) / "descriptor.json"
+            descriptor_path.write_text(json.dumps(descriptor))
+            canary = "synthetic-candidate-value"
+            with patch(
+                "sandbox.jobs.supervisor.capture_process_identity",
+                side_effect=RuntimeError(f"token={canary}"),
+            ):
+                self.assertEqual(run_descriptor(descriptor_path), 1)
+            result_json = repository.get(row["job_id"])["result_json"]
+            self.assertFalse(canary in result_json)
+            self.assertIn("[REDACTED]", result_json)
+            repository.close()

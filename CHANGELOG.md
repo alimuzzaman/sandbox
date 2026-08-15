@@ -60,6 +60,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] — v1.0.0 target
 
+### Fixed
+- Local `job-status --json` now returns a stable `job_not_found` receipt with
+  an explicit configured-remote retry hint instead of leaking a registry traceback.
+
 ### Added
 - `./sb smoke` — self-test subcommand: boots a fresh instance, verifies WP + REST, tears down.
 - `./sb doctor` now audits credential state (FluentBoards reachability, GitHub org set, `.env.local` permissions).

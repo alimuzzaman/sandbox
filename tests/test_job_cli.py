@@ -16,6 +16,7 @@ from unittest.mock import patch
 from sandbox.commands.jobs_runtime import (_download_artifact_file, cmd_job_list,
                                           cmd_job_start, cmd_job_status, _emit_json_line,
                                           configure_list_parser, configure_start_parser)
+from sandbox.jobs.registry import JobNotFound
 
 
 ROOT = Path(__file__).parent.parent
@@ -199,6 +200,27 @@ class JobCliTests(unittest.TestCase):
             self.assertEqual(output.getvalue().strip(),
                              f"{state['job_id']} succeeded (terminal) target=local workspace=unit "
                              "deadline=60s source=explicit")
+
+    def test_missing_local_status_returns_a_structured_remote_aware_error(self):
+        job_id = "0" * 32
+        service = SimpleNamespace(get=lambda _job_id: (_ for _ in ()).throw(
+            JobNotFound("not in this ledger")))
+        output = StringIO()
+        with patch("sandbox.commands.jobs_runtime.durable_job_dependencies",
+                   return_value={"job_service": service}), redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exited:
+                cmd_job_status(None, SimpleNamespace(remote=None, job_id=job_id, json=True))
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "ok": False,
+            "code": "job_not_found",
+            "job_id": job_id,
+            "error": "job was not found in the local durable-job ledger",
+            "hint": (
+                "The job may belong to a configured remote; run `./sb remote list` "
+                "and retry `./sb job-status <job-id> --remote <name> --json`."
+            ),
+        })
 
     def test_cli_artifact_get_rejects_invalid_bounds_before_transport(self):
         from sandbox.commands.jobs_runtime import cmd_job_artifact_get

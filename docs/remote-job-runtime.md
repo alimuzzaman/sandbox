@@ -19,6 +19,11 @@ development, and isolated labels for matrix cells:
 ./sb job-output JOB --stream stderr --tail-bytes 8192 --wait-seconds 2
 ```
 
+If local `job-status` returns `job_not_found`, it has not inferred a remote.
+Run `./sb remote list`, then repeat the same observation with the explicit
+`--remote NAME` selector. This returns a structured error rather than a Python
+traceback, and never resubmits the job.
+
 `job-output` accepts exactly one retained-output position selector: an opaque
 cursor, a byte offset across the rendered stream, a trailing byte count, a line
 count, or an RFC 3339/Unix-seconds `since` timestamp. `job-output --follow` is a client polling loop over retained files. `full`,

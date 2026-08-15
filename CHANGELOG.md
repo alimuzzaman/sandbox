@@ -63,6 +63,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - Local `job-status --json` now returns a stable `job_not_found` receipt with
   an explicit configured-remote retry hint instead of leaking a registry traceback.
+- Confirmed remote provisioning now keeps an owner-only, redacted milestone
+  journal and exposes incomplete prior attempts in the next plan instead of
+  leaving a receipt-less update opaque.
 
 ### Added
 - `./sb smoke` — self-test subcommand: boots a fresh instance, verifies WP + REST, tears down.

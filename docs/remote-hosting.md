@@ -66,6 +66,14 @@ interactively. In `--json`/non-interactive mode it defaults to HTTPS; pass
 `--control tailscale` to opt into Tailscale explicitly. It is plan-first: omit
 `--confirm` to inspect the selected transport without modifying the VPS.
 
+Every confirmed provision creates an owner-only, secret-redacted journal under
+`$SANDBOX_HOME/runtime/remote-provision/<name>/`. Its opaque ID is included in
+the final JSON receipt. If the caller is interrupted before that receipt, the
+next plan reports the last journal's ID and `in_progress` state, so operators
+can inspect the local evidence before deciding whether a new provision attempt
+is safe. Journals record milestones only; they never retain SSH targets,
+bearer tokens, or raw remote output.
+
 For HTTPS mode, `provision` SSHes in and, non-interactively, installs Docker CE +
 compose plugin, Caddy, the `sb` runtime itself, the MCP server venv, and the `visit`
 tools venv (Playwright + headless Chromium — needed server-side, since `visit` must

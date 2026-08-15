@@ -1021,6 +1021,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control_host = "sandbox.example.com"
                 args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)), \
+                     patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "configure_https_proxy"), \
                      patch.object(sr, "start_remote_mcp_server"), \
                      patch("builtins.print") as mock_print:
@@ -1031,6 +1032,14 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertNotIn("token", json.dumps(result).lower())
                 self.assertEqual(result["control_transport"], "https")
                 self.assertEqual(result["control_url"], "https://sandbox.example.com")
+                self.assertEqual(result["provision_log"]["status"], "complete")
+                journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
+                self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+                events = json.loads(journal.read_text())["events"]
+                self.assertEqual([event["stage"] for event in events], [
+                    "started", "runtime_staging", "runtime_staged", "bootstrap_running",
+                    "bootstrap_complete", "control_service_starting", "complete",
+                ])
 
     def test_provision_can_explicitly_use_tailscale(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1042,6 +1051,7 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 args.control_host = None
                 args.confirm = True
                 with patch("subprocess.run", return_value=_completed(returncode=0)) as mock_run, \
+                     patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
                      patch.object(sr, "resolve_tailscale_ip", return_value="100.64.1.2"), \
                      patch.object(sr, "start_remote_mcp_server"), \
                      patch("builtins.print") as mock_print:
@@ -1082,6 +1092,42 @@ class TestCmdRemoteProvisionKeepsTokenSecret(unittest.TestCase):
                 self.assertEqual(payload["status"], "planned")
                 self.assertFalse(payload["provisioned"])
                 self.assertTrue(payload["data"]["requires_confirm"])
+
+    def test_failed_staging_leaves_a_redacted_owner_only_journal(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                args = types.SimpleNamespace(name="myvps", control="https",
+                                             control_host="sandbox.example.com", confirm=True)
+                with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"), \
+                     patch.object(remote_cmd, "_upload_runtime_source",
+                                  side_effect=RuntimeError("token=private-value staging failed")):
+                    with self.assertRaises(SystemExit):
+                        remote_cmd._cmd_provision(args, as_json=True)
+                journal = next((Path(d) / "runtime" / "remote-provision" / "myvps").glob("*.json"))
+                payload = json.loads(journal.read_text())
+                self.assertEqual(payload["status"], "failed")
+                self.assertEqual(payload["events"][-1]["stage"], "runtime_staging_failed")
+                self.assertNotIn("private-value", journal.read_text())
+                self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+
+    def test_next_plan_surfaces_an_incomplete_previous_provision_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            with _patched_config_local(Path(d) / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4")
+                with patch.object(remote_cmd, "RUNTIME_DIR", Path(d) / "runtime"):
+                    journal = remote_cmd._new_provision_log("myvps", "https")
+                    remote_cmd._record_provision_event(journal, "runtime_staged")
+                    args = types.SimpleNamespace(name="myvps", control="https",
+                                                 control_host="sandbox.example.com", confirm=False)
+                    output = StringIO()
+                    with redirect_stdout(output):
+                        remote_cmd._cmd_provision(args, as_json=True)
+                payload = json.loads(output.getvalue())
+                self.assertEqual(payload["previous_provision_log"], {
+                    "log_id": journal["log_id"], "status": "in_progress",
+                    "updated_at": journal["updated_at"],
+                })
 
 
 class TestStartRemoteMcpServer(unittest.TestCase):

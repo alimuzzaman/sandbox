@@ -133,6 +133,18 @@ def _write_debug_muplugins(instance: str) -> None:
             shutil.copyfile(src, mu_dir / fn)
 
 
+def _write_host_runtime_muplugins(instance: str) -> None:
+    """Reconcile generated MU plugins that are safe on every WP runtime.
+
+    These plugins only depend on the shared WordPress document root, so they
+    belong on native Herd sites as well as container-backed sites. Runtime-
+    specific integrations such as Mailpit, download caching, licensing, and
+    snapshots remain owned by their existing Docker lifecycle branches.
+    """
+    _write_abilities_muplugin(instance)
+    _write_debug_muplugins(instance)
+
+
 def _write_abilities_muplugin(instance: str) -> None:
     """Drop the Sandbox Abilities mu-plugin (spec 003) into the instance.
 

@@ -1041,6 +1041,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         if server == "herd":
             _pin_wp_constants_in_config(name, inst_cfg)
             if wp_dir(name).exists():
+                _write_host_runtime_muplugins(name)
                 _remove_obsolete_builder_authoring_assets(name)
         else:
             # Apply owns only the PHP/web tier. ``_web_services`` also names
@@ -1094,7 +1095,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
                 _write_mail_muplugin(name)
                 _write_dl_cache_muplugin(name)
                 _write_ondemand_muplugin(name)   # spec 010 — on-demand local plugin sourcing
-                _write_abilities_muplugin(name)  # spec 003 — in-instance WP Abilities
+                _write_host_runtime_muplugins(name)  # specs 003/007 — host-file runtime tools
                 _write_licensing_muplugin(name)  # spec 013 — cross-instance Pro license activation
                 _remove_obsolete_builder_authoring_assets(name)
 

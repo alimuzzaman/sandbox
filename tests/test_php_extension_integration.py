@@ -353,6 +353,71 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         # are never passed to a destructive volume-removal command.
         self.assertEqual(persisted["instances"]["fixture"], block)
 
+    def test_herd_apply_reconciles_host_runtime_muplugins_without_compose(self):
+        import sandbox.core._instances as instances
+
+        root = Path(tempfile.mkdtemp(prefix="sb-herd-apply-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        existing = {
+            "instance": "fixture", "label": "default", "status": "ready",
+            "wordpress_port": 8188, "db_port": 3318, "mailpit_port": 8125,
+            "server": "herd",
+        }
+        pconf = {"root": str(root), "server": "herd"}
+        block = {"server": "herd"}
+
+        class FakeCore:
+            ConfigError = ValueError
+
+            @staticmethod
+            def load_project_config(_project, label=None):
+                return pconf
+
+            @staticmethod
+            def registry_get(_root, label="default"):
+                return existing
+
+            @staticmethod
+            def registry_list_for_root(_root):
+                return [existing]
+
+            @staticmethod
+            def registry_put(_root, **fields):
+                return {**existing, **fields}
+
+            @staticmethod
+            @contextmanager
+            def project_lock(_root):
+                yield
+
+        resolved = {"fixture": {
+            "server": "herd", "wordpress_port": 8188,
+            "db_port": 3318, "mailpit_port": 8125,
+        }}
+        with patch.object(instances, "_core", return_value=FakeCore()), \
+                patch.object(instances, "_capture_apply_rollback_state", return_value={}), \
+                patch.object(instances, "_local_yaml", return_value={"instances": {"fixture": {}}}), \
+                patch.object(instances, "_write_local_yaml"), \
+                patch.object(instances, "_build_instance_block", return_value=block), \
+                patch.object(instances, "prepare_php_extension_runtime", return_value=None), \
+                patch.object(instances, "load_config", return_value={}), \
+                patch.object(instances, "write_compose_files"), \
+                patch.object(instances, "resolve_instances", return_value=resolved), \
+                patch.object(instances, "compose") as compose, \
+                patch.object(instances, "_pin_wp_constants_in_config"), \
+                patch.object(instances, "wp_dir", return_value=root), \
+                patch.object(instances, "_write_host_runtime_muplugins") as host_plugins, \
+                patch.object(instances, "_remove_obsolete_builder_authoring_assets"), \
+                patch.object(instances, "_wire_project_plugins"), \
+                patch.object(instances, "_wire_project_themes"), \
+                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "site_url", return_value="https://fixture.test"):
+            result = instances.apply_config({}, str(root))
+
+        self.assertEqual(result["status"], "ready")
+        host_plugins.assert_called_once_with("fixture")
+        compose.assert_not_called()
+
     def test_ensure_prepares_child_images_before_compose_up_and_verifies_planes(self):
         import sandbox.core._instances as instances
         import sandbox.commands.data as data_commands

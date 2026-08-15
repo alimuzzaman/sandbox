@@ -23,7 +23,7 @@ from sandbox.core import (
     _ensure_proxy_up,
     _herd_db_name, _instance_reachable, _is_herd_instance, _local_yaml,
     _pin_wp_constants_in_config, _remove_obsolete_builder_authoring_assets,
-    _tld, _web_services, _write_abilities_muplugin, _write_debug_muplugins,
+    _tld, _web_services, _write_host_runtime_muplugins,
     _write_dl_cache_muplugin, _write_licensing_muplugin, _write_local_yaml,
     _write_mail_muplugin, _write_ondemand_muplugin, _write_snapshot_muplugin,
     active_project_file, compose, compose_file, die, ensure_instance, focus_file,
@@ -61,6 +61,7 @@ def cmd_up(cfg: dict, args) -> None:
         # Host-served by Herd — nothing to boot; Herd serves linked sites
         # whenever it's running.
         if wp_dir(inst).exists():
+            _write_host_runtime_muplugins(inst)
             _remove_obsolete_builder_authoring_assets(inst)
         ok(f"WordPress: {site_url(inst_cfg)}  (host-served by Herd)")
         return
@@ -92,7 +93,7 @@ def cmd_up(cfg: dict, args) -> None:
         _write_mail_muplugin(inst)
         _write_dl_cache_muplugin(inst)
         _write_ondemand_muplugin(inst)   # spec 010 — on-demand local plugin sourcing
-        _write_abilities_muplugin(inst)  # spec 003 — in-instance WP Abilities (host-file, ok on herd)
+        _write_host_runtime_muplugins(inst)  # specs 003/007 — host-file runtime tools
         _write_licensing_muplugin(inst)  # spec 013 — cross-instance Pro license activation
         _remove_obsolete_builder_authoring_assets(inst)
         # Re-apply the durable abilities enable-flag (spec 003 T003) so a user's
@@ -106,7 +107,6 @@ def cmd_up(cfg: dict, args) -> None:
                       instance=inst, check=False)
         except Exception:
             pass
-        _write_debug_muplugins(inst)     # spec 007 — dump()/dd() + QM capture (host-file, ok on herd)
         try:  # spec 004 — reap old background-job artifacts (>24h)
             from sandbox.commands.jobs import prune_jobs
             prune_jobs(inst)
@@ -578,6 +578,7 @@ def cmd_install(cfg, args) -> None:
     # the bind-mounted mu-plugin directory. Reapply its narrowly scoped shared
     # write mode before generating the autologin, snapshot, and mail plugins.
     _prepare_mu_plugin_directory(inst)
+    _write_host_runtime_muplugins(inst)
 
     # The OpenLiteSpeed image's vhost template does `autoLoadHtaccess`, but
     # WordPress only writes a physical .htaccess under Apache — under OLS it

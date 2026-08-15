@@ -69,6 +69,79 @@ class TestMuPluginDirectoryPreparation(unittest.TestCase):
         compose.assert_not_called()
 
 
+class TestHostRuntimeMuPluginLifecycle(unittest.TestCase):
+    def test_shared_reconciler_writes_abilities_and_debug_plugins(self):
+        import sandbox.core._provision as provision
+
+        with patch.object(provision, "_write_abilities_muplugin") as abilities, \
+                patch.object(provision, "_write_debug_muplugins") as debug:
+            provision._write_host_runtime_muplugins("preview-demo")
+
+        abilities.assert_called_once_with("preview-demo")
+        debug.assert_called_once_with("preview-demo")
+
+    def test_herd_up_reconciles_only_host_runtime_muplugins(self):
+        args = SimpleNamespace(resolved_instance="preview-demo")
+        runtime = {
+            "server": "herd", "domain": "preview-demo.test",
+            "wordpress_port": 8188,
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(lifecycle, "_core", return_value=SimpleNamespace(
+                    registry_find_instance=lambda _instance: None)), \
+                patch.object(lifecycle, "resolve_instances", return_value={
+                    "preview-demo": runtime}), \
+                patch.object(lifecycle, "wp_dir", return_value=Path(directory)), \
+                patch.object(lifecycle, "_write_host_runtime_muplugins") as host_plugins, \
+                patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"), \
+                patch.object(lifecycle, "_write_mail_muplugin") as mail_plugin, \
+                patch.object(lifecycle, "_write_dl_cache_muplugin") as cache_plugin, \
+                patch.object(lifecycle, "_write_ondemand_muplugin") as ondemand_plugin, \
+                patch.object(lifecycle, "_write_licensing_muplugin") as licensing_plugin, \
+                patch.object(lifecycle, "compose") as compose:
+            lifecycle.cmd_up({}, args)
+
+        host_plugins.assert_called_once_with("preview-demo")
+        compose.assert_not_called()
+        mail_plugin.assert_not_called()
+        cache_plugin.assert_not_called()
+        ondemand_plugin.assert_not_called()
+        licensing_plugin.assert_not_called()
+
+    def test_install_reconciles_host_runtime_muplugins_after_core_download(self):
+        events = []
+        args = SimpleNamespace(resolved_instance="preview-demo")
+        runtime = {
+            "server": "herd", "domain": "preview-demo.test",
+            "wordpress_port": 8188, "wp_version": None,
+            "admin": {"user": "admin", "password": "admin",
+                      "email": "admin@example.com", "site_title": "Sandbox"},
+        }
+        result = SimpleNamespace(returncode=1, stdout="")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(lifecycle, "preflight_instance_capability", return_value=None), \
+                patch.object(lifecycle, "resolve_instances", return_value={
+                    "preview-demo": runtime}), \
+                patch.object(lifecycle, "_download_wordpress_core",
+                             side_effect=lambda *_args: events.append("download")), \
+                patch.object(lifecycle, "wpcli", return_value=result), \
+                patch.object(lifecycle, "_prepare_mu_plugin_directory",
+                             side_effect=lambda *_args: events.append("prepare")), \
+                patch.object(lifecycle, "_write_host_runtime_muplugins",
+                             side_effect=lambda *_args: events.append("host-plugins")), \
+                patch.object(lifecycle, "_pin_wp_constants_in_config"), \
+                patch.object(lifecycle, "_convert_multisite"), \
+                patch.object(lifecycle, "wp_dir", return_value=Path(directory)), \
+                patch.object(lifecycle, "_autologin_mu_plugin", return_value="<?php"), \
+                patch.object(lifecycle, "save_local_autologin_token"), \
+                patch.object(lifecycle, "_remove_obsolete_builder_authoring_assets"):
+            lifecycle.cmd_install({}, args)
+
+        self.assertLess(events.index("download"), events.index("prepare"))
+        self.assertEqual(events.count("host-plugins"), 1)
+        self.assertLess(events.index("prepare"), events.index("host-plugins"))
+
+
 class TestDoctorJson(unittest.TestCase):
     def test_doctor_json_redacts_provider_token_in_preflight_error(self):
         from tests.redaction_corpus import GITHUB

@@ -58,6 +58,29 @@ class TargetResolutionTests(unittest.TestCase):
         self.assertEqual((target.kind, target.remote_name), ("remote", "vps"))
         self.assertEqual(target.sources["remote_selection"], "single-configured")
 
+    def test_inference_opt_out_keeps_a_configured_remote_local(self):
+        """Instance lifecycle must not follow the one registered remote.
+
+        `sb ensure` with no selector booted a local instance for years; once a
+        single remote was registered, inference silently deployed every project
+        to the VPS instead.
+        """
+        from sandbox.jobs.models import TargetRequest
+
+        target = self.service(remotes={"vps": {"provisioned": True}}).resolve(
+            TargetRequest("/tmp/project", allow_inferred_remote=False))
+        self.assertEqual((target.kind, target.remote_name), ("local", None))
+        self.assertEqual(target.sources["remote_selection"], "local")
+
+    def test_inference_opt_out_still_honours_a_project_remote_target(self):
+        from sandbox.jobs.models import TargetRequest
+
+        target = self.service(
+            {"default": "remote", "remote": "vps"},
+            {"vps": {"provisioned": True}},
+        ).resolve(TargetRequest("/tmp/project", allow_inferred_remote=False))
+        self.assertEqual((target.kind, target.remote_name), ("remote", "vps"))
+
     def test_ambiguous_configured_remotes_fail_closed(self):
         from sandbox.application.target_service import TargetResolutionError
         from sandbox.jobs.models import TargetRequest

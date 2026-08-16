@@ -11,6 +11,12 @@ Projects can opt into a configured remote default:
 {"runtime":{"default":"remote","remote":"scaleway-sandbox","workspace":"default"}}
 ```
 
+Instance lifecycle is exempt from that inference: `sb ensure`, `sb status`, and
+`sb logs` with no selector always act on the LOCAL instance. They go remote only
+for an explicit `--remote NAME` or a project whose `runtime.default` is
+`remote`. Registering a single remote therefore never moves a plain dev boot
+onto a VPS. Durable job execution keeps inferring the one configured remote.
+
 Use `--local` as an explicit override. Remote execution deploys the exact local
 working tree before acceptance, then the remote supervisor drains process pipes
 to durable local files. CLI/MCP callers read bounded retained output by cursor;

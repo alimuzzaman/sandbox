@@ -57,6 +57,13 @@ class TargetService:
             # is intentionally checked before the single-configured fallback.
             kind, remote_name, source = "remote", runtime["remote"], "project"
             selection_source = "profile"
+        elif not getattr(request, "allow_inferred_remote", True):
+            # Operations that do not permit inference stay local unless the
+            # project or the caller names a remote. `sb ensure` is the case
+            # this exists for: a plain dev boot must not follow the one
+            # registered remote onto a VPS.
+            kind, remote_name, source = "local", None, "project"
+            selection_source = "local"
         else:
             candidates = self._configured_remote_candidates()
             if len(candidates) > 1:

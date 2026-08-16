@@ -418,7 +418,12 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     try:
         target = durable_job_dependencies()["target_service"].resolve(TargetRequest(
             project_dir=project_dir, local=bool(getattr(args, "local", False)), remote=remote_name,
-            workspace=workspace, required_capability="job.exec"))
+            workspace=workspace, required_capability="job.exec",
+            # Instance lifecycle never infers a remote: `sb ensure`/`status`/
+            # `logs` with no selector boot and inspect the LOCAL instance, as
+            # they did before target inference existed. A remote is used only
+            # for --remote NAME or a project whose runtime default is remote.
+            allow_inferred_remote=False))
     except TargetResolutionError as exc:
         # Legacy compatibility tests and callers may invoke ensure from a
         # non-project directory without a target selector. Preserve the

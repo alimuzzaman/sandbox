@@ -45,7 +45,11 @@ on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`
 - `--refresh` walks each selected filesystem to depth 6, keeping every row at
   or above 32 MiB plus every row under a managed root (`$SANDBOX_HOME`,
   `deploy-src`, `runtime`, the containerd store) at any size, then stores the
-  result. Default budget 900s.
+  result. Default budget 900s, of which the walk keeps 90%. A large or busy
+  host needs more: a 190 GB, inode-dense host took over 17 minutes, so give it
+  `--budget 1800` and expect `complete: false` if it still runs out. An
+  incomplete index is still used, still reported as incomplete, and is never
+  allowed to replace a complete one.
 - `--fast` never walks and never inventories the engine. It answers from the
   cache, or says `directory_index.source = cache_missing` and tells the
   operator to run `--refresh`. Default budget 10s.

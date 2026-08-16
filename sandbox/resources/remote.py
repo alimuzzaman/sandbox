@@ -211,6 +211,14 @@ def walk_rows(argv, timeout, multiplier, keep_prefixes=()):
     return rows, complete
 
 
+def walk_budget():
+    # A refresh exists to finish the walk, so it keeps most of the budget;
+    # an ordinary deep pass leaves room for the other categories.
+    remaining = DEADLINE - time.monotonic()
+    share = 0.9 if DIRECTORY_CACHE_MODE == "refresh" else 0.7
+    return max(min(remaining * share, remaining - 15), 1.0)
+
+
 def directory_cache_read():
     try:
         payload = json.loads(DIRECTORY_CACHE_PATH.read_text(encoding="utf-8"))
@@ -1073,7 +1081,8 @@ def deep_attribution(capacity, managed_roots=()):
             argv.append(mount)
             # Leave the rest of the deep pass a share of the budget; a host
             # walk that consumes all of it starves every other category.
-            directory_timeout = max((DEADLINE - time.monotonic()) * 0.7, 1.0)
+            # A refresh exists to finish the walk, so it keeps most of it.
+            directory_timeout = walk_budget()
             index = directory_index(
                 mount, argv, multiplier, directory_timeout, keep_prefixes,
             )
@@ -1087,9 +1096,7 @@ def deep_attribution(capacity, managed_roots=()):
                 argv.append(mount)
                 multiplier = 1024
                 index = directory_index(
-                    mount, argv, multiplier,
-                    max((DEADLINE - time.monotonic()) * 0.7, 1.0),
-                    keep_prefixes,
+                    mount, argv, multiplier, walk_budget(), keep_prefixes,
                 )
             directory_indexes[mount] = index
             if index["rows"]:

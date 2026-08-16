@@ -443,7 +443,10 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     command = [sb, action, "--local", "--project-dir", target_path, "--label", target.workspace_label]
     if action == "ensure":
         command.append("--create")
-    if action == "status":
+    # `ensure` must report the instance record (url, ports, instance name) the
+    # same way the local path does; without --json the remote prints human text,
+    # `_last_json` finds nothing, and callers get a bare {"ok": true} with no URL.
+    if action in ("status", "ensure"):
         command.append("--json")
     result = _remote.ssh_run(remote, __import__("shlex").join(command), timeout=900 if action == "ensure" else 25)
     payload = None

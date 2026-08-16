@@ -602,5 +602,41 @@ class TestStatusJsonRedaction(unittest.TestCase):
         self.assertEqual(forwarded["exit_code"], 1)
         self.assertEqual(forwarded["php_extensions"], document["php_extensions"])
 
+    def test_remote_ensure_requests_json_and_returns_instance_record(self):
+        """Remote ensure must carry the instance record, not a bare ok flag.
+
+        Without `--json` on the remote command the VPS prints human text, the
+        parser finds no document, and every caller (the MCP server, project
+        `sb ensure --json` consumers) loses the URL.
+        """
+        import sandbox.commands.lifecycle as commands
+        from sandbox.core import _remote as remote
+
+        record = {"ok": True, "instance": "fixture-master", "url": "http://localhost:8201",
+                  "wordpress_port": 8201}
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        result = types.SimpleNamespace(returncode=0, stdout=json.dumps(record), stderr="")
+        args = types.SimpleNamespace(remote="fixture-remote", local=False,
+                                     project_dir="/tmp/project", workspace="default")
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "deploy_exact_working_tree",
+                                  return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "prepare_remote_workspace",
+                                  return_value="/srv/project-workspace"), \
+                mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+            ensured = commands._remote_lifecycle({}, args, "ensure")
+        command = ssh_run.call_args.args[1]
+        self.assertIn("--json", command)
+        self.assertIn("--create", command)
+        self.assertEqual(ensured["url"], "http://localhost:8201")
+        self.assertEqual(ensured["instance"], "fixture-master")
+        self.assertEqual(ensured["target"]["remote"], "fixture-remote")
+
 if __name__ == "__main__":
     unittest.main()

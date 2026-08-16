@@ -581,5 +581,93 @@ class TestResourceService(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "measurement_unavailable")
 
 
+class DirectoryCacheAwareAdapter(FakeAdapter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.directory_cache_calls = []
+
+    def observe(
+        self, *, thorough, budget_seconds, progress=None, focus=None,
+        deep=False, directory_cache=None,
+    ):
+        self.directory_cache_calls.append(directory_cache)
+        return super().observe(
+            thorough=thorough, budget_seconds=budget_seconds,
+            progress=progress, focus=focus, deep=deep,
+        )
+
+
+class TestPartialEvidenceIsUsable(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.now = NOW
+
+    def service(self, adapter):
+        return ResourceService(
+            adapter,
+            PlanStore(Path(self.temp.name), clock=lambda: self.now),
+            clock=lambda: self.now,
+        )
+
+    def test_live_capacity_jitter_does_not_discard_deep_attribution(self):
+        # Capacity and the deep pass read the same filesystem moments apart.
+        deep = DeepAttribution(
+            status="complete", filesystems=(), findings=(), capabilities=(),
+            coverage=(),
+            reconciliation=reconcile_attribution(
+                used_bytes=79_999, directory_allocated_bytes=60_000,
+            ),
+        )
+        payload = self.service(FakeAdapter(
+            (observation("managed", size_bytes=20_000),),
+            deep_attribution=deep,
+        )).status(deep=True)
+
+        self.assertEqual(payload["data"]["summary"]["attributed_bytes"], 60_000)
+        self.assertNotIn({
+            "category": "reconciliation", "status": "partial",
+            "reason": "capacity_scope_mismatch",
+        }, payload["data"]["category_outcomes"])
+
+    def test_directory_cache_mode_reaches_a_supporting_provider(self):
+        adapter = DirectoryCacheAwareAdapter(
+            (observation("managed", size_bytes=20_000),),
+        )
+        self.service(adapter).status(deep=True, directory_cache="cache_only")
+        self.assertEqual(adapter.directory_cache_calls, ["cache_only"])
+
+    def test_directory_cache_mode_is_omitted_for_older_providers(self):
+        adapter = FakeAdapter((observation("managed", size_bytes=20_000),))
+        payload = self.service(adapter).status(
+            deep=True, directory_cache="cache_only",
+        )
+        self.assertTrue(payload["ok"])
+
+
+class TestCategoryOutcomeEnrichment(unittest.TestCase):
+    def test_measured_bytes_and_skipped_rows_are_reported(self):
+        from sandbox.resources.service import enrich_outcomes
+
+        outcomes = enrich_outcomes(
+            (
+                {"category": "docker_images", "status": "timed_out"},
+                {"category": "mount_inventory", "status": "complete"},
+            ),
+            (
+                observation("image-a", kind="image", size_bytes=20_000),
+                observation("image-b", kind="image", size_bytes=None),
+            ),
+        )
+        self.assertEqual(outcomes[0], {
+            "category": "docker_images", "status": "timed_out",
+            "measured_bytes": 20_000, "measured_count": 1,
+            "unmeasured_count": 1,
+        })
+        self.assertEqual(
+            outcomes[1], {"category": "mount_inventory", "status": "complete"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,9 @@ def configure_parser(parser) -> None:
     parser.add_argument("--index-generation", type=int)
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--active-only", action="store_true")
+    parser.add_argument("--measure-sizes", action="store_true",
+                        help="measure on-disk workspace sizes under a bounded walk "
+                             "(default reports null sizes with a reason)")
     parser.add_argument("--mode", default="persistent")
     parser.add_argument("--confirm", "--yes", dest="confirm", action="store_true",
                         help="required before reset or destroy changes a workspace")
@@ -54,6 +57,7 @@ def cmd_workspace(_cfg, args) -> None:
         inventory_digest=getattr(args, "inventory_digest", None),
         index_generation=getattr(args, "index_generation", None),
         limit=getattr(args, "limit", 50), active_only=getattr(args, "active_only", False),
+        measure_sizes=getattr(args, "measure_sizes", False),
         mode=getattr(args, "mode", "persistent"),
     )
     try:
@@ -74,7 +78,22 @@ def cmd_workspace(_cfg, args) -> None:
     if args.json:
         print(json.dumps(result, sort_keys=True))
     elif args.action == "list":
+        index = result.get("index") or {}
+        if index.get("complete") is False:
+            print("WARNING: " + (result.get("warning") or "workspace index is incomplete") +
+                  f" [{index.get('code', 'workspace_index_incomplete')}]")
         for item in result.get("workspaces", []): print(item["label"])
+        on_disk = result.get("on_disk") or {}
+        if on_disk.get("available") is False:
+            print(f"on-disk: unavailable ({on_disk.get('reason')})")
+        for entry in on_disk.get("entries", []):
+            size = (entry.get("size_bytes") if entry.get("size_bytes") is not None
+                    else entry.get("size_reason"))
+            print(f"on-disk {'indexed' if entry.get('indexed') else 'UNINDEXED'} "
+                  f"{entry.get('path')} size={size} age={entry.get('age_seconds')}s")
+        if on_disk.get("truncated"):
+            print(f"on-disk: {len(on_disk.get('entries', []))} of "
+                  f"{on_disk.get('total')} entries shown")
     elif args.action == "migrate":
         print(result.get("plan_id", "migration") + ": " +
               ("ok" if result.get("ok") else result.get("code", "failed")))

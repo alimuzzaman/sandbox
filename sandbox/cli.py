@@ -845,7 +845,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     # dispatch startup consume the same budget as the provider.
     if args.cmd == "resources" and getattr(args, "action", None) == "status":
         requested_budget = (
-            args.budget if getattr(args, "budget", None) is not None else 15
+            args.budget if getattr(args, "budget", None) is not None
+            else 10 if getattr(args, "fast", False)
+            else 900 if getattr(args, "refresh", False)
+            else 15
         )
         args._invocation_deadline_monotonic = (
             float(invocation_started_monotonic) + float(requested_budget)

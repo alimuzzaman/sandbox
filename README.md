@@ -336,6 +336,10 @@ Inspect local or named-remote storage without booting an instance:
 ./sb resources status --json
 ./sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
 ./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
+# whole-host attribution in one command (rebuilds the cached directory index)
+./sb resources status --remote scaleway-sandbox --refresh --json
+# always-available: capacity plus the cached index, no disk walk
+./sb resources status --remote scaleway-sandbox --fast
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -389,9 +393,21 @@ verbosity; the complete sealed log remains available for later retrieval.
 Workspace control is backed by an owner-only durable index under
 `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. Remote list/status use project or
 workspace identity rather than a deployed checkout path. Legacy `workspace.json`
-files remain byte-preserved; ambiguous, malformed, or unattributed records return
-`workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
+files remain byte-preserved; ambiguous, malformed, or unattributed records are reported
+as `workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
 and never resets/destroys a workspace or removes a Docker network.
+
+`workspace list` is a read-only report and stays successful when the index is degraded:
+the payload carries `index.complete=false` with `index.code="workspace_index_incomplete"`
+(mirrored as a top-level `code`/`warning`, and as a `WARNING:` line in text output), plus
+an `on_disk` block enumerating every directory under the deployment root
+(`$SANDBOX_HOME/deploy-src`) with `path`, `indexed`, `workspace_id`, `modified_at`,
+`age_seconds`, and `size_bytes`. Sizes are `null` with a `size_reason` unless
+`--measure-sizes` is passed, and even then the walk is bounded by entry and time budgets
+(`size_budget_exhausted` / `size_deadline_exceeded` rather than a hanging `du`). This
+keeps unindexed deployment storage visible for reclaim decisions. Degradation is not
+weakened anywhere else: `workspace status`, create, reset, destroy, and migration apply
+still refuse a degraded or non-ready record.
 
 Remote CI is a durable parent/child submission. Sandbox preflights the workflow
 and blocks named incompatibilities until explicitly accepted, deploys the exact

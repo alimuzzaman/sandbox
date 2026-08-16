@@ -24,6 +24,55 @@ from .models import (
 from .plans import ResourcePlanError
 
 
+CATEGORY_KINDS = {
+    "docker_images": ("image",),
+    "docker_containers": ("container",),
+    "docker_volumes": ("volume",),
+    "docker_networks": ("network",),
+    "docker_build_cache": ("build_cache",),
+    "docker_storage": ("engine_storage",),
+    "host_filesystem": ("host_root",),
+    "deploy_worktrees": ("worktree",),
+    "sandbox_runtime": ("runtime", "download_cache"),
+    "job_artifacts": ("job_artifact",),
+}
+
+
+def enrich_outcomes(outcomes, resources) -> tuple:
+    """Say how much a category did measure before it ran out of time.
+
+    A bare ``timed_out`` (or a ``not_measured`` sitting next to zero-size
+    rows) reads like "nothing to see"; the measured total and the count of
+    rows left unmeasured make a partial result usable evidence instead.
+    """
+    totals: dict[str, list[int]] = {}
+    for item in resources:
+        row = totals.setdefault(getattr(item, "kind", None), [0, 0, 0])
+        size = getattr(item, "size_bytes", None)
+        if getattr(item, "size_state", None) == "measured" and size is not None:
+            row[0] += int(size)
+            row[1] += 1
+        else:
+            row[2] += 1
+    enriched = []
+    for outcome in outcomes:
+        selected = (
+            CATEGORY_KINDS.get(outcome.get("category"))
+            if isinstance(outcome, dict) else None
+        )
+        if not selected:
+            enriched.append(outcome)
+            continue
+        rows = [totals.get(name, [0, 0, 0]) for name in selected]
+        enriched.append({
+            **outcome,
+            "measured_bytes": sum(row[0] for row in rows),
+            "measured_count": sum(row[1] for row in rows),
+            "unmeasured_count": sum(row[2] for row in rows),
+        })
+    return tuple(enriched)
+
+
 class ResourceError(RuntimeError):
     def __init__(self, message: str, code: str = "resource_error", *, retryable: bool = False) -> None:
         super().__init__(message)
@@ -106,10 +155,16 @@ class ResourceService:
             }
             if len(selected_scopes) > 1:
                 return False
-        return (
-            deep_attribution.reconciliation.used_bytes
-            == int(capacity.get("used_bytes") or 0)
+        used = int(capacity.get("used_bytes") or 0)
+        # Capacity and the deep pass read the same live filesystem moments
+        # apart, so exact byte equality is not evidence of a scope mismatch.
+        # Use the same materiality threshold the drift contract already uses.
+        tolerance = min(
+            max(int(used * 0.01), 64 * 1024 * 1024), used // 10,
         )
+        return abs(
+            deep_attribution.reconciliation.used_bytes - used
+        ) <= tolerance
 
     @staticmethod
     def _with_scope_mismatch(deep_attribution):
@@ -146,6 +201,7 @@ class ResourceService:
     def _scan(
         self, *, thorough: bool, budget_seconds: float, progress=None,
         focus: str | None = None, deep: bool = False, cancelled=False,
+        directory_cache: str | None = None,
     ) -> StorageScan:
         budget = self._budget(budget_seconds)
         request = ResourceRequest(budget, cancelled)
@@ -166,6 +222,8 @@ class ResourceService:
         }
         if supports_cancellation:
             observe_kwargs["cancelled"] = cancelled
+        if directory_cache and self._supports_keyword(observe, "directory_cache"):
+            observe_kwargs["directory_cache"] = directory_cache
         snapshot = observe(**observe_kwargs)
         target = self.adapter.target()
         if snapshot.target != target:
@@ -173,7 +231,9 @@ class ResourceService:
                 "target identity changed during measurement",
                 "target_identity_changed",
             )
-        category_outcomes = tuple(snapshot.category_outcomes)
+        category_outcomes = enrich_outcomes(
+            tuple(snapshot.category_outcomes), snapshot.resources,
+        )
         deep_attribution = snapshot.deep_attribution
         if snapshot.capacity is None and self._terminal_status(
             request, category_outcomes, deep_attribution,
@@ -352,6 +412,7 @@ class ResourceService:
     def status(
         self, *, thorough: bool = False, budget_seconds: float = 15,
         progress=None, deep: bool = False, cancelled=False,
+        directory_cache: str | None = None,
     ) -> dict:
         try:
             scan = self._scan(
@@ -361,6 +422,7 @@ class ResourceService:
                 focus=None,
                 deep=deep,
                 cancelled=cancelled,
+                directory_cache=directory_cache,
             )
             return result(
                 True, "status", status=scan.status, target=scan.target,

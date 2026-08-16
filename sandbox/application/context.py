@@ -847,6 +847,7 @@ def _remote_workspace_control(resolved_target, action, request=None):
             workspace_id=workspace_id,
             limit=getattr(request, "limit", 50),
             active_only=getattr(request, "active_only", False),
+            measure_sizes=getattr(request, "measure_sizes", False),
         )
     if action == "migration_plan":
         return transport.migration_plan(

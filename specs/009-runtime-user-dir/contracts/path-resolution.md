@@ -113,6 +113,11 @@ confirmation-gated, lock-serialized, re-scans before one transaction, and fails 
 `workspace_index_incomplete` rather than an empty list. Migration and base relocation
 never remove legacy metadata or release networks.
 
+`sb workspace list` reports that incompleteness without failing: the payload stays
+`ok: true` with `index.complete=false`, `index.code="workspace_index_incomplete"`, and an
+`on_disk` inventory of the deployment root so unindexed storage cannot become invisible.
+Mutating workspace operations continue to refuse a degraded or non-ready record.
+
 Remote workspace status/list/migrate operations MUST accept project identity or
 workspace ID and MUST NOT require a checkout path. Reset/destroy remain confirmation-
 gated and busy-locked; resource monitoring consumes a typed ownership projection rather

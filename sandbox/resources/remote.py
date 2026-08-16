@@ -26,7 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 import platform
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -39,6 +41,30 @@ SB = HOME / "sb-src" / "sb"
 BUDGET_SECONDS = max(float(REQUEST.get("budget_seconds", 15)), 0.5)
 DEADLINE = time.monotonic() + max(BUDGET_SECONDS - 2, 0.25)
 PHASE = "startup"
+ENVELOPE = None
+DIRECTORY_CACHE_PATH = RUNTIME / "resources" / "directory-index.json"
+DIRECTORY_CACHE_TTL = max(float(REQUEST.get("directory_cache_ttl") or 21600), 0)
+DIRECTORY_CACHE_MODE = str(REQUEST.get("directory_cache") or "auto")
+# cache_only is the always-available fast path: read the cached host index,
+# never walk the disk, and never pay for engine inventory.
+FAST = DIRECTORY_CACHE_MODE == "cache_only"
+# Rows below this size are noise for a host-attribution report; dropping them
+# while streaming keeps a full-depth walk inside a bounded response.
+DIRECTORY_MIN_BYTES = max(int(REQUEST.get("directory_min_bytes") or 33554432), 0)
+DIRECTORY_DEPTH = min(max(int(REQUEST.get("directory_depth") or 6), 1), 12)
+
+
+INDEX_ROWS = {}
+
+
+def indexed_size(path):
+    # Reuse one host walk instead of paying for a du per managed path.
+    return INDEX_ROWS.get(str(path))
+
+
+def emit(payload):
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
 
 BYTE_SIZE = re.compile(
     r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b)?$", re.I,
@@ -72,25 +98,211 @@ def byte_count(value):
 def rid(kind, locator):
     return kind + "-" + hashlib.sha256(locator.encode()).hexdigest()[:20]
 
+TIMEOUT_TOOL = shutil.which("timeout")
+
+
+def bounded(argv, seconds):
+    # An elevated child runs as root, so this unprivileged probe cannot
+    # signal it; only a bound that runs *inside* sudo can stop it on time.
+    if TIMEOUT_TOOL and list(argv[:2]) == ["sudo", "-n"]:
+        return list(argv[:2]) + [
+            TIMEOUT_TOOL, "-k", "1", str(max(int(seconds), 1)),
+        ] + list(argv[2:])
+    return list(argv)
+
+
+def spawn(argv):
+    # Start a child in its own session so the whole tree stays killable.
+    #
+    # ``sudo`` forks the real worker, so killing only the direct child leaves
+    # the worker alive holding the stdout pipe; the parent then blocks past its
+    # own budget.  A dedicated session lets one killpg end the whole tree.
+    return subprocess.Popen(
+        argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+
+def terminate(process):
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def run(argv, timeout):
     remaining = max(min(float(timeout), DEADLINE - time.monotonic()), 0.01)
     try:
-        result = subprocess.run(
-            argv, text=True, capture_output=True, timeout=remaining, check=False,
-        )
-        return result.returncode, result.stdout[:4000000], result.stderr[:4096]
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
-        return 124, stdout[:4000000], (stderr + "\ntimed out")[:4096]
+        process = spawn(bounded(argv, remaining))
     except OSError:
         return 127, "", "unavailable"
+    try:
+        stdout, stderr = process.communicate(timeout=remaining)
+        return process.returncode, (stdout or "")[:4000000], (stderr or "")[:4096]
+    except subprocess.TimeoutExpired:
+        terminate(process)
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        return 124, (stdout or "")[:4000000], ((stderr or "") + "\ntimed out")[:4096]
+
+
+def walk_rows(argv, timeout, multiplier, keep_prefixes=()):
+    # Stream a directory walk, keeping material and managed rows only.
+    #
+    # Returns ``(rows, complete)``.  A walk that runs out of time keeps every
+    # row it already produced instead of discarding the whole measurement.
+    deadline = time.monotonic() + max(
+        min(float(timeout), DEADLINE - time.monotonic()), 0.01,
+    )
+    rows = []
+    try:
+        process = spawn(bounded(argv, deadline - time.monotonic()))
+    except OSError:
+        return rows, False
+    complete = False
+    try:
+        while True:
+            waiting = deadline - time.monotonic()
+            if waiting <= 0:
+                break
+            # readline() alone can block past the budget on a slow subtree.
+            if not select.select([process.stdout], (), (), waiting)[0]:
+                break
+            line = process.stdout.readline()
+            if not line:
+                try:
+                    complete = process.wait(timeout=2) == 0
+                except subprocess.TimeoutExpired:
+                    complete = False
+                break
+            parts = line.strip().split(None, 1)
+            if len(parts) != 2:
+                continue
+            try:
+                measured = int(parts[0]) * multiplier
+            except ValueError:
+                continue
+            path = parts[1].strip()
+            if measured < DIRECTORY_MIN_BYTES and not any(
+                path == prefix or path.startswith(prefix.rstrip("/") + "/")
+                for prefix in keep_prefixes
+            ):
+                continue
+            rows.append((measured, path))
+            if len(rows) >= 20000:
+                break
+    finally:
+        if process.poll() is None:
+            terminate(process)
+        try:
+            process.stdout.close()
+            process.stderr.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    return rows, complete
+
+
+def directory_cache_read():
+    try:
+        payload = json.loads(DIRECTORY_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("mounts"), dict):
+        return None
+    return payload
+
+
+def directory_cache_write(payload):
+    try:
+        DIRECTORY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        staging = DIRECTORY_CACHE_PATH.with_name(
+            DIRECTORY_CACHE_PATH.name + ".staging",
+        )
+        staging.write_text(
+            json.dumps(payload, separators=(",", ":")), encoding="utf-8",
+        )
+        os.replace(staging, DIRECTORY_CACHE_PATH)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return True
+
+
+def directory_index(mount, argv, multiplier, timeout, keep_prefixes):
+    # Return a ranked directory index for one mount, cache-first.
+    #
+    # A full host walk cannot finish inside an interactive budget on a large
+    # host, so the walk result is cached with its timestamp and completeness
+    # and reused until it expires.  The caller always learns which one it got.
+    # Always read the store so a refresh of one mount cannot drop another.
+    cached = directory_cache_read()
+    entry = (
+        (cached or {}).get("mounts", {}).get(mount)
+        if cached and DIRECTORY_CACHE_MODE != "refresh" else None
+    )
+    now = time.time()
+    if isinstance(entry, dict) and isinstance(entry.get("rows"), list):
+        age = max(now - float(entry.get("created_at") or 0), 0)
+        fresh = age <= DIRECTORY_CACHE_TTL
+        if fresh or DIRECTORY_CACHE_MODE == "cache_only":
+            cached_rows = [
+                (int(item[0]), str(item[1]))
+                for item in entry["rows"]
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            ]
+            INDEX_ROWS.update({path: measured for measured, path in cached_rows})
+            return {
+                "rows": cached_rows,
+                "complete": bool(entry.get("complete")),
+                "created_at": float(entry.get("created_at") or 0),
+                "age_seconds": int(age),
+                "stale": not fresh,
+                "source": "cache",
+            }
+    if DIRECTORY_CACHE_MODE == "cache_only":
+        return {
+            "rows": [], "complete": False, "created_at": None,
+            "age_seconds": None, "stale": True, "source": "cache_missing",
+        }
+    rows, complete = walk_rows(argv, timeout, multiplier, keep_prefixes)
+    INDEX_ROWS.update({path: measured for measured, path in rows})
+    index = {
+        "rows": rows, "complete": complete, "created_at": now,
+        "age_seconds": 0, "stale": False, "source": "scan",
+    }
+    if rows:
+        payload = cached if isinstance(cached, dict) else {"mounts": {}}
+        if not isinstance(payload.get("mounts"), dict):
+            payload["mounts"] = {}
+        previous = payload["mounts"].get(mount)
+        # Never replace a complete walk with a shorter truncated one.
+        if not (
+            isinstance(previous, dict)
+            and previous.get("complete")
+            and not complete
+            and max(now - float(previous.get("created_at") or 0), 0)
+            <= DIRECTORY_CACHE_TTL
+        ):
+            payload["mounts"][mount] = {
+                "created_at": now, "complete": complete,
+                "rows": [[measured, path] for measured, path in rows],
+            }
+            payload["schema_version"] = 1
+            index["cached"] = directory_cache_write(payload)
+    return index
 
 def size(path, thorough):
+    indexed = indexed_size(path)
+    if indexed is not None:
+        return "measured", indexed, None
     if not thorough:
         return "not_measured", None, None
     code, out, _err = run(["du", "-sk", str(path)], 8)
@@ -426,8 +638,30 @@ def filesystem_for_device(device, filesystems):
             return item["filesystem_id"]
     return None
 
-def parse_ranked_sizes(
-    output, filesystem_id, root, multiplier, safe_labels=None,
+def managed_label(path, docker_root):
+    # Name a sandbox-managed path; leave unmanaged host paths unnamed.
+    #
+    # Managed roots are named by the tool itself, so echoing their relative
+    # path discloses nothing new while making the report actionable.
+    for root, prefix in (
+        (HOME, "Sandbox home"),
+        (HOME.parent, "Sandbox host account"),
+        (docker_root, "Docker data"),
+    ):
+        if root is None:
+            continue
+        root_text = str(root).rstrip("/")
+        if not root_text:
+            continue
+        if path == root_text:
+            return prefix
+        if path.startswith(root_text + "/"):
+            return prefix + "/" + path[len(root_text) + 1:]
+    return None
+
+
+def rank_directory_rows(
+    rows, filesystem_id, root, safe_labels=None, docker_root=None,
 ):
     safe_roots = {
         "/var": "host variable data",
@@ -442,10 +676,50 @@ def parse_ranked_sizes(
         "/var/lib": "host state data",
         "/var/log": "host logs",
         "/var/cache": "host package cache",
+        "/var/lib/containerd": "containerd content store",
     }
     safe_roots.update(safe_labels or {})
-    rows = []
+    ranked = []
     total = None
+    for measured, path in rows:
+        if path.rstrip("/") == str(root).rstrip("/"):
+            total = measured
+        else:
+            ranked.append((measured, path))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    findings = [
+        deep_finding(
+            "directory", filesystem_id + ":" + path,
+            safe_roots.get(path)
+            or managed_label(path, docker_root)
+            or ("entry " + str(index + 1)),
+            measured,
+            filesystem_id=filesystem_id,
+            owner_kind="host",
+            capacity_accounted=False,
+            overlap="directory_root",
+            guidance="monitoring_only",
+            evidence=("allocated_blocks", "one_filesystem"),
+        )
+        for index, (measured, path) in enumerate(ranked[:300])
+    ]
+    paths = {os.path.normpath(path) for _measured, path in ranked}
+    frontier_total = sum(
+        measured for measured, path in ranked
+        if not any(
+            parent != os.path.normpath(path)
+            and os.path.normpath(path).startswith(parent.rstrip("/") + os.sep)
+            for parent in paths
+        )
+    )
+    return findings, total if total is not None else frontier_total
+
+
+def parse_ranked_sizes(
+    output, filesystem_id, root, multiplier, safe_labels=None,
+    docker_root=None,
+):
+    rows = []
     for line in output.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
@@ -454,35 +728,10 @@ def parse_ranked_sizes(
             measured = int(parts[0]) * multiplier
         except ValueError:
             continue
-        path = parts[1].strip()
-        if path.rstrip("/") == str(root).rstrip("/"):
-            total = measured
-        else:
-            rows.append((measured, path))
-    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    findings = [
-        deep_finding(
-            "directory", filesystem_id + ":" + path,
-            safe_roots.get(path, "entry " + str(index + 1)), measured,
-            filesystem_id=filesystem_id,
-            owner_kind="host",
-            capacity_accounted=False,
-            overlap="directory_root",
-            guidance="monitoring_only",
-            evidence=("allocated_blocks", "one_filesystem"),
-        )
-        for index, (measured, path) in enumerate(rows[:100])
-    ]
-    paths = {os.path.normpath(path) for _measured, path in rows}
-    frontier_total = sum(
-        measured for measured, path in rows
-        if not any(
-            parent != os.path.normpath(path)
-            and os.path.normpath(path).startswith(parent.rstrip("/") + os.sep)
-            for parent in paths
-        )
+        rows.append((measured, parts[1].strip()))
+    return rank_directory_rows(
+        rows, filesystem_id, root, safe_labels, docker_root,
     )
-    return findings, total if total is not None else frontier_total
 
 def deleted_open_findings(output, filesystems):
     process = {}
@@ -779,6 +1028,12 @@ def deep_attribution(capacity, managed_roots=()):
     directory_allocated = 0
     directory_states = set()
     attribution_rechecks = []
+    directory_indexes = {}
+    # Managed roots stay in the index at any size so workspace-level and
+    # runtime-level attribution survives the noise filter.
+    keep_prefixes = tuple(str(path) for path in (
+        HOME, DEPLOY, RUNTIME, Path("/var/lib/containerd"),
+    ))
     public_mount_ids = {
         row.get("mount_id"): rid(
             "mount", str(row.get("mount_id")) + "\0" + row["mount_point"],
@@ -801,39 +1056,46 @@ def deep_attribution(capacity, managed_roots=()):
             if other["mount_point"] != mount
             and other["mount_point"].startswith(mount.rstrip("/") + "/")
         )
-        if selected_mount and time.monotonic() < DEADLINE:
+        if selected_mount and (
+            time.monotonic() < DEADLINE or DIRECTORY_CACHE_MODE == "cache_only"
+        ):
             if gdu:
                 argv = prefix + [
                     gdu, "-n", "-p", "-c", "--no-prefix", "-x",
-                    "--depth", "4",
+                    "--depth", str(DIRECTORY_DEPTH),
                     "--no-delete", "--no-spawn-shell", "--no-view-file",
                 ]
-                argv.extend("--exclude=" + path for path in nested_mounts)
-                argv.append(mount)
                 multiplier = 1
             else:
-                argv = prefix + ["du", "-x", "-k", "-d", "4"]
-                argv.extend("--exclude=" + path for path in nested_mounts)
-                argv.append(mount)
+                argv = prefix + ["du", "-x", "-k", "-d", str(DIRECTORY_DEPTH)]
                 multiplier = 1024
-            directory_timeout = min(
-                max(BUDGET_SECONDS - 90, 120), 600,
+            argv.extend("--exclude=" + path for path in nested_mounts)
+            argv.append(mount)
+            # Leave the rest of the deep pass a share of the budget; a host
+            # walk that consumes all of it starves every other category.
+            directory_timeout = max((DEADLINE - time.monotonic()) * 0.7, 1.0)
+            index = directory_index(
+                mount, argv, multiplier, directory_timeout, keep_prefixes,
             )
-            code, out, _err = run(argv, directory_timeout)
-            if code not in {0, 124} and gdu and time.monotonic() < DEADLINE:
+            if not index["rows"] and gdu and index["source"] == "scan":
                 scanner = "du"
                 scanner_version = None
                 scanner_fallback = True
                 scanner_limitations.append("gdu_failed_fell_back_to_du")
-                argv = prefix + ["du", "-x", "-k", "-d", "4"]
+                argv = prefix + ["du", "-x", "-k", "-d", str(DIRECTORY_DEPTH)]
                 argv.extend("--exclude=" + path for path in nested_mounts)
                 argv.append(mount)
                 multiplier = 1024
-                code, out, _err = run(argv, directory_timeout)
-            if code == 0 or (code == 124 and out.strip()):
+                index = directory_index(
+                    mount, argv, multiplier,
+                    max((DEADLINE - time.monotonic()) * 0.7, 1.0),
+                    keep_prefixes,
+                )
+            directory_indexes[mount] = index
+            if index["rows"]:
                 try:
-                    ranked, observed = parse_ranked_sizes(
-                        out, filesystem_id, mount, multiplier, {
+                    ranked, observed = rank_directory_rows(
+                        index["rows"], filesystem_id, mount, {
                         str(HOME): "Sandbox home",
                         str(HOME.parent): "Sandbox host account",
                         str(HOME / "runtime"): "Sandbox runtime data",
@@ -853,7 +1115,7 @@ def deep_attribution(capacity, managed_roots=()):
                             str(docker_root / "image"):
                                 "Docker image metadata",
                         } if docker_root else {}),
-                        },
+                        }, docker_root,
                     )
                 except Exception:
                     ranked, observed = [], None
@@ -862,22 +1124,35 @@ def deep_attribution(capacity, managed_roots=()):
                     reason = "directory_parser_failure"
                 else:
                     findings.extend(ranked)
-                    state = "complete" if code == 0 else "partial"
-                    hardlinks = "confirmed" if code == 0 else "partial"
+                    state = "complete" if index["complete"] else "partial"
+                    hardlinks = "confirmed" if index["complete"] else "partial"
                     if state == "partial":
                         reason = "directory_measurement_timed_out_with_partial"
+                    if index["source"] == "cache":
+                        state = "complete" if (
+                            index["complete"] and not index["stale"]
+                        ) else "partial"
+                        reason = (
+                            "directory_index_cache_stale" if index["stale"]
+                            else None if index["complete"]
+                            else "directory_index_cache_partial"
+                        )
                     directory_allocated += observed
-                    attribution_rechecks.append((
-                        mount, observed,
-                        "gdu" if multiplier == 1 else "du",
-                        tuple(nested_mounts),
-                    ))
+                    if index["source"] == "scan" and index["complete"]:
+                        attribution_rechecks.append((
+                            mount, observed,
+                            "gdu" if multiplier == 1 else "du",
+                            tuple(nested_mounts),
+                        ))
             else:
-                state = "timed_out" if code == 124 else "unavailable"
+                state = (
+                    "unavailable" if index["source"] == "cache_missing"
+                    else "timed_out"
+                )
                 reason = (
-                    "directory_measurement_timed_out"
-                    if state == "timed_out"
-                    else "directory_measurement_unavailable"
+                    "directory_index_cache_missing"
+                    if index["source"] == "cache_missing"
+                    else "directory_measurement_timed_out"
                 )
         elif selected_mount:
             state, reason = "timed_out", "overall_budget_exhausted"
@@ -917,6 +1192,15 @@ def deep_attribution(capacity, managed_roots=()):
                 if selected_mount and nested_mounts
                 and state in {"complete", "partial"} else []
             ),
+            "directory_index": ({
+                "source": directory_indexes[mount]["source"],
+                "complete": directory_indexes[mount]["complete"],
+                "stale": directory_indexes[mount]["stale"],
+                "age_seconds": directory_indexes[mount]["age_seconds"],
+                "row_count": len(directory_indexes[mount]["rows"]),
+                "depth": DIRECTORY_DEPTH,
+                "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            } if mount in directory_indexes else None),
         })
         coverage.append({
             "category": "directory",
@@ -952,7 +1236,7 @@ def deep_attribution(capacity, managed_roots=()):
     deleted_started = time.monotonic()
     lsof = shutil.which("lsof")
     deleted_bytes = 0
-    if lsof and time.monotonic() < DEADLINE:
+    if lsof and not FAST and time.monotonic() < DEADLINE:
         try:
             code, out, _err = run(
                 prefix + [lsof, "-nP", "-FpcfDitsn", "+L1"], 20,
@@ -988,7 +1272,8 @@ def deep_attribution(capacity, managed_roots=()):
             "timed_out" if time.monotonic() >= DEADLINE else "unavailable"
         )
         deleted_reason = (
-            "overall_budget_exhausted"
+            "fast_mode_skipped" if FAST
+            else "overall_budget_exhausted"
             if deleted_status == "timed_out" else "lsof_unavailable"
         )
     capabilities.append({
@@ -1018,8 +1303,10 @@ def deep_attribution(capacity, managed_roots=()):
     })
     docker_started = time.monotonic()
     try:
-        code, out, _err = run(
-            ["docker", "system", "df", "-v", "--format", "json"], 30,
+        code, out, _err = (
+            (127, "", "") if FAST else run(
+                ["docker", "system", "df", "-v", "--format", "json"], 30,
+            )
         )
     except Exception:
         code, out = 127, ""
@@ -1036,7 +1323,9 @@ def deep_attribution(capacity, managed_roots=()):
     else:
         logical_bytes = 0
         docker_status = "timed_out" if code == 124 else "unavailable"
-        docker_reason = "docker_accounting_unavailable"
+        docker_reason = (
+            "fast_mode_skipped" if FAST else "docker_accounting_unavailable"
+        )
     capabilities.append({
         "category": "container_storage",
         "name": "docker_system_df",
@@ -1173,6 +1462,23 @@ def deep_attribution(capacity, managed_roots=()):
             if len(selected_scope_ids) == 1 else None
         ),
         "filesystems": filesystems,
+        "directory_index": ({
+            "mount": next(iter(directory_indexes)),
+            "source": next(iter(directory_indexes.values()))["source"],
+            "complete": next(iter(directory_indexes.values()))["complete"],
+            "stale": next(iter(directory_indexes.values()))["stale"],
+            "age_seconds": next(iter(directory_indexes.values()))["age_seconds"],
+            "depth": DIRECTORY_DEPTH,
+            "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            "ttl_seconds": int(DIRECTORY_CACHE_TTL),
+            "mode": DIRECTORY_CACHE_MODE,
+        } if directory_indexes else {
+            "mount": None, "source": "not_measured", "complete": False,
+            "stale": True, "age_seconds": None, "depth": DIRECTORY_DEPTH,
+            "minimum_row_bytes": DIRECTORY_MIN_BYTES,
+            "ttl_seconds": int(DIRECTORY_CACHE_TTL),
+            "mode": DIRECTORY_CACHE_MODE,
+        }),
         "findings": findings[:300],
         "capabilities": capabilities,
         "coverage": coverage,
@@ -1341,11 +1647,25 @@ def host_capacity_resources(thorough):
         (Path("/etc"), "host /etc"),
     )
     for path, display in roots:
+        if not path.exists():
+            continue
+        indexed = indexed_size(path)
+        if indexed is not None:
+            resources.append(observation(
+                "host_root", str(path), display, "host",
+                REQUEST.get("remote_name"), "retained", "measured", indexed, 0,
+                ("monitoring_only",),
+                ("filesystem_capacity_root", "directory_index"), (),
+                capacity_accounted=True,
+            ))
+            continue
+        if FAST:
+            # The fast path answers from the cached index or not at all.
+            status = "partial"
+            continue
         if time.monotonic() >= DEADLINE:
             status = "timed_out"
             break
-        if not path.exists():
-            continue
         code, out, _err = run(
             ["sudo", "-n", "du", "-x", "-sk", str(path)], 45,
         )
@@ -1381,7 +1701,22 @@ def docker_storage_resources(thorough):
         (Path("/var/lib/docker/buildkit"), "Docker BuildKit storage"),
         (Path("/var/lib/docker/containers"), "Docker container logs"),
         (Path("/var/lib/docker/image"), "Docker image metadata"),
+        # containerd keeps its own content store; `docker system df` never
+        # reports it, so a docker-only report silently loses that space.
+        (Path("/var/lib/containerd"), "containerd content store"),
     ):
+        indexed = indexed_size(path)
+        if indexed is not None:
+            resources.append(observation(
+                "engine_storage", str(path), display, "host",
+                REQUEST.get("remote_name"), "retained", "measured", indexed, 0,
+                ("monitoring_only",),
+                ("docker_storage_root", "directory_index"), (),
+            ))
+            continue
+        if FAST:
+            status = "partial"
+            continue
         if time.monotonic() >= DEADLINE:
             status = "timed_out"
             break
@@ -1430,6 +1765,24 @@ def scan():
         "available_bytes": int(usage.free),
         "reserved_bytes": max(int(usage.total) - int(usage.used) - int(usage.free), 0),
     }
+    # Capacity costs microseconds and is the one answer a full disk always
+    # needs.  Publish it before any bounded work so a probe that is killed
+    # later still reports it instead of reporting nothing at all.
+    global ENVELOPE
+    ENVELOPE = {
+        "stage": "envelope",
+        "identity": identity,
+        "capacity": capacity,
+        "capacity_scope_id": capacity_scope_id,
+        "resources": [],
+        "category_outcomes": [{
+            "category": "remote_probe", "status": "partial",
+            "reason": "probe_incomplete_capacity_only",
+        }],
+        "drift": None,
+        "deep_attribution": None,
+    }
+    emit(ENVELOPE)
     PHASE = "lifecycle_evidence"
     (
         protected_paths,
@@ -1443,7 +1796,21 @@ def scan():
     PHASE = "workspace_ownership"
     workspace_projection = load_workspace_projection()
     PHASE = "docker_inventory"
-    inventory, outcomes = docker_inventory()
+    if FAST:
+        inventory = {
+            "containers": [], "volumes": [], "networks": [], "images": [],
+            "build_cache": [],
+        }
+        outcomes = [
+            {"category": name, "status": "not_measured",
+             "reason": "fast_mode_engine_inventory_skipped"}
+            for name in (
+                "docker_containers", "docker_volumes", "docker_networks",
+                "docker_images", "docker_build_cache",
+            )
+        ]
+    else:
+        inventory, outcomes = docker_inventory()
     outcomes.extend(lifecycle_outcomes)
     outcomes.append({
         "category": "workspace_ownership",
@@ -1471,13 +1838,20 @@ def scan():
                 "category": "deep_attribution", "status": "unavailable",
                 "reason": "category_failure_isolated",
             })
-    if not targeted and focus is None and not deep_requested:
+    if not targeted and focus is None:
+        # In deep mode these are answered from the directory index, so the
+        # engine and host breakdown costs nothing extra and one command
+        # reports the whole host.
         PHASE = "docker_storage"
-        storage_resources, storage_outcomes = docker_storage_resources(thorough)
+        storage_resources, storage_outcomes = docker_storage_resources(
+            thorough or deep_requested,
+        )
         resources.extend(storage_resources)
         outcomes.extend(storage_outcomes)
         PHASE = "host_filesystem"
-        host_resources, host_outcomes = host_capacity_resources(thorough)
+        host_resources, host_outcomes = host_capacity_resources(
+            thorough or deep_requested,
+        )
         resources.extend(host_resources)
         outcomes.extend(host_outcomes)
     active_volumes = set()
@@ -1874,7 +2248,9 @@ def scan():
                     or target_locator != str(path)
                 ):
                     continue
-                state, measured_size, error = size(path, thorough or is_cache)
+                state, measured_size, error = size(
+                    path, (thorough or is_cache) and not FAST,
+                )
                 classification = "disposable_cache" if is_cache else "retained"
                 if is_cache and state != "measured":
                     classification = "unverified"
@@ -2021,13 +2397,22 @@ def remove():
 
 try:
     output = remove() if REQUEST.get("action") == "remove" else scan()
-    print(json.dumps(output, separators=(",", ":")))
+    if REQUEST.get("action") != "remove":
+        output["stage"] = "final"
+    emit(output)
 except Exception as exc:
-    print(json.dumps({
+    failure = dict(ENVELOPE or {})
+    failure.update({
+        "stage": "error",
         "error": "resource probe failed",
         "error_phase": PHASE,
         "error_type": type(exc).__name__,
-    }, separators=(",", ":")))
+    })
+    failure["category_outcomes"] = [{
+        "category": "remote_probe", "status": "unavailable",
+        "reason": "probe_failed_in_" + str(PHASE),
+    }]
+    emit(failure)
     sys.exit(1)
 """
 
@@ -2058,6 +2443,34 @@ def _program(request: dict) -> str:
     return _REMOTE_PROGRAM.replace("__JOB_LIST_PARSER__", parser_source).replace(
         "__REQUEST__", repr(encoded),
     )
+
+
+_STAGE_RANK = {"envelope": 0, "error": 1, "final": 2}
+
+
+def _salvage_payload(stdout: str) -> dict | None:
+    """Keep the richest complete probe record the transport delivered.
+
+    The probe publishes a capacity envelope before it starts bounded work and
+    the full record last.  A probe that is killed mid-write therefore still
+    yields capacity, so a full disk never degrades to "unmeasurable".
+    """
+    best = None
+    best_rank = -1
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(candidate, dict) or not candidate.get("identity"):
+            continue
+        rank = _STAGE_RANK.get(str(candidate.get("stage") or ""), 0)
+        if rank >= best_rank:
+            best, best_rank = candidate, rank
+    return best
 
 
 def _observation(value: dict) -> ResourceObservation:
@@ -2173,7 +2586,7 @@ class RemoteResourceAdapter:
     def observe(
         self, *, thorough: bool, budget_seconds: float,
         progress=None, focus: str | None = None, deep: bool = False,
-        cancelled=False,
+        cancelled=False, directory_cache: str | None = None,
     ) -> ProviderSnapshot:
         entry = self._entry()
         if self._cancelled(cancelled):
@@ -2192,15 +2605,10 @@ class RemoteResourceAdapter:
             "focus": focus,
             "deep": bool(deep),
             "cancelled": self._cancelled(cancelled),
+            "directory_cache": directory_cache or "auto",
         }, budget_seconds + 5)
-        try:
-            payload = json.loads(response.stdout)
-            identity = payload["identity"]
-            resources = tuple(
-                _observation(item) for item in payload.get("resources") or ()
-            )
-            target = StorageTarget("remote", self.remote_name, identity)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        payload = _salvage_payload(response.stdout)
+        if payload is None:
             status = (
                 "timed_out" if response.returncode == 124 else "unavailable"
             )
@@ -2208,6 +2616,11 @@ class RemoteResourceAdapter:
                 self.target(), None, (),
                 ({"category": "remote_probe", "status": status},),
             )
+        identity = payload["identity"]
+        resources = tuple(
+            _observation(item) for item in payload.get("resources") or ()
+        )
+        target = StorageTarget("remote", self.remote_name, identity)
         self._target = target
         outcomes = list(payload.get("category_outcomes") or ())
         terminal = None
@@ -2243,7 +2656,7 @@ class RemoteResourceAdapter:
         if response.returncode != 0:
             return None
         try:
-            payload = json.loads(response.stdout)
+            payload = _salvage_payload(response.stdout) or {}
             identity = payload["identity"]
             target = StorageTarget("remote", self.remote_name, identity)
             if self._target is not None and self._target != target:

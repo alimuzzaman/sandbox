@@ -267,6 +267,7 @@ class RemoteWorkspaceTransport:
         workspace_id: str | None = None,
         limit: int = 50,
         active_only: bool = False,
+        measure_sizes: bool = False,
     ) -> dict[str, Any]:
         args = ["workspace", "list", "--limit", str(_positive_limit(limit))]
         if project_identity is not None:
@@ -277,6 +278,10 @@ class RemoteWorkspaceTransport:
             raise RemoteWorkspaceError("workspace_request_invalid", "active_only must be boolean")
         if active_only:
             args.append("--active-only")
+        if not isinstance(measure_sizes, bool):
+            raise RemoteWorkspaceError("workspace_request_invalid", "measure_sizes must be boolean")
+        if measure_sizes:
+            args.append("--measure-sizes")
         return self._control(remote_name, args)
 
     def status(

@@ -28,6 +28,61 @@ Use deep attribution when the capacity-level unknown bucket remains large:
 ./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 ```
 
+## One command for the whole host
+
+On a large or nearly full host, a directory walk cannot finish inside an
+interactive budget. Deep mode therefore keeps a **cached host directory index**
+on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`.
+
+```sh
+# rebuild the index and report the whole host in one command
+./sb resources status --remote scaleway-sandbox --refresh --json
+
+# always-available report: capacity plus the cached index, no disk walk
+./sb resources status --remote scaleway-sandbox --fast
+```
+
+- `--refresh` walks each selected filesystem to depth 6, keeping every row at
+  or above 32 MiB plus every row under a managed root (`$SANDBOX_HOME`,
+  `deploy-src`, `runtime`, the containerd store) at any size, then stores the
+  result. Default budget 900s.
+- `--fast` never walks and never inventories the engine. It answers from the
+  cache, or says `directory_index.source = cache_missing` and tells the
+  operator to run `--refresh`. Default budget 10s.
+- Plain `--deep` reuses a cached index younger than 6 hours and otherwise walks
+  within its own budget, writing whatever it completed. A truncated walk is
+  never allowed to replace a complete one.
+- Every report states the index provenance: `source` (`scan`, `cache`,
+  `cache_missing`, `not_measured`), `complete`, `stale`, `age_seconds`,
+  `depth`, and `minimum_row_bytes`.
+
+Because the index already knows the size of every managed path, deep mode also
+reports host filesystem roots, Docker storage roots, the **containerd content
+store** (`/var/lib/containerd`, which `docker system df` never reports), and
+per-workspace `deploy-src` sizes without paying for one `du` per path.
+
+Sandbox-managed directories are named by their path relative to the managed
+root (`Sandbox home/deploy-src/<workspace>`); directories outside a managed root
+stay anonymized as `entry N`.
+
+## Never go blind
+
+Capacity is published by the probe before any bounded work starts, and the
+transport keeps the richest record it received. A probe that is killed
+mid-measurement therefore still reports capacity as a `partial` result with
+`remote_probe: probe_incomplete_capacity_only`, instead of failing the whole
+command with `measurement_unavailable`. A probe that raises reports the phase
+it failed in (`probe_failed_in_<phase>`).
+
+Human output leads with the unattributed share of used capacity, and shouts it
+when it is 10% or more. Category outcomes that are not complete carry
+`measured_bytes`, `measured_count`, and `unmeasured_count`, so a partial
+category reports what it did measure rather than looking like an empty one.
+
+Elevated measurement commands are bounded with `timeout` inside `sudo`: an
+unprivileged probe cannot signal a root child, and killing only the direct
+`sudo` process leaves the real worker holding the pipe and overruns the budget.
+
 Deep mode implies `--thorough` and is status-only. It inventories mount
 topology before walking, measures only the root, Sandbox-home, Docker-data,
 and typed managed-root capacity scopes, and uses one-filesystem scanner mode.
@@ -72,8 +127,10 @@ values, accounted bytes, overage, and the residual unexplained gap. It reports
 both capacity drift and attributed-allocation drift; each is material only when
 it exceeds the greater of one percent of used capacity or 64 MiB. A
 capacity-scope mismatch makes the result partial and prevents it being combined
-with the ordinary capacity summary. Ranked directory names are intentionally
-anonymized.
+with the ordinary capacity summary. Capacity and the deep pass read the same
+live filesystem moments apart, so a scope match tolerates the same materiality
+threshold used for drift rather than requiring exact byte equality. Ranked
+directory names outside a managed root are intentionally anonymized.
 
 Deleted-open evidence uses `lsof +L1` field output when available, accepts
 only regular zero-link records, deduplicates stable file identity where
@@ -180,6 +237,8 @@ The explicit `resources` MCP group exposes:
 
 These adapters use the same service and result envelope as the CLI.
 `resource_status(deep=true)` returns the same additive attribution contract as
-`status --deep`.
+`status --deep`. `resource_status(fast=true)` and `resource_status(refresh=true)`
+match `status --fast` and `status --refresh`; passing both is refused with
+`invalid_mode`.
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.

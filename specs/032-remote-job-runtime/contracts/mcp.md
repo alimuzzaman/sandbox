@@ -167,6 +167,10 @@ Workspace tools use typed service inputs:
 the busy-lock controller. Migration plans expose inventory digest, index generation,
 expiry, and adopted/unresolved/conflict/invalid decisions. Apply refuses drift with
 `workspace_migration_plan_stale`/`workspace_ownership_drift` and reports
-`workspace_index_incomplete` rather than an empty success. MCP adapters consume the
+`workspace_index_incomplete` rather than an empty success. `workspace_list` accepts
+`measure_sizes` and always returns `ok: true` with an `index` block
+(`complete`, `code`, `generation`, `counts`) and an `on_disk` block, so a degraded index
+is reported rather than hiding on-disk deployment storage; mutating workspace tools keep
+refusing degraded records. MCP adapters consume the
 workspace service and typed resource projection; they never open the SQLite index or
 legacy workspace JSON. No metadata migration call releases networks or performs cleanup.

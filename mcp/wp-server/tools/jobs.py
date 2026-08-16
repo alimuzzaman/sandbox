@@ -358,6 +358,7 @@ def _workspace_request(project_dir: str = ".", *, local: bool, remote: str | Non
                        inventory_digest: str | None = None,
                        index_generation: int | None = None,
                        limit: int = 50, active_only: bool = False,
+                       measure_sizes: bool = False,
                        mode: str = "persistent") -> TargetRequest:
     return TargetRequest(
         project_dir=project_dir, local=local, remote=remote, workspace=workspace,
@@ -365,7 +366,7 @@ def _workspace_request(project_dir: str = ".", *, local: bool, remote: str | Non
         migration_plan_id=migration_plan_id, confirm=confirm,
         expected_legacy_namespace=expected_legacy_namespace,
         inventory_digest=inventory_digest, index_generation=index_generation,
-        limit=limit, active_only=active_only, mode=mode,
+        limit=limit, active_only=active_only, measure_sizes=measure_sizes, mode=mode,
     )
 
 
@@ -379,6 +380,7 @@ def _workspace(action: str, project_dir: str = ".", *, local: bool = False,
                inventory_digest: str | None = None,
                index_generation: int | None = None,
                limit: int = 50, active_only: bool = False,
+               measure_sizes: bool = False,
                mode: str = "persistent") -> dict:
     """Use the shared namespace-aware workspace lifecycle service."""
     try:
@@ -388,7 +390,8 @@ def _workspace(action: str, project_dir: str = ".", *, local: bool = False,
             migration_plan_id=migration_plan_id, confirm=confirm,
             expected_legacy_namespace=expected_legacy_namespace,
             inventory_digest=inventory_digest, index_generation=index_generation,
-            limit=limit, active_only=active_only, mode=mode))
+            limit=limit, active_only=active_only, measure_sizes=measure_sizes,
+            mode=mode))
     except Exception as exc:
         return {"ok": False, "code": getattr(exc, "code", "workspace_operation_failed"), "error": str(exc)}
 
@@ -405,11 +408,16 @@ def workspace_create(project_dir: str = ".", *, local: bool = False, remote: str
 def workspace_list(project_dir: str = ".", *, local: bool = False, remote: str | None = None,
                    workspace: str | None = None, project_identity: str | None = None,
                    workspace_id: str | None = None, limit: int = 50,
-                   active_only: bool = False) -> dict:
-    """List workspaces in one explicit local or remote namespace."""
+                   active_only: bool = False, measure_sizes: bool = False) -> dict:
+    """List workspaces, plus on-disk deployment storage, in one namespace.
+
+    A degraded index reports `index.complete=false` with
+    `workspace_index_incomplete` instead of failing: read-only reporting must
+    never hide occupied storage. Sizes stay null unless `measure_sizes=True`.
+    """
     return _workspace("list", project_dir, local=local, remote=remote, workspace=workspace,
                       project_identity=project_identity, workspace_id=workspace_id,
-                      limit=limit, active_only=active_only)
+                      limit=limit, active_only=active_only, measure_sizes=measure_sizes)
 
 
 def workspace_status(project_dir: str = ".", *, local: bool = False, remote: str | None = None,

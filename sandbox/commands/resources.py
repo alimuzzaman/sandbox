@@ -61,6 +61,19 @@ def configure_parser(parser) -> None:
         action="store_true",
         help="run bounded filesystem, deleted-open, and engine attribution",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "always-available attribution: capacity plus the cached host "
+            "directory index, with no disk walk and no engine inventory"
+        ),
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="rebuild the cached host directory index instead of reusing it",
+    )
     parser.add_argument("--budget", type=float, default=None)
     parser.add_argument(
         "--cancelled",
@@ -112,10 +125,12 @@ def _emit(payload: dict, as_json: bool) -> None:
             f"{_human_bytes(capacity.get('total_bytes'))}; "
             f"available {_human_bytes(capacity.get('available_bytes'))}"
         )
+        _emit_unattributed(capacity, summary)
         print(
             f"  reclaimable {_human_bytes(summary.get('reclaimable_bytes'))}; "
             f"unknown {_human_bytes(summary.get('unknown_bytes'))}"
         )
+        _emit_directory_index(data.get("deep_attribution") or {})
         pressure = data.get("capacity_pressure") or {}
         if pressure:
             recovery = pressure.get("recovery") or {}
@@ -150,9 +165,21 @@ def _emit(payload: dict, as_json: bool) -> None:
             )
         for category in data.get("category_outcomes") or ():
             if category.get("status") not in {"complete", "observed"}:
+                measured = category.get("measured_bytes")
+                skipped = category.get("unmeasured_count")
+                detail = (
+                    ""
+                    if measured is None and skipped is None
+                    else (
+                        f"; measured {_human_bytes(measured)}"
+                        f"; unmeasured rows {skipped}"
+                    )
+                )
                 print(
                     f"  partial: {category.get('category')} "
-                    f"({category.get('status')})"
+                    f"({category.get('status')}"
+                    f"{': ' + str(category['reason']) if category.get('reason') else ''}"
+                    f"){detail}"
                 )
         _emit_deep(data.get("deep_attribution") or {})
     elif payload.get("action") == "plan":
@@ -167,6 +194,44 @@ def _emit(payload: dict, as_json: bool) -> None:
             f"  outcomes: {len(data.get('outcomes') or ())}; "
             f"observed reclaimed "
             f"{_human_bytes(data.get('observed_reclaimed_bytes'))}"
+        )
+
+
+def _emit_unattributed(capacity: dict, summary: dict) -> None:
+    """Lead with the gap: unattributed space is the finding, not a footnote."""
+    used = capacity.get("used_bytes")
+    unknown = summary.get("unknown_bytes")
+    if not isinstance(unknown, int) or not isinstance(used, int) or used <= 0:
+        return
+    share = unknown * 100.0 / used
+    marker = "UNATTRIBUTED" if share >= 10 else "unattributed"
+    print(
+        f"  {marker}: {_human_bytes(unknown)} of {_human_bytes(used)} used "
+        f"({share:.1f}%) is not attributed to any measured resource"
+    )
+    if share >= 10:
+        print(
+            "  attribution is incomplete — rerun with --deep, or rebuild the "
+            "host directory index with --refresh"
+        )
+
+
+def _emit_directory_index(deep: dict) -> None:
+    index = deep.get("directory_index") if isinstance(deep, dict) else None
+    if not isinstance(index, dict):
+        return
+    age = index.get("age_seconds")
+    print(
+        f"  directory index: {index.get('source', 'unknown')}; "
+        f"complete={index.get('complete')}; stale={index.get('stale')}; "
+        f"age={'unknown' if age is None else str(int(age)) + 's'}; "
+        f"depth={index.get('depth', 'unknown')}; "
+        f"floor {_human_bytes(index.get('minimum_row_bytes'))}"
+    )
+    if index.get("source") == "cache_missing":
+        print(
+            "  no cached host directory index — run "
+            "`sb resources status --deep --refresh` to build one"
         )
 
 
@@ -297,7 +362,23 @@ def cmd_resources(_cfg, args) -> None:
         else lambda category: print(f"  measuring: {category}")
     )
     if action == "status":
-        requested_budget = args.budget if args.budget is not None else 15
+        fast = bool(getattr(args, "fast", False))
+        refresh = bool(getattr(args, "refresh", False))
+        if fast and refresh:
+            from sandbox.resources.service import ResourceError, result
+            payload = result(
+                False, "status", status="failed",
+                error=ResourceError(
+                    "--fast and --refresh are mutually exclusive",
+                    "invalid_mode",
+                ),
+            )
+            _emit(payload, bool(args.json))
+            raise SystemExit(1)
+        default_budget = 10 if fast else 900 if refresh else 15
+        requested_budget = (
+            args.budget if args.budget is not None else default_budget
+        )
         remaining_budget = _remaining_status_budget(args, requested_budget)
         if remaining_budget == 0:
             _emit(_budget_exhausted_payload(requested_budget), bool(args.json))
@@ -309,11 +390,17 @@ def cmd_resources(_cfg, args) -> None:
             _emit(_budget_exhausted_payload(requested_budget), bool(args.json))
             raise SystemExit(1)
         status_kwargs = {
-            "thorough": bool(args.thorough or args.deep),
+            "thorough": bool(args.thorough or args.deep) and not fast,
             "budget_seconds": remaining_budget,
             "progress": progress,
-            "deep": bool(args.deep),
+            "deep": bool(args.deep or fast or refresh),
         }
+        if fast or refresh:
+            # Keep the default call compatible with providers that predate
+            # the cached host directory index.
+            status_kwargs["directory_cache"] = (
+                "cache_only" if fast else "refresh"
+            )
         if args.cancelled:
             status_kwargs["cancelled"] = True
         payload = service.status(

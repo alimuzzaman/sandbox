@@ -15,6 +15,10 @@ sb resources status --json
 sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
 sb resources status --remote scaleway-sandbox --thorough --budget 300 --json
 sb resources status --remote scaleway-sandbox --deep --budget 600 --json
+# whole-host attribution in one command; rebuilds the cached directory index
+sb resources status --remote scaleway-sandbox --refresh --json
+# always available, even at 97% full: capacity plus the cached index
+sb resources status --remote scaleway-sandbox --fast --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -48,7 +52,12 @@ as coverage evidence. Require complete deep coverage before interpreting the
 residual as genuinely unlocated.
 
 Completed evidence and parseable directory output survive a timeout; the
-request contract is budget plus five seconds. Reconciliation reports capacity
+request contract is budget plus five seconds. A probe that is killed still
+reports capacity (`remote_probe: probe_incomplete_capacity_only`) instead of
+failing with `measurement_unavailable`; a partial category reports
+`measured_bytes` and `unmeasured_count` rather than an implied zero. When the
+host directory index is missing, build it with `--refresh` before trusting a
+large unattributed residual. Reconciliation reports capacity
 and attributed drift (material over max(1% used, 64 MiB)); a scope mismatch is
 partial and cannot be combined with the outer capacity summary. Use
 `sb resources status --deep --cancelled --json` or MCP
@@ -138,6 +147,14 @@ it with `--plan-id ID --confirm`. Migration writes only the durable workspace in
 preserves every legacy `workspace.json` byte. Treat `workspace_index_incomplete`,
 conflicts, and invalid records as operator-visible blockers; never turn them into an
 empty list or use them as cleanup authority.
+
+`sb workspace list [--measure-sizes] [--json]` is a read-only report and succeeds even
+when the index is degraded: read `index.complete`/`index.code` for the degradation and
+`on_disk.entries` for every directory under the deployment root, including ones with no
+index record (`indexed: false`). Sizes are `null` with a `size_reason` unless
+`--measure-sizes` is given, and measurement stays bounded. Use that report to find
+orphaned deployment storage; it is still not cleanup authority, and status, create,
+reset, destroy, and migration apply keep refusing a degraded index.
 
 ## Remote CI workflows
 

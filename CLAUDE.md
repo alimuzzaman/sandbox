@@ -179,6 +179,8 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 18. wp-cli via `docker compose exec` on web; falls back to `compose run --rm wpcli` when web is down.
 19. Proxy mounts the DIRECTORY (`runtime/proxy:/etc/caddy:ro`), never the Caddyfile itself — a file bind mount pins an inode and `regen_caddyfile()` replaces the file, so the container loses `/etc/caddy/Caddyfile` and every `caddy reload` fails. `sb doctor` asserts config domain == Caddyfile route == readable-in-container.
 20. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
+21. An unprivileged process cannot kill a `sudo -n <cmd>` child: killing `sudo` leaves the root worker holding the stdout pipe, so `communicate()` blocks past the budget. Bound elevated commands with `timeout -k 1 N` INSIDE sudo, and start every child with `start_new_session=True` so the group can be killed.
+22. Host attribution: `sb resources status --fast` (cached index, seconds) / `--refresh` (rebuild it). `docker system df` does NOT cover `/var/lib/containerd`.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

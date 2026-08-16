@@ -317,3 +317,133 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(service.destroy(confirmed)["action"], "destroy")
             self.assertEqual(calls, [("remote:vps:test", action)
                                      for action in ("create", "status", "reset", "destroy")])
+
+
+class WorkspaceDegradedReportingTests(unittest.TestCase):
+    """A degraded index must never hide occupied deployment storage."""
+
+    def _service(self, temp, *, deploy_root):
+        repository = WorkspaceRepository(
+            Path(temp) / "workspaces" / "index.sqlite3",
+            Path(temp) / "legacy",
+        )
+        service = WorkspaceService(
+            _Target(), repository=repository, deployment_root=deploy_root,
+            lifecycle_gateway=lambda action, record: {"ok": True, action: True},
+        )
+        return repository, service
+
+    def test_degraded_index_still_reports_on_disk_workspaces(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy_root = Path(temp) / "deploy-src"
+            indexed = deploy_root / "indexed-checkout"
+            orphan = deploy_root / "orphan-checkout"
+            indexed.mkdir(parents=True)
+            orphan.mkdir()
+            (orphan / "payload.bin").write_bytes(b"x" * 64)
+            repository, service = self._service(temp, deploy_root=deploy_root)
+            record = repository.register(
+                "project:test", "unit",
+                metadata={"checkout_locator": str(indexed)})
+            repository.mark_lifecycle(
+                record.workspace_id, "indeterminate", status="indeterminate")
+
+            listed = service.list(TargetRequest(project_identity="project:test"))
+
+            self.assertTrue(listed["ok"])
+            self.assertFalse(listed["index"]["complete"])
+            self.assertEqual(listed["index"]["code"], "workspace_index_incomplete")
+            self.assertEqual(listed["code"], "workspace_index_incomplete")
+            self.assertIn("read-only report", listed["warning"])
+            self.assertEqual(listed["index"]["counts"]["indeterminate"], 1)
+            entries = {item["path"]: item for item in listed["on_disk"]["entries"]}
+            self.assertEqual(set(entries), {str(indexed), str(orphan)})
+            self.assertTrue(entries[str(indexed)]["indexed"])
+            self.assertEqual(
+                entries[str(indexed)]["workspace_id"], record.workspace_id)
+            for item in entries.values():
+                self.assertIsNone(item["size_bytes"])
+                self.assertEqual(item["size_reason"], "not_measured")
+                self.assertIsInstance(item["age_seconds"], int)
+                self.assertTrue(item["modified_at"].startswith("2"))
+
+    def test_on_disk_only_workspace_is_reported_as_unindexed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy_root = Path(temp) / "deploy-src"
+            orphan = deploy_root / "unindexed-85gb"
+            orphan.mkdir(parents=True)
+            (orphan / "blob").write_bytes(b"y" * 128)
+            _repository, service = self._service(temp, deploy_root=deploy_root)
+
+            listed = service.list(TargetRequest(project_identity="project:test"))
+
+            self.assertTrue(listed["ok"])
+            self.assertTrue(listed["index"]["complete"])
+            self.assertEqual(listed["workspaces"], [])
+            self.assertEqual(listed["on_disk"]["unindexed"], 1)
+            self.assertEqual(listed["on_disk"]["total"], 1)
+            self.assertFalse(listed["on_disk"]["truncated"])
+            entry = listed["on_disk"]["entries"][0]
+            self.assertEqual(entry["path"], str(orphan))
+            self.assertFalse(entry["indexed"])
+            self.assertIsNone(entry["workspace_id"])
+
+            measured = service.list(TargetRequest(
+                project_identity="project:test", measure_sizes=True))
+            measured_entry = measured["on_disk"]["entries"][0]
+            self.assertTrue(measured["on_disk"]["measured"])
+            self.assertEqual(measured_entry["size_reason"], "measured")
+            self.assertGreaterEqual(measured_entry["size_bytes"], 128)
+
+    def test_missing_deployment_root_reports_reason_without_failing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _repository, service = self._service(
+                temp, deploy_root=Path(temp) / "absent")
+            listed = service.list(TargetRequest(project_identity="project:test"))
+            self.assertTrue(listed["ok"])
+            self.assertFalse(listed["on_disk"]["available"])
+            self.assertEqual(listed["on_disk"]["reason"], "deployment_root_missing")
+            self.assertEqual(listed["on_disk"]["entries"], [])
+
+    def test_degraded_index_still_refuses_mutation_and_status(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy_root = Path(temp) / "deploy-src"
+            deploy_root.mkdir()
+            repository, service = self._service(temp, deploy_root=deploy_root)
+            record = repository.register("project:test", "unit")
+            repository.mark_lifecycle(
+                record.workspace_id, "indeterminate", status="indeterminate")
+            confirmed = TargetRequest(
+                project_identity="project:test", workspace="unit",
+                workspace_id=record.workspace_id, confirm=True)
+            for action in ("reset", "destroy"):
+                with self.assertRaises(Exception) as refusal:
+                    getattr(service, action)(confirmed)
+                self.assertEqual(
+                    refusal.exception.code, "workspace_recovery_required")
+            unconfirmed = TargetRequest(
+                project_identity="project:test", workspace="unit",
+                workspace_id=record.workspace_id)
+            status = service.status(unconfirmed)
+            self.assertFalse(status["ok"])
+            self.assertEqual(status["code"], "workspace_index_incomplete")
+            self.assertEqual(
+                repository.get(record.workspace_id).lifecycle, "indeterminate")
+
+    def test_healthy_index_listing_stays_successful_and_complete(self):
+        with tempfile.TemporaryDirectory() as temp:
+            deploy_root = Path(temp) / "deploy-src"
+            deploy_root.mkdir()
+            repository, service = self._service(temp, deploy_root=deploy_root)
+            repository.register("project:test", "unit")
+
+            listed = service.list(TargetRequest(project_identity="project:test"))
+
+            self.assertTrue(listed["ok"])
+            self.assertNotIn("code", listed)
+            self.assertNotIn("warning", listed)
+            self.assertTrue(listed["index"]["complete"])
+            self.assertIsNone(listed["index"]["code"])
+            self.assertEqual([item["label"] for item in listed["workspaces"]], ["unit"])
+            self.assertEqual(listed["generation"], listed["index"]["generation"])
+            self.assertEqual(listed["on_disk"]["entries"], [])

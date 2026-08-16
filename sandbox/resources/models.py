@@ -14,7 +14,8 @@ CLASSIFICATIONS = frozenset({
     "unverified", "unmanaged",
 })
 SIZE_STATES = frozenset({"measured", "not_measured", "timed_out", "unavailable"})
-PLAN_SCOPES = frozenset({"cache", "stale"})
+RECLAIM_TIERS = ("safe", "tmp", "all")
+PLAN_SCOPES = frozenset({"cache", "stale", *RECLAIM_TIERS})
 PLAN_STATES = frozenset({
     "planned", "in_progress", "completed", "indeterminate", "expired",
 })
@@ -293,6 +294,10 @@ class CleanupPlan:
     estimated_reclaimable_bytes: int
     state: str = "planned"
     confirmation_required: bool = True
+    # Feature-owned, opaque to the plan contract: tiered reclamation stores the
+    # reviewed candidate detail (class, tier, reason, mtime) it must replay at
+    # execution time without re-deciding policy against a changed host.
+    metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -326,6 +331,7 @@ class CleanupPlan:
         scan_id: str | None = None,
         now: datetime | None = None,
         ttl: timedelta = timedelta(minutes=15),
+        metadata: dict | None = None,
     ) -> "CleanupPlan":
         reference = (now or utc_now()).astimezone(timezone.utc)
         chosen = tuple(candidates)
@@ -342,6 +348,7 @@ class CleanupPlan:
             estimated_reclaimable_bytes=sum(
                 item.expected_reclaimable_bytes for item in chosen
             ),
+            metadata=dict(metadata or {}),
         )
 
     def to_dict(self, *, public: bool = False) -> dict:
@@ -359,6 +366,12 @@ class CleanupPlan:
             "state": self.state,
             "confirmation_required": self.confirmation_required,
         }
+        if self.metadata:
+            # Candidate locators are filesystem paths; keep them owner-only.
+            value["metadata"] = (
+                {"candidate_count": len(self.metadata.get("candidates") or ())}
+                if public else self.metadata
+            )
         return redact(value) if public else value
 
     @classmethod
@@ -381,6 +394,7 @@ class CleanupPlan:
             estimated_reclaimable_bytes=value.get("estimated_reclaimable_bytes"),
             state=value.get("state", "planned"),
             confirmation_required=value.get("confirmation_required", True),
+            metadata=value.get("metadata") or {},
         )
 
 
@@ -404,6 +418,7 @@ class StorageScan:
     deep_attribution: Any | None = None
     capacity_scope_id: str | None = None
     capacity_pressure: dict | None = None
+    reclaim: dict | None = None
 
     def __post_init__(self) -> None:
         if self.capacity is not None:
@@ -488,6 +503,8 @@ class StorageScan:
         }
         if self.deep_attribution is not None:
             value["deep_attribution"] = self.deep_attribution.to_dict()
+        if self.reclaim is not None:
+            value["reclaim"] = self.reclaim
         return redact(value)
 
 

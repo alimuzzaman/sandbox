@@ -55,6 +55,15 @@ def configure_parser(parser) -> None:
     parser.add_argument("action", choices=("status", "plan", "cleanup"))
     parser.add_argument("--remote", default=None, help="configured remote name")
     parser.add_argument("--scope", choices=("cache", "stale"), default=None)
+    parser.add_argument(
+        "--tier",
+        choices=("safe", "tmp", "all"),
+        default=None,
+        help=(
+            "tiered reclamation of managed deployment storage; strictly nested "
+            "(safe subset of tmp subset of all)"
+        ),
+    )
     parser.add_argument("--thorough", action="store_true")
     parser.add_argument(
         "--deep",
@@ -181,7 +190,12 @@ def _emit(payload: dict, as_json: bool) -> None:
                     f"{': ' + str(category['reason']) if category.get('reason') else ''}"
                     f"){detail}"
                 )
+        _emit_reclaim(data)
         _emit_deep(data.get("deep_attribution") or {})
+    elif payload.get("action") in {"plan", "reap"} and data.get("tier"):
+        _emit_reclaim_plan(data)
+    elif payload.get("action") in {"cleanup", "reap"} and data.get("tier"):
+        _emit_reclaim_cleanup(data)
     elif payload.get("action") == "plan":
         print(f"  plan: {data.get('plan_id')}")
         print(f"  expires: {data.get('expires_at')}")
@@ -355,8 +369,187 @@ def _emit_deep(deep: dict) -> None:
             )
 
 
+def _emit_reclaim(data: dict) -> None:
+    """Lead with the classification: it is the answer, not an appendix."""
+    block = data.get("reclaim")
+    if not isinstance(block, dict):
+        return
+    print(
+        f"  reclaim inventory: {block.get('status', 'unknown')}"
+        f"{' (' + str(block['reason']) + ')' if block.get('reason') else ''}; "
+        f"root {block.get('deployment_root', 'unknown')}"
+    )
+    for row in block.get("classes") or ():
+        print(
+            f"    {row.get('class', 'UNKNOWN'):>9} "
+            f"{row.get('count', 0):>4} entries "
+            f"{_human_bytes(row.get('bytes')):>12}"
+            + (
+                f"  ({row.get('unmeasured')} unmeasured)"
+                if row.get("unmeasured") else ""
+            )
+        )
+    volumes = block.get("volumes") or {}
+    print(
+        f"    volumes: {volumes.get('eligible', 0)} workspace-scoped eligible "
+        f"({_human_bytes(volumes.get('eligible_bytes'))}); "
+        f"{volumes.get('protected', 0)} protected"
+    )
+    tiers = block.get("tiers") or {}
+    if tiers:
+        print(
+            "    tier totals: " + " | ".join(
+                f"{name} {tiers[name]['candidates']} "
+                f"({_human_bytes(tiers[name]['bytes'])})"
+                for name in ("safe", "tmp", "all") if name in tiers
+            )
+        )
+    drift = block.get("drift") or {}
+    print(
+        f"    index drift: {drift.get('indexed_absent', 0)} indexed but absent; "
+        f"{drift.get('present_unindexed', 0)} present but unindexed"
+    )
+    if block.get("truncated") or block.get("unmeasured_count"):
+        print(
+            f"    PARTIAL: {block.get('unmeasured_count', 0)} entries unmeasured"
+            f"{'; entry walk truncated' if block.get('truncated') else ''}"
+        )
+    pressure = block.get("capacity_pressure") or {}
+    if pressure.get("level") in {"warning", "critical"}:
+        print(
+            f"    CAPACITY {str(pressure.get('level')).upper()}: "
+            f"{_human_bytes(pressure.get('free_bytes'))} free "
+            f"({(pressure.get('free_ratio') or 0) * 100:.1f}%); threshold "
+            f"{pressure.get('threshold_crossed')} — {pressure.get('guidance')}"
+        )
+
+
+def _emit_reclaim_plan(data: dict) -> None:
+    print(f"  plan: {data.get('plan_id')}  tier: {data.get('tier')}")
+    print(f"  expires: {data.get('expires_at')}")
+    print(
+        f"  candidates: {len(data.get('candidates') or ())}; "
+        f"estimated {_human_bytes(data.get('estimated_reclaimable_bytes'))}"
+    )
+    for item in (data.get("candidates") or ())[:200]:
+        print(
+            f"    {_human_bytes(item.get('bytes')):>12} "
+            f"{item.get('kind', 'unknown'):>9} "
+            f"{item.get('class', 'unknown'):>8} "
+            f"{item.get('display_name', item.get('locator'))} "
+            f"[{item.get('reason')}] mtime={item.get('modified_at') or 'unknown'}"
+        )
+    skipped = data.get("skipped") or ()
+    print(f"  skipped: {len(skipped)}")
+    for item in skipped[:200]:
+        print(
+            f"    {item.get('kind', 'unknown'):>9} "
+            f"{item.get('display_name', item.get('locator'))} "
+            f"[{item.get('reason')}]"
+        )
+    totals = data.get("tier_totals") or {}
+    if totals:
+        print(
+            "  tier totals: " + " | ".join(
+                f"{name} {_human_bytes(totals[name])}"
+                for name in ("safe", "tmp", "all") if name in totals
+            )
+        )
+    if data.get("truncated") or data.get("unmeasured_count"):
+        print(
+            f"  PARTIAL inventory: {data.get('unmeasured_count', 0)} entries "
+            f"unmeasured{'; walk truncated' if data.get('truncated') else ''} — "
+            "candidates below are what could be measured, not the whole host"
+        )
+
+
+def _emit_reclaim_cleanup(data: dict) -> None:
+    print(f"  tier: {data.get('tier')}  run: {data.get('run_id')}")
+    print(f"  manifest: {data.get('manifest_path')}")
+    print(
+        f"  processed {data.get('processed_candidates')} of "
+        f"{data.get('planned_candidates')} candidates; reclaimed "
+        f"{_human_bytes(data.get('observed_reclaimed_bytes'))}"
+        + ("; RESUMED" if data.get("resumed") else "")
+    )
+    counts: dict[str, int] = {}
+    for item in data.get("outcomes") or ():
+        counts[item.get("status", "unknown")] = counts.get(
+            item.get("status", "unknown"), 0,
+        ) + 1
+    print("  outcomes: " + ", ".join(
+        f"{name}={value}" for name, value in sorted(counts.items())
+    ) or "  outcomes: none")
+    for item in data.get("outcomes") or ():
+        if item.get("status") not in {"removed", "already_absent"}:
+            print(
+                f"    {item.get('status')}: {item.get('resource_id')} "
+                f"[{item.get('reason')}]"
+            )
+    reconciled = data.get("reconciled") or {}
+    if reconciled:
+        print(
+            f"  reconciled: registry {reconciled.get('registry_removed', 0)}; "
+            f"index {reconciled.get('index_removed', 0)} "
+            f"(pending {reconciled.get('index_pending', 0)}); "
+            f"leases {reconciled.get('leases_removed', 0)}"
+            + (
+                f"; {reconciled.get('status')}"
+                f" ({reconciled.get('reason')})"
+                if reconciled.get("status") != "complete" else ""
+            )
+        )
+    if data.get("budget_exhausted"):
+        print(
+            "  BUDGET EXHAUSTED: not every candidate was processed — re-run the "
+            "same tier to continue"
+        )
+
+
+def _tier_action(args) -> bool:
+    return bool(getattr(args, "tier", None)) and args.action in {"plan", "cleanup"}
+
+
+def _run_tier(args) -> dict:
+    from sandbox.resources.context import reclaim_service
+
+    service = reclaim_service(getattr(args, "remote", None))
+    if args.action == "plan":
+        return service.plan(
+            args.tier,
+            budget_seconds=args.budget if args.budget is not None else 60,
+        )
+    return service.cleanup(
+        tier=args.tier, plan_id=getattr(args, "plan_id", None),
+        confirm=bool(args.confirm),
+        budget_seconds=args.budget if args.budget is not None else 900,
+    )
+
+
 def cmd_resources(_cfg, args) -> None:
     action = args.action
+    if getattr(args, "tier", None) and getattr(args, "scope", None):
+        from sandbox.resources.service import ResourceError, result
+        _emit(result(
+            False, action, status="failed",
+            error=ResourceError("--tier and --scope are mutually exclusive",
+                                "invalid_mode"),
+        ), bool(args.json))
+        raise SystemExit(1)
+    if getattr(args, "tier", None) and action == "status":
+        from sandbox.resources.service import ResourceError, result
+        _emit(result(
+            False, action, status="failed",
+            error=ResourceError("--tier is valid only for plan and cleanup",
+                                "invalid_mode"),
+        ), bool(args.json))
+        raise SystemExit(1)
+    if _tier_action(args):
+        payload = _run_tier(args)
+        _emit(payload, bool(args.json))
+        if not payload.get("ok"):
+            raise SystemExit(1)
+        return
     progress = (
         None if args.json
         else lambda category: print(f"  measuring: {category}")

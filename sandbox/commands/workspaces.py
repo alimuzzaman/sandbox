@@ -10,7 +10,12 @@ from sandbox.registry import CommandSpec, register_specs
 
 
 def configure_parser(parser) -> None:
-    parser.add_argument("action", choices=("create", "list", "status", "migrate", "reset", "destroy"))
+    parser.add_argument("action", choices=(
+        "create", "list", "status", "migrate", "reset", "destroy",
+        "release", "ttl", "reap",
+    ))
+    parser.add_argument("name", nargs="?", default=None,
+                        help="workspace name for release and ttl")
     parser.add_argument("--project-dir", default=".")
     target = parser.add_mutually_exclusive_group()
     target.add_argument("--local", action="store_true")
@@ -35,10 +40,71 @@ def configure_parser(parser) -> None:
     # explicit acknowledgement without creating a second behavior branch.
     parser.add_argument("--ensure", action="store_true",
                         help="accept idempotent workspace creation")
+    parser.add_argument("--ttl", default=None,
+                        help="retention duration such as 2h or 14d "
+                             "(default 7d for workspaces and one-shot bases)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="reap: report what would be reclaimed, change nothing")
+    parser.add_argument("--budget", type=float, default=None)
     parser.add_argument("--json", action="store_true")
 
 
+_RETENTION_ACTIONS = frozenset({"release", "ttl", "reap"})
+
+
+def cmd_retention(args) -> None:
+    """Agent-facing retention: declare done, extend, or reap what expired."""
+    from sandbox.resources.context import reclaim_service
+    from sandbox.resources.models import redact
+
+    service = reclaim_service(getattr(args, "remote", None))
+    if args.action == "reap":
+        payload = service.reap(
+            dry_run=bool(args.dry_run) or not args.confirm,
+            ttl=args.ttl, confirm=bool(args.confirm),
+            budget_seconds=args.budget if args.budget is not None else 900,
+        )
+    elif not args.name:
+        from sandbox.core import die
+        die(f"workspace {args.action} requires a workspace name")
+        return
+    elif args.action == "release":
+        payload = service.release(args.name)
+    else:
+        if not args.ttl:
+            from sandbox.core import die
+            die("workspace ttl requires --ttl (for example --ttl 14d)")
+            return
+        payload = service.set_ttl(args.name, args.ttl)
+    payload = redact(payload)
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        error = payload.get("error") or {}
+        print(f"workspace {args.action}: {payload.get('status')}"
+              + (f" — {error.get('code')}: {error.get('message')}"
+                 if error else ""))
+        data = payload.get("data") or {}
+        if args.action == "ttl" and data.get("expires_at"):
+            print(f"  expires: {data['expires_at']}")
+        if args.action == "reap":
+            print(f"  dry-run: {bool(data.get('dry_run'))}")
+            for item in (data.get("candidates") or ())[:200]:
+                print(f"    {item.get('kind')} {item.get('display_name')} "
+                      f"[{item.get('reason')}]")
+            for item in (data.get("outcomes") or ())[:200]:
+                print(f"    {item.get('status')} {item.get('resource_id')} "
+                      f"[{item.get('reason')}]")
+            if data.get("manifest_path"):
+                print(f"  manifest: {data['manifest_path']}")
+    if not payload.get("ok"):
+        raise SystemExit(1)
+
+
 def cmd_workspace(_cfg, args) -> None:
+    if args.action in _RETENTION_ACTIONS:
+        cmd_retention(args)
+        return
     if (args.action in {"reset", "destroy"} or
             args.action == "migrate" and args.plan_id) and not args.confirm:
         from sandbox.core import die

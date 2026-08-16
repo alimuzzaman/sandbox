@@ -1749,6 +1749,596 @@ def docker_storage_resources(thorough):
         ))
     return resources, [{"category": "docker_storage", "status": status}]
 
+LEASE_DIR = RUNTIME / "resources" / "leases"
+DELETION_DIR = RUNTIME / "resources" / "deletions"
+LEASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+# Kept in lockstep with sandbox/resources/reclaim.WORKSPACE_VOLUME_PATTERN.
+# The probe re-asserts it independently so a malformed or hostile request can
+# never reach `docker volume rm` for a volume holding live site data.
+WORKSPACE_VOLUME = re.compile(
+    r"^sandbox-(?P<workspace>.+)_[A-Za-z0-9.-]*node[-_]?modules$",
+)
+WORKSPACE_MARKERS = ("-workspace-", ".workspace-")
+
+
+def hosted_site_names():
+    names = set()
+    for root in (RUNTIME / "hosts", DEPLOY / "hosts"):
+        try:
+            for child in root.iterdir():
+                if child.is_dir():
+                    names.add(child.name)
+        except OSError:
+            continue
+    return names
+
+
+def read_leases():
+    leases = {}
+    try:
+        children = sorted(LEASE_DIR.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return leases
+    for child in children:
+        if not child.name.endswith(".json"):
+            continue
+        try:
+            payload = json.loads(child.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("name"), str):
+            leases[payload["name"]] = payload
+    return leases
+
+
+def write_lease(name, payload):
+    LEASE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staging = LEASE_DIR / ("." + name + ".staging")
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    descriptor = os.open(
+        str(staging), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600,
+    )
+    try:
+        os.write(descriptor, body.encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(str(staging), str(LEASE_DIR / (name + ".json")))
+    return payload
+
+
+def lease_action():
+    op = str(REQUEST.get("op") or "list")
+    if op == "list":
+        return {"ok": True, "op": op, "leases": read_leases()}
+    name = REQUEST.get("name")
+    if not isinstance(name, str) or not LEASE_NAME.fullmatch(name):
+        return {"ok": False, "op": op, "reason": "invalid_lease_name"}
+    leases = read_leases()
+    if op == "get":
+        return {"ok": True, "op": op, "leases": {
+            name: leases[name],
+        } if name in leases else {}}
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    record = dict(leases.get(name) or {})
+    record.update({"schema": 1, "name": name, "updated_at": now})
+    if op == "release":
+        record["released"] = True
+        record["released_at"] = now
+    elif op == "set":
+        expires_at = REQUEST.get("expires_at")
+        if not isinstance(expires_at, str) or not expires_at:
+            return {"ok": False, "op": op, "reason": "invalid_expiry"}
+        record["expires_at"] = expires_at
+        record["released"] = False
+        record["released_at"] = None
+    else:
+        return {"ok": False, "op": op, "reason": "unsupported_lease_operation"}
+    try:
+        write_lease(name, record)
+    except OSError:
+        return {"ok": False, "op": op, "reason": "lease_write_failed"}
+    return {"ok": True, "op": op, "leases": {name: record}}
+
+
+def indexed_workspace_names(projection):
+    # Return indexed workspace names and their workspace IDs.
+    #
+    # The IDs are what index reconciliation needs after a removal: the sanctioned
+    # lifecycle command addresses a workspace by ID, never by directory name.
+    names = {}
+    if not isinstance(projection, dict):
+        return names, False
+    records = projection.get("records", projection.get("workspaces"))
+    if not isinstance(records, list):
+        return names, False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        workspace_id = record.get("workspace_id")
+        workspace_id = workspace_id if isinstance(workspace_id, str) else None
+        label = record.get("label")
+        if isinstance(label, str) and label:
+            names.setdefault(label, workspace_id)
+        for binding in record.get("bindings") or ():
+            if not isinstance(binding, dict):
+                continue
+            if binding.get("resource_type", binding.get("type")) != (
+                "runtime_instance"
+            ):
+                continue
+            value = binding.get("resource_id", binding.get("id"))
+            if isinstance(value, str) and value:
+                names.setdefault(value, workspace_id)
+    return names, True
+
+
+def entry_mtime(path):
+    # Use the newest of the entry root and its immediate children.
+    #
+    # A directory's own mtime does not move when a file changes deeper inside,
+    # and reclamation needs activity, not just structural change.  One extra
+    # scandir is cheap and catches the common "a build is writing in here" case.
+    newest = None
+    try:
+        newest = path.lstat().st_mtime
+    except OSError:
+        return None
+    try:
+        with os.scandir(str(path)) as children:
+            for child in children:
+                try:
+                    stamp = child.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if newest is None or stamp > newest:
+                    newest = stamp
+    except OSError:
+        pass
+    return newest
+
+
+def bounded_entry_size(path):
+    indexed = indexed_size(path)
+    if indexed is not None:
+        return "measured", indexed
+    if FAST or DEADLINE - time.monotonic() < 4:
+        return "not_measured", None
+    code, out, _err = run(["du", "-sx", "-sk", str(path)], 5)
+    if code:
+        return ("timed_out" if code == 124 else "unavailable"), None
+    try:
+        return "measured", int(out.split()[0]) * 1024
+    except (ValueError, IndexError):
+        return "unavailable", None
+
+
+def reclaim_inventory(inventory, protected_paths, projection, engine_complete):
+    hosted = hosted_site_names()
+    index_names, index_ok = indexed_workspace_names(projection)
+    binds = {}
+    running_volumes = set()
+    for container in inventory.get("containers") or ():
+        running = bool((container.get("State") or {}).get("Running"))
+        identity = str(container.get("Id") or "")
+        display = str(container.get("Name") or "").lstrip("/")
+        for mount in container.get("Mounts") or ():
+            if mount.get("Type") == "volume" and running and mount.get("Name"):
+                running_volumes.add(mount["Name"])
+            if mount.get("Type") != "bind":
+                continue
+            source = str(mount.get("Source") or "")
+            if source:
+                binds.setdefault(source, []).append({
+                    "id": identity, "name": display, "running": running,
+                })
+    block = {
+        "deployment_root": str(DEPLOY),
+        "runtime_root": str(RUNTIME),
+        "entries": [],
+        "volumes": [],
+        "scratch": [],
+        "leases": read_leases(),
+        "hosted_sites": sorted(hosted),
+        "index_names": sorted(index_names),
+        "workspace_ids": {
+            name: value for name, value in index_names.items() if value
+        },
+        "index_available": bool(index_ok),
+        "truncated": False,
+        "unmeasured_count": 0,
+        # Whether the *container* inventory is trustworthy is a different
+        # question from whether every directory could be measured.  One
+        # unmeasured directory must not turn every classification into
+        # UNKNOWN, so the two are reported separately.
+        "engine_complete": bool(engine_complete),
+        "status": "complete" if engine_complete else "partial",
+    }
+    if not engine_complete:
+        block["reason"] = "container_inventory_unavailable"
+    # A fast status skips the engine inventory, so the entry walk is the only
+    # work left; give it a small floor rather than returning an empty listing
+    # when the shared deadline has already been consumed by lifecycle reads.
+    deadline = DEADLINE
+    if FAST:
+        deadline = max(DEADLINE, time.monotonic() + min(3.0, BUDGET_SECONDS * 0.3))
+    try:
+        children = sorted(DEPLOY.iterdir(), key=lambda item: item.name)
+    except OSError:
+        block["status"] = "unavailable"
+        block["reason"] = "deployment_root_unreadable"
+        return block
+    for child in children:
+        if time.monotonic() >= deadline:
+            block["truncated"] = True
+            if block["status"] == "complete":
+                block["status"] = "partial"
+            break
+        try:
+            is_symlink = child.is_symlink()
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        path = str(child)
+        containers = []
+        for source, records in binds.items():
+            if source == path or source.startswith(path + os.sep):
+                containers.extend(records)
+        try:
+            canonical = str(child.resolve(strict=False))
+        except OSError:
+            canonical = path
+        references = protected_paths.get(canonical, ())
+        state, measured = bounded_entry_size(child)
+        if state != "measured":
+            block["unmeasured_count"] += 1
+            if block["status"] == "complete":
+                block["status"] = "partial"
+        block["entries"].append({
+            "name": child.name,
+            "path": path,
+            "size_bytes": measured,
+            "size_state": state,
+            "mtime": entry_mtime(child),
+            "is_workspace": any(
+                marker in child.name for marker in WORKSPACE_MARKERS
+            ),
+            "is_symlink": bool(is_symlink),
+            "containers": containers,
+            "registry": "instance_registry" in references,
+            "active_job": "retained_job" in references,
+            "indexed": child.name in index_names,
+            "hosted": child.name in hosted or child.name == "hosts",
+            "protections": [],
+        })
+    for volume in inventory.get("volumes") or ():
+        name = volume.get("Name")
+        if not isinstance(name, str) or not name:
+            continue
+        mountpoint = str(volume.get("Mountpoint") or "")
+        block["volumes"].append({
+            "name": name,
+            "project": owner(volume.get("Labels")),
+            "size_bytes": indexed_size(Path(mountpoint)) if mountpoint else None,
+            "mounted_running": name in running_volumes,
+        })
+    try:
+        for child in sorted(RUNTIME.iterdir(), key=lambda item: item.name):
+            if not child.name.startswith(".drive-volume-fallbacks-"):
+                continue
+            state, measured = bounded_entry_size(child)
+            block["scratch"].append({
+                "name": child.name,
+                "path": str(child),
+                "size_bytes": measured if state == "measured" else None,
+                "mtime": entry_mtime(child),
+            })
+    except OSError:
+        pass
+    return block
+
+
+def manifest_append(path, record):
+    # Append one durable record.
+    #
+    # ``O_APPEND`` plus ``fsync`` and no temporary file: the manifest has to be
+    # writable on a host with zero free bytes, where ``mkstemp`` + ``replace``
+    # fails.  Appending to an already-created file reuses the last block until it
+    # fills, which is what makes the record survive the exact situation that
+    # produces it.
+    descriptor = os.open(
+        str(path), os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600,
+    )
+    try:
+        os.write(
+            descriptor,
+            (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def refuse_target(kind, locator):
+    # Re-assert every protection host-side; never trust the request.
+    if kind == "volume":
+        match = WORKSPACE_VOLUME.fullmatch(locator)
+        if match is None or not any(
+            marker in match.group("workspace") for marker in WORKSPACE_MARKERS
+        ):
+            return "volume_not_workspace_scoped"
+        return None
+    if kind not in {"worktree", "runtime", "download_cache", "job_artifact"}:
+        return "unsupported_resource_kind"
+    path = Path(locator)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return "path_unresolvable"
+    if resolved in {RUNTIME, DEPLOY, HOME, Path("/")}:
+        return "managed_root"
+    if not (inside(resolved, RUNTIME) or inside(resolved, DEPLOY)):
+        return "path_escape"
+    hosts_root = (DEPLOY / "hosts").resolve(strict=False)
+    if resolved == hosts_root or inside(resolved, hosts_root):
+        return "hosted_site"
+    for name in hosted_site_names():
+        if resolved.name == name or inside(resolved, (DEPLOY / name).resolve(strict=False)):
+            return "hosted_site"
+    if path.is_symlink():
+        return "symlink"
+    return None
+
+
+def remove_path(path):
+    # Remove a tree, escalating once, and verify it is actually gone.
+    #
+    # Containers run as root, so ``.pnpm-store`` subtrees are root-owned and an
+    # unprivileged ``rmtree`` fails part way through.  Reporting that as success
+    # would both corrupt the byte accounting and hide a real failure, so absence
+    # is verified before any success is claimed.
+    elevated = False
+    failure = None
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            shutil.rmtree(str(path))
+    except OSError as exc:
+        failure = exc
+    if path.exists() or path.is_symlink():
+        elevated = True
+        run(["sudo", "-n", "rm", "-rf", "--", str(path)], 120)
+    absent = not (path.exists() or path.is_symlink())
+    return absent, elevated, failure
+
+
+def reclaim_action():
+    run_id = str(REQUEST.get("run_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        return {"stage": "final", "ok": False, "reason": "invalid_run_id"}
+    trigger = str(REQUEST.get("trigger") or "manual")
+    candidates = REQUEST.get("candidates")
+    if not isinstance(candidates, list):
+        return {"stage": "final", "ok": False, "reason": "invalid_candidates"}
+    try:
+        DELETION_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        manifest = DELETION_DIR / (run_id + ".jsonl")
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "phase": "run_start",
+            "trigger": trigger, "candidates": len(candidates),
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    except OSError:
+        # Without a durable record we do not delete anything at all.
+        return {"stage": "final", "ok": False, "reason": "manifest_unavailable"}
+    before = shutil.disk_usage("/")
+    outcomes = []
+    budget_exhausted = False
+    stopped = set()
+    for candidate in candidates:
+        if time.monotonic() >= DEADLINE:
+            budget_exhausted = True
+            break
+        if not isinstance(candidate, dict):
+            continue
+        seq = candidate.get("seq")
+        kind = str(candidate.get("kind") or "")
+        locator = str(candidate.get("locator") or "")
+        planned_bytes = candidate.get("bytes")
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        refusal = refuse_target(kind, locator)
+        if refusal is not None:
+            outcomes.append({
+                "seq": seq, "locator": locator, "status": "skipped",
+                "reason": refusal, "bytes": planned_bytes,
+                "elevated": False, "verified_absent": False,
+            })
+            manifest_append(manifest, {
+                "schema": 1, "run_id": run_id, "seq": seq, "phase": "outcome",
+                "path": locator, "status": "skipped", "reason": refusal,
+                "elevated": False, "verified_absent": False, "bytes": None,
+                "at": now,
+            })
+            continue
+        if kind == "volume":
+            expected = None
+        else:
+            path = Path(locator)
+            if not (path.exists() or path.is_symlink()):
+                outcomes.append({
+                    "seq": seq, "locator": locator, "status": "already_absent",
+                    "reason": "already_absent", "bytes": 0,
+                    "elevated": False, "verified_absent": True,
+                })
+                manifest_append(manifest, {
+                    "schema": 1, "run_id": run_id, "seq": seq,
+                    "phase": "outcome", "path": locator,
+                    "status": "already_absent", "reason": "already_absent",
+                    "elevated": False, "verified_absent": True, "bytes": 0,
+                    "at": now,
+                })
+                continue
+            expected = candidate.get("expected_mtime")
+            if expected is not None:
+                observed = entry_mtime(path)
+                if observed is None or abs(float(observed) - float(expected)) > 1.0:
+                    reason = "candidate_modified_since_plan"
+                    outcomes.append({
+                        "seq": seq, "locator": locator, "status": "skipped",
+                        "reason": reason, "bytes": planned_bytes,
+                        "elevated": False, "verified_absent": False,
+                    })
+                    manifest_append(manifest, {
+                        "schema": 1, "run_id": run_id, "seq": seq,
+                        "phase": "outcome", "path": locator,
+                        "status": "skipped", "reason": reason,
+                        "elevated": False, "verified_absent": False,
+                        "bytes": None, "at": now,
+                    })
+                    continue
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "seq": seq, "phase": "intent",
+            "path": locator, "kind": kind, "bytes": planned_bytes,
+            "class": candidate.get("class"), "tier": candidate.get("tier"),
+            "reason": candidate.get("reason"), "trigger": trigger, "at": now,
+        })
+        if kind == "volume":
+            for container in candidate.get("stop_containers") or ():
+                if isinstance(container, str) and container and container not in stopped:
+                    run(["docker", "stop", "-t", "5", container], 30)
+                    stopped.add(container)
+            code, _out, err = run(["docker", "volume", "rm", locator], 60)
+            if code == 0:
+                status, reason, absent = "removed", "removed", True
+            elif code == 124:
+                status, reason, absent = "timed_out", "cleanup_timed_out", False
+            elif "no such volume" in str(err).lower():
+                status, reason, absent = "already_absent", "already_absent", True
+            else:
+                status, reason, absent = "failed", "cleanup_failed", False
+            elevated = False
+        else:
+            for container in candidate.get("stop_containers") or ():
+                if isinstance(container, str) and container and container not in stopped:
+                    run(["docker", "stop", "-t", "5", container], 30)
+                    run(["docker", "rm", "-f", container], 30)
+                    stopped.add(container)
+            absent, elevated, failure = remove_path(Path(locator))
+            if absent:
+                status, reason = "removed", "removed"
+            elif failure is not None and isinstance(failure, PermissionError):
+                status, reason = "failed", "partial_removal_detected"
+            else:
+                status, reason = "failed", "partial_removal_detected"
+            if kind == "download_cache" and absent:
+                try:
+                    Path(locator).mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+        outcomes.append({
+            "seq": seq, "locator": locator, "status": status, "reason": reason,
+            "bytes": planned_bytes if status == "removed" else 0,
+            "elevated": elevated, "verified_absent": bool(absent),
+        })
+        manifest_append(manifest, {
+            "schema": 1, "run_id": run_id, "seq": seq, "phase": "outcome",
+            "path": locator, "status": status, "reason": reason,
+            "elevated": elevated, "verified_absent": bool(absent),
+            "bytes": planned_bytes if status == "removed" else 0,
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+    removed_paths = {
+        item["locator"] for item in outcomes
+        if item["status"] in {"removed", "already_absent"}
+    }
+    workspace_ids = REQUEST.get("workspace_ids")
+    reconciled = reconcile_after_removal(
+        removed_paths, workspace_ids if isinstance(workspace_ids, dict) else {},
+    )
+    after = shutil.disk_usage("/")
+    return {
+        "stage": "final",
+        "ok": True,
+        "run_id": run_id,
+        "manifest_path": str(manifest),
+        "outcomes": outcomes,
+        "reconciled": reconciled,
+        "budget_exhausted": budget_exhausted,
+        "capacity_before": {
+            "total_bytes": int(before.total), "used_bytes": int(before.used),
+            "available_bytes": int(before.free),
+            "reserved_bytes": max(
+                int(before.total) - int(before.used) - int(before.free), 0,
+            ),
+        },
+        "capacity_after": {
+            "total_bytes": int(after.total), "used_bytes": int(after.used),
+            "available_bytes": int(after.free),
+            "reserved_bytes": max(
+                int(after.total) - int(after.used) - int(after.free), 0,
+            ),
+        },
+    }
+
+
+def reconcile_after_removal(removed_paths, workspace_ids):
+    # Drop records whose storage is gone, and name what could not be dropped.
+    #
+    # The index and the disk disagreed in both directions, so removal is the only
+    # moment either side can be corrected without guessing.  Registry records go
+    # through the typed repository; index records go through the sanctioned
+    # workspace lifecycle command, which a host running an older runtime may not
+    # have — in which case the count is reported as pending rather than implied
+    # to be clean.
+    result = {
+        "registry_removed": 0, "index_removed": 0, "index_pending": 0,
+        "leases_removed": 0, "status": "complete",
+    }
+    names = {Path(item).name for item in removed_paths if item}
+    if not names:
+        return result
+    try:
+        from sandbox.project_registry import JsonRegistryRepository
+
+        repository = JsonRegistryRepository(RUNTIME / "registry.json")
+        for root, record in list(repository.read_only_all().items()):
+            key = root if isinstance(root, str) else getattr(record, "root", "")
+            if not isinstance(key, str) or not key:
+                continue
+            if Path(key).name in names and not Path(key).exists():
+                if repository.remove(key):
+                    result["registry_removed"] += 1
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
+        result["status"] = "partial"
+        result["reason"] = "registry_unavailable"
+    for name in sorted(names):
+        workspace_id = (workspace_ids or {}).get(name)
+        if not isinstance(workspace_id, str) or not workspace_id:
+            continue
+        code, _out, _err = run(
+            [str(SB), "workspace", "destroy", "--workspace-id", workspace_id,
+             "--confirm", "--json"], 20,
+        )
+        if code == 0:
+            result["index_removed"] += 1
+        else:
+            result["index_pending"] += 1
+    if result["index_pending"]:
+        result["status"] = "partial"
+        result.setdefault("reason", "index_reconciliation_unavailable")
+    for name in sorted(names):
+        if not LEASE_NAME.fullmatch(name):
+            continue
+        try:
+            (LEASE_DIR / (name + ".json")).unlink()
+            result["leases_removed"] += 1
+        except OSError:
+            pass
+    return result
+
+
 def scan():
     global PHASE
     thorough = bool(REQUEST.get("thorough"))
@@ -2334,6 +2924,33 @@ def scan():
             (error,) if error else (),
         ))
     outcomes.append({"category": "job_artifacts", "status": artifact_status})
+    reclaim = None
+    if not targeted and REQUEST.get("reclaim") is not False:
+        PHASE = "reclaim_inventory"
+        engine_complete = not FAST and all(
+            item.get("status") == "complete"
+            for item in outcomes
+            if isinstance(item, dict)
+            and item.get("category") == "docker_containers"
+        )
+        try:
+            reclaim = reclaim_inventory(
+                inventory, protected_paths, workspace_projection,
+                engine_complete,
+            )
+        except Exception:
+            reclaim = {
+                "deployment_root": str(DEPLOY), "runtime_root": str(RUNTIME),
+                "entries": [], "volumes": [], "scratch": [], "leases": {},
+                "hosted_sites": [], "index_names": [], "status": "unavailable",
+                "reason": "reclaim_inventory_failed", "truncated": False,
+                "unmeasured_count": 0,
+            }
+        outcomes.append({
+            "category": "reclaim_inventory",
+            "status": reclaim.get("status", "unavailable"),
+            "reason": reclaim.get("reason"),
+        })
     PHASE = "serialize"
     return {
         "identity": identity,
@@ -2343,6 +2960,7 @@ def scan():
         "category_outcomes": outcomes,
         "drift": None,
         "deep_attribution": deep,
+        "reclaim": reclaim,
     }
 
 def inside(path, root):
@@ -2402,9 +3020,16 @@ def remove():
         "reason": "removed" if code == 0 else ("cleanup_timed_out" if code == 124 else "cleanup_failed"),
     }
 
+ACTIONS = {
+    "remove": remove,
+    "reclaim": reclaim_action,
+    "lease": lease_action,
+}
+
 try:
-    output = remove() if REQUEST.get("action") == "remove" else scan()
-    if REQUEST.get("action") != "remove":
+    handler = ACTIONS.get(REQUEST.get("action"))
+    output = handler() if handler is not None else scan()
+    if handler is None:
         output["stage"] = "final"
     emit(output)
 except Exception as exc:
@@ -2647,7 +3272,56 @@ class RemoteResourceAdapter:
             payload.get("drift"),
             DeepAttribution.from_dict(payload.get("deep_attribution")),
             payload.get("capacity_scope_id"),
+            payload.get("reclaim"),
         )
+
+    # -- reclamation ------------------------------------------------------
+
+    def reclaim(self, candidates, *, run_id: str, trigger: str = "manual",
+                workspace_ids: dict | None = None,
+                budget_seconds: float = 900) -> dict:
+        """Execute one reviewed candidate set in a single bounded session.
+
+        One SSH round trip per candidate would mean hundreds of handshakes and
+        hundreds of chances to lose the connection mid-run, so the reviewed set
+        travels together and the probe re-asserts every protection host-side.
+        """
+        response = self._ssh(self._entry(), {
+            "action": "reclaim",
+            "run_id": run_id,
+            "trigger": trigger,
+            "candidates": list(candidates),
+            "workspace_ids": dict(workspace_ids or {}),
+            "budget_seconds": float(budget_seconds),
+        }, budget_seconds + 10)
+        return self._decode(response, "reclaim")
+
+    def lease(self, op: str, *, name: str | None = None,
+              expires_at: str | None = None) -> dict:
+        response = self._ssh(self._entry(), {
+            "action": "lease",
+            "op": op,
+            "name": name,
+            "expires_at": expires_at,
+            "budget_seconds": 20.0,
+        }, 25)
+        return self._decode(response, "lease")
+
+    @staticmethod
+    def _decode(response: ProcessResult, action: str) -> dict:
+        if response.returncode == 124:
+            return {"ok": False, "reason": f"{action}_timed_out"}
+        for line in reversed((response.stdout or "").splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return {"ok": False, "reason": f"{action}_response_invalid"}
 
     def revalidate(self, candidate: CleanupCandidate) -> ResourceObservation | None:
         entry = self._entry()
@@ -2709,3 +3383,93 @@ class RemoteResourceAdapter:
             False,
             self.clock(),
         )
+
+
+class LocalProbeAdapter:
+    """Run the shipped probe program against the local host.
+
+    The probe is the single implementation of host-side reclaim evidence and
+    mutation.  Executing the same source locally keeps local and remote targets
+    on one code path instead of letting a second classifier drift.
+    """
+
+    def __init__(self, *, python: str | None = None, home: str | None = None,
+                 runner: Callable | None = None, clock=utc_now) -> None:
+        import sys
+
+        self.python = python or sys.executable or "python3"
+        self.home = home
+        self._runner = runner
+        self.clock = clock
+
+    def _run(self, request: dict, timeout: float) -> ProcessResult:
+        if self._runner is not None:
+            return self._runner(request, timeout)
+        import os
+        import sys
+        from pathlib import Path as _Path
+
+        environment = dict(os.environ)
+        root = str(_Path(__file__).resolve().parents[2])
+        environment["PYTHONPATH"] = (
+            root + os.pathsep + environment["PYTHONPATH"]
+            if environment.get("PYTHONPATH") else root
+        )
+        if self.home:
+            environment["SANDBOX_HOME"] = str(self.home)
+        try:
+            completed = subprocess.run(
+                [self.python, "-"], input=_program(request), text=True,
+                capture_output=True, timeout=max(int(timeout), 1),
+                env=environment, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProcessResult(
+                (self.python, "-"), 124,
+                exc.stdout if isinstance(exc.stdout, str) else "",
+                exc.stderr if isinstance(exc.stderr, str) else "",
+            )
+        del sys
+        return ProcessResult(
+            (self.python, "-"), int(completed.returncode),
+            completed.stdout or "", completed.stderr or "",
+        )
+
+    def observe_reclaim(self, *, budget_seconds: float = 30,
+                        directory_cache: str = "auto") -> dict:
+        response = self._run({
+            "action": "observe",
+            "thorough": False,
+            "budget_seconds": float(budget_seconds),
+            "managed_host": True,
+            "remote_name": None,
+            "focus": None,
+            "deep": True,
+            "directory_cache": directory_cache,
+        }, budget_seconds + 5)
+        payload = _salvage_payload(response.stdout) or {}
+        return payload
+
+    def reclaim(self, candidates, *, run_id: str, trigger: str = "manual",
+                workspace_ids: dict | None = None,
+                budget_seconds: float = 900) -> dict:
+        response = self._run({
+            "action": "reclaim",
+            "run_id": run_id,
+            "trigger": trigger,
+            "candidates": list(candidates),
+            "workspace_ids": dict(workspace_ids or {}),
+            "budget_seconds": float(budget_seconds),
+        }, budget_seconds + 10)
+        return RemoteResourceAdapter._decode(response, "reclaim")
+
+    def lease(self, op: str, *, name: str | None = None,
+              expires_at: str | None = None) -> dict:
+        response = self._run({
+            "action": "lease",
+            "op": op,
+            "name": name,
+            "expires_at": expires_at,
+            "budget_seconds": 20.0,
+        }, 25)
+        return RemoteResourceAdapter._decode(response, "lease")

@@ -354,6 +354,26 @@ allocated-block evidence, and Docker unique/shared/activity/reclaimable
 diagnostics without double counting them. It is bounded (budget plus five
 seconds), preserves valid partial/cancelled evidence, installs nothing, and
 adds no cleanup path.
+
+Deployment storage has its own tiered path. `status` classifies every entry of
+`deploy-src` as PROTECTED / LIVE / STOPPED / REGONLY / BASE / ORPHAN with sizes,
+mtimes, per-class totals, and index-versus-disk drift; `plan` previews a tier
+with a reason per candidate and a skipped list; `cleanup` executes it, writing a
+deletion manifest before each removal so "what happened to X" stays answerable:
+
+```sh
+./sb resources status  --remote scaleway-sandbox --deep --budget 180
+./sb resources plan    --remote scaleway-sandbox --tier safe
+./sb resources cleanup --remote scaleway-sandbox --tier safe --confirm
+./sb workspace release <name> --remote scaleway-sandbox    # done with it
+./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
+./sb workspace reap --remote scaleway-sandbox --dry-run
+```
+
+Only workspace-scoped `node_modules`-style volumes are ever eligible — every
+other volume is protected at every tier, including ones the engine reports as
+unused — hosted sites are untouchable, a partial delete is reported as a
+failure rather than success, and the default retention window is 7 days.
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
 ### Durable remote-first jobs

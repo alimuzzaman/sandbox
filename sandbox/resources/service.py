@@ -5,6 +5,7 @@ from datetime import timezone
 import inspect
 import math
 import secrets
+import time
 
 from .attribution import (
     CoverageObservation,
@@ -71,6 +72,24 @@ def enrich_outcomes(outcomes, resources) -> tuple:
             "unmeasured_count": sum(row[2] for row in rows),
         })
     return tuple(enriched)
+
+
+def _reclaim_report(snapshot, capacity):
+    """Classify the host's raw reclaim evidence, when the provider sent any.
+
+    Keeping this on the same snapshot means `resources status` answers the
+    whole question in one round trip instead of a second probe just to say
+    which deployment directories are abandoned.
+    """
+    block = getattr(snapshot, "reclaim", None)
+    if not block:
+        return None
+    try:
+        from .reclaim import build_report
+
+        return build_report(block, capacity, now=time.time())
+    except Exception:
+        return {"status": "unavailable", "reason": "reclaim_report_failed"}
 
 
 class ResourceError(RuntimeError):
@@ -273,6 +292,7 @@ class ResourceService:
                 deep_attribution=deep_attribution,
                 capacity_scope_id=getattr(snapshot, "capacity_scope_id", None),
                 capacity_pressure=None,
+                reclaim=_reclaim_report(snapshot, None),
             )
         if snapshot.capacity is None:
             if request.is_cancelled():
@@ -407,6 +427,7 @@ class ResourceService:
                 snapshot.resources,
                 inventory_status=network_outcome,
             ),
+            reclaim=_reclaim_report(snapshot, snapshot.capacity),
         )
 
     def status(

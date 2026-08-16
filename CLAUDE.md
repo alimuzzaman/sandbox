@@ -181,8 +181,9 @@ Merge order: user-global → project → override. See `docs/sandbox-config-refe
 20. Baked-path artifacts (compose, herd shims, Caddyfile, venv) REGENERATE on relocate; data moves cleanly.
 21. An unprivileged process cannot kill a `sudo -n <cmd>` child: killing `sudo` leaves the root worker holding the stdout pipe, so `communicate()` blocks past the budget. Bound elevated commands with `timeout -k 1 N` INSIDE sudo, and start every child with `start_new_session=True` so the group can be killed.
 22. Host attribution: `sb resources status --fast` (cached index, seconds) / `--refresh` (rebuild it). `docker system df` does NOT cover `/var/lib/containerd`.
+23. Reclaiming host storage: `sb resources status/plan/cleanup --tier safe|tmp|all` (classes PROTECTED/LIVE/STOPPED/REGONLY/BASE/ORPHAN) + `sb workspace release|ttl|reap`. NEVER `docker volume prune`: live site data reads as dangling. Only `sandbox-<workspace>_*node-modules` volumes are eligible. Deletions are manifested at `$SANDBOX_HOME/runtime/resources/deletions/<run>.jsonl` BEFORE they happen. Default TTL 7 days. These ship their probe over SSH, so they need no host runtime sync; only `workspace list|status|create|reset|destroy --remote` run `sb` on the host.
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/041-safe-secret-inspection/plan.md
+at specs/042-host-storage-reclamation/plan.md
 <!-- SPECKIT END -->

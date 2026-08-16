@@ -70,6 +70,7 @@ class ProviderSnapshot:
     drift: dict | None = None
     deep_attribution: DeepAttribution | None = None
     capacity_scope_id: str | None = None
+    reclaim: dict | None = None
 
 
 @dataclass(frozen=True)

@@ -48,3 +48,31 @@ def resource_service(remote: str | None = None) -> ResourceService:
         adapter,
         PlanStore(Path(RUNTIME_DIR) / "resource-plans"),
     )
+
+
+def reclaim_service(remote: str | None = None):
+    """Build the tiered reclamation service for a local or remote target."""
+    import hashlib
+    import platform
+
+    from sandbox.core._paths import BASE, RUNTIME_DIR
+
+    from .models import StorageTarget
+    from .reclaim_service import (
+        ReclaimService, _LocalReclaimProvider, _RemoteReclaimProvider,
+    )
+    from .remote import LocalProbeAdapter, RemoteResourceAdapter
+
+    store = PlanStore(Path(RUNTIME_DIR) / "resource-plans")
+    if remote:
+        return ReclaimService(
+            _RemoteReclaimProvider(RemoteResourceAdapter(remote)), store,
+        )
+    seed = f"{platform.node()}:{BASE}"
+    target = StorageTarget(
+        "local", "local", hashlib.sha256(seed.encode()).hexdigest()[:24],
+    )
+    return ReclaimService(
+        _LocalReclaimProvider(LocalProbeAdapter(), target), store,
+        target=target,
+    )

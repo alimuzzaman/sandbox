@@ -21,6 +21,13 @@ sb resources status --remote scaleway-sandbox --refresh --json
 sb resources status --remote scaleway-sandbox --fast --json
 sb resources plan --scope cache --thorough --budget 60 --json
 sb resources plan --scope stale --thorough --budget 90 --json
+# tiered reclamation of deploy-src (classes, reasons, manifest, retention)
+sb resources status --remote scaleway-sandbox --deep --budget 180 --json
+sb resources plan --remote scaleway-sandbox --tier safe --json
+sb resources cleanup --remote scaleway-sandbox --tier safe --confirm --json
+sb workspace release <name> --remote scaleway-sandbox --json
+sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox --json
+sb workspace reap --remote scaleway-sandbox --dry-run --json
 ```
 
 Status and planning are read-only. Treat unavailable or timed-out bytes as
@@ -81,6 +88,17 @@ sb resources cleanup --plan-id PLAN_ID --confirm --json
 
 Do not supply paths or engine identifiers outside the plan. Never retry a
 timed-out remote cleanup automatically; rescan and create a new plan.
+
+`--tier safe|tmp|all` is the deployment-storage path and is mutually exclusive
+with `--scope`. Read the plan's `skipped` list before confirming: a protection
+rule is reported there, never silently omitted. Never run `docker volume prune`
+on a Sandbox host — live site databases and uploads read as dangling; only
+`sandbox-<workspace>_*node-modules` volumes are ever eligible, and the tool
+refuses anything else even when asked directly. When you finish with a
+workspace, say so (`sb workspace release <name>`) instead of leaving it to age
+out; extend with `sb workspace ttl <name> --ttl 14d` when you need it longer.
+Every deletion is recorded in
+`$SANDBOX_HOME/runtime/resources/deletions/<run_id>.jsonl` before it happens.
 
 ## Durable remote-first jobs
 

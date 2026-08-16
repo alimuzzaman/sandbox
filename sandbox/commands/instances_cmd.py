@@ -4,9 +4,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 import types as _types
 from contextlib import contextmanager
 import io
@@ -39,15 +42,51 @@ def _is_wordpress_project(config: dict) -> bool:
 
 
 def _print_ensure_json(document: object, *, sort_keys: bool = False,
-                       compact: bool = False) -> None:
-    """Emit one fail-closed public JSON document for ``sb ensure --json``."""
+                       compact: bool = False, reveal_login: bool = False) -> None:
+    """Emit one fail-closed public JSON document for ``sb ensure --json``.
+
+    ``reveal_login`` is the ``--reveal-login`` opt-in and restores the single
+    ``login_url`` field after redaction. Default output stays redacted, so the
+    guarantee is unchanged for every caller that does not ask. The opt-in is
+    only honoured for a LOCAL instance whose URL is loopback-bound: that
+    autologin token is a dev credential the caller already owns (it is stored
+    in ``sandbox.local.yml`` under the same UID) and it authenticates nothing
+    off this machine. Without the opt-in the redacted value still carries the
+    ``sandbox_autologin=`` parameter name, so consumers cannot distinguish it
+    from a working token by shape alone.
+    """
+    payload = redact_structure(document)
+    if reveal_login and isinstance(document, Mapping) and isinstance(payload, dict):
+        revealed = _local_autologin_url(document)
+        if revealed:
+            payload["login_url"] = revealed
     separators = (",", ":") if compact else None
     print(json.dumps(
-        redact_structure(document),
+        payload,
         sort_keys=sort_keys,
         separators=separators,
         default=str,
     ))
+
+
+def _local_autologin_url(document: Mapping) -> str:
+    """Return the instance's autologin URL when revealing it is safe.
+
+    Empty string when the record carries no autologin token, or when its host
+    is not loopback-bound -- a deployed or remote-rewritten URL never qualifies,
+    regardless of the flag.
+    """
+    value = document.get("login_url")
+    if not isinstance(value, str) or "sandbox_autologin=" not in value:
+        return ""
+    host = urlsplit(value).hostname or ""
+    if host in {"localhost", "::1"} or host.startswith("127."):
+        return value
+    try:
+        resolved = socket.gethostbyname(host)
+    except OSError:
+        return ""
+    return value if resolved.startswith("127.") else ""
 
 
 
@@ -174,8 +213,10 @@ def cmd_ensure(cfg, args) -> None:
         die(redact_text(summary))
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
-        # parse it past any boot/progress output above.
-        _print_ensure_json(entry)
+        # parse it past any boot/progress output above. This is the only call
+        # site that honours --reveal-login: the remote branch returned long
+        # before here, so the record is always a local instance.
+        _print_ensure_json(entry, reveal_login=getattr(args, "reveal_login", False))
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")
         print(f"  project: {entry['root']}")

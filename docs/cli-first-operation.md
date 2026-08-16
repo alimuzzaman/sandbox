@@ -98,6 +98,12 @@ Compose service. It does not invent a shell, service, or package command.
 WordPress-only commands remain capability-gated and are not valid for generic
 Compose projects.
 
+`./sb ensure --json` redacts every credential-shaped field, so `login_url`
+arrives as `?sandbox_autologin=[REDACTED]`. A local test harness that needs a
+password-free admin session passes `--reveal-login`: it restores `login_url`
+alone, leaves the other credentials redacted, and refuses any host that is not
+loopback-bound.
+
 ## MCP
 
 Run `./sb mcp --project-dir .` only when an MCP-capable client needs live tool

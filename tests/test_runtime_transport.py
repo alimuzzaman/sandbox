@@ -180,6 +180,68 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         for secret in ("login-token", "raw-token", "raw-password", "raw-authorization"):
             self.assertNotIn(secret, serialized)
 
+    def _ensure_json_payload(self, login_url, **overrides):
+        """Run `cmd_ensure --json` over one fixture record and parse its line."""
+        import sandbox.commands.instances_cmd as commands
+        from sandbox.runtimes.base import OperationResult
+
+        class SuccessfulService:
+            def invoke(self, request):
+                return OperationResult(
+                    True, "ensure", request.project_root, "wordpress",
+                    {
+                        "instance": "fixture",
+                        "url": "https://fixture.tst",
+                        "login_url": login_url,
+                        "autologin_token": "raw-token",
+                        "password": "raw-password",
+                    },
+                )
+
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, **overrides)
+        output = io.StringIO()
+        with mock.patch.object(commands, "wordpress_runtime_service",
+                               return_value=SuccessfulService()), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_ensure({}, args)
+        return output.getvalue(), json.loads(output.getvalue())
+
+    def test_cli_ensure_json_reveal_login_returns_local_autologin_url(self):
+        """--reveal-login is the documented opt-in for a loopback instance."""
+        login_url = "https://fixture.tst/?sandbox_autologin=login-token"
+        with mock.patch("socket.gethostbyname", return_value="127.0.0.42"):
+            serialized, payload = self._ensure_json_payload(login_url, reveal_login=True)
+        self.assertEqual(payload["login_url"], login_url)
+        # The opt-in covers login_url alone; every other credential stays redacted.
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertEqual(payload["password"], "[REDACTED]")
+        for secret in ("raw-token", "raw-password"):
+            self.assertNotIn(secret, serialized)
+
+    def test_cli_ensure_json_reveal_login_refuses_non_loopback_host(self):
+        """A deployed or rewritten URL never qualifies, flag or not."""
+        with mock.patch("socket.gethostbyname", return_value="203.0.113.9"):
+            serialized, payload = self._ensure_json_payload(
+                "https://public.example/?sandbox_autologin=login-token",
+                reveal_login=True,
+            )
+        self.assertEqual(
+            payload["login_url"],
+            "https://public.example/?sandbox_autologin=%5BREDACTED%5D",
+        )
+        self.assertNotIn("login-token", serialized)
+
+    def test_cli_ensure_json_reveal_login_refuses_unresolvable_host(self):
+        """Fail closed when the host cannot be proven loopback."""
+        with mock.patch("socket.gethostbyname", side_effect=OSError("no such host")):
+            serialized, payload = self._ensure_json_payload(
+                "https://fixture.tst/?sandbox_autologin=login-token",
+                reveal_login=True,
+            )
+        self.assertNotIn("login-token", serialized)
+        self.assertIn("sandbox_autologin=%5BREDACTED%5D", payload["login_url"])
+
     def test_cli_ensure_json_redacts_remote_credentials(self):
         import sandbox.commands.instances_cmd as commands
 

@@ -434,9 +434,17 @@ Use the same runtime operations without an MCP client:
 ./sb guide --project-dir .        # runtime-aware command catalog
 ./sb skill show sandbox-cli       # CLI-first operating skill
 ./sb ensure                       # start/reconcile local instance
+./sb ensure --json --reveal-login # ...and emit a usable admin autologin URL
 ./sb exec -- sh -lc 'npm test'    # generic Compose projects only
 ./sb deploy --remote <name> --ensure --expose
 ```
+
+`--json` output is redacted: every credential-shaped field, including the
+`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
+harnesses that need to open an admin session without a password pass
+`--reveal-login`, which restores `login_url` alone (other credentials stay
+redacted) and only for a loopback-bound local instance — a deployed or remote
+URL is never revealed, flag or not.
 
 `./sb mcp --project-dir .` remains available for an MCP-capable client. It is
 runtime-scoped: generic Compose projects do not load WordPress tools, and

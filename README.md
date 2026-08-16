@@ -459,8 +459,10 @@ Use the same runtime operations without an MCP client:
 `sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
 harnesses that need to open an admin session without a password pass
 `--reveal-login`, which restores `login_url` alone (other credentials stay
-redacted) and only for a loopback-bound local instance — a deployed or remote
-URL is never revealed, flag or not.
+redacted). A local instance qualifies when its host is loopback-bound; a remote
+ensure record qualifies on the flag, which is forwarded to the VPS so its own
+redaction runs after. A revealed URL for a publicly exposed instance is an
+admin credential — keep it in a gitignored descriptor, out of logs and commits.
 
 `./sb mcp --project-dir .` remains available for an MCP-capable client. It is
 runtime-scoped: generic Compose projects do not load WordPress tools, and

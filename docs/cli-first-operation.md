@@ -107,8 +107,13 @@ Compose projects.
 `./sb ensure --json` redacts every credential-shaped field, so `login_url`
 arrives as `?sandbox_autologin=[REDACTED]`. A local test harness that needs a
 password-free admin session passes `--reveal-login`: it restores `login_url`
-alone, leaves the other credentials redacted, and refuses any host that is not
-loopback-bound.
+alone and leaves the other credentials redacted. A local record must prove its
+host is loopback-bound; a remote ensure record is revealed on the flag alone,
+and the flag is forwarded to the VPS so its own redaction does not strip the
+token first. A remote staged from a runtime that predates the flag ensures
+without it and reports that — restage with `./sb remote provision <name>`.
+Treat a revealed URL from a publicly exposed instance as an admin credential:
+write it to a gitignored descriptor, never to a log or a commit.
 
 ## MCP
 

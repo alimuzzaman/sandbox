@@ -219,6 +219,100 @@ class TestRuntimeTransportPreflight(unittest.TestCase):
         for secret in ("raw-token", "raw-password"):
             self.assertNotIn(secret, serialized)
 
+    def test_cli_ensure_json_reveal_login_returns_remote_autologin_url(self):
+        """A remote ensure record qualifies too: E2E runners need a usable login.
+
+        The remote redacts its own JSON, so the flag has to reach the VPS and
+        the revealed field has to survive the local parse.
+        """
+        import sandbox.commands.instances_cmd as commands
+
+        login_url = "https://remote.fixture.tst/?sandbox_autologin=remote-login"
+        remote_result = {
+            "ok": True, "instance": "fixture-master",
+            "url": "https://remote.fixture.tst",
+            "login_url": login_url,
+            "autologin_token": "remote-token",
+            "target": {"remote": "fixture-remote", "workspace": "default"},
+        }
+        args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                     create=False, json=True, local=False,
+                                     reveal_login=True)
+        output = io.StringIO()
+        with mock.patch("sandbox.commands.lifecycle._remote_lifecycle",
+                        return_value=remote_result), \
+                contextlib.redirect_stdout(output):
+            commands.cmd_ensure({}, args)
+        serialized = output.getvalue()
+        payload = json.loads(serialized)
+        self.assertEqual(payload["login_url"], login_url)
+        self.assertEqual(payload["autologin_token"], "[REDACTED]")
+        self.assertNotIn("remote-token", serialized)
+
+    def test_remote_ensure_asks_the_vps_to_reveal_its_login_url(self):
+        import sandbox.commands.lifecycle as commands
+        from sandbox.core import _remote as remote
+
+        login_url = "https://remote.fixture.tst/?sandbox_autologin=remote-login"
+        record = {"ok": True, "instance": "fixture-master",
+                  "url": "https://remote.fixture.tst", "login_url": login_url,
+                  "autologin_token": "remote-token"}
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        result = types.SimpleNamespace(returncode=0, stdout=json.dumps(record), stderr="")
+        args = types.SimpleNamespace(remote="fixture-remote", local=False,
+                                     project_dir="/tmp/project", workspace="default",
+                                     reveal_login=True)
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "deploy_exact_working_tree",
+                                  return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "prepare_remote_workspace",
+                                  return_value="/srv/project-workspace"), \
+                mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run", return_value=result) as ssh_run:
+            ensured = commands._remote_lifecycle({}, args, "ensure")
+        self.assertIn("--reveal-login", ssh_run.call_args.args[1])
+        self.assertEqual(ensured["login_url"], login_url)
+        # Only login_url is lifted out of the unredacted document.
+        self.assertEqual(ensured["autologin_token"], "[REDACTED]")
+
+    def test_remote_ensure_retries_without_reveal_login_on_older_runtime(self):
+        """A remote staged from an older runtime must still boot the instance."""
+        import sandbox.commands.lifecycle as commands
+        from sandbox.core import _remote as remote
+
+        record = {"ok": True, "instance": "fixture-master", "url": "http://localhost:8201"}
+        rejected = types.SimpleNamespace(
+            returncode=2, stdout="",
+            stderr="sandbox: error: unrecognized arguments: --reveal-login")
+        accepted = types.SimpleNamespace(returncode=0, stdout=json.dumps(record), stderr="")
+        target = types.SimpleNamespace(
+            kind="remote", remote={"ssh": "fixture.invalid"}, remote_name="fixture-remote",
+            project_root="/tmp/project", workspace_label="default",
+        )
+        service = types.SimpleNamespace(resolve=lambda _request: target)
+        args = types.SimpleNamespace(remote="fixture-remote", local=False,
+                                     project_dir="/tmp/project", workspace="default",
+                                     reveal_login=True)
+        with mock.patch("sandbox.application.context.durable_job_dependencies",
+                        return_value={"target_service": service}), \
+                mock.patch.object(remote, "deploy_exact_working_tree",
+                                  return_value={"target_path": "/srv/project"}), \
+                mock.patch.object(remote, "prepare_remote_workspace",
+                                  return_value="/srv/project-workspace"), \
+                mock.patch.object(remote, "remote_sb_path", return_value="/srv/sandbox/sb"), \
+                mock.patch.object(remote, "ssh_run",
+                                  side_effect=[rejected, accepted]) as ssh_run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            ensured = commands._remote_lifecycle({}, args, "ensure")
+        self.assertEqual(ssh_run.call_count, 2)
+        self.assertNotIn("--reveal-login", ssh_run.call_args.args[1])
+        self.assertEqual(ensured["url"], "http://localhost:8201")
+
     def test_cli_ensure_json_reveal_login_refuses_non_loopback_host(self):
         """A deployed or rewritten URL never qualifies, flag or not."""
         with mock.patch("socket.gethostbyname", return_value="203.0.113.9"):

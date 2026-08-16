@@ -47,17 +47,23 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
 
     ``reveal_login`` is the ``--reveal-login`` opt-in and restores the single
     ``login_url`` field after redaction. Default output stays redacted, so the
-    guarantee is unchanged for every caller that does not ask. The opt-in is
-    only honoured for a LOCAL instance whose URL is loopback-bound: that
-    autologin token is a dev credential the caller already owns (it is stored
-    in ``sandbox.local.yml`` under the same UID) and it authenticates nothing
-    off this machine. Without the opt-in the redacted value still carries the
-    ``sandbox_autologin=`` parameter name, so consumers cannot distinguish it
-    from a working token by shape alone.
+    guarantee is unchanged for every caller that does not ask. Without the
+    opt-in the redacted value still carries the ``sandbox_autologin=``
+    parameter name, so consumers cannot distinguish it from a working token by
+    shape alone.
+
+    Two records qualify. A LOCAL instance whose URL is loopback-bound: that
+    token is a dev credential the caller already owns (stored in
+    ``sandbox.local.yml`` under the same UID) and authenticates nothing off
+    this machine. And a REMOTE ensure record, which an E2E runner needs for the
+    same reason a local one does -- note that a remote instance exposed on a
+    public hostname makes the revealed URL an admin credential for anyone who
+    obtains it, so it belongs in a gitignored descriptor, never in logs or a
+    commit.
     """
     payload = redact_structure(document)
     if reveal_login and isinstance(document, Mapping) and isinstance(payload, dict):
-        revealed = _local_autologin_url(document)
+        revealed = _autologin_url_to_reveal(document)
         if revealed:
             payload["login_url"] = revealed
     separators = (",", ":") if compact else None
@@ -69,16 +75,21 @@ def _print_ensure_json(document: object, *, sort_keys: bool = False,
     ))
 
 
-def _local_autologin_url(document: Mapping) -> str:
-    """Return the instance's autologin URL when revealing it is safe.
+def _autologin_url_to_reveal(document: Mapping) -> str:
+    """Return the autologin URL the ``--reveal-login`` opt-in may emit.
 
-    Empty string when the record carries no autologin token, or when its host
-    is not loopback-bound -- a deployed or remote-rewritten URL never qualifies,
-    regardless of the flag.
+    A remote ensure record qualifies on the strength of the flag alone: the
+    caller selected that remote, and the runner it feeds needs a usable login.
+    A local record still has to prove its host is loopback-bound, so a
+    deployed or rewritten local URL never leaks a token by accident.
+    Empty string when the record carries no autologin token at all.
     """
     value = document.get("login_url")
     if not isinstance(value, str) or "sandbox_autologin=" not in value:
         return ""
+    target = document.get("target")
+    if isinstance(target, Mapping) and target.get("remote"):
+        return value
     host = urlsplit(value).hostname or ""
     if host in {"localhost", "::1"} or host.startswith("127."):
         return value
@@ -142,7 +153,8 @@ def cmd_ensure(cfg, args) -> None:
         from sandbox.commands.lifecycle import _remote_lifecycle
         remote_result = _remote_lifecycle(cfg, args, "ensure")
         if remote_result is not None and getattr(args, "json", False):
-            _print_ensure_json(remote_result, sort_keys=True)
+            _print_ensure_json(remote_result, sort_keys=True,
+                               reveal_login=getattr(args, "reveal_login", False))
         elif remote_result is not None:
             print(f"remote workspace {getattr(args, 'workspace', None) or getattr(args, 'label', 'default')}: ready")
         if remote_result is not None:
@@ -213,9 +225,9 @@ def cmd_ensure(cfg, args) -> None:
         die(redact_text(summary))
     if getattr(args, "json", False):
         # Compact single line as the LAST stdout line so the MCP server can
-        # parse it past any boot/progress output above. This is the only call
-        # site that honours --reveal-login: the remote branch returned long
-        # before here, so the record is always a local instance.
+        # parse it past any boot/progress output above. The record here is
+        # always a local instance -- the remote branch returned long before,
+        # honouring --reveal-login on its own record.
         _print_ensure_json(entry, reveal_login=getattr(args, "reveal_login", False))
     else:
         ok(f"instance '{entry['instance']}' ready at {entry['url']}")

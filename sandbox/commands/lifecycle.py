@@ -453,7 +453,25 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
     # `_last_json` finds nothing, and callers get a bare {"ok": true} with no URL.
     if action in ("status", "ensure"):
         command.append("--json")
-    result = _remote.ssh_run(remote, __import__("shlex").join(command), timeout=900 if action == "ensure" else 25)
+    reveal_login = action == "ensure" and bool(getattr(args, "reveal_login", False))
+    if reveal_login:
+        # The remote redacts its own JSON, so the token has to be asked for on
+        # the VPS side too; asking here alone would only reveal a placeholder.
+        command.append("--reveal-login")
+    shlex_join = __import__("shlex").join
+    result = _remote.ssh_run(remote, shlex_join(command), timeout=900 if action == "ensure" else 25)
+    if reveal_login and result.returncode != 0 \
+            and "--reveal-login" in (result.stderr or "") \
+            and "unrecognized arguments" in (result.stderr or ""):
+        # A remote staged from an older runtime has no such flag. Losing the
+        # token is worth far less than losing the instance, so boot it anyway
+        # and let the record carry the redacted placeholder; `sb remote
+        # provision` restages the runtime when the token is actually needed.
+        info(f"remote '{target.remote_name}' runtime predates --reveal-login; "
+             "ensuring without it (run `./sb remote provision` to restage)")
+        command.remove("--reveal-login")
+        reveal_login = False
+        result = _remote.ssh_run(remote, shlex_join(command), timeout=900)
     payload = None
     if action == "status":
         try:
@@ -470,6 +488,14 @@ def _remote_lifecycle(cfg, args, action: str) -> dict | None:
         die((result.stderr or result.stdout or f"remote {action} failed").strip()[:2000])
     elif action != "logs":
         payload = _remote._last_json(result.stdout or "")
+        if reveal_login and isinstance(payload, dict):
+            # Lift ONE field out of the unredacted remote document: the
+            # autologin URL the operator explicitly asked for. Everything else
+            # stays as the redacted parse produced it.
+            raw = _remote._last_json(result.stdout or "", redact=False) or {}
+            revealed = raw.get("login_url")
+            if isinstance(revealed, str) and "sandbox_autologin=" in revealed:
+                payload["login_url"] = revealed
     if action == "logs":
         return {"ok": True, "action": action, "output": result.stdout or "",
                 "target": {"remote": target.remote_name, "workspace": target.workspace_label}}

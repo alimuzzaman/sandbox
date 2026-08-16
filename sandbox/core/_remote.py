@@ -640,7 +640,15 @@ def ensure_deploy_repo(remote: dict, project_root) -> str:
     return target
 
 
-def _last_json(stdout: str) -> dict | None:
+def _last_json(stdout: str, *, redact: bool = True) -> dict | None:
+    """Parse the last JSON object printed by a remote command.
+
+    Redaction is the default and the only path callers should use for a whole
+    document. ``redact=False`` exists for the narrow case of lifting ONE field
+    the operator explicitly asked for (``sb ensure --reveal-login``); the
+    caller must merge that field into an otherwise redacted payload rather
+    than forwarding the raw document.
+    """
     for line in reversed((stdout or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -650,6 +658,8 @@ def _last_json(stdout: str) -> dict | None:
         except json.JSONDecodeError:
             continue
         if isinstance(data, dict):
+            if not redact:
+                return data
             sanitized = redact_structure(data)
             return sanitized if isinstance(sanitized, dict) else None
     return None

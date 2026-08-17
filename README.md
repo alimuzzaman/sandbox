@@ -164,7 +164,8 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
   "plugins":   ["."],                 // this repo; sibling slugs/paths/zip-URLs for addons
   "mappings":  { "wp-content/plugins/elementor-pro": "/abs/path" },
   "phpVersion": null,                 // null → wordpress:latest; e.g. "8.1"
-  "wpVersion":  null,                 // e.g. "6.4"
+  "wpVersion":  null,                 // EXACT pin ("6.4" = 6.4.0, not 6.4.x).
+                                      // Leave null unless one build is required.
   "server":     "apache",             // apache | nginx | litespeed
   "config":     { "WP_DEBUG": true }, // → wp-config constants
   "tests":      { "suite": "auto" }   // auto-detect WP_UnitTestCase vs Brain/Monkey

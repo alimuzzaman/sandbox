@@ -182,9 +182,11 @@ file path.
   "themes": [],
 
   // Version pins. null → wordpress:latest (no implicit pin). Quote them so
-  // YAML/JSON don't coerce "8.1" to a float.
+  // YAML/JSON don't coerce "8.1" to a float. LEAVE wpVersion null unless you
+  // need one exact WordPress build — a pin is EXACT, so "7.0" is the 7.0.0
+  // release, not the newest 7.0.x. See "Version pins" below.
   "phpVersion": null,   // e.g. "8.1" — resolves server-aware (see below)
-  "wpVersion":  null,   // e.g. "6.4"
+  "wpVersion":  null,   // e.g. "6.4.3" — omit to track the current release
 
   // false | true | "subdirectory" | "subdomain". true = subdirectory (the
   // baseline that works on localhost:<port>). See "Multisite" below.
@@ -367,16 +369,33 @@ in a later release once the map is proven.
 > (`sandbox.config.override.example.json`); migrate those to the map form, e.g.
 > `{ "plugins": { "templately": "/Users/you/Sites/git/templately" } }`.
 
-### How version pins resolve (server-aware)
+### Version pins — pin PHP freely, pin WordPress deliberately
 
-`phpVersion`/`wpVersion` map to the right image **per server**:
+`wpVersion` is an **exact** version, never a version *line*: `"7.0"` installs the
+7.0.0 release and stays there, it does **not** track 7.0.4. Leave it `null` (the
+default) unless the work genuinely needs one exact build — reproducing a
+version-specific report, or a regression bisect. Everything else (feature work,
+plugin development, "match the user's stack") wants an unpinned, current
+WordPress. `phpVersion` is different: PHP is a real compatibility variable and
+pinning it costs nothing, so pin it whenever the target PHP matters.
 
-| server | image (php pinned) | image (wp+php pinned) |
+A pin that is no longer wanted is not sticky: delete it and `./sb apply
+--project-dir <DIR>` moves the live site to the current release (see below).
+
+`phpVersion` maps to the right image **per server**; `wpVersion` never enters an
+image tag at all:
+
+| server | image (php pinned) | where `wpVersion` acts |
 |---|---|---|
-| `apache` | `wordpress:php<php>` | `wordpress:<wp>-php<php>` |
-| `nginx` | `wordpress:php<php>-fpm` | `wordpress:<wp>-php<php>-fpm` |
-| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | (WP via `wp core download`) |
-| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | WP via host `wp core download` |
+| `apache` | `wordpress:php<php>` | `wp core download --version=<wp>` at install |
+| `nginx` | `wordpress:php<php>-fpm` | `wp core download --version=<wp>` at install |
+| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | `wp core download --version=<wp>` at install |
+| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | host `wp core download --version=<wp>` at install |
+
+The WP version is deliberately kept OUT of the image tag (the @wordpress/env
+approach): a PHP-only base image plus an in-container core download avoids
+`manifest unknown` errors for patch-level tags Docker Hub never published
+(`wordpress:6.9.4-php8.1`), and keeps every server stack on ONE bootstrap path.
 
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The
@@ -514,10 +533,10 @@ Config changes apply **in place** with `./sb apply --project-dir <DIR>` (MCP:
 `apply_config`) — it re-renders compose and recreates only the web tier, so the
 new constants take effect **without dropping the DB or uploads**. This is the
 non-destructive alternative to `recreate_instance` / `./sb instance delete` +
-`ensure`. A changed `wpVersion` is reported but not applied by `apply`
-(swapping core under a live DB needs an explicit recreate); a `phpVersion`
-change *does* apply because the web tier is force-recreated against the new
-image. See **In-place reconcile (`sb apply`)** below.
+`ensure`. Both version pins apply: a `phpVersion` change lands because the web
+tier is force-recreated against the new image, and a `wpVersion` change (or a
+REMOVED pin) lands because apply reconciles WordPress core itself. See
+**In-place reconcile (`sb apply`)** below.
 
 ## Multisite
 
@@ -582,14 +601,28 @@ multisite. It:
    bind-mounts).
 2. Regenerates the compose file and `compose up -d --force-recreate`s only the
    web tier. Constants survive via `WORDPRESS_CONFIG_EXTRA`; the DB volume is
-   untouched, so **no data loss**. A `phpVersion` change takes effect (the web
-   image is recreated); a `wpVersion` change is **reported but not applied**
-   (core swaps under a live DB are left to an explicit `recreate_instance`).
+   untouched, so **no data loss**. A `phpVersion` change takes effect here (the
+   web image is recreated).
 3. Re-syncs plugin/theme symlinks + installs (idempotent).
 4. Runs `wp core multisite-convert` if multisite was **newly** enabled
    (idempotent — skips an already-converted network). Switching an existing
    multisite between subdirectory↔subdomain is **not** applied in place; that
    needs a recreate.
+5. **Reconciles WordPress core** against the live `wp core version`:
+
+   | config | live core | apply runs |
+   |---|---|---|
+   | `wpVersion: "6.8.2"` | `6.8.2` | nothing |
+   | `wpVersion: "6.8.2"` | anything else | `wp core update --version=6.8.2 --force` (upgrade **or** downgrade) |
+   | no pin | current release | nothing |
+   | no pin | older | `wp core update` → current release |
+
+   Then `wp core update-db` (`--network` on multisite), so the schema follows
+   the files. Container recreates never re-version WordPress — core lives in the
+   bind mount — so this step is the ONLY thing that moves a running instance off
+   the core it was installed with. It is non-fatal: a wp.org failure warns and
+   leaves the site on its current core. The result comes back as
+   `wp_core: {from, to, changed}`.
 
 Contrast with `recreate_instance` (destroy + re-boot — wipes DB + uploads) and
 bare `./sb apply` with no `--project-dir` (the legacy alias for `./sb setup`,

@@ -457,9 +457,79 @@ def _warn_version_drift(cfg: dict, instance_name, pconf: dict) -> None:
     want = (norm(pconf.get("phpVersion")), norm(pconf.get("wpVersion")))
     if cur == want:
         return
+    root = pconf.get("root") or "."
     info(f"⚠ '{instance_name}' is running php={cur[0] or 'latest'}/wp={cur[1] or 'latest'} "
          f"but config now pins php={want[0] or 'latest'}/wp={want[1] or 'latest'}. "
-         f"Recreate to apply: ./sb instance delete {instance_name}, then re-run.")
+         f"Reconcile in place: ./sb apply --project-dir {root} "
+         f"(php = web tier recreate, wp = core update, no data loss).")
+
+
+def _live_wp_core_version(instance: str) -> str | None:
+    """The WordPress version the instance is ACTUALLY running, or None when no
+    core is installed yet / wp-cli can't answer."""
+    res = wpcli(["core", "version"], instance=instance,
+                check=False, capture=True)
+    if getattr(res, "returncode", 1) not in (0, None):
+        return None
+    lines = [ln.strip() for ln in (getattr(res, "stdout", "") or "").splitlines()
+             if ln.strip()]
+    if not lines:
+        return None
+    v = lines[-1]
+    return v if re.match(r"^\d+(\.\d+)*(-\S+)?$", v) else None
+
+
+def _reconcile_wp_core(instance: str, inst_cfg: dict, pconf: dict) -> dict:
+    """Bring the RUNNING WordPress core in line with the project config.
+
+    The image is PHP-only and core is downloaded into the bind mount at install
+    time (see cmd_install), so nothing about a container recreate re-versions
+    WordPress — an instance keeps whatever core it was installed with forever.
+    That is how an instance sits on an old patch release long after its config
+    changed: a pin edit only affected NEW instances, and dropping a pin affected
+    nothing at all. Apply owns that reconcile:
+
+      * pinned `wpVersion` and live core differs → `wp core update --version=<pin>
+        --force` (works in both directions, so a downgrade for a version-specific
+        repro works too);
+      * no pin → "track the current release": `wp core update`, a no-op when the
+        site is already current.
+
+    Then `wp core update-db` (network-wide on multisite), because a core swap
+    under a live DB leaves the schema at the old version otherwise.
+
+    Non-fatal by construction: a wp.org hiccup or an update failure warns and
+    leaves the site on its current core rather than failing the whole apply.
+    """
+    want = pconf.get("wpVersion")
+    want = str(want) if want not in (None, "") else None
+    live = _live_wp_core_version(instance)
+    if live is None:
+        info("apply: no WordPress core to reconcile yet (skipping core update)")
+        return {"changed": False, "reason": "not-installed"}
+    if want and live == want:
+        return {"changed": False, "from": live, "to": live}
+    if want:
+        info(f"apply: WordPress core {live} → {want} (pinned)…")
+        args = ["core", "update", f"--version={want}", "--force"]
+    else:
+        args = ["core", "update"]
+    res = wpcli(args, instance=instance, check=False, capture=True)
+    if getattr(res, "returncode", 1) not in (0, None):
+        detail = ((getattr(res, "stderr", "") or getattr(res, "stdout", "")
+                   or "").strip().splitlines() or [""])[-1]
+        info(f"⚠ WordPress core reconcile failed ({detail[:200]}); "
+             f"site stays on {live}")
+        return {"changed": False, "from": live, "to": live,
+                "error": detail[:200]}
+    now = _live_wp_core_version(instance) or want or live
+    if now == live:
+        return {"changed": False, "from": live, "to": now}
+    network = ["--network"] if _multisite_mode(inst_cfg) else []
+    wpcli(["core", "update-db", *network], instance=instance,
+          check=False, capture=True)
+    ok(f"WordPress core {live} → {now}")
+    return {"changed": True, "from": live, "to": now}
 
 
 def _wait_http(port: int, timeout: int = 30) -> bool:
@@ -1113,9 +1183,11 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
             info(f"⚠ multisite mode change {prev_ms}→{cur_ms} can't be applied "
                  f"in place — recreate the instance to switch network type.")
 
-        # Warn (don't act) on a wp_version pin change — swapping core under a
-        # live DB is destructive-adjacent; leave it to an explicit recreate.
-        _warn_version_drift(cfg, name, pconf)
+        # 5. Reconcile WordPress core itself. The instance block was rewritten
+        #    from pconf above, so a pin-vs-block comparison can never disagree
+        #    here — the only honest source of drift is the LIVE `wp core
+        #    version`, which nothing else in apply touches.
+        core_state = _reconcile_wp_core(name, inst_cfg, pconf)
 
         # Re-derive from live state instead of reusing the recorded URL: a
         # clean URL assigned AFTER this instance was registered (e.g. by a later
@@ -1125,7 +1197,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
         # domain is serving.
         base_url = (site_url(inst_cfg) or existing.get("url")
                     or f"http://localhost:{ports['wordpress_port']}")
-        return sc.registry_put(
+        record = sc.registry_put(
             root,
             label=label,
             instance=name,
@@ -1136,6 +1208,11 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
             wp_version=pconf.get("wpVersion"),
             source=pconf.get("source"),
         )
+        # Report the core reconcile alongside the record (the registry stores
+        # the PIN; this is what the site actually runs after this apply).
+        if isinstance(record, dict) and core_state:
+            record = {**record, "wp_core": core_state}
+        return record
 
 
 def _instance_running(name: str) -> bool:

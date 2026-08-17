@@ -277,6 +277,26 @@ Use WordPress-specific commands only when the project guide reports a
 WordPress runtime. Do not use `wp`, database, or plugin commands against a
 generic Compose project.
 
+### Version pins in `sandbox.config.json`
+
+`wpVersion` is an EXACT build, not a version line: `"7.0"` means the 7.0.0
+release and stays there while 7.0.4 ships. Leave it unset — the default tracks
+the current release — unless the task requires one specific WordPress build
+(reproducing a version-specific report, bisecting a regression), and then write
+the full `X.Y.Z`. Do not transcribe a reported version into a pin just because a
+bug report mentions it. `phpVersion` is the opposite: pin it whenever the target
+PHP matters.
+
+```bash
+sb apply --project-dir .        # reconciles the LIVE site to the config
+```
+
+Apply moves WordPress core to match the config: a pin installs that exact build
+(upgrade or downgrade), no pin updates to the current release, and both run
+`wp core update-db` afterwards. Editing a pin without applying changes nothing
+about a running instance — core lives in the bind mount and survives every
+container recreate.
+
 ## Delivery
 
 After required verification succeeds, stage the relevant files, commit, and

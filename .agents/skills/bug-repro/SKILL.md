@@ -51,6 +51,29 @@ against the running stack is.
 
 ---
 
+## Matching the reported stack — minimally
+
+A bug report lists everything (WP, PHP, theme, 30 plugins). Copy only what the
+bug plausibly depends on. Every extra pin is a variable you now own forever.
+
+- **`phpVersion`** — pin it when the report implicates PHP (fatals, deprecations,
+  type errors, 8.x behavior). Cheap and reversible.
+- **`wpVersion`** — leave it OUT by default. The pin is **exact**, not a line:
+  `"7.0"` installs 7.0.0 and sits there while 7.0.4 ships. Pin it only to
+  reproduce a version-specific report or bisect a regression, and then write the
+  FULL `X.Y.Z` you actually mean. "The reporter said WP 7.0" is not a reason to
+  pin — it is a reason to test on current WordPress unless the bug disappears
+  there.
+- **Plugins** — add the ones in the reported interaction, not the whole list.
+
+Drop a pin the moment it stops earning its place, then
+`./sb apply --project-dir <DIR>`: apply reconciles WordPress core in place
+(pin → that exact build, no pin → the current release, both followed by
+`wp core update-db`), so unpinning fixes the LIVE site, not just future ones.
+Say in the report which versions the repro actually ran on.
+
+---
+
 ## When headless repro is impossible
 
 Some bugs only manifest in the editor, in real browser layout, or under

@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+- `sb apply --project-dir` / `apply_config` now reconcile WordPress core itself:
+  a pinned `wpVersion` is installed exactly (`wp core update --version=<pin>
+  --force`, upgrade or downgrade) and an UNPINNED project is moved to the
+  current release, each followed by `wp core update-db` (`--network` on
+  multisite). Core lives in the bind mount and survives every container
+  recreate, so editing or deleting a pin previously changed nothing about a
+  running instance. Non-fatal: a failed update warns and leaves the site on its
+  current core. Reported as `wp_core: {from, to, changed}`.
+- The version-drift warning on `ensure` now points at `./sb apply` (which
+  reconciles both pins in place) instead of telling the operator to delete and
+  recreate the instance.
+
+### Docs
+- `wpVersion` is documented as an EXACT build, not a version line: `"7.0"` is
+  the 7.0.0 release and never tracks 7.0.4. Leave it unset unless one specific
+  build is required; the `bug-repro` and `sandbox-cli` skills now say so at the
+  point where a reported stack gets transcribed into config.
+- Corrected the stale server/pin table in `docs/sandbox-config-reference.md`:
+  `wpVersion` never enters an image tag on ANY server — every stack downloads
+  core in-container.
+
 ## [0.2.2] — 2026-08-13
 
 ### Fixed

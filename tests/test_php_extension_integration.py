@@ -334,7 +334,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}), \
                 patch.object(instances, "_wire_project_plugins"), \
                 patch.object(instances, "_wire_project_themes"), \
-                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
                 patch.object(instances, "site_url", return_value="http://localhost:8188"), \
                 patch.object(instances, "wp_dir", return_value=root / "wp"):
             result = instances.apply_config({}, str(root))
@@ -410,7 +410,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "_remove_obsolete_builder_authoring_assets"), \
                 patch.object(instances, "_wire_project_plugins"), \
                 patch.object(instances, "_wire_project_themes"), \
-                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
                 patch.object(instances, "site_url", return_value="https://fixture.test"):
             result = instances.apply_config({}, str(root))
 
@@ -553,7 +553,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "_resolve_port_conflicts", return_value={}), \
                 patch.object(instances, "resolve_instances", return_value={"fixture": existing}), \
                 patch.object(instances, "_instance_reachable", return_value=True), \
-                patch.object(instances, "_warn_version_drift"), \
+                patch.object(instances, "_reconcile_wp_core", return_value={}), \
                 patch.object(instances, "_auto_heal_wp_url"), \
                 patch.object(instances, "_refresh_registered_url", return_value=existing), \
                 patch.object(data_commands, "capture_install_snapshots") as capture:
@@ -669,7 +669,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                         "drift": {"state": "drift", "issues": [{"message": "GD plane mismatch"}]}}))
                     stack.enter_context(patch.object(instances, "_wire_project_plugins"))
                     stack.enter_context(patch.object(instances, "_wire_project_themes"))
-                    stack.enter_context(patch.object(instances, "_warn_version_drift"))
+                    stack.enter_context(patch.object(instances, "_reconcile_wp_core", return_value={}))
                     stack.enter_context(patch.object(instances, "site_url", return_value="http://localhost:8188"))
                     with self.assertRaisesRegex(ValueError, "rollback=(succeeded|failed)") as raised:
                         instances.apply_config({}, str(root))

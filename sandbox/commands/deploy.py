@@ -8,6 +8,7 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.registry import register
 from sandbox.application.context import preflight_project_capability
 import sandbox.core._remote as sr
+import sandbox.core._proplugins as pro
 
 
 _REMOTE_DEPLOY_CAPABILITIES = {
@@ -137,6 +138,17 @@ def cmd_deploy(cfg, args) -> None:
             applied = sr.apply_uncommitted(entry, target, root, diff_text, untracked)
         else:
             applied = 0
+        # Pro plugins are a HOST-level catalog, not project state: mirror them
+        # before the instance boots so its On-Demand page lists the same slugs
+        # the local machine offers. Fail-soft — a project deploy stays valid
+        # even when the shared store cannot be pushed.
+        pro_plugins = None
+        if getattr(args, "pro_plugins", True):
+            try:
+                pro_plugins = pro.sync(entry, remote_name, cfg=cfg)
+            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+                pro_plugins = {"ok": False,
+                               "error": sr.redact_ssh_connection(str(exc), entry)}
         instance = None
         public_url = None
         if getattr(args, "ensure", False) or getattr(args, "expose", False):
@@ -199,6 +211,7 @@ def cmd_deploy(cfg, args) -> None:
              "pushed_commit": pushed_sha,
              "source_immutable": resolved_source is not None,
              "uncommitted_files_applied": applied, "instance": instance,
+             "pro_plugins": pro_plugins,
              "url": public_url, "error": None}
     if as_json:
         print(json.dumps(result))
@@ -209,6 +222,12 @@ def cmd_deploy(cfg, args) -> None:
         else:
             print(f"  pushed HEAD ({pushed_sha[:7]}) -> {remote_name}")
             print(f"  applied {applied} uncommitted file(s)")
+        if pro_plugins and not pro_plugins.get("ok"):
+            print(f"  pro plugins: NOT mirrored — {pro_plugins.get('error')}")
+        elif pro_plugins and pro_plugins.get("skipped") in (None, "unchanged"):
+            state = "already current" if pro_plugins.get("skipped") else "mirrored"
+            print(f"  pro plugins: {state} "
+                  f"({len(pro_plugins.get('slugs') or [])} on-demand slug(s))")
         if instance:
             print(f"  remote instance: {instance.get('instance')}")
         if public_url:

@@ -13,6 +13,7 @@ from sandbox.core import *  # noqa: F401,F403
 from sandbox.core._paths import RUNTIME_DIR
 from sandbox.registry import register
 import sandbox.core._remote as sr
+import sandbox.core._proplugins as pro
 from sandbox.services.redaction import redact_text
 
 
@@ -138,8 +139,55 @@ def cmd_remote(cfg, args) -> None:
         "docker-pool": _cmd_docker_pool,
         "domains": _cmd_domains,
         "service": _cmd_service,
+        "plugins": _cmd_plugins,
     }
     dispatch[action](args, as_json)
+
+
+def _cmd_plugins(args, as_json: bool) -> None:
+    """`./sb remote plugins <name> [--force] [--dry-run]` -- mirror the local
+    pro-plugin store onto the host and register its slugs in the REMOTE
+    user-global catalog, so every instance there offers them on demand."""
+    name = _require_name(args)
+    entry = sr.get_remote(name)
+    if not entry:
+        die(f"no remote named '{name}'")
+    try:
+        data = pro.sync(entry, name, cfg=load_config(),
+                        force=bool(getattr(args, "force", False)),
+                        dry_run=bool(getattr(args, "dry_run", False)))
+    except (RuntimeError, ValueError, subprocess.SubprocessError, OSError) as exc:
+        data = {"ok": False, "error": sr.redact_ssh_connection(str(exc), entry)}
+    if as_json:
+        print(json.dumps(data, sort_keys=True))
+        if not data.get("ok"):
+            raise SystemExit(1)
+        return
+    if not data.get("ok"):
+        die(data.get("error", "pro-plugin mirror failed"))
+    if data.get("skipped") == "no_local_store":
+        print("no local pro-plugin store — set `defaults.pro_plugins_home` to enable")
+        return
+    if data.get("skipped") == "empty_store":
+        print(f"no plugin directories in {data['store']} — nothing to mirror")
+        return
+    if data.get("skipped") == "dry_run":
+        verb = "would push" if data.get("would_push") else "unchanged, would skip"
+        print(f"{verb}: {len(data['slugs'])} plugin(s), "
+              f"{data['bytes'] // (1024 * 1024)} MiB -> {data['remote_store']}")
+        print("  " + ", ".join(data["slugs"]))
+        return
+    if data.get("skipped") == "unchanged":
+        ok(f"{name} already mirrors this store ({len(data['slugs'])} plugin(s))")
+        return
+    ok(f"mirrored {len(data['slugs'])} pro plugin(s) to {data['remote_store']}")
+    print(f"  catalog: {data.get('catalog')}")
+    print("  on-demand: " + ", ".join(data.get("registered") or []))
+    if data.get("unregistered"):
+        print("  removed: " + ", ".join(data["unregistered"]))
+    if data.get("conflicts"):
+        print("  left alone (host configures these itself): "
+              + ", ".join(data["conflicts"]))
 
 
 def _cmd_domains(args, as_json: bool) -> None:

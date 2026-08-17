@@ -187,6 +187,43 @@ the resulting generic HTTP port through Caddy and returns the public URL. No plu
 activation or WordPress URL update is performed. `--plugin-slug` is WordPress-only and
 is rejected for generic projects so an accidental flag cannot be silently ignored.
 
+### Pro plugins on the remote host
+
+Pro plugins are not project code — they are a machine-level catalog. Locally they
+live in one store directory (`defaults.pro_plugins_home`, default
+`~/Sites/plugins-pro`) and are registered slug -> path in the user-global catalog,
+which is what makes every local instance list them on **Plugins -> Sandbox
+On-Demand** without installing them.
+
+`./sb deploy` mirrors that whole store to `<remote $SANDBOX_HOME>/plugins-pro` and
+merges its slugs into the REMOTE user-global catalog, so **every** instance on that
+host offers the same on-demand plugins. Run it on its own with:
+
+```bash
+./sb remote plugins myvps            # mirror now
+./sb remote plugins myvps --dry-run  # what would go up, transfers nothing
+./sb remote plugins myvps --force    # re-push even when nothing changed
+./sb deploy --remote myvps --no-pro-plugins   # skip the mirror for this deploy
+```
+
+Behavior:
+
+- Only directories carrying a WordPress `Plugin Name:` header are advertised; loose
+  files and zips still ride along in the mirror, but never enter the catalog.
+- The mirror is `rsync --archive --delete`: the remote store is a copy of the local
+  store as of the last push, never a continuous sync. `.git/`, `node_modules/`,
+  `.DS_Store`, `.idea/`, `.vscode/` are excluded.
+- A content fingerprint is recorded per remote under
+  `$SANDBOX_HOME/runtime/pro-plugins/<remote>.json`, so an unchanged re-push is a
+  no-op and deploying stays fast.
+- Catalog entries are written as bare paths, which resolve to **on-demand**: present
+  on the On-Demand page, never auto-activated. A slug the host configured itself
+  (an object entry, or a path outside the store) is reported as a conflict and left
+  untouched. A slug removed from the local store is unregistered on the next push.
+- Mirroring is fail-soft inside `deploy`: the project deploy still succeeds and the
+  JSON result carries `pro_plugins.ok=false` with the reason.
+- Licensing is unchanged — mirroring ships the code, not the keys (`./sb license`).
+
 ## 5. Using a remote instance
 
 Once deployed, boot and use it exactly like a local project — but by running commands

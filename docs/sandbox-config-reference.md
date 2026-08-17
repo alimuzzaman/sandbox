@@ -333,6 +333,13 @@ zipping the local dir to a throwaway temp copy). A wp-admin screen — **Plugins
 Sandbox On-Demand** — lists on-demand plugins with a one-click "Install from
 local" button.
 
+On a remote host the same page is populated by mirroring the machine's Pro store
+(`defaults.pro_plugins_home`, default `~/Sites/plugins-pro`) with
+`./sb remote plugins <name>` — or automatically by `./sb deploy`. It copies the store
+to `<remote $SANDBOX_HOME>/plugins-pro` and merges those slugs as bare paths into the
+remote user-global catalog, so every instance on that host resolves them on demand.
+See `docs/remote-hosting.md` → "Pro plugins on the remote host".
+
 If an on-demand local path disappears after provisioning, it remains registered
 so the install interception returns a clear local-source error. Sandbox never
 falls back to downloading that configured slug from the registry. Re-provisioning

@@ -482,9 +482,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     remote_p = sub.add_parser("remote",
         help="Register/provision/manage remote VPS targets for sandbox instances "
              "(see docs/remote-hosting.md, specs/014-remote-vps-hosting/)")
-    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains"],
+    remote_p.add_argument("action", choices=["add", "list", "provision", "up", "down", "remove", "set-origin", "service", "docker-pool", "domains", "plugins"],
         help="add: register a VPS; list: show configured remotes + reachability; "
              "provision: install everything needed on a registered remote (idempotent); "
+             "plugins: mirror the local pro-plugin store to the host so every remote "
+             "instance offers those slugs on its wp-admin On-Demand page; "
              "up/down: start/stop the remote MCP server; docker-pool: plan/apply "
              "the fixed /24 daemon address pools; domains: list configured "
              "instance and hosted-route domains; remove: forget a remote "
@@ -514,6 +516,11 @@ Per-project (each plugin carries its own sandbox.config.json):
         help="interrupted-recovery assertion: baseline containers no longer present in Docker inventory")
     remote_p.add_argument("--recovery-since", default=None,
         help="required UTC transaction-start assertion when no daemon backup exists (YYYY-MM-DDTHH:MM:SSZ)")
+    remote_p.add_argument("--force", action="store_true",
+        help="for `remote plugins`: re-push the pro-plugin store even when its "
+             "content fingerprint is unchanged since the last push")
+    remote_p.add_argument("--dry-run", dest="dry_run", action="store_true",
+        help="for `remote plugins`: report what would be mirrored, transfer nothing")
     remote_p.add_argument("--json", action="store_true",
         help="print the result as JSON (for the MCP server)")
 
@@ -533,6 +540,9 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--domain", default=None,
         help="public hostname for --expose; default is "
              "default-<project-slug>.sandbox.asb.bd")
+    deploy_p.add_argument("--no-pro-plugins", dest="pro_plugins", action="store_false",
+        default=True,
+        help="skip the automatic pro-plugin store mirror (see `./sb remote plugins`)")
     deploy_p.add_argument("--plugin-slug", default=None,
         help="WordPress-only plugin slug to activate after --ensure; defaults to project slug")
     deploy_p.add_argument("--json", action="store_true",

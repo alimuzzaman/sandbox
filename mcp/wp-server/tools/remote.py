@@ -29,7 +29,8 @@ def _redact_ssh_connection(value: str) -> str:
 @mcp.tool()
 def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
                   expose: bool = True, domain: str | None = None,
-                  plugin_slug: str | None = None) -> dict:
+                  plugin_slug: str | None = None,
+                  pro_plugins: bool = True) -> dict:
     """Deploy the local project's current state (committed HEAD + uncommitted
     changes, including untracked files) to a registered, provisioned remote VPS
     target on demand. One-way, on-demand only — never a continuous sync; the
@@ -52,8 +53,12 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
       CLI defaults to default-<project-slug>.sandbox.asb.bd.
     plugin_slug: optional WordPress-only slug to activate after ensure. Defaults to
       project slug; generic projects reject this argument.
+    pro_plugins: when true (default), also mirror this machine's Pro plugin store to
+      the remote host so every instance there offers those slugs on demand. Unchanged
+      stores are a no-op; a failure never fails the deploy.
 
-    Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url, error}.
+    Returns {ok, remote, pushed_commit, uncommitted_files_applied, instance, url,
+    pro_plugins, error}.
     """
     if _require_project_deployment_capability is None:
         # Command-forwarding unit harnesses do not compose the full app.
@@ -72,6 +77,8 @@ def remote_deploy(project_dir: str, remote: str, ensure: bool = True,
         cmd.extend(["--domain", domain])
     if plugin_slug:
         cmd.extend(["--plugin-slug", plugin_slug])
+    if not pro_plugins:
+        cmd.append("--no-pro-plugins")
     res = _run_sandbox_json(cmd, 1200)
     if res["timed_out"]:
         return {

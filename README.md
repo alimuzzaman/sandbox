@@ -619,8 +619,14 @@ Two layers:
 ```yaml
 defaults:
   plugins_home: "$HOME/dev"     # where cloned plugins live
+  pro_plugins_home: "$HOME/Sites/plugins-pro"   # shared Pro store, offered on demand
   github_org: "wpdeveloper"
 ```
+
+`pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
+plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
+host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
+— see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
 There is **no central project catalog** — each plugin self-describes.
 

@@ -510,6 +510,34 @@ class TestHostingManifest(unittest.TestCase):
         self.assertIn("--force-recreate --renew-anon-volumes --remove-orphans web worker", commands[0])
         self.assertTrue(commands[-1].endswith("up -d web worker"))
 
+    @patch("sandbox.commands.hosting._write_remote_text")
+    @patch("sandbox.commands.hosting._remote_checked")
+    def test_build_false_deploys_without_rebuilding_any_image(self, remote_checked, _write):
+        with self._write(_manifest()) as directory:
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080",
+                "container_port: 8080\n      build: false\n      init_services: [setup]",
+            ))
+            validated = hosting.validate_manifest(directory)
+        runtime = {"compose_override": "services: {}\n", "environment": "EXAMPLE=value\n"}
+        hosting_cmd._run_compose({}, validated, "/srv/example", "/srv/runtime", runtime)
+        commands = [call.args[1] for call in remote_checked.call_args_list]
+        self.assertNotIn("--build", commands[0])
+        self.assertIn("up -d --force-recreate --renew-anon-volumes --remove-orphans web", commands[0])
+        self.assertFalse(any(command.endswith("build setup") for command in commands))
+        self.assertTrue(any(command.endswith("run --rm setup") for command in commands))
+
+    def test_build_defaults_to_true_and_rejects_a_non_boolean(self):
+        with self._write(_manifest()) as directory:
+            self.assertTrue(hosting.validate_manifest(directory)["compose"]["build"])
+            manifest = Path(directory) / "sandbox.hosting.yml"
+            manifest.write_text(manifest.read_text().replace(
+                "container_port: 8080", "container_port: 8080\n      build: cached"
+            ))
+            with self.assertRaisesRegex(hosting.HostingError, "compose.build must be true or false"):
+                hosting.validate_manifest(directory)
+
     @patch("sandbox.commands.hosting.time.sleep")
     @patch("sandbox.commands.hosting.remote.ssh_run")
     def test_remote_health_retries_startup_connection_reset(self, ssh_run, _sleep):

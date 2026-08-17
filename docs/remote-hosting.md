@@ -230,6 +230,13 @@ Use `compose.background_services` for declared long-lived workers that must be b
 recreated, and started with the web service. Keep one-shot migration/setup jobs in
 `compose.init_services`; each service name must be unique across the three fields.
 
+`compose.build` (default `true`) controls whether apply rebuilds images. Set it to
+`false` for an environment whose image build does not fit the 900s deploy timeout: apply
+then deploys config, secrets, and routing onto the image the remote already has, and
+skips the explicit `init_services` build. Compose still builds a service that has no
+image at all, so a first deploy works either way, and new application code only ships
+once the image is rebuilt.
+
 An environment may also protect its public origin with Basic Auth:
 
 ```yaml

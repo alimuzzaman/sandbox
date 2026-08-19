@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "topic": "Vercel Sandbox architecture and transferable primitives",
+  "accessedOn": "2026-08-19",
+  "sources": [
+    {
+      "id": "vercel-sandbox-product",
+      "authority": "Vercel",
+      "url": "https://vercel.com/docs/sandbox",
+      "supports": [
+        "Sandbox is a compute primitive for untrusted or user-generated code",
+        "Each sandbox is a Firecracker microVM with its own filesystem and network",
+        "System-privileged workloads such as Docker, VPN clients, and FUSE are supported",
+        "Persistence is the default; snapshots, tags, drives, and multi-agent users are documented features"
+      ]
+    },
+    {
+      "id": "vercel-sandbox-concepts",
+      "authority": "Vercel",
+      "url": "https://vercel.com/docs/sandbox/concepts",
+      "supports": [
+        "A sandbox is a durable name plus config; a session is one running VM instance",
+        "Stop snapshots the filesystem and the next SDK call resumes from the newest snapshot",
+        "Sandboxes provision in the iad1 region",
+        "Each sandbox has a dedicated guest kernel, which is stronger isolation than containers",
+        "A unique per-sandbox proxy CA is mounted and added to the system trust bundle",
+        "Containers run inside a sandbox do not inherit the proxy CA or its environment variables",
+        "Sandboxes are not intended for permanent hosting or long-term data storage"
+      ]
+    },
+    {
+      "id": "vercel-sandbox-cli",
+      "authority": "Vercel",
+      "url": "https://vercel.com/docs/sandbox/cli-reference",
+      "supports": [
+        "The CLI is modeled on the Docker CLI: list, create, run, exec, connect, copy, stop, remove, fork, config, sessions, snapshot, snapshots, drives",
+        "sandbox run --name resumes an existing sandbox or creates it, ignoring create-only flags",
+        "--stop and --rm control what happens when a command exits and are mutually exclusive",
+        "sandbox fork seeds from the source snapshot and config; env is not copied and tags fully replace",
+        "Snapshot retention flags: --snapshot-expiration, --keep-last-snapshots, --keep-last-snapshots-for, --delete-evicted-snapshots",
+        "Network policy flags: --network-policy, --allowed-domain, --allowed-cidr, --denied-cidr",
+        "Drives mount as drive:path[:read-write|read-only]",
+        "Interactive sessions extend the timeout unless --no-extend-timeout is passed"
+      ]
+    },
+    {
+      "id": "vercel-sandbox-pricing",
+      "authority": "Vercel",
+      "url": "https://vercel.com/docs/sandbox/pricing",
+      "supports": [
+        "Per-plan caps: 4/8/32 vCPUs, 8/16/64 GB memory, 45 minutes vs 24 hours, 10 vs 10,000 concurrent sandboxes, 15 open ports, 32 GB disk",
+        "Default timeout is 5 minutes and each vCPU includes 2 GB of memory",
+        "Metered dimensions are active CPU, provisioned memory, creations, egress, and snapshot storage",
+        "Time waiting on I/O is not counted as active CPU",
+        "Inbound downloads are free; egress and exposed-port traffic are billed",
+        "vCPU allocation uses a dynamic quota that ramps with sustained use and decays after 10 idle minutes",
+        "Snapshots expire 30 days after last use by default"
+      ]
+    },
+    {
+      "id": "vercel-sandbox-skill",
+      "authority": "Vercel (vercel/sandbox repository)",
+      "url": "https://github.com/vercel/sandbox/blob/main/skills/sandbox/SKILL.md",
+      "supports": [
+        "SDK v2 replaced anonymous ephemeral sandboxes with named persistent ones",
+        "Sandbox.getOrCreate with onCreate and onResume hooks is the documented dev-server pattern",
+        "Sandbox.fork from a base sandbox is the documented isolation pattern",
+        "sandbox.update({ports}) replaces the full port list rather than merging"
+      ]
+    },
+    {
+      "id": "vercel-sandbox-challenge",
+      "authority": "Vercel",
+      "url": "https://vercel.com/blog/one-million-dollar-hacker-challenge-for-vercel-sandbox",
+      "supports": [
+        "A HackerOne program runs 18 August to 1 September 2026 with up to $1M available",
+        "Maximum payout per report is $50,000, for cross-tenant access",
+        "In scope: escaping the Firecracker microVM to the host or another tenant, and bypassing the sandbox firewall",
+        "Container-only escapes inside the guest are out of scope because enforcement is at the host",
+        "A working proof-of-concept through the @vercel/sandbox SDK is required"
+      ]
+    },
+    {
+      "id": "local-sb-surface",
+      "authority": "This repository (read-only inspection, 2026-08-19)",
+      "url": "file://./sb",
+      "supports": [
+        "sb exposes up/down/clean but no stop-with-restorable-state or automatic resume",
+        "sb snapshot accepts only name, --force, --db-only, --instance, --label; there is no retention or expiration option",
+        "There is no fork command",
+        "NODE_EXTRA_CA_CERTS is set on the host in sandbox/commands/config_setup.py; no CA bundle variables are injected into instance containers"
+      ]
+    }
+  ]
+}

@@ -1897,6 +1897,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "reconcile_remote_instance", return_value=inst) as mock_apply, \
                      patch.object(sr, "activate_remote_plugin") as mock_activate, \
                      patch.object(sr, "configure_instance_https_route") as mock_route, \
+                     patch.object(sr, "instance_route_hosts", return_value=[]), \
                      patch.object(sr, "set_remote_instance_url") as mock_url, \
                      patch("builtins.print") as mock_print:
                     deploy_cmd.cmd_deploy(None, args)
@@ -1927,6 +1928,141 @@ class TestDeployEnsureExpose(unittest.TestCase):
                     sr.get_remote("myvps"), "/remote/demo",
                     "https://default-demo.sandbox.asb.bd"
                 )
+
+    def _expose_with_aliases(self, *, alias_arg, project_aliases=None,
+                             existing_routes=(), prune=False):
+        """Run one `deploy --ensure --expose` and report what it routed."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            (root / "sandbox.config.json").write_text(
+                '{"slug":"demo","plugins":{"demo":"."}}'
+            )
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                args.alias = alias_arg
+                args.prune_routes = prune
+                args.pro_plugins = False
+                inst = {"instance": "demo", "label": "default",
+                        "wordpress_port": 8188, "url": "http://localhost:8188"}
+                pconf = {"root": str(root), "slug": "demo"}
+                if project_aliases is not None:
+                    pconf["aliases"] = project_aliases
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config", return_value=pconf), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=inst), \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst), \
+                     patch.object(sr, "activate_remote_plugin"), \
+                     patch.object(sr, "configure_instance_https_route") as route, \
+                     patch.object(sr, "instance_route_hosts",
+                                  return_value=list(existing_routes)), \
+                     patch.object(sr, "remove_instance_https_route") as remove, \
+                     patch.object(sr, "set_remote_instance_url"), \
+                     patch("builtins.print") as mock_print:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+                routed = [c.args[1] for c in route.call_args_list]
+                removed = [c.args[1] for c in remove.call_args_list]
+                return result, routed, removed
+
+    def test_expose_routes_each_declared_alias_to_the_same_port(self):
+        result, routed, _ = self._expose_with_aliases(
+            alias_arg=["cdn.example.com", "assets.example.com"])
+        # The primary hostname is configured first: a failing alias must never
+        # leave the instance unreachable on its own domain.
+        self.assertEqual(routed, ["default-demo.sandbox.asb.bd",
+                                  "cdn.example.com", "assets.example.com"])
+        self.assertEqual(result["instance"]["alias_urls"],
+                         ["https://cdn.example.com", "https://assets.example.com"])
+
+    def test_expose_falls_back_to_the_project_declaration(self):
+        _, routed, _ = self._expose_with_aliases(
+            alias_arg=None, project_aliases=["cdn.example.com"])
+        self.assertIn("cdn.example.com", routed)
+
+    def test_an_explicit_alias_flag_overrides_the_project_declaration(self):
+        _, routed, _ = self._expose_with_aliases(
+            alias_arg=["only.example.com"], project_aliases=["cdn.example.com"])
+        self.assertIn("only.example.com", routed)
+        self.assertNotIn("cdn.example.com", routed)
+
+    def test_stale_routes_are_reported_but_not_deleted_by_default(self):
+        result, _, removed = self._expose_with_aliases(
+            alias_arg=["cdn.example.com"],
+            existing_routes=["default-demo.sandbox.asb.bd", "cdn.example.com",
+                             "old-name.sandbox.asb.bd"])
+        self.assertEqual(removed, [])
+        self.assertEqual(result["instance"]["stale_routes"],
+                         ["old-name.sandbox.asb.bd"])
+
+    def test_prune_routes_deletes_only_the_undeclared_hostnames(self):
+        result, _, removed = self._expose_with_aliases(
+            alias_arg=["cdn.example.com"],
+            existing_routes=["default-demo.sandbox.asb.bd", "cdn.example.com",
+                             "old-name.sandbox.asb.bd"],
+            prune=True)
+        self.assertEqual(removed, ["old-name.sandbox.asb.bd"])
+        self.assertEqual(result["instance"]["pruned_routes"],
+                         ["old-name.sandbox.asb.bd"])
+        self.assertEqual(result["instance"]["stale_routes"], [])
+
+    def test_an_unreadable_route_inventory_does_not_fail_the_deploy(self):
+        # The instance is already exposed and serving by then; losing the
+        # inventory read is a reporting gap, not a deploy failure.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".git").mkdir()
+            with _patched_config_local(root / "sandbox.local.yml"):
+                sr.put_remote("myvps", ssh="ubuntu@1.2.3.4", provisioned=True)
+                args = MagicMock()
+                args.project_dir = str(root)
+                args.remote = "myvps"
+                args.json = True
+                args.ensure = True
+                args.expose = True
+                args.domain = "default-demo.sandbox.asb.bd"
+                args.plugin_slug = "demo"
+                args.alias = []
+                args.prune_routes = False
+                args.pro_plugins = False
+                inst = {"instance": "demo", "label": "default",
+                        "wordpress_port": 8188, "url": "http://localhost:8188"}
+                sc = deploy_cmd._core()
+                with patch.object(sc, "load_project_config",
+                                  return_value={"root": str(root), "slug": "demo"}), \
+                     patch.object(sr, "ensure_deploy_repo", return_value="/remote/demo"), \
+                     patch.object(sr, "current_branch", return_value="main"), \
+                     patch.object(sr, "push_commits", return_value="abc123"), \
+                     patch.object(sr, "reset_target_to"), \
+                     patch.object(sr, "capture_uncommitted", return_value=("", [])), \
+                     patch.object(sr, "apply_uncommitted", return_value=0), \
+                     patch.object(sr, "ensure_remote_instance", return_value=inst), \
+                     patch.object(sr, "reconcile_remote_instance", return_value=inst), \
+                     patch.object(sr, "activate_remote_plugin"), \
+                     patch.object(sr, "configure_instance_https_route"), \
+                     patch.object(sr, "instance_route_hosts",
+                                  side_effect=RuntimeError("ssh died")), \
+                     patch.object(sr, "set_remote_instance_url"), \
+                     patch("builtins.print") as mock_print:
+                    deploy_cmd.cmd_deploy(None, args)
+                result = json.loads(mock_print.call_args[0][0])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "https://default-demo.sandbox.asb.bd")
+        self.assertEqual(result["instance"]["stale_routes"], [])
 
     def test_malformed_ensure_result_returns_actionable_json_error(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1984,6 +2120,7 @@ class TestDeployEnsureExpose(unittest.TestCase):
                      patch.object(sr, "activate_remote_plugin") as activate, \
                      patch.object(sr, "set_remote_instance_url") as set_url, \
                      patch.object(sr, "configure_instance_https_route") as route, \
+                     patch.object(sr, "instance_route_hosts", return_value=[]), \
                      patch("builtins.print") as printed:
                     deploy_cmd.cmd_deploy(None, args)
                 result = json.loads(printed.call_args[0][0])

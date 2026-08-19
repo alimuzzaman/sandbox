@@ -540,6 +540,13 @@ Per-project (each plugin carries its own sandbox.config.json):
     deploy_p.add_argument("--domain", default=None,
         help="public hostname for --expose; default is "
              "default-<project-slug>.sandbox.asb.bd")
+    deploy_p.add_argument("--alias", action="append", default=None,
+        metavar="HOSTNAME",
+        help="extra hostname the exposed instance also answers on (repeatable); "
+             "defaults to the project's sandbox.config.json `aliases`")
+    deploy_p.add_argument("--prune-routes", action="store_true",
+        help="with --expose, delete remote routes pointing at this instance's "
+             "port that are not the current domain or an alias")
     deploy_p.add_argument("--no-pro-plugins", dest="pro_plugins", action="store_false",
         default=True,
         help="skip the automatic pro-plugin store mirror (see `./sb remote plugins`)")

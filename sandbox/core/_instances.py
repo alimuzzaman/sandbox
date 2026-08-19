@@ -661,6 +661,23 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
             if _prev.get("tld"):
                 block["tld"] = _prev["tld"]
 
+    # Extra hostnames this instance answers on. Declared in the project's
+    # sandbox.config.json, so they follow the project to a remote and are
+    # re-rendered into the Caddyfile, the cert SANs, and WORDPRESS_CONFIG_EXTRA
+    # on every apply. Validated strictly here — a typo should fail the apply
+    # that introduced it, not degrade quietly into an unroutable hostname.
+    # An explicit empty list is a removal; omission preserves what is there.
+    if "aliases" in pconf and pconf.get("aliases") is not None:
+        _aliases = normalize_aliases(pconf.get("aliases"),
+                                     primary=block.get("domain"), strict=True)
+        if _aliases:
+            block["aliases"] = _aliases
+    else:
+        _prev_aliases = _local_yaml().get("instances", {}).get(name, {}).get("aliases")
+        if _prev_aliases:
+            block["aliases"] = normalize_aliases(_prev_aliases,
+                                                 primary=block.get("domain"))
+
     # Collect source paths that need extra Docker bind-mounts — any mapping
     # source or local plugin path outside plugins_home won't be visible
     # inside the container, so symlinks there are dangling and WP skips them.

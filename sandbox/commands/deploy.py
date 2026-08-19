@@ -181,10 +181,46 @@ def cmd_deploy(cfg, args) -> None:
             port = int(_require_instance_field(instance, port_field))
             if not 1 <= port <= 65535:
                 raise RuntimeError(f"remote ensure returned invalid {port_field!r}")
+            # Aliases are declared per project so they travel with it; --alias
+            # overrides for a one-off. The primary domain is configured first
+            # so a failing alias never leaves the instance unreachable on its
+            # own hostname.
+            declared = getattr(args, "alias", None)
+            # argparse gives a list or None; adapters that build their own args
+            # object may give neither, and a project declaration is the default.
+            if not isinstance(declared, (list, tuple)):
+                declared = pconf.get("aliases")
+            aliases = normalize_aliases(declared, primary=domain, strict=True)
             sr.configure_instance_https_route(entry, domain, port)
+            for alias in aliases:
+                sr.configure_instance_https_route(entry, alias, port)
+            # Routes are per-hostname files, so a renamed domain leaves the old
+            # one serving. Report it always; only delete when asked, because
+            # this reads the whole host and another checkout may own a route
+            # this project cannot see in its own config.
+            prune = getattr(args, "prune_routes", False) is True
+            stale, pruned = [], []
+            try:
+                stale = [h for h in sr.instance_route_hosts(entry, port)
+                         if h != domain and h not in aliases]
+            except (RuntimeError, ValueError, subprocess.SubprocessError, OSError):
+                # The instance is already exposed and serving at this point.
+                # An unreadable route inventory is a reporting gap, not a
+                # deploy failure -- unless the caller asked us to act on it.
+                if prune:
+                    raise
+                stale = []
+            if stale and prune:
+                for host in stale:
+                    sr.remove_instance_https_route(entry, host)
+                    pruned.append(host)
             if is_wordpress:
                 sr.set_remote_instance_url(entry, target, public_url)
             instance["url"] = public_url
+            instance["aliases"] = aliases
+            instance["alias_urls"] = [f"https://{a}" for a in aliases]
+            instance["stale_routes"] = [h for h in stale if h not in pruned]
+            instance["pruned_routes"] = pruned
             if is_wordpress:
                 instance["login_url"] = sr.rewrite_instance_url(
                     instance.get("login_url"), public_url
@@ -232,6 +268,14 @@ def cmd_deploy(cfg, args) -> None:
             print(f"  remote instance: {instance.get('instance')}")
         if public_url:
             print(f"  public URL: {public_url}")
+        for alias_url in (instance or {}).get("alias_urls") or []:
+            print(f"  alias URL: {alias_url}")
+        stale_routes = (instance or {}).get("stale_routes") or []
+        if stale_routes:
+            print(f"  stale routes still serving this instance: "
+                  f"{', '.join(stale_routes)} (remove with --prune-routes)")
+        for host in (instance or {}).get("pruned_routes") or []:
+            print(f"  removed stale route: {host}")
         source_label = (
             f"immutable source {source_ref!r} ({pushed_sha[:12]})"
             if source_ref is not None else "working tree"

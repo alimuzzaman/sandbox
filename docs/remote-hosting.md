@@ -177,6 +177,27 @@ DNS for that hostname must already point at the VPS. In MCP, `remote_deploy(...)
 defaults to `ensure=true` and `expose=true`, so agents get the full remote instance and
 public URL path unless they explicitly opt out.
 
+#### Extra hostnames (`--alias`)
+
+`--alias HOSTNAME` (repeatable) exposes the instance on additional hostnames
+pointing at the same port — a CDN pull-zone origin, for example. It defaults to
+the project's `sandbox.config.json` `aliases`, so declared aliases travel with
+the project and do not have to be repeated on the command line. Aliases also
+reach the instance's `WP_HOME`/`WP_SITEURL` so WordPress serves them as
+themselves instead of redirecting to the primary domain; see **Aliases** in
+`docs/sandbox-config-reference.md` for what that does and does not trust.
+
+The primary `--domain` is routed first, so a bad alias never leaves the
+instance unreachable on its own hostname. DNS for every hostname must already
+point at the VPS.
+
+Routes are per-hostname files on the remote, so changing `--domain` between
+deploys leaves the old route serving. Deploy reports those as `stale_routes` in
+its JSON and in the human output. `--prune-routes` deletes the ones that proxy
+to this instance's port and are neither the current domain nor a declared
+alias. It is opt-in: the inventory is read from the whole host, so a route may
+belong to a checkout whose config this project cannot see.
+
 ### Generic Compose projects
 
 The same command works for an explicit non-WordPress Compose project. Its
@@ -453,7 +474,7 @@ reference. Summary:
 | `./sb remote up` / `down <name> --confirm` | Legacy-compatible lifecycle entrypoints; planning is the default and migrated remotes use the owned service |
 | `./sb remote remove <name>` | Forget locally — never touches the VPS |
 | `./sb deploy --remote <name>` | One-way, on-demand push of local state to the VPS |
-| `./sb deploy --remote <name> --ensure --expose [--domain <host>]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL |
+| `./sb deploy --remote <name> --ensure --expose [--domain <host>] [--alias <host>]... [--prune-routes]` | One-shot deploy, boot/refresh and non-destructively reconcile the remote WP instance, activate the plugin, and expose a public HTTPS URL (plus any alias hostnames) |
 
 MCP tool:
 `remote_deploy(project_dir: str, remote: str, ensure: bool = True, expose: bool = True, domain: str | None = None, plugin_slug: str | None = None) -> dict`.

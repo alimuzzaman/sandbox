@@ -192,6 +192,10 @@ file path.
   // baseline that works on localhost:<port>). See "Multisite" below.
   "multisite": false,
 
+  // Extra hostnames this instance also answers on. Bare hostnames only — no
+  // scheme, port, path, or wildcard. See "Aliases" below.
+  "aliases": [],
+
   // Web stack. apache/nginx/litespeed are docker (only the compose web tier
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
   "server": "nginx",    // nginx (default) | apache | litespeed | herd
@@ -544,6 +548,76 @@ non-destructive alternative to `recreate_instance` / `./sb instance delete` +
 tier is force-recreated against the new image, and a `wpVersion` change (or a
 REMOVED pin) lands because apply reconciles WordPress core itself. See
 **In-place reconcile (`sb apply`)** below.
+
+## Aliases (extra hostnames)
+
+`aliases` lists additional hostnames one instance answers on, alongside its
+primary domain. The CDN case is the motivating one: point a CDN pull zone at
+the instance, give it its own hostname, and let it fetch assets without the
+origin redirecting it away.
+
+Declaring an alias reaches four places, and it needs all four to actually work:
+
+1. **Route.** The generated Caddyfile gets a site block per alias, reverse-
+   proxying the same instance port as the primary domain. Aliases are routed
+   even when the instance has no `.tst` domain — the proxy matches on `Host`.
+2. **Certificate.** `./sb secure` mints ONE cert per instance, keyed by its
+   primary domain, with every alias as an extra SAN. The alias site block reads
+   the primary's cert files, so https covers every name at once.
+3. **wp-config.** `WP_HOME` and `WP_SITEURL` are defined from the request host
+   **when that host is a declared alias**, so WordPress serves the alias as
+   itself rather than redirecting to the primary domain.
+4. **Instance block.** The declaration is persisted into
+   `sandbox.local.yml`, so it survives `sb apply` and travels to a remote with
+   the project.
+
+**Resolution is yours to arrange.** Only `.tst` names are wildcarded by the
+sandbox resolver; any other alias needs an `/etc/hosts` entry locally, or a
+real DNS record for a remote.
+
+### What the host-aware URL does and does not do
+
+The generated PHP matches `$_SERVER['HTTP_HOST']` against the declared alias
+list and nothing else. Anything unrecognized — a spoofed `Host` header, the
+instance's own primary domain, or wp-cli, which sets no `HTTP_HOST` at all —
+leaves both constants undefined and WordPress falls back to the `home` and
+`siteurl` options exactly as before. That is deliberate:
+
+- It is **additive**. The primary hostname's behavior is unchanged, so adding
+  an alias cannot break a working site.
+- `HTTP_HOST` is attacker-controlled. Allowlisting it is what stops a forged
+  `Host` from rewriting the URL WordPress prints into a password-reset mail.
+- A request that arrives with a port in the `Host` (`cdn.example.com:8188`)
+  does not match a bare alias, and falls back the same way.
+
+The scheme comes from `X-Forwarded-Proto` when the direct `HTTPS` flag is
+absent, because Caddy — and, on a remote, Cloudflare in front of it —
+terminates TLS and forwards plain HTTP.
+
+Because the constants outrank the DB options whenever they ARE defined,
+`wp option update home` only ever affects the primary hostname. That is the
+same relationship any `WP_HOME` constant has with the option.
+
+### Not available for multisite or herd
+
+Aliases resolve to an empty list on a multisite instance: a network already
+maps hostnames to sites through `wp_site.domain`, and a second name for site 1
+would fight that mapping rather than extend it. Use subdomain multisite's
+wildcard route instead. Herd serves its own sites at `<name>.test` and never
+routes through the sandbox proxy, so aliases do not apply there either.
+
+### On a remote
+
+`./sb deploy --expose` routes the primary domain first, then each alias, so a
+bad alias never leaves the instance unreachable on its own hostname.
+`--alias HOSTNAME` (repeatable) overrides the project declaration for a one-off.
+
+Remote routes are per-hostname files, so changing `--domain` leaves the old
+route serving. Deploy reports those as `stale_routes`; `--prune-routes` deletes
+the ones that point at this instance's port and are neither the current domain
+nor a declared alias. Pruning is opt-in because the inventory is read from the
+whole host, and a route may belong to a checkout that this project's config
+cannot see.
 
 ## Multisite
 

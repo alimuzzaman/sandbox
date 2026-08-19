@@ -915,6 +915,42 @@ def remove_instance_https_route(remote: dict, domain: str) -> None:
         )
 
 
+def instance_route_hosts(remote: dict, port: int) -> list[str]:
+    """Hostnames whose Sandbox instance route currently proxies to `port`.
+
+    Read back from the remote's own Caddy fragments rather than from local
+    state, because the routes outlive the machine that created them: a route
+    added from another checkout, or by an earlier `--expose --domain`, is still
+    live and still owned by this instance's port. That makes stale-route
+    pruning self-describing instead of dependent on a local record that may not
+    exist. Only Sandbox's own `sandbox-instance-*` fragments are considered —
+    permanent `sb host` routes are never in scope."""
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("invalid remote instance port")
+    cmd = (
+        "if [ \"$(id -u)\" = 0 ]; then SUDO=; else SUDO=sudo; fi; "
+        f"$SUDO grep -l -F {shlex.quote(f'reverse_proxy 127.0.0.1:{int(port)}')} "
+        "/etc/caddy/conf.d/sandbox-instance-*.caddy 2>/dev/null || true"
+    )
+    res = ssh_run(remote, cmd, timeout=60)
+    if res.returncode != 0:
+        raise RuntimeError(
+            "could not read remote instance routes: "
+            f"{_safe_remote_diagnostic(res, remote, limit=1000)}"
+        )
+    hosts = []
+    for line in (res.stdout or "").splitlines():
+        name = line.strip().rsplit("/", 1)[-1]
+        if not name.startswith("sandbox-instance-") or not name.endswith(".caddy"):
+            continue
+        host = name[len("sandbox-instance-"):-len(".caddy")]
+        try:
+            hosts.append(_validate_hostname(host, "remote instance domain"))
+        except ValueError:
+            continue
+    return hosts
+
+
 def delete_remote_instance(remote: dict, instance_name: str) -> None:
     """Delete precisely one named remote Sandbox instance and its Docker data."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,30}", instance_name or ""):

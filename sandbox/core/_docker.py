@@ -81,7 +81,54 @@ def _config_extra_php(inst_cfg: dict, docroot: str = "/var/www/html") -> str:
             "    $base = '/';",
             "}",
         ]
+    lines += _alias_url_php(inst_cfg)
     return "\n".join(lines)
+
+
+def _alias_url_php(inst_cfg: dict) -> list[str]:
+    """PHP that makes WP_HOME/WP_SITEURL follow the request host — but ONLY
+    when that host is a declared alias of this instance.
+
+    Constants, not an `option_home` filter: they are read before plugins load,
+    so login redirects, enqueued asset URLs, and the REST root all follow the
+    alias, which an mu-plugin hooking the option would miss.
+
+    $_SERVER['HTTP_HOST'] is attacker-controlled, so it is matched against the
+    declared alias list and nothing else. Anything unrecognized — a spoofed
+    Host, the instance's own primary domain, or wp-cli, which sets no HTTP_HOST
+    at all — leaves both constants undefined, and WP falls back to the home and
+    siteurl options exactly as it does today. That is what keeps this additive:
+    the primary hostname's behavior is untouched, and a forged Host cannot
+    rewrite the URL WordPress prints into a password-reset mail.
+
+    The scheme comes from X-Forwarded-Proto when the direct HTTPS flag is
+    absent, because Caddy (and, on a remote, Cloudflare in front of it)
+    terminates TLS and forwards plain HTTP. That header is only trustworthy
+    because every path into the instance goes through the sandbox proxy, which
+    sets it — a container published straight to the internet would not qualify.
+    """
+    aliases = instance_aliases(inst_cfg)
+    if not aliases:
+        return []
+    listed = ", ".join(_php_squote(a) for a in aliases)
+    return [
+        f"$sandbox_alias_hosts = array({listed});",
+        "$sandbox_alias_host = isset($_SERVER['HTTP_HOST'])",
+        "    ? rtrim(strtolower(trim((string) $_SERVER['HTTP_HOST'])), '.') : '';",
+        "if (in_array($sandbox_alias_host, $sandbox_alias_hosts, true)) {",
+        "    $sandbox_alias_scheme = 'http';",
+        "    if (!empty($_SERVER['HTTPS'])",
+        "        && strtolower((string) $_SERVER['HTTPS']) !== 'off') {",
+        "        $sandbox_alias_scheme = 'https';",
+        "    } elseif (isset($_SERVER['HTTP_X_FORWARDED_PROTO'])",
+        "        && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {",
+        "        $sandbox_alias_scheme = 'https';",
+        "    }",
+        "    $sandbox_alias_url = $sandbox_alias_scheme . '://' . $sandbox_alias_host;",
+        "    defined('WP_HOME') || define('WP_HOME', $sandbox_alias_url);",
+        "    defined('WP_SITEURL') || define('WP_SITEURL', $sandbox_alias_url);",
+        "}",
+    ]
 
 
 def _env_config_lines(inst_cfg: dict, docroot: str = "/var/www/html",

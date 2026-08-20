@@ -105,6 +105,13 @@ class TestMcpDoctorProbe(unittest.TestCase):
         self.assertFalse(malformed[0][1])
         self.assertIn("is invalid", malformed[0][2])
 
+        with patch("sandbox.resources.monitor.storage_doctor_checks",
+                   return_value=[]):
+            empty = lifecycle._storage_pressure_doctor_checks()
+        self.assertEqual(empty[0][0], "storage monitor evidence available")
+        self.assertFalse(empty[0][1])
+        self.assertIn("is invalid", empty[0][2])
+
     def test_doctor_emits_one_storage_section_check_per_evidence_row(self):
         rows = [
             {"label": "local", "ok": True, "hint": ""},

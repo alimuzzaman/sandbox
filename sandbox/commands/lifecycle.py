@@ -773,7 +773,7 @@ def _storage_pressure_doctor_checks() -> list[tuple[str, bool, str]]:
             "storage monitor evidence could not be read; refresh it with sb resources monitor --json",
         )]
 
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or not rows:
         return [(
             "storage monitor evidence available",
             False,

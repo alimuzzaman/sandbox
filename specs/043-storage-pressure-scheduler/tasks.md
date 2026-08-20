@@ -69,21 +69,21 @@ parallel.
 - [ ] **T013** Add `_emit_monitor()` and `_emit_schedule()` renderers carrying free bytes,
   total, free percentage, threshold crossed, and the next command on warning/critical, and
   adding no warning line on `normal`. Exit 1 on `critical`/`unknown`/refusal.
-- [ ] **T014** Add the read-only "Storage pressure" section to `sb doctor`
+- [x] **T014** Add the read-only "Storage pressure" section to `sb doctor`
   (`sandbox/commands/lifecycle.py`), consuming `storage_doctor_checks()` in the same
   `check(label, ok, hint)` shape the remote-target section already uses.
 
 ## Phase 6 — MCP tier parity (user story 5)
 
-- [ ] **T015** Add `tier` to `resource_cleanup_plan` and `resource_cleanup_apply` in
+- [x] **T015** Add `tier` to `resource_cleanup_plan` and `resource_cleanup_apply` in
   `mcp/wp-server/tools/resources.py`, routing tiers through the reclaim service and refusing
   tier+scope, neither, and unknown tiers.
-- [ ] **T016** Declare `reclaim_service_factory` for the `resources` group in
+- [x] **T016** Declare `reclaim_service_factory` for the `resources` group in
   `mcp/wp-server/tools/manifest.py` and provide it in `mcp/wp-server/server.py`.
 
 ## Phase 7 — Tests
 
-- [ ] **T017** [P] `tests/test_storage_monitor_policy.py` — defaults; every validation
+- [x] **T017** [P] `tests/test_resource_reclaim_policy.py` — defaults; every validation
   rejection; layer precedence; classification at exactly `warn_ratio`, just above, exactly
   `critical_ratio`, `0` free, `unknown` capacity; the automatic gate on/off.
 - [ ] **T018** [P] `tests/test_storage_monitor_schedule.py` — plan renders with
@@ -93,7 +93,7 @@ parallel.
   nothing at every level; auto path runs only `safe` and only when eligible; non-safe tier
   refused before any provider call; reap dry by default and real when opted in; record
   written with the full contract; lock held yields `skipped`.
-- [ ] **T020** [P] `tests/test_mcp_resource_tier.py` — tier plans route to the reclaim
+- [x] **T020** [P] `tests/test_mcp_resource_tier.py` — tier plans route to the reclaim
   service; apply without confirm refused; tier+scope, neither, and unknown tier refused.
 
 ## Phase 8 — Docs and verification

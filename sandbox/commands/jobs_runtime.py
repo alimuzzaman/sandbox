@@ -144,7 +144,11 @@ def configure_start_parser(parser) -> None:
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--stall-seconds", type=int, default=300)
     parser.add_argument("--cancel-on-stall", action="store_true")
-    parser.add_argument("--profile", default="exec")
+    parser.add_argument(
+        "--profile", default="exec",
+        help=("execution deadline profile (built-ins: exec, unit, integration, e2e, ci, "
+               "overall, overnight; default: exec)"),
+    )
     parser.add_argument("--output-profile", default="smart")
     parser.add_argument("--request-id")
     parser.add_argument("--source-identity")

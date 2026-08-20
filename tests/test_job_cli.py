@@ -149,6 +149,20 @@ class JobCliTests(unittest.TestCase):
         )
         self.assertIn("target=local workspace=unit deadline=120s source=explicit", output.getvalue())
 
+    def test_start_parser_help_lists_builtin_profiles_and_default(self):
+        parser = __import__("argparse").ArgumentParser()
+        configure_start_parser(parser)
+        expected = (
+            "execution deadline profile (built-ins: exec, unit, integration, e2e, ci, "
+            "overall, overnight; default: exec)"
+        )
+
+        profile = next(action for action in parser._actions if action.dest == "profile")
+        self.assertEqual(profile.default, "exec")
+        self.assertIsNone(profile.choices)
+        self.assertEqual(profile.help, expected)
+        self.assertIn(expected, " ".join(parser.format_help().split()))
+
     def test_start_rejects_source_path_hash_as_project_identity_fallback(self):
         parser = __import__("argparse").ArgumentParser()
         configure_start_parser(parser)

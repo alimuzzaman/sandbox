@@ -911,6 +911,9 @@ provisioned remote, it can make remote execution the project default:
 }
 ```
 
+For example, `./sb job-start --profile unit -- <argv>` selects the built-in
+`unit` execution deadline profile for an explicit job.
+
 Every profile has a finite timeout (at most seven days). Built-ins are `exec`,
 `unit`, `integration`, `e2e`, `ci`, `overall`, and `overnight`; output built-ins
 are `full`, `smart`, `errors`, `sampled`, and `quiet`. Explicit `--timeout`

@@ -3,15 +3,17 @@
 Policy resolution is deliberately a configuration-only operation.  It reads
 the machine configuration through the owning config helpers, validates a
 named remote through the owning remote registry, and only then asks the
-machine-config manifest to normalize one merged policy.  The record store is
-the only persistence owned by this module; it keeps one private, atomically
-replaced JSON document per target.
+machine-config manifest to normalize one merged policy.  The record store and
+the persistent monitor guard are the only persistence owned by this module;
+records are atomically replaced while guard state is updated through its
+retained descriptor.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, timezone
+import errno
 import copy
 import hashlib
 import json
@@ -19,8 +21,15 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import tempfile
 from typing import Any
+
+try:  # POSIX is the supported controller runtime; keep import-safe elsewhere.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts.
+    fcntl = None
 
 from sandbox.config.manifest import apply_machine_config
 from sandbox.config.storage_monitor import StorageMonitorConfigError
@@ -62,6 +71,35 @@ _SAFE_GUIDANCE = frozenset({
     "free space is below the warning threshold; run `sb resources plan --tier safe` and review the candidates",
     "free space is critically low; run `sb resources cleanup --tier safe --confirm` after reviewing the plan",
 })
+
+
+class StorageMonitorLockError(RuntimeError):
+    """A monitor lock could not be acquired or its grace was invalid.
+
+    The public message is deliberately constant.  Lock failures must not expose
+    target names, filesystem paths, or operating-system diagnostics.
+    """
+
+    _MESSAGES = {
+        "invalid_lock_grace": "storage monitor lock grace is invalid",
+        "lock_unavailable": "storage monitor lock is unavailable",
+    }
+
+    def __init__(self, code: str = "lock_unavailable") -> None:
+        if code not in self._MESSAGES:
+            code = "lock_unavailable"
+        self.code = code
+        super().__init__(self._MESSAGES[code])
+
+
+_LOCK_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_LOCK_MAX_BYTES = 4096
+_LOCK_MODE = 0o600
+_LOCK_PARENT_MODE = 0o700
+
+
+def _lock_error(code: str = "lock_unavailable") -> StorageMonitorLockError:
+    return StorageMonitorLockError(code)
 
 
 def _unknown_target(name: str) -> StorageMonitorConfigError:
@@ -257,6 +295,663 @@ def record_path(target: Any) -> Path:
     identity = "local" if kind == "local" else f"remote:{name}"
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return Path(RUNTIME_DIR) / "resources" / "monitor" / f"{digest}.json"
+
+
+def lock_path(target: Any) -> Path:
+    """Return the draft compatibility lock path beside a target's record.
+
+    New callers must use :func:`guard_path`.  The ``.lock`` spelling remains
+    readable for one-way compatibility with the unreleased draft, but it is
+    never created, replaced, truncated, or removed by the lease lifecycle.
+    """
+    return record_path(target).with_suffix(".lock")
+
+
+def guard_path(target: Any) -> Path:
+    """Return the private per-target guard path used for lock arbitration."""
+    return record_path(target).with_suffix(".guard")
+
+
+_GUARD_FIELDS = frozenset({
+    "schema", "state", "pid", "created_at", "released_at", "owner_token",
+})
+_LEGACY_LOCK_FIELDS = frozenset({"schema", "pid", "created_at", "owner_token"})
+_GUARD_STATES = frozenset({"active", "released"})
+_GUARD_SCHEMA = 2
+_LEGACY_SCHEMA = 1
+_EMPTY = object()
+_INVALID = object()
+
+
+def _optional_flag(name: str) -> int:
+    return int(getattr(os, name, 0) or 0)
+
+
+def _safe_mode(mode: int, expected: int = _LOCK_MODE) -> bool:
+    return (mode & 0o7777) == expected
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _close_fd(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _prepare_lock_parent(path: Path) -> int:
+    """Create and validate the private monitor directory, retaining its fd."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=_LOCK_PARENT_MODE)
+    flags = (
+        os.O_RDONLY
+        | _optional_flag("O_DIRECTORY")
+        | _optional_flag("O_NOFOLLOW")
+        | _optional_flag("O_CLOEXEC")
+    )
+    descriptor = os.open(parent, flags)
+    try:
+        parent_stat = os.fstat(descriptor)
+        getuid = getattr(os, "getuid", None)
+        if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_nlink < 1:
+            raise OSError(errno.ENOTDIR, "monitor parent is not a directory")
+        if callable(getuid) and parent_stat.st_uid != getuid():
+            raise OSError(errno.EACCES, "monitor parent owner is unsafe")
+        # fchmod is descriptor-relative and closes the mode race that a
+        # path-based chmod would introduce.  Revalidate after the change.
+        if not _safe_mode(parent_stat.st_mode, _LOCK_PARENT_MODE):
+            os.fchmod(descriptor, _LOCK_PARENT_MODE)
+            parent_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_nlink < 1
+            or not _safe_mode(parent_stat.st_mode, _LOCK_PARENT_MODE)
+            or (callable(getuid) and parent_stat.st_uid != getuid())
+        ):
+            raise OSError(errno.EACCES, "monitor parent is unsafe")
+        return descriptor
+    except Exception:
+        _close_fd(descriptor)
+        raise
+
+
+def _open_child(
+    path: Path,
+    flags: int,
+    mode: int = 0,
+    parent_descriptor: int | None = None,
+) -> int:
+    """Open one monitor child by name below the retained parent descriptor."""
+    if parent_descriptor is None:
+        return os.open(path, flags, mode) if mode else os.open(path, flags)
+    if mode:
+        return os.open(path.name, flags, mode, dir_fd=parent_descriptor)
+    return os.open(path.name, flags, dir_fd=parent_descriptor)
+
+
+def _lstat_child(path: Path, parent_descriptor: int | None) -> os.stat_result:
+    return os.lstat(path.name, dir_fd=parent_descriptor)
+
+
+def _guard_identity_matches(
+    path: Path,
+    expected: os.stat_result,
+    parent_descriptor: int,
+) -> bool:
+    """Check that the pathname still names our originally opened guard.
+
+    This is an identity check only.  A mismatch means the fd is detached and
+    the caller must not write it or attempt to repair the successor pathname.
+    """
+    try:
+        current = _lstat_child(path, parent_descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(current.st_mode)
+        and current.st_nlink == 1
+        and _safe_mode(current.st_mode)
+        and _same_inode(current, expected)
+    )
+
+
+def _open_guard(
+    path: Path,
+    parent_descriptor: int,
+) -> tuple[int, os.stat_result] | None:
+    """Open and validate one persistent guard without repairing old evidence.
+
+    ``O_EXCL`` lets us distinguish the one guard this acquisition created from
+    an existing artifact.  Only the former may be normalized with descriptor
+    ``fchmod``; an existing wrong-mode artifact is unsafe evidence and remains
+    byte-for-byte untouched.
+    """
+    common_flags = _optional_flag("O_NOFOLLOW") | _optional_flag("O_CLOEXEC")
+    created = False
+    try:
+        try:
+            descriptor = _open_child(
+                path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | common_flags,
+                _LOCK_MODE,
+                parent_descriptor,
+            )
+            created = True
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            descriptor = _open_child(
+                path,
+                os.O_RDWR | common_flags,
+                parent_descriptor=parent_descriptor,
+            )
+    except OSError as exc:
+        # Unsafe paths and inaccessible artifacts are indistinguishable from a
+        # held advisory lock to callers.  No path cleanup is attempted.
+        if exc.errno in {
+            errno.EACCES, errno.EAGAIN, errno.ELOOP, errno.EPERM, errno.ENOENT,
+        }:
+            return None
+        raise
+    try:
+        opened = os.fstat(descriptor)
+        current = _lstat_child(path, parent_descriptor)
+        getuid = getattr(os, "getuid", None)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or not _same_inode(opened, current)
+            or (callable(getuid) and opened.st_uid != getuid())
+        ):
+            _close_fd(descriptor)
+            return None
+        if created:
+            os.fchmod(descriptor, _LOCK_MODE)
+            opened = os.fstat(descriptor)
+            current = _lstat_child(path, parent_descriptor)
+        if (
+            not _safe_mode(opened.st_mode)
+            or not _safe_mode(current.st_mode)
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or not _same_inode(opened, current)
+            or (callable(getuid) and opened.st_uid != getuid())
+        ):
+            _close_fd(descriptor)
+            return None
+        return descriptor, opened
+    except Exception:
+        _close_fd(descriptor)
+        raise
+
+
+def _release_guard(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    if fcntl is not None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    _close_fd(descriptor)
+
+
+def _acquire_guard(path: Path, parent_descriptor: int) -> tuple[int, os.stat_result] | None:
+    if fcntl is None:
+        raise _lock_error()
+    opened = _open_guard(path, parent_descriptor)
+    if opened is None:
+        return None
+    descriptor, identity = opened
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        _release_guard(descriptor)
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+            return None
+        raise
+    # A replacement between the initial identity checks and flock must detach
+    # without touching the successor file.
+    if not _guard_identity_matches(path, identity, parent_descriptor):
+        _release_guard(descriptor)
+        return None
+    return descriptor, identity
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith("Z") else value,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _json_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate guard field")
+        result[key] = value
+    return result
+
+
+def _read_fd(descriptor: int) -> bytes | None:
+    """Read one bounded payload from a retained fd, never through its path."""
+    try:
+        size = os.fstat(descriptor).st_size
+        if size < 0 or size > _LOCK_MAX_BYTES:
+            return None
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _LOCK_MAX_BYTES:
+            chunk = os.read(descriptor, min(1024, _LOCK_MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _LOCK_MAX_BYTES:
+                return None
+        return b"".join(chunks)
+    except OSError:
+        return None
+
+
+def _encode_guard(payload: Mapping[str, Any]) -> bytes:
+    encoded = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    if len(encoded) > _LOCK_MAX_BYTES:
+        raise ValueError("guard payload is too large")
+    return encoded
+
+
+def _decode_guard(raw: bytes) -> dict[str, Any] | object:
+    if raw == b"":
+        return _EMPTY
+    try:
+        # The canonical contract is ASCII.  This also rejects an actual UTF-8
+        # character even though json.loads could otherwise accept it.
+        text = raw.decode("ascii")
+        value = json.loads(text, object_pairs_hook=_json_no_duplicates)
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+        return _INVALID
+    if not isinstance(value, dict) or set(value) != _GUARD_FIELDS:
+        return _INVALID
+    if type(value.get("schema")) is not int or value["schema"] != _GUARD_SCHEMA:
+        return _INVALID
+    if value.get("state") not in _GUARD_STATES:
+        return _INVALID
+    pid = value.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return _INVALID
+    created = _parse_utc(value.get("created_at"))
+    if created is None:
+        return _INVALID
+    released_value = value.get("released_at")
+    released = None if released_value is None else _parse_utc(released_value)
+    if value["state"] == "active":
+        if released_value is not None:
+            return _INVALID
+    elif released is None or released < created:
+        return _INVALID
+    token = value.get("owner_token")
+    if not isinstance(token, str) or _LOCK_TOKEN_RE.fullmatch(token) is None:
+        return _INVALID
+    # New guard writes are canonical compact objects.  Reject whitespace and
+    # alternate ordering as malformed evidence rather than normalizing it.
+    try:
+        if _encode_guard(value) != raw:
+            return _INVALID
+    except (TypeError, ValueError, OverflowError):
+        return _INVALID
+    value["_parsed_created_at"] = created
+    value["_parsed_released_at"] = released
+    return value
+
+
+def _read_guard(descriptor: int) -> dict[str, Any] | object:
+    raw = _read_fd(descriptor)
+    if raw is None:
+        return _INVALID
+    return _decode_guard(raw)
+
+
+def _decode_legacy(raw: bytes) -> dict[str, Any] | object:
+    if raw == b"" or len(raw) > _LOCK_MAX_BYTES:
+        return _INVALID
+    try:
+        value = json.loads(raw.decode("ascii"), object_pairs_hook=_json_no_duplicates)
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+        return _INVALID
+    if not isinstance(value, dict) or set(value) != _LEGACY_LOCK_FIELDS:
+        return _INVALID
+    if type(value.get("schema")) is not int or value["schema"] != _LEGACY_SCHEMA:
+        return _INVALID
+    pid = value.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return _INVALID
+    created = _parse_utc(value.get("created_at"))
+    token = value.get("owner_token")
+    if created is None or not isinstance(token, str) or _LOCK_TOKEN_RE.fullmatch(token) is None:
+        return _INVALID
+    value["_parsed_created_at"] = created
+    return value
+
+
+def _inspect_legacy(path: Path, parent_descriptor: int) -> dict[str, Any] | object:
+    """Read one draft ``.lock`` artifact by fd; never remove or rewrite it."""
+    flags = os.O_RDONLY | _optional_flag("O_NOFOLLOW") | _optional_flag("O_CLOEXEC")
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = _open_child(path, flags, parent_descriptor=parent_descriptor)
+        except FileNotFoundError:
+            return _EMPTY
+        opened = os.fstat(descriptor)
+        current = _lstat_child(path, parent_descriptor)
+        getuid = getattr(os, "getuid", None)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or not _safe_mode(opened.st_mode)
+            or not _safe_mode(current.st_mode)
+            or not _same_inode(opened, current)
+            or (callable(getuid) and opened.st_uid != getuid())
+        ):
+            return _INVALID
+        raw = _read_fd(descriptor)
+        if raw is None:
+            return _INVALID
+        return _decode_legacy(raw)
+    except (OSError, TypeError, ValueError, OverflowError):
+        return _INVALID
+    finally:
+        _close_fd(descriptor)
+
+
+def _pid_liveness(pid: int) -> str:
+    """Return ``alive``, ``dead``, or ``ambiguous`` without spawning."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "alive"
+    except OverflowError:
+        return "ambiguous"
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return "dead"
+        if exc.errno == errno.EPERM:
+            return "alive"
+        return "ambiguous"
+    except Exception:
+        return "ambiguous"
+    return "alive"
+
+
+def _is_stale(payload: Mapping[str, Any], stale_after_seconds: int) -> bool:
+    parsed = payload.get("_parsed_created_at")
+    if not isinstance(parsed, datetime):
+        return False
+    now = datetime.now(timezone.utc)
+    age = (now - parsed).total_seconds()
+    if parsed > now or not math.isfinite(age) or age <= stale_after_seconds:
+        return False
+    return _pid_liveness(payload["pid"]) == "dead"
+
+
+def _active_payload() -> dict[str, Any]:
+    return {
+        "schema": _GUARD_SCHEMA,
+        "state": "active",
+        "pid": os.getpid(),
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "released_at": None,
+        "owner_token": secrets.token_hex(16),
+    }
+
+
+def _released_payload(active: Mapping[str, Any]) -> dict[str, Any]:
+    created = active.get("created_at")
+    released = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "schema": _GUARD_SCHEMA,
+        "state": "released",
+        "pid": active["pid"],
+        "created_at": created,
+        "released_at": released,
+        "owner_token": active["owner_token"],
+    }
+
+
+def _write_fd_payload(
+    descriptor: int,
+    payload: Mapping[str, Any],
+    previous: bytes | None = None,
+) -> None:
+    """Write and fsync one payload through a retained fd only.
+
+    A best-effort rollback keeps active evidence when a write/fsync fails.  No
+    pathname operation is used, so a replaced successor cannot be touched.
+    """
+    encoded = _encode_guard(payload)
+    if previous is None:
+        previous = _read_fd(descriptor)
+    if previous is None:
+        previous = b""
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if not written:
+                raise OSError(errno.EIO, "guard write failed")
+            offset += written
+        os.fsync(descriptor)
+    except Exception:
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            offset = 0
+            while offset < len(previous):
+                written = os.write(descriptor, previous[offset:])
+                if not written:
+                    break
+                offset += written
+            os.fsync(descriptor)
+        except Exception:
+            pass
+        raise
+
+
+class _MonitorLock:
+    """Context-manager lease backed by one retained guard fd."""
+
+    __slots__ = (
+        "acquired", "reason", "_path", "_guard_descriptor", "_guard_identity",
+        "_parent_descriptor", "_payload", "_released",
+    )
+
+    def __init__(
+        self,
+        *,
+        acquired: bool,
+        reason: str,
+        path: Path,
+        guard_descriptor: int | None = None,
+        guard_identity: os.stat_result | None = None,
+        parent_descriptor: int | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.acquired = acquired
+        self.reason = reason
+        self._path = path
+        self._guard_descriptor = guard_descriptor
+        self._guard_identity = guard_identity
+        self._parent_descriptor = parent_descriptor
+        self._payload = dict(payload) if payload is not None else None
+        self._released = False
+
+    def __enter__(self) -> "_MonitorLock":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        # Release is deliberately best-effort; returning False preserves the
+        # body exception even if durable release evidence cannot be written.
+        self.release()
+        return False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        descriptor = self._guard_descriptor
+        parent_descriptor = self._parent_descriptor
+        try:
+            if (
+                self.acquired
+                and descriptor is not None
+                and self._guard_identity is not None
+                and parent_descriptor is not None
+                and self._payload is not None
+                and self._payload.get("state") == "active"
+                and _guard_identity_matches(self._path, self._guard_identity, parent_descriptor)
+            ):
+                current = _read_guard(descriptor)
+                if (
+                    isinstance(current, dict)
+                    and current.get("state") == "active"
+                    and current.get("owner_token") == self._payload.get("owner_token")
+                    and current.get("pid") == self._payload.get("pid")
+                ):
+                    try:
+                        _write_fd_payload(descriptor, _released_payload(current))
+                    except Exception:
+                        # Keep the active payload (rollback is best effort),
+                        # then always unlock/close below.
+                        pass
+        finally:
+            _release_guard(descriptor)
+            self._guard_descriptor = None
+            _close_fd(parent_descriptor)
+            self._parent_descriptor = None
+
+
+def monitor_lock(target: Any, *, stale_after_seconds: int = 1800) -> _MonitorLock:
+    """Acquire one nonblocking persistent monitor lease for ``target``.
+
+    The v2 ``.guard`` file is both the advisory ``flock`` liveness lock and
+    durable state evidence.  A released marker remains on disk.  The draft
+    v1 ``.lock`` is inspected once only while an empty guard is held, and is
+    never deleted or replaced.
+    """
+    grace_valid = (
+        not isinstance(stale_after_seconds, bool)
+        and isinstance(stale_after_seconds, int)
+        and 1 <= stale_after_seconds <= 86400
+    )
+    if not grace_valid:
+        raise _lock_error("invalid_lock_grace")
+
+    try:
+        path = guard_path(target)
+        legacy_path = lock_path(target)
+        parent_descriptor = _prepare_lock_parent(path)
+    except StorageMonitorLockError:
+        raise
+    except Exception:
+        raise _lock_error() from None
+
+    opened: tuple[int, os.stat_result] | None = None
+    try:
+        opened = _acquire_guard(path, parent_descriptor)
+    except Exception:
+        _close_fd(parent_descriptor)
+        raise _lock_error() from None
+    if opened is None:
+        _close_fd(parent_descriptor)
+        return _MonitorLock(acquired=False, reason="lock_held", path=path)
+
+    descriptor, identity = opened
+    transferred = False
+    try:
+        if not _guard_identity_matches(path, identity, parent_descriptor):
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+        state = _read_guard(descriptor)
+        if state is _INVALID:
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+
+        reason = "acquired"
+        if state is _EMPTY:
+            # Legacy compatibility is intentionally one-way.  Once this guard
+            # has any v2 state, the .lock artifact is not consulted again.
+            legacy = _inspect_legacy(legacy_path, parent_descriptor)
+            if legacy is _INVALID:
+                return _MonitorLock(acquired=False, reason="lock_held", path=path)
+            if legacy is not _EMPTY:
+                if not _is_stale(legacy, stale_after_seconds):
+                    return _MonitorLock(acquired=False, reason="lock_held", path=path)
+                reason = "stale_lock_recovered"
+        elif not isinstance(state, dict):
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+        elif state.get("state") == "active":
+            if not _is_stale(state, stale_after_seconds):
+                return _MonitorLock(acquired=False, reason="lock_held", path=path)
+            reason = "stale_lock_recovered"
+        elif state.get("state") != "released":
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+
+        if not _guard_identity_matches(path, identity, parent_descriptor):
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+        payload = _active_payload()
+        try:
+            previous = _read_fd(descriptor)
+            if previous is None:
+                raise OSError(errno.EIO, "guard read failed")
+            _write_fd_payload(descriptor, payload, previous)
+        except Exception:
+            raise _lock_error() from None
+        # If the pathname changed while we were writing, detach the old fd and
+        # do not write/recover the successor.  The caller observes contention.
+        if not _guard_identity_matches(path, identity, parent_descriptor):
+            return _MonitorLock(acquired=False, reason="lock_held", path=path)
+        result = _MonitorLock(
+            acquired=True,
+            reason=reason,
+            path=path,
+            guard_descriptor=descriptor,
+            guard_identity=identity,
+            parent_descriptor=parent_descriptor,
+            payload=payload,
+        )
+        transferred = True
+        return result
+    finally:
+        if not transferred:
+            _release_guard(descriptor)
+            _close_fd(parent_descriptor)
 
 
 def _assert_json_value(value: Any, seen: set[int] | None = None) -> None:
@@ -894,6 +1589,10 @@ def storage_doctor_checks() -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "guard_path",
+    "StorageMonitorLockError",
+    "lock_path",
+    "monitor_lock",
     "read_record",
     "record_age_seconds",
     "record_path",

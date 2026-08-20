@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import builtins
 from datetime import datetime, timezone
+import errno
 import hashlib
+import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 from unittest import TestCase, mock
 
 from sandbox.config.manifest import MACHINE_CONFIG_PROVIDERS, apply_machine_config
@@ -458,6 +462,461 @@ class TestStorageMonitorRecords(TestCase):
         self.assertEqual(Path(seen["dir"]), path.parent)
         fchmod.assert_called_once()
         self.assertEqual(fchmod.call_args.args[1], 0o600)
+
+
+class TestStorageMonitorLocks(TestCase):
+    """Persistent fd-owned lease contract (Spec 043 T006)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.temp.name)
+        self.runtime_patch = mock.patch.object(monitor, "RUNTIME_DIR", self.runtime)
+        self.runtime_patch.start()
+        self.local = {"kind": "local", "name": "local"}
+        self.remote = {"kind": "remote", "name": "secret-remote"}
+
+    def tearDown(self):
+        self.runtime_patch.stop()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _timestamp(delta_seconds=0):
+        from datetime import timedelta
+
+        return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat().replace(
+            "+00:00", "Z"
+        )
+
+    def _guard_file(self, target, *, state="active", created_delta=0,
+                    released_delta=60, pid=99999999, token="a" * 32,
+                    payload=None, mode=0o600):
+        path = monitor.guard_path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = payload if payload is not None else {
+            "schema": 2,
+            "state": state,
+            "pid": pid,
+            "created_at": self._timestamp(created_delta),
+            "released_at": (
+                None if state == "active" else self._timestamp(created_delta + released_delta)
+            ),
+            "owner_token": token,
+        }
+        path.write_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii"))
+        os.chmod(path, mode)
+        return path
+
+    def _legacy_file(self, target, *, created_delta=0, pid=99999999,
+                     token="a" * 32, raw=None, mode=0o600):
+        path = monitor.lock_path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = {
+            "schema": 1,
+            "pid": pid,
+            "created_at": self._timestamp(created_delta),
+            "owner_token": token,
+        }
+        path.write_bytes(
+            raw if raw is not None else json.dumps(
+                value, sort_keys=True, separators=(",", ":")
+            ).encode("ascii")
+        )
+        os.chmod(path, mode)
+        return path
+
+    @staticmethod
+    def _read_json(path):
+        return json.loads(path.read_text(encoding="ascii"))
+
+    def test_opaque_local_remote_paths_modes_and_schema2_payload(self):
+        locks = [monitor.monitor_lock(self.local), monitor.monitor_lock(self.remote)]
+        try:
+            self.assertTrue(all(lock.acquired for lock in locks))
+            self.assertEqual({lock.reason for lock in locks}, {"acquired"})
+            self.assertEqual(monitor.guard_path(self.local).parent.stat().st_mode & 0o777, 0o700)
+            for target, lock in zip((self.local, self.remote), locks):
+                path = monitor.guard_path(target)
+                self.assertNotIn("secret-remote", str(path))
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                raw = path.read_bytes()
+                self.assertLessEqual(len(raw), 4096)
+                raw.decode("ascii")
+                payload = self._read_json(path)
+                self.assertEqual(set(payload), {
+                    "schema", "state", "pid", "created_at", "released_at", "owner_token",
+                })
+                self.assertEqual(payload["schema"], 2)
+                self.assertEqual(payload["state"], "active")
+                self.assertIsNone(payload["released_at"])
+                self.assertGreater(payload["pid"], 0)
+                self.assertRegex(payload["owner_token"], r"^[0-9a-f]{32}$")
+                self.assertTrue(payload["created_at"].endswith("Z"))
+                self.assertEqual(
+                    raw,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii"),
+                )
+                self.assertNotIn("secret-remote", raw.decode("ascii"))
+        finally:
+            for lock in locks:
+                lock.release()
+        for target in (self.local, self.remote):
+            self.assertTrue(monitor.guard_path(target).exists())
+            self.assertEqual(self._read_json(monitor.guard_path(target))["state"], "released")
+            self.assertFalse(monitor.lock_path(target).exists())
+
+    def test_same_target_contender_is_immediate_but_different_target_acquires(self):
+        first = monitor.monitor_lock(self.remote)
+        other = None
+        try:
+            contender = monitor.monitor_lock(self.remote)
+            self.assertFalse(contender.acquired)
+            self.assertEqual(contender.reason, "lock_held")
+            other = monitor.monitor_lock(self.local)
+            self.assertTrue(other.acquired)
+        finally:
+            first.release()
+            if other is not None:
+                other.release()
+
+    def test_normal_and_exception_release_keep_released_marker_and_reacquire(self):
+        lock = monitor.monitor_lock(self.remote)
+        with lock:
+            pass
+        path = monitor.guard_path(self.remote)
+        released = self._read_json(path)
+        self.assertEqual(released["state"], "released")
+        self.assertIsNotNone(released["released_at"])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        lock.release()
+
+        reacquired = monitor.monitor_lock(self.remote)
+        self.assertTrue(reacquired.acquired)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "body failure"):
+                with reacquired:
+                    raise RuntimeError("body failure")
+        finally:
+            reacquired.release()
+        released_again = self._read_json(path)
+        self.assertEqual(released_again["state"], "released")
+        self.assertIsNotNone(released_again["released_at"])
+
+    def test_invalid_grace_is_bounded_and_does_not_leak_target(self):
+        values = (True, False, 0, -1, 86401, 1.0, "1", None, float("nan"), float("inf"), 10**400)
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(monitor.StorageMonitorLockError) as raised:
+                    monitor.monitor_lock(self.remote, stale_after_seconds=value)
+                self.assertEqual(raised.exception.code, "invalid_lock_grace")
+                self.assertNotIn("secret-remote", str(raised.exception))
+                self.assertNotIn(str(monitor.RUNTIME_DIR), str(raised.exception))
+
+    def test_held_lock_is_immediate_and_exceptional_context_releases(self):
+        first = monitor.monitor_lock(self.remote)
+        self.assertTrue(first.acquired)
+        try:
+            second = monitor.monitor_lock(self.remote)
+            self.assertFalse(second.acquired)
+            self.assertEqual(second.reason, "lock_held")
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                with first:
+                    raise RuntimeError("boom")
+            released = self._read_json(monitor.guard_path(self.remote))
+            self.assertEqual(released["state"], "released")
+            third = monitor.monitor_lock(self.remote)
+            self.assertTrue(third.acquired)
+            third.release()
+            third.release()
+        finally:
+            first.release()
+
+    def test_active_evidence_matrix_is_fail_closed_except_old_dead(self):
+        cases = (
+            ("live", -3600, None, "lock_held", os.getpid()),
+            ("young-dead", -10, ProcessLookupError(), "lock_held", 99999999),
+            ("old-dead", -3600, ProcessLookupError(), "stale_lock_recovered", 99999999),
+            ("eperm", -3600, OSError(errno.EPERM, "denied"), "lock_held", 99999999),
+            ("future", 3600, ProcessLookupError(), "lock_held", 99999999),
+        )
+        for label, age, kill_error, expected, pid in cases:
+            with self.subTest(label=label):
+                target = {"kind": "remote", "name": f"remote-{label}"}
+                path = self._guard_file(target, created_delta=age, pid=pid)
+                effect = None if kill_error is None else kill_error
+                with mock.patch.object(monitor.os, "kill", side_effect=effect):
+                    lock = monitor.monitor_lock(target, stale_after_seconds=1800)
+                self.assertEqual(lock.reason, expected)
+                if lock.acquired:
+                    self.assertEqual(self._read_json(path)["state"], "active")
+                    lock.release()
+                else:
+                    self.assertTrue(path.exists())
+                self.assertTrue(path.exists())
+
+    def test_malformed_unreadable_symlink_multilink_and_wrong_mode_are_held(self):
+        target = self.remote
+        malformed = self._guard_file(target, payload={"schema": 2}, mode=0o600)
+        self.assertEqual(monitor.monitor_lock(target).reason, "lock_held")
+        malformed.unlink()
+
+        oversized = self._guard_file(target, payload={"schema": 2, "blob": "x" * 5000}, mode=0o600)
+        self.assertEqual(monitor.monitor_lock(target).reason, "lock_held")
+        oversized.unlink()
+
+        wrong_state = self._guard_file(target, payload={
+            "schema": 2, "state": "active", "pid": os.getpid(),
+            "created_at": self._timestamp(-3600), "released_at": self._timestamp(-3590),
+            "owner_token": "a" * 32,
+        })
+        with mock.patch.object(monitor.os, "kill", side_effect=ProcessLookupError()):
+            self.assertEqual(monitor.monitor_lock(target).reason, "lock_held")
+        wrong_state.unlink()
+
+        source = self.runtime / "source"
+        source.write_text("not-a-lock", encoding="utf-8")
+        link = monitor.guard_path(target)
+        link.symlink_to(source)
+        self.assertEqual(monitor.monitor_lock(target).reason, "lock_held")
+        self.assertTrue(link.is_symlink())
+        link.unlink()
+
+        safe = self._guard_file(target)
+        sibling = safe.with_name("sibling")
+        os.link(safe, sibling)
+        self.assertEqual(monitor.monitor_lock(target).reason, "lock_held")
+        safe.unlink()
+        sibling.unlink()
+
+    def test_one_stale_recovery_winner_and_guard_contention(self):
+        target = self.remote
+        self._guard_file(target, created_delta=-3600)
+        barrier = threading.Barrier(2)
+        results = []
+
+        def take():
+            barrier.wait()
+            with mock.patch.object(monitor.os, "kill", side_effect=ProcessLookupError()):
+                result = monitor.monitor_lock(target, stale_after_seconds=1800)
+            results.append(result)
+
+        workers = [threading.Thread(target=take) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        self.assertEqual(sum(result.acquired for result in results), 1)
+        self.assertEqual({result.reason for result in results}, {"stale_lock_recovered", "lock_held"})
+        for result in results:
+            result.release()
+
+    def test_old_release_detaches_after_interleaved_replacement_and_preserves_successor_flock(self):
+        target = self.remote
+        old = monitor.monitor_lock(target)
+        self.assertTrue(old.acquired)
+        successor_fd = None
+        try:
+            guard = monitor.guard_path(target)
+            successor = self.runtime / "successor"
+            successor_payload = {
+                "schema": 2,
+                "state": "released",
+                "pid": os.getpid(),
+                "created_at": self._timestamp(-60),
+                "released_at": self._timestamp(-1),
+                "owner_token": "b" * 32,
+            }
+            successor_bytes = json.dumps(
+                successor_payload, sort_keys=True, separators=(",", ":")
+            ).encode("ascii")
+            successor.write_bytes(successor_bytes)
+            os.chmod(successor, 0o600)
+            successor_stat = successor.stat()
+            successor_fd = os.open(successor, os.O_RDWR)
+            monitor.fcntl.flock(successor_fd, monitor.fcntl.LOCK_EX | monitor.fcntl.LOCK_NB)
+            real_replace = monitor.os.replace
+            real_write = monitor.os.write
+            replaced = False
+
+            def replace_before_retained_fd_write(fd, data):
+                nonlocal replaced
+                if not replaced:
+                    replaced = True
+                    # The release path has already performed its identity and
+                    # payload read checks; only the old retained fd is written
+                    # after this atomic successor replacement.
+                    real_replace(successor, guard)
+                return real_write(fd, data)
+
+            with mock.patch.object(monitor.os, "write", side_effect=replace_before_retained_fd_write), \
+                 mock.patch.object(monitor.os, "unlink", side_effect=AssertionError("unlink")), \
+                 mock.patch.object(monitor.os, "replace", side_effect=AssertionError("replace")):
+                old.release()
+            self.assertTrue(replaced)
+            self.assertEqual(guard.read_bytes(), successor_bytes)
+            current_stat = guard.stat()
+            self.assertEqual((current_stat.st_dev, current_stat.st_ino), (successor_stat.st_dev, successor_stat.st_ino))
+            self.assertEqual(current_stat.st_mode & 0o777, 0o600)
+            self.assertEqual(self._read_json(guard)["owner_token"], "b" * 32)
+            probe_fd = os.open(guard, os.O_RDWR)
+            try:
+                with self.assertRaises(OSError) as raised:
+                    monitor.fcntl.flock(probe_fd, monitor.fcntl.LOCK_EX | monitor.fcntl.LOCK_NB)
+                self.assertIn(raised.exception.errno, (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK))
+            finally:
+                os.close(probe_fd)
+        finally:
+            old.release()
+            if successor_fd is not None:
+                monitor.fcntl.flock(successor_fd, monitor.fcntl.LOCK_UN)
+                os.close(successor_fd)
+
+    def test_wrong_mode_old_dead_active_guard_is_held_and_untouched(self):
+        target = {"kind": "remote", "name": "wrong-mode-old-dead"}
+        path = self._guard_file(target, created_delta=-3600, pid=99999999, mode=0o644)
+        original = path.read_bytes()
+        with mock.patch.object(monitor.os, "kill", side_effect=AssertionError("must not inspect PID")):
+            lease = monitor.monitor_lock(target, stale_after_seconds=1800)
+        self.assertFalse(lease.acquired)
+        self.assertEqual(lease.reason, "lock_held")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_release_write_failure_leaves_active_evidence_and_unlocks(self):
+        target = self.remote
+        lock = monitor.monitor_lock(target)
+        path = monitor.guard_path(target)
+        with mock.patch.object(monitor.os, "fsync", side_effect=OSError(errno.EIO, "disk")):
+            lock.release()
+        payload = self._read_json(path)
+        self.assertEqual(payload["state"], "active")
+        contender = monitor.monitor_lock(target)
+        self.assertFalse(contender.acquired)
+        self.assertEqual(contender.reason, "lock_held")
+
+    def test_acquired_write_failure_leaves_replaced_successor(self):
+        target = self.remote
+        guard = monitor.guard_path(target)
+        successor = self.runtime / "successor"
+        successor.write_bytes(b"successor-state")
+        os.chmod(successor, 0o600)
+        original_fsync = monitor.os.fsync
+        replaced = False
+
+        def replace_then_fail(descriptor):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                os.replace(successor, guard)
+                raise OSError(errno.EIO, "postwrite failure")
+            return original_fsync(descriptor)
+
+        with mock.patch.object(monitor.os, "fsync", side_effect=replace_then_fail):
+            with self.assertRaises(monitor.StorageMonitorLockError):
+                monitor.monitor_lock(target)
+        self.assertEqual(guard.read_bytes(), b"successor-state")
+
+    def test_legacy_empty_missing_old_dead_young_live_malformed_never_deletes(self):
+        # Empty/missing legacy bootstraps the v2 guard.
+        target = {"kind": "remote", "name": "legacy-missing"}
+        lock = monitor.monitor_lock(target)
+        self.assertTrue(lock.acquired)
+        lock.release()
+        self.assertFalse(monitor.lock_path(target).exists())
+
+        cases = (
+            ("old-dead", -3600, ProcessLookupError(), "stale_lock_recovered"),
+            ("young-dead", -10, ProcessLookupError(), "lock_held"),
+            ("live", -3600, None, "lock_held"),
+        )
+        for label, age, kill_error, expected in cases:
+            with self.subTest(label=label):
+                target = {"kind": "remote", "name": f"legacy-{label}"}
+                path = self._legacy_file(target, created_delta=age, pid=(os.getpid() if label == "live" else 99999999))
+                original = path.read_bytes()
+                effect = None if kill_error is None else kill_error
+                with mock.patch.object(monitor.os, "kill", side_effect=effect):
+                    lease = monitor.monitor_lock(target)
+                self.assertEqual(lease.reason, expected)
+                self.assertTrue(path.exists())
+                self.assertEqual(path.read_bytes(), original)
+                if lease.acquired:
+                    self.assertEqual(self._read_json(monitor.guard_path(target))["schema"], 2)
+                    lease.release()
+
+        target = {"kind": "remote", "name": "legacy-malformed"}
+        path = self._legacy_file(target, raw=b"not-json")
+        original = path.read_bytes()
+        lease = monitor.monitor_lock(target)
+        self.assertFalse(lease.acquired)
+        self.assertEqual(lease.reason, "lock_held")
+        self.assertTrue(path.exists())
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_denied_or_unreadable_legacy_is_held_and_preserved(self):
+        target = {"kind": "remote", "name": "legacy-denied"}
+        path = self._legacy_file(target)
+        real_open = monitor.os.open
+
+        def deny_lock_open(value, flags, *args, **kwargs):
+            if Path(value).name == path.name:
+                raise PermissionError(errno.EACCES, "denied")
+            return real_open(value, flags, *args, **kwargs)
+
+        with mock.patch.object(monitor.os, "open", side_effect=deny_lock_open):
+            lock = monitor.monitor_lock(target)
+        self.assertFalse(lock.acquired)
+        self.assertEqual(lock.reason, "lock_held")
+        self.assertTrue(path.exists())
+
+        target = {"kind": "remote", "name": "legacy-unreadable"}
+        path = self._legacy_file(target)
+        original = path.read_bytes()
+
+        def deny_lock_read(descriptor, size):
+            raise PermissionError(errno.EACCES, "unreadable")
+
+        with mock.patch.object(monitor.os, "read", side_effect=deny_lock_read):
+            lock = monitor.monitor_lock(target)
+        self.assertFalse(lock.acquired)
+        self.assertEqual(lock.reason, "lock_held")
+        self.assertTrue(path.exists())
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_unsafe_guard_artifact_is_rejected_without_following_or_removing(self):
+        target = self.remote
+        guard = monitor.guard_path(target)
+        guard.parent.mkdir(parents=True, exist_ok=True)
+        source = self.runtime / "guard-target"
+        source.write_text("guard", encoding="utf-8")
+        guard.symlink_to(source)
+        lock = monitor.monitor_lock(target)
+        self.assertFalse(lock.acquired)
+        self.assertEqual(lock.reason, "lock_held")
+        self.assertTrue(guard.is_symlink())
+        self.assertEqual(source.read_text(encoding="utf-8"), "guard")
+        guard.unlink()
+
+    def test_lock_never_resolves_config_or_remote_registry(self):
+        blockers = (
+            mock.patch.object(monitor, "load_config", side_effect=AssertionError("config")),
+            mock.patch.object(monitor, "get_remote", side_effect=AssertionError("remote")),
+            mock.patch.object(monitor, "list_remotes", side_effect=AssertionError("registry")),
+        )
+        with blockers[0], blockers[1], blockers[2]:
+            lock = monitor.monitor_lock(self.remote)
+        try:
+            self.assertTrue(lock.acquired)
+        finally:
+            lock.release()
+
+    def test_no_subprocess_or_remote_runner_is_involved(self):
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("runner")) as run:
+            lock = monitor.monitor_lock(self.remote)
+            try:
+                self.assertTrue(lock.acquired)
+            finally:
+                lock.release()
+        run.assert_not_called()
 
 
 class TestStorageDoctorChecks(TestCase):

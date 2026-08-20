@@ -61,6 +61,47 @@ truncated to 24 hex characters, so a target name never appears in a path.
 The record is the only thing `sb doctor` reads. It is a *last-run* record, not a history:
 each run replaces it. Deletion history remains 042's per-run manifest.
 
+## MonitorLock (persistent, owner-only lease)
+
+`monitor_lock(target, *, stale_after_seconds=1800)` arbitrates one local monitor
+run per target. The explicit 1800-second grace is the conservative default that
+corresponds to the current `schedule_timeout: 30min`; a runner with a resolved
+timeout passes its value explicitly. The canonical artifact is the opaque
+`<digest>.guard` in the same validated 0700 parent directory. It is mode 0600 and
+persists after release: the file is both the nonblocking POSIX `flock(LOCK_EX |
+LOCK_NB)` liveness lock and the state evidence. Its compact ASCII JSON object is
+schema 2 and has exactly these fields:
+
+```json
+{"created_at":"2026-08-20T00:00:00Z","owner_token":"0123456789abcdef0123456789abcdef","pid":123,"released_at":null,"schema":2,"state":"active"}
+```
+
+`pid` is positive, `created_at` is UTC, and `owner_token` is random 32-character
+lowercase hex. Active state requires `released_at: null`; released state requires
+a UTC `released_at` not earlier than `created_at`. All state reads and writes use
+the retained guard fd (`lseek`/`read`/`ftruncate`/`write`/`fsync`); no lifecycle
+operation unlinks or replaces either lock pathname. Replacing the pathname after
+the initial fd identity checks detaches the old lease and fails closed without
+touching the successor.
+
+`monitor_lock` returns a context manager with `acquired` and one of `acquired`,
+`stale_lock_recovered`, or `lock_held` as `reason`; a held lock never waits or
+raises. An empty or released guard can be written as a fresh active lease. Active
+evidence is recoverable only when its UTC age is strictly older than the grace and
+`kill(pid, 0)` returns definite `ESRCH`; live/EPERM, young, future, malformed,
+unreadable, symlink, nonregular, multi-link, wrong-mode, or ambiguous-PID evidence
+is held and left untouched. Release writes and fsyncs a released marker through
+the held fd, then unlocks/closes idempotently. If that write fails, the lease still
+unlocks while active evidence is retained, so a later caller fails closed.
+
+During one transition from an empty guard, the unreleased draft `<digest>.lock`
+may be inspected for compatibility. Missing legacy state bootstraps v2; valid
+old/dead state migrates into a fresh v2 active lease with
+`stale_lock_recovered`. Young/live, malformed, or unsafe legacy state returns
+`lock_held`; the legacy file is never deleted. Once v2 state exists, the guard is
+authoritative. The flock is advisory and protects cooperating callers only; this
+spec contains no live runner, timer, or process-isolation proof.
+
 ## SchedulePlan (in-memory, rendered)
 
 | Field | Type | Meaning |

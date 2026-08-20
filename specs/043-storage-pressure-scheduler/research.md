@@ -22,19 +22,36 @@ no randomized delay, no lock semantics, and no structured status); an in-process
 ## R2 — How is overlap prevented?
 
 **Decision**: systemd `ExecStart` wraps the command in `flock -n`, exactly as
-`render_systemd_units` already does for recovery; launchd, which has no equivalent, gets the
-same guarantee from an O_EXCL lock file taken by the monitor runner itself
-(`$SANDBOX_HOME/runtime/resources/monitor/<digest>.lock`), released in a `finally`.
+`render_systemd_units` already does for recovery. The runner API is
+`monitor_lock(target, *, stale_after_seconds=1800)`. The explicit 1800-second default
+is the conservative value corresponding to the current `schedule_timeout: 30min`; a
+runner with a resolved timeout passes that value explicitly. Both launchd and manual
+runs use one persistent owner-only `<digest>.guard` file held with nonblocking POSIX
+`flock` for the lease lifetime. The guard's schema-2 active/released marker is retained
+after release, so no pathname unlink or replacement is needed for lifecycle changes.
 
-**Rationale**: the runner-side lock is the portable guarantee and also protects a human run
-that races a scheduled one. `flock` is kept on Linux because it prevents even starting the
-Python process. A stale lock is detected by age and its owning PID and is broken with a
-recorded reason rather than deadlocking the schedule forever.
+**Rationale**: the runner-side lock protects a human run that races a scheduled one, but
+the flock is advisory and only protects cooperating callers. State reads/writes stay on
+the retained descriptor, with fd identity checks before the initial open and before a
+release; a later pathname replacement detaches the old lease without mutating its
+successor. A stale active marker is recoverable only when validated UTC age is older than
+the grace and the PID is definitely dead (`ESRCH`); live or EPERM, young/future,
+malformed/unreadable/unsafe evidence, or ambiguous PID is held and never removed. A
+released marker can be reacquired directly. Guard contention returns `lock_held`
+immediately.
+
+**Compatibility**: while a newly created guard is empty, one read of the unreleased
+schema-1 `<digest>.lock` draft is allowed. Missing legacy state bootstraps v2; old/dead
+legacy state is migrated into a fresh active marker with a stale-recovery reason. Legacy
+files are never removed, and once v2 has state the guard is authoritative.
 
 **Alternatives considered**: relying on systemd's `Type=oneshot` non-overlap (rejected: it
-only covers the same unit, not a concurrent human run); a lock in the remote's state
-(rejected: two different controlling machines are not the case this feature protects, and a
-remote lock costs a round trip before we know whether we need one).
+only covers the same unit, not a concurrent human run); pathname O_EXCL creation plus
+unlink-on-release (rejected: POSIX cannot compare identity and unlink atomically, so an
+old owner could remove a successor); a lock in the remote's state (rejected: two different
+controlling machines are not the case this feature protects, and a remote lock costs a
+round trip before we know whether we need one). No live timer/runner proof is implied by
+this lease design.
 
 ## R3 — Where do the configuration keys live?
 

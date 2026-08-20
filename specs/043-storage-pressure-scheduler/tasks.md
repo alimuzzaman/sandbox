@@ -26,8 +26,14 @@ parallel.
 - [X] **T005** In the same module, add the record store: `record_path(target)`,
   `write_record(record)` (atomic replace, mode 0600), `read_record(target)`, and
   `record_age_seconds(record, now)`.
-- [ ] **T006** In the same module, add `monitor_lock(target)` — an O_EXCL lock with stale
-  detection by age and PID, returning `lock_held` rather than blocking.
+- [X] **T006** In the same module, add `monitor_lock(target)` — a persistent opaque
+  `<digest>.guard` lease (0600 under a validated 0700 parent) held with nonblocking POSIX
+  `flock`, using schema-2 active/released state evidence through the retained fd only.
+  Empty/released guards can acquire; stale active evidence is recoverable only for
+  strictly-old definite-`ESRCH` PIDs. Release is idempotent and leaves a persistent
+  released marker; no lifecycle path unlinks or replaces `.guard` or the draft `.lock`.
+  Legacy `.lock` is inspected once only while an empty guard is held and is never deleted.
+  The flock is advisory for cooperating callers; this task provides no live runner proof.
 - [X] **T007** [P] Add `storage_doctor_checks()` returning `{label, ok, hint}` rows for the
   local target and every configured remote, from records only, treating a missing or stale
   record as a failed check with its age and the refresh command.

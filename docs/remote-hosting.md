@@ -413,8 +413,23 @@ manifest default) and can set an admin session once. Sandbox stores only a SHA-2
 hash in the running container, never records the token in Git or host state, and a
 new link replaces the previous unused link. Treat the returned URL like a password.
 
-The selected policy is Cloudflare-proxied DNS with Origin CA certificates and Full
+The default policy is Cloudflare-proxied DNS with Origin CA certificates and Full
 (strict) TLS. Origin keys are generated on the VPS and never returned by Sandbox.
+
+Nested hostnames that are not covered by the zone's edge certificate can opt into
+DNS-only public ACME instead. Caddy then obtains and renews a publicly trusted
+certificate, while Cloudflare manages only the DNS record:
+
+```yaml
+cloudflare:
+  proxied: false
+  tls: acme
+```
+
+This mode exposes the origin directly and does not provide Cloudflare CDN, WAF, or
+proxy-header guarantees. Consequently, `basic_auth.bypass_ips` is rejected in this
+mode; ordinary Basic Auth remains supported. Wildcard routes are also rejected because
+they require a DNS-01 challenge and remote DNS credentials; declare each exact hostname.
 
 Then use `wp_cli`, `fs_read`, `visit`, `run_tests`, etc. through the `sandbox-myvps` MCP
 connection exactly as you would through `sandbox` locally.

@@ -31,3 +31,12 @@ cycle.
 environment key. During confirmed apply, Sandbox streams that secret to remote Caddy's
 `hash-password` command and writes only the resulting hash to the managed Caddy
 fragment. Plan and validation output report the username and secret key name only.
+
+`cloudflare` accepts exactly one TLS policy:
+
+- `proxied: true`, `tls: origin-ca`, `ssl_mode: strict` keeps Cloudflare at the edge.
+- `proxied: false`, `tls: acme` creates DNS-only records and lets Caddy manage a public
+  ACME certificate. This opt-in mode exposes the origin and cannot use
+  `basic_auth.bypass_ips`, which depends on trusted Cloudflare proxy headers. It accepts
+  exact hostnames only and rejects wildcards or existing CNAMEs because public ACME is
+  intentionally implemented without remote DNS credentials.

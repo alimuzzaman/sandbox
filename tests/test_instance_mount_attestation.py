@@ -118,19 +118,17 @@ class TestSourceMountAttestation(unittest.TestCase):
         patches = [mock.patch.object(_instances, name, side_effect=AssertionError(name)) for name in writes]
         with mock.patch.object(_instances, "_core", return_value=state), \
                 mock.patch.object(_instances, "_instance_reachable", return_value=False), \
-                mock.patch.object(_instances, "attest_source_mounts", return_value={
-                    "ok": False, "code": "instance_mount_drift",
-                }) as attest, \
+                mock.patch.object(_instances, "attest_source_mounts") as attest, \
                 contextlib.ExitStack() as stack:
             for patcher in patches:
                 stack.enter_context(patcher)
             result = _instances.ensure_instance(cfg, "/project")
 
         self.assertFalse(missing_plugins_home.exists())
-        self.assertEqual(result["error"]["code"], "instance_mount_drift")
+        self.assertEqual(result["error"]["code"], "instance_mount_state_unavailable")
         self.assertFalse(result["mutated"])
         state.registry_put.assert_not_called()
-        self.assertEqual(attest.call_args.args[2], [str(missing_plugins_home.resolve())])
+        attest.assert_not_called()
         self.assertEqual(locks, ["/project"])
 
     def test_ready_attestation_uses_current_project_sources_not_persisted_mounts(self):
@@ -139,6 +137,7 @@ class TestSourceMountAttestation(unittest.TestCase):
             plugins_home = root / "plugins-home"
             current_source = root / "current-source"
             stale_source = root / "stale-source"
+            plugins_home.mkdir()
             current_source.mkdir()
             stale_source.mkdir()
 
@@ -185,6 +184,7 @@ class TestSourceMountAttestation(unittest.TestCase):
             plugins_home = root / "plugins-home"
             missing = root / "missing-source"
             readable = root / "readable-source"
+            plugins_home.mkdir()
             readable.mkdir()
             cfg = {"defaults": {"plugins_home": str(plugins_home)}}
             declarations = (
@@ -199,15 +199,32 @@ class TestSourceMountAttestation(unittest.TestCase):
             for declaration in declarations:
                 with self.subTest(declaration=declaration):
                     self.assertIsNone(_instances._desired_source_mounts(cfg, str(root), declaration))
-            with mock.patch.object(_instances.os, "access", return_value=False):
+            with mock.patch.object(
+                    _instances.os, "access",
+                    side_effect=lambda path, _mode: Path(path).resolve() != readable.resolve(),
+            ):
                 self.assertIsNone(_instances._desired_source_mounts(
                     cfg, str(root), {"plugins": [str(readable)]},
                 ))
 
+    def test_missing_or_unreadable_plugins_home_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugins_home = root / "plugins-home"
+            cfg = {"defaults": {"plugins_home": str(plugins_home)}}
+
+            self.assertIsNone(_instances._desired_source_mounts(cfg, str(root), {}))
+
+            plugins_home.mkdir()
+            with mock.patch.object(_instances.os, "access", return_value=False):
+                self.assertIsNone(_instances._desired_source_mounts(cfg, str(root), {}))
+
     def test_missing_declared_source_refuses_before_any_ensure_write(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            plugins_home = root / "plugins-home"
             missing = root / "missing-source"
+            plugins_home.mkdir()
 
             class State:
                 ConfigError = RuntimeError
@@ -238,7 +255,7 @@ class TestSourceMountAttestation(unittest.TestCase):
                         _instances, name, side_effect=AssertionError(name),
                     ))
                 result = _instances.ensure_instance(
-                    {"defaults": {"plugins_home": str(root / "plugins-home")}}, str(root),
+                    {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
                 )
 
             self.assertEqual(result["error"]["code"], "instance_mount_state_unavailable")

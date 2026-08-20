@@ -779,6 +779,8 @@ def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | Non
         if not plugins_home.is_absolute():
             plugins_home = ROOT / plugins_home
         plugins_home = plugins_home.resolve()
+        if not plugins_home.is_dir() or not os.access(plugins_home, os.R_OK | os.X_OK):
+            raise OSError("plugins home is unavailable")
         root_path = Path(root)
         sources = [str(plugins_home)]
 

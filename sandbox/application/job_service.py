@@ -553,8 +553,17 @@ class JobService:
         snapshot = self.repository.snapshot(job_id)
         if any(not stream.get("available", True) for stream in snapshot.get("output", ())):
             raise RuntimeError("output_unavailable")
-        page = JobOutputStore(self.storage, self.repository, job_id).read(query)
-        return present_output(page, self._output_profile(snapshot, query.profile))
+        # Resolve presentation policy before opening retained bytes.  A custom
+        # profile's byte/event budget is an observation cap, not merely a
+        # post-render truncation hint; this keeps source reads bounded as well.
+        profile = self._output_profile(snapshot, query.profile)
+        bounded = replace(
+            query,
+            max_bytes=min(query.max_bytes, profile.max_bytes),
+            max_events=min(query.max_events, profile.max_events),
+        )
+        page = JobOutputStore(self.storage, self.repository, job_id).read(bounded)
+        return present_output(page, profile)
 
     def _output_profile(self, snapshot: dict, name: str) -> OutputProfile:
         """Resolve a declarative presentation profile from the job composition."""

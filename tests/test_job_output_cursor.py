@@ -2,16 +2,73 @@ import unittest
 import tempfile
 import threading
 import time
+import base64
+import json
 from pathlib import Path
 
 from sandbox.jobs.models import OutputQuery
 from sandbox.jobs.models import JobSubmission, SourceIdentity
-from sandbox.jobs.output import JobOutputStore
+from sandbox.jobs.output import JobOutputStore, OutputCursorError, _cursor, _parse_cursor
 from sandbox.jobs.registry import JobRepository
 from sandbox.jobs.storage import JobStorage
 
 
 class OutputCursorModelTests(unittest.TestCase):
+    def test_v2_cursor_has_sequence_and_offset_and_accepts_v1(self):
+        job_id = "a" * 32
+        value = _cursor(job_id, "combined", 7, 13)
+        payload = json.loads(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
+        self.assertEqual(set(payload), {"v", "j", "s", "q", "o"})
+        self.assertEqual(payload["v"], 2)
+        self.assertEqual(_parse_cursor(value, job_id, "combined"), (7, 13))
+
+        legacy = base64.urlsafe_b64encode(json.dumps(
+            {"j": job_id, "s": "combined", "q": 7}, separators=(",", ":")
+        ).encode()).decode().rstrip("=")
+        self.assertEqual(_parse_cursor(legacy, job_id, "combined"), (7, 0))
+
+        for malformed in (
+            _cursor(job_id, "combined", 7, 13)[:-1] + "!",
+            base64.urlsafe_b64encode(json.dumps(
+                {"v": 2, "j": job_id, "s": "combined", "q": 7, "o": 1, "x": 2}
+            ).encode()).decode().rstrip("="),
+            base64.urlsafe_b64encode(json.dumps(
+                {"v": 2, "j": job_id, "s": "combined", "q": True, "o": 0}
+            ).encode()).decode().rstrip("="),
+            base64.urlsafe_b64encode(json.dumps(
+                {"v": 2.0, "j": job_id, "s": "combined", "q": 7, "o": 0}
+            ).encode()).decode().rstrip("="),
+        ):
+            with self.assertRaises(OutputCursorError):
+                _parse_cursor(malformed, job_id, "combined")
+
+    def test_read_rejects_v2_cursor_reused_for_another_job_or_stream(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            first, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "first", ("echo", "x"), 60,
+                SourceIdentity("s")))
+            second, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "second", ("echo", "x"), 60,
+                SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            storage.job_dir(first["job_id"], create=True)
+            storage.job_dir(second["job_id"], create=True)
+            first_output = JobOutputStore(storage, repo, first["job_id"])
+            second_output = JobOutputStore(storage, repo, second["job_id"])
+            first_output.append("stdout", b"first\n"); first_output.finish("stdout")
+            first_output.append("stderr", b"error\n"); first_output.finish("stderr")
+            second_output.append("stdout", b"second\n"); second_output.finish("stdout")
+
+            # This is an emitted, valid v2 cursor, not merely a malformed-token
+            # parser fixture. Reusing it must fail at the store boundary.
+            cursor = first_output.read(OutputQuery(stream="stdout", max_bytes=1))["cursor"]
+            with self.assertRaisesRegex(OutputCursorError, "invalid for this job and stream"):
+                second_output.read(OutputQuery(stream="stdout", cursor=cursor))
+            with self.assertRaisesRegex(OutputCursorError, "invalid for this job and stream"):
+                first_output.read(OutputQuery(stream="stderr", cursor=cursor))
+            repo.close()
+
     def test_only_one_position_selector_is_allowed(self):
         with self.assertRaises(ValueError):
             OutputQuery(cursor="abc", offset=0)
@@ -72,4 +129,86 @@ class OutputCursorModelTests(unittest.TestCase):
 
             self.assertEqual(sequences, list(range(100)))
             self.assertEqual(len(sequences), len(set(sequences)))
+            repo.close()
+
+    def test_capped_pages_resume_event_suffix_without_duplicate_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "w", ("echo", "x"), 60, SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            storage.job_dir(job["job_id"], create=True)
+            output = JobOutputStore(storage, repo, job["job_id"])
+            output.append("stdout", b"abcdefghij"); output.finish("stdout")
+            output.append("stdout", b"tail"); output.finish("stdout")
+
+            cursor = None
+            pages = []
+            for _ in range(4):
+                page = output.read(OutputQuery(max_bytes=4, cursor=cursor) if cursor
+                                   else OutputQuery(max_bytes=4))
+                pages.append(page)
+                cursor = page["cursor"]
+
+            self.assertEqual("".join(page["data"] for page in pages), "abcdefghijtail")
+            self.assertEqual(pages[0]["events_read"], 1)
+            self.assertEqual(pages[1]["events"], [])
+            self.assertEqual(pages[2]["events_read"], 1)
+            self.assertEqual(pages[3]["events"], [])
+            self.assertTrue(pages[0]["has_more"])
+            self.assertTrue(pages[1]["has_more"])
+            self.assertTrue(pages[2]["has_more"])
+            self.assertFalse(pages[3]["has_more"])
+            repo.close()
+
+    def test_partial_cursor_long_poll_returns_retained_suffix_immediately(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "w", ("echo", "x"), 60, SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            storage.job_dir(job["job_id"], create=True)
+            output = JobOutputStore(storage, repo, job["job_id"])
+            output.append("stdout", b"abcdefgh"); output.finish("stdout")
+            first = output.read(OutputQuery(max_bytes=3))
+            started = time.monotonic()
+            suffix = output.read(OutputQuery(cursor=first["cursor"], max_bytes=32, wait_seconds=2))
+            elapsed = time.monotonic() - started
+            self.assertEqual(suffix["data"], "defgh")
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(suffix["events"], [])
+            repo.close()
+
+    def test_paged_base64_redacted_output_reassembles_without_secret_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = JobRepository(Path(temp) / "jobs.sqlite")
+            job, _ = repo.accept(JobSubmission(
+                "test", "/p", "p", "local", "w", ("echo", "x"), 60,
+                SourceIdentity("s")))
+            storage = JobStorage(temp, free_disk_reserve=0)
+            storage.job_dir(job["job_id"], create=True)
+            output = JobOutputStore(storage, repo, job["job_id"], secrets=["secret-value"])
+            output.append("stdout", b"prefix secret-value suffix\n"); output.finish("stdout")
+            output.append("stdout", b"tail secret-value end\n"); output.finish("stdout")
+
+            full = output.read(OutputQuery(encoding="base64", max_bytes=1024))
+            expected = base64.b64decode(full["data"], validate=True)
+            self.assertEqual(expected, b"prefix [REDACTED] suffix\ntail [REDACTED] end\n")
+            self.assertNotIn(b"secret-value", expected)
+
+            cursor = None
+            pages = []
+            while True:
+                page = output.read(OutputQuery(encoding="base64", max_bytes=5, cursor=cursor)
+                                   if cursor else OutputQuery(encoding="base64", max_bytes=5))
+                page_bytes = base64.b64decode(page["data"], validate=True)
+                self.assertNotIn(b"secret-value", page_bytes)
+                pages.append(page_bytes)
+                cursor = page["cursor"]
+                if not page["has_more"]:
+                    break
+            self.assertEqual(b"".join(pages), expected)
+            for path in output.directory.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(b"secret-value", path.read_bytes())
             repo.close()

@@ -159,8 +159,20 @@ Result:
 }
 ```
 
-The cursor is exclusive: using the returned cursor never repeats a prior event. A
-cursor for another job/stream or an expired retained range fails explicitly.
+The cursor is an opaque URL-safe envelope. New responses emit v2 with exactly
+`{v:2,j,s,q,o}`: `q` is the retained event sequence and `o` is the byte offset
+within that event. A capped page that ends inside an event keeps the same `q`
+and advances `o`; a page that finishes the event advances `q` and resets `o` to
+zero. Legacy v1 envelopes (`{j,s,q}`) are accepted as `(q,0)` and are never
+emitted again. The cursor is exclusive: using the returned cursor never repeats
+retained bytes. A suffix page does not repeat metadata for the event whose prefix
+was already returned. `has_more` describes unread retained bytes, including a
+remaining suffix of the current event. A cursor for another job/stream or an
+expired retained range fails explicitly.
+
+Presentation profile byte/event caps are applied before retained bytes are read;
+profile filtering remains display-only and never changes the persisted redacted
+source.
 
 ## Metrics
 

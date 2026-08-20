@@ -155,8 +155,11 @@ constitutional exception or complexity waiver is required.
 - `events.ndjson` records monotonically increasing sequence, timestamp, stream,
   segment, offset, byte length, and event kind. This reconstructs observed combined
   order without duplicating payload bytes.
-- A cursor is an opaque, versioned, authenticated-by-checksum encoding of job ID,
-  stream selection, and next sequence/offset. Callers must not parse it.
+- A cursor is an opaque, versioned encoding of job ID, stream selection, and the
+  next sequence/offset. New cursors use the strict v2 `{v:2,j,s,q,o}` envelope;
+  v1 sequence-only cursors remain readable for compatibility. Callers must not
+  parse it. Capped pages resume at the same event plus byte offset, report
+  `has_more` from unread bytes, and do not repeat metadata for a resumed suffix.
 - Output retrieval supports stream, cursor, byte offset, tail bytes, line count, time
   boundary, UTF-8 replacement text, and base64. Each response includes the next cursor,
   bounded/truncated flags, retained range, and output-completeness state.

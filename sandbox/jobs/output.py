@@ -39,22 +39,85 @@ def _utc() -> float:
     return time.time()
 
 
-def _cursor(job_id: str, stream: str, sequence: int) -> str:
-    payload = json.dumps({"j": job_id, "s": stream, "q": sequence}, separators=(",", ":")).encode()
+_CURSOR_MAX = (1 << 63) - 1
+_OUTPUT_STREAMS = frozenset({"combined", "stdout", "stderr"})
+
+
+def _cursor(job_id: str, stream: str, sequence: int, offset: int = 0) -> str:
+    """Encode the v2 opaque output position.
+
+    ``sequence`` identifies the event and ``offset`` is a byte position inside
+    that event.  The offset is deliberately part of the cursor rather than a
+    separate query selector so a capped page can be resumed without dropping a
+    suffix of a large event.
+    """
+    if (not isinstance(job_id, str) or not job_id or
+            stream not in _OUTPUT_STREAMS or
+            isinstance(sequence, bool) or not isinstance(sequence, int) or
+            not 0 <= sequence <= _CURSOR_MAX or
+            isinstance(offset, bool) or not isinstance(offset, int) or
+            not 0 <= offset <= _CURSOR_MAX):
+        raise OutputCursorError("output cursor position is invalid")
+    payload = json.dumps({"v": 2, "j": job_id, "s": stream, "q": sequence, "o": offset},
+                         separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-def _parse_cursor(value: str, job_id: str, stream: str) -> int:
+def _decode_cursor(value: str) -> dict[str, Any]:
+    """Decode one strict, URL-safe JSON cursor envelope.
+
+    A legacy v1 envelope omitted ``v`` and ``o``.  It remains readable for
+    reconnecting callers, but every newly emitted cursor is v2.
+    """
+    if not isinstance(value, str) or not value or not re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", value):
+        raise ValueError
+    unpadded = value.rstrip("=")
+    if len(unpadded) % 4 == 1:
+        raise ValueError
+    encoded = unpadded + "=" * (-len(unpadded) % 4)
+    payload = base64.b64decode(encoded, altchars=b"-_", validate=True)
+
+    duplicates: list[str] = []
+
+    def pairs(items):
+        result = {}
+        for key, item in items:
+            if key in result:
+                duplicates.append(str(key))
+            result[key] = item
+        return result
+
+    decoded = json.loads(payload.decode("utf-8"), object_pairs_hook=pairs)
+    if duplicates or not isinstance(decoded, dict):
+        raise ValueError
+    return decoded
+
+
+def _parse_cursor(value: str, job_id: str, stream: str) -> tuple[int, int]:
+    """Return ``(sequence, offset)`` for a v1 or v2 cursor.
+
+    Parsing is intentionally strict: no unknown envelope keys, booleans, float
+    positions, unbounded integers, or cross-job/stream cursors are accepted.
+    """
     try:
-        payload = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-        decoded = json.loads(payload)
-        if decoded != {"j": job_id, "s": stream, "q": decoded.get("q")}:
+        decoded = _decode_cursor(value)
+        keys = set(decoded)
+        if keys == {"j", "s", "q"}:
+            sequence, offset = decoded["q"], 0
+        elif (keys == {"v", "j", "s", "q", "o"} and
+              isinstance(decoded["v"], int) and not isinstance(decoded["v"], bool) and
+              decoded["v"] == 2):
+            sequence, offset = decoded["q"], decoded["o"]
+        else:
             raise ValueError
-        sequence = decoded["q"]
-        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        if decoded["j"] != job_id or decoded["s"] != stream or stream not in _OUTPUT_STREAMS:
             raise ValueError
-        return sequence
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        for position in (sequence, offset):
+            if (isinstance(position, bool) or not isinstance(position, int) or
+                    not 0 <= position <= _CURSOR_MAX):
+                raise ValueError
+        return sequence, offset
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise OutputCursorError("output cursor is invalid for this job and stream") from exc
 
 
@@ -240,6 +303,44 @@ class JobOutputStore:
         with self._events_path.open("rb") as handle:
             return [OutputEvent(**json.loads(line)) for line in handle if line.strip()]
 
+    @staticmethod
+    def _has_unread(events: list[OutputEvent], sequence: int, offset: int) -> bool:
+        """Whether a cursor position has any retained bytes after it."""
+        for event in events:
+            if event.sequence < sequence:
+                continue
+            if event.sequence == sequence:
+                return offset < event.size
+            return True
+        return False
+
+    @staticmethod
+    def _validate_cursor_position(all_events: list[OutputEvent], stream: str,
+                                  sequence: int, offset: int) -> None:
+        """Reject positions outside the currently retained event range."""
+        if not all_events:
+            if (sequence, offset) != (0, 0):
+                raise OutputCursorError("output cursor is outside the retained range")
+            return
+        first = all_events[0].sequence
+        next_sequence = all_events[-1].sequence + 1
+        if sequence < first or sequence > next_sequence:
+            raise OutputCursorError("output cursor is outside the retained range")
+        if sequence == next_sequence:
+            if offset:
+                raise OutputCursorError("output cursor is outside the retained range")
+            return
+        event = next((item for item in all_events if item.sequence == sequence), None)
+        # A stream-specific cursor may legitimately point between two events in
+        # the combined ordering.  An offset is meaningful only for the exact
+        # event that belongs to the selected stream.
+        if event is None or (stream != "combined" and event.stream != stream):
+            if offset:
+                raise OutputCursorError("output cursor is outside the retained range")
+            return
+        if offset >= event.size:
+            raise OutputCursorError("output cursor is outside the retained range")
+
     def _index(self, stream: str, *, complete: bool = False) -> None:
         if stream == "combined":
             events = self._events()
@@ -258,21 +359,32 @@ class JobOutputStore:
 
     def read(self, query: OutputQuery) -> dict[str, Any]:
         stream = query.stream
-        events = self._events()
-        initial_count = len(events)
-        if query.wait_seconds and query.cursor:
-            deadline = time.monotonic() + query.wait_seconds
-            while time.monotonic() < deadline:
-                time.sleep(min(.1, deadline - time.monotonic()))
-                candidate = self._events()
-                if len(candidate) > initial_count:
-                    events = candidate
-                    break
-        if stream != "combined":
-            events = [event for event in events if event.stream == stream]
+        all_events = self._events()
         if query.cursor:
-            start_sequence = _parse_cursor(query.cursor, self.job_id, stream)
+            start_sequence, start_offset = _parse_cursor(query.cursor, self.job_id, stream)
+            self._validate_cursor_position(all_events, stream, start_sequence, start_offset)
+            stream_events = ([event for event in all_events if event.stream == stream]
+                             if stream != "combined" else list(all_events))
+            # A partial cursor already has a retained suffix.  Return it without
+            # waiting; only a cursor at the retained end needs long-polling.
+            if query.wait_seconds and not self._has_unread(stream_events, start_sequence, start_offset):
+                deadline = time.monotonic() + query.wait_seconds
+                while time.monotonic() < deadline:
+                    time.sleep(min(.1, deadline - time.monotonic()))
+                    candidate_all = self._events()
+                    candidate_stream = ([event for event in candidate_all if event.stream == stream]
+                                        if stream != "combined" else list(candidate_all))
+                    if self._has_unread(candidate_stream, start_sequence, start_offset):
+                        all_events = candidate_all
+                        break
+            events = ([event for event in all_events if event.stream == stream]
+                      if stream != "combined" else list(all_events))
             events = [event for event in events if event.sequence >= start_sequence]
+        else:
+            start_sequence = all_events[0].sequence if all_events else 0
+            start_offset = 0
+            events = ([event for event in all_events if event.stream == stream]
+                      if stream != "combined" else list(all_events))
         if query.since is not None:
             threshold = _parse_since(query.since)
             events = [event for event in events if event.timestamp >= threshold]
@@ -286,23 +398,42 @@ class JobOutputStore:
             events = list(reversed(selected))
         line_filter = query.lines
         remaining_offset = query.offset or 0
-        selected, chunks, total = [], [], 0
+        metadata, chunks, total = [], [], 0
+        consumed_events = 0
+        next_sequence, next_offset = start_sequence, start_offset
         for event in events:
-            raw = self._read_event(event, stream)
+            event_offset = start_offset if event.sequence == start_sequence else 0
             if remaining_offset:
-                if len(raw) <= remaining_offset:
-                    remaining_offset -= len(raw)
+                available = max(0, event.size - event_offset)
+                if available <= remaining_offset:
+                    remaining_offset -= available
+                    next_sequence, next_offset = event.sequence + 1, 0
                     continue
-                raw = raw[remaining_offset:]
+                event_offset += remaining_offset
                 remaining_offset = 0
-            if not raw:
+            available = max(0, event.size - event_offset)
+            if not available:
+                next_sequence, next_offset = event.sequence + 1, 0
                 continue
-            if total + len(raw) > query.max_bytes:
-                raw = raw[:max(0, query.max_bytes - total)]
-            if not raw:
+            read_limit = min(available, query.max_bytes - total)
+            if read_limit <= 0:
                 break
-            selected.append(event); chunks.append(raw); total += len(raw)
-            if len(selected) >= query.max_events or total >= query.max_bytes:
+            # Read only the bounded suffix needed by this page.  In particular,
+            # profile caps applied by the service cannot cause an entire large
+            # retained event to be loaded before it is truncated.
+            raw = self._read_event(event, stream, event_offset, read_limit)
+            if not raw:
+                next_sequence, next_offset = event.sequence + 1, 0
+                continue
+            consumed_events += 1
+            chunks.append(raw); total += len(raw)
+            if not (query.cursor and event.sequence == start_sequence and start_offset):
+                metadata.append(event)
+            if len(raw) < available:
+                next_sequence, next_offset = event.sequence, event_offset + len(raw)
+                break
+            next_sequence, next_offset = event.sequence + 1, 0
+            if consumed_events >= query.max_events or total >= query.max_bytes:
                 break
         data = b"".join(chunks)
         if line_filter is not None and query.encoding == "utf8":
@@ -311,16 +442,20 @@ class JobOutputStore:
             rendered = base64.b64encode(data).decode()
         else:
             rendered = _CONTROL.sub("", data.decode("utf-8", errors="replace"))
-        next_sequence = (selected[-1].sequence + 1) if selected else (events[0].sequence if events else 0)
         return {"ok": True, "job_id": self.job_id, "stream": stream, "profile": query.profile,
                 "encoding": query.encoding, "data": rendered,
-                "events": [event.as_dict() for event in selected], "bytes_read": len(data),
-                "events_read": len(selected), "cursor": _cursor(self.job_id, stream, next_sequence),
-                "has_more": len(selected) < len(events), "bounded": True,
-                "retained": {"first_sequence": 0, "next_sequence": len(self._events())}}
+                "events": [event.as_dict() for event in metadata], "bytes_read": len(data),
+                "events_read": len(metadata), "cursor": _cursor(self.job_id, stream, next_sequence, next_offset),
+                "has_more": self._has_unread(events, next_sequence, next_offset), "bounded": True,
+                "retained": {"first_sequence": all_events[0].sequence if all_events else 0,
+                             "next_sequence": all_events[-1].sequence + 1 if all_events else 0}}
 
-    def _read_event(self, event: OutputEvent, stream: str) -> bytes:
-        return self._read_stream(event.stream, event.offset, event.size)
+    def _read_event(self, event: OutputEvent, stream: str, offset: int = 0,
+                    size: int | None = None) -> bytes:
+        available = max(0, event.size - offset)
+        if size is None:
+            size = available
+        return self._read_stream(event.stream, event.offset + offset, min(size, available))
 
 
 def present_output(page: dict[str, Any], profile: OutputProfile) -> dict[str, Any]:

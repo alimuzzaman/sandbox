@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import hashlib
+from unittest.mock import patch
 from pathlib import Path
 
 from sandbox.application.job_service import JobService
@@ -124,3 +125,32 @@ class JobOutputTests(unittest.TestCase):
         self.assertEqual(page["data"], "error two\n")
         self.assertEqual(self.repository.submission_snapshot(custom["job_id"])["output_profile_definition"],
                          {"mode": "errors"})
+
+    def test_service_applies_profile_caps_before_reading_retained_bytes(self):
+        custom, _ = self.repository.accept(JobSubmission(
+            "test", "/project", "project", "local", "capped", ("echo", "x"), 60,
+            SourceIdentity("source"), output_profile="bounded",
+            output_profile_definition={"mode": "full", "maxBytes": 4, "maxEvents": 1},
+        ))
+        self.storage.job_dir(custom["job_id"], create=True)
+        output = JobOutputStore(self.storage, self.repository, custom["job_id"])
+        output.append("stdout", b"abcdefghij"); output.finish("stdout")
+        service = JobService(self.repository, self.storage, None, launcher=lambda _: None)
+        observed_sizes = []
+        original = JobOutputStore._read_event
+
+        def observed(store, event, stream, offset=0, size=None):
+            observed_sizes.append(size)
+            return original(store, event, stream, offset, size)
+
+        with patch.object(JobOutputStore, "_read_event", observed):
+            page = service.read_output(custom["job_id"], OutputQuery(max_bytes=64, max_events=50,
+                                                                       profile="bounded"))
+        self.assertEqual(page["data"], "abcd")
+        self.assertEqual(observed_sizes, [4])
+
+    def test_redaction_is_persisted_before_retained_source_is_read(self):
+        output = JobOutputStore(self.storage, self.repository, self.job["job_id"], secrets=["secret-value"])
+        output.append("stdout", b"prefix secret-value suffix\n"); output.finish("stdout")
+        stream_path = next((self.storage.job_dir(self.job["job_id"]) / "output" / "stdout").glob("*.bin"))
+        self.assertNotIn(b"secret-value", stream_path.read_bytes())

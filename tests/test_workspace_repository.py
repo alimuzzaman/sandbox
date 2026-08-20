@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -234,6 +235,316 @@ class WorkspaceRepositoryTests(unittest.TestCase):
         self.assertEqual(moved.workspace_id, record.workspace_id)
         self.assertEqual(moved.aliases, ("stable-alias",))
         self.assertEqual(moved.bindings[0]["resource_id"], "sandbox-move")
+
+    def test_home_rebase_updates_managed_locators_and_digests_atomically(self):
+        old = self.root / "rebase-old"
+        new = self.root / "rebase-new"
+        old_runtime = old / "runtime"
+        legacy_file = old_runtime / "jobs" / "workspaces" / "local-abc" / "default" / "workspace.json"
+        checkout = old_runtime / "deploy" / "checkout"
+        source_checkout = old_runtime / "deploy" / "source"
+        legacy_file.parent.mkdir(parents=True)
+        checkout.mkdir(parents=True)
+        source_checkout.mkdir(parents=True)
+        legacy_bytes = b'{"label":"default","namespace":"local:abc"}\n'
+        legacy_file.write_bytes(legacy_bytes)
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        )
+        digest = lambda value: "sha256:" + hashlib.sha256(str(value).encode()).hexdigest()
+        record = repository.register(
+            "project:rebase", "default", namespace="local-abc",
+            path=str(legacy_file), aliases=("stable",),
+            metadata={
+                "checkout_locator": str(checkout),
+                "checkout_locator_digest": digest(checkout),
+                "source_checkout_locator": str(source_checkout),
+                "source_checkout_locator_digest": digest(source_checkout),
+                "external_locator": str(self.root / "external"),
+            },
+        )
+        repository.bind_resource(record.workspace_id, "compose_project", "rebase")
+        generation = repository.schema_generation()
+        old.rename(new)
+        new_repository = WorkspaceRepository(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            new / "runtime" / "jobs" / "workspaces",
+        )
+        result = WorkspaceRepository.rebase_home_locators(
+            new / "runtime" / "workspaces" / "index.sqlite3", old, new)
+        self.assertEqual(result["rows_rebased"], 1)
+        self.assertEqual(result["locators_rebased"], 3)
+        self.assertEqual(new_repository.schema_generation(), generation)
+        moved = new_repository.get(record.workspace_id)
+        self.assertEqual(moved.workspace_id, record.workspace_id)
+        self.assertEqual(moved.aliases, ("stable",))
+        self.assertEqual(moved.bindings[0]["resource_id"], "rebase")
+        self.assertEqual(moved.path, str(new / "runtime" / "jobs" / "workspaces" / "local-abc" / "default" / "workspace.json"))
+        self.assertEqual(moved.metadata["checkout_locator"], str(new / "runtime" / "deploy" / "checkout"))
+        self.assertEqual(moved.metadata["source_checkout_locator"], str(new / "runtime" / "deploy" / "source"))
+        self.assertEqual(moved.metadata["checkout_locator_digest"], digest(new / "runtime" / "deploy" / "checkout"))
+        self.assertEqual(moved.metadata["source_checkout_locator_digest"], digest(new / "runtime" / "deploy" / "source"))
+        self.assertEqual(moved.metadata["external_locator"], str(self.root / "external"))
+        self.assertEqual((new / "runtime" / "jobs" / "workspaces" / "local-abc" / "default" / "workspace.json").read_bytes(), legacy_bytes)
+        replay = WorkspaceRepository.rebase_home_locators(
+            new / "runtime" / "workspaces" / "index.sqlite3", old, new)
+        self.assertTrue(replay["already_rebased"])
+        self.assertEqual(replay["rows_rebased"], 0)
+
+    def test_home_rebase_validates_every_row_before_writing_any_row(self):
+        old = self.root / "atomic-old"
+        new = self.root / "atomic-new"
+        index = old / "runtime" / "workspaces" / "index.sqlite3"
+        legacy = old / "runtime" / "jobs" / "workspaces"
+        first = legacy / "local-a" / "one" / "workspace.json"
+        second = legacy / "local-b" / "two" / "workspace.json"
+        first.parent.mkdir(parents=True)
+        second.parent.mkdir(parents=True)
+        first.write_text("{}")
+        second.write_text("{}")
+        repository = WorkspaceRepository(index, legacy)
+        one = repository.register("project:a", "one", path=str(first))
+        two = repository.register("project:b", "two", path=str(second))
+        before = {
+            item.workspace_id: (item.path, dict(item.metadata))
+            for item in repository.list(include_legacy=False)
+        }
+        old.rename(new)
+        # The first destination exists after the move; remove only the second
+        # managed target to force a validation failure after both rows load.
+        (new / "runtime" / "jobs" / "workspaces" / "local-b" / "two" / "workspace.json").unlink()
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            WorkspaceRepository.rebase_home_locators(index.relative_to(old).parts and new / "runtime" / "workspaces" / "index.sqlite3", old, new)
+        self.assertEqual(caught.exception.code, "workspace_locator_missing")
+        reopened = WorkspaceRepository(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            new / "runtime" / "jobs" / "workspaces",
+        )
+        self.assertEqual(
+            {item.workspace_id: (item.path, dict(item.metadata)) for item in reopened.list(include_legacy=False)},
+            before,
+        )
+
+    def test_home_rebase_absent_index_does_not_create_sqlite_state(self):
+        old = self.root / "absent-old"
+        new = self.root / "absent-new"
+        index = new / "runtime" / "workspaces" / "index.sqlite3"
+
+        result = WorkspaceRepository.rebase_home_locators(index, old, new)
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "metadata_only": True,
+                "index_present": False,
+                "rows_rebased": 0,
+                "locators_rebased": 0,
+                "already_rebased": True,
+                "index_generation": None,
+            },
+        )
+        self.assertFalse(index.exists())
+        self.assertFalse(index.parent.exists())
+
+    def test_home_rebase_rejects_index_and_destination_symlinks_without_row_changes(self):
+        old = self.root / "symlink-old"
+        new = self.root / "symlink-new"
+        legacy_file = old / "runtime" / "jobs" / "workspaces" / "local-a" / "default" / "workspace.json"
+        legacy_file.parent.mkdir(parents=True)
+        legacy_file.write_text("{}")
+        repository = WorkspaceRepository(
+            old / "runtime" / "workspaces" / "index.sqlite3",
+            old / "runtime" / "jobs" / "workspaces",
+        )
+        record = repository.register("project:symlink", "default", path=str(legacy_file))
+        generation = repository.schema_generation()
+        old.rename(new)
+        index = new / "runtime" / "workspaces" / "index.sqlite3"
+        index_copy = new / "index-copy.sqlite3"
+        index.replace(index_copy)
+        index.symlink_to(index_copy)
+
+        with self.assertRaises(WorkspaceIndexError) as index_error:
+            WorkspaceRepository.rebase_home_locators(index, old, new)
+        self.assertEqual(index_error.exception.code, "index_symlink")
+        self.assertTrue(index.is_symlink())
+        index.unlink()
+        index_copy.replace(index)
+
+        outside = self.root / "outside-workspace.json"
+        outside.write_text("outside")
+        legacy_file = new / "runtime" / "jobs" / "workspaces" / "local-a" / "default" / "workspace.json"
+        legacy_file.unlink()
+        legacy_file.symlink_to(outside)
+        with self.assertRaises(WorkspaceIndexError) as locator_error:
+            WorkspaceRepository.rebase_home_locators(index, old, new)
+        self.assertEqual(locator_error.exception.code, "workspace_locator_symlink")
+
+        reopened = WorkspaceRepository(
+            index,
+            new / "runtime" / "jobs" / "workspaces",
+        )
+        unchanged = reopened.get(record.workspace_id)
+        self.assertEqual(unchanged.path, str(legacy_file).replace(str(new), str(old), 1))
+        self.assertEqual(reopened.schema_generation(), generation)
+        self.assertTrue(legacy_file.is_symlink())
+
+    def test_home_rebase_rejects_lexical_locator_escape_without_row_or_generation_changes(self):
+        old = self.root / "lexical-old"
+        new = self.root / "lexical-new"
+        legacy_root = old / "runtime" / "jobs" / "workspaces"
+        valid_path = legacy_root / "local-a" / "default" / "workspace.json"
+        valid_path.parent.mkdir(parents=True)
+        valid_path.write_text("{}")
+        repository = WorkspaceRepository(
+            old / "runtime" / "workspaces" / "index.sqlite3", legacy_root
+        )
+        external = self.root / "external-deployment" / "checkout"
+        valid = repository.register(
+            "project:lexical-valid", "default", path=str(valid_path),
+            metadata={"external_locator": str(external)},
+        )
+        # Preserve the spelling: a lexical parent traversal is an invalid
+        # managed locator even when a normalized spelling happens to exist.
+        escaped = old / ".." / "lexical-escape.json"
+        invalid = repository.register(
+            "project:lexical-invalid", "default", path=str(escaped)
+        )
+        before_connection = repository._connect()
+        try:
+            before_rows = before_connection.execute(
+                "SELECT workspace_id,path,metadata_json FROM workspaces ORDER BY workspace_id"
+            ).fetchall()
+        finally:
+            before_connection.close()
+        generation = repository.schema_generation()
+        old.rename(new)
+
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            WorkspaceRepository.rebase_home_locators(
+                new / "runtime" / "workspaces" / "index.sqlite3", old, new
+            )
+        self.assertEqual(caught.exception.code, "workspace_locator_escape")
+
+        reopened = WorkspaceRepository(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            new / "runtime" / "jobs" / "workspaces",
+        )
+        after_connection = reopened._connect()
+        try:
+            after_rows = after_connection.execute(
+                "SELECT workspace_id,path,metadata_json FROM workspaces ORDER BY workspace_id"
+            ).fetchall()
+        finally:
+            after_connection.close()
+        self.assertEqual(
+            [tuple(row) for row in after_rows], [tuple(row) for row in before_rows]
+        )
+        self.assertEqual(reopened.schema_generation(), generation)
+        self.assertEqual(reopened.get(valid.workspace_id).metadata["external_locator"], str(external))
+        self.assertEqual(reopened.get(invalid.workspace_id).path, str(escaped))
+
+    def test_home_rebase_rejects_symlinked_parent_destination_transactionally(self):
+        old = self.root / "parent-old"
+        new = self.root / "parent-new"
+        legacy_root = old / "runtime" / "jobs" / "workspaces"
+        valid_path = legacy_root / "local-a" / "default" / "workspace.json"
+        invalid_path = legacy_root / "local-b" / "default" / "workspace.json"
+        valid_path.parent.mkdir(parents=True)
+        invalid_path.parent.mkdir(parents=True)
+        valid_path.write_text("valid")
+        invalid_path.write_text("invalid")
+        outside = self.root / "outside-parent"
+        outside.mkdir()
+        symlink_parent = old / "runtime" / "deploy" / "escaped-parent"
+        symlink_parent.parent.mkdir(parents=True)
+        symlink_parent.symlink_to(outside, target_is_directory=True)
+        escaped = symlink_parent / "nested" / "checkout"
+        digest = lambda value: "sha256:" + hashlib.sha256(str(value).encode()).hexdigest()
+        repository = WorkspaceRepository(
+            old / "runtime" / "workspaces" / "index.sqlite3", legacy_root
+        )
+        external = self.root / "external-deployment" / "checkout"
+        valid = repository.register(
+            "project:parent-valid", "default", path=str(valid_path),
+            metadata={"external_locator": str(external)},
+        )
+        invalid = repository.register(
+            "project:parent-invalid", "default", path=str(invalid_path),
+            metadata={
+                "checkout_locator": str(escaped),
+                "checkout_locator_digest": digest(escaped),
+            },
+        )
+        before_connection = repository._connect()
+        try:
+            before_rows = before_connection.execute(
+                "SELECT workspace_id,path,metadata_json FROM workspaces ORDER BY workspace_id"
+            ).fetchall()
+        finally:
+            before_connection.close()
+        generation = repository.schema_generation()
+        old.rename(new)
+
+        with self.assertRaises(WorkspaceIndexError) as caught:
+            WorkspaceRepository.rebase_home_locators(
+                new / "runtime" / "workspaces" / "index.sqlite3", old, new
+            )
+        self.assertEqual(caught.exception.code, "workspace_locator_symlink")
+
+        reopened = WorkspaceRepository(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            new / "runtime" / "jobs" / "workspaces",
+        )
+        after_connection = reopened._connect()
+        try:
+            after_rows = after_connection.execute(
+                "SELECT workspace_id,path,metadata_json FROM workspaces ORDER BY workspace_id"
+            ).fetchall()
+        finally:
+            after_connection.close()
+        self.assertEqual(
+            [tuple(row) for row in after_rows], [tuple(row) for row in before_rows]
+        )
+        self.assertEqual(reopened.schema_generation(), generation)
+        self.assertEqual(reopened.get(valid.workspace_id).metadata["external_locator"], str(external))
+        self.assertEqual(reopened.get(invalid.workspace_id).metadata["checkout_locator"], str(escaped))
+        self.assertTrue((new / "runtime" / "deploy" / "escaped-parent").is_symlink())
+
+    @unittest.skipUnless(sys.platform == "darwin", "the /var and /private/var alias is macOS-specific")
+    def test_home_rebase_handles_var_private_var_alias_with_containment(self):
+        physical_root = self.root.resolve()
+        physical_text = str(physical_root)
+        if not physical_text.startswith("/private/var/"):
+            self.skipTest("temporary directory is not under the macOS /var alias")
+        lexical_root = Path("/var" + physical_text[len("/private/var"):])
+        old = lexical_root / "alias-old"
+        new = physical_root / "alias-new"
+        legacy_file = old / "runtime" / "jobs" / "workspaces" / "local-a" / "default" / "workspace.json"
+        legacy_file.parent.mkdir(parents=True)
+        legacy_file.write_text("{}")
+        repository = WorkspaceRepository(
+            old / "runtime" / "workspaces" / "index.sqlite3",
+            old / "runtime" / "jobs" / "workspaces",
+        )
+        record = repository.register("project:alias", "default", path=str(legacy_file))
+        old.rename(new)
+
+        result = WorkspaceRepository.rebase_home_locators(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            old,
+            new,
+        )
+
+        self.assertEqual(result["rows_rebased"], 1)
+        moved = WorkspaceRepository(
+            new / "runtime" / "workspaces" / "index.sqlite3",
+            new / "runtime" / "jobs" / "workspaces",
+        ).get(record.workspace_id)
+        self.assertEqual(moved.path, str(new / "runtime" / "jobs" / "workspaces" / "local-a" / "default" / "workspace.json"))
+        self.assertTrue(Path(moved.path).resolve().is_relative_to(new.resolve()))
 
     def test_v0_schema_upgrades_after_existing_rows_without_losing_data(self):
         v0_index = self.root / "v0" / "runtime" / "workspaces" / "index.sqlite3"

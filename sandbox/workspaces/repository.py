@@ -41,6 +41,11 @@ SCHEMA_VERSION = 1
 DEFAULT_PLAN_TTL_SECONDS = 900
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,511}$")
+_LOCATOR_DIGESTS = (
+    ("checkout_locator", "checkout_locator_digest"),
+    ("source_checkout_locator", "source_checkout_locator_digest"),
+)
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _WRITE_LOCK = threading.RLock()
 _LIFECYCLES = frozenset({
     "provisioning", "ready", "resetting", "destroying", "destroyed",
@@ -80,6 +85,128 @@ class AliasCollisionError(WorkspaceIndexError):
 class MigrationStaleError(WorkspaceIndexError):
     def __init__(self, reason: str = "migration plan is stale") -> None:
         super().__init__("workspace_migration_plan_stale", reason)
+
+
+def _locator_digest(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _base_path(value: str | Path, label: str) -> Path:
+    """Resolve a migration base without following a caller-owned locator."""
+    if not isinstance(value, (str, Path)):
+        raise WorkspaceIndexError("workspace_locator_invalid", f"{label} is invalid")
+    try:
+        result = Path(value).expanduser()
+    except (TypeError, ValueError, OSError) as exc:
+        raise WorkspaceIndexError("workspace_locator_invalid", f"{label} is invalid") from exc
+    if not result.is_absolute() or "\x00" in str(result):
+        raise WorkspaceIndexError("workspace_locator_invalid", f"{label} is invalid")
+    # Keep the lexical absolute spelling.  macOS exposes ``/var`` as a
+    # symlink to ``/private/var``; resolving the migration base here would
+    # make an index row recorded with the former spelling look external even
+    # though both paths identify the same managed tree.  Callers that inspect
+    # destination safety still resolve the candidate target independently.
+    return result.absolute()
+
+
+def _relative_locator(value: str, base: Path, label: str) -> tuple[Path, Path] | None:
+    """Return ``(relative, lexical)`` when *value* is under *base*.
+
+    The lexical form is intentional.  The old base may already have been
+    removed when finalization runs, and resolving an old path would make a
+    stale locator look external.  ``..`` is rejected before it can escape the
+    managed base.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise WorkspaceIndexError("workspace_locator_invalid", f"{label} is invalid")
+    try:
+        raw = Path(value).expanduser()
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_locator_invalid", f"{label} is invalid") from exc
+    if not raw.is_absolute():
+        return None
+    try:
+        relative = raw.relative_to(base)
+    except ValueError:
+        # A managed locator may have been written before a platform alias was
+        # canonicalized (notably ``/var`` versus ``/private/var`` on macOS).
+        # Compare canonical forms only as a fallback; retain the relative
+        # spelling for the destination so the index remains deterministic.
+        try:
+            relative = raw.resolve(strict=False).relative_to(base.resolve(strict=False))
+        except (OSError, RuntimeError, ValueError):
+            return None
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise WorkspaceIndexError(
+            "workspace_locator_escape",
+            f"{label} escapes the managed migration base",
+        )
+    return relative, raw
+
+
+def _destination_target(base: Path, relative: Path, label: str) -> Path:
+    """Validate a relocated target before any SQLite row is changed."""
+    target = base / relative
+    # A destination target is managed state, not an arbitrary path supplied by
+    # a workspace record.  Check every component so a symlinked parent cannot
+    # redirect a supposedly safe relative locator outside the new base.
+    cursor = base
+    try:
+        if cursor.is_symlink():
+            raise WorkspaceIndexError(
+                "workspace_locator_symlink",
+                f"{label} destination base is a symlink",
+            )
+        for part in relative.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise WorkspaceIndexError(
+                    "workspace_locator_symlink",
+                    f"{label} destination is a symlink",
+                )
+    except OSError as exc:
+        raise WorkspaceIndexError(
+            "workspace_locator_unavailable",
+            f"{label} destination could not be inspected",
+        ) from exc
+    try:
+        resolved_base = base.resolve(strict=False)
+        resolved_target = target.resolve(strict=False)
+        resolved_target.relative_to(resolved_base)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkspaceIndexError(
+            "workspace_locator_symlink",
+            f"{label} destination escapes the managed base",
+        ) from exc
+    if not target.exists():
+        raise WorkspaceIndexError(
+            "workspace_locator_missing",
+            f"{label} destination is missing",
+        )
+    return target
+
+
+def _rebase_locator(
+    value: str,
+    source_base: Path,
+    destination_base: Path,
+    label: str,
+) -> tuple[str, bool, bool]:
+    """Rebase one absolute managed locator, returning value/changed/managed."""
+    source = _relative_locator(value, source_base, label)
+    if source is not None:
+        relative, _raw = source
+        target = _destination_target(destination_base, relative, label)
+        return str(target), True, True
+    destination = _relative_locator(value, destination_base, label)
+    if destination is not None:
+        relative, _raw = destination
+        target = _destination_target(destination_base, relative, label)
+        return str(target), False, True
+    # Locators outside SANDBOX_HOME are deployment-owned or otherwise external
+    # state.  Relocation must leave them byte-for-byte unchanged.
+    return value, False, False
 
 
 def _utc(value: Any = None) -> datetime:
@@ -293,6 +420,226 @@ class WorkspaceRepository:
         repository.clock = None
         repository.plan_ttl_seconds = DEFAULT_PLAN_TTL_SECONDS
         return repository.ownership_projection()
+
+    @classmethod
+    def rebase_home_locators(
+        cls,
+        index_path: str | Path,
+        source_base: str | Path,
+        destination_base: str | Path,
+    ) -> dict[str, Any]:
+        """Atomically rebase managed workspace locators after a home move.
+
+        This is deliberately an existing-index-only operation.  It never
+        constructs a repository (which would create an absent index), never
+        touches legacy ``workspace.json`` bytes, and never changes ownership,
+        aliases, bindings, migration receipts, or index generation.  The
+        caller supplies the source base from the verified migration journal;
+        an index row is changed only when its locator is under that exact base.
+        """
+        source = _base_path(source_base, "source base")
+        destination = _base_path(destination_base, "destination base")
+        index = Path(index_path).expanduser().absolute()
+        if source == destination:
+            return {
+                "ok": True,
+                "metadata_only": True,
+                "index_present": index.is_file() and not index.is_symlink(),
+                "rows_rebased": 0,
+                "locators_rebased": 0,
+                "already_rebased": True,
+                "index_generation": None,
+            }
+        if index.is_symlink():
+            raise WorkspaceIndexError(
+                "index_symlink", "workspace index must not be a symlink")
+        if not index.exists():
+            # No parent directory or SQLite file is created for a clean clone
+            # or an index-less legacy migration.
+            return {
+                "ok": True,
+                "metadata_only": True,
+                "index_present": False,
+                "rows_rebased": 0,
+                "locators_rebased": 0,
+                "already_rebased": True,
+                "index_generation": None,
+            }
+        if not index.is_file():
+            raise WorkspaceIndexError(
+                "workspace_index_invalid", "workspace index is not a regular file")
+
+        try:
+            # ``mode=rw`` is important: a race after ``is_file`` must not turn
+            # this metadata-only finalizer into an index creator.
+            connection = sqlite3.connect(
+                f"{index.as_uri()}?mode=rw", uri=True,
+                timeout=5.0, isolation_level=None,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            raise WorkspaceIndexError(
+                "workspace_index_unavailable",
+                "workspace ownership index could not be opened",
+            ) from exc
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
+            with _WRITE_LOCK:
+                connection.execute("BEGIN IMMEDIATE")
+                table = connection.execute(
+                    "SELECT type FROM sqlite_master WHERE name='workspaces'"
+                ).fetchone()
+                if table is None or table[0] != "table":
+                    raise WorkspaceIndexError(
+                        "workspace_index_invalid",
+                        "workspace index has no workspaces table",
+                    )
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
+                }
+                if not {"workspace_id", "path", "metadata_json"}.issubset(columns):
+                    raise WorkspaceIndexError(
+                        "workspace_index_invalid",
+                        "workspace index is missing locator columns",
+                    )
+                generation_row = connection.execute(
+                    "SELECT value FROM workspace_meta WHERE key='generation'"
+                ).fetchone()
+                if generation_row is None:
+                    raise WorkspaceIndexError(
+                        "workspace_index_invalid",
+                        "workspace index generation is unavailable",
+                    )
+                try:
+                    generation = int(generation_row[0])
+                except (TypeError, ValueError) as exc:
+                    raise WorkspaceIndexError(
+                        "workspace_index_invalid",
+                        "workspace index generation is invalid",
+                    ) from exc
+
+                rows = connection.execute(
+                    "SELECT workspace_id,path,metadata_json FROM workspaces "
+                    "ORDER BY workspace_id"
+                ).fetchall()
+                planned: list[tuple[str, str | None, str, int]] = []
+                target_owners: dict[str, str] = {}
+                for row in rows:
+                    workspace_id = row["workspace_id"]
+                    old_path = row["path"]
+                    new_path = old_path
+                    path_changed = False
+                    if old_path is not None:
+                        if not isinstance(old_path, str):
+                            raise WorkspaceIndexError(
+                                "workspace_locator_invalid",
+                                "workspace path is invalid",
+                            )
+                        new_path, path_changed, _managed = _rebase_locator(
+                            old_path, source, destination, "workspace path")
+                    try:
+                        metadata = json.loads(row["metadata_json"] or "{}")
+                    except (TypeError, ValueError) as exc:
+                        raise WorkspaceIndexError(
+                            "workspace_metadata_invalid",
+                            "workspace metadata is not valid JSON",
+                        ) from exc
+                    if not isinstance(metadata, dict):
+                        raise WorkspaceIndexError(
+                            "workspace_metadata_invalid",
+                            "workspace metadata must be an object",
+                        )
+                    rebased_metadata = dict(metadata)
+                    locator_changes = int(path_changed)
+                    for locator_key, digest_key in _LOCATOR_DIGESTS:
+                        locator_present = locator_key in metadata
+                        digest_present = digest_key in metadata
+                        if digest_present and not locator_present:
+                            raise WorkspaceIndexError(
+                                "workspace_metadata_inconsistent",
+                                f"{digest_key} has no matching locator",
+                            )
+                        if not locator_present:
+                            continue
+                        locator = metadata[locator_key]
+                        if locator is None and not digest_present:
+                            continue
+                        if not isinstance(locator, str) or not locator:
+                            raise WorkspaceIndexError(
+                                "workspace_locator_invalid",
+                                f"{locator_key} is invalid",
+                            )
+                        digest = metadata.get(digest_key)
+                        if digest_present:
+                            if not isinstance(digest, str) or not _SHA256_DIGEST.fullmatch(digest):
+                                raise WorkspaceIndexError(
+                                    "workspace_metadata_inconsistent",
+                                    f"{digest_key} is invalid",
+                                )
+                            if digest != _locator_digest(locator):
+                                raise WorkspaceIndexError(
+                                    "workspace_metadata_inconsistent",
+                                    f"{digest_key} does not match {locator_key}",
+                                )
+                        rebased, changed, _managed = _rebase_locator(
+                            locator, source, destination, locator_key)
+                        if changed:
+                            rebased_metadata[locator_key] = rebased
+                            if digest_present:
+                                rebased_metadata[digest_key] = _locator_digest(rebased)
+                            locator_changes += 1
+                    if new_path is not None:
+                        # The UNIQUE index normally catches this, but checking
+                        # all rows before the first UPDATE gives a stable
+                        # conflict and guarantees all-or-nothing behavior.
+                        owner = target_owners.get(new_path)
+                        if owner is not None and owner != workspace_id:
+                            raise WorkspaceIndexError(
+                                "workspace_locator_conflict",
+                                "relocated workspace paths conflict",
+                            )
+                        target_owners[new_path] = workspace_id
+                    metadata_changed = rebased_metadata != metadata
+                    metadata_json = (
+                        _json(rebased_metadata)
+                        if metadata_changed else row["metadata_json"]
+                    )
+                    if path_changed or metadata_json != row["metadata_json"]:
+                        planned.append((workspace_id, new_path, metadata_json, locator_changes))
+
+                # No mutation occurs until every row, destination target, and
+                # related digest has passed validation above.
+                locator_count = 0
+                for workspace_id, new_path, metadata_json, locator_changes in planned:
+                    connection.execute(
+                        "UPDATE workspaces SET path=?,metadata_json=? WHERE workspace_id=?",
+                        (new_path, metadata_json, workspace_id),
+                    )
+                    locator_count += locator_changes
+                connection.execute("COMMIT")
+                return {
+                    "ok": True,
+                    "metadata_only": True,
+                    "index_present": True,
+                    "rows_rebased": len(planned),
+                    "locators_rebased": locator_count,
+                    "already_rebased": not planned,
+                    "index_generation": generation,
+                }
+        except WorkspaceIndexError:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise WorkspaceIndexError(
+                "workspace_index_invalid",
+                "workspace index locator rebase failed",
+            ) from exc
+        finally:
+            connection.close()
 
     def initialize(self) -> int:
         with _WRITE_LOCK:

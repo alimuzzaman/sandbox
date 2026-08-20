@@ -83,6 +83,107 @@ class TestSpec009MigrationSafety(unittest.TestCase):
         tools.assert_called_once()
         self.assertFalse(herd.exists())
 
+    def test_finalize_retains_invalid_journal_before_any_generation_orchestration(self):
+        """Corrupt or lexically relative journals must stop finalization safely."""
+        journal_path = self.destination_base / migrate._JOURNAL
+        cases = (
+            ("malformed", b"{not-json\n"),
+            ("non-object", b"[]\n"),
+            (
+                "relative-source",
+                json.dumps({
+                    "source": "relative/legacy-base",
+                    "moves": [str(self.destination / "registry.json")],
+                }).encode() + b"\n",
+            ),
+        )
+        for label, raw in cases:
+            with self.subTest(label=label):
+                journal_path.parent.mkdir(parents=True, exist_ok=True)
+                journal_path.write_bytes(raw)
+                with patch.object(migrate, "BASE", self.destination_base), \
+                     patch.object(migrate, "RUNTIME_DIR", self.destination), \
+                     patch.object(migrate, "_regenerate_baked_artifacts") as baked, \
+                     patch.object(migrate, "write_compose_files") as compose, \
+                     patch.object(migrate, "regen_caddyfile") as caddy, \
+                     patch.object(migrate, "ensure_tools_venv") as tools, \
+                     patch.object(migrate, "resolve_instances") as resolve, \
+                     patch.object(migrate, "_instance_running") as running, \
+                     patch.object(migrate, "_wait_reachable") as wait, \
+                     patch.object(migrate, "compose") as recreate, \
+                     patch.object(migrate, "die", side_effect=migrate.MigrationConflict) as die:
+                    with self.assertRaises(migrate.MigrationConflict):
+                        migrate._finalize({})
+
+                self.assertEqual(journal_path.read_bytes(), raw)
+                die.assert_called_once()
+                for operation in (baked, compose, caddy, tools, resolve,
+                                  running, wait, recreate):
+                    operation.assert_not_called()
+
+    def test_finalize_retains_unreadable_journal_before_any_generation_orchestration(self):
+        """An unreadable authorization journal is a bounded, retryable failure."""
+        journal_path = self.destination_base / migrate._JOURNAL
+        raw = b'{"source":"/old-base","moves":[]}'
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        journal_path.write_bytes(raw)
+        with patch.object(migrate, "BASE", self.destination_base), \
+             patch.object(migrate, "RUNTIME_DIR", self.destination), \
+             patch.object(migrate, "_regenerate_baked_artifacts") as baked, \
+             patch.object(migrate, "write_compose_files") as compose, \
+             patch.object(migrate, "regen_caddyfile") as caddy, \
+             patch.object(migrate, "ensure_tools_venv") as tools, \
+             patch.object(migrate, "resolve_instances") as resolve, \
+             patch.object(migrate, "_instance_running") as running, \
+             patch.object(migrate, "_wait_reachable") as wait, \
+             patch.object(migrate, "compose") as recreate, \
+             patch.object(migrate, "die", side_effect=migrate.MigrationConflict) as die, \
+             patch("pathlib.Path.read_text", side_effect=PermissionError("permission denied")):
+            with self.assertRaises(migrate.MigrationConflict):
+                migrate._finalize({})
+
+        self.assertEqual(journal_path.read_bytes(), raw)
+        die.assert_called_once()
+        for operation in (baked, compose, caddy, tools, resolve,
+                          running, wait, recreate):
+            operation.assert_not_called()
+
+    def test_finalize_rebases_from_a_valid_verified_journal(self):
+        source_base = self.root / "legacy-base"
+        source_base.mkdir()
+        journal_path = self.destination_base / migrate._JOURNAL
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        journal_path.write_text(json.dumps({
+            "source": str(source_base),
+            "moves": [str(self.destination / "registry.json")],
+        }) + "\n")
+        rebased = {
+            "ok": True,
+            "metadata_only": True,
+            "index_present": False,
+            "rows_rebased": 0,
+            "locators_rebased": 0,
+            "already_rebased": True,
+            "index_generation": None,
+        }
+        with patch.object(migrate, "BASE", self.destination_base), \
+             patch.object(migrate, "RUNTIME_DIR", self.destination), \
+             patch.object(migrate, "resolve_instances", return_value={}), \
+             patch.object(migrate, "_regenerate_baked_artifacts") as baked, \
+             patch(
+                 "sandbox.workspaces.repository.WorkspaceRepository.rebase_home_locators",
+                 return_value=rebased,
+             ) as rebase:
+            migrate._finalize({})
+
+        rebase.assert_called_once_with(
+            self.destination / "workspaces" / "index.sqlite3",
+            source_base.resolve(),
+            self.destination_base,
+        )
+        baked.assert_called_once_with({})
+        self.assertFalse(journal_path.exists())
+
     def test_auto_migration_runs_only_for_an_empty_destination(self):
         legacy_root = self.root / "repo"
         self._write(legacy_root / "runtime" / "registry.json", "{}")

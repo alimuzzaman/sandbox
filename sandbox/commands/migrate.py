@@ -180,11 +180,35 @@ def _journal_path(base: Path) -> Path:
 
 
 def _load_journal(base: Path) -> dict | None:
+    """Load a transfer journal, distinguishing absence from corruption.
+
+    A journal is an authorization record for retrying a relocation.  Treating
+    a malformed, unreadable, or non-object record as an absent journal would
+    let finalization regenerate baked artifacts and then delete the only
+    recovery evidence.  Only a genuinely absent journal is a normal no-op;
+    every other read/parse failure is a bounded conflict and leaves the file
+    untouched for operator review.
+    """
+    path = _journal_path(base)
     try:
-        data = json.loads(_journal_path(base).read_text())
-    except (OSError, ValueError):
+        raw = path.read_text()
+    except FileNotFoundError:
         return None
-    return data if isinstance(data, dict) else None
+    except (OSError, UnicodeError) as exc:
+        raise MigrationConflict(
+            "Migration journal is unreadable; retaining it for review."
+        ) from exc
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise MigrationConflict(
+            "Migration journal is malformed; retaining it for review."
+        ) from exc
+    if not isinstance(data, dict):
+        raise MigrationConflict(
+            "Migration journal must be an object; retaining it for review."
+        )
+    return data
 
 
 def _write_journal(base: Path, source_base: Path, moves: list[tuple[Path, Path]]) -> None:
@@ -201,6 +225,53 @@ def _clear_journal(base: Path) -> None:
         _journal_path(base).unlink()
     except FileNotFoundError:
         pass
+
+
+def _verified_journal_source(base: Path, journal: dict) -> Path:
+    """Return the exact source base authorized by a transfer journal."""
+    source = journal.get("source")
+    moves = journal.get("moves")
+    if not isinstance(source, str) or not source or not isinstance(moves, list):
+        raise MigrationConflict("Migration journal is incomplete; retaining it for review.")
+    try:
+        raw_source_path = Path(source).expanduser()
+        # Reject lexical relative sources before ``resolve`` can turn them
+        # into an apparently-authorized absolute path.
+        if not raw_source_path.is_absolute():
+            raise MigrationConflict(
+                "Migration journal source must be an absolute base; retaining it for review."
+            )
+        destination_path = base.expanduser().resolve(strict=False)
+        source_path = raw_source_path.resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MigrationConflict("Migration journal source is invalid; retaining it for review.") from exc
+    if (not source_path.is_absolute() or source_path == destination_path or
+            source_path == Path("/") or source_path == destination_path.parent):
+        raise MigrationConflict("Migration journal source is not a distinct absolute base; retaining it for review.")
+    for move in moves:
+        if not isinstance(move, str):
+            raise MigrationConflict("Migration journal contains an invalid destination; retaining it for review.")
+        try:
+            target = Path(move).expanduser().resolve(strict=False)
+            target.relative_to(destination_path)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise MigrationConflict("Migration journal destination escapes the new base; retaining it for review.") from exc
+    return source_path
+
+
+def _rebase_workspace_index_from_journal(base: Path) -> dict:
+    """Rebase the existing workspace index before any generated artifact work."""
+    journal = _load_journal(base)
+    if journal is None:
+        return {
+            "ok": True, "metadata_only": True, "index_present": False,
+            "rows_rebased": 0, "locators_rebased": 0,
+            "already_rebased": True, "index_generation": None,
+        }
+    source = _verified_journal_source(base, journal)
+    from sandbox.workspaces.repository import WorkspaceRepository
+    return WorkspaceRepository.rebase_home_locators(
+        RUNTIME_DIR / "workspaces" / "index.sqlite3", source, base)
 
 
 def _base_has_state(base: Path) -> bool:
@@ -403,6 +474,9 @@ def _regenerate_extension_contexts(cfg) -> int:
 def _finalize(cfg) -> None:
     info(f"Finalizing migration. RUNTIME_DIR = {RUNTIME_DIR}")
     try:
+        # Rebase first: a failed or inconsistent existing index must stop
+        # before Compose, proxy, tool, or instance orchestration is touched.
+        _rebase_workspace_index_from_journal(BASE)
         _regenerate_baked_artifacts(cfg)
     except Exception as exc:
         die(f"Migration retained its verified data but could not regenerate baked artifacts: {exc}")

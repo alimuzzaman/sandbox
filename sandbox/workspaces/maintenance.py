@@ -25,6 +25,14 @@ def _held() -> dict[Path, dict[str, object]]:
     return state
 
 
+def _close_setup_descriptor(descriptor: int) -> None:
+    """Best-effort cleanup while preserving the normalized setup failure."""
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
 @contextmanager
 def base_maintenance_lock(*bases: Path, exclusive: bool, timeout_seconds: float = 0.0):
     """Lock managed bases in a stable order, re-entrantly within one thread.
@@ -48,7 +56,6 @@ def base_maintenance_lock(*bases: Path, exclusive: bool, timeout_seconds: float 
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise BaseMaintenanceBusy("base maintenance path is unavailable") from exc
     state = _held()
-    acquired: list[Path] = []
     referenced: list[Path] = []
     try:
         for base in paths:
@@ -78,15 +85,20 @@ def base_maintenance_lock(*bases: Path, exclusive: bool, timeout_seconds: float 
                                 f"base maintenance lock is already held for {base}"
                             ) from exc
                         time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            except BaseMaintenanceBusy:
+                _close_setup_descriptor(descriptor)
+                raise
+            except OSError as exc:
+                _close_setup_descriptor(descriptor)
+                raise BaseMaintenanceBusy("base maintenance lock setup failed") from exc
             except Exception:
-                os.close(descriptor)
+                _close_setup_descriptor(descriptor)
                 raise
             state[base] = {
                 "mode": "exclusive" if exclusive else "shared",
                 "count": 1,
                 "descriptor": descriptor,
             }
-            acquired.append(base)
             referenced.append(base)
         yield
     finally:

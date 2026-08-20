@@ -83,6 +83,12 @@ class TestSpec009MigrationSafety(unittest.TestCase):
                 raise OSError("simulated migration copy failure")
         self.assertEqual(str(caught.exception), "simulated migration copy failure")
 
+    def test_migration_lock_maps_flock_setup_failure_to_conflict(self):
+        with patch("fcntl.flock", side_effect=OSError("flock unavailable")):
+            with self.assertRaises(migrate.MigrationConflict):
+                with migrate._migration_lock(self.destination_base):
+                    self.fail("lock setup failure must not enter the body")
+
     def test_transfer_journal_rebases_a_real_checkpointed_workspace_index(self):
         old_base = self.root / "old-home"
         new_base = self.root / "new-home"

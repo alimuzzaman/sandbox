@@ -745,6 +745,13 @@ class WorkspaceRepositoryTests(unittest.TestCase):
                 self.assertEqual(future.result(timeout=5), "workspace_busy")
         self.assertIsNone(self.repo.find("project:blocked", "default"))
 
+    def test_repository_maps_fchmod_setup_failure_to_workspace_busy(self):
+        with mock.patch("os.fchmod", side_effect=OSError("fchmod unavailable")):
+            with self.assertRaises(WorkspaceIndexError) as caught:
+                self.repo.register("project:blocked", "default")
+        self.assertEqual(caught.exception.code, "workspace_busy")
+        self.assertIsNone(self.repo.find("project:blocked", "default"))
+
     def test_migration_apply_acquires_candidate_workspace_lock(self):
         self._legacy()
         plan = self.repo.migration_plan(

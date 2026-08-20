@@ -427,8 +427,13 @@ def _upload_runtime_source(ssh_target: str) -> None:
         "__pycache__",
         ".pytest_cache",
     ]
+    # Keep the runtime archive's sidecar policy identical to dirty-overlay
+    # deployment: match only ``._*`` basenames at any depth, preserving normal
+    # dotfiles such as ``.env``.  Count-only diagnostics never include paths or
+    # file contents.
+    tar_excludes = [*excludes, *sr.appledouble_tar_exclude_patterns()]
     tar_cmd = ["tar"]
-    for item in excludes:
+    for item in tar_excludes:
         tar_cmd.extend(["--exclude", item])
     tar_cmd.extend(["-czf", "-", "."])
     remote_cmd = (
@@ -436,8 +441,13 @@ def _upload_runtime_source(ssh_target: str) -> None:
         "mkdir -p \"$sandbox_home/sb-src\"; "
         "tar -xzf - -C \"$sandbox_home/sb-src\""
     )
+    skipped = sr.count_appledouble_files(ROOT, excluded_roots=excludes)
+    sr.emit_appledouble_skip_diagnostic(skipped, context="runtime-source")
     tar_res = subprocess.run(
         tar_cmd, cwd=str(ROOT), capture_output=True, timeout=300, check=False,
+        # BSD tar synthesizes AppleDouble members for macOS metadata unless
+        # this environment switch is set. GNU tar ignores it.
+        env={**os.environ, "COPYFILE_DISABLE": "1"},
     )
     if tar_res.returncode != 0:
         raise RuntimeError(

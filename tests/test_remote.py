@@ -11,15 +11,17 @@ live-verification pass against a real VPS.
 """
 import json
 import importlib.util
+import io
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -728,6 +730,14 @@ class TestPushCommits(unittest.TestCase):
 
 
 class TestCaptureAndApplyUncommitted(unittest.TestCase):
+    def test_appledouble_filter_is_basename_only(self):
+        kept, skipped = sr.filter_appledouble_paths([
+            "._root-sidecar", "nested/._nested-sidecar", ".env",
+            "nested/.env", "notes._suffix",
+        ])
+        self.assertEqual(skipped, 2)
+        self.assertEqual(kept, [".env", "nested/.env", "notes._suffix"])
+
     def test_deploy_descriptor_includes_primary_but_not_machine_override(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -750,6 +760,40 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
         diff_text, untracked = sr.capture_uncommitted("/local/proj")
         self.assertIn("diff --git", diff_text)
         self.assertEqual(untracked, ["new-file.txt", "sub/new2.txt"])
+
+    @patch("subprocess.run")
+    def test_capture_excludes_appledouble_untracked_but_keeps_dotfiles(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout=""),
+            _completed(
+                returncode=0,
+                stdout=(
+                    "?? ._root-sidecar\n"
+                    "?? .env\n"
+                    "?? nested/._nested-sidecar\n"
+                    "?? nested/.env\n"
+                ),
+            ),
+        ]
+        diagnostic = StringIO()
+        with redirect_stderr(diagnostic):
+            diff_text, untracked = sr.capture_uncommitted("/local/proj")
+        self.assertEqual(diff_text, "")
+        self.assertEqual(untracked, [".env", "nested/.env"])
+        self.assertIn("skipped 2", diagnostic.getvalue())
+        self.assertNotIn("._root-sidecar", diagnostic.getvalue())
+        self.assertNotIn("nested/._nested-sidecar", diagnostic.getvalue())
+
+    @patch("subprocess.run")
+    def test_capture_ignores_tracked_appledouble_only_diff(self, mock_run):
+        mock_run.side_effect = [
+            _completed(returncode=0, stdout="diff --git a/._tracked b/._tracked\n"),
+            _completed(returncode=0, stdout=" M ._tracked\n"),
+        ]
+        with redirect_stderr(StringIO()):
+            diff_text, untracked = sr.capture_uncommitted("/local/proj")
+        self.assertEqual(diff_text, "")
+        self.assertEqual(untracked, [])
 
     @patch("subprocess.run")
     def test_uses_untracked_files_all_so_nested_new_files_are_not_collapsed(self, mock_run):
@@ -854,6 +898,50 @@ class TestCaptureAndApplyUncommitted(unittest.TestCase):
             self.assertIn("b.php", tar_args)
             mock_ssh_run.assert_called_once()
             self.assertIn("/home/ubuntu/sandbox/deploy-src/proj", mock_ssh_run.call_args[0][1])
+
+    @patch("sandbox.core._remote.ssh_run")
+    def test_dirty_archive_excludes_sidecars_and_preserves_dotfiles_bytes(self, mock_ssh_run):
+        mock_ssh_run.return_value = _completed(returncode=0)
+        with tempfile.TemporaryDirectory() as d:
+            project = Path(d)
+            nested = project / "nested"
+            nested.mkdir()
+            (project / "._root-sidecar").write_bytes(b"sidecar-root")
+            (nested / "._nested-sidecar").write_bytes(b"sidecar-nested")
+            (project / ".env").write_bytes(b"SECRET=keep-this-byte-sequence\x00\xff")
+            (nested / ".env").write_bytes(b"NESTED=keep")
+            (project / "ordinary.bin").write_bytes(b"\x00\x01\xfe\xff")
+            untracked = [
+                "._root-sidecar", "nested/._nested-sidecar", ".env",
+                "nested/.env", "ordinary.bin",
+            ]
+            diagnostic = StringIO()
+            with redirect_stderr(diagnostic):
+                applied = sr.apply_uncommitted(
+                    {"ssh": "ubuntu@1.2.3.4"}, "/remote/project", project,
+                    "", untracked,
+                )
+            self.assertEqual(applied, 3)
+            self.assertIn("skipped 2", diagnostic.getvalue())
+            self.assertNotIn("._root-sidecar", diagnostic.getvalue())
+            archive_bytes = mock_ssh_run.call_args.kwargs["input_data"]
+            with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+                members = {
+                    member.name[2:] if member.name.startswith("./") else member.name
+                    for member in archive.getmembers()
+                }
+                self.assertEqual(
+                    members,
+                    {".env", "nested/.env", "ordinary.bin"},
+                )
+                files = {
+                    (member.name[2:] if member.name.startswith("./") else member.name):
+                    archive.extractfile(member).read()
+                    for member in archive.getmembers() if member.isfile()
+                }
+                self.assertEqual(files[".env"], b"SECRET=keep-this-byte-sequence\x00\xff")
+                self.assertEqual(files["nested/.env"], b"NESTED=keep")
+                self.assertEqual(files["ordinary.bin"], b"\x00\x01\xfe\xff")
 
     @patch("sandbox.core._remote.ssh_run_batch")
     @patch("subprocess.run")
@@ -979,6 +1067,8 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertIn(".cli-venv", tar_args)
         self.assertIn("mcp/wp-server/.venv", tar_args)
         self.assertIn("runtime", tar_args)
+        self.assertIn("._*", tar_args)
+        self.assertIn("*/._*", tar_args)
         self.assertEqual(mock_run.call_args_list[0][1]["cwd"], str(ROOT))
 
         ssh_args = mock_run.call_args_list[1][0][0]
@@ -988,6 +1078,41 @@ class TestUploadRuntimeSource(unittest.TestCase):
         self.assertNotIn("rm -rf", ssh_args[-1])
         self.assertEqual(mock_run.call_args_list[1][1]["input"], b"tarball")
         self.assertFalse(mock_run.call_args_list[1][1]["text"])
+
+    def test_upload_runtime_source_archive_excludes_sidecars_and_preserves_dotfiles(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "sandbox").mkdir()
+            (root / "nested").mkdir()
+            (root / "._runtime-sidecar").write_bytes(b"sidecar")
+            (root / "nested" / "._runtime-nested-sidecar").write_bytes(b"sidecar")
+            (root / ".env").write_bytes(b"RUNTIME=keep\x00\xff")
+            (root / "nested" / ".gitignore").write_bytes(b"*.tmp\n")
+            (root / "ordinary.bin").write_bytes(b"\x00\x01\xfe\xff")
+            ssh_result = _completed(returncode=0, stdout=b"", stderr=b"")
+            with patch.object(remote_cmd, "ROOT", root), \
+                 patch.object(sr, "ssh_process", return_value=ssh_result) as ssh, \
+                 redirect_stderr(StringIO()) as diagnostic:
+                remote_cmd._upload_runtime_source("ubuntu@1.2.3.4")
+            payload = ssh.call_args.kwargs["input_data"]
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                members = {
+                    member.name[2:] if member.name.startswith("./") else member.name
+                    for member in archive.getmembers()
+                }
+                self.assertEqual(
+                    members,
+                    {".", "sandbox", "nested", ".env", "nested/.gitignore", "ordinary.bin"},
+                )
+                files = {
+                    (member.name[2:] if member.name.startswith("./") else member.name):
+                    archive.extractfile(member).read()
+                    for member in archive.getmembers() if member.isfile()
+                }
+                self.assertEqual(files[".env"], b"RUNTIME=keep\x00\xff")
+                self.assertEqual(files["nested/.gitignore"], b"*.tmp\n")
+                self.assertEqual(files["ordinary.bin"], b"\x00\x01\xfe\xff")
+            self.assertNotIn("._runtime-sidecar", diagnostic.getvalue())
 
     @patch("subprocess.run")
     def test_upload_runtime_source_uses_custom_ssh_port(self, mock_run):
@@ -1425,6 +1550,21 @@ class TestStopRemoteMcpServer(unittest.TestCase):
 
 
 class TestRemoteMcpServiceStatus(unittest.TestCase):
+    def test_runtime_revision_sources_ignore_appledouble_sidecars(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "VERSION").write_text("1.0\n")
+            (root / "sb").write_text("#!/bin/sh\n")
+            (root / "sandbox").mkdir()
+            (root / "sandbox" / "good.py").write_text("value = 1\n")
+            (root / "sandbox" / "._sidecar.py").write_bytes(b"resource-fork")
+            relative = {
+                source.relative_to(root).as_posix()
+                for source in sr._remote_mcp_revision_sources(root)
+            }
+            self.assertIn("sandbox/good.py", relative)
+            self.assertNotIn("sandbox/._sidecar.py", relative)
+
     def test_runtime_revision_covers_the_shipped_cli_and_mcp_surface(self):
         root = Path(sr.__file__).resolve().parents[2]
         relative = {

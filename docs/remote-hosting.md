@@ -125,6 +125,12 @@ the host is unavailable. Long-lived MCP HTTP access uses the remote server's
 HTTPS/Tailscale transport rather than an SSH tunnel; a tunnel would add
 forwarding lifecycle without reducing ordinary command-shell latency.
 
+Both archive paths omit macOS AppleDouble sidecars whose basename starts with
+`._` (at any directory depth). The filter is deliberately basename-only:
+ordinary dotfiles such as `.env` and `.gitignore` remain eligible, and transferred
+files keep their local bytes. When sidecars are encountered, Sandbox reports only
+a bounded count of skipped entries; it never prints their paths or contents.
+
 Register the second MCP server through your client’s supported secret mechanism. The
 remote bearer credential is never printed, returned in JSON, embedded in a command,
 or copied into a service definition. It stays in Sandbox's owner-only local secret
@@ -146,9 +152,9 @@ This is a **one-way, on-demand** push — never a continuous sync. Every deploy:
 existing SSH connection).
 2. Resets the VPS's working tree to that commit.
 3. Applies your CURRENT uncommitted changes on top — both edits to tracked files and
-   brand-new untracked files. This step REPLACES whatever a previous deploy applied; it
-   never stacks. "Is my code live on the VPS" always has one answer: "as of my last
-   `./sb deploy`."
+   brand-new untracked files (excluding only `._*` AppleDouble sidecars by basename).
+   This step REPLACES whatever a previous deploy applied; it never stacks. "Is my code
+   live on the VPS" always has one answer: "as of my last `./sb deploy`."
 4. Transfers the selected primary project descriptor (`sandbox.config.*` or
    `.wp-env.json`) even when the checkout keeps that file out of Git, so the remote can
    reproduce plugin mounts. Machine-only `sandbox.config.override.*` and secret files

@@ -42,6 +42,7 @@ import ipaddress
 import urllib.error
 import urllib.request
 import subprocess
+import sys
 import time
 from pathlib import PurePosixPath
 from pathlib import Path
@@ -53,6 +54,102 @@ from sandbox.core._paths import CONFIG_LOCAL, RUNTIME_DIR
 from sandbox.services.redaction import redact_structure, redact_text
 
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+# macOS writes AppleDouble metadata alongside files when a checkout is copied
+# through a filesystem that cannot carry the resource fork.  These files are
+# never intended project input.  Keep this policy deliberately narrow: only a
+# basename beginning with ``._`` is a sidecar; ordinary dotfiles (including
+# ``.env``) remain transfer eligible.
+_APPLEDOUBLE_BASENAME_PREFIX = "._"
+_APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
+
+
+def is_appledouble_basename(value: str | os.PathLike) -> bool:
+    """Return whether ``value`` has an AppleDouble sidecar basename.
+
+    The check is intentionally basename-only.  A path such as ``.env`` or
+    ``nested/.config`` is ordinary project input, while ``nested/._metadata``
+    is excluded regardless of its parent directory.
+    """
+    if isinstance(value, (str, os.PathLike)):
+        name = PurePosixPath(os.fspath(value)).name
+    else:
+        return False
+    return name.startswith(_APPLEDOUBLE_BASENAME_PREFIX)
+
+
+def filter_appledouble_paths(paths):
+    """Return ``(kept, skipped_count)`` for an iterable of relative paths.
+
+    No skipped path is retained for later command construction, and the count
+    is the only diagnostic datum callers should expose.
+    """
+    kept = []
+    skipped = 0
+    for value in paths:
+        if is_appledouble_basename(value):
+            skipped += 1
+        else:
+            kept.append(value)
+    return kept, skipped
+
+
+def appledouble_tar_exclude_patterns() -> tuple[str, ...]:
+    """Patterns covering ``._*`` basenames at the archive root and below it."""
+    return _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS
+
+
+def count_appledouble_files(root: str | Path, *, excluded_roots=()) -> int:
+    """Count sidecar entries that a runtime archive would otherwise include.
+
+    ``excluded_roots`` contains project-relative directory/file names already
+    omitted by the archive.  This helper never returns paths or reads file
+    contents; it exists solely for a safe count-only operator diagnostic.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    excluded = []
+    for value in excluded_roots:
+        if not isinstance(value, str) or not value:
+            continue
+        candidate = PurePosixPath(value)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            continue
+        excluded.append(candidate)
+    count = 0
+    try:
+        entries = root.rglob("*")
+        for entry in entries:
+            try:
+                relative = PurePosixPath(entry.relative_to(root).as_posix())
+            except (OSError, ValueError):
+                continue
+            if not is_appledouble_basename(relative):
+                continue
+            if any(relative == prefix or prefix in relative.parents for prefix in excluded):
+                continue
+            count += 1
+    except OSError:
+        # A diagnostic must never make an otherwise valid upload fail.  Tar is
+        # still authoritative for transfer success/failure below.
+        return 0
+    return count
+
+
+def emit_appledouble_skip_diagnostic(count: int, *, context: str) -> None:
+    """Emit a bounded count-only sidecar diagnostic without path disclosure."""
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return
+    labels = {
+        "dirty-overlay": "dirty overlay",
+        "runtime-source": "runtime source upload",
+    }
+    label = labels.get(context, "remote transfer")
+    print(
+        f"{label}: skipped {count} macOS AppleDouble sidecar(s)",
+        file=sys.stderr,
+    )
 
 # OpenSSH multiplexing removes the repeated TCP/KEX/authentication cost while
 # still keeping each command a separately isolated SSH session. Ten minutes is
@@ -1235,10 +1332,15 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
         cwd=str(project_root), capture_output=True, text=True, check=False,
     )
     untracked = []
+    status_entries = []
+    tracked_changes = False
+    skipped = 0
     for line in (status_res.stdout or "").splitlines():
-        if not line.startswith("??"):
+        if len(line) < 3:
             continue
+        status_entries.append(line)
         relative = line[3:].strip()
+        status = line[:2]
         # `git status --short` can still report untracked siblings as
         # `../name` when the declared source root is nested in the checkout.
         # They are outside the transfer root and must not be copied (nor later
@@ -1246,7 +1348,22 @@ def capture_uncommitted(project_root) -> tuple[str, list[str]]:
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts:
             continue
-        untracked.append(relative)
+        if status == "??":
+            if is_appledouble_basename(relative):
+                skipped += 1
+                continue
+            untracked.append(relative)
+        elif status.strip():
+            # A sidecar-only tracked edit must not make the overlay appear
+            # dirty.  This status pass is already part of the capture, so no
+            # extra Git invocation (or diff content parsing) is needed.
+            if is_appledouble_basename(relative):
+                skipped += 1
+            else:
+                tracked_changes = True
+    if diff_text.strip() and status_entries and not tracked_changes:
+        diff_text = ""
+    emit_appledouble_skip_diagnostic(skipped, context="dirty-overlay")
     return diff_text, untracked
 
 
@@ -1277,6 +1394,9 @@ def deploy_project_descriptor_files(project_root) -> list[str]:
         raise RuntimeError("project descriptor must stay within the deploy root") from exc
     if not selected.is_file():
         raise RuntimeError("project descriptor is not a regular file")
+    if is_appledouble_basename(relative):
+        emit_appledouble_skip_diagnostic(1, context="dirty-overlay")
+        return []
     return [relative.as_posix()]
 
 
@@ -1326,6 +1446,11 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
 
     deleted = [safe_relpath(value) for value in deleted]
     to_copy = [safe_relpath(value) for value in to_copy]
+    deleted, skipped_deleted = filter_appledouble_paths(deleted)
+    to_copy, skipped_to_copy = filter_appledouble_paths(to_copy)
+    emit_appledouble_skip_diagnostic(
+        skipped_deleted + skipped_to_copy, context="dirty-overlay"
+    )
     if deleted:
         commands = [
             f"rm -f -- {shlex.quote(target_path.rstrip('/') + '/' + relpath)}"
@@ -1349,6 +1474,11 @@ def apply_uncommitted(remote: dict, target_path: str, project_root,
         tar_res = subprocess.run(
             ["tar", "-czf", "-", "--", *existing], cwd=str(project_root),
             capture_output=True, check=False,
+            # BSD tar on macOS otherwise synthesizes ``._*`` members from
+            # filesystem metadata even when no sidecar exists in the input.
+            # Disable that metadata channel so the archive contains only the
+            # intended project bytes; GNU tar ignores this variable.
+            env={**os.environ, "COPYFILE_DISABLE": "1"},
         )
         if tar_res.returncode != 0:
             raise RuntimeError(
@@ -1405,7 +1535,8 @@ def _remote_mcp_revision_sources(root: Path | None = None) -> tuple[Path, ...]:
         parts.extend(source_root.rglob("*.py"))
     return tuple(sorted(
         (source for source in parts if source.is_file() and
-         ".venv" not in source.parts and "__pycache__" not in source.parts),
+         ".venv" not in source.parts and "__pycache__" not in source.parts and
+         not is_appledouble_basename(source)),
         key=lambda source: source.relative_to(root).as_posix(),
     ))
 

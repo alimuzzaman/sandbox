@@ -277,6 +277,111 @@ else:
             "unattributed_allocated_subnets": 1,
         })
 
+    def test_generated_probe_matches_full_network_ids_after_no_trunc(self):
+        # Docker's default ``network ls -q`` truncates IDs to 12 characters,
+        # while ``network inspect`` returns full IDs.  The probe must request
+        # untruncated IDs before comparing the two inventories; otherwise the
+        # same healthy inventory is reported as ambiguous and admission is
+        # blocked.
+        full_ids = ["a" * 64, "b" * 64, "c" * 64]
+        legacy_ids = [value[:12] for value in full_ids]
+        rows = [
+            {
+                "Id": full_ids[0],
+                "Name": "sandbox-project_default",
+                "Labels": {"com.docker.compose.project": "sandbox-project"},
+                "IPAM": {"Config": [{"Subnet": "10.250.0.0/30"}]},
+            },
+            {
+                "Id": full_ids[1],
+                "Name": "customer-network",
+                "Labels": {"com.docker.compose.project": "customer"},
+                "IPAM": {"Config": [{"Subnet": "10.250.0.4/30"}]},
+            },
+            {
+                "Id": full_ids[2],
+                "Name": "unowned-network",
+                "Labels": {},
+                "IPAM": {"Config": [{"Subnet": "10.250.0.8/30"}]},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "daemon.json"
+            config.write_text(json.dumps({
+                "default-address-pools": [{
+                    "base": "10.250.0.0/28", "size": 30,
+                }],
+            }))
+            inspect_args = root / "inspect-args.json"
+            docker = root / "docker"
+            docker.write_text(f"""#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+full_ids = {full_ids!r}
+legacy_ids = {legacy_ids!r}
+rows = {rows!r}
+if sys.argv[1:] == ["network", "ls", "-q"]:
+    print("\\n".join(legacy_ids))
+elif sys.argv[1:] == ["network", "ls", "--no-trunc", "-q"]:
+    print("\\n".join(full_ids))
+elif sys.argv[1:3] == ["network", "inspect"]:
+    Path(os.environ["INSPECT_ARGS"]).write_text(json.dumps(sys.argv[3:]))
+    print(json.dumps(rows))
+else:
+    raise SystemExit(2)
+""")
+            docker.chmod(0o755)
+            source = _remote._REMOTE_NETWORK_CAPACITY_PROGRAM.replace(
+                'Path("/etc/docker/daemon.json")',
+                f"Path({str(config)!r})",
+            )
+            env = dict(os.environ)
+            env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
+            env["INSPECT_ARGS"] = str(inspect_args)
+
+            process = subprocess.run(
+                [sys.executable, "-c", source],
+                capture_output=True, text=True, env=env, check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            payload = json.loads(process.stdout.strip().splitlines()[-1])
+            self.assertEqual(json.loads(inspect_args.read_text()), full_ids)
+            self.assertEqual(payload["status"], "complete")
+            decision = evaluate_network_capacity(payload)
+            self.assertTrue(decision["ok"])
+            self.assertEqual(decision["status"], "admitted")
+
+            # Re-run the same fixture with the pre-fix command.  The fake
+            # daemon returns prefixes for that command, so the old probe sees
+            # a set mismatch against inspect's full IDs and fails closed.
+            legacy_source = source.replace(
+                '["docker", "network", "ls", "--no-trunc", "-q"]',
+                '["docker", "network", "ls", "-q"]',
+            )
+            self.assertNotEqual(source, legacy_source)
+            process = subprocess.run(
+                [sys.executable, "-c", legacy_source],
+                capture_output=True, text=True, env=env, check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            legacy_payload = json.loads(process.stdout.strip().splitlines()[-1])
+            self.assertEqual(json.loads(inspect_args.read_text()), legacy_ids)
+            self.assertEqual(legacy_payload, {
+                "ok": True,
+                "status": "partial",
+                "reason": "network_inventory_ambiguous",
+            })
+            legacy_decision = evaluate_network_capacity(legacy_payload)
+            self.assertFalse(legacy_decision["ok"])
+            self.assertEqual(
+                legacy_decision["evidence"]["reason"],
+                "network_inventory_ambiguous",
+            )
+
     def test_generated_probe_reports_pool_collision_without_network_details(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

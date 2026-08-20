@@ -32,9 +32,13 @@ observe the configured address pools and every user-defined network's IPAM
 subnet, then report usable subnet capacity. Foreign and unattributed networks
 reduce usable capacity just like Sandbox-owned networks; a raw network count or
 filesystem free-space value is not evidence. Missing or partial probe data, and
-pool exhaustion, fail before the source tree is staged. The bounded refusal
-points to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
-operators must not remove Docker networks directly.
+pool exhaustion, allocation collisions, or ambiguous inventory fail before the
+source tree is staged. The admission makes one bounded probe call; it does not
+retry or delete networks automatically. A blocked admission can recover only
+after a fresh complete probe proves usable capacity. The bounded refusal points
+to the reviewed plan workflow (`./sb remote docker-pool NAME --json`);
+operators must not remove Docker networks directly or treat disk capacity as a
+network-capacity fix.
 
 For command examples and operational boundaries, see
 [`docs/remote-hosting-implementation.md`](remote-hosting-implementation.md). Durable

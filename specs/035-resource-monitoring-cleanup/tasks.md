@@ -313,7 +313,7 @@ T001-T044.
 - [x] T047 [US3/US5] Add active/foreign/unattributed network protection cases for
   `0fac3b07`; each must remain an explicit exclusion before and after a plan
   revalidation and must not be deleted by an exact cleanup apply.
-- [ ] T048 [US1/US2] Add constrained-pool collision/exhaustion and recovery
+- [X] T048 [US1/US2] Add constrained-pool collision/exhaustion and recovery
   coverage for `822b9323`; assert stable capacity errors, bounded retries, and
   no automatic deletion or disk-capacity misclassification.
 - [X] T049 [US2] Add remote timeout/stale-control observation coverage for

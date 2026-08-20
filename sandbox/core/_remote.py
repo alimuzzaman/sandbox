@@ -62,6 +62,7 @@ _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # ``.env``) remain transfer eligible.
 _APPLEDOUBLE_BASENAME_PREFIX = "._"
 _APPLEDOUBLE_TAR_EXCLUDE_PATTERNS = ("._*", "*/._*")
+_NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS = 300
 
 
 def is_appledouble_basename(value: str | os.PathLike) -> bool:
@@ -1660,6 +1661,7 @@ import subprocess
 
 CONFIG = Path("/etc/docker/daemon.json")
 MAX_SUBNETS = 1000000
+MAX_NETWORKS = 10000
 
 
 def emit(value):
@@ -1749,6 +1751,9 @@ ids = run(["docker", "network", "ls", "-q"], 20)
 if ids is None or ids.returncode != 0:
     fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
 network_ids = [value.strip() for value in (ids.stdout or "").splitlines() if value.strip()]
+if len(network_ids) > MAX_NETWORKS or len(set(network_ids)) != len(network_ids):
+    emit({"ok": True, "status": "partial", "reason": "network_inventory_ambiguous"})
+    raise SystemExit(0)
 rows = []
 if network_ids:
     inspected = run(["docker", "network", "inspect", *network_ids], 30)
@@ -1760,9 +1765,19 @@ if network_ids:
         fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
     if not isinstance(rows, list):
         fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
+    if len(rows) != len(network_ids):
+        emit({"ok": True, "status": "partial", "reason": "network_inventory_incomplete"})
+        raise SystemExit(0)
+    observed_ids = [row.get("Id") if isinstance(row, dict) else None for row in rows]
+    if (any(not isinstance(value, str) or not value for value in observed_ids)
+            or len(set(observed_ids)) != len(observed_ids)
+            or set(observed_ids) != set(network_ids)):
+        emit({"ok": True, "status": "partial", "reason": "network_inventory_ambiguous"})
+        raise SystemExit(0)
 
 allocations = {}
 ownership = {"sandbox": 0, "foreign": 0, "unattributed": 0}
+collisions = set()
 unknown_networks = 0
 for row in rows:
     if not isinstance(row, dict):
@@ -1800,8 +1815,12 @@ for row in rows:
                 previous = allocations.get(key)
                 if previous is None:
                     allocations[key] = owner
-                elif previous != owner:
-                    allocations[key] = "unattributed"
+                else:
+                    # A pool unit may be claimed by only one user-defined
+                    # network.  Even a same-owner duplicate is ambiguous: it
+                    # can be a stale/duplicated daemon observation, so never
+                    # treat it as two known allocations or free capacity.
+                    collisions.add(key)
         if not matched:
             # A valid subnet outside the configured default pools is not an
             # allocation from those pools, but its presence is still retained
@@ -1811,6 +1830,11 @@ for row in rows:
 if unknown_networks:
     emit({"ok": True, "status": "partial", "reason": "network_ipam_unavailable",
           "unknown_network_count": unknown_networks})
+    raise SystemExit(0)
+
+if collisions:
+    emit({"ok": True, "status": "partial", "reason": "network_allocation_conflict",
+          "collision_count": len(collisions)})
     raise SystemExit(0)
 
 for owner in ownership:
@@ -1857,6 +1881,7 @@ class NetworkCapacityAdmissionError(RuntimeError):
             "capacity": decision.get("capacity"),
             "evidence": decision.get("evidence"),
             "recovery": decision.get("recovery"),
+            "retryable": False,
             "side_effects": decision.get("side_effects"),
         }, sort_keys=True))
 
@@ -1874,6 +1899,12 @@ def remote_network_capacity_admission(
     if isinstance(required_subnets, bool) or not isinstance(required_subnets, int) \
             or required_subnets < 1:
         raise ValueError("required_subnets must be a positive integer")
+    if (isinstance(timeout, bool) or not isinstance(timeout, int)
+            or timeout < 1 or timeout > _NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS):
+        raise ValueError(
+            "network capacity probe timeout must be an integer between 1 and "
+            f"{_NETWORK_CAPACITY_MAX_TIMEOUT_SECONDS} seconds"
+        )
     import base64
 
     encoded = base64.b64encode(_REMOTE_NETWORK_CAPACITY_PROGRAM.encode()).decode()
@@ -1886,16 +1917,20 @@ def remote_network_capacity_admission(
         result = None
     payload = None
     output = getattr(result, "stdout", "") if result is not None else ""
+    candidates = []
     if isinstance(output, str):
-        for line in reversed(output.splitlines()):
+        for line in output.splitlines():
             try:
                 candidate = json.loads(line)
             except (TypeError, ValueError):
                 continue
             if isinstance(candidate, dict):
-                payload = candidate
-                break
-    if payload is None:
+                candidates.append(candidate)
+    if len(candidates) == 1:
+        payload = candidates[0]
+    elif len(candidates) > 1:
+        payload = {"status": "unavailable", "reason": "probe_output_ambiguous"}
+    else:
         payload = {"status": "unavailable", "reason": "probe_output_unavailable"}
     if getattr(result, "returncode", 1) != 0 and payload.get("status") == "complete":
         payload = {"status": "unavailable", "reason": "probe_failed"}

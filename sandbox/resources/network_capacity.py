@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Iterable
+from typing import Any
 
 
 NETWORK_RESOURCE_CLASS = "docker_user_defined_network_subnet"
 CAPACITY_PLAN_COMMAND = "./sb remote docker-pool REMOTE_NAME --json"
+NETWORK_ALLOCATION_CONFLICT = "network_allocation_conflict"
 _OPAQUE_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}-[0-9a-f]{16,64}$")
 _OWNER_CLASSES = frozenset({"sandbox", "foreign", "unattributed"})
 _CAPACITY_STATES = frozenset({"complete", "partial", "unavailable"})
@@ -74,6 +75,7 @@ def _blocked(
         "evidence": evidence or {"status": state},
         "recovery": {
             "automatic_cleanup": False,
+            "automatic_retry": False,
             "plan": "reviewed_docker_network_capacity",
             "next_command": _capacity_plan_command(remote_name),
             "guidance": (
@@ -83,6 +85,7 @@ def _blocked(
                 "or a raw network count."
             ),
         },
+        "retryable": False,
         "side_effects": {"staging_started": False, "network_allocation_started": False},
     }
 
@@ -110,9 +113,61 @@ def evaluate_network_capacity(
             capacity={"status": "unavailable", "usable_subnets": None},
         )
 
+    if "ok" in evidence and evidence.get("ok") is not True:
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="unavailable",
+            remote_name=remote_name,
+            capacity={"status": "unavailable", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "unavailable", "reason": "probe_not_successful"},
+        )
+
     state = evidence.get("status")
     if state not in _CAPACITY_STATES:
         state = "unavailable"
+
+    # A collision is not an allocation owned by an unknown party.  It is an
+    # ambiguous observation: two user-defined networks claim the same pool
+    # unit, so no amount of aggregate arithmetic can establish safe capacity.
+    # Keep only a bounded count in the public envelope; never echo network
+    # names, IDs, subnets, or probe diagnostics.
+    collisions_present = "collisions" in evidence
+    collisions = evidence.get("collisions", [])
+    collision_count = evidence.get("collision_count")
+    if not isinstance(collisions, list) or any(
+            not isinstance(item, dict) for item in collisions):
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": "invalid_collision_evidence"},
+        )
+    if collision_count is None:
+        collision_count = len(collisions)
+    if (not _non_negative_int(collision_count)
+            or (collisions_present and collision_count != len(collisions))):
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": "invalid_collision_evidence"},
+        )
+    if collision_count:
+        return _blocked(
+            code=NETWORK_ALLOCATION_CONFLICT,
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": NETWORK_ALLOCATION_CONFLICT,
+                      "collision_count": collision_count},
+        )
+
     pools = evidence.get("pools")
     totals = evidence.get("totals")
     ownership = evidence.get("ownership")
@@ -124,6 +179,7 @@ def evaluate_network_capacity(
             capacity={
                 "status": state,
                 "usable_subnets": None,
+                "required_subnets": required_subnets,
                 "total_subnets": totals.get("total_subnets")
                 if isinstance(totals, dict) and _non_negative_int(totals.get("total_subnets"))
                 else None,
@@ -140,7 +196,8 @@ def evaluate_network_capacity(
             code="docker_network_capacity_unavailable",
             state="partial",
             remote_name=remote_name,
-            capacity={"status": "partial", "usable_subnets": None},
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
             evidence={"status": "partial", "reason": "invalid_capacity_totals"},
         )
     if allocated > total or usable != total - allocated:
@@ -148,18 +205,40 @@ def evaluate_network_capacity(
             code="docker_network_capacity_unavailable",
             state="partial",
             remote_name=remote_name,
-            capacity={"status": "partial", "usable_subnets": None},
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
             evidence={"status": "partial", "reason": "inconsistent_capacity_totals"},
         )
 
+    if not pools:
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": "missing_pool_evidence"},
+        )
+
     normalized_pools: list[dict] = []
+    pool_ids: set[str] = set()
     for item in pools:
         if not isinstance(item, dict):
             return _blocked(
                 code="docker_network_capacity_unavailable",
                 state="partial",
                 remote_name=remote_name,
-                capacity={"status": "partial", "usable_subnets": None},
+                capacity={"status": "partial", "usable_subnets": None,
+                          "required_subnets": required_subnets},
+                evidence={"status": "partial", "reason": "invalid_pool_evidence"},
+            )
+        if "pool_id" not in item:
+            return _blocked(
+                code="docker_network_capacity_unavailable",
+                state="partial",
+                remote_name=remote_name,
+                capacity={"status": "partial", "usable_subnets": None,
+                          "required_subnets": required_subnets},
                 evidence={"status": "partial", "reason": "invalid_pool_evidence"},
             )
         pool_total = item.get("capacity_subnets")
@@ -172,11 +251,23 @@ def evaluate_network_capacity(
                 code="docker_network_capacity_unavailable",
                 state="partial",
                 remote_name=remote_name,
-                capacity={"status": "partial", "usable_subnets": None},
+                capacity={"status": "partial", "usable_subnets": None,
+                          "required_subnets": required_subnets},
                 evidence={"status": "partial", "reason": "invalid_pool_capacity"},
             )
+        pool_id = _opaque_id(item.get("pool_id"), kind="pool")
+        if pool_id in pool_ids:
+            return _blocked(
+                code="docker_network_capacity_unavailable",
+                state="partial",
+                remote_name=remote_name,
+                capacity={"status": "partial", "usable_subnets": None,
+                          "required_subnets": required_subnets},
+                evidence={"status": "partial", "reason": "ambiguous_pool_evidence"},
+            )
+        pool_ids.add(pool_id)
         normalized_pools.append({
-            "pool_id": _opaque_id(item.get("pool_id"), kind="pool"),
+            "pool_id": pool_id,
             "capacity_subnets": pool_total,
             "allocated_subnets": pool_allocated,
             "usable_subnets": pool_usable,
@@ -196,7 +287,8 @@ def evaluate_network_capacity(
                     code="docker_network_capacity_unavailable",
                     state="partial",
                     remote_name=remote_name,
-                    capacity={"status": "partial", "usable_subnets": None},
+                    capacity={"status": "partial", "usable_subnets": None,
+                              "required_subnets": required_subnets},
                     evidence={"status": "partial", "reason": "invalid_ownership_evidence"},
                 )
             normalized_ownership[field] = value
@@ -205,8 +297,22 @@ def evaluate_network_capacity(
             code="docker_network_capacity_unavailable",
             state="partial",
             remote_name=remote_name,
-            capacity={"status": "partial", "usable_subnets": None},
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
             evidence={"status": "partial", "reason": "ownership_does_not_cover_allocations"},
+        )
+
+    pool_total = sum(item["capacity_subnets"] for item in normalized_pools)
+    pool_allocated = sum(item["allocated_subnets"] for item in normalized_pools)
+    pool_usable = sum(item["usable_subnets"] for item in normalized_pools)
+    if (pool_total, pool_allocated, pool_usable) != (total, allocated, usable):
+        return _blocked(
+            code="docker_network_capacity_unavailable",
+            state="partial",
+            remote_name=remote_name,
+            capacity={"status": "partial", "usable_subnets": None,
+                      "required_subnets": required_subnets},
+            evidence={"status": "partial", "reason": "inconsistent_pool_totals"},
         )
 
     capacity = {
@@ -247,10 +353,12 @@ def evaluate_network_capacity(
         "evidence": evidence_summary,
         "recovery": {
             "automatic_cleanup": False,
+            "automatic_retry": False,
             "plan": "reviewed_docker_network_capacity",
             "next_command": _capacity_plan_command(remote_name),
             "guidance": "Explicit subnet capacity was observed; continue with the bounded remote operation.",
         },
+        "retryable": False,
         "side_effects": {"staging_started": False, "network_allocation_started": False},
     }
 

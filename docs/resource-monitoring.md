@@ -28,6 +28,65 @@ Use deep attribution when the capacity-level unknown bucket remains large:
 ./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
 ```
 
+## One command for the whole host
+
+On a large or nearly full host, a directory walk cannot finish inside an
+interactive budget. Deep mode therefore keeps a **cached host directory index**
+on the host itself, under `$SANDBOX_HOME/runtime/resources/directory-index.json`.
+
+```sh
+# rebuild the index and report the whole host in one command
+./sb resources status --remote scaleway-sandbox --refresh --json
+
+# always-available report: capacity plus the cached index, no disk walk
+./sb resources status --remote scaleway-sandbox --fast
+```
+
+- `--refresh` walks each selected filesystem to depth 6, keeping every row at
+  or above 32 MiB plus every row under a managed root (`$SANDBOX_HOME`,
+  `deploy-src`, `runtime`, the containerd store) at any size, then stores the
+  result. Default budget 900s, of which the walk keeps 90%. A large or busy
+  host needs more: a 190 GB, inode-dense host took over 17 minutes, so give it
+  `--budget 1800` and expect `complete: false` if it still runs out. An
+  incomplete index is still used, still reported as incomplete, and is never
+  allowed to replace a complete one.
+- `--fast` never walks and never inventories the engine. It answers from the
+  cache, or says `directory_index.source = cache_missing` and tells the
+  operator to run `--refresh`. Default budget 10s.
+- Plain `--deep` reuses a cached index younger than 6 hours and otherwise walks
+  within its own budget, writing whatever it completed. A truncated walk is
+  never allowed to replace a complete one.
+- Every report states the index provenance: `source` (`scan`, `cache`,
+  `cache_missing`, `not_measured`), `complete`, `stale`, `age_seconds`,
+  `depth`, and `minimum_row_bytes`.
+
+Because the index already knows the size of every managed path, deep mode also
+reports host filesystem roots, Docker storage roots, the **containerd content
+store** (`/var/lib/containerd`, which `docker system df` never reports), and
+per-workspace `deploy-src` sizes without paying for one `du` per path.
+
+Sandbox-managed directories are named by their path relative to the managed
+root (`Sandbox home/deploy-src/<workspace>`); directories outside a managed root
+stay anonymized as `entry N`.
+
+## Never go blind
+
+Capacity is published by the probe before any bounded work starts, and the
+transport keeps the richest record it received. A probe that is killed
+mid-measurement therefore still reports capacity as a `partial` result with
+`remote_probe: probe_incomplete_capacity_only`, instead of failing the whole
+command with `measurement_unavailable`. A probe that raises reports the phase
+it failed in (`probe_failed_in_<phase>`).
+
+Human output leads with the unattributed share of used capacity, and shouts it
+when it is 10% or more. Category outcomes that are not complete carry
+`measured_bytes`, `measured_count`, and `unmeasured_count`, so a partial
+category reports what it did measure rather than looking like an empty one.
+
+Elevated measurement commands are bounded with `timeout` inside `sudo`: an
+unprivileged probe cannot signal a root child, and killing only the direct
+`sudo` process leaves the real worker holding the pipe and overruns the budget.
+
 Deep mode implies `--thorough` and is status-only. It inventories mount
 topology before walking, measures only the root, Sandbox-home, Docker-data,
 and typed managed-root capacity scopes, and uses one-filesystem scanner mode.
@@ -72,8 +131,10 @@ values, accounted bytes, overage, and the residual unexplained gap. It reports
 both capacity drift and attributed-allocation drift; each is material only when
 it exceeds the greater of one percent of used capacity or 64 MiB. A
 capacity-scope mismatch makes the result partial and prevents it being combined
-with the ordinary capacity summary. Ranked directory names are intentionally
-anonymized.
+with the ordinary capacity summary. Capacity and the deep pass read the same
+live filesystem moments apart, so a scope match tolerates the same materiality
+threshold used for drift rather than requiring exact byte equality. Ranked
+directory names outside a managed root are intentionally anonymized.
 
 Deleted-open evidence uses `lsof +L1` field output when available, accepts
 only regular zero-link records, deduplicates stable file identity where
@@ -170,6 +231,146 @@ Do not confirm a plan until its candidates and exclusions have been reviewed.
 Use a disposable fixture for mutating validation; monitoring and planning are
 safe against permanent hosts.
 
+## Tiered reclamation of deployment storage
+
+`--scope cache|stale` reclaims engine and cache resources. `--tier safe|tmp|all`
+is the separate, deployment-storage path: it classifies every entry of
+`$SANDBOX_HOME/deploy-src`, selects candidates by lifecycle class and retention,
+and writes a deletion manifest before it removes anything. The two are mutually
+exclusive on one invocation.
+
+### Lifecycle classes
+
+Every deployment entry gets exactly one class, first match wins:
+
+| Class | Meaning |
+|---|---|
+| `PROTECTED` | hosted site, registered instance, active job, symlink, or a path outside the managed roots |
+| `LIVE` | a running container binds it |
+| `STOPPED` | a container exists for it but is not running |
+| `REGONLY` | the workspace index references it, but no container exists |
+| `BASE` | no workspace marker in the name — a base deployment target |
+| `ORPHAN` | a workspace directory with no container, no registry record, and no index record |
+| `UNKNOWN` | the container inventory was unavailable, so no class can be proved |
+
+`status` prints per-class counts and byte totals, index-versus-disk drift in both
+directions, and the per-tier candidate totals:
+
+```sh
+./sb resources status --remote scaleway-sandbox --deep --budget 180
+./sb resources status --remote scaleway-sandbox --fast     # cached index only
+```
+
+`--fast` skips the engine inventory, so LIVE/STOPPED cannot be proved and those
+entries are reported `UNKNOWN` with reason `container_inventory_unavailable`
+and zero candidates at every tier. That is deliberate: a fast report never
+authorises a deletion.
+
+### Tiers
+
+| Tier | Adds |
+|---|---|
+| `safe` | ORPHAN entries, released entries, expired registry-only entries, and their workspace-scoped package volumes |
+| `tmp` | `safe` plus disposable runtime scratch (`.drive-volume-fallbacks-*`) |
+| `all` | `tmp` plus expired STOPPED workspaces, expired one-shot BASE deployments, and released entries that still have a running container |
+
+Tiers are strictly nested and the nesting is asserted by tests.
+
+### Safety rules enforced in code
+
+- **Volumes are deny-by-default.** Only a name matching
+  `sandbox-<workspace>_<name>node-modules`, where `<workspace>` contains a
+  workspace marker, is ever eligible — and only when its owning workspace is
+  itself a candidate or genuinely absent. Compose truncates long project names,
+  so the owning-workspace check is prefix-aware: matching exactly once labelled
+  a live workspace's volume "orphaned" on the real remote. Everything else,
+  including volumes the engine reports as unused, is refused with
+  `volume_not_workspace_scoped`. This is what keeps `lenzora-postgres-data`,
+  `sandbox-amarsonar-bangla-public_wordpress-db`, `wordpress-uploads`, and
+  `lenzora-storage` out of every plan.
+- **Hosted sites are untouchable.** `deploy-src/hosts/**` and any entry naming a
+  site registered under `$SANDBOX_HOME/runtime/hosts/` are refused at every
+  tier, and again host-side immediately before removal.
+- **In use means activity, not a process.** An entry is in use when an active
+  job binds it, an unexpired lease covers it, or its modification time is inside
+  the retention window. A running container produces the `LIVE` class — which
+  keeps it out of `safe` — but an idle keepalive container cannot outvote an
+  explicit release or an expired window.
+- **Root-owned trees.** Removal escalates once through bounded
+  `sudo -n timeout -k 1 N rm -rf --` and then re-stats the path. If anything
+  remains, the outcome is `failed` with `partial_removal_detected` and its bytes
+  are excluded from the reclaimed total. A partial delete is never success.
+- **Growth exclusion.** The plan records `(size, mtime)`; the apply refuses a
+  candidate whose mtime advanced (`candidate_modified_since_plan`). A size
+  difference with an unchanged mtime is a measurement race, not growth, and is
+  not an exclusion.
+
+### Plan and apply
+
+```sh
+./sb resources plan    --remote scaleway-sandbox --tier safe
+./sb resources cleanup --remote scaleway-sandbox --tier safe --confirm
+./sb resources cleanup --remote scaleway-sandbox --tier safe --plan-id ID --confirm
+```
+
+`plan` has no side effects on the target host and lists, per candidate, the
+path, bytes, mtime, class, tier, and reason — plus everything it skipped and
+why. `cleanup` without `--plan-id` creates and executes a plan in one call (the
+one-click path) and still stores the plan id.
+
+Execution is resumable and idempotent. An interrupted run leaves its plan
+`in_progress`; re-running the same plan id resumes it and reports `resumed:
+true`. A completed plan id is refused (`plan_already_used`); re-running the same
+*tier* is always safe and reports `already_absent` for anything already gone.
+
+### Deletion manifest
+
+Before each removal the host appends an `intent` record, and after it an
+`outcome` record, to
+`$SANDBOX_HOME/runtime/resources/deletions/<run_id>.jsonl` (mode `0600`,
+append-only, `fsync` per record). No temporary file is used, so the manifest
+works on a filesystem with zero free bytes; if the manifest cannot be created,
+the whole run is refused with `manifest_unavailable` rather than deleting
+unrecorded. Each intent names the path, bytes, class, tier, reason, trigger and
+time, which is what makes "what happened to X" answerable afterwards.
+
+After removal the host reconciles: registry records whose root is gone are
+dropped through the typed repository, feature-owned lease files are removed, and
+workspace index records are dropped through `sb workspace destroy
+--workspace-id`. A host whose runtime predates that command reports
+`index_pending` with status `partial` instead of implying the index is clean.
+
+### Retention
+
+```sh
+./sb workspace release <name> --remote R          # done with it, reclaim now
+./sb workspace ttl <name> --ttl 14d --remote R    # keep it longer
+./sb workspace reap --remote R --dry-run          # what would expire
+./sb workspace reap --remote R --confirm          # reclaim it
+```
+
+The default retention window is **7 days** for workspaces and 7 days for
+one-shot base deployments. Leases live in
+`$SANDBOX_HOME/runtime/resources/leases/<name>.json` (mode `0600`); the name
+grammar is path-free. `reap` is a dry run unless `--confirm` is passed, and it
+never touches disposable runtime scratch — that stays with `--tier tmp`.
+
+### Threshold alerting
+
+`status` classifies free-space pressure: `warning` below 15% free, `critical`
+below 5%. Automatic reclamation is **off by default** and, when enabled, may
+only ever run the `safe` tier; every automatic run is recorded in the manifest
+with `trigger: "threshold"`.
+
+### What needs a host runtime sync
+
+`resources status|plan|cleanup` and `workspace release|ttl|reap` ship their probe
+program over the connection on every call, so they work against a host running
+an older Sandbox runtime. Only the host-executed control commands — `workspace
+list|status|create|reset|destroy --remote` — run `sb` on the host and therefore
+depend on its `sb-src` copy. Index reconciliation after a cleanup uses that same
+command, which is why it degrades to `index_pending` rather than failing.
+
 ## MCP parity
 
 The explicit `resources` MCP group exposes:
@@ -180,6 +381,8 @@ The explicit `resources` MCP group exposes:
 
 These adapters use the same service and result envelope as the CLI.
 `resource_status(deep=true)` returns the same additive attribution contract as
-`status --deep`.
+`status --deep`. `resource_status(fast=true)` and `resource_status(refresh=true)`
+match `status --fast` and `status --refresh`; passing both is refused with
+`invalid_mode`.
 `resource_cleanup_apply` refuses missing confirmation before resolving a
 provider.

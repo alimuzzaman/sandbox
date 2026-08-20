@@ -6,9 +6,8 @@
  * Re-implemented against public WP/PHP APIs — NOT derived from any AGPL source.
  * Provisioned per-instance by the Sandbox; dev/staging only.
  *
- * MVP slice: the `sandbox/execute-php` ability (US1). The mcp-adapter MCP-server
- * exposure, file abilities, discover override, and crash-recovery loader land in
- * later slices.
+ * Includes the MCP server, file abilities, discovery guidance, and the
+ * crash-recovery loader described by Spec 003.
  */
 
 if (!defined('ABSPATH')) {
@@ -97,9 +96,90 @@ $sandbox_mcp_autoload = __DIR__ . '/sandbox-abilities/vendor/autoload.php';
 if (sandbox_abilities_enabled() && is_readable($sandbox_mcp_autoload)) {
     require_once $sandbox_mcp_autoload;
     if (class_exists('WP\\MCP\\Core\\McpAdapter')) {
+        // Enrich only the Sandbox server's successful discovery result.
+        add_filter('mcp_adapter_tool_call_result', 'sandbox_abilities_enrich_discovery', 10, 5);
         \WP\MCP\Core\McpAdapter::instance();
         add_action('mcp_adapter_init', 'sandbox_abilities_register_mcp_server');
     }
+}
+
+/** Sandbox-server transport gate: authenticated administrators only. */
+function sandbox_abilities_mcp_transport_permission_callback($request = null): bool
+{
+    return is_user_logged_in() && current_user_can('manage_options');
+}
+
+/** Read the host-generated context document, accepting only one safe slug/null. */
+function sandbox_abilities_environment_context(): array
+{
+    $path = __DIR__ . '/sandbox-abilities-context.json';
+    if (!is_readable($path)) {
+        return ['focused_plugin' => null];
+    }
+    $raw = file_get_contents($path, false, null, 0, 512);
+    $decoded = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($decoded) || array_keys($decoded) !== ['focused_plugin']) {
+        return ['focused_plugin' => null];
+    }
+    $slug = $decoded['focused_plugin'];
+    if ($slug !== null && (!is_string($slug) || !preg_match('/^[a-z0-9][a-z0-9_-]{0,190}$/D', $slug))) {
+        $slug = null;
+    }
+    return ['focused_plugin' => $slug];
+}
+
+/** Rebuild a credential-free base URL from WordPress's configured home URL. */
+function sandbox_abilities_safe_instance_url(): ?string
+{
+    $raw = (string) home_url('/');
+    if ($raw === '' || strlen($raw) > 2048) {
+        return null;
+    }
+    $parts = wp_parse_url($raw);
+    if (!is_array($parts)) {
+        return null;
+    }
+    $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    if (!in_array($scheme, ['http', 'https'], true)
+        || !preg_match('/^[a-z0-9.-]+$/D', $host)
+        || strlen($host) > 253) {
+        return null;
+    }
+    $port = isset($parts['port']) ? (int) $parts['port'] : null;
+    if ($port !== null && ($port < 1 || $port > 65535)) {
+        return null;
+    }
+    $path = (string) ($parts['path'] ?? '/');
+    if ($path === '' || $path[0] !== '/' || preg_match('/[\x00-\x20\x7f]/', $path)) {
+        return null;
+    }
+    return $scheme . '://' . $host . ($port !== null ? ':' . $port : '') . rtrim($path, '/') . '/';
+}
+
+/** Append guidance only to a valid discovery result on the Sandbox server. */
+function sandbox_abilities_enrich_discovery($result, $args, $tool_name, $mcp_tool, $server)
+{
+    if (is_wp_error($result)
+        || $tool_name !== 'mcp-adapter-discover-abilities'
+        || !is_object($server)
+        || !method_exists($server, 'get_server_id')
+        || $server->get_server_id() !== 'sandbox'
+        || !is_array($result)
+        || (array_key_exists('success', $result) && $result['success'] === false)
+        || (array_key_exists('isError', $result) && $result['isError'] === true)
+        || array_key_exists('error', $result)
+        || !isset($result['abilities'])
+        || !is_array($result['abilities'])) {
+        return $result;
+    }
+    $context = sandbox_abilities_environment_context();
+    $result['sandbox_environment'] = [
+        'focused_plugin'   => $context['focused_plugin'],
+        'instance_url'     => sandbox_abilities_safe_instance_url(),
+        'snapshot_reminder' => 'Before destructive changes, use the supported Sandbox snapshot workflow.',
+    ];
+    return $result;
 }
 
 /** Register the Sandbox MCP server (route /wp-json/sandbox/mcp) exposing our abilities. */
@@ -118,7 +198,10 @@ function sandbox_abilities_register_mcp_server($adapter): void
         [\WP\MCP\Transport\HttpTransport::class],
         null,                      // error handler → adapter default
         null,                      // observability → adapter default
-        sandbox_abilities_mcp_tool_ids()
+        sandbox_abilities_mcp_tool_ids(),
+        [],                        // resources
+        [],                        // prompts
+        'sandbox_abilities_mcp_transport_permission_callback'
     );
 }
 
@@ -128,6 +211,7 @@ function sandbox_abilities_register_mcp_server($adapter): void
 function sandbox_abilities_mcp_tool_ids(): array
 {
     $ids = [
+        'mcp-adapter/discover-abilities',
         'sandbox/execute-php',
         'sandbox/read-file',
         'sandbox/write-file',

@@ -64,3 +64,7 @@ and dicts union with the project config.
   registry. See CLAUDE.md → "Instances — one per project directory".
 - Local checkouts on this machine live under `/Users/alim/Sites/git/<slug>` (and
   some Pro zips/checkouts under `/Users/alim/Sites/plugins-pro/`).
+- The Pro store (`defaults.pro_plugins_home`) is mirrored to a remote host by
+  `./sb remote plugins <name>` (and automatically by `./sb deploy`), which registers
+  the same slugs on-demand in the REMOTE user-global catalog. See
+  [`docs/remote-hosting.md`](remote-hosting.md) → "Pro plugins on the remote host".

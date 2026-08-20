@@ -117,8 +117,8 @@ def _bridge_handle(method: str, instance: str, subpath: str,
     """Token-authed snapshot bridge for the wp-admin mu-plugin (spec 002).
 
     Only these verbs, only for `instance`, only with the matching Bearer token:
-      GET /snapshots · POST /snapshot {name,force,db_only} · POST /restore {name}
-      POST /reset · DELETE /snapshot/<name> · GET /job/<id>
+      GET /snapshots · POST /snapshot {name,force,db_only}
+      POST /restore {name,confirm} · POST /reset {confirm}
       DELETE /snapshot/<name> · GET /job/<id>
     Snapshot/restore run out-of-band via the existing job machinery so a restore
     never severs the caller's request. NO arbitrary host commands (FR-010)."""
@@ -204,10 +204,19 @@ def _bridge_handle(method: str, instance: str, subpath: str,
 
     if method == "POST" and subpath == "/reset":
         # The wp-admin proxy enforces nonce + manage_options before this
-        # token-authenticated bridge call. Run asynchronously because reset
-        # drops and imports the database, which would otherwise outlive HTTP.
+        # token-authenticated bridge call. Authentication does not imply consent:
+        # refuse synchronously before accepting a job unless the proxy carries
+        # the explicit boolean acknowledgement from the confirmed UI action.
+        if body.get("confirm") is not True:
+            return 400, {
+                "ok": False,
+                "error": "confirmation_required",
+                "reason": "reset requires confirm=true",
+            }
+        # Run asynchronously because reset drops and imports the database,
+        # which would otherwise outlive the originating HTTP request.
         ns = _types.SimpleNamespace(resolved_instance=instance, yes=True,
-                                    rebaseline=False)
+                                    confirm=True, rebaseline=False)
         jid = _start_job("reset to fresh install", lambda: cmd_reset(cfg, ns))
         return 202, {"ok": True, "job_id": jid}
 

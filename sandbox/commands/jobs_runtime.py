@@ -15,6 +15,7 @@ from pathlib import Path
 from sandbox.application.context import durable_job_dependencies
 from sandbox.application.target_service import TargetResolutionError
 from sandbox.jobs.models import ArtifactQuery, JobSubmission, OutputQuery, SourceIdentity, TargetRequest
+from sandbox.jobs.registry import JobNotFound
 from sandbox.registry import CommandSpec, register_specs
 
 
@@ -27,6 +28,20 @@ def _emit_json_line(payload: dict) -> None:
     """Publish one complete control-plane envelope before process teardown."""
     encoded = json.dumps(payload, sort_keys=True)
     print(encoded, flush=True)
+
+
+def _local_job_not_found(job_id: str) -> dict:
+    """Return a stable, path-free recovery receipt for local observation."""
+    return {
+        "ok": False,
+        "code": "job_not_found",
+        "job_id": job_id,
+        "error": "job was not found in the local durable-job ledger",
+        "hint": (
+            "The job may belong to a configured remote; run `./sb remote list` "
+            "and retry `./sb job-status <job-id> --remote <name> --json`."
+        ),
+    }
 
 
 def _source_identity(root: str) -> SourceIdentity:
@@ -329,7 +344,14 @@ def cmd_job_status(_cfg, args) -> None:
         result = RemoteJobTransport(deploy=_remote.deploy_exact_working_tree, ssh_run=_remote.ssh_run,
             remote_lookup=_remote.get_remote, remote_sb_path=_remote.remote_sb_path).status(args.remote, args.job_id)
     else:
-        result = durable_job_dependencies()["job_service"].get(args.job_id)
+        try:
+            result = durable_job_dependencies()["job_service"].get(args.job_id)
+        except JobNotFound:
+            missing = _local_job_not_found(args.job_id)
+            if args.json:
+                print(json.dumps(missing, sort_keys=True))
+                raise SystemExit(1)
+            _die(f"{missing['code']}: {missing['error']}. {missing['hint']}")
     if args.json:
         print(json.dumps({"ok": True, **result}, sort_keys=True))
         return

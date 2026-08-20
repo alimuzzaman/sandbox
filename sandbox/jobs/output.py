@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from sandbox.services.redaction import RedactionError, StreamingRedactor
+
 from .models import OutputProfile, OutputQuery, validate_job_id
 from .storage import StoragePressureError
 
@@ -27,10 +29,6 @@ class OutputError(RuntimeError):
 
 
 class OutputCursorError(OutputError):
-    pass
-
-
-class RedactionError(OutputError):
     pass
 
 
@@ -72,48 +70,6 @@ def _parse_since(value: str) -> float:
     if timestamp != timestamp or timestamp in {float("inf"), float("-inf")}:
         raise OutputError("output since value is invalid")
     return timestamp
-
-
-class StreamingRedactor:
-    """Byte-safe secret redactor with cross-chunk carry-over.
-
-    The carry is deliberately withheld until the next append/finalization, preventing
-    a secret split across two OS pipe reads from reaching retained output.
-    """
-
-    def __init__(self, secrets: Iterable[bytes | str] = ()) -> None:
-        normalized = []
-        for value in secrets:
-            raw = value.encode() if isinstance(value, str) else value
-            if not isinstance(raw, bytes) or not raw:
-                raise RedactionError("redaction secrets must be non-empty bytes")
-            normalized.append(raw)
-        self.secrets = tuple(sorted(set(normalized), key=len, reverse=True))
-        self._carry = b""
-        self._window = max((len(value) for value in self.secrets), default=1) - 1
-
-    def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
-        if not isinstance(chunk, bytes):
-            raise RedactionError("output chunk must be bytes")
-        data = self._carry + chunk
-        if final:
-            complete, self._carry = data, b""
-        else:
-            # Retain only a suffix that could become a secret once the next pipe
-            # read arrives.  Fixed-size splitting is insufficient: it can emit a
-            # prefix of a secret whose remainder is kept in the next chunk.
-            keep_from = len(data)
-            for secret in self.secrets:
-                for size in range(1, min(len(secret) - 1, len(data)) + 1):
-                    if data.endswith(secret[:size]):
-                        keep_from = min(keep_from, len(data) - size)
-            complete, self._carry = data[:keep_from], data[keep_from:]
-        for secret in self.secrets:
-            complete = complete.replace(secret, b"[REDACTED]")
-        return complete
-
-    def finish(self) -> bytes:
-        return self.feed(b"", final=True)
 
 
 @dataclass(frozen=True)
@@ -225,6 +181,13 @@ class JobOutputStore:
     def append(self, stream: str, chunk: bytes, *, timestamp: float | None = None) -> OutputEvent | None:
         if stream not in self._redactors:
             raise OutputError("output stream is invalid")
+        # Capacity is checked before the shared streaming redactor mutates its
+        # carry state. A deferred partial token must not make a storage-pressure
+        # failure appear successful until finalization.
+        try:
+            self.storage.require_capacity(len(chunk) + 512)
+        except StoragePressureError as exc:
+            raise OutputError("durable output storage pressure") from exc
         content = self._redactors[stream].feed(chunk)
         return self._append_ready(stream, content, timestamp=timestamp)
 

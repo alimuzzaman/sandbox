@@ -112,10 +112,47 @@ class TestBridgeHandle(unittest.TestCase):
             self.assertEqual(code, 202, raw)
             self.assertEqual(data["name"], slug, raw)
 
-    def test_reset_starts_an_out_of_band_job(self):
-        code, data = self.call("POST", "/reset")
+    def test_reset_missing_confirmation_refuses_before_job_acceptance(self):
+        with mock.patch.object(bridge, "_start_job") as start, \
+                mock.patch("sandbox.commands.data.cmd_reset") as reset:
+            code, data = self.call("POST", "/reset")
+        self.assertEqual(code, 400)
+        self.assertEqual(data["error"], "confirmation_required")
+        start.assert_not_called()
+        reset.assert_not_called()
+
+    def test_reset_false_confirmation_refuses_before_job_acceptance(self):
+        with mock.patch.object(bridge, "_start_job") as start, \
+                mock.patch("sandbox.commands.data.cmd_reset") as reset:
+            code, data = self.call("POST", "/reset", {"confirm": False})
+        self.assertEqual(code, 400)
+        self.assertEqual(data["error"], "confirmation_required")
+        start.assert_not_called()
+        reset.assert_not_called()
+
+    def test_reset_confirmed_dispatches_exact_command_arguments(self):
+        captured = []
+
+        def start(label, fn):
+            captured.append((label, fn))
+            return "job-1"
+
+        with mock.patch.object(bridge, "_start_job", start), \
+                mock.patch("sandbox.commands.data.cmd_reset") as reset:
+            code, data = self.call("POST", "/reset", {"confirm": True})
         self.assertEqual(code, 202)
         self.assertEqual(data["job_id"], "job-1")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][0], "reset to fresh install")
+        captured[0][1]()
+        reset.assert_called_once()
+        args = reset.call_args.args[1]
+        self.assertEqual(vars(args), {
+            "resolved_instance": "inst",
+            "yes": True,
+            "confirm": True,
+            "rebaseline": False,
+        })
 
     # --- restore (traversal is the high-severity finding) ---
     def test_restore_traversal_400(self):

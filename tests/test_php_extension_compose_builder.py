@@ -11,6 +11,7 @@ from pathlib import Path
 from sandbox.php_extensions.compose_builder import (
     UnsupportedExtensionError,
     UnsupportedParentImageError,
+    extension_cache_status,
     materialize_compose_extension_context,
     plan_compose_extension_images,
 )
@@ -109,6 +110,40 @@ class TestComposeExtensionBuilder(unittest.TestCase):
                 self.assertEqual(self._plan().cache_state, "hit")
                 dockerfile.write_text("tampered\n")
                 self.assertEqual(self._plan().cache_state, "invalidated")
+            finally:
+                if old is None:
+                    os.environ.pop("SANDBOX_HOME", None)
+                else:
+                    os.environ["SANDBOX_HOME"] = old
+
+    def test_cache_status_distinguishes_missing_ready_stale_and_discarded_without_private_paths(self):
+        with tempfile.TemporaryDirectory(prefix="sb-ext-status-") as home:
+            old = os.environ.get("SANDBOX_HOME")
+            os.environ["SANDBOX_HOME"] = home
+            try:
+                plan = self._plan()
+                missing = extension_cache_status(plan.digest)
+                self.assertEqual(missing["state"], "missing")
+                self.assertIsNone(missing["provenance"])
+
+                materialize_compose_extension_context(plan)
+                ready = extension_cache_status(plan.digest)
+                self.assertEqual(ready["state"], "ready")
+                self.assertEqual(ready["cache_state"], "hit")
+                serialized = json.dumps(ready, sort_keys=True)
+                self.assertNotIn(str(Path(home).resolve()), serialized)
+                self.assertNotIn("password", serialized.lower())
+                self.assertNotIn("token", serialized.lower())
+
+                (plan.context_dir / "Dockerfile.web").write_text("tampered\n")
+                stale = extension_cache_status(plan.digest)
+                self.assertEqual(stale["state"], "stale")
+                self.assertEqual(stale["cache_state"], "invalidated")
+
+                (plan.context_dir / ".discarded").write_text("operator discard\n")
+                discarded = extension_cache_status(plan.digest)
+                self.assertEqual(discarded["state"], "discarded")
+                self.assertEqual(discarded["cache_state"], "invalidated")
             finally:
                 if old is None:
                     os.environ.pop("SANDBOX_HOME", None)

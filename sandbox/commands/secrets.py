@@ -8,12 +8,13 @@ import sys
 from pathlib import Path
 
 from sandbox.registry import CommandSpec, register_specs
+from sandbox.services.redaction import redact_structure
 from sandbox.secrets import SecretBrokerError
 from sandbox.secrets.context import build_secret_service
 from sandbox.secrets.models import MAX_VALUE_BYTES
 
 
-ACTIONS = ("source-info", "inspect", "validate", "run", "set", "reveal", "migrate-zshrc")
+ACTIONS = ("source-info", "inspect", "validate", "run", "set", "organize", "reveal", "migrate-zshrc")
 _DISPLAY_ENTRY_FIELDS = (
     "key", "state", "kind", "length_bucket", "exact_length",
     "public_prefix", "last4", "masked", "disclosed_material",
@@ -73,6 +74,15 @@ def configure_parser(parser) -> None:
     setting.add_argument("--json", action="store_true")
     setting.add_argument("--project-dir", default=".")
 
+    organize = actions.add_parser(
+        "organize", help="group one dotenv source into documented sections without reading values",
+    )
+    organize.add_argument("--source", default="personal")
+    organize.add_argument("--apply", action="store_true", help="write the grouped file (default: report only)")
+    organize.add_argument("--if-revision")
+    organize.add_argument("--json", action="store_true")
+    organize.add_argument("--project-dir", default=".")
+
     reveal = actions.add_parser("reveal", help="human-only display of exactly one value on the controlling TTY")
     reveal.add_argument("--source", required=True)
     reveal.add_argument("--key", required=True)
@@ -94,6 +104,9 @@ def _service(project_dir: str):
 
 
 def _emit(payload: dict, as_json: bool) -> None:
+    payload = redact_structure(payload)
+    if not isinstance(payload, dict):
+        payload = {"ok": False, "operation": "secrets", "error": "redaction_failed"}
     if as_json:
         print(json.dumps(payload, sort_keys=True))
         return
@@ -107,6 +120,13 @@ def _emit(payload: dict, as_json: bool) -> None:
             f"{name}={entry[name]}" for name in _DISPLAY_ENTRY_FIELDS if name in entry
         )
         print(f"  {fields}")
+    if operation == "organize":
+        state = "applied" if payload.get("applied") else (
+            "rewrite pending" if payload.get("changed") else "already organized")
+        print(f"  {payload.get('count', 0)} keys, {state}")
+        for group in payload.get("groups", ()):
+            print(f"  {group['title']}: {len(group['keys'])}")
+            print(f"    {', '.join(group['keys'])}")
     if payload.get("validation"):
         print(json.dumps(payload["validation"], sort_keys=True))
     if payload.get("action"):
@@ -167,7 +187,8 @@ def _migrate(args) -> None:
         moved = _secrets.migrate_zshrc()
         cloudflare_migrated = _cloudflare.migrate_legacy_token()
     except _secrets.SecretError as exc:
-        die(str(exc))
+        from sandbox.services.redaction import redact_text
+        die(redact_text(str(exc)))
     result = {"ok": True, "file": str(_secrets.secret_file()), "migrated": sorted(moved),
               "cloudflare_migrated": cloudflare_migrated}
     if args.json:
@@ -214,6 +235,9 @@ def cmd_secrets(cfg, args) -> None:
                 payload = service.set(args.source, args.key, value,
                                       input_channel="stdin" if args.stdin else "tty", **kwargs)
             _emit(payload, args.json)
+        elif args.action == "organize":
+            _emit(service.organize(args.source, apply=args.apply,
+                                   expected_revision=args.if_revision), args.json)
         elif args.action == "reveal":
             try:
                 with open("/dev/tty", "r+") as tty:

@@ -269,12 +269,21 @@ class TargetRequest:
     index_generation: int | None = None
     limit: int = 50
     active_only: bool = False
+    measure_sizes: bool = False
     mode: str = "persistent"
+    # Whether this operation may infer the single configured remote when no
+    # target is selected (spec 014: "operations that permit target inference").
+    # Instance lifecycle opts out: booting a dev instance is a local action
+    # unless the project or the caller asks for a remote, and inferring one
+    # moved every project's `sb ensure` onto the VPS.
+    allow_inferred_remote: bool = True
 
     def __post_init__(self) -> None:
         _safe_text(self.project_dir, "project directory")
         if not isinstance(self.local, bool):
             raise ValueError("local selector must be boolean")
+        if not isinstance(self.allow_inferred_remote, bool):
+            raise ValueError("inferred remote selector must be boolean")
         if self.remote is not None:
             _safe_name(self.remote, "remote name")
         if self.workspace is not None:
@@ -302,6 +311,8 @@ class TargetRequest:
             raise ValueError("workspace list limit must be between 1 and 5000")
         if not isinstance(self.active_only, bool):
             raise ValueError("workspace active-only selector must be boolean")
+        if not isinstance(self.measure_sizes, bool):
+            raise ValueError("workspace size-measurement selector must be boolean")
         _safe_name(self.mode, "workspace mode")
 
 

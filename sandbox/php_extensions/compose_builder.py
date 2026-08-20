@@ -470,6 +470,97 @@ def _cache_state(context_dir: Path, digest: str) -> str:
     return "hit"
 
 
+_CACHE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _safe_cache_provenance(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the non-secret portion of one generated context receipt.
+
+    Provenance files are machine state, not an authority boundary.  A caller
+    may have edited one by hand or an old release may have written fields that
+    were not part of the current receipt schema.  Status output therefore
+    selects a small allowlist instead of serialising the entire JSON document
+    (which could disclose a private checkout path or an accidental secret).
+    """
+    allowed = {
+        "schema", "digest", "catalog_version", "recipe_catalog_digest",
+        "parent_digests", "parent_images", "php_version", "server",
+        "platform", "architecture", "recipe_ids",
+    }
+    result: dict[str, Any] = {}
+    for key in allowed:
+        value = data.get(key)
+        if key in {"parent_digests", "parent_images"}:
+            if isinstance(value, Mapping):
+                result[key] = {str(item): str(raw) for item, raw in value.items()
+                               if item in {"web", "wpcli"}}
+        elif key == "recipe_ids":
+            if isinstance(value, (list, tuple)):
+                result[key] = [str(item) for item in value if isinstance(item, str)]
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            result[key] = value
+    return result
+
+
+def extension_cache_status(digest: str | None, *, root: Path | None = None) -> dict[str, Any]:
+    """Inspect one content-addressed extension context without mutating it.
+
+    The result deliberately distinguishes a missing entry, a stale/tampered
+    entry, and an explicitly discarded entry.  ``cache_state`` is retained as
+    a compatibility alias for older callers that used ``hit``/``miss`` names.
+    No absolute path or generated Dockerfile content is returned.
+    """
+    if not isinstance(digest, str) or not _CACHE_DIGEST_RE.fullmatch(digest.lower()):
+        return {
+            "state": "missing", "cache_state": "miss", "digest": None,
+            "provenance": None, "reason": "no valid persisted extension digest",
+        }
+    digest = digest.lower()
+    base = (root if root is not None else extension_build_root()).resolve()
+    context_dir = (base / digest).resolve()
+    try:
+        context_dir.relative_to(base)
+    except ValueError:
+        return {
+            "state": "stale", "cache_state": "invalidated", "digest": digest,
+            "provenance": None, "reason": "cache entry is outside the managed build root",
+        }
+    discarded = context_dir / ".discarded"
+    if discarded.exists():
+        return {
+            "state": "discarded", "cache_state": "invalidated", "digest": digest,
+            "provenance": None, "reason": "cache entry was explicitly discarded",
+        }
+    provenance_file = context_dir / "provenance.json"
+    if not context_dir.is_dir() or not provenance_file.is_file():
+        return {
+            "state": "missing", "cache_state": "miss", "digest": digest,
+            "provenance": None, "reason": "cache entry or provenance is absent",
+        }
+    try:
+        data = json.loads(provenance_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {
+            "state": "stale", "cache_state": "invalidated", "digest": digest,
+            "provenance": None, "reason": "provenance is unreadable",
+        }
+    if not isinstance(data, Mapping):
+        return {
+            "state": "stale", "cache_state": "invalidated", "digest": digest,
+            "provenance": None, "reason": "provenance is malformed",
+        }
+    safe = _safe_cache_provenance(data)
+    if _cache_state(context_dir, digest) != "hit":
+        return {
+            "state": "stale", "cache_state": "invalidated", "digest": digest,
+            "provenance": safe, "reason": "context files or digest do not match provenance",
+        }
+    return {
+        "state": "ready", "cache_state": "hit", "digest": digest,
+        "provenance": safe, "reason": "context and provenance match the requested digest",
+    }
+
+
 def _recipe_ids(reqs: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(
         RECIPES[name].recipe_id
@@ -660,7 +751,8 @@ __all__ = [
     "CATALOG_VERSION", "RECIPES", "BuildContextError", "ComposeBuilderError",
     "ComposeExtensionPlan", "DigestMismatchError", "ExtensionRequirement",
     "ImagePlan", "UnsupportedExtensionError", "UnsupportedParentImageError",
-    "extension_build_root", "materialize_compose_extension_context",
+    "extension_build_root", "extension_cache_status",
+    "materialize_compose_extension_context",
     "materialize_extension_build_context", "normalize_requirements",
     "plan_compose_extension_images", "plan_extension_images",
 ]

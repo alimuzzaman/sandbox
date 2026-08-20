@@ -660,6 +660,13 @@ class TestPluginConfigMap(unittest.TestCase):
         self.assertTrue(m["plugin-check"]["active"])
         self.assertTrue(m["mcp-adapter"]["active"])
 
+        query_monitor = self._resolve(
+            {"plugins": sandbox_core.DEFAULTS["plugins"]}
+        )["query-monitor"]
+        self.assertEqual(query_monitor["source"], {"kind": "org", "value": None})
+        self.assertFalse(query_monitor["active"])
+        self.assertFalse(query_monitor["on_demand"])
+
     def test_shorthand_false_is_inactive_installed(self):
         r = self._resolve({"plugins": {"qm": False}})["qm"]
         self.assertFalse(r["active"]); self.assertFalse(r["on_demand"])

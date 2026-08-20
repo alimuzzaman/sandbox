@@ -164,7 +164,8 @@ A plugin repo carries a **`sandbox.config.json`** describing its stack:
   "plugins":   ["."],                 // this repo; sibling slugs/paths/zip-URLs for addons
   "mappings":  { "wp-content/plugins/elementor-pro": "/abs/path" },
   "phpVersion": null,                 // null → wordpress:latest; e.g. "8.1"
-  "wpVersion":  null,                 // e.g. "6.4"
+  "wpVersion":  null,                 // EXACT pin ("6.4" = 6.4.0, not 6.4.x).
+                                      // Leave null unless one build is required.
   "server":     "apache",             // apache | nginx | litespeed
   "config":     { "WP_DEBUG": true }, // → wp-config constants
   "tests":      { "suite": "auto" }   // auto-detect WP_UnitTestCase vs Brain/Monkey
@@ -336,6 +337,10 @@ Inspect local or named-remote storage without booting an instance:
 ./sb resources status --json
 ./sb resources status --remote scaleway-sandbox --thorough --budget 60 --json
 ./sb resources status --remote scaleway-sandbox --deep --budget 600 --json
+# whole-host attribution in one command (rebuilds the cached directory index)
+./sb resources status --remote scaleway-sandbox --refresh --json
+# always-available: capacity plus the cached index, no disk walk
+./sb resources status --remote scaleway-sandbox --fast
 ./sb resources plan --scope cache --thorough --budget 60 --json
 ./sb resources plan --scope stale --thorough --budget 90 --json
 ```
@@ -350,6 +355,26 @@ allocated-block evidence, and Docker unique/shared/activity/reclaimable
 diagnostics without double counting them. It is bounded (budget plus five
 seconds), preserves valid partial/cancelled evidence, installs nothing, and
 adds no cleanup path.
+
+Deployment storage has its own tiered path. `status` classifies every entry of
+`deploy-src` as PROTECTED / LIVE / STOPPED / REGONLY / BASE / ORPHAN with sizes,
+mtimes, per-class totals, and index-versus-disk drift; `plan` previews a tier
+with a reason per candidate and a skipped list; `cleanup` executes it, writing a
+deletion manifest before each removal so "what happened to X" stays answerable:
+
+```sh
+./sb resources status  --remote scaleway-sandbox --deep --budget 180
+./sb resources plan    --remote scaleway-sandbox --tier safe
+./sb resources cleanup --remote scaleway-sandbox --tier safe --confirm
+./sb workspace release <name> --remote scaleway-sandbox    # done with it
+./sb workspace ttl <name> --ttl 14d --remote scaleway-sandbox
+./sb workspace reap --remote scaleway-sandbox --dry-run
+```
+
+Only workspace-scoped `node_modules`-style volumes are ever eligible — every
+other volume is protected at every tier, including ones the engine reports as
+unused — hosted sites are untouchable, a partial delete is reported as a
+failure rather than success, and the default retention window is 7 days.
 See [Resource Monitoring and Safe Cleanup](docs/resource-monitoring.md).
 
 ### Durable remote-first jobs
@@ -389,9 +414,21 @@ verbosity; the complete sealed log remains available for later retrieval.
 Workspace control is backed by an owner-only durable index under
 `$SANDBOX_HOME/runtime/workspaces/index.sqlite3`. Remote list/status use project or
 workspace identity rather than a deployed checkout path. Legacy `workspace.json`
-files remain byte-preserved; ambiguous, malformed, or unattributed records return
-`workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
+files remain byte-preserved; ambiguous, malformed, or unattributed records are reported
+as `workspace_index_incomplete` instead of an empty inventory. Migration is metadata-only
 and never resets/destroys a workspace or removes a Docker network.
+
+`workspace list` is a read-only report and stays successful when the index is degraded:
+the payload carries `index.complete=false` with `index.code="workspace_index_incomplete"`
+(mirrored as a top-level `code`/`warning`, and as a `WARNING:` line in text output), plus
+an `on_disk` block enumerating every directory under the deployment root
+(`$SANDBOX_HOME/deploy-src`) with `path`, `indexed`, `workspace_id`, `modified_at`,
+`age_seconds`, and `size_bytes`. Sizes are `null` with a `size_reason` unless
+`--measure-sizes` is passed, and even then the walk is bounded by entry and time budgets
+(`size_budget_exhausted` / `size_deadline_exceeded` rather than a hanging `du`). This
+keeps unindexed deployment storage visible for reclaim decisions. Degradation is not
+weakened anywhere else: `workspace status`, create, reset, destroy, and migration apply
+still refuse a degraded or non-ready record.
 
 Remote CI is a durable parent/child submission. Sandbox preflights the workflow
 and blocks named incompatibilities until explicitly accepted, deploys the exact
@@ -434,9 +471,19 @@ Use the same runtime operations without an MCP client:
 ./sb guide --project-dir .        # runtime-aware command catalog
 ./sb skill show sandbox-cli       # CLI-first operating skill
 ./sb ensure                       # start/reconcile local instance
+./sb ensure --json --reveal-login # ...and emit a usable admin autologin URL
 ./sb exec -- sh -lc 'npm test'    # generic Compose projects only
 ./sb deploy --remote <name> --ensure --expose
 ```
+
+`--json` output is redacted: every credential-shaped field, including the
+`sandbox_autologin` token inside `login_url`, comes back as `[REDACTED]`. Test
+harnesses that need to open an admin session without a password pass
+`--reveal-login`, which restores `login_url` alone (other credentials stay
+redacted). A local instance qualifies when its host is loopback-bound; a remote
+ensure record qualifies on the flag, which is forwarded to the VPS so its own
+redaction runs after. A revealed URL for a publicly exposed instance is an
+admin credential — keep it in a gitignored descriptor, out of logs and commits.
 
 `./sb mcp --project-dir .` remains available for an MCP-capable client. It is
 runtime-scoped: generic Compose projects do not load WordPress tools, and
@@ -572,8 +619,14 @@ Two layers:
 ```yaml
 defaults:
   plugins_home: "$HOME/dev"     # where cloned plugins live
+  pro_plugins_home: "$HOME/Sites/plugins-pro"   # shared Pro store, offered on demand
   github_org: "wpdeveloper"
 ```
+
+`pro_plugins_home` (default `~/Sites/plugins-pro`) is the one directory holding Pro
+plugin copies. `./sb deploy` and `./sb remote plugins <name>` mirror it to a remote
+host so every instance there lists the same slugs on **Plugins → Sandbox On-Demand**
+— see [`docs/remote-hosting.md`](docs/remote-hosting.md).
 
 There is **no central project catalog** — each plugin self-describes.
 

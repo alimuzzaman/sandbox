@@ -37,6 +37,24 @@ def _load_wp_tool():
 
 
 class JobMcpTests(unittest.TestCase):
+    def test_remote_runner_exception_is_not_serialized_by_job_start(self):
+        from tools import jobs
+
+        fixture = "runner-private-value"
+        target = SimpleNamespace(
+            kind="remote", project_root="/project", remote_name="vps",
+            workspace_label="unit", runtime_policy={}, sources={"identity": "project:remote"},
+        )
+        transport = SimpleNamespace(submit=Mock(side_effect=RuntimeError(fixture)))
+        with patch.object(jobs, "_target_service", SimpleNamespace(resolve=lambda _request: target)), \
+                patch("sandbox.transports.remote_jobs.RemoteJobTransport", return_value=transport):
+            result = jobs.job_start(["tool", "safe"], "/project", remote="vps")
+
+        self.assertEqual(result, {
+            "ok": False, "code": "supervisor_launch_failed", "error": "job submission failed",
+        })
+        self.assertFalse(fixture in str(result))
+
     def test_job_list_forwards_project_workspace_and_pages_filtered_results(self):
         from tools import jobs
 

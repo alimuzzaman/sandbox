@@ -114,6 +114,16 @@ def _resolve(include_disabled: bool = False,
     return out
 
 
+def _enabled_slug_exists(slug: str,
+                         project_dir: str | os.PathLike[str] | None = None) -> bool:
+    """Whether any enabled source already publishes ``slug``."""
+    return any(
+        rec["slug"] == slug and rec["enable"]
+        for scope in ("project", "personal", "sandbox")
+        for rec in _iter_source(scope, project_dir)
+    )
+
+
 def cmd_skill(cfg, args) -> None:
     action = args.action
     if action == "list":
@@ -145,23 +155,33 @@ def cmd_skill(cfg, args) -> None:
         root = _scope_root(scope)
         if not root:
             die(f"scope '{scope}' unavailable here (no project root for cwd?)")
+        source_collision = next((
+            rec for source in ("project", "personal", "sandbox")
+            for rec in _iter_source(source)
+            if rec["slug"] == slug and rec["enable"] and rec["scope"] != scope
+        ), None)
         # Project/personal skills must never shadow a built-in silently.
         if scope != "sandbox" and (_SANDBOX_SKILLS / slug).is_dir():
             if args.on_conflict != "rename":
                 die(f"'{slug}' shadows a built-in sandbox skill — use --on-conflict rename")
+        elif source_collision and args.on_conflict != "rename":
+            die(f"'{slug}' conflicts with an enabled {source_collision['scope']} skill "
+                "— use --on-conflict rename")
         dest = root / slug
-        if dest.exists():
+        if dest.exists() or source_collision:
             if scope == "sandbox" and args.on_conflict == "replace":
                 die(f"cannot replace built-in sandbox skill '{slug}' — use --on-conflict rename")
             if args.on_conflict == "fail" or not args.on_conflict:
                 n = 2
-                while (root / f"{slug}-{n}").exists():
+                while ((root / f"{slug}-{n}").exists()
+                       or _enabled_slug_exists(f"{slug}-{n}")):
                     n += 1
                 die(f"skill '{slug}' exists in {scope} — pass --on-conflict replace|rename "
                     f"(free slug: {slug}-{n})")
             if args.on_conflict == "rename":
                 n = 2
-                while (root / f"{slug}-{n}").exists():
+                while ((root / f"{slug}-{n}").exists()
+                       or _enabled_slug_exists(f"{slug}-{n}")):
                     n += 1
                 slug = f"{slug}-{n}"
                 dest = root / slug

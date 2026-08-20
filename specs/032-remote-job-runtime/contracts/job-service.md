@@ -313,6 +313,17 @@ records remain and `workspace_migration_plan_stale` or `workspace_ownership_drif
 the inventory or generation changes. It never deletes or rewrites legacy metadata and
 never releases networks or performs cleanup.
 
+### Degraded-index reporting
+
+`WorkspaceService.list` is read-only reporting and stays `ok: true` when the index is
+degraded. It returns `index` (`generation`, `complete`, `code`, `counts`), a top-level
+`code`/`warning` carrying `workspace_index_incomplete` while degraded, and an `on_disk`
+inventory of the deployment root's children (`path`, `indexed`, `workspace_id`,
+`modified_at`, `age_seconds`, `size_bytes`, `size_reason`). Sizes are `null` unless
+`measure_sizes` is requested, and measurement is bounded by entry/time budgets rather
+than an unbounded walk. `WorkspaceService.status` and every mutating operation
+(create/reset/destroy/migration apply) keep failing on a degraded or non-ready record.
+
 ### Remote controls
 
 Remote list/status/migrate use `project_identity` and/or `workspace_id`; they MUST NOT

@@ -629,10 +629,15 @@ class DeepAttribution:
     coverage: tuple[CoverageObservation, ...]
     reconciliation: AttributionReconciliation
     capacity_scope_id: str | None = None
+    directory_index: dict | None = None
 
     def __post_init__(self) -> None:
         if self.status not in DEEP_STATES:
             raise ValueError("invalid deep attribution status")
+        if self.directory_index is not None and not isinstance(
+            self.directory_index, dict,
+        ):
+            raise ValueError("directory_index must be an object or null")
         if self.capacity_scope_id is not None and (
             not isinstance(self.capacity_scope_id, str) or not self.capacity_scope_id
         ):
@@ -647,6 +652,7 @@ class DeepAttribution:
             "coverage": [item.to_dict() for item in self.coverage],
             "reconciliation": self.reconciliation.to_dict(),
             "capacity_scope_id": self.capacity_scope_id,
+            "directory_index": self.directory_index,
         })
 
     @classmethod
@@ -675,6 +681,10 @@ class DeepAttribution:
                 value.get("reconciliation") or {},
             ),
             capacity_scope_id=value.get("capacity_scope_id"),
+            directory_index=(
+                value.get("directory_index")
+                if isinstance(value.get("directory_index"), dict) else None
+            ),
         )
 
 

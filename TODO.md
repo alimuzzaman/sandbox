@@ -1,35 +1,23 @@
 # Sandbox TODO
 
-Updated: 2026-08-12. Structure: standing engineering work (§1–§2) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
+Updated: 2026-08-19. Structure: standing engineering work (§1–§3) runs continuously; product delivery is phased, each phase owned by a standalone PRD under `todo/` (index and decision list in `todo/README.md`). Finished work is deleted, not archived — history lives in git and the spec ledgers.
 
-Sources: `[guardian]` = 2026-08-12 product feedback + current Sandbox evidence · `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[herd-parity]` = 2026-08-11 local probes + official Herd/Laravel/Docker/Node/pnpm/MySQL research under `.ai/research/2026-08-11-herd-sandbox-parity/` · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
+Sources: `[guardian]` = 2026-08-12 product feedback + current Sandbox evidence · `[mail]` = 2026-08-06 live host probes + provider research · `[dns]` = 2026-08-06 Cloudflare zone work · `[ops]` = observed on the remote host · `[herd-parity]` = 2026-08-11 local probes + official Herd/Laravel/Docker/Node/pnpm/MySQL research under `.ai/research/2026-08-11-herd-sandbox-parity/` · `[vercel]` = 2026-08-19 official Vercel Sandbox documentation review under `.ai/research/2026-08-19-vercel-sandbox/` · `[prd NN]` = detailed brief in `todo/NN-*/prd.md`.
 
 Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is Contabo not Scaleway). Do not re-run the provider comparison; the open questions that remain are listed in `todo/01-outbound-mail/prd.md` §11.
 
 ## 0. Immediate operational blockers (P0; before new remote harness work)
 
-- [ ] Restore safe Docker network capacity on `scaleway-sandbox`. Start with a read-only
-  ownership/liveness inventory of the 29 connected Sandbox-managed user-defined
-  networks, map them to retained workspaces and active jobs, then present exact
-  destruction candidates for explicit approval. A normal stale-resource plan currently
-  excludes every network as active, so broad prune and applying the expired volume-only
-  plan are not valid fixes. If retained workspaces are all required, separately review a
-  daemon address-pool expansion with rollback and collision evidence. `[ops · incident
-  memory/plugin-behavior/remote-network-pool-exhaustion-2026-08-12.md]`
 - [ ] Add network-capacity admission evidence before remote workspace/test provisioning:
   report usable subnet capacity (or a bounded unavailable state), fail before staging
   when a network cannot be allocated, identify the owning resource class, and point to a
   reviewed cleanup/capacity plan. Cover pool exhaustion with a deterministic regression;
   do not infer capacity from disk space or network count alone. `[ops → prd 00 §5 P0]`
-- [ ] Normalize remote resource-inventory timeouts and stale workspace-control metadata
-  into bounded structured errors. The thorough resource probe currently leaks a local
-  `TimeoutExpired` traceback, remote diagnostics are unreachable, and workspace listing
-  can resolve a deleted remote project directory. Keep these read-only fixes separate
-  from cleanup authority. `[ops · observability]`
-- [ ] Decide the revision only after capacity is restored: rerun the declared `fast`
-  suite against either the explicitly accepted remote checkout or a separately approved
-  deployment of the current local revision. The reported 31-commit drift can change test
-  behavior but cannot cause or cure Docker subnet-pool exhaustion. `[ops]`
+- [ ] Complete the durable workspace index on `scaleway-sandbox` without guessing
+  ownership. The current metadata-only plan exposes 32 unresolved legacy records and
+  therefore correctly refuses a complete list. Preserve every legacy record, require
+  exact job/project evidence or operator mapping, and keep migration separate from
+  reset, destroy, network release, and cleanup authority. `[ops · observability]`
 
 ## 1. Loose ends (hours; found while shipping, none blocking)
 
@@ -45,6 +33,57 @@ Direct-delivery research is done (2026-08-06: port 25 open, IP unlisted, host is
 - [ ] Research Caddy's official [PHP serving patterns](https://caddyserver.com/docs/caddyfile/patterns#php): compare `php_fastcgi` with PHP-FPM and FrankenPHP's `php_server` against the current Caddy-ingress plus nginx/Apache/PHP-FPM design. Evaluate per-instance isolation, PHP-version and socket ownership, WordPress/static-file routing, operability, rollback, and whether any runtime change is warranted before proposing one.
 - [ ] Review the T3 Code app repository and identify any relevant patterns or lessons that could be applied to Sandbox. Research only; propose changes separately before implementation.
 - [ ] Make remote deployment and workspace staging ignore macOS AppleDouble sidecars (`._*`) without ignoring ordinary dotfiles. Cover uncommitted-diff archive upload and Sandbox-runtime source upload; acceptance is a remote staging regression proving no sidecar reaches deploy targets or workspaces while valid dotfiles and intended files remain byte-identical, with skipped-sidecar counts in safe diagnostics. `[ops · remote staging]`
+
+## 3. Environment lifecycle primitives `[vercel]`
+
+Four primitives from the 2026-08-19 Vercel Sandbox review that Sandbox lacks and
+that map onto queued work. Full findings, local gaps, and what is deliberately
+not adopted: `.ai/research/2026-08-19-vercel-sandbox/findings.md`. Research only
+— each item needs its own design pass before implementation.
+
+- [ ] Split instance identity from the running session, and make storage-pressure
+  relief hibernate rather than reap: stop the session, snapshot the filesystem,
+  resume transparently on the next `sb wp` / `visit` / MCP call. Today `./sb`
+  offers `down` (stops, reclaims nothing durable) or `clean` (destroys data) with
+  no state in between, which is why pressure relief currently costs the user
+  their site. Feeds spec 043. `[vercel → findings §1, §3.1]`
+- [ ] Add `sb fork <instance>` — seed a new instance from another's current
+  snapshot plus config. Targets the most expensive repeated operation we have:
+  every `run_e2e` worker and every `ci_run` matrix cell installs WordPress from
+  scratch. Copy the two documented sharp edges: secrets are not carried into the
+  fork, and tag/port overrides replace rather than merge. Needs its own spec.
+  `[vercel → findings §3.2]`
+- [ ] Make snapshot retention declared policy instead of manual hygiene:
+  expiration TTL, keep-last-N, and an explicit rule for what happens to evicted
+  snapshots, enforced at capture time. `./sb snapshot` currently takes only
+  `--force`/`--db-only`, so snapshots grow unbounded inside the class spec 042's
+  tiered cleanup refuses to touch. Feeds specs 042/043. `[vercel → findings §3.3]`
+- [ ] Carry the explicit per-mount access mode (`read-write` / `read-only`) into
+  spec 044's shared node store and git dedup design. Vercel Drives — one named
+  volume, many consumers, mode declared at the mount site — is independent
+  validation of that shape and of what makes a shared store safe to attach
+  widely. `[vercel → findings §3.4]`
+- [ ] Meter per instance — active CPU excluding I/O wait, memory-hours, egress
+  bytes, snapshot bytes, last-touched — so a pressure scheduler can rank victims.
+  `sb resources status` attributes disk only, which is not enough to choose what
+  to hibernate. Feeds spec 043. `[vercel → findings §3.5]`
+- [ ] Treat an attached consumer as a lease: never reap or hibernate an instance
+  with a live shell, an open browser session, or a running job. `[vercel → findings §3.6]`
+- [ ] Probe whether an instance's `wp_remote_get()` to its own HTTPS domain
+  passes TLS verification. `NODE_EXTRA_CA_CERTS` is set on the host only
+  (`sandbox/commands/config_setup.py`); no CA-bundle variables reach instance
+  containers and no `update-ca-certificates` step exists in the Compose sources.
+  State the observed result before proposing a fix. `[vercel → findings §2]`
+- [ ] Add free-form `key=value` tags to instances, filterable in `sb instances`,
+  so retention and cleanup policy can target a set instead of matching derived
+  names. Today only a derived name and an operator-chosen `label` exist.
+  `[vercel → findings §3.8]`
+- [ ] Deferred unless the threat model changes: per-instance egress policy
+  (deny-all base, domain/CIDR allowlists). Only relevant if Sandbox ever runs
+  untrusted plugin or agent-generated code; not needed for today's trusted-code
+  workload. Related: Sandbox isolates with Docker on a shared kernel, shared
+  across workspaces on the remote host, so documentation must keep saying
+  trusted code only. `[vercel → findings §3.9, §4]`
 
 ## Phase 0 — WordPress Plugin Release Guardian / Operations Agent `[prd 00]`
 

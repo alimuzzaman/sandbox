@@ -29,6 +29,16 @@ def ensure_pyyaml() -> None:
 
     cli_py = CLI_VENV / "bin" / "python"
     if not cli_py.exists():
+        # A killed or interrupted first bootstrap can leave the venv directory
+        # behind without its interpreter.  Passing that path back to
+        # ``python -m venv`` raises ``FileExistsError`` instead of recovering.
+        # Only remove a real directory at the generated CLI-venv location;
+        # never follow or replace a user-supplied file/symlink.
+        if CLI_VENV.is_symlink() or (CLI_VENV.exists() and not CLI_VENV.is_dir()):
+            die("CLI venv path exists but is not a directory; remove it and retry")
+        if CLI_VENV.is_dir():
+            info("Incomplete CLI venv found; recreating .cli-venv/…")
+            shutil.rmtree(CLI_VENV)
         info("Creating CLI venv at .cli-venv/ (one-time)…")
         subprocess.check_call([sys.executable, "-m", "venv", str(CLI_VENV)])
         subprocess.check_call(

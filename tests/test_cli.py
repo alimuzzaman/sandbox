@@ -7,6 +7,8 @@ package import, registry dispatch, and the no-`main` resolution behavior.
 import os
 import json
 import subprocess
+import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from contextlib import redirect_stdout, redirect_stderr
@@ -108,6 +110,26 @@ class TestResolutionGate(unittest.TestCase):
                 mock.patch.object(runtime.sys, "argv", ["/tmp/no-sb-wrapper/sandbox-cli"]):
             self.assertIn("-m sandbox.cli", runtime._guide_invocation())
 
+    def test_incomplete_cli_venv_is_recreated_before_bootstrap(self):
+        import sandbox.core._config as config
+
+        with tempfile.TemporaryDirectory() as directory:
+            incomplete = Path(directory) / ".cli-venv"
+            incomplete.mkdir()
+            (incomplete / "partial.marker").write_text("interrupted")
+            calls = []
+
+            with mock.patch.object(config, "CLI_VENV", incomplete), \
+                    mock.patch.dict(sys.modules, {"yaml": None}), \
+                    mock.patch.object(config.subprocess, "check_call",
+                                      side_effect=lambda argv: calls.append(argv)), \
+                    mock.patch.object(config.sys, "prefix", str(incomplete)):
+                config.ensure_pyyaml()
+
+            self.assertFalse(incomplete.exists())
+            self.assertEqual(calls[0][1:3], ["-m", "venv"])
+            self.assertEqual(calls[1][1:3], ["install", "--quiet"])
+
     def test_global_label_before_subcommand_is_preserved(self):
         import sandbox.cli as cli
         self.assertEqual(cli._global_label_before_subcommand(
@@ -117,6 +139,11 @@ class TestResolutionGate(unittest.TestCase):
         r = run_sb("restore", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--yes", r.stdout)
+
+    def test_doctor_help_exposes_machine_readable_report(self):
+        r = run_sb("doctor", "--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--json", r.stdout)
 
     def test_deploy_help_exposes_immutable_source_ref(self):
         r = run_sb("deploy", "--help")

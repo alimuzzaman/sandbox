@@ -527,6 +527,9 @@ class TestResourceInterfaces(unittest.TestCase):
             cancelled = resources.resource_status(deep=True, cancelled=True)
             self.assertTrue(cancelled["ok"])
             self.assertEqual(cancelled["status"], "cancelled")
+            both = resources.resource_status(fast=True, refresh=True)
+            self.assertFalse(both["ok"])
+            self.assertEqual(both["error"]["code"], "invalid_mode")
             self.assertTrue(resources.resource_cleanup_plan("cache")["ok"])
             self.assertTrue(
                 resources.resource_cleanup_apply("a" * 32, confirm=True)["ok"],
@@ -566,6 +569,92 @@ class TestResourceInterfaces(unittest.TestCase):
             self.assertEqual(calls, [])
         finally:
             sys.path.remove(str(mcp_root))
+
+
+class CacheAwareRecordingService(RecordingService):
+    def __init__(self, *, unknown_bytes=0, used_bytes=5, index=None):
+        super().__init__()
+        self.modes = []
+        self.unknown_bytes = unknown_bytes
+        self.used_bytes = used_bytes
+        self.index = index
+
+    def status(self, **kwargs):
+        self.modes.append(kwargs.get("directory_cache"))
+        payload = super().status(**{
+            key: value for key, value in kwargs.items()
+            if key != "directory_cache"
+        })
+        payload["data"]["capacity"]["used_bytes"] = self.used_bytes
+        payload["data"]["summary"]["unknown_bytes"] = self.unknown_bytes
+        if self.index is not None:
+            payload["data"].setdefault("deep_attribution", {})
+            payload["data"]["deep_attribution"]["directory_index"] = self.index
+        return payload
+
+
+class TestAlwaysAvailableAttribution(unittest.TestCase):
+    def parser(self):
+        from sandbox.commands.resources import configure_parser
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        return parser
+
+    def _run(self, argv, service):
+        from sandbox.commands import resources
+        args = self.parser().parse_args(argv)
+        output = io.StringIO()
+        with patch.object(resources, "resource_service", return_value=service), \
+             redirect_stdout(output):
+            resources.cmd_resources({}, args)
+        return output.getvalue()
+
+    def test_fast_reads_the_cached_index_and_never_walks(self):
+        service = CacheAwareRecordingService()
+        self._run(["status", "--fast", "--json"], service)
+        self.assertEqual(service.modes, ["cache_only"])
+        # --fast is deep attribution from cache, never a thorough sweep.
+        self.assertEqual(service.calls[0][1:3], (False, True))
+        self.assertEqual(service.calls[0][3], 10.0)
+
+    def test_refresh_rebuilds_the_index_with_a_long_budget(self):
+        service = CacheAwareRecordingService()
+        self._run(["status", "--refresh", "--json"], service)
+        self.assertEqual(service.modes, ["refresh"])
+        self.assertEqual(service.calls[0][3], 900.0)
+
+    def test_fast_and_refresh_are_mutually_exclusive(self):
+        service = CacheAwareRecordingService()
+        with self.assertRaises(SystemExit):
+            self._run(["status", "--fast", "--refresh", "--json"], service)
+        self.assertEqual(service.modes, [])
+
+    def test_default_status_stays_compatible_with_older_providers(self):
+        service = CacheAwareRecordingService()
+        self._run(["status", "--json"], service)
+        self.assertEqual(service.modes, [None])
+
+    def test_large_unattributed_share_is_announced_first(self):
+        service = CacheAwareRecordingService(
+            unknown_bytes=178_000_000_000, used_bytes=187_000_000_000,
+        )
+        text = self._run(["status"], service)
+        lines = [line for line in text.splitlines() if "UNATTRIBUTED" in line]
+        self.assertTrue(lines, text)
+        self.assertLess(
+            text.index("UNATTRIBUTED"), text.index("reclaimable"),
+        )
+        self.assertIn("95.2%", lines[0])
+        self.assertIn("--refresh", text)
+
+    def test_missing_index_tells_the_operator_how_to_build_one(self):
+        service = CacheAwareRecordingService(index={
+            "source": "cache_missing", "complete": False, "stale": True,
+            "age_seconds": None, "depth": 6, "minimum_row_bytes": 33554432,
+        })
+        text = self._run(["status", "--fast"], service)
+        self.assertIn("directory index: cache_missing", text)
+        self.assertIn("--deep --refresh", text)
 
 
 if __name__ == "__main__":

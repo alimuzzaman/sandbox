@@ -288,6 +288,36 @@ variable, an arbitrary input file, a shell command string, or an ordinary MCP
 field for the candidate. Do not verify by opening the source afterward; use
 metadata, validation, or a bounded trusted child.
 
+### 6b. Group one dotenv source into documented sections
+
+```bash
+./sb secrets organize --source SOURCE_ALIAS --project-dir PROJECT_DIR
+./sb secrets organize --source SOURCE_ALIAS --apply --project-dir PROJECT_DIR
+```
+
+`--source` defaults to `personal`. Without `--apply` the command reports only;
+with it, the source is rewritten under the same lock, signature check, ownership,
+and permissions as a targeted update. Pass `--if-revision OPAQUE_REVISION` to
+refuse a write when the source changed since a prior inspection.
+
+Organization moves the raw assignment records produced by the parser and emits
+generated banner comments around them. No value is decoded into the output, and
+a rewrite is refused unless reparsing the rendering yields the identical set of
+assignment lines. Comment lines directly above an assignment travel with it;
+detached comment blocks are filed by the first known key name they mention, or
+into `Notes`. Rerunning is stable: previously generated banners are recognized
+and replaced rather than nested.
+
+Groups are declared in `sandbox/secrets/organizer.py` by exact key name and key
+prefix, ordered by owner. Exact matches win over prefixes and the longest prefix
+wins among prefixes. A key matching no group keeps its content and is reported
+under `Ungrouped`; add a group entry rather than renaming the key. The result
+contains group titles, key names, and counts only.
+
+Mixed newline styles, unsupported syntax, duplicate keys, and non-dotenv formats
+fail closed (`mixed_newlines`, `syntax_unsupported`, `organize_unsupported`).
+There is no MCP form: organization is local CLI only.
+
 ### 7. Reveal one key only as a human exception
 
 Agents must not execute reveal. The human operator must leave every

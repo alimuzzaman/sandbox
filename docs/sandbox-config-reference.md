@@ -182,13 +182,19 @@ file path.
   "themes": [],
 
   // Version pins. null → wordpress:latest (no implicit pin). Quote them so
-  // YAML/JSON don't coerce "8.1" to a float.
+  // YAML/JSON don't coerce "8.1" to a float. LEAVE wpVersion null unless you
+  // need one exact WordPress build — a pin is EXACT, so "7.0" is the 7.0.0
+  // release, not the newest 7.0.x. See "Version pins" below.
   "phpVersion": null,   // e.g. "8.1" — resolves server-aware (see below)
-  "wpVersion":  null,   // e.g. "6.4"
+  "wpVersion":  null,   // e.g. "6.4.3" — omit to track the current release
 
   // false | true | "subdirectory" | "subdomain". true = subdirectory (the
   // baseline that works on localhost:<port>). See "Multisite" below.
   "multisite": false,
+
+  // Extra hostnames this instance also answers on. Bare hostnames only — no
+  // scheme, port, path, or wildcard. See "Aliases" below.
+  "aliases": [],
 
   // Web stack. apache/nginx/litespeed are docker (only the compose web tier
   // differs); "herd" is HOST-native (Laravel Herd + host MySQL — see below).
@@ -331,6 +337,13 @@ zipping the local dir to a throwaway temp copy). A wp-admin screen — **Plugins
 Sandbox On-Demand** — lists on-demand plugins with a one-click "Install from
 local" button.
 
+On a remote host the same page is populated by mirroring the machine's Pro store
+(`defaults.pro_plugins_home`, default `~/Sites/plugins-pro`) with
+`./sb remote plugins <name>` — or automatically by `./sb deploy`. It copies the store
+to `<remote $SANDBOX_HOME>/plugins-pro` and merges those slugs as bare paths into the
+remote user-global catalog, so every instance on that host resolves them on demand.
+See `docs/remote-hosting.md` → "Pro plugins on the remote host".
+
 If an on-demand local path disappears after provisioning, it remains registered
 so the install interception returns a clear local-source error. Sandbox never
 falls back to downloading that configured slug from the registry. Re-provisioning
@@ -367,16 +380,33 @@ in a later release once the map is proven.
 > (`sandbox.config.override.example.json`); migrate those to the map form, e.g.
 > `{ "plugins": { "templately": "/Users/you/Sites/git/templately" } }`.
 
-### How version pins resolve (server-aware)
+### Version pins — pin PHP freely, pin WordPress deliberately
 
-`phpVersion`/`wpVersion` map to the right image **per server**:
+`wpVersion` is an **exact** version, never a version *line*: `"7.0"` installs the
+7.0.0 release and stays there, it does **not** track 7.0.4. Leave it `null` (the
+default) unless the work genuinely needs one exact build — reproducing a
+version-specific report, or a regression bisect. Everything else (feature work,
+plugin development, "match the user's stack") wants an unpinned, current
+WordPress. `phpVersion` is different: PHP is a real compatibility variable and
+pinning it costs nothing, so pin it whenever the target PHP matters.
 
-| server | image (php pinned) | image (wp+php pinned) |
+A pin that is no longer wanted is not sticky: delete it and `./sb apply
+--project-dir <DIR>` moves the live site to the current release (see below).
+
+`phpVersion` maps to the right image **per server**; `wpVersion` never enters an
+image tag at all:
+
+| server | image (php pinned) | where `wpVersion` acts |
 |---|---|---|
-| `apache` | `wordpress:php<php>` | `wordpress:<wp>-php<php>` |
-| `nginx` | `wordpress:php<php>-fpm` | `wordpress:<wp>-php<php>-fpm` |
-| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | (WP via `wp core download`) |
-| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | WP via host `wp core download` |
+| `apache` | `wordpress:php<php>` | `wp core download --version=<wp>` at install |
+| `nginx` | `wordpress:php<php>-fpm` | `wp core download --version=<wp>` at install |
+| `litespeed` | `litespeedtech/openlitespeed:1.8.2-lsphp<php_nodot>` | `wp core download --version=<wp>` at install |
+| `herd` | host PHP via `herd isolate php@<php>` (web) + `php<MM>` binary (CLI/phpunit) | host `wp core download --version=<wp>` at install |
+
+The WP version is deliberately kept OUT of the image tag (the @wordpress/env
+approach): a PHP-only base image plus an in-container core download avoids
+`manifest unknown` errors for patch-level tags Docker Hub never published
+(`wordpress:6.9.4-php8.1`), and keeps every server stack on ONE bootstrap path.
 
 The wp-cli container (where `sandbox test` runs composer + phpunit) follows the
 PHP pin (`wordpress:cli-php<php>`), so tests execute on the project's PHP. The
@@ -427,10 +457,25 @@ approved signed-APT package plan. Generic Compose, LiteSpeed, Herd, Valet, custo
 images, arbitrary packages, URLs, Dockerfiles, shell fragments, and unknown/global
 INI mutation are never auto-modified by this field.
 
-`sb status --json` and `sb doctor` report desired constraints, parent/build
-provenance, every observed plane, drift, and staleness. `sb apply` rebuilds only
+`sb status` / `sb status --json` and `sb doctor` / `sb doctor --json` use the
+same canonical extension report and process result. JSON mode writes exactly one
+document to stdout and exits nonzero after emitting it when an extension check
+fails; a valid nonzero remote status document is forwarded with the same result.
+The report includes the profile, catalog revision/digest, canonical requirements,
+resolution digest, every web/WP-CLI/bounded-exec/PHPUnit observation, readiness,
+drift, and staleness. A build digest appears only when its read-only cache receipt
+is complete. Provenance is limited to recipe-catalog and parent digests plus
+allowlisted recipe IDs; raw probe stdout/stderr, context paths, image URLs,
+commands, shell fragments, and unrelated or arbitrary project values are never
+reported.
+
+Extension failures use the stable codes `missing`, `version_mismatch`,
+`version_unobservable`, `unsupported_provisioning`, `unsupported_disable`, and
+`plane_drift`. Projects that omit `phpExtensions` retain the legacy status shape.
+`sb apply` rebuilds only
 the WordPress web tier (`wp` plus nginx when selected); DB, Mailpit, uploads,
 snapshots, and project files are preserved.
+Status JSON omits credential-like fields and redacts `sandbox_autologin` values.
 
 ## Host driver (`server: "herd"`)
 
@@ -499,10 +544,80 @@ Config changes apply **in place** with `./sb apply --project-dir <DIR>` (MCP:
 `apply_config`) — it re-renders compose and recreates only the web tier, so the
 new constants take effect **without dropping the DB or uploads**. This is the
 non-destructive alternative to `recreate_instance` / `./sb instance delete` +
-`ensure`. A changed `wpVersion` is reported but not applied by `apply`
-(swapping core under a live DB needs an explicit recreate); a `phpVersion`
-change *does* apply because the web tier is force-recreated against the new
-image. See **In-place reconcile (`sb apply`)** below.
+`ensure`. Both version pins apply: a `phpVersion` change lands because the web
+tier is force-recreated against the new image, and a `wpVersion` change (or a
+REMOVED pin) lands because apply reconciles WordPress core itself. See
+**In-place reconcile (`sb apply`)** below.
+
+## Aliases (extra hostnames)
+
+`aliases` lists additional hostnames one instance answers on, alongside its
+primary domain. The CDN case is the motivating one: point a CDN pull zone at
+the instance, give it its own hostname, and let it fetch assets without the
+origin redirecting it away.
+
+Declaring an alias reaches four places, and it needs all four to actually work:
+
+1. **Route.** The generated Caddyfile gets a site block per alias, reverse-
+   proxying the same instance port as the primary domain. Aliases are routed
+   even when the instance has no `.tst` domain — the proxy matches on `Host`.
+2. **Certificate.** `./sb secure` mints ONE cert per instance, keyed by its
+   primary domain, with every alias as an extra SAN. The alias site block reads
+   the primary's cert files, so https covers every name at once.
+3. **wp-config.** `WP_HOME` and `WP_SITEURL` are defined from the request host
+   **when that host is a declared alias**, so WordPress serves the alias as
+   itself rather than redirecting to the primary domain.
+4. **Instance block.** The declaration is persisted into
+   `sandbox.local.yml`, so it survives `sb apply` and travels to a remote with
+   the project.
+
+**Resolution is yours to arrange.** Only `.tst` names are wildcarded by the
+sandbox resolver; any other alias needs an `/etc/hosts` entry locally, or a
+real DNS record for a remote.
+
+### What the host-aware URL does and does not do
+
+The generated PHP matches `$_SERVER['HTTP_HOST']` against the declared alias
+list and nothing else. Anything unrecognized — a spoofed `Host` header, the
+instance's own primary domain, or wp-cli, which sets no `HTTP_HOST` at all —
+leaves both constants undefined and WordPress falls back to the `home` and
+`siteurl` options exactly as before. That is deliberate:
+
+- It is **additive**. The primary hostname's behavior is unchanged, so adding
+  an alias cannot break a working site.
+- `HTTP_HOST` is attacker-controlled. Allowlisting it is what stops a forged
+  `Host` from rewriting the URL WordPress prints into a password-reset mail.
+- A request that arrives with a port in the `Host` (`cdn.example.com:8188`)
+  does not match a bare alias, and falls back the same way.
+
+The scheme comes from `X-Forwarded-Proto` when the direct `HTTPS` flag is
+absent, because Caddy — and, on a remote, Cloudflare in front of it —
+terminates TLS and forwards plain HTTP.
+
+Because the constants outrank the DB options whenever they ARE defined,
+`wp option update home` only ever affects the primary hostname. That is the
+same relationship any `WP_HOME` constant has with the option.
+
+### Not available for multisite or herd
+
+Aliases resolve to an empty list on a multisite instance: a network already
+maps hostnames to sites through `wp_site.domain`, and a second name for site 1
+would fight that mapping rather than extend it. Use subdomain multisite's
+wildcard route instead. Herd serves its own sites at `<name>.test` and never
+routes through the sandbox proxy, so aliases do not apply there either.
+
+### On a remote
+
+`./sb deploy --expose` routes the primary domain first, then each alias, so a
+bad alias never leaves the instance unreachable on its own hostname.
+`--alias HOSTNAME` (repeatable) overrides the project declaration for a one-off.
+
+Remote routes are per-hostname files, so changing `--domain` leaves the old
+route serving. Deploy reports those as `stale_routes`; `--prune-routes` deletes
+the ones that point at this instance's port and are neither the current domain
+nor a declared alias. Pruning is opt-in because the inventory is read from the
+whole host, and a route may belong to a checkout that this project's config
+cannot see.
 
 ## Multisite
 
@@ -567,14 +682,28 @@ multisite. It:
    bind-mounts).
 2. Regenerates the compose file and `compose up -d --force-recreate`s only the
    web tier. Constants survive via `WORDPRESS_CONFIG_EXTRA`; the DB volume is
-   untouched, so **no data loss**. A `phpVersion` change takes effect (the web
-   image is recreated); a `wpVersion` change is **reported but not applied**
-   (core swaps under a live DB are left to an explicit `recreate_instance`).
+   untouched, so **no data loss**. A `phpVersion` change takes effect here (the
+   web image is recreated).
 3. Re-syncs plugin/theme symlinks + installs (idempotent).
 4. Runs `wp core multisite-convert` if multisite was **newly** enabled
    (idempotent — skips an already-converted network). Switching an existing
    multisite between subdirectory↔subdomain is **not** applied in place; that
    needs a recreate.
+5. **Reconciles WordPress core** against the live `wp core version`:
+
+   | config | live core | apply runs |
+   |---|---|---|
+   | `wpVersion: "6.8.2"` | `6.8.2` | nothing |
+   | `wpVersion: "6.8.2"` | anything else | `wp core update --version=6.8.2 --force` (upgrade **or** downgrade) |
+   | no pin | current release | nothing |
+   | no pin | older | `wp core update` → current release |
+
+   Then `wp core update-db` (`--network` on multisite), so the schema follows
+   the files. Container recreates never re-version WordPress — core lives in the
+   bind mount — so this step is the ONLY thing that moves a running instance off
+   the core it was installed with. It is non-fatal: a wp.org failure warns and
+   leaves the site on its current core. The result comes back as
+   `wp_core: {from, to, changed}`.
 
 Contrast with `recreate_instance` (destroy + re-boot — wipes DB + uploads) and
 bare `./sb apply` with no `--project-dir` (the legacy alias for `./sb setup`,

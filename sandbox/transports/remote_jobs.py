@@ -5,21 +5,17 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
-import re
 import shlex
 from typing import Any, Callable
 
 from sandbox.jobs.models import validate_ack_job_id
+from sandbox.services.redaction import redact_structure, redact_text, require_safe_argv
 
 
 class RemoteJobTransportError(RuntimeError):
     pass
 
 
-_REMOTE_SECRET = re.compile(
-    r"(?i)\b(bearer|token|password|secret|api[_-]?key|authorization)\b(?:\s*[:=]\s*|\s+)[^\s]+"
-)
-_URL_USERINFO = re.compile(r"\b(https?://)[^\s/@:]+:[^\s/@]+@")
 _MAX_REMOTE_JSON_BYTES = 1_048_576
 
 
@@ -27,9 +23,7 @@ def _safe_remote_detail(value: object, *, limit: int = 512) -> str:
     """Return bounded controller diagnostics without forwarding credentials."""
     if not isinstance(value, str):
         return ""
-    text = _URL_USERINFO.sub(r"\1[REDACTED]@", value.strip())
-    text = _REMOTE_SECRET.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
-    return text[-limit:]
+    return redact_text(value.strip())[-limit:]
 
 
 def _last_json(text: str) -> dict | None:
@@ -43,7 +37,8 @@ def _last_json(text: str) -> dict | None:
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            return value
+            sanitized = redact_structure(value)
+            return sanitized if isinstance(sanitized, dict) else None
     return None
 
 
@@ -155,6 +150,20 @@ class RemoteJobTransport:
     def _remote_command(self, remote: dict, argv: list[str]) -> str:
         return shlex.join([self.remote_sb_path(remote), *argv])
 
+    def _run(self, remote: dict, command: str, *, timeout: int):
+        """Sever arbitrary runner failures from the public transport error."""
+        failed = False
+        try:
+            result = self.ssh_run(remote, command, timeout=timeout)
+        except Exception:
+            # Raise after leaving the handler so the raw exception is neither
+            # the cause nor context of the bounded public error.
+            failed = True
+            result = None
+        if failed:
+            raise RemoteJobTransportError("remote job transport runner failed") from None
+        return result
+
     def _execution_remote(self, name: str) -> dict:
         """Resolve a provisioned execution target before any deployment side effect."""
         remote = self.remote_lookup(name)
@@ -171,6 +180,12 @@ class RemoteJobTransport:
     def submit(self, submission) -> dict:
         if submission.target_kind != "remote" or not submission.remote_name:
             raise RemoteJobTransportError("remote transport requires a remote submission")
+        try:
+            require_safe_argv(submission.argv)
+        except ValueError:
+            raise RemoteJobTransportError(
+                "remote job command contains credential-like material"
+            ) from None
         remote = self._execution_remote(submission.remote_name)
         deployed = self.deploy(remote, submission.project_root)
         self._validate_deployment(deployed)
@@ -186,6 +201,13 @@ class RemoteJobTransport:
         """
         if not submissions:
             return []
+        for item in submissions:
+            try:
+                require_safe_argv(item.argv)
+            except ValueError:
+                raise RemoteJobTransportError(
+                    "remote job command contains credential-like material"
+                ) from None
         first = submissions[0]
         if (first.target_kind != "remote" or not first.remote_name or
                 any(item.target_kind != "remote" or item.remote_name != first.remote_name or
@@ -222,7 +244,7 @@ class RemoteJobTransport:
                 "--project-identity", first.project_identity,
                 "--timeout", str(max(item.deadline_seconds for item in submissions)),
                 "--output-profile", first.output_profile, "--spec-json", encoded, "--json"]
-        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
+        result = self._run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(
@@ -250,7 +272,7 @@ class RemoteJobTransport:
         # Preserve top-level directory inodes already used by nested Compose
         # bind mounts while replacing their contents and pruning stale dirs.
         command = workspace_refresh_command(source_path, workspace_path)
-        result = self.ssh_run(remote, command, timeout=120)
+        result = self._run(remote, command, timeout=120)
         if getattr(result, "returncode", 1) != 0:
             detail = "\n".join(part.strip() for part in (
                 getattr(result, "stderr", ""), getattr(result, "stdout", ""),
@@ -330,7 +352,7 @@ class RemoteJobTransport:
             ))
             argv = ["sh", "-lc", controller]
         args += ["--json", "--", *argv]
-        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=30)
+        result = self._run(remote, self._remote_command(remote, args), timeout=30)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(
@@ -379,7 +401,7 @@ class RemoteJobTransport:
         # retained output. SSH carries only the resulting page, never child IO.
         if wait_seconds:
             args += ["--wait-seconds", str(wait_seconds)]
-        result = self.ssh_run(remote, self._remote_command(remote, args), timeout=25)
+        result = self._run(remote, self._remote_command(remote, args), timeout=25)
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(
@@ -391,7 +413,9 @@ class RemoteJobTransport:
         remote = self.remote_lookup(remote_name)
         if not isinstance(remote, dict) or not remote.get("provisioned"):
             raise RemoteJobTransportError("unknown or unprovisioned remote")
-        result = self.ssh_run(remote, self._remote_command(remote, [*argv, "--json"]), timeout=timeout)
+        result = self._run(
+            remote, self._remote_command(remote, [*argv, "--json"]), timeout=timeout,
+        )
         payload = _last_json(getattr(result, "stdout", ""))
         if getattr(result, "returncode", 1) != 0 or not payload or payload.get("ok") is not True:
             raise RemoteJobTransportError(

@@ -124,6 +124,41 @@ class WorkspaceResourceOwnershipTests(unittest.TestCase):
             self.assertEqual(network.classification, "active")
             self.assertIn("workspace_active_reference", network.references)
 
+    def test_destroyed_workspace_keeps_owner_identity_and_marks_network_orphaned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runner = Runner()
+            runner.network_connected = False
+            projection = {
+                "records": [{
+                    "workspace_id": "ws_unit", "project_identity": "project:unit",
+                    "label": "default", "owner_kind": "workspace",
+                    "lifecycle": "destroyed", "status": "destroyed",
+                    "observed_at": OBSERVED_AT, "index_generation": 1,
+                    "active_references": {"leases": 0, "containers": 0, "jobs": 0},
+                    "bindings": [{
+                        "resource_type": "compose_project",
+                        "resource_id": "sandbox-unit", "status": "owned",
+                    }],
+                }],
+                "index_generation": 1,
+                "counts": {"total": 1, "unresolved": 0, "conflict": 0, "incomplete": 0},
+            }
+            adapter = LocalResourceAdapter(
+                Path(temp), runner=runner, clock=lambda: NOW, host_root=Path(temp),
+                workspace_projection=lambda: projection,
+            )
+            network = next(item for item in adapter.observe(
+                thorough=False, budget_seconds=30).resources if item.kind == "network")
+
+            self.assertEqual((network.owner_kind, network.owner_id), ("workspace", "ws_unit"))
+            self.assertEqual(network.lifecycle, "orphaned")
+            self.assertEqual(dict(network.active_references), {
+                "leases": 0, "containers": 0, "jobs": 0,
+            })
+            self.assertEqual(network.allocation_state, "allocated")
+            self.assertFalse(network.cleanup_eligible)
+            self.assertFalse(any(call[:3] == ("docker", "network", "rm") for call in runner.calls))
+
     def test_runtime_instance_binding_gives_workspace_worktree_an_opaque_owner(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

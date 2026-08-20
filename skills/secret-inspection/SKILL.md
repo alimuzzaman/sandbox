@@ -172,6 +172,21 @@ Never use a plaintext flag, `KEY=value`, an ordinary environment variable, an
 arbitrary input file, or a shell command string. Confirm only non-secret status,
 validation state, and the opaque revision. Do not inspect the file afterward.
 
+## 6b. Group a dotenv source without reading it
+
+```bash
+./sb secrets organize --source SOURCE_ALIAS --project-dir PROJECT_DIR
+./sb secrets organize --source SOURCE_ALIAS --apply --project-dir PROJECT_DIR
+```
+
+`--source` defaults to `personal`; without `--apply` nothing is written. The
+command reorders raw assignment records into documented sections and reports
+group titles, key names, and counts only. It never decodes a value, and refuses
+the rewrite unless every assignment line round-trips unchanged. Keys with no
+registered group are reported under `Ungrouped` — add a group in
+`sandbox/secrets/organizer.py` instead of renaming the key. Do not verify the
+result by opening the file; rerun `organize` or `inspect`.
+
 ## 7. Human-only reveal exception
 
 Do not run `secrets reveal` as an agent. Tell the human:

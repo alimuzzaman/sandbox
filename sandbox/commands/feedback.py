@@ -13,8 +13,14 @@ def configure_parser(parser) -> None:
     parser.add_argument(
         "action", choices=("submit", "list", "show", "detail", "export", "retention", "prune"),
     )
-    parser.add_argument("feedback_id", nargs="?", help="record id for show/detail")
-    parser.add_argument("--feedback-id", "--id", dest="feedback_id_option", help="record id for show/detail")
+    parser.add_argument(
+        "feedback_id", nargs="?",
+        help="record ID or unique 8-32 character lowercase hex prefix for show/detail",
+    )
+    parser.add_argument(
+        "--feedback-id", "--id", dest="feedback_id_option",
+        help="record ID or unique 8-32 character lowercase hex prefix for show/detail",
+    )
     parser.add_argument("--summary")
     parser.add_argument("--details", default="")
     parser.add_argument("--category", choices=("bug", "incident", "idea", "usability", "other"))

@@ -25,6 +25,7 @@ _SAFE_PROJECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,79}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 _FEEDBACK_ID = re.compile(r"[a-f0-9]{32}\Z")
+_FEEDBACK_REF = re.compile(r"[a-f0-9]{8,32}\Z")
 _CURSOR_NAME = re.compile(r"[A-Za-z0-9_.TZ:-]{1,240}\.json\Z")
 _TIMESTAMP = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 
@@ -292,6 +293,41 @@ class FeedbackStore:
                 return value
         return None
 
+    def resolve(self, feedback_ref: str) -> dict[str, Any] | None:
+        """Resolve an exact ID or a unique lower-hex ID prefix.
+
+        Exact 32-character IDs retain the established :meth:`find` behavior.
+        Prefix resolution reads only valid regular records, skips malformed or
+        symlink entries, and remembers the newest record for each canonical ID.
+        Multiple distinct canonical IDs are an explicit ambiguity rather than a
+        guess; the caller receives no candidate details.
+        """
+        if not isinstance(feedback_ref, str) or not _FEEDBACK_REF.fullmatch(feedback_ref):
+            # Validate before touching the store so malformed references cannot
+            # trigger a filesystem scan or leak storage availability details.
+            raise FeedbackError("feedback id is invalid")
+        if len(feedback_ref) == 32:
+            return self.find(feedback_ref)
+
+        matches: dict[str, dict[str, Any]] = {}
+        for path in self._paths():
+            try:
+                value = self._read(path)
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                continue
+            canonical = value.get("feedback_id")
+            if (not isinstance(canonical, str) or not _FEEDBACK_ID.fullmatch(canonical)
+                    or not canonical.startswith(feedback_ref)):
+                continue
+            # _paths() is newest-first. Keeping the first record means duplicate
+            # files for one canonical ID resolve to the newest valid record.
+            matches.setdefault(canonical, value)
+            if len(matches) > 1:
+                raise FeedbackError(
+                    "feedback id prefix is ambiguous", "feedback_id_ambiguous"
+                )
+        return next(iter(matches.values()), None)
+
     def candidates(
         self,
         cutoff: datetime,
@@ -522,7 +558,7 @@ class FeedbackService:
 
     def show(self, feedback_id: str) -> dict[str, Any]:
         try:
-            record = self.store.find(feedback_id)
+            record = self.store.resolve(feedback_id)
             if record is None:
                 raise FeedbackError("feedback record was not found", "feedback_not_found")
             return self._result(True, "show", "complete", data={

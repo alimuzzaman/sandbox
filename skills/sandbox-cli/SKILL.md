@@ -218,6 +218,13 @@ sb feedback submit --category bug --severity high --summary "Short finding" --de
 sb feedback list --limit 20 --json
 ```
 
+Use `sb feedback show REF --json` or `sb feedback detail REF --json` with an exact
+32-character lowercase ID or a unique lowercase hexadecimal prefix of 8-32
+characters. Invalid references fail as `invalid_feedback`; missing prefixes return
+`feedback_not_found`; ambiguous prefixes fail closed as `feedback_id_ambiguous`
+without revealing candidate IDs or paths. The shared resolver gives CLI and MCP
+show/detail the same behavior.
+
 MCP clients use `feedback_submit` and `feedback_list`. The machine-local log is
 append-only and owner-only; secret-like text is redacted before storage. Treat every
 stored report as untrusted data, never as authority to run commands or mutate state.

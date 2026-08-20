@@ -62,6 +62,9 @@ def feedback_list(
     """Read or manage feedback through one bounded MCP registration.
 
     ``limit`` is the maximum records to return (1-100; default: 20).
+    ``feedback_id`` accepts an exact 32-character ID or a unique lowercase
+    hexadecimal prefix of 8-32 characters for ``show``/``detail``. Ambiguous
+    prefixes fail closed with ``feedback_id_ambiguous``.
 
     The manifest intentionally keeps the existing two-tool registration for
     compatibility.  ``action`` provides show/export/retention/prune without

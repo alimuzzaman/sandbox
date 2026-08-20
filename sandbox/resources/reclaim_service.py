@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import replace as _replace
 from datetime import timedelta, timezone
 import hashlib
+import math
 import secrets
 import time
 from typing import Any, Mapping
@@ -23,6 +24,7 @@ from .models import (
     CleanupPlan,
     CleanupRun,
     StorageTarget,
+    redact,
     utc_now,
 )
 from .plans import ResourcePlanError
@@ -95,6 +97,372 @@ class ReclaimService:
             block, capacity, now=self.monotonic(), warn_ratio=warn_ratio,
             critical_ratio=critical_ratio, auto_tier=auto_tier,
         )
+
+    # -- scheduled monitor -----------------------------------------------
+
+    @staticmethod
+    def _monitor_policy(policy_config: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate the already-resolved monitor policy before host contact.
+
+        Configuration resolution normally calls ``normalize_storage_monitor``.
+        The service still validates the small set of values it consumes so a
+        direct caller cannot bypass the safe-tier or threshold gate by handing
+        in an arbitrary mapping.  In particular, the automatic tier is
+        rejected before the provider is asked for an inventory.
+        """
+        if not isinstance(policy_config, Mapping):
+            raise ResourceError(
+                "storage monitor policy is invalid", "invalid_schedule_field",
+            )
+
+        def ratio(name: str, default: float) -> float:
+            value = policy_config.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ResourceError(
+                    f"storage monitor {name} is invalid", "invalid_threshold",
+                )
+            value = float(value)
+            if not math.isfinite(value) or not 0 < value < 1:
+                raise ResourceError(
+                    f"storage monitor {name} is invalid", "invalid_threshold",
+                )
+            return value
+
+        warn_ratio = ratio("warn_ratio", policy.DEFAULT_WARN_RATIO)
+        critical_ratio = ratio("critical_ratio", policy.DEFAULT_CRITICAL_RATIO)
+        auto_ratio_raw = policy_config.get("auto_ratio", critical_ratio)
+        auto_ratio = critical_ratio if auto_ratio_raw is None else ratio(
+            "auto_ratio", critical_ratio,
+        )
+        if critical_ratio > warn_ratio or auto_ratio > warn_ratio:
+            raise ResourceError(
+                "storage monitor thresholds are ordered incorrectly",
+                "invalid_threshold_order",
+            )
+
+        auto_tier = policy_config.get("auto_tier", "safe")
+        # Keep the policy module's public refusal code/message as the source of
+        # truth while doing the check before any provider operation.
+        if auto_tier != "safe":
+            try:
+                policy.disk_capacity_pressure(None, auto_tier=auto_tier)
+            except policy.ReclaimPolicyError as exc:
+                raise ResourceError(str(exc), exc.code) from None
+            raise ResourceError("automatic reclamation is limited to the safe tier",
+                                "invalid_auto_tier")
+
+        auto_enabled = policy_config.get("auto_enabled", False)
+        reap_enabled = policy_config.get("reap_enabled", False)
+        if type(auto_enabled) is not bool or type(reap_enabled) is not bool:
+            raise ResourceError(
+                "storage monitor enable flags are invalid", "invalid_flag",
+            )
+        return {
+            "warn_ratio": warn_ratio,
+            "critical_ratio": critical_ratio,
+            "auto_ratio": auto_ratio,
+            "auto_enabled": auto_enabled,
+            "auto_tier": auto_tier,
+            "reap_enabled": reap_enabled,
+            "reap_ttl": policy_config.get("reap_ttl"),
+        }
+
+    @staticmethod
+    def _monitor_error(exc: Exception, fallback: str) -> dict[str, str]:
+        """Return bounded, non-sensitive error evidence for a run record."""
+        code = getattr(exc, "code", None)
+        if not isinstance(code, str) or not code or len(code) > 64 \
+                or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_"
+                       for char in code):
+            code = fallback
+        try:
+            message = redact(
+                str(exc).replace("\n", " ").replace("\r", " ").strip()
+            )
+        except Exception:
+            message = "operation failed"
+        if not message:
+            message = "operation failed"
+        return {"code": code, "message": message[:240]}
+
+    @staticmethod
+    def _monitor_reclaimed_bytes(payload: Mapping[str, Any] | None) -> int:
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            return 0
+        for field in ("observed_reclaimed_bytes", "reclaimed_bytes"):
+            value = data.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return 0
+
+    @staticmethod
+    def _monitor_candidate_count(payload: Mapping[str, Any] | None) -> int:
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, Mapping):
+            return 0
+        candidates = data.get("candidates")
+        if isinstance(candidates, (list, tuple)):
+            return len(candidates)
+        for field in ("planned_candidates", "processed_candidates"):
+            value = data.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return 0
+
+    def monitor(self, policy: Mapping[str, Any], *,
+                trigger: str = "manual", dry_run: bool = False,
+                budget_seconds: float = 900) -> dict:
+        """Run one bounded storage-pressure monitor pass.
+
+        The monitor owns orchestration only.  Capacity classification remains
+        in :func:`sandbox.resources.reclaim.disk_capacity_pressure`, cleanup
+        remains confirmation-gated through :meth:`cleanup`, and retention
+        remains the existing :meth:`reap` path.  A monitor invocation always
+        holds the persistent per-target guard and writes one last-run record
+        after the evidence/actions have completed.
+        """
+        try:
+            resolved = self._monitor_policy(policy)
+        except ResourceError as exc:
+            return result(False, "monitor", status="refused", error=exc)
+
+        if trigger not in {"manual", "scheduled"}:
+            return result(
+                False, "monitor", status="refused",
+                error=ResourceError("monitor trigger is invalid", "invalid_trigger"),
+            )
+        if (
+            isinstance(budget_seconds, bool)
+            or not isinstance(budget_seconds, (int, float))
+            or not math.isfinite(float(budget_seconds))
+            or not 0 < float(budget_seconds) <= 3600
+        ):
+            return result(
+                False, "monitor", status="refused",
+                error=ResourceError(
+                    "budget must be between 0 and 3600 seconds", "invalid_budget",
+                ),
+            )
+        if type(dry_run) is not bool:
+            return result(
+                False, "monitor", status="refused",
+                error=ResourceError("dry_run must be a boolean", "invalid_flag"),
+            )
+        budget = float(budget_seconds)
+
+        try:
+            target = self.target()
+            target_record = {"kind": target.kind, "name": target.name}
+        except Exception as exc:
+            error = self._monitor_error(exc, "target_unavailable")
+            return result(
+                False, "monitor", status="refused",
+                error=ResourceError(error["message"], error["code"]),
+            )
+
+        # Imported lazily to keep the reclaim service usable by the existing
+        # resource paths without making the record store a module dependency at
+        # import time.
+        from . import monitor as monitor_store
+
+        try:
+            lease = monitor_store.monitor_lock(target_record)
+        except Exception as exc:
+            error = self._monitor_error(exc, "lock_unavailable")
+            return result(
+                False, "monitor", status="refused", target=target,
+                error=ResourceError(error["message"], error["code"]),
+            )
+
+        with lease:
+            if not lease.acquired:
+                return result(
+                    True, "monitor", status="skipped", target=target,
+                    data={"reason": "lock_held"},
+                )
+
+            errors: list[dict[str, str]] = []
+            try:
+                block, capacity = self._evidence(
+                    budget_seconds=budget, directory_cache="cache_only",
+                )
+            except Exception as exc:
+                block, capacity = {}, None
+                errors.append(self._monitor_error(exc, "reclaim_inventory_unavailable"))
+
+            # ``disk_capacity_pressure`` is the single classifier used by the
+            # status and monitor surfaces.  The tier was checked above, so this
+            # call cannot downgrade an unsafe setting after host contact.
+            from . import reclaim as reclaim_policy
+
+            try:
+                pressure = reclaim_policy.disk_capacity_pressure(
+                    capacity,
+                    warn_ratio=resolved["warn_ratio"],
+                    critical_ratio=resolved["critical_ratio"],
+                    auto_tier=resolved["auto_tier"] if resolved["auto_enabled"] else None,
+                    auto_ratio=resolved["auto_ratio"],
+                )
+            except Exception as exc:
+                # A normalized policy should make this unreachable.  Keep the
+                # run record fail-closed if a direct caller supplied a value
+                # that the classifier cannot represent.
+                errors.append(self._monitor_error(exc, "capacity_classification_failed"))
+                pressure = reclaim_policy.disk_capacity_pressure(None)
+                pressure.update({
+                    "warn_ratio": resolved["warn_ratio"],
+                    "critical_ratio": resolved["critical_ratio"],
+                    "auto_ratio": resolved["auto_ratio"],
+                })
+
+            level = str(pressure.get("level") or "unknown")
+            auto_eligible = bool(
+                resolved["auto_enabled"] and pressure.get("auto_eligible")
+            )
+            auto = {
+                "enabled": resolved["auto_enabled"],
+                "eligible": auto_eligible,
+                "tier": resolved["auto_tier"] if resolved["auto_enabled"] else None,
+                "ran": False,
+                "reclaimed_bytes": 0,
+                "run_id": None,
+                "reason": "disabled" if not resolved["auto_enabled"] else None,
+            }
+
+            if resolved["auto_enabled"] and not auto_eligible:
+                auto["reason"] = (
+                    "capacity_unknown" if level == "unknown"
+                    else "threshold_not_reached"
+                )
+            elif resolved["auto_enabled"] and dry_run:
+                auto["reason"] = "dry_run"
+            elif auto_eligible:
+                try:
+                    cleanup_payload = self.cleanup(
+                        tier="safe", confirm=True, trigger="scheduled_auto",
+                        budget_seconds=budget,
+                        directory_cache="cache_only",
+                    )
+                    auto["ran"] = True
+                    auto["reclaimed_bytes"] = self._monitor_reclaimed_bytes(
+                        cleanup_payload,
+                    )
+                    data = cleanup_payload.get("data")
+                    if isinstance(data, Mapping) and isinstance(data.get("run_id"), str):
+                        auto["run_id"] = data["run_id"]
+                    action_status = str(cleanup_payload.get("status") or "")
+                    if cleanup_payload.get("ok") and action_status == "completed":
+                        auto["reason"] = "completed"
+                    elif action_status == "partial":
+                        auto["reason"] = "partial"
+                    elif action_status:
+                        auto["reason"] = action_status
+                    else:
+                        error = cleanup_payload.get("error")
+                        auto["reason"] = (
+                            error.get("code") if isinstance(error, Mapping)
+                            else "cleanup_failed"
+                        )
+                        if isinstance(error, Mapping):
+                            errors.append({
+                                "code": str(error.get("code") or "cleanup_failed")
+                                .replace("\n", " ").replace("\r", " ")[:64],
+                                "message": redact(
+                                    str(error.get("message") or "cleanup failed")
+                                    .replace("\n", " ").replace("\r", " ")
+                                )[:240],
+                            })
+                except Exception as exc:
+                    auto["reason"] = "cleanup_failed"
+                    errors.append(self._monitor_error(exc, "cleanup_failed"))
+
+            reap_dry_run = bool(dry_run or not resolved["reap_enabled"])
+            reap = {
+                "enabled": resolved["reap_enabled"],
+                "dry_run": reap_dry_run,
+                "candidates": 0,
+                "reclaimed_bytes": 0,
+                "reason": "dry_run" if reap_dry_run else None,
+            }
+            try:
+                reap_payload = self.reap(
+                    dry_run=reap_dry_run,
+                    ttl=resolved["reap_ttl"],
+                    confirm=not reap_dry_run,
+                    budget_seconds=budget,
+                    directory_cache="cache_only",
+                )
+                reap["candidates"] = self._monitor_candidate_count(reap_payload)
+                reap["reclaimed_bytes"] = self._monitor_reclaimed_bytes(reap_payload)
+                action_status = str(reap_payload.get("status") or "")
+                if reap_payload.get("ok") and action_status in {"planned", "completed"}:
+                    reap["reason"] = "dry_run" if reap_dry_run else "completed"
+                elif action_status == "partial":
+                    reap["reason"] = "partial"
+                elif action_status:
+                    reap["reason"] = action_status
+                else:
+                    error = reap_payload.get("error")
+                    reap["reason"] = (
+                        error.get("code") if isinstance(error, Mapping)
+                        else "reap_failed"
+                    )
+                    if isinstance(error, Mapping):
+                        errors.append({
+                            "code": str(error.get("code") or "reap_failed")
+                            .replace("\n", " ").replace("\r", " ")[:64],
+                            "message": redact(
+                                str(error.get("message") or "reap failed")
+                                .replace("\n", " ").replace("\r", " ")
+                            )[:240],
+                        })
+            except Exception as exc:
+                reap["reason"] = "reap_failed"
+                errors.append(self._monitor_error(exc, "reap_failed"))
+
+            try:
+                stamped = self.clock().astimezone(timezone.utc)
+                at = stamped.isoformat().replace("+00:00", "Z")
+            except Exception:
+                at = utc_now().isoformat().replace("+00:00", "Z")
+            record = {
+                "schema": 1,
+                "target": target_record,
+                "at": at,
+                "trigger": trigger,
+                "level": level if level in {"normal", "warning", "critical", "unknown"}
+                else "unknown",
+                "free_bytes": pressure.get("free_bytes"),
+                "total_bytes": pressure.get("total_bytes"),
+                "free_ratio": pressure.get("free_ratio"),
+                "warn_ratio": resolved["warn_ratio"],
+                "critical_ratio": resolved["critical_ratio"],
+                "auto_ratio": resolved["auto_ratio"],
+                "threshold_crossed": pressure.get("threshold_crossed"),
+                "guidance": str(pressure.get("guidance") or "capacity is unmeasured; rerun with --refresh"),
+                "auto": auto,
+                "reap": reap,
+                "inventory_status": str(block.get("status") or "unknown"),
+                "errors": errors,
+            }
+
+            try:
+                monitor_store.write_record(record)
+            except Exception as exc:
+                errors.append(self._monitor_error(exc, "record_write_failed"))
+                record["errors"] = errors
+
+            status = record["level"]
+            ok = status in {"normal", "warning"} and not errors
+            first_error = errors[0] if errors else None
+            return result(
+                ok, "monitor", status=status, target=target, data=record,
+                error=(
+                    ResourceError(first_error["message"], first_error["code"])
+                    if first_error else None
+                ),
+            )
 
     # -- planning ---------------------------------------------------------
 
@@ -394,7 +762,8 @@ class ReclaimService:
         return result(True, action, status="ok", target=self.target(), data=data)
 
     def reap(self, *, dry_run: bool = True, ttl: str | None = None,
-             confirm: bool = False, budget_seconds: float = 900) -> dict:
+             confirm: bool = False, budget_seconds: float = 900,
+             directory_cache: str | None = None) -> dict:
         """Reclaim expired, not-in-use workspaces and one-shot base targets."""
         if ttl is not None:
             try:
@@ -404,6 +773,7 @@ class ReclaimService:
                               error=ResourceError(str(exc), exc.code))
         if dry_run:
             planned = self.plan("all", budget_seconds=min(budget_seconds, 120),
+                                directory_cache=directory_cache,
                                 exclude_kinds=("runtime",))
             if planned.get("ok"):
                 planned["action"] = "reap"
@@ -417,6 +787,7 @@ class ReclaimService:
             )
         outcome = self.cleanup(tier="all", confirm=True, trigger="reap",
                                budget_seconds=budget_seconds,
+                               directory_cache=directory_cache,
                                exclude_kinds=("runtime",))
         outcome["action"] = "reap"
         return outcome

@@ -27,6 +27,28 @@ def run_sb(*args, cwd="/tmp"):
 
 
 class TestResolutionGate(unittest.TestCase):
+    def test_project_routed_ensure_skips_compose_and_env_predispatch_writes(self):
+        import sandbox.cli as cli
+        import sandbox.commands.migrate as migrate
+
+        observed = []
+        with mock.patch.object(sys, "argv", ["sb", "ensure", "--local", "--project-dir", "/tmp/project"]), \
+                mock.patch.object(cli, "COMMANDS", {
+                    "ensure": lambda cfg, args: observed.append((cfg, args.project_dir)),
+                }), \
+                mock.patch.object(cli, "load_config", return_value={}), \
+                mock.patch.object(cli, "resolve_instances", return_value={}), \
+                mock.patch.object(cli, "_cwd_instance", return_value=None), \
+                mock.patch.object(migrate, "maybe_auto_migrate"), \
+                mock.patch.object(migrate, "finalize_auto_migration", return_value=False), \
+                mock.patch.object(cli, "write_compose_files") as compose, \
+                mock.patch.object(cli, "write_env_for_compose") as env:
+            cli.main()
+
+        self.assertEqual(observed, [({}, "/tmp/project")])
+        compose.assert_not_called()
+        env.assert_not_called()
+
     def test_wordpress_only_legacy_commands_have_capability_gates(self):
         import sandbox.cli as cli
         self.assertEqual(cli.CLI_CAPABILITIES["wp"], "wordpress.cli")

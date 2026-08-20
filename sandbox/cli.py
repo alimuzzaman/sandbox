@@ -1042,7 +1042,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     bounded_resource_status = (
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
-    if not bounded_resource_status and args.cmd != "secrets":
+    # Project-routed ensure owns its ready-path attestation.  Pre-writing
+    # Compose or the legacy environment here would mutate persistent state
+    # before it can refuse a stale live mount set.
+    ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
+    if not bounded_resource_status and args.cmd != "secrets" and not ensure_attestation_gate:
         if not auto_migration_finalized:
             write_compose_files(cfg)
         # Keep the legacy `.env` populated so anyone still invoking the

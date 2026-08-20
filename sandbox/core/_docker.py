@@ -69,8 +69,8 @@ def _canonical_bind_path(value: object) -> str | None:
 def _source_mount_services(server: str) -> tuple[str, ...]:
     """Return every Docker web plane expected to see project source binds."""
     if server == "nginx":
-        return ("wp", "wpcli", "nginx")
-    return ("wp", "wpcli")
+        return ("wp", "nginx")
+    return ("wp",)
 
 
 def attest_source_mounts(instance: str, server: str,
@@ -98,11 +98,7 @@ def attest_source_mounts(instance: str, server: str,
     for service in _source_mount_services(server):
         try:
             listed = run(
-                # wpcli is an execution plane but exits after its normal
-                # ``--info`` command, so it must be observed alongside the
-                # running web service. Multiple retained candidates are still
-                # an unavailable (never guessed) state below.
-                ["docker", "ps", "-aq",
+                ["docker", "ps", "-q",
                  "--filter", f"label=com.docker.compose.project={project}",
                  "--filter", f"label=com.docker.compose.service={service}"],
                 check=False, capture=True, timeout=10,

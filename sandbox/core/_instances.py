@@ -770,25 +770,39 @@ def _build_instance_block(cfg: dict, name: str, root: str, pconf: dict,
     return block
 
 
-def _desired_source_mounts(cfg: dict, inst_cfg: dict) -> list[str] | None:
-    """Resolve source-bind policy without the creating ``_plugins_home`` helper."""
+def _desired_source_mounts(cfg: dict, root: str, pconf: dict) -> list[str] | None:
+    """Derive the current project-config source policy without creating paths."""
     defaults = cfg.get("defaults", {}) or {}
     raw_plugins_home = defaults.get("plugins_home", "") or "./plugins"
     try:
         plugins_home = Path(str(raw_plugins_home)).expanduser()
         if not plugins_home.is_absolute():
             plugins_home = ROOT / plugins_home
-        sources = [str(plugins_home.resolve())]
-        extras = inst_cfg.get("extra_mounts") or []
-        if not isinstance(extras, (list, tuple)):
-            return None
-        for extra in extras:
-            if not isinstance(extra, str):
-                return None
-            source = Path(extra).expanduser()
+        plugins_home = plugins_home.resolve()
+        root_path = Path(root)
+        sources = [str(plugins_home)]
+
+        def add_if_external(value: object) -> None:
+            source = Path(str(value)).expanduser()
             if not source.is_absolute():
-                return None
-            sources.append(str(source.resolve()))
+                source = (root_path / source).resolve()
+            source = source.resolve()
+            if source.exists() and not source.is_relative_to(plugins_home):
+                sources.append(str(source))
+
+        for entry in list(pconf.get("plugins") or []) + list(pconf.get("themes") or []):
+            if entry == ".":
+                add_if_external(root_path)
+            elif isinstance(entry, str) and ("/" in entry or entry.startswith((".", "~"))):
+                add_if_external(entry)
+        for value in (pconf.get("mappings") or {}).values():
+            add_if_external(value)
+        for value in (pconf.get("mappings_inactive") or {}).values():
+            add_if_external(value)
+        for entry in (pconf.get("plugins_resolved") or {}).values():
+            source = entry.get("source") or {}
+            if source.get("kind") == "path" and source.get("value"):
+                add_if_external(source["value"])
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
     return list(dict.fromkeys(sources))
@@ -920,10 +934,9 @@ def ensure_instance(cfg: dict, project_dir: str, label: str = "default",
         # port conflict reconciliation: that helper can write local config and
         # Compose, which a drift/unavailable refusal must never do.
         if existing and existing.get("status") == "ready":
-            live_cfg = resolve_instances(cfg).get(existing.get("instance"))
-            server = (live_cfg or {}).get("server", existing.get("server"))
+            server = _valid_server(existing.get("server") or pconf.get("server") or "nginx")
             if server != "herd":
-                desired_sources = _desired_source_mounts(cfg, live_cfg or {})
+                desired_sources = _desired_source_mounts(cfg, root, pconf)
                 attestation = (
                     attest_source_mounts(existing["instance"], str(server), desired_sources)
                     if desired_sources is not None else

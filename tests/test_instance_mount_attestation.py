@@ -28,7 +28,7 @@ def _inspect_run(mounts_by_service, *, unavailable=False, malformed=False):
     def run(command, **_kwargs):
         if unavailable:
             return _Result(1, "")
-        if command[:3] == ["docker", "ps", "-aq"]:
+        if command[:3] == ["docker", "ps", "-q"]:
             label = next(item for item in command if item.startswith("label=com.docker.compose.service="))
             service = label.rsplit("=", 1)[-1]
             return _Result(0, f"container-{service}\n")
@@ -52,9 +52,9 @@ class TestSourceMountAttestation(unittest.TestCase):
 
     def test_apache_nginx_and_litespeed_accept_equal_canonical_source_sets(self):
         sources = ["/tmp/plugins-home", "/tmp/extra-source"]
-        for server, services in (("apache", ("wp", "wpcli")),
-                                 ("nginx", ("wp", "wpcli", "nginx")),
-                                 ("litespeed", ("wp", "wpcli"))):
+        for server, services in (("apache", ("wp",)),
+                                 ("nginx", ("wp", "nginx")),
+                                 ("litespeed", ("wp",))):
             mounts = {service: self._mounts(sources) for service in services}
             with self.subTest(server=server), \
                     mock.patch.object(_docker, "run", _inspect_run(mounts)):
@@ -71,7 +71,7 @@ class TestSourceMountAttestation(unittest.TestCase):
             "destination_changed": sources,
         }
         for case, observed_sources in cases.items():
-            mounts = {service: self._mounts(observed_sources) for service in ("wp", "wpcli")}
+            mounts = {"wp": self._mounts(observed_sources)}
             if case == "writable":
                 mounts["wp"][0]["RW"] = True
             if case == "destination_changed":
@@ -116,9 +116,6 @@ class TestSourceMountAttestation(unittest.TestCase):
         patches = [mock.patch.object(_instances, name, side_effect=AssertionError(name)) for name in writes]
         with mock.patch.object(_instances, "_core", return_value=state), \
                 mock.patch.object(_instances, "_instance_reachable", return_value=False), \
-                mock.patch.object(_instances, "resolve_instances", return_value={
-                    "fixture": {"server": "nginx", "extra_mounts": ["/tmp/extra-source"]},
-                }), \
                 mock.patch.object(_instances, "attest_source_mounts", return_value={
                     "ok": False, "code": "instance_mount_drift",
                 }) as attest, \
@@ -131,9 +128,53 @@ class TestSourceMountAttestation(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "instance_mount_drift")
         self.assertFalse(result["mutated"])
         state.registry_put.assert_not_called()
-        self.assertEqual(set(attest.call_args.args[2]), {
-            str(missing_plugins_home.resolve()), str(Path("/tmp/extra-source").resolve()),
-        })
+        self.assertEqual(attest.call_args.args[2], [str(missing_plugins_home.resolve())])
+
+    def test_ready_attestation_uses_current_project_sources_not_persisted_mounts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plugins_home = root / "plugins-home"
+            current_source = root / "current-source"
+            stale_source = root / "stale-source"
+            current_source.mkdir()
+            stale_source.mkdir()
+
+            class State:
+                ConfigError = RuntimeError
+
+                @staticmethod
+                @contextlib.contextmanager
+                def project_lock(_value):
+                    yield
+
+                @staticmethod
+                def load_project_config(_project, label=None):
+                    return {"root": str(root), "server": "apache",
+                            "plugins": [str(current_source)]}
+
+                @staticmethod
+                def registry_get(_root, label=None):
+                    return {"instance": "fixture", "status": "ready", "server": "apache"}
+
+            with mock.patch.object(_instances, "_core", return_value=State()), \
+                    mock.patch.object(_instances, "attest_source_mounts", return_value={
+                        "ok": False, "code": "instance_mount_drift",
+                    }) as attest, \
+                    mock.patch.object(_instances, "_resolve_port_conflicts", side_effect=AssertionError), \
+                    mock.patch.object(_instances, "resolve_instances", side_effect=AssertionError):
+                result = _instances.ensure_instance(
+                    {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                )
+
+            self.assertEqual(result["error"]["code"], "instance_mount_drift")
+            self.assertEqual(set(attest.call_args.args[2]), {
+                str(plugins_home.resolve()), str(current_source.resolve()),
+            })
+            self.assertNotIn(str(stale_source.resolve()), attest.call_args.args[2])
+            self.assertEqual(_instances._desired_source_mounts(
+                {"defaults": {"plugins_home": str(plugins_home)}}, str(root),
+                {"plugins": []},
+            ), [str(plugins_home.resolve())])
 
     def test_herd_bypasses_docker_observation(self):
         self.assertEqual(_docker.attest_source_mounts("fixture", "herd", []), {"ok": True})

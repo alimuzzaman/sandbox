@@ -926,7 +926,10 @@ def _remote_workspace_service_status(resolved_target):
 
     remote = getattr(resolved_target, "remote", None)
     if not isinstance(remote, dict):
-        remote = _remote.get_remote(getattr(resolved_target, "remote_name", None))
+        remote_name = getattr(resolved_target, "remote_name", None)
+        if not isinstance(remote_name, str) or not remote_name:
+            return {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+        remote = _remote.get_remote(remote_name)
     if not isinstance(remote, dict):
         # Let the application boundary classify absent evidence as unavailable
         # without exposing the requested name or any registry payload.

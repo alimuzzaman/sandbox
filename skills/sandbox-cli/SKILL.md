@@ -298,6 +298,12 @@ PHP matters.
 sb apply --project-dir .        # reconciles the LIVE site to the config
 ```
 
+If a ready Docker instance's source self-binds are drifted or cannot be
+attested, `sb ensure` returns `instance_mount_drift` or
+`instance_mount_state_unavailable` without changing local state. Inspect Docker
+state, then use the explicit `sb apply --project-dir .`; do not retry ensure as
+a substitute for reconciliation. Herd has no Docker mount attestation.
+
 Apply moves WordPress core to match the config: a pin installs that exact build
 (upgrade or downgrade), no pin updates to the current release, and both run
 `wp core update-db` afterwards. Editing a pin without applying changes nothing

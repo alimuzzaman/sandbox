@@ -875,7 +875,7 @@ Per-project (each plugin carries its own sandbox.config.json):
     # fallback, move it once when the selected base is genuinely empty.  The
     # helper re-execs this exact command after staging the data; explicit
     # migration/home commands keep their own dry-run and relocation semantics.
-    if args.cmd not in {"migrate", "home"}:
+    if args.cmd not in {"migrate", "home", "ensure"}:
         from sandbox.commands.migrate import maybe_auto_migrate
         maybe_auto_migrate()
 
@@ -1031,8 +1031,10 @@ Per-project (each plugin carries its own sandbox.config.json):
     # environment file is still refreshed below.  Keeping this after target
     # resolution and capability preflight preserves the historical ordering
     # for commands that must refuse an invalid target first.
-    from sandbox.commands.migrate import finalize_auto_migration
-    auto_migration_finalized = finalize_auto_migration(cfg)
+    auto_migration_finalized = False
+    if args.cmd != "ensure":
+        from sandbox.commands.migrate import finalize_auto_migration
+        auto_migration_finalized = finalize_auto_migration(cfg)
 
     # (Re)generate per-instance compose files so they're always in sync with the
     # registered instances. Cheap + idempotent.
@@ -1042,7 +1044,11 @@ Per-project (each plugin carries its own sandbox.config.json):
     bounded_resource_status = (
         args.cmd == "resources" and getattr(args, "action", None) == "status"
     )
-    if not bounded_resource_status and args.cmd != "secrets":
+    # Project-routed ensure owns its ready-path attestation.  Pre-writing
+    # Compose or the legacy environment here would mutate persistent state
+    # before it can refuse a stale live mount set.
+    ensure_attestation_gate = args.cmd == "ensure" and args.cmd in PROJECT_ROUTED
+    if not bounded_resource_status and args.cmd != "secrets" and not ensure_attestation_gate:
         if not auto_migration_finalized:
             write_compose_files(cfg)
         # Keep the legacy `.env` populated so anyone still invoking the

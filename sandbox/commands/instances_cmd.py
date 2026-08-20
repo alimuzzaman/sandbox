@@ -194,7 +194,9 @@ def cmd_ensure(cfg, args) -> None:
         # operator and printed a traceback instead.
         reason = (entry or {}).get("reason") if isinstance(entry, dict) else None
         detail = (entry or {}).get("error") if isinstance(entry, dict) else None
-        code = reason.get("code") if isinstance(reason, dict) else reason
+        error = detail if isinstance(detail, dict) else None
+        code = (reason.get("code") if isinstance(reason, dict) else reason) \
+            or (error.get("code") if error else None)
         # A runtime that succeeds without an instance record is not a failure.
         # Managed-native reports a backend and health instead of the Compose
         # instance entry, and printing "instance is not ready: ready" for a
@@ -215,7 +217,8 @@ def cmd_ensure(cfg, args) -> None:
         # message plus the completed steps otherwise.
         if getattr(args, "json", False):
             _print_ensure_json(entry, compact=True)
-        message = reason.get("message") if isinstance(reason, dict) else None
+        message = (reason.get("message") if isinstance(reason, dict) else None) \
+            or (error.get("message") if error else None)
         failed_after = reason.get("failed_after") if isinstance(reason, dict) else None
         summary = f"instance is not ready: {code or detail or 'no reason reported'}"
         if message and message != code:

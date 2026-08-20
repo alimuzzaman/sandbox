@@ -23,6 +23,38 @@ class RejectingService:
 
 
 class TestRuntimeTransportPreflight(unittest.TestCase):
+    def test_cli_ensure_preserves_typed_mount_refusal_json_and_human_guidance(self):
+        import sandbox.commands.instances_cmd as commands
+
+        service = mock.Mock()
+        service.invoke.return_value = OperationResult(
+            False, "ensure", "/tmp/project", "wordpress", {
+                "ok": False, "mutated": False,
+                "error": {
+                    "code": "instance_mount_drift",
+                    "message": "live source bind drift; run `sb apply --project-dir <project-dir>`",
+                },
+            },
+        )
+        for as_json in (True, False):
+            args = types.SimpleNamespace(project_dir="/tmp/project", label="default",
+                                         create=False, json=as_json, local=True)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with self.subTest(json=as_json), \
+                    mock.patch.object(commands, "wordpress_runtime_service", return_value=service), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
+                    self.assertRaises(SystemExit) as raised:
+                commands.cmd_ensure({}, args)
+            self.assertEqual(raised.exception.code, 1)
+            if as_json:
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["error"]["code"], "instance_mount_drift")
+                self.assertFalse(payload["mutated"])
+            else:
+                self.assertIn("instance_mount_drift", stderr.getvalue())
+                self.assertIn("sb apply --project-dir <project-dir>", stderr.getvalue())
+
     def test_cli_ensure_rejects_before_legacy_ensure(self):
         import sandbox.commands.instances_cmd as commands
 

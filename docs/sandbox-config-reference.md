@@ -702,6 +702,15 @@ database or uploads**. Use it after editing config — toggling a constant
 (`TEMPLATELY_DEV_API`, `WP_DEBUG`), adding a plugin/theme, or enabling
 multisite. It:
 
+For a ready Docker instance, `sb ensure` first attests that every required web
+plane has exactly the read-only self-bind source set generated from
+`defaults.plugins_home` plus that instance's `extra_mounts`. Drift returns
+`instance_mount_drift`; unavailable or malformed Docker inspection returns
+`instance_mount_state_unavailable`. Both refuse before writing registry,
+Compose, environment, snapshots, or project wiring. Run the explicit
+`sb apply --project-dir <DIR>` / `apply_config` reconciliation after the state
+is available; Herd has no Docker source-bind attestation.
+
 1. Rewrites the `instances.<name>` block in `sandbox.local.yml` from the
    current project config (constants, multisite flag, version pins, extra
    bind-mounts).

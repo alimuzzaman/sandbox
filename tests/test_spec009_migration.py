@@ -5,6 +5,7 @@ import json
 import io
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,12 @@ class TestSpec009MigrationSafety(unittest.TestCase):
             with self.assertRaises(migrate.MigrationConflict):
                 with migrate._migration_lock(self.destination_base):
                     pass
+
+    def test_migration_lock_preserves_body_io_errors(self):
+        with self.assertRaises(OSError) as caught:
+            with migrate._migration_lock(self.destination_base):
+                raise OSError("simulated migration copy failure")
+        self.assertEqual(str(caught.exception), "simulated migration copy failure")
 
     def test_transfer_journal_rebases_a_real_checkpointed_workspace_index(self):
         old_base = self.root / "old-home"
@@ -215,6 +222,97 @@ class TestSpec009MigrationSafety(unittest.TestCase):
             {item.workspace_id for item in repository.list(include_legacy=False)},
             {first.workspace_id, second.workspace_id},
         )
+
+    def test_subprocess_repository_writer_blocks_transfer_before_journal_or_copy(self):
+        old_base = self.root / "legacy-home"
+        new_base = self.root / "new-home"
+        old_runtime = old_base / "runtime"
+        repository = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        )
+        first = repository.register("project:one", "first")
+        project_root = Path(__file__).resolve().parents[1]
+        script = """
+from pathlib import Path
+import sys
+from sandbox.workspaces.maintenance import base_maintenance_lock
+from sandbox.workspaces.repository import WorkspaceRepository
+base = Path(sys.argv[1])
+repository = WorkspaceRepository(base / 'runtime' / 'workspaces' / 'index.sqlite3',
+                                 base / 'runtime' / 'jobs' / 'workspaces')
+with base_maintenance_lock(base, exclusive=False):
+    print('locked', flush=True)
+    sys.stdin.readline()
+    record = repository.register('project:two', 'second')
+print(record.workspace_id, flush=True)
+"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(project_root) + os.pathsep + env.get("PYTHONPATH", "")
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(old_base)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env,
+        )
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "locked")
+            with self.assertRaises(migrate.MigrationConflict):
+                with migrate._migration_lock(old_base, new_base):
+                    migrate._transfer(
+                        old_runtime, new_base / "runtime", old_base, new_base, [])
+            self.assertTrue((old_runtime / "workspaces" / "index.sqlite3").exists())
+            self.assertFalse((new_base / migrate._JOURNAL).exists())
+            self.assertFalse((new_base / "runtime" / "workspaces" / "index.sqlite3").exists())
+            process.stdin.write("release\n")
+            process.stdin.close()
+            self.assertTrue(process.stdout.readline().strip().startswith("ws_"))
+            self.assertEqual(process.wait(timeout=5), 0, process.stderr.read())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+        records = WorkspaceRepository(
+            old_runtime / "workspaces" / "index.sqlite3",
+            old_runtime / "jobs" / "workspaces",
+        ).list(include_legacy=False)
+        self.assertEqual(len(records), 2)
+        self.assertIn(first.workspace_id, {item.workspace_id for item in records})
+        self.assertEqual({item.label for item in records}, {"first", "second"})
+
+    def test_busy_or_malformed_workspace_checkpoint_retains_source_before_journal(self):
+        for case in ("busy", "malformed"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source_base = root / "old-home"
+                destination_base = root / "new-home"
+                source_runtime = source_base / "runtime"
+                index = source_runtime / "workspaces" / "index.sqlite3"
+                index.parent.mkdir(parents=True)
+                held_connection = None
+                if case == "busy":
+                    repository = WorkspaceRepository(
+                        index, source_runtime / "jobs" / "workspaces")
+                    repository.register("project:one", "first")
+                    held_connection = sqlite3.connect(index, timeout=0.0, isolation_level=None)
+                    held_connection.execute("BEGIN IMMEDIATE")
+                else:
+                    index.write_bytes(b"SQLite format 3\x00malformed-index")
+                try:
+                    with self.assertRaises(migrate.MigrationConflict):
+                        migrate._transfer(
+                            source_runtime, destination_base / "runtime",
+                            source_base, destination_base, [],
+                        )
+                finally:
+                    if held_connection is not None:
+                        held_connection.execute("ROLLBACK")
+                        held_connection.close()
+                self.assertTrue(index.exists())
+                self.assertFalse((destination_base / migrate._JOURNAL).exists())
+                self.assertFalse((destination_base / "runtime" / "workspaces" / "index.sqlite3").exists())
 
     def test_finalize_regenerates_proxy_compose_and_tools(self):
         herd = self.destination / "herd-shims"

@@ -59,8 +59,11 @@ def base_maintenance_lock(*bases: Path, exclusive: bool, timeout_seconds: float 
                 entry["count"] = int(entry["count"]) + 1
                 referenced.append(base)
                 continue
-            base.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(base / BASE_MAINTENANCE_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                base.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(base / BASE_MAINTENANCE_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError as exc:
+                raise BaseMaintenanceBusy("base maintenance lock is unavailable") from exc
             try:
                 os.fchmod(descriptor, 0o600)
                 flags = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB

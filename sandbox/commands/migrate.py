@@ -154,17 +154,19 @@ def _migration_lock(*bases: Path):
     """Fail closed when another Sandbox process is already relocating state."""
     if getattr(_MIGRATION_LOCK_STATE, "held", False):
         raise MigrationConflict("Migration is already running; wait for it to finish and retry.")
+    lock = base_maintenance_lock(*bases, exclusive=True)
     try:
-        with base_maintenance_lock(*bases, exclusive=True):
-            _MIGRATION_LOCK_STATE.held = True
-            try:
-                yield
-            finally:
-                _MIGRATION_LOCK_STATE.held = False
-    except (BaseMaintenanceBusy, OSError) as exc:
+        lock.__enter__()
+    except BaseMaintenanceBusy as exc:
         raise MigrationConflict(
             "Migration is already running or workspace state is in use; wait for it to finish and retry."
         ) from exc
+    try:
+        _MIGRATION_LOCK_STATE.held = True
+        yield
+    finally:
+        _MIGRATION_LOCK_STATE.held = False
+        lock.__exit__(None, None, None)
 
 
 def _journal_path(base: Path) -> Path:

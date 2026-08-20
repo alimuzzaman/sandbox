@@ -323,7 +323,7 @@ class WorkspaceRepository:
         try:
             with _base_maintenance_lock(self._maintenance_base(), exclusive=False):
                 yield
-        except BaseMaintenanceBusy as exc:
+        except (BaseMaintenanceBusy, OSError) as exc:
             raise WorkspaceIndexError(
                 "workspace_busy",
                 "workspace repository is unavailable while home maintenance is active",
@@ -496,7 +496,7 @@ class WorkspaceRepository:
             with _base_maintenance_lock(destination, exclusive=False):
                 return cls._rebase_home_locators_locked(
                     index, source_base, destination)
-        except BaseMaintenanceBusy as exc:
+        except (BaseMaintenanceBusy, OSError) as exc:
             raise WorkspaceIndexError(
                 "workspace_busy",
                 "workspace repository is unavailable while home maintenance is active",

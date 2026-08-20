@@ -102,7 +102,16 @@ def validate_remote_name(name: str) -> str:
 
 
 def get_remote(name: str) -> dict | None:
-    return _remote_block().get(name)
+    entry = _remote_block().get(name)
+    if not isinstance(entry, dict):
+        return entry
+    # Keep the owning record name available to pre-staging admission without
+    # changing the persisted secret-store schema.  The marker is internal and
+    # never sent to a remote command or included in a public envelope.
+    copy = dict(entry)
+    if isinstance(name, str) and _NAME_RE.fullmatch(name):
+        copy["_remote_name"] = name
+    return copy
 
 
 def resolve_source_ref(project_root: str | Path, source_ref: str) -> str:
@@ -138,6 +147,8 @@ def deploy_exact_working_tree(
     *,
     source_ref: str | None = None,
     source_root: str | Path | None = None,
+    required_subnets: int = 1,
+    remote_name: str | None = None,
 ) -> dict:
     """Deploy committed, modified, and untracked project state once.
 
@@ -146,6 +157,22 @@ def deploy_exact_working_tree(
     job to prove which exact working tree it was accepted against.
     """
     root = Path(project_root).resolve()
+    # Admission is intentionally the first remote operation.  In particular,
+    # it must precede ensure_deploy_repo(), git push, reset, dirty-overlay
+    # upload, and any subsequent workspace/instance staging.  A partial or
+    # unavailable probe is a bounded refusal; it is never converted into a
+    # count-based or disk-space-based guess.
+    admitted_remote_name = remote_name
+    if not (isinstance(admitted_remote_name, str)
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", admitted_remote_name)):
+        candidate = remote.get("_remote_name") if isinstance(remote, dict) else None
+        admitted_remote_name = candidate if isinstance(candidate, str) \
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", candidate) else None
+    network_capacity = remote_network_capacity_admission(
+        remote, required_subnets=required_subnets, remote_name=admitted_remote_name,
+    )
+    if network_capacity.get("ok") is not True:
+        raise NetworkCapacityAdmissionError(network_capacity)
     resolved_source = resolve_source_ref(root, source_ref) if source_ref is not None else None
     target = ensure_deploy_repo(remote, root)
     branch = current_branch(root) if resolved_source is None else None
@@ -162,6 +189,7 @@ def deploy_exact_working_tree(
     return {"target_path": target, "commit": pushed_sha, "dirty": bool(diff_text or untracked),
             "dirty_digest": dirty, "identity": f"sha256:{identity}",
             "uncommitted_files_applied": applied,
+            "network_capacity": network_capacity,
             "source_ref": source_ref,
             # For a nested immutable deploy the pushed commit is the
             # source-root subtree artifact; retain the user's resolved ref as
@@ -1486,6 +1514,266 @@ REMOTE_DOCKER_ADDRESS_POOLS = (
     {"base": "10.201.0.0/16", "size": 24},
     {"base": "10.202.0.0/16", "size": 24},
 )
+
+
+# This is deliberately separate from ``remote_docker_pool``.  That command
+# plans a reviewed daemon configuration transaction; admission is a read-only
+# preflight that must prove the currently configured pool and every currently
+# allocated user-defined subnet before a deploy/staging side effect begins.
+_REMOTE_NETWORK_CAPACITY_PROGRAM = r'''
+import hashlib
+import ipaddress
+import json
+from pathlib import Path
+import subprocess
+
+CONFIG = Path("/etc/docker/daemon.json")
+MAX_SUBNETS = 1000000
+
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+
+def fail(code, reason):
+    emit({"ok": False, "status": "unavailable", "code": code,
+          "reason": reason})
+    raise SystemExit(0)
+
+
+def run(argv, timeout):
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def opaque(kind, value):
+    digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    return kind + "-" + digest[:20]
+
+
+def load_pools():
+    try:
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        fail("docker_address_pools_unavailable", "daemon address-pool configuration is unavailable")
+    rows = config.get("default-address-pools") if isinstance(config, dict) else None
+    if not isinstance(rows, list) or not rows:
+        fail("docker_address_pools_unavailable", "daemon address-pool configuration is unavailable")
+    result = []
+    for item in rows:
+        if not isinstance(item, dict):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        try:
+            base = ipaddress.ip_network(item.get("base"), strict=True)
+            size = item.get("size")
+        except (TypeError, ValueError):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        if (base.version != 4 or not base.is_private or isinstance(size, bool)
+                or not isinstance(size, int) or size < base.prefixlen or size > 30):
+            fail("docker_address_pools_invalid", "daemon address-pool configuration is invalid")
+        capacity = 1 << (size - base.prefixlen)
+        if capacity < 1 or capacity > MAX_SUBNETS:
+            fail("docker_address_pools_invalid", "daemon address-pool configuration exceeds probe bounds")
+        result.append({
+            "base": base, "size": size,
+            "id": opaque("pool", str(base) + "/" + str(size)),
+            "units": set(),
+        })
+    for left_index, left in enumerate(result):
+        for right in result[left_index + 1:]:
+            if left["base"].overlaps(right["base"]):
+                fail("docker_address_pools_invalid", "daemon address pools overlap")
+    return result
+
+
+def owner_class(labels):
+    labels = labels if isinstance(labels, dict) else {}
+    project = labels.get("com.docker.compose.project")
+    working = str(labels.get("com.docker.compose.project.working_dir") or "")
+    if (isinstance(project, str) and project.startswith("sandbox-")) or \
+            "/sandbox/" in working or working.endswith("/sandbox"):
+        return "sandbox"
+    if isinstance(project, str) and project:
+        return "foreign"
+    return "unattributed"
+
+
+def units_for(subnet, pool):
+    if not subnet.subnet_of(pool["base"]):
+        return ()
+    unit_prefix = pool["size"]
+    unit_size = 1 << (32 - unit_prefix)
+    first = (int(subnet.network_address) - int(pool["base"].network_address)) // unit_size
+    count = 1 << max(unit_prefix - subnet.prefixlen, 0)
+    if first < 0 or first + count > (1 << (unit_prefix - pool["base"].prefixlen)):
+        return ()
+    return range(first, first + count)
+
+
+pools = load_pools()
+ids = run(["docker", "network", "ls", "-q"], 20)
+if ids is None or ids.returncode != 0:
+    fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
+network_ids = [value.strip() for value in (ids.stdout or "").splitlines() if value.strip()]
+rows = []
+if network_ids:
+    inspected = run(["docker", "network", "inspect", *network_ids], 30)
+    if inspected is None or inspected.returncode != 0:
+        fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
+    try:
+        rows = json.loads(inspected.stdout or "[]")
+    except (TypeError, ValueError):
+        fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
+    if not isinstance(rows, list):
+        fail("docker_network_inventory_invalid", "Docker network inventory is invalid")
+
+allocations = {}
+ownership = {"sandbox": 0, "foreign": 0, "unattributed": 0}
+unknown_networks = 0
+for row in rows:
+    if not isinstance(row, dict):
+        unknown_networks += 1
+        continue
+    name = str(row.get("Name") or "")
+    if name in {"bridge", "host", "none"}:
+        continue
+    labels = row.get("Labels") if isinstance(row.get("Labels"), dict) else {}
+    owner = owner_class(labels)
+    ipam = row.get("IPAM") if isinstance(row.get("IPAM"), dict) else {}
+    configs = ipam.get("Config") if isinstance(ipam.get("Config"), list) else None
+    if not configs:
+        unknown_networks += 1
+        continue
+    for config in configs:
+        if not isinstance(config, dict) or not config.get("Subnet"):
+            unknown_networks += 1
+            continue
+        try:
+            subnet = ipaddress.ip_network(config.get("Subnet"), strict=False)
+        except (TypeError, ValueError):
+            unknown_networks += 1
+            continue
+        if subnet.version != 4:
+            continue
+        matched = False
+        for pool in pools:
+            units = units_for(subnet, pool)
+            if not units:
+                continue
+            matched = True
+            for unit in units:
+                key = (pool["id"], unit)
+                previous = allocations.get(key)
+                if previous is None:
+                    allocations[key] = owner
+                elif previous != owner:
+                    allocations[key] = "unattributed"
+        if not matched:
+            # A valid subnet outside the configured default pools is not an
+            # allocation from those pools, but its presence is still retained
+            # as bounded evidence through the network inventory status.
+            continue
+
+if unknown_networks:
+    emit({"ok": True, "status": "partial", "reason": "network_ipam_unavailable",
+          "unknown_network_count": unknown_networks})
+    raise SystemExit(0)
+
+for owner in ownership:
+    ownership[owner] = sum(value == owner for value in allocations.values())
+pool_rows = []
+for pool in pools:
+    total = 1 << (pool["size"] - pool["base"].prefixlen)
+    allocated = sum(key[0] == pool["id"] for key in allocations)
+    pool_rows.append({"pool_id": pool["id"], "capacity_subnets": total,
+                      "allocated_subnets": allocated,
+                      "usable_subnets": total - allocated})
+total = sum(item["capacity_subnets"] for item in pool_rows)
+allocated = len(allocations)
+emit({
+    "ok": True, "status": "complete",
+    "pools": pool_rows,
+    "totals": {"total_subnets": total, "allocated_subnets": allocated,
+               "usable_subnets": total - allocated},
+    "ownership": {
+        "sandbox_allocated_subnets": ownership["sandbox"],
+        "foreign_allocated_subnets": ownership["foreign"],
+        "unattributed_allocated_subnets": ownership["unattributed"],
+    },
+})
+'''
+
+
+class NetworkCapacityAdmissionError(RuntimeError):
+    """A remote operation was refused before any deploy/staging side effect."""
+
+    def __init__(self, decision: dict):
+        self.decision = decision
+        code = decision.get("code") or "docker_network_capacity_unavailable"
+        # Keep the public exception bounded and machine-readable.  All values
+        # in ``decision`` are produced by the redacted policy evaluator (opaque
+        # IDs only), so callers can surface this without forwarding probe
+        # paths, names, or command lines.
+        super().__init__(json.dumps({
+            "code": code,
+            "status": decision.get("status", "blocked"),
+            "resource_class": decision.get("resource_class"),
+            "capacity": decision.get("capacity"),
+            "recovery": decision.get("recovery"),
+            "side_effects": decision.get("side_effects"),
+        }, sort_keys=True))
+
+
+def remote_network_capacity_admission(
+    remote: dict,
+    *,
+    required_subnets: int = 1,
+    remote_name: str | None = None,
+    timeout: int = 60,
+) -> dict:
+    """Probe configured Docker pools and evaluate explicit usable capacity."""
+    from sandbox.resources.network_capacity import evaluate_network_capacity
+
+    if isinstance(required_subnets, bool) or not isinstance(required_subnets, int) \
+            or required_subnets < 1:
+        raise ValueError("required_subnets must be a positive integer")
+    import base64
+
+    encoded = base64.b64encode(_REMOTE_NETWORK_CAPACITY_PROGRAM.encode()).decode()
+    command = "sudo -n python3 -c " + shlex.quote(
+        "import base64;exec(base64.b64decode(" + repr(encoded) + "))"
+    )
+    try:
+        result = ssh_run(remote, command, timeout=max(1, int(timeout)))
+    except Exception:
+        result = None
+    payload = None
+    output = getattr(result, "stdout", "") if result is not None else ""
+    if isinstance(output, str):
+        for line in reversed(output.splitlines()):
+            try:
+                candidate = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+    if payload is None:
+        payload = {"status": "unavailable", "reason": "probe_output_unavailable"}
+    if getattr(result, "returncode", 1) != 0 and payload.get("status") == "complete":
+        payload = {"status": "unavailable", "reason": "probe_failed"}
+    decision = evaluate_network_capacity(
+        payload, required_subnets=required_subnets, remote_name=remote_name,
+    )
+    return decision
+
+
+# Short names make the pre-staging seam easy to inject in focused tests and
+# preserve one feature-owned implementation.
+remote_network_capacity = remote_network_capacity_admission
 
 
 def _remote_docker_pool_program(*, confirm: bool, recover_interrupted: bool = False,

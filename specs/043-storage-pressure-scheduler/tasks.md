@@ -52,12 +52,12 @@ parallel.
 
 ## Phase 4 — The scheduled run (user stories 3, 4)
 
-- [ ] **T010** Add `ReclaimService.monitor(policy, *, trigger, dry_run, budget_seconds)` to
+- [x] **T010** Add `ReclaimService.monitor(policy, *, trigger, dry_run, budget_seconds)` to
   `sandbox/resources/reclaim_service.py`: measure with `directory_cache="cache_only"`,
   classify through `policy.disk_capacity_pressure` with the resolved ratios, run the safe
   tier only when the gate is satisfied and not `dry_run`, always run the reap (dry unless
   `reap_enabled` and not `dry_run`), and return the MonitorRunRecord shape.
-- [ ] **T011** Ensure the automatic cleanup call is `tier="safe", trigger="scheduled_auto"`
+- [x] **T011** Ensure the automatic cleanup call is `tier="safe", trigger="scheduled_auto"`
   and that a non-safe configured tier propagates the existing `invalid_auto_tier` refusal
   before any provider call.
 
@@ -89,7 +89,7 @@ parallel.
 - [ ] **T018** [P] `tests/test_storage_monitor_schedule.py` — plan renders with
   `enabled: false` and writes nothing; activation and deactivation refused without confirm;
   fixed argv enforced; both platforms render; idempotent activation.
-- [ ] **T019** [P] `tests/test_storage_monitor_runner.py` — default configuration deletes
+- [x] **T019** [P] `tests/test_storage_monitor_runner.py` — default configuration deletes
   nothing at every level; auto path runs only `safe` and only when eligible; non-safe tier
   refused before any provider call; reap dry by default and real when opted in; record
   written with the full contract; lock held yields `skipped`.

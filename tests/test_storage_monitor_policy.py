@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import builtins
+from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
+import subprocess
+import tempfile
 from unittest import TestCase, mock
 
 from sandbox.config.manifest import MACHINE_CONFIG_PROVIDERS, apply_machine_config
@@ -13,6 +17,7 @@ from sandbox.config.storage_monitor import (
     normalize_storage_monitor,
 )
 from sandbox.resources import reclaim
+from sandbox.resources import monitor
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -200,6 +205,187 @@ class TestStorageMonitorYamlDefaults(TestCase):
             "record_max_age_seconds": 21600,
         })
         self.assertIn("auto_enabled` and `reap_enabled` are deletion authority", text)
+
+
+class TestStorageMonitorResolution(TestCase):
+    def test_precedence_and_sparse_remote_override(self):
+        # load_config() owns the checked-in + machine-local merge.  The
+        # monitor resolver then overlays only the target's sparse keys before
+        # the manifest performs its one normalization pass.
+        loaded = {
+            "resources": {
+                "monitor": {
+                    "warn_ratio": 0.22,
+                    "critical_ratio": 0.09,
+                    "auto_enabled": False,
+                    "schedule_calendar": "daily",
+                },
+            },
+        }
+        entry = {
+            "ssh": "owner@example.invalid",
+            "storage_monitor": {"auto_enabled": True, "auto_ratio": 0.11},
+        }
+        with mock.patch.object(monitor, "load_config", return_value=loaded), \
+             mock.patch.object(monitor, "get_remote", return_value=entry):
+            policy = monitor.resolve_policy("remote-a")
+
+        self.assertEqual(policy["warn_ratio"], 0.22)
+        self.assertEqual(policy["critical_ratio"], 0.09)
+        self.assertTrue(policy["auto_enabled"])
+        self.assertEqual(policy["auto_ratio"], 0.11)
+        self.assertEqual(policy["schedule_calendar"], "daily")
+        self.assertFalse(policy["reap_enabled"])
+        self.assertNotIn("ssh", policy)
+
+    def test_local_resolution_uses_machine_layer_and_built_in_fallbacks(self):
+        loaded = {"resources": {"monitor": {"auto_enabled": True}}}
+        with mock.patch.object(monitor, "load_config", return_value=loaded) as load, \
+             mock.patch.object(monitor, "apply_machine_config",
+                               wraps=apply_machine_config) as apply:
+            policy = monitor.resolve_policy(None)
+
+        load.assert_called_once_with()
+        apply.assert_called_once()
+        self.assertTrue(policy["auto_enabled"])
+        self.assertEqual(policy["warn_ratio"], 0.15)
+        self.assertEqual(policy["critical_ratio"], 0.05)
+        self.assertEqual(policy["auto_ratio"], 0.05)
+
+    def test_remote_only_sparse_layer_keeps_built_in_defaults(self):
+        with mock.patch.object(monitor, "load_config", return_value={}), \
+             mock.patch.object(
+                 monitor, "get_remote",
+                 return_value={"storage_monitor": {"auto_enabled": True}},
+             ):
+            policy = monitor.resolve_policy("remote-a")
+        self.assertTrue(policy["auto_enabled"])
+        self.assertEqual(policy["warn_ratio"], 0.15)
+        self.assertEqual(policy["critical_ratio"], 0.05)
+        self.assertEqual(policy["auto_ratio"], 0.05)
+
+    def test_registered_remote_from_list_remotes_supplies_sparse_override(self):
+        with mock.patch.object(monitor, "load_config", return_value={}), \
+             mock.patch.object(monitor, "get_remote", return_value=None), \
+             mock.patch.object(
+                 monitor,
+                 "list_remotes",
+                 return_value={"remote-a": {"storage_monitor": {"warn_ratio": 0.3}}},
+             ):
+            policy = monitor.resolve_policy("remote-a")
+        self.assertEqual(policy["warn_ratio"], 0.3)
+        self.assertEqual(policy["critical_ratio"], 0.05)
+
+    def test_unknown_target_fails_before_config_or_process_work(self):
+        with mock.patch.object(monitor, "get_remote", return_value=None), \
+             mock.patch.object(monitor, "list_remotes", return_value={}), \
+             mock.patch.object(monitor, "load_config",
+                               side_effect=AssertionError("config should not load")), \
+             mock.patch.object(subprocess, "run",
+                               side_effect=AssertionError("no subprocess")):
+            with self.assertRaises(StorageMonitorConfigError) as raised:
+                monitor.resolve_policy("not-registered")
+        self.assertEqual(raised.exception.code, "unknown_target")
+        self.assertIn("not-registered", str(raised.exception))
+
+
+class TestStorageMonitorRecords(TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.temp.name)
+        self.runtime_patch = mock.patch.object(monitor, "RUNTIME_DIR", self.runtime)
+        self.runtime_patch.start()
+
+    def tearDown(self):
+        self.runtime_patch.stop()
+        self.temp.cleanup()
+
+    @staticmethod
+    def record(target="local", **extra):
+        value = {
+            "schema": 1,
+            "target": target,
+            "at": "2026-08-20T00:00:00Z",
+            "level": "normal",
+            "free_bytes": 100,
+            "total_bytes": 200,
+        }
+        value.update(extra)
+        return value
+
+    def test_path_is_opaque_and_uses_required_digest(self):
+        path = monitor.record_path({"kind": "remote", "name": "secret-host"})
+        expected = hashlib.sha256(b"remote:secret-host").hexdigest()[:24] + ".json"
+        self.assertEqual(path.name, expected)
+        self.assertNotIn("secret-host", str(path))
+        self.assertEqual(
+            monitor.record_path("local").name,
+            hashlib.sha256(b"local").hexdigest()[:24] + ".json",
+        )
+
+    def test_round_trip_is_private_and_missing_or_corrupt_reads_fail_closed(self):
+        record = self.record({
+            "kind": "remote",
+            "name": "remote-a",
+            "ssh": "do-not-persist",
+        })
+        path = monitor.write_record(record)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        loaded = monitor.read_record({"kind": "remote", "name": "remote-a"})
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["target"], {"kind": "remote", "name": "remote-a"})
+        self.assertNotIn("do-not-persist", path.read_text())
+
+        missing = monitor.read_record({"kind": "remote", "name": "other"})
+        self.assertIsNone(missing)
+        path.write_text("not-json", encoding="utf-8")
+        self.assertIsNone(monitor.read_record({"kind": "remote", "name": "remote-a"}))
+
+    def test_atomic_replacement_keeps_previous_record_on_failure_and_latest_only(self):
+        first = self.record(level="warning")
+        path = monitor.write_record(first)
+        original = path.read_text(encoding="utf-8")
+        second = self.record(level="critical")
+        with mock.patch.object(monitor.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaisesRegex(OSError, "replace failed"):
+                monitor.write_record(second)
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+        monitor.write_record(second)
+        self.assertEqual(monitor.read_record("local")["level"], "critical")
+        self.assertEqual(
+            [item for item in path.parent.iterdir() if item.suffix == ".json"],
+            [path],
+        )
+
+    def test_record_age_handles_valid_future_and_invalid_evidence(self):
+        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        record = self.record(at="2026-08-19T23:00:00Z")
+        self.assertEqual(monitor.record_age_seconds(record, now), 3600.0)
+        self.assertEqual(
+            monitor.record_age_seconds(self.record(at="2026-08-20T01:00:00Z"), now),
+            0.0,
+        )
+        self.assertIsNone(monitor.record_age_seconds({}, now))
+        self.assertIsNone(monitor.record_age_seconds(self.record(at="invalid"), now))
+        self.assertIsNone(monitor.record_age_seconds(self.record(at=None), now))
+
+    def test_write_record_uses_owner_only_fchmod_and_same_directory_tempfile(self):
+        real_mkstemp = monitor.tempfile.mkstemp
+        seen = {}
+
+        def capture_mkstemp(*args, **kwargs):
+            seen["dir"] = kwargs.get("dir")
+            return real_mkstemp(*args, **kwargs)
+
+        with mock.patch.object(monitor.tempfile, "mkstemp", side_effect=capture_mkstemp), \
+             mock.patch.object(monitor.os, "fchmod", wraps=monitor.os.fchmod) as fchmod:
+            path = monitor.write_record(self.record())
+        self.assertEqual(Path(seen["dir"]), path.parent)
+        fchmod.assert_called_once()
+        self.assertEqual(fchmod.call_args.args[1], 0o600)
 
 
 if __name__ == "__main__":

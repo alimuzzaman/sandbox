@@ -20,10 +20,10 @@ parallel.
 
 ## Phase 2 — Policy resolution and the run record (user stories 1, 3)
 
-- [ ] **T004** Create `sandbox/resources/monitor.py` with `resolve_policy(remote)` layering
+- [X] **T004** Create `sandbox/resources/monitor.py` with `resolve_policy(remote)` layering
   built-in defaults, `sandbox.yml`, `sandbox.local.yml`, and
   `remotes.<name>.storage_monitor`, raising `unknown_target` for an unregistered name.
-- [ ] **T005** In the same module, add the record store: `record_path(target)`,
+- [X] **T005** In the same module, add the record store: `record_path(target)`,
   `write_record(record)` (atomic replace, mode 0600), `read_record(target)`, and
   `record_age_seconds(record, now)`.
 - [ ] **T006** In the same module, add `monitor_lock(target)` — an O_EXCL lock with stale

@@ -306,6 +306,9 @@ class WorkspaceRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             calls = []
             service = WorkspaceService(_RemoteTarget(), JobStorage(temp, free_disk_reserve=0),
+                remote_service_status=lambda _target: {
+                    "ownership": "proven", "runtime_revision_state": "match",
+                },
                 remote_control=lambda target, action: calls.append((target.namespace, action)) or {
                     "ok": True, "action": action, "namespace": target.namespace,
                 })
@@ -317,6 +320,114 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertEqual(service.destroy(confirmed)["action"], "destroy")
             self.assertEqual(calls, [("remote:vps:test", action)
                                      for action in ("create", "status", "reset", "destroy")])
+
+    def test_remote_workspace_revision_preflight_runs_before_every_control_action(self):
+        with tempfile.TemporaryDirectory() as temp:
+            calls = []
+
+            def status(target):
+                calls.append(("status", target.workspace_label))
+                return {"ownership": "proven", "runtime_revision_state": "match"}
+
+            def control(target, action):
+                calls.append(("control", action))
+                return {"ok": True, "action": action}
+
+            service = WorkspaceService(
+                _RemoteTarget(), JobStorage(temp, free_disk_reserve=0),
+                remote_service_status=status, remote_control=control,
+            )
+            request = TargetRequest("/p", remote="vps", workspace="e2e")
+            confirmed = TargetRequest("/p", remote="vps", workspace="e2e", confirm=True)
+
+            service.create(request)
+            service.list(request)
+            service.status(request)
+            service.migration_plan(request)
+            service.migration_apply(TargetRequest(
+                "/p", remote="vps", workspace="e2e", migration_plan_id="plan-1",
+                confirm=True,
+            ))
+            service.reset(confirmed)
+            service.destroy(confirmed)
+
+            self.assertEqual(
+                [kind for kind, _value in calls],
+                ["status", "control", "status", "control", "status", "control",
+                 "status", "control", "status", "control", "status", "control",
+                 "status", "control"],
+            )
+
+    def test_remote_workspace_revision_and_ownership_failures_are_safe_and_pre_dispatch(self):
+        states = (
+            ("mismatch", "proven", "workspace_remote_revision_mismatch"),
+            ("unavailable", "proven", "workspace_remote_revision_unavailable"),
+            ("unknown", "proven", "workspace_remote_revision_unknown"),
+            ("match", "ambiguous", "workspace_remote_service_unproven"),
+            ("match", "missing", "workspace_remote_service_unproven"),
+            ("match", "unknown", "workspace_remote_service_unproven"),
+        )
+        for revision, ownership, expected_code in states:
+            with self.subTest(revision=revision, ownership=ownership), tempfile.TemporaryDirectory() as temp:
+                control_calls = []
+                service = WorkspaceService(
+                    _RemoteTarget(), JobStorage(temp, free_disk_reserve=0),
+                    remote_service_status=lambda _target, revision=revision, ownership=ownership: {
+                        "ownership": ownership,
+                        "runtime_revision_state": revision,
+                        "installed_runtime_revision": "remote-secret-like-value",
+                        "detail": "/Users/private/unit",
+                    },
+                    remote_control=lambda *_args: control_calls.append(True),
+                )
+                with self.assertRaises(Exception) as refused:
+                    service.list(TargetRequest("/p", remote="vps", workspace="e2e"))
+                self.assertEqual(refused.exception.code, expected_code)
+                self.assertEqual(control_calls, [])
+                self.assertEqual(
+                    refused.exception.details["observed"],
+                    {"ownership": ownership, "runtime_revision_state": revision},
+                )
+                self.assertEqual(
+                    refused.exception.details["recovery_command"],
+                    "./sb remote service migrate <name> --confirm --json",
+                )
+                self.assertNotIn("/Users/private", str(refused.exception))
+                self.assertNotIn("remote-secret-like-value", str(refused.exception))
+
+    def test_remote_workspace_missing_or_failed_preflight_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            control_calls = []
+            service = WorkspaceService(
+                _RemoteTarget(), JobStorage(temp, free_disk_reserve=0),
+                remote_control=lambda *_args: control_calls.append(True),
+            )
+            with self.assertRaises(Exception) as missing:
+                service.status(TargetRequest("/p", remote="vps", workspace="e2e"))
+            self.assertEqual(missing.exception.code, "workspace_remote_preflight_unavailable")
+            self.assertEqual(control_calls, [])
+            self.assertEqual(
+                missing.exception.details["observed"],
+                {"ownership": "unknown", "runtime_revision_state": "unavailable"},
+            )
+
+            service.remote_service_status = lambda _target: (_ for _ in ()).throw(
+                RuntimeError("ssh ubuntu@1.2.3.4 token=secret"))
+            with self.assertRaises(Exception) as failed:
+                service.status(TargetRequest("/p", remote="vps", workspace="e2e"))
+            self.assertEqual(failed.exception.code, "workspace_remote_preflight_unavailable")
+            self.assertNotIn("ubuntu@1.2.3.4", str(failed.exception))
+            self.assertNotIn("secret", str(failed.exception))
+
+    def test_local_workspace_operations_do_not_require_remote_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = WorkspaceService(
+                _Target(), JobStorage(temp, free_disk_reserve=0),
+                remote_service_status=lambda _target: self.fail("local must not probe remote"),
+            )
+            request = TargetRequest("/p", local=True, workspace="local-unit")
+            self.assertTrue(service.create(request)["ok"])
+            self.assertTrue(service.list(request)["ok"])
 
 
 class WorkspaceDegradedReportingTests(unittest.TestCase):

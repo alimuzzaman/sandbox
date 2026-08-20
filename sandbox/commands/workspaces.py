@@ -50,6 +50,9 @@ def configure_parser(parser) -> None:
 
 
 _RETENTION_ACTIONS = frozenset({"release", "ttl", "reap"})
+_REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
+_REMOTE_REVISION_STATES = frozenset({"match", "mismatch", "unavailable", "unknown"})
+_REMOTE_OWNERSHIP_STATES = frozenset({"proven", "missing", "ambiguous", "unknown"})
 
 
 def cmd_retention(args) -> None:
@@ -134,13 +137,39 @@ def cmd_workspace(_cfg, args) -> None:
     except Exception as exc:
         if args.json:
             code = getattr(exc, "code", "workspace_operation_failed")
+            error = {"code": code, "message": str(exc)}
+            details = getattr(exc, "details", None)
+            # Workspace preflight details are finite, adapter-owned values.
+            # Preserve only those fields so JSON callers receive the observed
+            # state and supported recovery command without leaking arbitrary
+            # exception detail from a remote boundary.
+            if isinstance(details, dict):
+                observed = details.get("observed")
+                if (isinstance(observed, dict) and
+                        set(observed) == {"ownership", "runtime_revision_state"} and
+                        isinstance(observed.get("ownership"), str) and
+                        isinstance(observed.get("runtime_revision_state"), str) and
+                        observed.get("ownership") in _REMOTE_OWNERSHIP_STATES and
+                        observed.get("runtime_revision_state") in _REMOTE_REVISION_STATES):
+                    error["observed"] = {
+                        "ownership": observed["ownership"],
+                        "runtime_revision_state": observed["runtime_revision_state"],
+                    }
+                if details.get("recovery_command") == _REMOTE_WORKSPACE_RECOVERY:
+                    error["recovery_command"] = _REMOTE_WORKSPACE_RECOVERY
             print(json.dumps({
                 "ok": False,
-                "error": {"code": code, "message": str(exc)},
+                "error": error,
             }, sort_keys=True))
             raise SystemExit(1)
         from sandbox.core import die
-        die(f"{getattr(exc, 'code', 'workspace_operation_failed')}: {exc}")
+        message = str(exc)
+        details = getattr(exc, "details", None)
+        if (isinstance(details, dict) and
+                details.get("recovery_command") == _REMOTE_WORKSPACE_RECOVERY and
+                _REMOTE_WORKSPACE_RECOVERY not in message):
+            message += f"; recovery: {_REMOTE_WORKSPACE_RECOVERY}"
+        die(f"{getattr(exc, 'code', 'workspace_operation_failed')}: {message}")
     if args.json:
         print(json.dumps(result, sort_keys=True))
     elif args.action == "list":

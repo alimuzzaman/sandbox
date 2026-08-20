@@ -38,6 +38,9 @@ _SAFE_NAMESPACE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _ON_DISK_ENTRY_LIMIT = 2000
 _SIZE_ENTRY_BUDGET = 50_000
 _SIZE_TIME_BUDGET_SECONDS = 5.0
+_REMOTE_REVISION_STATES = {"match", "mismatch", "unavailable", "unknown"}
+_REMOTE_OWNERSHIP_STATES = {"proven", "missing", "ambiguous", "unknown"}
+_REMOTE_WORKSPACE_RECOVERY = "./sb remote service migrate <name> --confirm --json"
 
 
 def _iso(epoch: float) -> str:
@@ -171,6 +174,11 @@ class WorkspaceService:
     resource_binding_resolver: Any | None = None
     deployment_receipt_resolver: Any | None = None
     deployment_root: Path | None = None
+    # Remote workspace control is allowed only after the selected MCP service
+    # has proved both ownership and parity with this runtime.  The resolver is
+    # injected at the composition boundary so this application service never
+    # reaches into the remote registry or reads its state files directly.
+    remote_service_status: Any | None = None
 
     def __post_init__(self) -> None:
         if self.repository is None and self.storage is not None:
@@ -399,10 +407,95 @@ class WorkspaceService:
         if self.remote_control is None:
             raise WorkspaceIndexError(
                 "workspace_remote_unavailable", "remote workspace control is unavailable")
+
+        self._assert_remote_service_ready(target)
         import inspect
         parameters = inspect.signature(self.remote_control).parameters
         return (self.remote_control(target, action, request)
                 if len(parameters) >= 3 else self.remote_control(target, action))
+
+    @staticmethod
+    def _safe_remote_observation(status: Any) -> dict[str, str]:
+        """Keep only finite enum observations from the remote status probe.
+
+        The status probe runs outside this process and is therefore treated as
+        untrusted input.  In particular, never copy a remote error, unit
+        content, endpoint, or credential-bearing field into a workspace error.
+        """
+        ownership = status.get("ownership") if isinstance(status, dict) else None
+        revision = status.get("runtime_revision_state") if isinstance(status, dict) else None
+        if not isinstance(ownership, str):
+            ownership = None
+        if not isinstance(revision, str):
+            revision = None
+        return {
+            "ownership": ownership if ownership in _REMOTE_OWNERSHIP_STATES else "unknown",
+            "runtime_revision_state": revision if revision in _REMOTE_REVISION_STATES else "unknown",
+        }
+
+    @staticmethod
+    def _remote_failure_message(message: str, observed: dict[str, str]) -> str:
+        """Render finite preflight evidence for adapters that flatten errors."""
+        return (
+            f"{message} (observed ownership={observed['ownership']}, "
+            f"runtime_revision_state={observed['runtime_revision_state']}; "
+            f"recovery: {_REMOTE_WORKSPACE_RECOVERY})"
+        )
+
+    def _assert_remote_service_ready(self, target) -> None:
+        """Fail closed before dispatching any remote workspace operation.
+
+        A configured service record is not evidence that the selected owned
+        service is running the same Sandbox runtime.  The injected status
+        resolver is the only authority for that live observation; absent or
+        malformed evidence is refused just like an explicit mismatch.
+        """
+        status: Any = None
+        probe_failed = False
+        if not callable(self.remote_service_status):
+            probe_failed = True
+        else:
+            try:
+                status = self.remote_service_status(target)
+            except Exception:
+                # Remote diagnostics are intentionally not forwarded.  The
+                # operator gets the supported refresh/migration command below.
+                probe_failed = True
+
+        observed = self._safe_remote_observation(status)
+        if probe_failed and not isinstance(status, dict):
+            observed = {"ownership": "unknown", "runtime_revision_state": "unavailable"}
+        if probe_failed:
+            raise WorkspaceIndexError(
+                "workspace_remote_preflight_unavailable",
+                self._remote_failure_message(
+                    "remote MCP service revision evidence is unavailable; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
+
+        if observed["ownership"] != "proven":
+            raise WorkspaceIndexError(
+                "workspace_remote_service_unproven",
+                self._remote_failure_message(
+                    "remote MCP service ownership could not be proven; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
+
+        revision_state = observed["runtime_revision_state"]
+        if revision_state != "match":
+            code = f"workspace_remote_revision_{revision_state}"
+            raise WorkspaceIndexError(
+                code,
+                self._remote_failure_message(
+                    "remote MCP service runtime revision is not verified; refresh the owned service before retrying",
+                    observed,
+                ),
+                observed=observed, recovery_command=_REMOTE_WORKSPACE_RECOVERY,
+            )
 
     def _legacy_root(self, namespace: str) -> Path:
         if not isinstance(namespace, str) or not _SAFE_NAMESPACE.fullmatch(namespace):

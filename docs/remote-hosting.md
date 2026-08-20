@@ -506,6 +506,17 @@ exact process's PID, working directory, bind, and port before handing it off. If
 new unit cannot start, its prior files are restored and only that proven legacy process
 is restarted. No generic process search or termination is used.
 
+Remote workspace list, status, migration planning, creation, reset, and destroy all
+run the same read-only service preflight before sending a workspace request. The
+selected owned MCP service must report `ownership=proven` and
+`runtime_revision_state=match`; mismatch, unavailable, unknown, or unproven evidence
+is refused without dispatching the workspace command. Refresh the service through the
+supported lifecycle command, then retry:
+
+```sh
+./sb remote service migrate <name> --confirm --json
+```
+
 Confirmed migration also builds or repairs the staged Sandbox CLI and MCP virtual
 environments before stopping a proven legacy process, so a runtime refresh cannot leave
 the replacement service without its interpreter dependencies.

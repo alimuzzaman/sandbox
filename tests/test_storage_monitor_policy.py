@@ -288,6 +288,16 @@ class TestStorageMonitorResolution(TestCase):
         self.assertEqual(raised.exception.code, "unknown_target")
         self.assertIn("not-registered", str(raised.exception))
 
+    def test_contradictory_local_descriptor_fails_before_config_load(self):
+        descriptor = {"kind": "local", "name": "remote-a"}
+        with mock.patch.object(
+            monitor, "load_config", side_effect=AssertionError("config should not load")
+        ) as load:
+            with self.assertRaises(StorageMonitorConfigError) as raised:
+                monitor.resolve_policy(descriptor)
+        self.assertEqual(raised.exception.code, "unknown_target")
+        load.assert_not_called()
+
 
 class TestStorageMonitorRecords(TestCase):
     def setUp(self):
@@ -341,6 +351,68 @@ class TestStorageMonitorRecords(TestCase):
         self.assertIsNone(missing)
         path.write_text("not-json", encoding="utf-8")
         self.assertIsNone(monitor.read_record({"kind": "remote", "name": "remote-a"}))
+
+    def test_record_schema_is_closed_finite_and_all_runner_fields_are_preserved(self):
+        full = self.record(
+            {
+                "kind": "remote",
+                "name": "remote-a",
+            },
+            trigger="scheduled",
+            free_ratio=0.5,
+            warn_ratio=0.15,
+            critical_ratio=0.05,
+            auto_ratio=0.05,
+            threshold_crossed=None,
+            guidance="no action required",
+            auto={
+                "enabled": False,
+                "eligible": False,
+                "tier": None,
+                "ran": False,
+                "reclaimed_bytes": 0,
+                "run_id": None,
+                "reason": "disabled",
+            },
+            reap={
+                "enabled": False,
+                "dry_run": True,
+                "candidates": 0,
+                "reclaimed_bytes": 0,
+                "reason": "disabled",
+            },
+            inventory_status="complete",
+            errors=[],
+        )
+        path = monitor.write_record(full)
+        self.assertEqual(monitor.read_record({"kind": "remote", "name": "remote-a"}), full)
+        self.assertNotIn("ssh", path.read_text(encoding="utf-8"))
+
+        for invalid in (
+            self.record(ssh="owner@example.invalid"),
+            self.record(free_ratio=float("nan")),
+            self.record(auto={"enabled": False, "unexpected": "field"}),
+        ):
+            with self.assertRaises(ValueError):
+                monitor.write_record(invalid)
+
+    def test_read_record_rejects_foreign_or_malformed_embedded_target(self):
+        path = monitor.write_record(self.record("local"))
+        path.write_text(
+            '{"schema":1,"target":{"kind":"remote","name":"other"},'
+            '"at":"2026-08-20T00:00:00Z","level":"normal",'
+            '"free_bytes":100,"total_bytes":200}',
+            encoding="utf-8",
+        )
+        self.assertIsNone(monitor.read_record("local"))
+
+        path.write_text(
+            '{"schema":1,"target":{"kind":"local","name":"local"},'
+            '"at":"2026-08-20T00:00:00Z","level":"normal",'
+            '"free_bytes":100,"total_bytes":200,"ssh":"secret"}',
+            encoding="utf-8",
+        )
+        self.assertIsNone(monitor.read_record("local"))
 
     def test_atomic_replacement_keeps_previous_record_on_failure_and_latest_only(self):
         first = self.record(level="warning")

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -28,6 +29,26 @@ from sandbox.core._remote import get_remote, list_remotes
 
 
 _LOCAL_TARGET = {"kind": "local", "name": "local"}
+
+# Keep this contract aligned with specs/043-storage-pressure-scheduler's
+# MonitorRunRecord.  The runner is intentionally not implemented in this
+# module yet, so all documented runner fields remain admissible here.
+_RECORD_FIELDS = frozenset({
+    "schema", "target", "at", "trigger", "level", "free_bytes",
+    "total_bytes", "free_ratio", "warn_ratio", "critical_ratio",
+    "auto_ratio", "threshold_crossed", "guidance", "auto", "reap",
+    "inventory_status", "errors",
+})
+_AUTO_FIELDS = frozenset({
+    "enabled", "eligible", "tier", "ran", "reclaimed_bytes", "run_id", "reason",
+})
+_REAP_FIELDS = frozenset({
+    "enabled", "dry_run", "candidates", "reclaimed_bytes", "reason",
+})
+_ERROR_FIELDS = frozenset({"code", "message"})
+_LEVELS = frozenset({"normal", "warning", "critical", "unknown"})
+_TRIGGERS = frozenset({"manual", "scheduled"})
+_THRESHOLDS = frozenset({"warn_ratio", "critical_ratio"})
 
 
 def _unknown_target(name: str) -> StorageMonitorConfigError:
@@ -49,7 +70,13 @@ def _remote_name(remote: Any) -> str | None:
         # its fields are never treated as configuration authority.
         kind = remote.get("kind")
         if kind == "local":
-            return None
+            # A local descriptor is canonical only as {kind: local, name:
+            # local}.  Treat contradictory descriptors as unknown targets so
+            # they cannot silently fall back to loading the local policy.
+            if remote.get("name") == "local":
+                return None
+            name = remote.get("name")
+            raise _unknown_target(name.strip() if isinstance(name, str) else "")
         name = remote.get("name")
         if not isinstance(name, str):
             name = ""
@@ -57,7 +84,10 @@ def _remote_name(remote: Any) -> str | None:
     else:
         kind = getattr(remote, "kind", None)
         if kind == "local":
-            return None
+            if getattr(remote, "name", None) == "local":
+                return None
+            name = getattr(remote, "name", "")
+            raise _unknown_target(name.strip() if isinstance(name, str) else "")
         name = getattr(remote, "name", "")
         name = name.strip() if isinstance(name, str) else ""
     if not name:
@@ -184,13 +214,20 @@ def _target_descriptor(target: Any) -> tuple[str, str, dict[str, str]]:
         kind = getattr(target, "kind", None)
         name = getattr(target, "name", None)
 
-    if kind == "local" and name == "local":
-        return "local", "local", dict(_LOCAL_TARGET)
-    if kind == "remote" and isinstance(name, str) and name:
-        return "remote", name, {"kind": "remote", "name": name}
+    if kind == "local":
+        if name == "local":
+            return "local", "local", dict(_LOCAL_TARGET)
+        raise ValueError("target is invalid")
+    if kind == "remote" and isinstance(name, str):
+        name = name.strip()
+        if name and not any(ord(char) < 32 or ord(char) == 127 for char in name):
+            return "remote", name, {"kind": "remote", "name": name}
     # A name-only target object is useful to record callers that pass the same
     # remote argument used by ``resolve_policy``.
     if kind is None and isinstance(name, str) and name:
+        name = name.strip()
+        if not name or any(ord(char) < 32 or ord(char) == 127 for char in name):
+            raise ValueError("target is invalid")
         if name == "local":
             return "local", "local", dict(_LOCAL_TARGET)
         return "remote", name, {"kind": "remote", "name": name}
@@ -209,11 +246,139 @@ def record_path(target: Any) -> Path:
     return Path(RUNTIME_DIR) / "resources" / "monitor" / f"{digest}.json"
 
 
+def _assert_json_value(value: Any, seen: set[int] | None = None) -> None:
+    """Reject Python values that are not finite, native JSON values."""
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("record is invalid")
+        return
+    if not isinstance(value, (dict, list)):
+        raise ValueError("record is invalid")
+
+    active = set() if seen is None else seen
+    identity = id(value)
+    if identity in active:
+        raise ValueError("record is invalid")
+    active.add(identity)
+    try:
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("record is invalid")
+            for item in value.values():
+                _assert_json_value(item, active)
+        else:
+            for item in value:
+                _assert_json_value(item, active)
+    finally:
+        active.remove(identity)
+
+
+def _record_number(value: Any, *, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("record is invalid")
+    if not math.isfinite(float(value)):
+        raise ValueError("record is invalid")
+
+
+def _record_integer(value: Any, *, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("record is invalid")
+
+
+def _record_timestamp(value: Any) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("record is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("record is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError("record is invalid")
+
+
+def _validate_record_shape(value: Any) -> dict[str, Any]:
+    """Validate one persisted/candidate record without contacting a target."""
+    if not isinstance(value, dict):
+        raise ValueError("record is invalid")
+    if set(value) - _RECORD_FIELDS:
+        raise ValueError("record is invalid")
+    if value.get("schema") != 1 or type(value.get("schema")) is not int:
+        raise ValueError("record is invalid")
+    if "target" not in value:
+        raise ValueError("record is invalid")
+
+    _assert_json_value(value)
+    target = value["target"]
+    if not isinstance(target, dict) or set(target) != {"kind", "name"}:
+        raise ValueError("record is invalid")
+    try:
+        _kind, _name, safe_target = _target_descriptor(target)
+    except (TypeError, ValueError):
+        raise ValueError("record is invalid") from None
+    if target != safe_target:
+        raise ValueError("record is invalid")
+
+    if "at" in value:
+        _record_timestamp(value["at"])
+    if "trigger" in value and value["trigger"] not in _TRIGGERS:
+        raise ValueError("record is invalid")
+    if "level" in value and value["level"] not in _LEVELS:
+        raise ValueError("record is invalid")
+    for field in ("free_bytes", "total_bytes"):
+        if field in value:
+            _record_integer(value[field], nullable=True)
+    if "free_ratio" in value:
+        _record_number(value["free_ratio"], nullable=True)
+        if value["free_ratio"] is not None and not 0 <= value["free_ratio"] <= 1:
+            raise ValueError("record is invalid")
+    for field in ("warn_ratio", "critical_ratio", "auto_ratio"):
+        if field in value:
+            _record_number(value[field])
+            if not 0 < value[field] < 1:
+                raise ValueError("record is invalid")
+    if "threshold_crossed" in value:
+        crossed = value["threshold_crossed"]
+        if crossed is not None and crossed not in _THRESHOLDS:
+            raise ValueError("record is invalid")
+    for field in ("guidance", "inventory_status"):
+        if field in value and not isinstance(value[field], str):
+            raise ValueError("record is invalid")
+
+    if "auto" in value:
+        auto = value["auto"]
+        if not isinstance(auto, dict) or set(auto) - _AUTO_FIELDS:
+            raise ValueError("record is invalid")
+    if "reap" in value:
+        reap = value["reap"]
+        if not isinstance(reap, dict) or set(reap) - _REAP_FIELDS:
+            raise ValueError("record is invalid")
+    if "errors" in value:
+        errors = value["errors"]
+        if not isinstance(errors, list):
+            raise ValueError("record is invalid")
+        for error in errors:
+            if not isinstance(error, dict) or set(error) - _ERROR_FIELDS:
+                raise ValueError("record is invalid")
+            if any(not isinstance(error[field], str) for field in error):
+                raise ValueError("record is invalid")
+    return value
+
+
 def _safe_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], Path]:
     if not isinstance(record, Mapping):
         raise ValueError("record is invalid")
     payload = dict(record)
-    if "target" not in payload:
+    if "target" not in payload or any(
+        not isinstance(key, str) or key not in _RECORD_FIELDS for key in payload
+    ):
         raise ValueError("record is invalid")
     try:
         _kind, _name, safe_target = _target_descriptor(payload.get("target"))
@@ -223,9 +388,15 @@ def _safe_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], Path]:
     # field so a caller cannot persist an SSH connection or another sensitive
     # registry field by accident.
     payload["target"] = safe_target
+    _validate_record_shape(payload)
     try:
-        json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError, OverflowError):
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
         raise ValueError("record is invalid") from None
     return payload, record_path(safe_target)
 
@@ -275,13 +446,17 @@ def write_record(record: Mapping[str, Any]) -> Path:
 def read_record(target: Any) -> dict[str, Any] | None:
     """Read one record, returning ``None`` for missing/corrupt evidence."""
     try:
-        path = record_path(target)
+        _kind, _name, safe_target = _target_descriptor(target)
+        path = record_path(safe_target)
         with path.open("r", encoding="utf-8") as handle:
             value = json.load(handle)
-        if not isinstance(value, dict):
+        _validate_record_shape(value)
+        # A record at a valid digest path is still not evidence if its
+        # embedded identity names another target (or is non-canonical).
+        if value.get("target") != safe_target:
             return None
         return value
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, RecursionError):
         # A monitor/doctor surface must fail closed without echoing corrupt
         # payload or filesystem details to an operator.
         return None

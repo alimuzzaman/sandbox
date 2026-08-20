@@ -1721,7 +1721,10 @@ class NetworkCapacityAdmissionError(RuntimeError):
             "code": code,
             "status": decision.get("status", "blocked"),
             "resource_class": decision.get("resource_class"),
+            "resource_kind": decision.get("resource_kind"),
+            "owner_classes": decision.get("owner_classes"),
             "capacity": decision.get("capacity"),
+            "evidence": decision.get("evidence"),
             "recovery": decision.get("recovery"),
             "side_effects": decision.get("side_effects"),
         }, sort_keys=True))

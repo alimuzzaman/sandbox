@@ -28,6 +28,9 @@ Inspect the newest records:
 sb feedback list --limit 20 --json
 ```
 
+The `--limit` / `limit` option controls the maximum records to return (1-100;
+default: 20).
+
 MCP-capable agents use `feedback_submit` and `feedback_list`. Both interfaces share
 the same validation and storage service. Reports include category, severity, source,
 an optional safe project identity, remote name, and reference. Summary, details, and

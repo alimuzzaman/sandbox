@@ -61,6 +61,8 @@ def feedback_list(
 ) -> dict:
     """Read or manage feedback through one bounded MCP registration.
 
+    ``limit`` is the maximum records to return (1-100; default: 20).
+
     The manifest intentionally keeps the existing two-tool registration for
     compatibility.  ``action`` provides show/export/retention/prune without
     adding an unadvertised third registration; direct helper functions below

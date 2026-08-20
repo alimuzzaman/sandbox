@@ -25,7 +25,10 @@ def configure_parser(parser) -> None:
     parser.add_argument("--project", dest="project_filter", help="filter by safe project name or identity")
     parser.add_argument("--remote")
     parser.add_argument("--reference", default="")
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument(
+        "--limit", type=int, default=20,
+        help="maximum records to return (1-100; default: 20)",
+    )
     parser.add_argument("--cursor")
     parser.add_argument("--since")
     parser.add_argument("--until")

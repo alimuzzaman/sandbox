@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 import io
 import importlib.util
@@ -86,6 +87,24 @@ class TestFeedbackService(unittest.TestCase):
         limit = self.service.list(101)
         self.assertFalse(limit["ok"])
         self.assertEqual(limit["error"]["code"], "invalid_feedback")
+
+    def test_invalid_limit_reports_the_supported_range(self):
+        payload = self.service.list(101)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["message"], "limit must be between 1 and 100")
+
+    def test_cli_limit_help_discloses_range_and_default(self):
+        from sandbox.commands.feedback import configure_parser
+
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+
+        limit = next(action for action in parser._actions if action.dest == "limit")
+        expected = "maximum records to return (1-100; default: 20)"
+        self.assertEqual(limit.help, expected)
+        self.assertEqual(limit.default, 20)
+        self.assertIn(expected, " ".join(parser.format_help().split()))
 
     def test_regression_f90c671_invalid_count_is_independent_of_display_limit(self):
         self.assertTrue(self.service.submit("valid")["ok"])
@@ -292,6 +311,16 @@ class TestFeedbackService(unittest.TestCase):
 
 
 class TestFeedbackMcpAdapter(unittest.TestCase):
+    def test_feedback_list_docstring_discloses_range_and_default(self):
+        path = ROOT / "mcp" / "wp-server" / "tools" / "feedback.py"
+        spec = importlib.util.spec_from_file_location("feedback_tool_docstring", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+
+        self.assertIn("maximum records to return (1-100; default: 20)",
+                      module.feedback_list.__doc__ or "")
+
     def test_adapter_registers_and_delegates_to_shared_service(self):
         path = ROOT / "mcp" / "wp-server" / "tools" / "feedback.py"
         spec = importlib.util.spec_from_file_location("feedback_tool_under_test", path)

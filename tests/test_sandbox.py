@@ -17,6 +17,8 @@ import tempfile
 import unittest
 import json
 import importlib
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -203,6 +205,100 @@ class TestSiteUrl(unittest.TestCase):
             core.site_url({"server": "herd", "domain": "x.test",
                            "wordpress_port": 8080}),
             "https://x.test")
+
+
+class TestCanonicalReachability(unittest.TestCase):
+    """Apply/rollback health probes use the canonical URL and no redirects."""
+
+    class _Response:
+        def __init__(self, status):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def getcode(self):
+            return self.status
+
+    class _Opener:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+            self.calls = []
+
+        def open(self, url, timeout):
+            self.calls.append((url, timeout))
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return TestCanonicalReachability._Response(outcome)
+
+    @staticmethod
+    def _http_error(url, code):
+        return urllib.error.HTTPError(url, code, "fixture", {}, None)
+
+    def _probe(self, outcomes, *, timeout=None):
+        import sandbox.core._instances as instances
+
+        opener = self._Opener(outcomes)
+        cfg = {"domain": "fixture.tst", "wordpress_port": 8188}
+        # ``time`` and ``urllib`` are imported inside _wait_reachable; patching
+        # the standard modules still affects those imports.
+        import time
+        with mock.patch.object(instances, "site_url",
+                               return_value="https://fixture.tst") as site, \
+                mock.patch.object(urllib.request, "build_opener",
+                                  return_value=opener) as build, \
+                mock.patch.object(time, "sleep") as sleep, \
+                mock.patch("ssl._create_unverified_context",
+                           return_value="fixture-context"):
+            result = instances._wait_reachable(
+                cfg, timeout=timeout if timeout is not None else len(outcomes))
+        return result, opener, site, build, sleep
+
+    def test_https_canonical_url_uses_no_redirect_and_unverified_tls(self):
+        result, opener, site, build, _sleep = self._probe([301], timeout=1)
+
+        self.assertTrue(result)
+        site.assert_called_once_with({"domain": "fixture.tst",
+                                      "wordpress_port": 8188})
+        self.assertEqual(opener.calls, [("https://fixture.tst", 2)])
+        handlers = build.call_args.args
+        proxy_handlers = [handler for handler in handlers
+                          if isinstance(handler, urllib.request.ProxyHandler)]
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
+        redirect_handlers = [handler for handler in handlers
+                             if isinstance(handler, type)
+                             and issubclass(handler,
+                                            urllib.request.HTTPRedirectHandler)]
+        self.assertEqual(len(redirect_handlers), 1)
+        self.assertIsNone(redirect_handlers[0]().redirect_request(
+            None, None, 301, "moved", {}, "https://other.invalid"))
+        https_handlers = [handler for handler in handlers
+                          if isinstance(handler, urllib.request.HTTPSHandler)]
+        self.assertEqual(len(https_handlers), 1)
+        self.assertEqual(https_handlers[0]._context, "fixture-context")
+
+    def test_redirect_and_not_found_are_reachable_without_following(self):
+        for status in (301, 404):
+            with self.subTest(status=status):
+                result, opener, _site, _build, _sleep = self._probe(
+                    [self._http_error("https://fixture.tst", status)], timeout=1)
+                self.assertTrue(result)
+                self.assertEqual(len(opener.calls), 1)
+
+    def test_server_error_and_transport_failure_retry_then_fail(self):
+        result, opener, _site, _build, sleep = self._probe([
+            self._http_error("https://fixture.tst", 500),
+            OSError("connection refused"),
+        ], timeout=2)
+
+        self.assertFalse(result)
+        self.assertEqual(len(opener.calls), 2)
+        sleep.assert_called_once_with(1)
 
 
 class TestCaddyBlocks(unittest.TestCase):

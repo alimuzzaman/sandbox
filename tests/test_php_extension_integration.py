@@ -330,7 +330,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                 patch.object(instances, "write_compose_files"), \
                 patch.object(instances, "resolve_instances", return_value=resolved), \
                 patch.object(instances, "compose", side_effect=lambda *args, **kwargs: compose_calls.append((args, kwargs))), \
-                patch.object(instances, "_wait_http"), \
+                patch.object(instances, "_wait_reachable", return_value=True) as wait_reachable, \
                 patch.object(instances, "php_extension_status", return_value={"drift": {"state": "ready"}}), \
                 patch.object(instances, "_wire_project_plugins"), \
                 patch.object(instances, "_wire_project_themes"), \
@@ -352,6 +352,7 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
         # The in-place apply command owns only web services; DB and uploads
         # are never passed to a destructive volume-removal command.
         self.assertEqual(persisted["instances"]["fixture"], block)
+        wait_reachable.assert_called_once_with(resolved["fixture"])
 
     def test_herd_apply_reconciles_host_runtime_muplugins_without_compose(self):
         import sandbox.core._instances as instances
@@ -664,7 +665,11 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                     stack.enter_context(patch.object(instances, "_persist_php_extension_runtime"))
                     stack.enter_context(patch.object(instances, "write_compose_files", side_effect=write_compose))
                     stack.enter_context(patch.object(instances, "compose", side_effect=fake_compose))
-                    stack.enter_context(patch.object(instances, "_wait_http", return_value=True))
+                    stack.enter_context(patch.object(instances, "_wait_http",
+                                                      side_effect=AssertionError(
+                                                          "apply/rollback must use canonical reachability")))
+                    wait_reachable = stack.enter_context(
+                        patch.object(instances, "_wait_reachable", return_value=True))
                     stack.enter_context(patch.object(instances, "php_extension_status", return_value={
                         "drift": {"state": "drift", "issues": [{"message": "GD plane mismatch"}]}}))
                     stack.enter_context(patch.object(instances, "_wire_project_plugins"))
@@ -689,6 +694,17 @@ class PhpExtensionIntegrationTests(unittest.TestCase):
                         self.assertNotIn("mailpit", args)
                     expected = "rollback=succeeded" if rollback_ok else "rollback=failed"
                     self.assertIn(expected, str(raised.exception))
+                    self.assertEqual(len(wait_reachable.call_args_list),
+                                     2 if rollback_ok else 1)
+                    self.assertEqual(wait_reachable.call_args_list[0].args[0],
+                                     {"server": "nginx", "wordpress_port": 8188,
+                                      "db_port": 3318, "mailpit_port": 8125,
+                                      "php_extensions": block["php_extensions"]})
+                    if rollback_ok:
+                        self.assertEqual(wait_reachable.call_args_list[1].args[0],
+                                         wait_reachable.call_args_list[0].args[0])
+                if fail_before_runtime:
+                    self.assertEqual(wait_reachable.call_args_list, [])
             finally:
                 __import__("shutil").rmtree(root, ignore_errors=True)
 

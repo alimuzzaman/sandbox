@@ -545,27 +545,57 @@ def _wait_http(port: int, timeout: int = 30) -> bool:
 
 
 def _wait_reachable(inst_cfg: dict, timeout: int = 30) -> bool:
-    """Wait until WP resolves a site at its REAL URL — the proxy
-    https://<name>.<tld> when secured, else localhost:<port>. Unlike _wait_http
-    (port-only), this is correct for a secured multisite, whose
-    DOMAIN_CURRENT_SITE is the .tld host so localhost:<port> 500s 'Site not
-    found'. A 4xx (login redirect) counts as up; 5xx keeps waiting."""
+    """Wait for the instance's canonical URL without following redirects.
+
+    ``site_url`` selects the real browser URL (including a secured proxy host)
+    rather than merely checking the published port.  A response in the
+    2xx--4xx range proves that the web tier answered; 5xx responses and
+    transport failures keep retrying until the bounded timeout expires.  The
+    redirect handler is deliberately disabled so a redirect to a stale or
+    unrelated host cannot make the health gate report the wrong service as
+    reachable.  Local mkcert certificates are not necessarily in Python's
+    trust store, so HTTPS verification is disabled for this loopback probe.
+    """
     import ssl
     import time
     import urllib.error
     import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
     url = site_url(inst_cfg)
     ctx = ssl._create_unverified_context()
-    for _ in range(timeout):
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirect,
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+    for attempt in range(timeout):
         try:
-            urllib.request.urlopen(url, timeout=2, context=ctx)
-            return True
+            response = opener.open(url, timeout=2)
+            try:
+                status = getattr(response, "status", None)
+                if status is None:
+                    status = response.getcode()
+                if 200 <= status < 500:
+                    return True
+            finally:
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
         except urllib.error.HTTPError as e:
-            if e.code < 500:
+            status = e.code
+            close = getattr(e, "close", None)
+            if close is not None:
+                close()
+            if 200 <= status < 500:
                 return True
         except Exception:
             pass
-        time.sleep(1)
+        if attempt + 1 < timeout:
+            time.sleep(1)
     return False
 
 
@@ -1149,7 +1179,7 @@ def apply_config(cfg: dict, project_dir: str, label: str | None = None) -> dict:
                               getattr(result, "stdout", "") or
                               f"exit {returncode}").strip()
                     raise RuntimeError(f"web reconcile failed: {detail[:240]}")
-                if not _wait_http(ports["wordpress_port"]):
+                if not _wait_reachable(inst_cfg):
                     raise RuntimeError("web reconcile did not become reachable")
                 if inst_cfg.get("php_extensions", inst_cfg.get("phpExtensions")) is not None:
                     extension_status = php_extension_status(inst_cfg, instance=name)
@@ -1322,8 +1352,7 @@ def _restore_apply_rollback_state(snapshot: dict, name: str,
                           getattr(result, "stdout", "") or
                           f"exit {returncode}").strip()
                 errors.append(f"runtime rollback failed: {detail[:240]}")
-            elif runtime.get("wordpress_port") and not _wait_http(
-                    runtime["wordpress_port"]):
+            elif runtime.get("wordpress_port") and not _wait_reachable(runtime):
                 errors.append("runtime rollback failed: restored web tier did not become reachable")
         except Exception as exc:
             errors.append(f"runtime rollback failed: {str(exc)[:240]}")

@@ -725,6 +725,10 @@ multisite. It:
    leaves the site on its current core. The result comes back as
    `wp_core: {from, to, changed}`.
 
+   The web health gate probes the instance's canonical URL directly (without
+   following redirects); 2xx–4xx responses count as reachable, while 5xx and
+   transport failures retry within the bounded timeout.
+
 Contrast with `recreate_instance` (destroy + re-boot — wipes DB + uploads) and
 bare `./sb apply` with no `--project-dir` (the legacy alias for `./sb setup`,
 which re-applies the sandbox's own `sandbox.yml`).

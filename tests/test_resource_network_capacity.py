@@ -236,7 +236,7 @@ class NetworkCapacityAdmissionTests(unittest.TestCase):
             docker.write_text("""#!/usr/bin/env python3
 import json
 import sys
-if sys.argv[1:] == ["network", "ls", "-q"]:
+if sys.argv[1:] == ["network", "ls", "--no-trunc", "-q"]:
     print("sandbox-id\\nforeign-id\\nunattributed-id")
 elif sys.argv[1:3] == ["network", "inspect"]:
     print(json.dumps([
@@ -290,7 +290,7 @@ else:
             docker.write_text("""#!/usr/bin/env python3
 import json
 import sys
-if sys.argv[1:] == ["network", "ls", "-q"]:
+if sys.argv[1:] == ["network", "ls", "--no-trunc", "-q"]:
     print("first-id\\nsecond-id")
 elif sys.argv[1:3] == ["network", "inspect"]:
     print(json.dumps([

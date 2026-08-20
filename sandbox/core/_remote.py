@@ -1747,7 +1747,7 @@ def units_for(subnet, pool):
 
 
 pools = load_pools()
-ids = run(["docker", "network", "ls", "-q"], 20)
+ids = run(["docker", "network", "ls", "--no-trunc", "-q"], 20)
 if ids is None or ids.returncode != 0:
     fail("docker_network_inventory_unavailable", "Docker network inventory is unavailable")
 network_ids = [value.strip() for value in (ids.stdout or "").splitlines() if value.strip()]
